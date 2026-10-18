@@ -1,0 +1,73 @@
+import type { TaskId } from './types.js';
+
+/** Everything a runner is given to start one task. */
+export interface RunSpec {
+  taskId: TaskId;
+  runner: string;
+  /** Markdown brief the runner is told to follow. */
+  briefPath: string;
+  /** Where the runner must write its result manifest (JSON) before it reports `finished`. */
+  resultPath: string;
+  /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
+  mcp?: { url: string; token: string };
+}
+
+export type RunnerEvent =
+  | { type: 'progress'; note: string }
+  /** The runner wrote `resultPath`. The orchestrator validates it. */
+  | { type: 'finished' }
+  | { type: 'failed'; reason: string };
+
+export interface RunHandle {
+  /** Ends when the run is over. An iterator that ends without `finished` or `failed` fails the task. */
+  readonly events: AsyncIterable<RunnerEvent>;
+  /** Stop the run. Must be safe to call after the run has ended. */
+  cancel(): Promise<void>;
+}
+
+export interface Runner {
+  readonly name: string;
+  start(spec: RunSpec): Promise<RunHandle>;
+}
+
+export class RunnerRegistry {
+  private readonly runners = new Map<string, Runner>();
+
+  constructor(runners: Iterable<Runner> = []) {
+    for (const runner of runners) this.register(runner);
+  }
+
+  register(runner: Runner): void {
+    if (this.runners.has(runner.name)) throw new Error(`Runner already registered: ${runner.name}`);
+    this.runners.set(runner.name, runner);
+  }
+
+  get(name: string): Runner | undefined {
+    return this.runners.get(name);
+  }
+
+  names(): string[] {
+    return [...this.runners.keys()];
+  }
+}
+
+export class RunnerNotImplementedError extends Error {
+  constructor(runner: string) {
+    super(`Runner "${runner}" is not implemented yet`);
+    this.name = 'RunnerNotImplementedError';
+  }
+}
+
+function stub(name: string): Runner {
+  return {
+    name,
+    async start() {
+      throw new RunnerNotImplementedError(name);
+    },
+  };
+}
+
+/** Typed placeholder for the Claude Agent SDK runner. Starting it fails the task with a clear reason. */
+export const claudeAgentSdkRunner: Runner = stub('claude-agent-sdk');
+/** Typed placeholder for the Codex runner. */
+export const codexRunner: Runner = stub('codex');

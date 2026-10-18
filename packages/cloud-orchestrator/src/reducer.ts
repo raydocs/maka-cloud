@@ -1,0 +1,82 @@
+import type { StoredEvent, TaskId, TaskRecord, TaskView } from './types.js';
+import { isTerminal } from './types.js';
+
+export type TaskMap = Map<TaskId, TaskRecord>;
+
+/** Progress notes kept per task; older notes stay in the log. */
+export const MAX_PROGRESS_NOTES = 20;
+const VIEW_PROGRESS_NOTES = 10;
+
+/**
+ * Fold one log entry into `tasks`. This is the only place task state is
+ * computed, for live updates and for replay alike. The first terminal event for
+ * a task wins; anything after it (a runner finishing after a cancel) is ignored.
+ */
+export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
+  if (event.type === 'task_created') {
+    tasks.set(event.taskId, {
+      taskId: event.taskId,
+      sessionId: event.sessionId,
+      ...(event.parentTaskId === undefined ? {} : { parentTaskId: event.parentTaskId }),
+      runner: event.runner,
+      ...(event.title === undefined ? {} : { title: event.title }),
+      mode: event.mode,
+      state: 'queued',
+      createdAt: at,
+      progress: [],
+    });
+    return;
+  }
+  const task = tasks.get(event.taskId);
+  if (!task || isTerminal(task.state)) return;
+  switch (event.type) {
+    case 'task_started':
+      task.state = 'running';
+      task.startedAt = at;
+      return;
+    case 'task_progress':
+      task.progress.push(event.note);
+      if (task.progress.length > MAX_PROGRESS_NOTES) task.progress.shift();
+      return;
+    case 'task_succeeded':
+      task.state = 'succeeded';
+      task.finishedAt = at;
+      task.manifest = event.manifest;
+      return;
+    case 'task_failed':
+      task.state = 'failed';
+      task.finishedAt = at;
+      task.failureReason = event.reason;
+      return;
+    case 'task_cancel_requested':
+      task.cancelRequestedBy ??= event.by;
+      return;
+    case 'task_cancelled':
+      task.state = 'cancelled';
+      task.finishedAt = at;
+      return;
+  }
+}
+
+export function reduce(events: Iterable<StoredEvent>): TaskMap {
+  const tasks: TaskMap = new Map();
+  for (const stored of events) applyEvent(tasks, stored);
+  return tasks;
+}
+
+export function toView(task: TaskRecord): TaskView {
+  return {
+    taskId: task.taskId,
+    ...(task.parentTaskId === undefined ? {} : { parentTaskId: task.parentTaskId }),
+    runner: task.runner,
+    ...(task.title === undefined ? {} : { title: task.title }),
+    state: task.state,
+    createdAt: task.createdAt,
+    ...(task.startedAt === undefined ? {} : { startedAt: task.startedAt }),
+    ...(task.finishedAt === undefined ? {} : { finishedAt: task.finishedAt }),
+    progress: task.progress.slice(-VIEW_PROGRESS_NOTES),
+    ...(task.manifest === undefined ? {} : { manifest: structuredClone(task.manifest) }),
+    ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
+    cancelRequested: task.cancelRequestedBy !== undefined,
+  };
+}
