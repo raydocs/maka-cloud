@@ -20,6 +20,7 @@
     "packages/runtime",
     "packages/acp-executor-plugin",
     "packages/antigravity-acp-plugin",
+    "packages/cloud-instabox",
     "packages/runtime-host",
     "packages/eval",
     "packages/computer-use",

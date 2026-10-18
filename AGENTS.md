@@ -64,3 +64,5 @@ Upstream files this fork changes, so a sync knows what to re-check.
 | `scripts/asf-license-headers.mjs` | `maka-cloud-fork` exclusion rule for our files | never |
 | `.github/dependabot.yml` | deleted: dependency bumps come through upstream syncs, not separate Dependabot PRs | never; on a sync, keep it deleted |
 | `package.json`, `packages/runtime/package.json`, `package-lock.json`, `apps/desktop/artifact-budget.json`, `patches/@ai-sdk+*`, `scripts/generate-third-party-notices.mjs`, `LICENSE`, `*THIRD_PARTY_NOTICES.txt` | ai-sdk family upgrade for Claude Haiku 5.5 (branch `chore/ai-sdk-upgrade`) | upstream ships the same or newer ai-sdk versions |
+| `package.json`, `package-lock.json` | `packages/cloud-instabox` added to `workspaces` (and its lockfile entries) | never; on a sync, keep it in the list and rerun `npm install` |
+| `packages/runtime/package.json` | `exports` gains `./workspace-executor`, `./grep-search`, `./text-line-window` so `@maka-cloud/instabox` can implement `WorkspaceExecutor` and reuse the ripgrep result parser (good candidate to send upstream) | upstream exports the same subpaths |
