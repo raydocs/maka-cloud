@@ -246,6 +246,12 @@ export const exclusionRules = [
     matches: isOneOf('.github/pull_request_template.md'),
   },
   {
+    id: 'maka-cloud-fork',
+    justification:
+      'Files added by the private maka-cloud fork. They are not contributions to the ASF, so an ASF header would assert provenance the ASF does not have.',
+    matches: isOneOf('AGENTS.md', '.github/workflows/fork-upstream-sync.yml'),
+  },
+  {
     id: 'byte-significant-fixtures',
     justification:
       'Recorded inputs and captured historical state. Tests assert on their exact bytes or parse them with a strict reader, and their value is that they reproduce what a real system produced rather than that they are authored source.',
