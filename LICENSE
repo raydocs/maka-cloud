@@ -205,11 +205,11 @@ THIRD-PARTY COMPONENTS
 
 Vercel Code Mode and run execution-budget patches
 
-Source: https://www.npmjs.com/package/@ai-sdk/code-mode/v/1.0.79
+Source: https://www.npmjs.com/package/@ai-sdk/code-mode/v/1.0.100
         https://www.npmjs.com/package/run/v/2.1.4
 Repository: https://github.com/vercel/ai/tree/main/packages/code-mode
             https://github.com/vercel-labs/run/tree/run%402.1.4/packages/run
-Dependency patches: patches/@ai-sdk+code-mode+1.0.79.patch
+Dependency patches: patches/@ai-sdk+code-mode+1.0.100.patch
                     patches/run+2.1.4.patch
 Readable source changes: patches/run-2.1.4-source.diff
 Copyright 2023 Vercel, Inc.

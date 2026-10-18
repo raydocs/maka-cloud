@@ -116,7 +116,7 @@
     "smoke:windows:dist": "node scripts/windows-smoke.mjs"
   },
   "devDependencies": {
-    "@ai-sdk/provider-utils": "5.0.51",
+    "@ai-sdk/provider-utils": "5.0.62",
     "@astryxdesign/cli": "0.6.3",
     "@astryxdesign/core": "0.6.3",
     "@biomejs/biome": "2.5.14",
