@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
     steps:
@@ -35,12 +35,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-          token: ${{ secrets.FORK_SYNC_TOKEN }}
+          persist-credentials: false
 
       - name: Mirror apache/maka main to the upstream branch
         run: |
           git fetch --no-tags https://github.com/apache/maka.git main
-          git push --force origin FETCH_HEAD:refs/heads/upstream
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" FETCH_HEAD:refs/heads/upstream
 
       - name: Open a sync pull request when main is behind
         run: |
