@@ -1,7 +1,6 @@
 {
   "name": "@maka-cloud/orchestrator",
   "version": "0.1.0",
-  "license": "UNLICENSED",
   "description": "Orchestration MCP server: delegate_task, task_status, task_wait and task_cancel over an append-only task log.",
   "type": "module",
   "private": true,
