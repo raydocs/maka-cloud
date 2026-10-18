@@ -31,14 +31,16 @@ so every change here has to keep the next upstream merge cheap.
 
 ## Where our code goes
 
-- Put product code in new directories and packages that upstream does not
-  have. Integrate through Maka's extension points: the `WorkspaceExecutor` in
-  `packages/runtime`, plugins, MCP servers, and model providers.
+- Put product code in new packages named `packages/cloud-*`, and fork docs in
+  `docs/fork/`. Integrate through Maka's extension points: the
+  `WorkspaceExecutor` in `packages/runtime`, plugins, MCP servers, and model
+  providers. Task briefs live in `docs/fork/TASKS.md`.
 - Change an upstream file only when no extension point fits. Keep the change
   minimal, record it in "Fork delta" below, and prefer sending it upstream.
 - Upstream files keep their ASF license headers. Our new files carry no ASF
-  header; list them in the `maka-cloud-fork` rule in
-  `scripts/asf-license-headers.mjs`, or the pre-commit hook rejects them.
+  header. The `maka-cloud-fork` rule in `scripts/asf-license-headers.mjs`
+  already excludes `packages/cloud-*` and `docs/fork/`; a fork file anywhere
+  else must be added to that rule, or the pre-commit hook rejects it.
 - Inherited upstream workflows other than `ci.yml` are disabled. Do not
   enable release, publish or scheduled upstream workflows here.
 
@@ -60,4 +62,5 @@ Upstream files this fork changes, so a sync knows what to re-check.
 | File | Change | Drop when |
 |---|---|---|
 | `scripts/asf-license-headers.mjs` | `maka-cloud-fork` exclusion rule for our files | never |
+| `.github/dependabot.yml` | deleted: dependency bumps come through upstream syncs, not separate Dependabot PRs | never; on a sync, keep it deleted |
 | `package.json`, `packages/runtime/package.json`, `package-lock.json`, `apps/desktop/artifact-budget.json`, `patches/@ai-sdk+*`, `scripts/generate-third-party-notices.mjs`, `LICENSE`, `*THIRD_PARTY_NOTICES.txt` | ai-sdk family upgrade for Claude Haiku 5.5 (branch `chore/ai-sdk-upgrade`) | upstream ships the same or newer ai-sdk versions |
