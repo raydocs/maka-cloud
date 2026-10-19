@@ -67,6 +67,8 @@ export interface CloudServerOptions {
    */
   createHandler?: (context: {
     publisher: ConversationPublisher;
+    /** The restored orchestrator, before the server listens. */
+    orchestrator: Orchestrator;
     /**
      * The orchestrator access of a conversation, for work the handler resumes
      * at start before any message arrives (retrying cancels a crash left undone).
@@ -144,6 +146,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     handler = options.createHandler
       ? await options.createHandler({
           publisher,
+          orchestrator,
           conductorAccess: (conversationId) => {
             const sessionId = conversations.sessionOf(conversationId);
             return sessionId === undefined ? undefined : accessFor(sessionId);
