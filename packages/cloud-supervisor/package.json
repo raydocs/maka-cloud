@@ -16,6 +16,7 @@
     "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\""
   },
   "dependencies": {
+    "@maka-cloud/playbooks": "0.1.0",
     "zod": "^4.6.5"
   }
 }

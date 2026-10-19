@@ -13,11 +13,21 @@ test('stop releases the subscription, the timer and everything in flight, and ma
     },
   });
   await r.supervisor.settled();
-  assert.deepEqual(r.supervisor.stats(), { inflight: 0, feedSubscriptions: 1, timers: 1 });
+  assert.deepEqual(r.supervisor.stats(), {
+    inflight: 0,
+    feedSubscriptions: 1,
+    timers: 1,
+    verifications: 0,
+  });
   assert.equal(r.host.feed.listening(), 1);
   await Promise.all([r.stop(), r.stop()]);
   await r.stop();
-  assert.deepEqual(r.supervisor.stats(), { inflight: 0, feedSubscriptions: 0, timers: 0 });
+  assert.deepEqual(r.supervisor.stats(), {
+    inflight: 0,
+    feedSubscriptions: 0,
+    timers: 0,
+    verifications: 0,
+  });
   assert.equal(r.host.feed.listening(), 0);
   assert.equal(cancelled, 1);
 });

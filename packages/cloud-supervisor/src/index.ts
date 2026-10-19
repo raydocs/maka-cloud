@@ -33,3 +33,14 @@ export {
   type SourceFetcher,
 } from './verification/fetcher.js';
 export { nodeTransport, type Transport } from './verification/transport.js';
+export {
+  type ArtifactRead,
+  type BudgetPort,
+  type EvidenceSource,
+  type Mismatch,
+  type Outcome,
+  type VerificationOptions,
+  type Vendor,
+  type VerifierModel,
+  type VerifierRequest,
+} from './verification/ports.js';

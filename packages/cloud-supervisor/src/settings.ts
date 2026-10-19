@@ -33,6 +33,8 @@ export const SettingsSchema = z
     timeZone: z.string().max(64).refine(validTimeZone, 'unknown time zone'),
     /** Local time of the scheduled digest; null turns it off. */
     digestAt: Clock.nullable(),
+    /** The most the model checks of finished tasks may spend per day (in `timeZone`). */
+    verifierDailyCapUsd: z.number().min(0).max(1000),
     /** Muted kinds still appear in the inbox and the digest; only the push is held back. */
     mutedKinds: z.array(z.enum(ITEM_KINDS)).max(ITEM_KINDS.length),
   })
@@ -47,6 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
   quietHours: null,
   timeZone: 'UTC',
   digestAt: '08:00',
+  verifierDailyCapUsd: 5,
   mutedKinds: [],
 };
 

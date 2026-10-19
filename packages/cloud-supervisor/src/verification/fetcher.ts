@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { raceAbort } from './abort.js';
 import { isPublicAddress } from './address.js';
 import { type Transport, type TransportResponse, nodeTransport } from './transport.js';
 
@@ -28,7 +29,7 @@ export type FetchRefusal =
 
 export type FetchOutcome =
   | { ok: true; text: string; finalUrl: string; contentType: string; bytes: number }
-  | { ok: false; reason: FetchRefusal; detail: string };
+  | { ok: false; reason: FetchRefusal; detail: string; status?: number };
 
 export interface SourceFetcher {
   fetchText(url: string, signal: AbortSignal): Promise<FetchOutcome>;
@@ -53,38 +54,11 @@ async function systemResolve(hostname: string): Promise<string[]> {
   return found.map((entry) => entry.address);
 }
 
-/** Rejects when `signal` aborts, even if `work` ignores it. A value that arrives after that is handed to `late`. */
-function raceAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal,
-  late?: (value: T) => void,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const onAbort = () => {
-      settled = true;
-      reject(signal.reason);
-    };
-    if (signal.aborted) onAbort();
-    else signal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        if (settled) late?.(value);
-        else resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        if (!settled) reject(error);
-      },
-    );
-  });
-}
-
 class Refused extends Error {
   constructor(
     readonly reason: FetchRefusal,
     detail: string,
+    readonly status?: number,
   ) {
     super(detail);
   }
@@ -191,7 +165,11 @@ export function createSourceFetcher(options: FetcherOptions = {}): SourceFetcher
           continue;
         }
         if (response.status < 200 || response.status >= 300) {
-          throw new Refused('http_status', `the source answered ${response.status}`);
+          throw new Refused(
+            'http_status',
+            `the source answered ${response.status}`,
+            response.status,
+          );
         }
         const encoding = (response.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
         if (encoding !== 'identity') throw new Refused('unsupported_type', 'an encoded body');

@@ -87,6 +87,34 @@ export interface AnswerRecord {
   createdAt: number;
 }
 
+export type VerificationState =
+  | 'queued'
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'could_not_check'
+  | 'skipped';
+
+export interface VerificationRecord {
+  verificationId: string;
+  taskId: string;
+  conversationId: string;
+  kind: 'coding' | 'research' | 'none';
+  state: VerificationState;
+  /** Attempts started since the last time it was queued by a person. */
+  attempt: number;
+  /** Counts the times a person asked to check again; part of every spend key. */
+  epoch: number;
+  reason: string | null;
+  result: { mismatches?: Array<{ claim: string; found: string }>; code?: string } | null;
+  nextAttemptAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Where a spend reservation is: held against the day's cap, or armed (the conversation budget accepted it and a model may be running). */
+export type SpendStage = 'reserve' | 'armed' | 'settle' | 'release';
+
 const str = (value: unknown): string => String(value);
 const optional = (value: unknown): string | null => (value === null ? null : String(value));
 
@@ -631,6 +659,176 @@ export class Store {
     return row && row.at !== null ? Number(row.at) : 0;
   }
 
+  // verifications
+
+  verification(taskId: string): VerificationRecord | undefined {
+    const row = this.get('SELECT * FROM verifications WHERE task_id = ?', taskId);
+    return row ? toVerification(row) : undefined;
+  }
+
+  /** Claims the task's one verification. A repeated event or a restart finds the row and does nothing. */
+  enqueueVerification(
+    task: Pick<TaskRecord, 'taskId' | 'conversationId'>,
+    kind: VerificationRecord['kind'],
+    at: number,
+  ): boolean {
+    const verificationId = `ver_${randomUUID().replaceAll('-', '')}`;
+    const result = this.run(
+      `INSERT OR IGNORE INTO verifications
+         (verification_id, task_id, conversation_id, kind, state, attempt, epoch, reason, result,
+          next_attempt_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?, ?)`,
+      verificationId,
+      task.taskId,
+      task.conversationId,
+      kind,
+      kind === 'none' ? 'skipped' : 'queued',
+      kind === 'none' ? 'nothing to check against' : null,
+      at,
+      at,
+      at,
+    );
+    return result.changes === 1;
+  }
+
+  /** Running work left by a process that stopped goes back to the queue. */
+  requeueRunning(): void {
+    this.run("UPDATE verifications SET state = 'queued' WHERE state = 'running'");
+  }
+
+  /** Starts up to `limit` due verifications: each is marked running and counts an attempt. */
+  claimDueVerifications(at: number, limit: number): VerificationRecord[] {
+    if (limit <= 0) return [];
+    const due = this.all(
+      "SELECT * FROM verifications WHERE state = 'queued' AND next_attempt_at <= ? ORDER BY created_at, verification_id LIMIT ?",
+      at,
+      limit,
+    ).map(toVerification);
+    for (const row of due) {
+      this.run(
+        "UPDATE verifications SET state = 'running', attempt = attempt + 1, updated_at = ? WHERE verification_id = ?",
+        at,
+        row.verificationId,
+      );
+    }
+    return due.map((row) => ({
+      ...row,
+      state: 'running',
+      attempt: row.attempt + 1,
+      updatedAt: at,
+    }));
+  }
+
+  finishVerification(
+    verificationId: string,
+    state: Exclude<VerificationState, 'queued' | 'running'>,
+    reason: string | null,
+    result: VerificationRecord['result'],
+    at: number,
+  ): void {
+    this.run(
+      'UPDATE verifications SET state = ?, reason = ?, result = ?, updated_at = ? WHERE verification_id = ?',
+      state,
+      reason,
+      result === null ? null : JSON.stringify(result),
+      at,
+      verificationId,
+    );
+  }
+
+  retryVerificationLater(
+    verificationId: string,
+    reason: string,
+    nextAttemptAt: number,
+    at: number,
+  ): void {
+    this.run(
+      "UPDATE verifications SET state = 'queued', reason = ?, next_attempt_at = ?, updated_at = ? WHERE verification_id = ?",
+      reason,
+      nextAttemptAt,
+      at,
+      verificationId,
+    );
+  }
+
+  /** A person asked to check again: a fresh set of attempts and a new epoch, so no spend key repeats. */
+  requeueVerification(taskId: string, at: number): boolean {
+    return (
+      this.run(
+        `UPDATE verifications SET state = 'queued', attempt = 0, epoch = epoch + 1, reason = NULL, result = NULL,
+           next_attempt_at = ?, updated_at = ?
+         WHERE task_id = ? AND state IN ('could_not_check', 'failed')`,
+        at,
+        at,
+        taskId,
+      ).changes === 1
+    );
+  }
+
+  activeVerificationCount(): number {
+    return Number(
+      (
+        this.get(
+          "SELECT COUNT(*) AS n FROM verifications WHERE state IN ('queued', 'running')",
+        ) as Row
+      ).n,
+    );
+  }
+
+  // verifier spend
+
+  /** What the day has charged: the latest row of each key, so a settlement replaces its reservation. */
+  spentOn(day: string): number {
+    const row = this.get(
+      `SELECT COALESCE(SUM(s.usd), 0) AS usd FROM verifier_spend s
+       WHERE s.day = ? AND s.id = (SELECT MAX(id) FROM verifier_spend WHERE key = s.key)`,
+      day,
+    ) as Row;
+    return Number(row.usd);
+  }
+
+  /** The day's cap check and the reservation are one write: two at the cap cannot both pass. */
+  reserveVerifierSpend(key: string, day: string, usd: number, capUsd: number, at: number): boolean {
+    if (this.spentOn(day) + usd > capUsd + 1e-9) return false;
+    this.recordSpend(key, day, 'reserve', usd, at);
+    return true;
+  }
+
+  recordSpend(key: string, day: string, stage: SpendStage, usd: number, at: number): void {
+    this.run(
+      'INSERT INTO verifier_spend (key, day, stage, usd, at) VALUES (?, ?, ?, ?, ?)',
+      key,
+      day,
+      stage,
+      usd,
+      at,
+    );
+  }
+
+  spendOf(key: string): { day: string; stage: SpendStage; usd: number } | undefined {
+    const row = this.get(
+      'SELECT day, stage, usd FROM verifier_spend WHERE key = ? ORDER BY id DESC LIMIT 1',
+      key,
+    );
+    return row
+      ? { day: str(row.day), stage: row.stage as SpendStage, usd: Number(row.usd) }
+      : undefined;
+  }
+
+  /** Reservations that never settled: a process stopped between reserving and settling. */
+  openSpends(): Array<{ key: string; day: string; stage: 'reserve' | 'armed'; usd: number }> {
+    return this.all(
+      `SELECT key, day, stage, usd FROM verifier_spend s
+       WHERE id = (SELECT MAX(id) FROM verifier_spend WHERE key = s.key) AND stage IN ('reserve', 'armed')
+       ORDER BY id`,
+    ).map((row) => ({
+      key: str(row.key),
+      day: str(row.day),
+      stage: row.stage as 'reserve' | 'armed',
+      usd: Number(row.usd),
+    }));
+  }
+
   /** Slots claimed whose digest was never built (a crash in between). */
   emptySlots(): Array<{ digestId: string }> {
     return this.all("SELECT digest_id FROM digests WHERE body = '' ORDER BY at").map((row) => ({
@@ -654,6 +852,24 @@ function toTask(row: Row): TaskRecord {
     stallRaised: Number(row.stall_raised) === 1,
     finishedAt: row.finished_at === null ? null : Number(row.finished_at),
     manifest: row.manifest === null ? null : (JSON.parse(str(row.manifest)) as SignalManifest),
+  };
+}
+
+function toVerification(row: Row): VerificationRecord {
+  return {
+    verificationId: str(row.verification_id),
+    taskId: str(row.task_id),
+    conversationId: str(row.conversation_id),
+    kind: row.kind as VerificationRecord['kind'],
+    state: row.state as VerificationState,
+    attempt: Number(row.attempt),
+    epoch: Number(row.epoch),
+    reason: optional(row.reason),
+    result:
+      row.result === null ? null : (JSON.parse(str(row.result)) as VerificationRecord['result']),
+    nextAttemptAt: Number(row.next_attempt_at),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
   };
 }
 
