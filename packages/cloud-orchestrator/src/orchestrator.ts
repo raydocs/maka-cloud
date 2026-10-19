@@ -809,56 +809,84 @@ export class Orchestrator {
       });
       return;
     }
-    // The hand-off. A cancel or an ended ancestor may have landed while the
-    // runner was starting, and the task need not be terminal yet: a cancel in
-    // progress has no handle to stop. Anything that is stopping gets the late
-    // handle cancelled here, because nothing else knows about it.
-    if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
-      // Its stream is read for what the run spent, the spend that settles during the cancel
-      // included; the cancel ends the stream.
-      const spend = this.drainSpend(taskId, handle);
-      // Still counted as starting while the cancel is out, so a task that ends
-      // meanwhile owes a stop. One that failed is owed before that is cleared.
-      let cancelled = false;
-      try {
-        cancelled = await cancelHandle(handle);
-        if (!cancelled) await this.recordStopPending(taskId, 'cancel_failed');
-      } finally {
-        this.starting.delete(taskId);
-      }
-      if (cancelled) await Promise.all([spend, this.recordStopped(taskId)]);
-      return;
-    }
-    this.handles.set(taskId, handle);
-    this.starting.delete(taskId);
-    const started = await this.record({ type: 'task_started', taskId }, () => {
-      if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
-        throw new Superseded();
-    });
-    // Dropped: whatever is stopping the task also holds the handle now and ends its stream; the
-    // spend the run reports until then is still recorded.
-    if (!started) {
-      void this.drainSpend(taskId, handle);
-      return;
-    }
-    // pump records its own failures; a store failure has nowhere left to report.
-    void this.pump(taskId, handle).catch(() => undefined);
-  }
-
-  /** Records the spend a run reports until its stream ends; nothing else it reports counts. */
-  private async drainSpend(taskId: TaskId, handle: RunHandle): Promise<void> {
+    // One reader per handle, started the moment the handle exists and living as long as its
+    // stream, whatever happens to this start: it records what the run spends until the stream ends,
+    // and what the run reports only once its start is recorded. pump records its own failures; a
+    // store failure has nowhere left to report.
+    let reports!: (recorded: boolean) => void;
+    const reading = this.pump(
+      taskId,
+      handle,
+      new Promise<boolean>((resolve) => {
+        reports = resolve;
+      }),
+    ).catch(() => undefined);
+    let recorded = false;
     try {
-      for await (const event of handle.events) {
-        if (event.type !== 'usage') continue;
-        if (!Number.isFinite(event.costUsd) || event.costUsd < 0) continue;
-        await this.recordSpend(taskId, event.costUsd);
+      // The hand-off. A cancel or an ended ancestor may have landed while the
+      // runner was starting, and the task need not be terminal yet: a cancel in
+      // progress has no handle to stop. Anything that is stopping gets the late
+      // handle cancelled here, because nothing else knows about it.
+      if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
+        // The reader records the spend that settles during the cancel too; the cancel ends the
+        // stream.
+        reports(false);
+        await this.cancelUnrecorded(taskId, handle, reading);
+        return;
       }
-    } catch {
-      // The stream broke: there is nothing more to read.
+      this.handles.set(taskId, handle);
+      this.starting.delete(taskId);
+      try {
+        const started = await this.record({ type: 'task_started', taskId }, () => {
+          if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
+            throw new Superseded();
+        });
+        // Dropped: whatever is stopping the task also holds the handle now and ends its stream;
+        // the reader still records the spend the run reports until then.
+        recorded = started !== undefined;
+      } catch (error) {
+        // The start could not be written, so nothing the run reports can be. It is stopped, unless
+        // a stop already holds it, and the reader records its spend until the stream ends.
+        reports(false);
+        if (this.handles.get(taskId) !== handle) return;
+        this.handles.delete(taskId);
+        this.starting.add(taskId);
+        await this.cancelUnrecorded(taskId, handle, reading);
+        await this.recordRunnerOutcome({
+          type: 'task_failed',
+          taskId,
+          reason: `the run's start could not be recorded: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      reports(recorded);
     }
   }
 
-  private async pump(taskId: TaskId, handle: RunHandle): Promise<void> {
+  /**
+   * Cancels a run whose start is not recorded. It counts as starting while the cancel is out, so a
+   * task that ends meanwhile owes a stop; one that failed is owed before that is cleared.
+   */
+  private async cancelUnrecorded(
+    taskId: TaskId,
+    handle: RunHandle,
+    reading: Promise<void>,
+  ): Promise<void> {
+    let cancelled = false;
+    try {
+      cancelled = await cancelHandle(handle);
+      if (!cancelled) await this.recordStopPending(taskId, 'cancel_failed');
+    } finally {
+      this.starting.delete(taskId);
+    }
+    if (cancelled) await Promise.all([reading, this.recordStopped(taskId)]);
+  }
+
+  /**
+   * Reads a run's stream to its end. Spend is recorded as it comes; everything else waits for
+   * `reports`, and counts only if the run's start was recorded.
+   */
+  private async pump(taskId: TaskId, handle: RunHandle, reports: Promise<boolean>): Promise<void> {
     try {
       for await (const event of handle.events) {
         if (event.type === 'usage') {
@@ -866,6 +894,7 @@ export class Orchestrator {
           await this.recordSpend(taskId, event.costUsd);
           continue;
         }
+        if (!(await reports)) continue;
         // The outcome of a stopping task no longer counts, but its stream is read to the end:
         // the run reports what settled while it stopped.
         if (this.isStopping(taskId)) continue;
@@ -887,6 +916,7 @@ export class Orchestrator {
         }
       }
     } catch (error) {
+      if (!(await reports)) return;
       // The stream broke; the remote run may still be alive, so the handle
       // stays registered and is cancelled when the task ends.
       await this.recordRunnerOutcome({
@@ -896,6 +926,7 @@ export class Orchestrator {
       });
       return;
     }
+    if (!(await reports)) return;
     // A clean end of the stream does not prove the remote run stopped, so the
     // handle stays registered and is cancelled when the task ends.
     await this.recordRunnerOutcome({

@@ -84,12 +84,18 @@ whose cost it cannot bound is refused (400), never sent.
 - **Input bound.** The UTF-8 byte length of the request body as tokens (no tokenizer emits more
   tokens than bytes of text), plus a fixed overhead per request (default 4,000 tokens, for the
   vendor's hidden tool-use prompt).
-- **No images or files.** What a model bills for an image depends on the model and the detail
-  level (a tile-based model bills a 32×32 image at detail `high` 8,500 tokens), and no rule is
-  verified for every model. So any image or file is refused, wherever it sits (message content,
-  tool results and outputs, document content): Anthropic `image` blocks and documents whose source
-  is not text, OpenAI `input_image`, `input_file` and `computer_screenshot`. Coding and research
-  send text only. A per-model, per-detail bound can come later for models with a verified rule.
+- **Only listed content.** Request content is checked against an allowlist, at every depth, so
+  a type the gateway does not know is refused rather than bounded by its bytes. Anthropic: the
+  system prompt is text blocks; a message is `{role, content}` with role `user` or `assistant`;
+  its blocks are `text`, `thinking`, `redacted_thinking`, `tool_use` and `tool_result`, each with
+  only its listed keys, and a tool result's content is a string or text blocks. OpenAI: every
+  typed object in `input` is a message, a text, refusal or reasoning part, one of the local tool
+  calls the tool list allows or its output, or a typed value inside one (a shell action or
+  outcome, a patch operation); `instructions` is a string. Everything else is refused: images,
+  files and documents (what a model bills for an image depends on the model and the detail
+  level, and a tile-based model bills a 32×32 image at detail `high` 8,500 tokens), search
+  results, citations, stored items and server-tool history such as a fetched PDF, which bills
+  its pages and not the bytes of its URL. Coding and research need only text.
 - **When the byte bound does not fit.** Agent contexts are large and bytes overstate tokens about
   fourfold. When the byte bound exceeds what is left, an Anthropic request is counted with the
   vendor's free token-count endpoint (plus 10% and the overhead)
@@ -117,16 +123,25 @@ whose cost it cannot bound is refused (400), never sent.
 - The gateway reads the vendor's usage from the response as it passes through, without changing
   the bytes: Anthropic `message_start` (input and cache counts) and `message_delta` (output);
   OpenAI `response.completed`, `response.incomplete` or `response.failed`, or the JSON body.
-- **Settle** at the reported usage, only when its input and output counts are present and every
-  count is a non-negative number. `null` is accepted only where the API documents a count as
-  nullable (the input and cache counts of an Anthropic `message_delta`, the cache counts of
-  `message_start`). A nested object that is present (the Anthropic cache-write split, OpenAI
-  `input_tokens_details` and `output_tokens_details`) must be an object with valid counts; the
-  cache-write split must give both lifetimes and add up to the aggregate; cached tokens cannot
-  exceed the input. Anything else settles at the reservation, never at an earlier count. An error status before any output (4xx, 5xx) settles at 0: the
-  vendors do not bill those. A response that ends without complete, valid usage settles at the full
-  reservation, since what was billed is unknown; a stream cut after a valid `message_start`
-  settles at the reported input plus the full output bound.
+- **Settle** at the reported usage only when it meets the vendor's schema for its mode;
+  anything else settles at the reservation, never at an earlier count. Every count is a
+  non-negative integer, and a field the schema does not list may not carry a charge (only a
+  string, a boolean, `null` or 0 is ignored).
+  - Anthropic (`message_start`, each `message_delta`, or the JSON body): the output count is
+    required; the input count too, except in a delta, where `null` means unchanged; the cache
+    counts may be `null`. Counts are cumulative, so none may go down. A cache-write split, when
+    present, gives both lifetimes, neither going down, and adds up to the aggregate given with it
+    or earlier; writes the split does not cover are charged at the dearest lifetime the request
+    allows. Hosted-tool counts must be zero.
+  - OpenAI (one final usage object; a second one is malformed): input and output counts are
+    required; `input_tokens_details` and `output_tokens_details`, when present, carry
+    `cached_tokens` and `reasoning_tokens`, no larger than their totals; `total_tokens`, when
+    present, is their sum.
+
+  An error status before any output (4xx, 5xx) settles at 0: the vendors do not bill those. A
+  response that ends without complete, valid usage settles at the full reservation, since what
+  was billed is unknown; a stream cut after a valid `message_start` settles at the reported input
+  plus the full output bound.
 - **Cut.** A stream is cut (the upstream request aborted, the client's stream ended with an error
   event) when the grant is revoked, when the gateway closes, and when the reported input already
   makes the request cost more than its reservation. The last case is a bound that turned out
@@ -148,7 +163,8 @@ the gateway instead.
   timeouts are free.
 - **Budget.** Each call reserves its fixed price ($0.00075 by default) through the grant's port
   before it is sent. It settles at that price when the provider billed it or may have (a
-  connection that broke after the request was sent, or a timeout), else at 0. A call the budget
+  connection that broke after the request was sent, a timeout, or a 200 whose answer has no
+  list of results), else at 0. Only a valid empty list counts as an unbilled empty search. A call the budget
   cannot cover is refused with 402 and never sent. Searches count against the grant's in-flight
   limit, are cut on revoke and after 30 seconds, and `revoke()` waits for them to settle.
 - **Untrusted text.** The gateway keeps only http(s) URLs and strips control and bidi characters,

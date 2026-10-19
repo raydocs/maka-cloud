@@ -45,10 +45,12 @@ class EventQueue implements AsyncIterable<RunnerEvent> {
   private wake: (() => void) | undefined;
   private closed = false;
 
-  push(event: RunnerEvent): void {
-    if (this.closed) return;
+  /** Queues `event`, unless the stream has closed; says whether it was queued. */
+  push(event: RunnerEvent): boolean {
+    if (this.closed) return false;
     this.items.push(event);
     this.wake?.();
+    return true;
   }
 
   close(): void {
@@ -130,7 +132,8 @@ class Run implements RunHandle {
   /** The current invocation: an estimate per model call, until the CLI reports its own total. */
   private callCosts = new Map<string, number>();
   private reportedTotal: number | undefined;
-  private lastReportedUsd = -1;
+  /** The spend last queued as a `usage` event: only an event actually queued moves it. */
+  private publishedUsd = -1;
   /** Set once the run has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
   private readonly secrets = new Set<string>();
@@ -656,13 +659,19 @@ class Run implements RunHandle {
   /**
    * Reports what the run has spent so far, and stops it once that reaches its budget. `final` is
    * the spend once the access has settled: reported even after the run ended or was cancelled.
+   * What is observed and what is published are kept apart, so a spend seen after the end and not
+   * reported then is still reported by the final call.
    */
   private meter(final = false): void {
     const spent =
       Math.round(((this.meteredUsd ?? 0) + this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
-    if (spent === this.lastReportedUsd) return;
-    this.lastReportedUsd = spent;
-    if (!this.ended || final) this.events.push({ type: 'usage', costUsd: spent });
+    if (
+      (!this.ended || final) &&
+      spent !== this.publishedUsd &&
+      this.events.push({ type: 'usage', costUsd: spent })
+    ) {
+      this.publishedUsd = spent;
+    }
     const budget = this.spec.budgetUsd;
     if (budget !== undefined && spent >= budget && !this.budgetStop) {
       this.budgetStop = `budget of ${usd(budget)} reached (${usd(spent)} spent)`;

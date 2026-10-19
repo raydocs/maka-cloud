@@ -315,6 +315,13 @@ test('the DeepSeek backend says when a call was billed', async () => {
     [() => new Response('{}', { status: 500 }), { ok: false, billed: 'no', retryable: true }],
     [() => new Response('{}', { status: 400 }), { ok: false, billed: 'no', retryable: false }],
     [() => new Response('{"results": [', { status: 200 }), { ok: false, billed: 'unknown' }],
+    // A 200 without a list of results may have been billed: only a valid empty list is free.
+    [() => Response.json({}), { ok: false, billed: 'unknown' }],
+    [() => Response.json({ results: null }), { ok: false, billed: 'unknown' }],
+    [() => Response.json({ results: { url: 'https://e.test' } }), { ok: false, billed: 'unknown' }],
+    [() => Response.json({ data: [{ url: 'https://e.test' }] }), { ok: false, billed: 'unknown' }],
+    [() => Response.json(null), { ok: false, billed: 'unknown' }],
+    [() => Response.json([]), { ok: false, billed: 'unknown' }],
   ];
   for (const [answer, expected] of outcomes) {
     const outcome = await deepSeekRig(answer).provider.search({ query: 'q', count: 5 }, signal);
