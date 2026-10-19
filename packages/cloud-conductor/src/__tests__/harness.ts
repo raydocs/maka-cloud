@@ -7,6 +7,7 @@ import {
   FakeRunner,
   MemoryTaskStore,
   Orchestrator,
+  type OrchestratorOptions,
   OrchestratorServer,
   RunnerRegistry,
 } from '@maka-cloud/orchestrator';
@@ -42,6 +43,7 @@ export interface HarnessOptions {
   conductor?: Partial<ConductorOptions>;
   /** Runners finish every task they start with the default manifest. Default true. */
   autoComplete?: boolean;
+  orchestrator?: Partial<OrchestratorOptions>;
 }
 
 export async function makeHarness(t: TestContext, options: HarnessOptions = {}): Promise<Harness> {
@@ -59,6 +61,7 @@ export async function makeHarness(t: TestContext, options: HarnessOptions = {}):
     store: new MemoryTaskStore(),
     runners: new RunnerRegistry([claude, codex]),
     handoffRoot: join(dir, 'handoff'),
+    ...options.orchestrator,
   });
   const server = new OrchestratorServer(orchestrator);
   const mcpUrl = await server.listen();
@@ -128,6 +131,7 @@ export async function makeHarness(t: TestContext, options: HarnessOptions = {}):
       );
     }
     await harness.conductor.close();
+    harness.orchestrator.close();
     await server.close();
     await model.close();
     await rm(dir, { recursive: true, force: true });

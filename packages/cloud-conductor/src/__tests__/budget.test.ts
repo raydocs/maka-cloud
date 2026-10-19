@@ -417,3 +417,58 @@ test('a settlement above its reservation charges the full amount, flags it, and 
   assert.equal(conductorRequests(h).length, before + 1);
   assert.equal(h.conductor.state.run(runId)?.state, 'done');
 });
+
+test('a task that ended while its run may still be going keeps its reservation until the stop is confirmed', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    orchestrator: { stopRetry: { firstMs: 1, maxMs: 1 } },
+    conductor: { limits: { stopCheckMs: 5 } },
+  });
+  // The sandbox cannot be reached: the cancel fails, and so does a stop by id until it can.
+  let reachable = false;
+  h.claude.stopOrphaned = async () => {
+    if (!reachable) throw new Error('sandbox unreachable');
+  };
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    const run = (await realStart(spec)) as FakeRun;
+    run.cancel = async () => {
+      throw new Error('sandbox unreachable');
+    };
+    return run;
+  };
+  const owed = gate();
+  const realCancel = h.orchestrator.cancel.bind(h.orchestrator);
+  h.orchestrator.cancel = async (session, taskId) => {
+    const view = await realCancel(session, taskId);
+    if (view.stopPending === true) owed.open();
+    return view;
+  };
+  const settled = gate();
+  const realSettle = h.conductor.state.settleDelegation.bind(h.conductor.state);
+  h.conductor.state.settleDelegation = (key, actualUsd) => {
+    const result = realSettle(key, actualUsd);
+    settled.open();
+    return result;
+  };
+  h.model.script('planner', plan);
+  h.model.script('conductor', startResearch, calls(delegate(2)), text('Done.'));
+  await h.send('cnv_1', 'Research.');
+  // The run is over, so its task is cancelled: it ends, but its run is not known to have stopped.
+  await owed.promise;
+  await h.conductor.idle();
+  const [delegation] = h.conductor.state.unsettledDelegations();
+  assert.ok(delegation, 'the delegation is not settled');
+  assert.equal(
+    h.conductor.state.budget(delegation.runId).reservedUsd,
+    2,
+    'the reservation is held',
+  );
+
+  reachable = true;
+  await settled.promise;
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+  const budget = h.conductor.state.budget(delegation.runId);
+  assert.equal(budget.reservedUsd, 0);
+  assert.equal(budget.taskUsd, 2, 'no spend was reported, so the whole reservation is charged');
+});

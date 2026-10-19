@@ -101,7 +101,7 @@ export interface CloudServerOptions {
   port?: number;
   mcp?: OrchestratorServerOptions;
   http?: Partial<HttpLimits>;
-  orchestrator?: Pick<OrchestratorOptions, 'quotas' | 'caches' | 'maxDepth' | 'now'>;
+  orchestrator?: Pick<OrchestratorOptions, 'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry'>;
   handler?: ConversationHandler;
   /**
    * Builds the handler once the database is open, with the publisher it posts
@@ -167,7 +167,13 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     });
     if (options.sweepOrphans) {
       try {
-        const swept = await options.sweepOrphans(store.taskIds());
+        // A task that owes a stop is not left alone just because the log knows it.
+        const owed = new Set(store.stopPendingTaskIds());
+        const swept = await options.sweepOrphans(
+          (function* () {
+            for (const taskId of store.taskIds()) if (!owed.has(taskId)) yield taskId;
+          })(),
+        );
         if (swept.failed.length > 0) warn('sweepOrphans could not stop some runners', swept.failed);
       } catch (error) {
         warn('sweepOrphans failed', error);
@@ -344,6 +350,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         }
         await mcp?.close();
       } finally {
+        // Owed stops are retried by the next process over this database.
+        orchestrator.close();
         // The database goes last and always: its lock is what keeps a second server out.
         ownInvites.close();
         db.close();

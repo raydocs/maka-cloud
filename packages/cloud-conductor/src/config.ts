@@ -51,6 +51,11 @@ export interface ConductorLimits {
   outboxRetryMs: number;
   /** Longest wait between two sends of one outbox event. */
   outboxMaxRetryMs: number;
+  /**
+   * How long to wait before asking again about a task that ended while its run
+   * was not known to have stopped. Its reservation is held until it has.
+   */
+  stopCheckMs: number;
 }
 
 export const DEFAULT_LIMITS: ConductorLimits = {
@@ -66,6 +71,7 @@ export const DEFAULT_LIMITS: ConductorLimits = {
   maxNoticesPerRun: 20,
   outboxRetryMs: 1000,
   outboxMaxRetryMs: 60_000,
+  stopCheckMs: 60_000,
 };
 
 export const CONNECTION_SLUG = 'conductor-anthropic';

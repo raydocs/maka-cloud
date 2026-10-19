@@ -107,6 +107,8 @@ export interface ConductorStats {
   outboxSending: number;
   /** Conversations waiting to retry an outbox event that failed. */
   outboxRetrying: number;
+  /** Conversations waiting to ask again about tasks whose stop is not confirmed. */
+  stopChecks: number;
 }
 
 /**
@@ -173,6 +175,7 @@ export class Conductor {
   private readonly orchestratorAccess: ConductorOptions['orchestratorAccess'];
   private readonly sending = new Map<string, Promise<void>>();
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly stopChecks = new Map<string, NodeJS.Timeout>();
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -349,6 +352,7 @@ export class Conductor {
       openClients: this.counters.openClients,
       outboxSending: this.sending.size,
       outboxRetrying: this.retryTimers.size,
+      stopChecks: this.stopChecks.size,
     };
   }
 
@@ -388,6 +392,8 @@ export class Conductor {
       }
       for (const timer of this.retryTimers.values()) clearTimeout(timer);
       this.retryTimers.clear();
+      for (const timer of this.stopChecks.values()) clearTimeout(timer);
+      this.stopChecks.clear();
       await this.idle();
       try {
         await this.host.close();
@@ -798,9 +804,11 @@ export class Conductor {
   }
 
   /**
-   * Settles a delegation from a task view once the task has ended: at what its
-   * tree reported spending, or at the whole reservation when no runner in it
-   * reports spend. A cancel by key that found no task settles at 0.
+   * Settles a delegation from a task view once the task has ended and its run
+   * is known to have stopped: at what its tree reported spending, or at the
+   * whole reservation when no runner in it reports spend. A cancel by key that
+   * found no task settles at 0. An ended task whose run may still be going
+   * keeps its reservation, and is asked about again until its stop is confirmed.
    */
   private settleView(delegation: DelegationRow, view: Record<string, unknown> | undefined): void {
     if (!view) return;
@@ -812,8 +820,28 @@ export class Conductor {
       this.state.bindTask(delegation.key, view.taskId);
     }
     if (!['succeeded', 'failed', 'cancelled'].includes(String(view.state))) return;
+    if (view.stopPending === true) {
+      this.state.markCancelPending([delegation.key]);
+      this.checkStopLater(delegation.conversationId);
+      return;
+    }
     const actual = typeof view.costUsd === 'number' ? view.costUsd : delegation.reservedUsd;
     this.state.settleDelegation(delegation.key, actual);
+  }
+
+  /** Asks the orchestrator again, after a while, about the conversation's tasks that are owed a cancel. */
+  private checkStopLater(conversationId: string): void {
+    if (this.closing.signal.aborted || this.stopChecks.has(conversationId)) return;
+    const timer = setTimeout(() => {
+      this.stopChecks.delete(conversationId);
+      if (this.closing.signal.aborted) return;
+      const access =
+        this.lanes.get(conversationId)?.access ?? this.orchestratorAccess?.(conversationId);
+      // Taking the access queues the retry.
+      if (access) this.lane(conversationId, access);
+    }, this.limits.stopCheckMs);
+    timer.unref();
+    this.stopChecks.set(conversationId, timer);
   }
 
   // Budget

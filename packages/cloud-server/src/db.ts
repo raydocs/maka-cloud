@@ -144,7 +144,22 @@ CREATE TRIGGER extension_events_no_delete BEFORE DELETE ON extension_events
 BEGIN SELECT RAISE(ABORT, 'extension_events is append-only'); END;
 `;
 
-export const MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+/**
+ * v5: which tasks owe a stop (`task_stop_pending` with no `task_stopped` after
+ * it), ended or not, so a restart finds the stops it must retry.
+ */
+const SCHEMA_V5 = `
+ALTER TABLE task_index ADD COLUMN stop_pending INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX task_index_stop_pending ON task_index (n) WHERE stop_pending = 1;
+`;
+
+export const MIGRATIONS: readonly string[] = [
+  SCHEMA_V1,
+  SCHEMA_V2,
+  SCHEMA_V3,
+  SCHEMA_V4,
+  SCHEMA_V5,
+];
 
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an

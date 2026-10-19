@@ -76,7 +76,24 @@ export type TaskEvent =
   | { type: 'task_resume_requested'; taskId: TaskId; by: SessionId }
   | { type: 'task_resumed'; taskId: TaskId }
   /** The runner could not resume. The task stays paused. */
-  | { type: 'task_resume_failed'; taskId: TaskId; reason: string };
+  | { type: 'task_resume_failed'; taskId: TaskId; reason: string }
+  /**
+   * The task's run may still be going somewhere (a remote sandbox) and nothing has
+   * confirmed it stopped: a stop failed, or the task ended while its run was live.
+   * Written before the task's terminal event whenever that is known by then. The
+   * orchestrator retries the stop until `task_stopped`; an ended task is not a
+   * stopped one until then.
+   */
+  | { type: 'task_stop_pending'; taskId: TaskId; cause: StopPendingCause }
+  /** The runner confirmed nothing of the task is left running. */
+  | { type: 'task_stopped'; taskId: TaskId };
+
+/**
+ * Why a stop is owed: `restart` (a restart could not stop a leftover run),
+ * `cancel_failed` (the runner refused a cancel) or `run_live` (the task ended
+ * while its run was still registered or starting).
+ */
+export type StopPendingCause = 'restart' | 'cancel_failed' | 'run_live';
 
 export interface StoredEvent {
   /** Position in the log, starting at 1 and strictly increasing. */
@@ -114,6 +131,8 @@ export interface TaskRecord {
   pauseRequested?: boolean;
   /** A resume was asked for and has neither happened nor failed yet. */
   resumeRequested?: boolean;
+  /** A `task_stop_pending` with no `task_stopped` after it: the run is not known to have stopped. */
+  stopPending?: boolean;
 }
 
 /** What a tool caller sees. Paths and session ids stay inside the server. */
@@ -140,6 +159,12 @@ export interface TaskView {
   pauseRequested: boolean;
   /** Set by waiting calls that returned because the timeout elapsed, not because the task ended. */
   waitTimedOut?: boolean;
+  /**
+   * The task's run is not known to have stopped, whatever `state` says: stopping it
+   * failed and is retried until the runner confirms. A finished task with this set
+   * may still be running (and spending) somewhere.
+   */
+  stopPending?: boolean;
 }
 
 export type OrchestratorErrorCode =

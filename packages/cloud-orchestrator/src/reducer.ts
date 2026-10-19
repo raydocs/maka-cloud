@@ -10,7 +10,8 @@ const VIEW_PROGRESS_NOTES = 10;
 /**
  * Fold one log entry into `tasks`. This is the only place task state is
  * computed, for live updates and for replay alike. The first terminal event for
- * a task wins; anything after it (a runner finishing after a cancel) is ignored.
+ * a task wins; anything after it (a runner finishing after a cancel) is ignored,
+ * except whether its run is known to have stopped.
  */
 export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
   if (event.type === 'task_created') {
@@ -30,7 +31,17 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     return;
   }
   const task = tasks.get(event.taskId);
-  if (!task || isTerminal(task.state)) return;
+  if (!task) return;
+  // Whether the run stopped is tracked past the task's end.
+  if (event.type === 'task_stop_pending') {
+    task.stopPending = true;
+    return;
+  }
+  if (event.type === 'task_stopped') {
+    delete task.stopPending;
+    return;
+  }
+  if (isTerminal(task.state)) return;
   switch (event.type) {
     case 'task_started':
       task.state = 'running';
@@ -110,6 +121,7 @@ export function toView(task: TaskRecord): TaskView {
     ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
     cancelRequested: task.cancelRequestedBy !== undefined,
     pauseRequested: task.pauseRequested === true,
+    ...(task.stopPending === true ? { stopPending: true } : {}),
     ...(task.costUsd === undefined ? {} : { costUsd: task.costUsd }),
     ...(task.budgetUsd === undefined
       ? {}
