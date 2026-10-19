@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { Gateway } from '@maka-cloud/gateway';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { type TestContext, test } from 'node:test';
+import { Gateway, SqliteSpendJournal } from '@maka-cloud/gateway';
 import type { CheckCharge } from '@maka-cloud/supervisor';
 import { gatewayPrices } from '../gateway.js';
-import {
-  createGatewaySummaryModel,
-  createGatewayVerifierModel,
-  dailyLimit,
-} from '../inbox/models.js';
+import { createGatewaySummaryModel, createGatewayVerifierModel } from '../inbox/models.js';
+import { startInbox } from '../inbox/setup.js';
 
 const CHECK = {
   vendor: 'openai' as const,
@@ -131,12 +131,29 @@ test('a check whose budget refuses is never sent', async () => {
   assert.equal(gateway.openGrants, 0);
 });
 
-test('the digest summary goes through the gateway on its own daily limit', async () => {
+/** A spend journal on a fresh file; `open` opens it again, as the next process would. */
+async function journalFile(t: TestContext) {
+  const dir = await mkdtemp(join(tmpdir(), 'host-summary-limit-'));
+  const opened: SqliteSpendJournal[] = [];
+  t.after(async () => {
+    for (const journal of opened) journal.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  return {
+    open: () => {
+      const journal = new SqliteSpendJournal(join(dir, 'gateway-spend.db'));
+      opened.push(journal);
+      return journal;
+    },
+  };
+}
+
+test('the digest summary goes through the gateway on its own daily limit', async (t) => {
   const { gateway, vendor } = rig();
   let now = Date.parse('2026-10-19T10:00:00Z');
   // Haiku at $0.1 / $0.5: a summary reserves about $0.001 and settles at $0.00015, so a $0.002
   // day takes a handful before the next reservation no longer fits.
-  const limit = dailyLimit(0.002, () => now);
+  const limit = (await journalFile(t)).open().dailyLimit('digest summary', 0.002, () => now);
   const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, limit);
   const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
   assert.deepEqual(await summary.summarize(items, new AbortController().signal), {
@@ -160,6 +177,61 @@ test('the digest summary goes through the gateway on its own daily limit', async
   now += 24 * 60 * 60 * 1000;
   await summary.summarize(items, new AbortController().signal);
   assert.equal(messages().length, sent + 1, 'a new day has its own limit');
+});
+
+test("a restart does not start the digest summary's day afresh", async (t) => {
+  const { gateway, vendor } = rig();
+  const now = () => Date.parse('2026-10-19T10:00:00Z');
+  const file = await journalFile(t);
+  const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
+  const messages = () => vendor.seen.filter((request) => request.url.endsWith('/v1/messages'));
+  const summarizeUntilRefused = async (budget: ReturnType<SqliteSpendJournal['dailyLimit']>) => {
+    const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, budget);
+    for (let sent = 0; sent < 20; sent += 1) {
+      try {
+        await summary.summarize(items, new AbortController().signal);
+      } catch {
+        return sent;
+      }
+    }
+    return 20;
+  };
+  const before = await summarizeUntilRefused(file.open().dailyLimit('digest summary', 0.002, now));
+  assert.ok(before > 0 && before < 20, 'the day’s limit stops the summaries');
+  assert.equal(messages().length, before);
+  // The next process reads the same file: the day's spend is still there.
+  const after = await summarizeUntilRefused(file.open().dailyLimit('digest summary', 0.002, now));
+  assert.equal(after, 0, 'the restarted process cannot spend the day again');
+  assert.equal(messages().length, before, 'and sends nothing');
+});
+
+test('a summary reservation a crashed process never settled still counts against its day', async (t) => {
+  const now = () => Date.parse('2026-10-19T10:00:00Z');
+  const file = await journalFile(t);
+  const crashed = file.open().dailyLimit('digest summary', 0.5, now);
+  assert.deepEqual(crashed.reserve('in-flight', 0.4), { ok: true });
+  const next = file.open().dailyLimit('digest summary', 0.5, now);
+  assert.equal(next.reserve('second', 0.2).ok, false, 'the open reservation still holds $0.40');
+  assert.deepEqual(next.reserve('small', 0.1), { ok: true });
+  next.settle('small', 0.01);
+  assert.deepEqual(next.reserve('fits', 0.09), { ok: true }, 'a settle frees what it did not use');
+  assert.equal(next.reserve('bad', Number.NaN).ok, false);
+});
+
+test('without a daily limit that survives a restart, the inbox builds no summary model', async () => {
+  const { gateway, vendor } = rig();
+  await assert.rejects(
+    startInbox(
+      {
+        dbPath: '/nonexistent/supervisor.db',
+        config: { verifierModels: [], summaryModel: 'claude-haiku-5-5', dailyCapUsd: 5 },
+        gateway,
+      },
+      { parts: {}, conductor: {} } as never,
+    ),
+    /daily limit that survives a restart/u,
+  );
+  assert.equal(vendor.seen.length, 0);
 });
 
 test('check models the configuration does not price are priced from their pool entry', () => {

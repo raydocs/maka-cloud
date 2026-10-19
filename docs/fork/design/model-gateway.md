@@ -79,8 +79,9 @@ The gateway invents no ledger. A grant charges a **budget port**: `reserve(key, 
   run budget through `Conductor.reserveSpend/settleSpend`. A check model through the gateway is
   `metered`: the supervisor stops reserving its own estimate and hands the gateway a charge, so
   the gateway reserves on the exact request body; a refusal is a check that could not run for
-  budget. The digest summary goes through the gateway on its own limit of $0.50 per UTC day, held
-  in memory (a restart starts the day afresh; at the summary's size that is cents).
+  budget. The digest summary goes through the gateway on its own limit of $0.50 per UTC day, kept
+  in the spend journal: a restart reads the day's spend back, and a reservation a crashed process
+  never settled counts in full. Without that limit the inbox does not build the summary model.
 
 ## Worst-case reservation
 
