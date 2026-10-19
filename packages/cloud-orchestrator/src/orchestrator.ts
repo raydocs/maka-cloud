@@ -1,5 +1,13 @@
-import { type IssuedSession, SessionAuth, type SessionInfo } from './auth.js';
+import {
+  type IssuedSession,
+  MemorySessionStore,
+  SessionAuth,
+  type SessionInfo,
+  type SessionStore,
+} from './auth.js';
+import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
+import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
 import { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
 import type { RunHandle, RunnerRegistry } from './runner.js';
 import type { TaskStore } from './store.js';
@@ -19,6 +27,7 @@ export const DEFAULT_WAIT_MS = 60_000;
 export const MAX_WAIT_MS = 10 * 60_000;
 export const DEFAULT_MAX_DEPTH = 5;
 const MAX_TITLE_LENGTH = 200;
+export const DEFAULT_ARCHIVE_CACHE: CacheLimits = { maxEntries: 512, maxBytes: 4 * 1024 * 1024 };
 
 export interface OrchestratorOptions {
   store: TaskStore;
@@ -32,6 +41,30 @@ export interface OrchestratorOptions {
    */
   maxDepth?: number;
   newTaskId?: () => TaskId;
+  /** Where session digests live. Defaults to memory; a server that restarts supplies a durable one. */
+  sessions?: SessionStore;
+  quotas?: Partial<QuotaLimits>;
+  caches?: {
+    /** Finished tasks read back from the store. 0 entries reads the store every time. */
+    archivedTasks?: CacheLimits;
+    sessions?: CacheLimits;
+  };
+}
+
+/** Sizes of the structures that must stay bounded, for tests and diagnostics. */
+export interface OrchestratorStats {
+  /** Tasks held in memory: only those not yet ended. */
+  activeTasks: number;
+  archivedCached: number;
+  archivedCachedBytes: number;
+  sessionsCached: number;
+  /** Task ids with at least one pending wait. */
+  waitedTasks: number;
+  /** Sessions holding a wait slot. */
+  sessionsWaiting: number;
+  /** Trees counted against the active-task quota. */
+  treesCounted: number;
+  connectionSessions: number;
 }
 
 export interface DelegateInput {
@@ -49,25 +82,43 @@ export class Orchestrator {
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly newTaskId: () => TaskId;
-  private readonly auth = new SessionAuth();
+  private readonly auth: SessionAuth;
+  private readonly quotas: QuotaLimits;
+  /** Tasks that have not ended. A task leaves this map on its terminal event and is read from the store after that. */
   private tasks: TaskMap = new Map();
+  private readonly archive: BoundedCache<TaskId, TaskRecord>;
+  private readonly activeByRoot = new KeyedCounter<SessionId>();
+  private readonly waitsBySession = new KeyedCounter<SessionId>();
+  private readonly connectionsBySession = new KeyedCounter<SessionId>();
+  private openConnections = 0;
   private readonly handles = new Map<TaskId, RunHandle>();
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
   private writeChain: Promise<unknown> = Promise.resolve();
   private endpoint: string | undefined;
+  /** Tasks `restore` found unfinished and ended. */
+  private orphans: TaskId[] = [];
 
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
     this.runners = options.runners;
     this.handoff = new Handoff(options.handoffRoot);
     this.now = options.now ?? Date.now;
+    this.quotas = { ...DEFAULT_QUOTAS, ...options.quotas };
+    this.auth = new SessionAuth(
+      options.sessions ?? new MemorySessionStore(),
+      options.caches?.sessions,
+    );
+    this.archive = new BoundedCache(
+      options.caches?.archivedTasks ?? DEFAULT_ARCHIVE_CACHE,
+      (record) => JSON.stringify(record).length,
+    );
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.newTaskId =
       options.newTaskId ?? (() => `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`);
   }
 
-  /** Builds the orchestrator and restores every task from the store's log. */
+  /** Builds the orchestrator and ends every task the store still lists as unfinished. */
   static async create(options: OrchestratorOptions): Promise<Orchestrator> {
     const orchestrator = new Orchestrator(options);
     await orchestrator.restore();
@@ -87,6 +138,56 @@ export class Orchestrator {
     this.auth.revoke(sessionId);
   }
 
+  /** New secret for an existing session whose holder lost its token; the session keeps its tasks. */
+  rotateSession(sessionId: SessionId): IssuedSession | undefined {
+    return this.auth.rotate(sessionId);
+  }
+
+  /** Tasks the last `create` found unfinished and ended. Nothing runs them after a restart. */
+  get orphanedTaskIds(): readonly TaskId[] {
+    return this.orphans;
+  }
+
+  stats(): OrchestratorStats {
+    return {
+      activeTasks: this.tasks.size,
+      archivedCached: this.archive.size,
+      archivedCachedBytes: this.archive.bytes,
+      sessionsCached: this.auth.cached,
+      waitedTasks: this.waiters.size,
+      sessionsWaiting: this.waitsBySession.keys,
+      treesCounted: this.activeByRoot.keys,
+      connectionSessions: this.connectionsBySession.keys,
+    };
+  }
+
+  /**
+   * Takes a connection slot for the session and returns the function that gives
+   * it back. The MCP endpoint calls this per request and releases it when the
+   * response closes.
+   */
+  acquireConnection(session: SessionInfo): () => void {
+    const limit = this.limitFor(
+      session,
+      this.quotas.maxConnections,
+      this.quotas.maxExecutorConnections,
+    );
+    if (this.openConnections >= this.quotas.maxTotalConnections) {
+      throw quotaExceeded('The server has too many open connections');
+    }
+    if (!this.connectionsBySession.tryAcquire(session.sessionId, limit)) {
+      throw quotaExceeded(`A session may hold at most ${limit} open connections`);
+    }
+    this.openConnections += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.openConnections -= 1;
+      this.connectionsBySession.release(session.sessionId);
+    };
+  }
+
   authenticate(token: string): SessionInfo | undefined {
     return this.auth.resolve(token);
   }
@@ -97,6 +198,23 @@ export class Orchestrator {
     signal?: AbortSignal,
   ): Promise<TaskView> {
     this.assertSessionActive(session);
+    const mode = input.mode ?? 'async';
+    // A wait-mode delegate holds its wait slot from the start, so it is refused
+    // before a task is created rather than after.
+    const releaseWait = mode === 'wait' ? this.acquireWait(session) : undefined;
+    try {
+      return await this.delegateTask(session, input, mode, signal);
+    } finally {
+      releaseWait?.();
+    }
+  }
+
+  private async delegateTask(
+    session: SessionInfo,
+    input: DelegateInput,
+    mode: TaskMode,
+    signal: AbortSignal | undefined,
+  ): Promise<TaskView> {
     const runner = this.runners.get(input.runner);
     if (!runner) {
       throw new OrchestratorError(
@@ -120,7 +238,9 @@ export class Orchestrator {
         );
       }
     }
-    const mode = input.mode ?? 'async';
+    const rootSessionId = this.rootSessionOf(session);
+    // Fail early under overload; the check that counts is the one in the write chain below.
+    this.assertTaskQuota(rootSessionId);
     const taskId = this.newTaskId();
     let paths: HandoffPaths;
     try {
@@ -137,6 +257,7 @@ export class Orchestrator {
           type: 'task_created',
           taskId,
           sessionId: session.sessionId,
+          rootSessionId,
           ...(parent === undefined ? {} : { parentTaskId: parent }),
           runner: input.runner,
           ...(input.title === undefined ? {} : { title: input.title }),
@@ -145,6 +266,9 @@ export class Orchestrator {
         () => {
           this.assertSessionActive(session);
           if (parent !== undefined) this.assertParentActive(parent);
+          // Counting and appending happen in the same step of the chain, so
+          // concurrent delegates cannot all pass at limit - 1.
+          this.assertTaskQuota(rootSessionId);
         },
       );
     } catch (error) {
@@ -153,7 +277,7 @@ export class Orchestrator {
     }
     // launch records its own failures; a store failure has nowhere left to report.
     void this.launch(taskId, input.runner, paths).catch(() => undefined);
-    if (mode === 'wait') return this.waitView(taskId, input.timeoutMs, signal);
+    if (mode === 'wait') return await this.waitView(taskId, input.timeoutMs, signal);
     return this.view(taskId);
   }
 
@@ -169,7 +293,14 @@ export class Orchestrator {
     signal?: AbortSignal,
   ): Promise<TaskView> {
     this.visible(session, taskId);
-    return this.waitView(taskId, timeoutMs, signal);
+    // A task that already ended answers at once and needs no slot.
+    if (this.isDone(taskId)) return this.view(taskId);
+    const release = this.acquireWait(session);
+    try {
+      return await this.waitView(taskId, timeoutMs, signal);
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -180,29 +311,38 @@ export class Orchestrator {
   async cancel(session: SessionInfo, taskId: TaskId): Promise<TaskView> {
     this.visible(session, taskId);
     for (;;) {
-      const targets = this.subtree(taskId).filter((task) => !isTerminal(task.state));
+      const targets = this.activeSubtree(taskId);
       if (targets.length === 0) break;
       // Mark everything first so nothing in the tree can start new children
       // while the tree is being torn down.
-      for (const task of targets) {
+      for (const { task } of targets) {
         await this.record({
           type: 'task_cancel_requested',
           taskId: task.taskId,
           by: session.sessionId,
         });
       }
-      targets.sort((a, b) => this.ancestry(b.taskId).length - this.ancestry(a.taskId).length);
-      for (const task of targets) await this.cancelOne(task.taskId);
+      targets.sort((a, b) => b.depth - a.depth);
+      for (const { task } of targets) await this.cancelOne(task.taskId);
     }
     return this.view(taskId);
   }
 
   private async restore(): Promise<void> {
-    this.tasks = reduce(await this.store.read());
+    // Only unfinished tasks are loaded; everything that ended stays in the store.
+    for (const taskId of this.store.activeTaskIds()) {
+      const task = reduce(this.store.readTask(taskId)).get(taskId);
+      if (!task || isTerminal(task.state)) continue;
+      this.tasks.set(taskId, task);
+      this.activeByRoot.add(task.rootSessionId);
+    }
     for (const task of [...this.tasks.values()]) {
-      if (isTerminal(task.state)) continue;
       // Nothing is running after a restart. History is never edited, so the
       // outcome is appended.
+      this.orphans.push(task.taskId);
+      // The map of executor sessions died with the process, but a durable
+      // session store still holds the digests of the ones this task was given.
+      this.auth.revokeForTask(task.taskId);
       await this.record(
         task.cancelRequestedBy !== undefined
           ? { type: 'task_cancelled', taskId: task.taskId }
@@ -329,9 +469,13 @@ export class Orchestrator {
   }
 
   private afterApply(event: TaskEvent): void {
-    if (event.type === 'task_created') return;
     const task = this.tasks.get(event.taskId);
-    if (!task || !isTerminal(task.state)) return;
+    if (!task) return;
+    if (event.type === 'task_created') {
+      this.activeByRoot.add(task.rootSessionId);
+      return;
+    }
+    if (!isTerminal(task.state)) return;
     this.handles.delete(task.taskId);
     const executor = this.executorSessions.get(task.taskId);
     if (executor !== undefined) {
@@ -343,6 +487,9 @@ export class Orchestrator {
       this.waiters.delete(task.taskId);
       for (const wake of [...waiting]) wake();
     }
+    // Waiters read the finished task back from the store, so it can leave memory now.
+    this.activeByRoot.release(task.rootSessionId);
+    this.tasks.delete(task.taskId);
   }
 
   private async waitView(
@@ -385,7 +532,7 @@ export class Orchestrator {
   }
 
   private view(taskId: TaskId): TaskView {
-    const task = this.tasks.get(taskId);
+    const task = this.lookup(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
     return toView(task);
   }
@@ -412,20 +559,74 @@ export class Orchestrator {
     }
   }
 
-  /** Ended, or a cancel is under way: the runner's own outcome no longer counts. */
+  /**
+   * A task that is not in memory has ended (an id that never existed is turned
+   * away by `visible` before it gets here), so these treat "not in memory" as
+   * "ended".
+   */
   private isStopping(taskId: TaskId): boolean {
     const task = this.tasks.get(taskId);
-    return !task || isTerminal(task.state) || task.cancelRequestedBy !== undefined;
+    return !task || task.cancelRequestedBy !== undefined;
   }
 
   private isDone(taskId: TaskId): boolean {
-    const task = this.tasks.get(taskId);
-    return !task || isTerminal(task.state);
+    return !this.tasks.has(taskId);
+  }
+
+  /** An unfinished task from memory, otherwise a finished one read back from the store. */
+  private lookup(taskId: TaskId): TaskRecord | undefined {
+    const active = this.tasks.get(taskId);
+    if (active) return active;
+    const cached = this.archive.get(taskId);
+    if (cached) return cached;
+    const events = this.store.readTask(taskId);
+    if (events.length === 0) return undefined;
+    const record = reduce(events).get(taskId);
+    // Only an ended task is immutable, which is why caching it needs no invalidation.
+    if (record && isTerminal(record.state)) this.archive.set(taskId, record);
+    return record;
+  }
+
+  /** The root session that owns the tree a new task from `session` joins. */
+  private rootSessionOf(session: SessionInfo): SessionId {
+    if (session.parentTaskId === undefined) return session.sessionId;
+    return this.lookup(session.parentTaskId)?.rootSessionId ?? session.sessionId;
+  }
+
+  private assertTaskQuota(rootSessionId: SessionId): void {
+    if (this.activeByRoot.count(rootSessionId) >= this.quotas.maxActiveTasks) {
+      throw quotaExceeded(
+        `A conversation may have at most ${this.quotas.maxActiveTasks} unfinished tasks`,
+      );
+    }
+    const since = this.now() - this.quotas.taskWindowMs;
+    if (this.store.countCreatedSince(rootSessionId, since) >= this.quotas.maxTasksPerWindow) {
+      throw quotaExceeded(
+        `A conversation may create at most ${this.quotas.maxTasksPerWindow} tasks per ${Math.round(this.quotas.taskWindowMs / 60_000)} minutes`,
+      );
+    }
+  }
+
+  private acquireWait(session: SessionInfo): () => void {
+    const limit = this.limitFor(session, this.quotas.maxWaits, this.quotas.maxExecutorWaits);
+    if (!this.waitsBySession.tryAcquire(session.sessionId, limit)) {
+      throw quotaExceeded(`A session may hold at most ${limit} waits at a time`);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.waitsBySession.release(session.sessionId);
+    };
+  }
+
+  private limitFor(session: SessionInfo, conductor: number, executor: number): number {
+    return session.parentTaskId === undefined ? conductor : executor;
   }
 
   /** A session sees tasks it created and everything beneath them, nothing else. */
   private visible(session: SessionInfo, taskId: TaskId): TaskRecord {
-    const task = this.tasks.get(taskId);
+    const task = this.lookup(taskId);
     if (
       !task ||
       !this.ancestry(taskId).some((ancestor) => ancestor.sessionId === session.sessionId)
@@ -439,20 +640,37 @@ export class Orchestrator {
   private ancestry(taskId: TaskId): TaskRecord[] {
     const chain: TaskRecord[] = [];
     for (
-      let current = this.tasks.get(taskId);
+      let current = this.lookup(taskId);
       current;
-      current =
-        current.parentTaskId === undefined ? undefined : this.tasks.get(current.parentTaskId)
+      current = current.parentTaskId === undefined ? undefined : this.lookup(current.parentTaskId)
     ) {
       chain.push(current);
     }
     return chain;
   }
 
-  private subtree(rootId: TaskId): TaskRecord[] {
-    return [...this.tasks.values()].filter((task) =>
-      this.ancestry(task.taskId).some((ancestor) => ancestor.taskId === rootId),
-    );
+  /**
+   * Unfinished tasks in the subtree of `rootId` (itself included) with their
+   * depth below it. It walks the store's child index, so cost follows the size
+   * of this subtree, and it passes through ended tasks: an ended parent does not
+   * hide its running children.
+   */
+  private activeSubtree(rootId: TaskId): Array<{ task: TaskRecord; depth: number }> {
+    const found: Array<{ task: TaskRecord; depth: number }> = [];
+    const seen = new Set<TaskId>();
+    let level = [rootId];
+    for (let depth = 0; level.length > 0; depth += 1) {
+      const next: TaskId[] = [];
+      for (const id of level) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const task = this.tasks.get(id);
+        if (task) found.push({ task, depth });
+        next.push(...this.store.childrenOf(id));
+      }
+      level = next;
+    }
+    return found;
   }
 }
 

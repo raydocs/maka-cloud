@@ -17,6 +17,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     tasks.set(event.taskId, {
       taskId: event.taskId,
       sessionId: event.sessionId,
+      rootSessionId: event.rootSessionId ?? event.sessionId,
       ...(event.parentTaskId === undefined ? {} : { parentTaskId: event.parentTaskId }),
       runner: event.runner,
       ...(event.title === undefined ? {} : { title: event.title }),
