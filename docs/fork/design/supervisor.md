@@ -615,9 +615,14 @@ before the fix.
   edited after it was made, a missing or unusable record, a listed rendering that
   does not exist, an artifact name listed twice, and an artifact listed as a link
   (a link cannot be read here and reproduced, so it is never skipped). A task that
-  lists both a change (`changes.json`, `change.patch`) and a report is `unverified`
-  too, since one kind of check cannot stand for both. With no rendering listed
-  there is nothing to reproduce and every claim is checked. A contract test in the
+  lists both a change (`changes.json`, `change.patch`) and any report artifact
+  (`report.json`, `report.md`, `report.html`) is `unverified` too, since one kind of
+  check cannot stand for both, and so is a rendering listed without `report.json`.
+  Every artifact name comes from one helper (`artifactName` in `kind.ts`): the path
+  of a link or a local path without query or fragment, percent-decoded,
+  NFKC-normalized and case-folded. Classifying, counting and reading use it alone,
+  and any report artifact, in any form, puts the research check in scope. With no
+  rendering listed there is nothing to reproduce and every claim is checked. A contract test in the
   playbooks (`run.test.ts`) keeps the record able to reproduce what `cite-check`
   delivers. `ArtifactRead` carries the raw `bytes` next to the decoded `text` for
   this comparison.
