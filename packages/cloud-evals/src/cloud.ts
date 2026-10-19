@@ -89,6 +89,14 @@ export function publicTaskOf(cell: ExperimentCell): PublicTask {
   };
 }
 
+/**
+ * Names the id the model gateway's spend journal used for this attempt, so a restart can tell
+ * which journaled spend an attempt record already holds.
+ */
+function gatewayArtifact(taskId: string): JsonObject {
+  return { kind: 'gateway', taskId };
+}
+
 function defaultTaskId(cellId: string): string {
   return `tsk_${createHash('sha256').update(`${cellId}\u0000${randomUUID()}`).digest('hex').slice(0, 32)}`;
 }
@@ -243,16 +251,19 @@ export function createCloudEvals(options: CloudEvalsOptions): CloudEvals {
           durationMs: now() - started,
           status,
           failureReason: result.failureReason,
-          artifacts: result.outcome
-            ? [
-                {
-                  kind: 'outcome',
-                  sha256: result.outcome.sha256,
-                  files: result.outcome.files,
-                  patch: result.outcome.patch,
-                },
-              ]
-            : [],
+          artifacts: [
+            gatewayArtifact(state.taskId),
+            ...(result.outcome
+              ? [
+                  {
+                    kind: 'outcome',
+                    sha256: result.outcome.sha256,
+                    files: result.outcome.files,
+                    patch: result.outcome.patch,
+                  },
+                ]
+              : []),
+          ],
         };
       } catch (error) {
         const costUsd = error instanceof DriverError ? error.costUsd : null;
@@ -263,7 +274,7 @@ export function createCloudEvals(options: CloudEvalsOptions): CloudEvals {
           durationMs: now() - started,
           status: 'infra_failed',
           failureReason: error instanceof Error ? error.message : String(error),
-          artifacts: [],
+          artifacts: [gatewayArtifact(state.taskId)],
         };
       }
     },

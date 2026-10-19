@@ -76,6 +76,12 @@ stop that could not be confirmed, or a grader error is `infra_failed` (replaced 
   cannot overspend the total. A run that started and reported no cost is charged its cap. On a resumed run the ledger
   starts from what the earlier attempts already cost. Every exit (finish, abort, timeout, driver throw, grader throw)
   settles the reservation, stops the run, returns the lease and removes the attempt directory; each has a test.
+- **Restart.** The gateway's spend journal (`gateway-spend.db`) is in the experiment directory. At the start of a live
+  run, what earlier processes spent through it (their settles, and every open hold at its reserved amount) is moved into
+  `carried-spend.json` in the same directory, synced to disk before the journal is told to forget it, and starts the
+  ledger. An attempt record names its gateway task id; for an attempt the journal also holds, the larger of the two
+  amounts counts, once. A cell that died before it was recorded therefore still counts. An unreadable
+  `carried-spend.json` stops the run.
 
 ## Commands
 
