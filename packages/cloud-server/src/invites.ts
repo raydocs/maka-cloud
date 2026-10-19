@@ -15,6 +15,21 @@ export interface CreatedInvite extends InviteInfo {
 
 const PREFIX = 'mki_';
 
+/**
+ * Step `i` takes the invites file from version `i` to `i + 1`; steps are only
+ * appended. v1 is the table as it was before the file had a version, so a file
+ * created then (version 0, table present) passes through it unchanged.
+ */
+export const INVITE_MIGRATIONS: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS invites (
+    invite_id TEXT PRIMARY KEY,
+    token_sha256 BLOB NOT NULL,
+    label TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+  )`,
+];
+
 function digest(token: string): Buffer {
   return createHash('sha256').update(token).digest();
 }
@@ -33,6 +48,8 @@ function inviteIdOf(token: string): string | undefined {
  */
 export class InviteStore {
   private readonly db: DatabaseSync;
+  private readonly revokeListeners = new Set<(inviteId: string) => void>();
+  private dataVersion: number;
 
   constructor(
     path: string,
@@ -41,13 +58,13 @@ export class InviteStore {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec(`CREATE TABLE IF NOT EXISTS invites (
-      invite_id TEXT PRIMARY KEY,
-      token_sha256 BLOB NOT NULL,
-      label TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      revoked_at INTEGER
-    )`);
+    try {
+      migrateInvites(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+    this.dataVersion = this.readDataVersion();
   }
 
   close(): void {
@@ -70,7 +87,38 @@ export class InviteStore {
     const result = this.db
       .prepare('UPDATE invites SET revoked_at = ? WHERE invite_id = ? AND revoked_at IS NULL')
       .run(this.now(), inviteId);
-    return Number(result.changes) > 0;
+    const revoked = Number(result.changes) > 0;
+    if (revoked) for (const listener of [...this.revokeListeners]) listener(inviteId);
+    return revoked;
+  }
+
+  /** Whether the invite exists and is not revoked. Read from the file every time. */
+  active(inviteId: string): boolean {
+    const row = this.db
+      .prepare('SELECT revoked_at FROM invites WHERE invite_id = ?')
+      .get(inviteId) as { revoked_at: number | null } | undefined;
+    return row !== undefined && row.revoked_at === null;
+  }
+
+  /** Called after a revoke through this store. Returns the unsubscribe function. */
+  onRevoke(listener: (inviteId: string) => void): () => void {
+    this.revokeListeners.add(listener);
+    return () => this.revokeListeners.delete(listener);
+  }
+
+  /**
+   * Whether another connection (the command line, from its own process) wrote
+   * the file since the last call. One cheap pragma, so it can be polled.
+   */
+  changedElsewhere(): boolean {
+    const version = this.readDataVersion();
+    const changed = version !== this.dataVersion;
+    this.dataVersion = version;
+    return changed;
+  }
+
+  private readDataVersion(): number {
+    return (this.db.prepare('PRAGMA data_version').get() as { data_version: number }).data_version;
   }
 
   list(): InviteInfo[] {
@@ -115,5 +163,25 @@ export class InviteStore {
       createdAt: row.created_at,
       revokedAt: null,
     };
+  }
+}
+
+function migrateInvites(db: DatabaseSync): void {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const { user_version: version } = db.prepare('PRAGMA user_version').get() as {
+      user_version: number;
+    };
+    if (version > INVITE_MIGRATIONS.length) {
+      throw new Error(`Unsupported invites schema version ${version}`);
+    }
+    for (let step = version; step < INVITE_MIGRATIONS.length; step += 1) {
+      db.exec(INVITE_MIGRATIONS[step] ?? '');
+      db.exec(`PRAGMA user_version = ${step + 1}`);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
 }

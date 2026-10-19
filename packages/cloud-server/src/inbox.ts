@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { HttpError, parseCount, readJson, respond } from './http.js';
+import { HttpError, parseCount, readJson, respond, take } from './http.js';
 import type { InviteInfo } from './invites.js';
 import type { RateLimiter } from './rate-limit.js';
 
@@ -10,16 +10,29 @@ import type { RateLimiter } from './rate-limit.js';
  * supervisor to this shape. Items and settings are the supervisor's own JSON.
  */
 export interface InboxService {
-  list(query: { state: 'open' | 'closed' | 'all'; after: number; limit: number }): Promise<{
+  /** Items of the conversations in `conversations` only: the caller's own. */
+  list(query: {
+    state: 'open' | 'closed' | 'all';
+    after: number;
+    limit: number;
+    conversations: readonly string[];
+  }): Promise<{
     items: unknown[];
     next: number | null;
   }>;
+  /**
+   * An item outside `conversations` is `not_found`. `caller` is the invite that
+   * answers; it is stored with the answer and handed back when the answer is
+   * delivered, so it can be checked again where the answer takes effect.
+   */
   answer(request: {
     itemId: string;
     answerId: string;
     optionId: string;
     text?: string;
     preconditionHash: string;
+    caller: string;
+    conversations: readonly string[];
   }): Promise<InboxAnswerResult>;
   /** `ok: false` for a kind the inbox does not have. */
   setMute(kind: string, muted: boolean): { ok: true; settings: unknown } | { ok: false };
@@ -49,7 +62,6 @@ const ANSWER_FAILURE: Record<string, number> = {
 };
 
 const STATES = ['open', 'closed', 'all'] as const;
-const KIND = /^[a-z][a-z_]{0,31}$/u;
 const answerBody = z
   .object({
     answerId: z.string().min(1).max(64),
@@ -59,11 +71,26 @@ const answerBody = z
   })
   .strict();
 
-/** The `/v1/inbox/…` routes. They sit behind the same invite as every other route. */
+/** Who owns what, for the inbox routes. */
+export interface InboxOwners {
+  /** Whether the invite is still active: checked again after the body is read. */
+  active(inviteId: string): boolean;
+  /** The ids of the conversations the invite owns. */
+  conversationsOf(inviteId: string): string[];
+}
+
+/**
+ * The `/v1/inbox/…` routes. They sit behind the same invite as every other
+ * route, and an invite sees and answers the items of its own conversations
+ * only. The mutes, the settings and the digest are one set for the whole
+ * server, shared by every owner, so no invite reaches them: they answer 404
+ * until they are kept per owner.
+ */
 export class InboxRoutes {
   constructor(
     private readonly service: InboxService,
     private readonly limiter: RateLimiter,
+    private readonly owners: InboxOwners,
   ) {}
 
   /** Answers a request under `/v1/inbox`, or returns false for a path that is not one of its routes. */
@@ -77,7 +104,7 @@ export class InboxRoutes {
     const method = req.method ?? 'GET';
     if (path === '/v1/inbox/items') {
       allow(method, 'GET');
-      await this.list(res, url);
+      await this.list(res, url, invite);
       return true;
     }
     const answer = /^\/v1\/inbox\/items\/([^/]+)\/answer$/u.exec(path);
@@ -86,47 +113,10 @@ export class InboxRoutes {
       await this.answer(req, res, invite, decodeURIComponent(answer[1] ?? ''));
       return true;
     }
-    const mute = /^\/v1\/inbox\/mutes\/([^/]+)$/u.exec(path);
-    if (mute) {
-      if (method !== 'PUT' && method !== 'DELETE') {
-        throw new HttpError(405, 'method_not_allowed', { allow: 'PUT, DELETE' });
-      }
-      const kind = decodeURIComponent(mute[1] ?? '');
-      if (!KIND.test(kind)) throw new HttpError(404, 'not_found');
-      this.limit(invite);
-      await discard(req);
-      const result = this.service.setMute(kind, method === 'PUT');
-      if (!result.ok) throw new HttpError(404, 'not_found');
-      respond(res, 200, { settings: result.settings });
-      return true;
-    }
-    if (path === '/v1/inbox/settings') {
-      if (method === 'GET') {
-        respond(res, 200, { settings: this.service.settings() });
-        return true;
-      }
-      if (method !== 'PUT') throw new HttpError(405, 'method_not_allowed', { allow: 'GET, PUT' });
-      const body = await readJson(req, false);
-      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-        throw new HttpError(400, 'invalid_request');
-      }
-      this.limit(invite);
-      const result = this.service.updateSettings(body);
-      if (!result.ok) throw new HttpError(400, 'invalid_request');
-      respond(res, 200, { settings: result.settings });
-      return true;
-    }
-    if (path === '/v1/inbox/digest') {
-      allow(method, 'POST');
-      this.limit(invite);
-      await discard(req);
-      respond(res, 200, { digest: await this.service.digest() });
-      return true;
-    }
     return false;
   }
 
-  private async list(res: ServerResponse, url: URL): Promise<void> {
+  private async list(res: ServerResponse, url: URL, invite: InviteInfo): Promise<void> {
     const state = url.searchParams.get('state') ?? 'open';
     if (!(STATES as readonly string[]).includes(state)) throw new HttpError(400, 'invalid_request');
     const after = parseCount(url.searchParams.get('after'), 0);
@@ -135,6 +125,7 @@ export class InboxRoutes {
       state: state as (typeof STATES)[number],
       after,
       limit,
+      conversations: this.owners.conversationsOf(invite.inviteId),
     });
     respond(res, 200, { items: page.items, ...(page.next === null ? {} : { next: page.next }) });
   }
@@ -145,15 +136,22 @@ export class InboxRoutes {
     invite: InviteInfo,
     itemId: string,
   ): Promise<void> {
+    // Before the body: a client over its rate does not get to send one.
+    take(this.limiter, invite);
     const body = answerBody.safeParse(await readJson(req, false));
     if (!body.success) throw new HttpError(400, 'invalid_request');
-    this.limit(invite);
+    // Checked again now the body is in: a revoke that landed while it arrived wins.
+    if (!this.owners.active(invite.inviteId)) {
+      throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+    }
     const result = await this.service.answer({
       itemId,
       answerId: body.data.answerId,
       optionId: body.data.optionId,
       ...(body.data.text === undefined ? {} : { text: body.data.text }),
       preconditionHash: body.data.preconditionHash,
+      caller: invite.inviteId,
+      conversations: this.owners.conversationsOf(invite.inviteId),
     });
     if (!result.ok) {
       const status = ANSWER_FAILURE[result.reason];
@@ -170,22 +168,8 @@ export class InboxRoutes {
       item: result.item,
     });
   }
-
-  private limit(invite: InviteInfo): void {
-    const allowed = this.limiter.take(invite.inviteId);
-    if (!allowed.ok) {
-      throw new HttpError(429, 'quota_exceeded', {
-        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
-      });
-    }
-  }
 }
 
 function allow(method: string, expected: string): void {
   if (method !== expected) throw new HttpError(405, 'method_not_allowed', { allow: expected });
-}
-
-/** Reads a body nobody uses, so a client that sends one is not left hanging. */
-async function discard(req: IncomingMessage): Promise<void> {
-  await readJson(req, true);
 }

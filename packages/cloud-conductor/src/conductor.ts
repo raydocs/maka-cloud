@@ -55,6 +55,13 @@ export interface ConductorOptions {
   now?: () => number;
   /** Reports what must not stop the conductor: an outbox that threw, a cancel that failed. */
   onWarning?: (message: string, detail?: unknown) => void;
+  /**
+   * Whether the one who approved an irreversible call (`UserAnswer.caller`;
+   * null when the answer carried none) may still have it run. Asked right
+   * before the approved call runs, in the transaction that uses the approval.
+   * Without it every approval stands.
+   */
+  approverAuthorized?: (approvedBy: string | null, conversationId: string) => boolean;
   /** Test seams. */
   hooks?: {
     /** After a turn is registered and before its message is sent. */
@@ -76,6 +83,8 @@ export interface UserAnswer {
   optionId: string;
   /** Optional words the user added to the chosen option; passed to the model with it. */
   text?: string;
+  /** Who answered, as the server names them (an invite id). Recorded with an approval. */
+  caller?: string;
 }
 
 export const MAX_ANSWER_TEXT_LENGTH = 4000;
@@ -169,6 +178,7 @@ export class Conductor {
   private readonly counters = { openClients: 0, timers: 0, planners: 0 };
   private readonly closing = new AbortController();
   private readonly orchestratorAccess: ConductorOptions['orchestratorAccess'];
+  private readonly approverAuthorized: ConductorOptions['approverAuthorized'];
   private readonly sending = new Map<string, Promise<void>>();
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private slotsInUse = 0;
@@ -185,6 +195,7 @@ export class Conductor {
     this.warn = options.onWarning ?? (() => undefined);
     this.hooks = options.hooks ?? {};
     this.orchestratorAccess = options.orchestratorAccess;
+    this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
       root: join(options.root, 'maka'),
@@ -271,6 +282,7 @@ export class Conductor {
       answer.questionId,
       answer.optionId,
       answer.text,
+      answer.caller,
     );
     if (!result.accepted) return result;
     if (result.duplicate) return { accepted: true, duplicate: true };
@@ -922,6 +934,8 @@ export class Conductor {
         const delegation = this.state.delegationOfTask(taskId);
         if (delegation && delegation.state !== 'settled') this.settleView(delegation, view);
       },
+      approverAuthorized: (approvedBy, conversationId) =>
+        this.approverAuthorized ? this.approverAuthorized(approvedBy, conversationId) : true,
     };
   }
 

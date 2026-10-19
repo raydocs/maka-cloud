@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { InboxAnswerResult, InboxService } from '../inbox.js';
-import { startHarness } from './harness.js';
+import { newConversation, startHarness } from './harness.js';
 
 interface Calls {
   list: unknown[];
@@ -96,11 +96,13 @@ test('the list passes its filters on, with bounds, and shows where the next page
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { items: [{ itemId: 'a' }], next: 7 });
   await h.api('/v1/inbox/items');
+  const conversationId = await newConversation(h);
   await h.api('/v1/inbox/items?limit=0');
+  // The caller's own conversations scope the list.
   assert.deepEqual(calls.list, [
-    { state: 'all', after: 3, limit: 200 },
-    { state: 'open', after: 0, limit: 50 },
-    { state: 'open', after: 0, limit: 1 },
+    { state: 'all', after: 3, limit: 200, conversations: [] },
+    { state: 'open', after: 0, limit: 50, conversations: [] },
+    { state: 'open', after: 0, limit: 1, conversations: [conversationId] },
   ]);
   for (const query of ['state=bogus', 'after=-1', 'limit=x', 'after=1.5']) {
     assert.equal((await h.api(`/v1/inbox/items?${query}`)).status, 400, query);
@@ -125,10 +127,11 @@ test('an answer is passed on as sent and the status says whether delivery is sti
   const third = await h.api('/v1/inbox/items/itm_1/answer', json(ANSWER));
   assert.equal(third.status, 200);
   assert.equal(((await third.json()) as { duplicate: boolean }).duplicate, true);
+  const scope = { caller: h.inviteId, conversations: [] };
   assert.deepEqual(calls.answer, [
-    { itemId: 'itm_1', ...ANSWER, text: 'go ahead' },
-    { itemId: 'itm_2', ...ANSWER },
-    { itemId: 'itm_1', ...ANSWER },
+    { itemId: 'itm_1', ...ANSWER, text: 'go ahead', ...scope },
+    { itemId: 'itm_2', ...ANSWER, ...scope },
+    { itemId: 'itm_1', ...ANSWER, ...scope },
   ]);
 });
 
@@ -193,69 +196,40 @@ test('an answer body with missing, extra or oversized fields never reaches the s
   assert.deepEqual(calls.answer, []);
 });
 
-test('mute and unmute reach the supervisor, an unknown kind is 404', async (t) => {
+test('the mutes, the settings and the digest are shared by every owner, so no invite reaches them', async (t) => {
   const { h, calls } = await setup(t);
-  const muted = await h.api('/v1/inbox/mutes/finished', { method: 'PUT' });
-  assert.equal(muted.status, 200);
-  assert.deepEqual(await muted.json(), { settings: { mutedKinds: ['finished'] } });
-  const unmuted = await h.api('/v1/inbox/mutes/finished', { method: 'DELETE' });
-  assert.deepEqual(await unmuted.json(), { settings: { mutedKinds: [] } });
-  for (const kind of ['nope', 'Finished', '..%2Fx', 'x'.repeat(40)]) {
-    assert.equal((await h.api(`/v1/inbox/mutes/${kind}`, { method: 'PUT' })).status, 404, kind);
+  const routes: Array<[string, string, unknown?]> = [
+    ['PUT', '/v1/inbox/mutes/finished'],
+    ['DELETE', '/v1/inbox/mutes/finished'],
+    ['GET', '/v1/inbox/settings'],
+    ['PUT', '/v1/inbox/settings', { stallAfterMinutes: 45 }],
+    ['POST', '/v1/inbox/digest'],
+  ];
+  for (const [method, path, body] of routes) {
+    const res = await h.api(path, {
+      method,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    assert.equal(res.status, 404, `${method} ${path}`);
+    assert.deepEqual(await res.json(), { error: 'not_found' });
   }
-  assert.deepEqual(calls.mute, [
-    ['finished', true],
-    ['finished', false],
-    ['nope', true],
-  ]);
-  assert.equal((await h.api('/v1/inbox/mutes/finished', { method: 'POST' })).status, 405);
+  assert.deepEqual(calls, { list: [], answer: [], mute: [], settings: [], digest: 0 });
 });
 
-test('settings can be read, and a patch the supervisor rejects is a 400 that changes nothing', async (t) => {
-  const { h, calls } = await setup(t);
-  const read = await h.api('/v1/inbox/settings');
-  assert.deepEqual(await read.json(), { settings: { stallAfterMinutes: 30 } });
-  const ok = await h.api('/v1/inbox/settings', {
-    method: 'PUT',
-    body: JSON.stringify({ stallAfterMinutes: 45 }),
-  });
-  assert.equal(ok.status, 200);
-  assert.deepEqual(await ok.json(), { settings: { stallAfterMinutes: 45 } });
-  const bad = await h.api('/v1/inbox/settings', {
-    method: 'PUT',
-    body: JSON.stringify({ stallAfterMinutes: -1 }),
-  });
-  assert.equal(bad.status, 400);
-  for (const body of ['[]', '"x"', 'null', '']) {
-    assert.equal((await h.api('/v1/inbox/settings', { method: 'PUT', body })).status, 400, body);
-  }
-  assert.deepEqual(calls.settings, [{ stallAfterMinutes: 45 }, { stallAfterMinutes: -1 }]);
-  assert.equal((await h.api('/v1/inbox/settings', { method: 'DELETE' })).status, 405);
-});
-
-test('a digest is built on request and returned', async (t) => {
-  const { h, calls } = await setup(t);
-  const res = await h.api('/v1/inbox/digest', { method: 'POST' });
-  assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { digest: { digestId: 'dig_1' } });
-  assert.equal(calls.digest, 1);
-  assert.equal((await h.api('/v1/inbox/digest')).status, 405);
-});
-
-test('writes are rate limited per invite and a refused call reaches nothing', async (t) => {
+test('answers are rate limited per invite before the body is read, and a refused call reaches nothing', async (t) => {
   const { h, calls } = await setup(t, {}, { controlPerMinute: 2 });
   const first = await h.api('/v1/inbox/items/itm_1/answer', json(ANSWER));
-  const second = await h.api('/v1/inbox/mutes/finished', { method: 'PUT' });
-  const third = await h.api('/v1/inbox/digest', { method: 'POST' });
+  const second = await h.api('/v1/inbox/items/itm_1/answer', json(ANSWER));
+  // Not even a valid body: the limit comes first.
+  const third = await h.api('/v1/inbox/items/itm_1/answer', json({}));
   assert.deepEqual([first.status, second.status, third.status], [200, 200, 429]);
   assert.ok(Number(third.headers.get('retry-after')) >= 1);
-  assert.equal(calls.digest, 0);
+  assert.equal(calls.answer.length, 2);
   // Reads are not limited.
   assert.equal((await h.api('/v1/inbox/items')).status, 200);
-  assert.equal((await h.api('/v1/inbox/settings')).status, 200);
   // Another invite has a bucket of its own.
   const other = h.server.invites.create('other');
-  const res = await h.api('/v1/inbox/digest', { method: 'POST', token: other.token });
+  const res = await h.api('/v1/inbox/items/itm_1/answer', { ...json(ANSWER), token: other.token });
   assert.equal(res.status, 200);
 });
 
@@ -268,7 +242,7 @@ test('a service that throws is an internal error without its message, and the se
   const res = await h.api('/v1/inbox/items');
   assert.equal(res.status, 500);
   assert.equal(await res.text(), JSON.stringify({ error: 'internal_error' }));
-  assert.equal((await h.api('/v1/inbox/settings')).status, 200);
+  assert.equal((await h.api('/v1/conversations')).status, 200);
 });
 
 test('an unknown path under /v1/inbox is 404 for an invited client', async (t) => {

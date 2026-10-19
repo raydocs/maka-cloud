@@ -335,6 +335,12 @@ check (T5, inside its write chain) is the final arbiter for question answers.
 | `POST /v1/inbox/digest` | Build and return a digest now. |
 | SSE `inbox.item` on `GET /v1/events` | Item snapshot with `version`. Clients list on connect, then apply events by `(id, version)`. |
 
+Since per-invite isolation, items are listed and answered within the caller's
+own conversations, and the answer stores its caller so delivery is refused once
+that invite is revoked. Mutes, settings and the digest are one set for the
+whole server, so the server answers 404 to them for every invite until they are
+kept per owner; digests stay off client streams.
+
 The item rows live in `supervisor.db`, the stream lives in the T4 feed. They are
 joined by `feed_outbox`: every item version is recorded with the item, and a
 publisher loop appends it to the feed through `host.publish` and marks it

@@ -123,13 +123,17 @@ test('a missing or wrong token gets the same 401 on all three routes, and a revo
   assert.equal(h.fake.runFor(taskId).cancelCalls, 0);
 });
 
-test('an unknown task is 404, wrong methods are 405, and neither takes a rate-limit token', async (t) => {
+test('wrong methods are 405 without a rate-limit token, and an unknown task is 404 after taking one', async (t) => {
   const { h } = await setup(t, { http: { controlPerMinute: 1 } });
-  for (let i = 0; i < 3; i += 1) assert.equal((await act(h, 'tsk_nope', 'pause')).status, 404);
-  const wrong = await h.api('/v1/tasks/tsk_nope/pause');
-  assert.equal(wrong.status, 405);
-  assert.equal(wrong.headers.get('allow'), 'POST');
+  for (let i = 0; i < 3; i += 1) {
+    const wrong = await h.api('/v1/tasks/tsk_nope/pause');
+    assert.equal(wrong.status, 405);
+    assert.equal(wrong.headers.get('allow'), 'POST');
+  }
   assert.equal((await act(h, 'tsk_nope', 'stop')).status, 404);
+  // The limit is taken before the body is read, so an unknown task costs a token too.
+  assert.equal((await act(h, 'tsk_nope', 'pause')).status, 404);
+  assert.equal((await act(h, 'tsk_nope', 'pause')).status, 429);
 });
 
 test('a runner that cannot pause answers 409 pause_unsupported and nothing is recorded', async (t) => {
@@ -203,8 +207,10 @@ test('control requests are limited per invite and the limit comes back with Retr
   assert.equal(refused.status, 429);
   assert.ok(Number(refused.headers.get('retry-after')) >= 1);
   assert.equal(h.fake.runFor(taskId).resumeCalls, 1);
+  // Another invite has a bucket of its own, but the task is not its to touch.
   const other = h.server.invites.create('other');
-  assert.equal((await act(h, taskId, 'resume', other.token)).status, 200);
+  assert.equal((await act(h, taskId, 'resume', other.token)).status, 404);
+  assert.equal(h.fake.runFor(taskId).resumeCalls, 1);
 });
 
 test('a task that was paused when the server stopped is ended on restart', async (t) => {
@@ -266,70 +272,94 @@ test('cost comes from the orchestrator log: absent until a run reports it, a tot
 // The orchestrator's own suite proves `authorize` runs in the write chain. This
 // proves the server's `authorize` is the real check: it looks at the invite and the
 // conversation at that moment, not at what was true when the request arrived.
-test('the access handed to the orchestrator re-checks the invite when the orchestrator calls it', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'control-access-'));
-  const db = openDatabase(join(dir, 'server.sqlite'));
-  const hub = new FeedHub();
-  const invites = new InviteStore(join(dir, 'invites.sqlite'));
-  const invite = invites.create('test');
-  let n = 0;
-  const conversations = new ConversationStore(db, hub, () => ({
-    sessionId: `ses_${n++}`,
-    token: 'unused',
-  }));
-  const conversation = conversations.create();
-  const sessionId = conversations.sessionOf(conversation.conversationId) ?? '';
-  let release: () => void = () => undefined;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let reached: () => void = () => undefined;
-  const arrived = new Promise<void>((resolve) => {
-    reached = resolve;
-  });
-  const api = new PublicApi({
-    db,
-    invites,
-    conversations,
-    tasks: new SqliteTaskStore(db, hub),
-    hub,
-    messageLimiter: new RateLimiter(1_000_000),
-    controlLimiter: new RateLimiter(1_000_000),
-    orchestrator: {
-      rootSessionOfTask: () => sessionId,
-      cancelAs: async (access: OperatorAccess) => {
-        reached();
-        await gate;
-        access.authorize();
-        throw new OrchestratorError('invalid_state', 'unreachable');
-      },
-      pauseAs: () => Promise.reject(new Error('unused')),
-      resumeAs: () => Promise.reject(new Error('unused')),
+for (const change of [
+  {
+    name: 'the invite when the orchestrator calls it',
+    status: 401,
+    apply: (env: { invites: InviteStore; inviteId: string }) => {
+      env.invites.revoke(env.inviteId);
     },
-    artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
-    artifactLimiter: new RateLimiter(1_000_000),
-    limits: DEFAULT_HTTP_LIMITS,
-    onMessage: () => undefined,
-  });
-  const server = createServer((req, res) => {
-    void api.handle(req, res);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(async () => {
+  },
+  {
+    name: 'who owns the conversation when the orchestrator calls it',
+    status: 404,
+    apply: (env: { db: ReturnType<typeof openDatabase>; conversationId: string }) => {
+      env.db
+        .prepare("UPDATE conversations SET owner = 'inv_someone_else' WHERE conversation_id = ?")
+        .run(env.conversationId);
+    },
+  },
+] as const) {
+  test(`the access handed to the orchestrator re-checks ${change.name}`, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'control-access-'));
+    const db = openDatabase(join(dir, 'server.sqlite'));
+    const hub = new FeedHub();
+    const invites = new InviteStore(join(dir, 'invites.sqlite'));
+    const invite = invites.create('test');
+    let n = 0;
+    const conversations = new ConversationStore(db, hub, () => ({
+      sessionId: `ses_${n++}`,
+      token: 'unused',
+    }));
+    const conversation = conversations.create(invite.inviteId);
+    const sessionId = conversations.sessionOf(conversation.conversationId) ?? '';
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached: () => void = () => undefined;
+    const arrived = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const api = new PublicApi({
+      db,
+      invites,
+      conversations,
+      tasks: new SqliteTaskStore(db, hub),
+      hub,
+      messageLimiter: new RateLimiter(1_000_000),
+      controlLimiter: new RateLimiter(1_000_000),
+      orchestrator: {
+        rootSessionOfTask: () => sessionId,
+        cancelAs: async (access: OperatorAccess) => {
+          reached();
+          await gate;
+          access.authorize();
+          throw new OrchestratorError('invalid_state', 'unreachable');
+        },
+        pauseAs: () => Promise.reject(new Error('unused')),
+        resumeAs: () => Promise.reject(new Error('unused')),
+      },
+      artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
+      artifactLimiter: new RateLimiter(1_000_000),
+      limits: DEFAULT_HTTP_LIMITS,
+      onMessage: () => undefined,
+    });
+    const server = createServer((req, res) => {
+      void api.handle(req, res);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(async () => {
+      release();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      invites.close();
+      db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/tasks/tsk_1/cancel`;
+    const pending = fetch(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${invite.token}` },
+    });
+    await arrived;
+    change.apply({
+      db,
+      invites,
+      inviteId: invite.inviteId,
+      conversationId: conversation.conversationId,
+    });
     release();
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    invites.close();
-    db.close();
-    await rm(dir, { recursive: true, force: true });
+    assert.equal((await pending).status, change.status);
   });
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/tasks/tsk_1/cancel`;
-  const pending = fetch(url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${invite.token}` },
-  });
-  await arrived;
-  invites.revoke(invite.inviteId);
-  release();
-  assert.equal((await pending).status, 401);
-});
+}
