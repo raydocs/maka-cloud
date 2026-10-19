@@ -134,8 +134,9 @@ test('a check whose budget refuses is never sent', async () => {
 test('the digest summary goes through the gateway on its own daily limit', async () => {
   const { gateway, vendor } = rig();
   let now = Date.parse('2026-10-19T10:00:00Z');
-  // Haiku at $0.1 / $0.5: one summary reserves well under a cent, so a $0.004 day fits few.
-  const limit = dailyLimit(0.004, () => now);
+  // Haiku at $0.1 / $0.5: a summary reserves about $0.001 and settles at $0.00015, so a $0.002
+  // day takes a handful before the next reservation no longer fits.
+  const limit = dailyLimit(0.002, () => now);
   const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, limit);
   const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
   assert.deepEqual(await summary.summarize(items, new AbortController().signal), {
@@ -152,11 +153,13 @@ test('the digest summary goes through the gateway on its own daily limit', async
       break;
     }
   }
+  // The gateway may ask the free count endpoint before it refuses; only messages are billed.
+  const messages = () => vendor.seen.filter((request) => request.url.endsWith('/v1/messages'));
   assert.ok(sent < 20, 'the day’s limit stops the summaries');
-  assert.equal(vendor.seen.length, sent, 'a refused summary is not sent');
+  assert.equal(messages().length, sent, 'a refused summary is not sent');
   now += 24 * 60 * 60 * 1000;
   await summary.summarize(items, new AbortController().signal);
-  assert.equal(vendor.seen.length, sent + 1, 'a new day has its own limit');
+  assert.equal(messages().length, sent + 1, 'a new day has its own limit');
 });
 
 test('check models the configuration does not price are priced from their pool entry', () => {

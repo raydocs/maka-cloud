@@ -12,8 +12,10 @@ import {
   tool,
   toolResults,
 } from '@maka-cloud/conductor/testing/fake-model';
+import { Gateway } from '@maka-cloud/gateway';
 import { FakeRun, FakeRunner, RunnerRegistry } from '@maka-cloud/orchestrator';
 import { formatCiteCheckLine, REPORT_ARTIFACTS, RUNNER_EXPORT_PREFIX } from '@maka-cloud/playbooks';
+import { conductorGateway } from '../gateway.js';
 import { type Cloud, type CloudOptions, startCloud } from '../host.js';
 
 interface SseEvent {
@@ -54,7 +56,13 @@ const RESEARCH_MANIFEST = {
   artifacts: ['report.md', 'report.html', 'verification.json'],
 };
 
-async function startStack(t: TestContext, runnerStart?: (run: FakeRun) => void): Promise<Stack> {
+type ConductorAccess = NonNullable<CloudOptions['conductor']>['access'];
+
+async function startStack(
+  t: TestContext,
+  runnerStart?: (run: FakeRun) => void,
+  access?: (modelUrl: string) => ConductorAccess,
+): Promise<Stack> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-test-'));
   const model = await startFakeModel();
   const onStart =
@@ -68,7 +76,9 @@ async function startStack(t: TestContext, runnerStart?: (run: FakeRun) => void):
     handoffRoot: join(dir, 'handoff'),
     runners: new RunnerRegistry([claude, codex]),
     conductorRoot: join(dir, 'conductor'),
-    conductor: { access: { apiKey: 'sk-test-not-a-key', baseUrl: model.url } },
+    conductor: {
+      access: access?.(model.url) ?? { apiKey: 'sk-test-not-a-key', baseUrl: model.url },
+    },
     onWarning: (message, detail) => warnings.push({ message, detail }),
   };
   const stack = { model, claude, codex, warnings } as Stack;
@@ -211,6 +221,40 @@ test('one sentence in: the research playbook runs through the server, the task a
     tasks.tasks.map((task) => task.state),
     ['succeeded'],
   );
+});
+
+test('the conductor reaches the model only through the gateway: the key stays there and each request is charged to the run', async (t) => {
+  const MASTER = 'sk-master-host-only-0123456789';
+  const keys: Array<string | null> = [];
+  let gateway: Gateway | undefined;
+  const stack = await startStack(t, undefined, (modelUrl) => {
+    gateway = new Gateway({
+      upstreams: { anthropic: { apiKey: MASTER, baseUrl: modelUrl } },
+      fetch: (input, init) => {
+        keys.push(new Headers(init?.headers).get('x-api-key'));
+        return fetch(input, init);
+      },
+    });
+    return { apiKey: 'gateway-in-process', gateway: conductorGateway(gateway) };
+  });
+  t.after(() => gateway?.close());
+  stack.model.script('planner', text('1. Answer.'));
+  stack.model.script('conductor', text('Answered through the gateway.'));
+  const conversationId = await newConversation(stack);
+  await stack.api(`/v1/conversations/${conversationId}/messages`, { text: 'Hello.' });
+  const events = await readFeed(stack, conversationId, (seen) => assistantTexts(seen).length > 0);
+  assert.deepEqual(assistantTexts(events), ['Answered through the gateway.']);
+
+  assert.ok(stack.model.requests.length >= 1);
+  assert.equal(keys.length, stack.model.requests.length, 'every model request went through it');
+  assert.ok(keys.every((key) => key === MASTER), 'the vendor got the host’s key');
+  assert.ok(stack.model.requests.every((request) => !request.raw.includes(MASTER)));
+  const [run] = stack.cloud.conductor.state.runsInState('done');
+  assert.ok(run);
+  const budget = stack.cloud.conductor.state.budget(run.runId);
+  assert.ok(budget.modelUsd > 0, 'the gateway settled each request in the run ledger');
+  assert.equal(budget.reservedUsd, 0);
+  assert.equal(gateway?.inFlight, 0);
 });
 
 test('a question is answered over HTTP: the card, the answer and the reply all go through the feed, once each', async (t) => {
