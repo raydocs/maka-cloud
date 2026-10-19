@@ -172,3 +172,88 @@ test('spend a child reports after its top-level task ended is recorded on the en
   );
   assert.equal(h.orchestrator.status(conductor, top.taskId).state, 'succeeded');
 });
+
+function gate() {
+  let open: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+test('spend a run reports while it is cancelled at the hand-off is recorded', async (t) => {
+  const started = gate();
+  const h = await makeHarness(t, {
+    fake: {
+      onStart: async (run: FakeRun) => {
+        settlesOnCancel(run, 0.6);
+        await started.promise;
+      },
+    },
+  });
+  const conductor = h.session();
+  const task = await h.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'x',
+    budgetUsd: 5,
+  });
+  await eventually(() => h.fake.runs.length === 1, 'the run is starting');
+  // Cancelled while its runner is still starting: the late handle is cancelled when it comes up.
+  await h.orchestrator.cancel(conductor, task.taskId);
+  started.open();
+  await h.orchestrator.settled();
+  assert.equal(h.fake.runFor(task.taskId).cancelCalls, 1);
+  assert.equal(h.orchestrator.status(conductor, task.taskId).costUsd, 0.6);
+});
+
+test('spend a run reports after its start was dropped is recorded', async (t) => {
+  const store = new GatedStore();
+  const childStarted = gate();
+  const finalUsd = [2, 0, 0.3];
+  const h = await makeHarness(t, {
+    store,
+    fake: {
+      onStart: async (run: FakeRun) => {
+        const index = h.fake.runs.length - 1;
+        settlesOnCancel(run, finalUsd[index] ?? 0);
+        if (index === 2) await childStarted.promise;
+      },
+    },
+  });
+  const conductor = h.session();
+  const top = await h.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'top',
+    budgetUsd: 1,
+  });
+  await eventually(() => h.fake.runs.length === 1, 'the top run');
+  const executor = h.executorSession(top.taskId);
+  const sibling = await h.orchestrator.delegate(executor, { runner: 'fake', brief: 'sibling' });
+  await eventually(() => h.fake.runs.length === 2, 'the sibling run');
+  const child = await h.orchestrator.delegate(executor, { runner: 'fake', brief: 'child' });
+  await eventually(() => h.fake.runs.length === 3, 'the child is starting');
+
+  // Hold the write chain, then queue the spend that crosses the cap ahead of the child's start.
+  const release = store.holdNext('task_progress');
+  h.fake.runFor(sibling.taskId).progress('busy');
+  await eventually(() => store.held, 'the chain is held');
+  const costQueued = eventQueued(h, 'task_cost');
+  h.fake.runFor(top.taskId).usage(2);
+  await costQueued;
+  const startQueued = eventQueued(h, 'task_started');
+  childStarted.open();
+  await startQueued;
+  release();
+
+  await h.orchestrator.settled();
+  const log = (await h.store.read()).map(({ event }) => event);
+  assert.ok(
+    !log.some((event) => event.type === 'task_started' && event.taskId === child.taskId),
+    'the child start was dropped: the tree was over budget by then',
+  );
+  assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
+  await eventually(
+    () => h.orchestrator.status(conductor, top.taskId).costUsd === 2.3,
+    'the child spend settled during its cancel',
+  );
+});

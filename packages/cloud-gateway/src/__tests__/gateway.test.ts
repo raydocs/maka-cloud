@@ -39,7 +39,7 @@ function rig(options: Partial<GatewayOptions> = {}) {
   const gateway = new Gateway({
     upstreams: { anthropic: { apiKey: MASTER }, openai: { apiKey: OPENAI_MASTER } },
     models: [CODEX],
-    limits: { requestOverheadTokens: 0, imageBaseTokens: 1_000 },
+    limits: { requestOverheadTokens: 0 },
     fetch: upstream.fetch,
     onWarning: (message, detail) => warnings.push({ message, detail }),
     ...options,
@@ -84,6 +84,13 @@ function post(
     },
     body: JSON.stringify(value),
     ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+/** An Anthropic stream that starts with `start` and ends with a delta carrying `usage`. */
+function stream(start: Record<string, unknown>, usage: Record<string, unknown>): Response {
+  return new Response(sse([start, ...anthropicEnd(usage)]), {
+    headers: { 'content-type': 'text/event-stream' },
   });
 }
 
@@ -421,7 +428,7 @@ test('requests whose cost the body does not show are refused before anything is 
   assert.equal(upstream.requests.length, 0);
 });
 
-test('a document is counted before it is reserved, and a failed count refuses it', async () => {
+test('a request with an image or a file is refused and never sent', async () => {
   const { gateway, upstream } = rig();
   const client = gateway.inProcess({ vendor: 'anthropic', subject: 'x', budget: { limitUsd: 10 } });
   const value = body({
@@ -438,20 +445,26 @@ test('a document is counted before it is reserved, and a failed count refuses it
       },
     ],
   });
-  upstream.next(() => json({ input_tokens: 3_000 }));
-  upstream.next(() => anthropicStream(3_000, 10));
-  const ok = await post(client, value);
-  assert.equal(ok.status, 200);
-  await text(ok);
-  const count = upstream.requests[0];
-  assert.match(count?.url ?? '', /count_tokens$/u);
-  assert.deepEqual(Object.keys(count?.body ?? {}).sort(), ['messages', 'model']);
-  assert.equal(count?.headers.get('x-api-key'), MASTER);
-
-  upstream.next(() => json({ type: 'error', error: { type: 'invalid_request_error' } }, 400));
   const refused = await post(client, value);
   assert.equal(refused.status, 400);
-  assert.equal(upstream.requests.length, 3, 'nothing was sent after the failed count');
+  assert.match(await text(refused), /images and files are not allowed/u);
+  assert.equal(upstream.requests.length, 0);
+});
+
+test('a failed count refuses a request whose byte bound does not fit', async () => {
+  const { gateway, upstream } = rig();
+  const client = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'x',
+    budget: { limitUsd: 0.03 },
+  });
+  const value = body({ messages: [{ role: 'user', content: 'x'.repeat(3_000) }] });
+  upstream.next(() => json({ type: 'error', error: { type: 'invalid_request_error' } }, 400));
+  const refused = await post(client, value);
+  assert.equal(refused.status, 402);
+  await text(refused);
+  assert.equal(upstream.requests.length, 1, 'only the count was sent');
+  assert.match(upstream.requests[0]?.url ?? '', /count_tokens$/u);
 });
 
 test('each way a request ends releases its slot and settles once', async (t) => {
@@ -540,7 +553,8 @@ test('each way a request ends releases its slot and settles once', async (t) => 
 
   await t.test('revoked while the request is being counted', async () => {
     const { gateway, upstream } = rig();
-    const ledger = recordingPort(10);
+    // The byte bound does not fit, so the request is counted first.
+    const ledger = recordingPort(0.03);
     const client = gateway.inProcess({ vendor: 'anthropic', subject: 'x', budget: ledger.port });
     let release: (() => void) | undefined;
     upstream.next(
@@ -554,14 +568,7 @@ test('each way a request ends releases its slot and settles once', async (t) => 
     );
     const pending = post(
       client,
-      body({
-        messages: [
-          {
-            role: 'user',
-            content: [{ type: 'image', source: { type: 'url', url: 'https://x/y.png' } }],
-          },
-        ],
-      }),
+      body({ messages: [{ role: 'user', content: 'x'.repeat(3_000) }] }),
     );
     await upstream.received(1);
     client.revoke();
@@ -602,6 +609,52 @@ test('usage with a count that is not a number settles at the reservation', async
         ]),
         { headers: { 'content-type': 'text/event-stream' } },
       ),
+    // A split that leaves a lifetime out drops the 1,000 written tokens.
+    () =>
+      stream(
+        anthropicStart({
+          input_tokens: 12,
+          output_tokens: 1,
+          cache_creation_input_tokens: 1_000,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: null },
+        }),
+        { output_tokens: 5 },
+      ),
+    // A split that does not add up to the aggregate.
+    () =>
+      stream(
+        anthropicStart({
+          input_tokens: 12,
+          output_tokens: 1,
+          cache_creation_input_tokens: 1_000,
+          cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 },
+        }),
+        { output_tokens: 5 },
+      ),
+    () =>
+      stream(anthropicStart({ input_tokens: 12, output_tokens: 1, cache_creation: 'split' }), {
+        output_tokens: 5,
+      }),
+    // A final delta without a count keeps no earlier one.
+    () =>
+      new Response(
+        sse([
+          anthropicStart({ input_tokens: 12, output_tokens: 1 }),
+          { type: 'message_delta', delta: {}, usage: { output_tokens: 5 } },
+          ...anthropicEnd({ output_tokens: null }),
+        ]),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+    () =>
+      new Response(
+        sse([
+          anthropicStart({ input_tokens: 12, output_tokens: 1 }),
+          { type: 'message_delta', delta: {}, usage: { output_tokens: 5 } },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          { type: 'message_stop' },
+        ]),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
   ];
   for (const script of malformed) {
     upstream.next(script);
@@ -611,6 +664,11 @@ test('usage with a count that is not a number settles at the reservation', async
     { input_tokens: 10, output_tokens: 'many' },
     { input_tokens: 10, input_tokens_details: { cached_tokens: {} }, output_tokens: 3 },
     { output_tokens: 3 },
+    { input_tokens: 10, input_tokens_details: 'not-an-object', output_tokens: 3 },
+    { input_tokens: 10, input_tokens_details: { cached_tokens: null }, output_tokens: 3 },
+    { input_tokens: 10, input_tokens_details: { cached_tokens: 11 }, output_tokens: 3 },
+    { input_tokens: 10, output_tokens: 3, output_tokens_details: [] },
+    { input_tokens: 10, output_tokens: 3, output_tokens_details: { reasoning_tokens: 4 } },
   ]) {
     upstream.next(
       () =>
@@ -632,8 +690,36 @@ test('usage with a count that is not a number settles at the reservation', async
     assert.deepEqual(ledger.settled, ledger.reserved, 'each settled at what it reserved');
     assert.ok(ledger.settled.every(([, usd]) => usd > 0));
   }
-  assert.equal(claude.settled.length, 4);
-  assert.equal(codex.settled.length, 3);
+  assert.equal(claude.settled.length, 9);
+  assert.equal(codex.settled.length, 8);
+});
+
+test('the counts the Messages API leaves null in a delta settle at the reported usage', async () => {
+  const { gateway, upstream } = rig();
+  const ledger = recordingPort(1);
+  const client = gateway.inProcess({ vendor: 'anthropic', subject: 'u', budget: ledger.port });
+  upstream.next(() =>
+    stream(
+      anthropicStart({
+        input_tokens: 12,
+        output_tokens: 1,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: 100,
+        cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 },
+      }),
+      {
+        input_tokens: null,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+        output_tokens: 5,
+      },
+    ),
+  );
+  await text(await post(client, body()));
+  assert.deepEqual(
+    ledger.settled.map(([, usd]) => usd),
+    [costUsd(OPUS, { input: 12, cacheRead: 0, cacheWrite5m: 100, cacheWrite1h: 0, output: 5 })],
+  );
 });
 
 test('revoking resolves only once the requests in flight have settled', async () => {
@@ -702,7 +788,7 @@ test('a revoke settles a stream that nobody is reading', async () => {
 
 test('a grant has a bounded number of requests in flight', async () => {
   const { gateway, upstream } = rig({
-    limits: { requestOverheadTokens: 0, imageBaseTokens: 1, maxInflightPerGrant: 1 },
+    limits: { requestOverheadTokens: 0, maxInflightPerGrant: 1 },
   });
   const client = gateway.inProcess({ vendor: 'anthropic', subject: 'x', budget: { limitUsd: 10 } });
   let open: ControlledBody | undefined;

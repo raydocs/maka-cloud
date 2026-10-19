@@ -366,15 +366,13 @@ export class Gateway {
     const key = `${grant.id}:${randomBytes(8).toString('hex')}`;
     let reservedUsd: number | undefined;
     let budgetRefusal: string | undefined;
-    if (!bounded.mustCount) {
-      const usd = worstCaseUsd(bounded.price, bounded);
-      const reserved = this.reserve(grant, key, usd);
-      if (reserved.ok) reservedUsd = usd;
-      else if (reserved.budget && vendor === 'anthropic') budgetRefusal = reserved.reason;
-      else return refuse(reserved.budget ? 'budget' : 'invalid_request', reserved.reason);
-    }
+    const usd = worstCaseUsd(bounded.price, bounded);
+    const reserved = this.reserve(grant, key, usd);
+    if (reserved.ok) reservedUsd = usd;
+    else if (reserved.budget && vendor === 'anthropic') budgetRefusal = reserved.reason;
+    else return refuse(reserved.budget ? 'budget' : 'invalid_request', reserved.reason);
     if (reservedUsd === undefined) {
-      // The size does not bound it, or that bound does not fit: count it, and reserve the count.
+      // The byte bound does not fit: count the request, and reserve the count.
       const counted = await this.count(upstream, json, headers, flight.controller.signal);
       if (flight.controller.signal.aborted) {
         return refuse('unavailable', flight.cut ?? 'the request was cancelled');
@@ -382,11 +380,7 @@ export class Gateway {
       if (!counted.ok) {
         if (counted.transient)
           return refuse('unavailable', 'the request could not be counted; try again');
-        if (budgetRefusal !== undefined) return refuse('budget', budgetRefusal);
-        return refuse(
-          'invalid_request',
-          'the request could not be counted, so its cost cannot be bounded',
-        );
+        return refuse('budget', budgetRefusal ?? 'the request could not be counted');
       }
       const usd = worstCaseUsd(bounded.price, {
         ...bounded,

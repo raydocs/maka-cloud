@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { boundAnthropic, boundOpenAI, DEFAULT_BOUND_LIMITS } from '../bound.js';
 import { costUsd, modelTable, priceProblem, worstCaseUsd } from '../pricing.js';
-import { dataUrl, png } from './images.js';
 
 const table = modelTable([
   {
@@ -32,35 +31,22 @@ function openai(value: Record<string, unknown>) {
   return boundOpenAI(encode(value), value, table, DEFAULT_BOUND_LIMITS);
 }
 
-/** The bound of one image: the base plus every 32×32 patch it covers. */
-function imageBound(width: number, height: number): number {
-  return (
-    DEFAULT_BOUND_LIMITS.imageBaseTokens +
-    Math.ceil(width / 32) * Math.ceil(height / 32) * DEFAULT_BOUND_LIMITS.imagePatchTokens
-  );
-}
-
-test('the input bound is the body bytes, the fixed overhead and a bound per image from its size', () => {
-  const image = {
-    type: 'image',
-    source: { type: 'base64', media_type: 'image/png', data: png(100, 50).toString('base64') },
-  };
+test('the input bound is the body bytes and the fixed overhead', () => {
   const value = {
     ...base,
     messages: [
-      { role: 'user', content: [image, { type: 'text', text: 'what is this' }] },
+      { role: 'user', content: [{ type: 'text', text: 'what is this' }] },
       { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'read', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: [image] }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'text' }] },
     ],
   };
   const bounded = anthropic(value);
   assert.ok(bounded.ok);
   assert.equal(
     bounded.inputTokens,
-    encode(value).byteLength + DEFAULT_BOUND_LIMITS.requestOverheadTokens + 2 * imageBound(100, 50),
+    encode(value).byteLength + DEFAULT_BOUND_LIMITS.requestOverheadTokens,
   );
   assert.equal(bounded.outputTokens, 2_000);
-  assert.equal(bounded.mustCount, false);
   assert.equal(bounded.inputMultiplier, 1.25);
 });
 
@@ -74,16 +60,24 @@ test('a one-hour cache hint raises the input rate to the one-hour write price', 
   assert.equal(bounded.oneHourCache, true);
 });
 
-test('content the bytes cannot bound must be counted first', () => {
+test('images and files are refused wherever they sit; a text document is bounded by its bytes', () => {
+  const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000020000000200806000000', 'hex');
+  const inline = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') },
+  };
   for (const block of [
+    inline,
     { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } },
     { type: 'image', source: { type: 'file', file_id: 'file_1' } },
-    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0K' } },
     { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBE' } },
+    { type: 'document', source: { type: 'url', url: 'https://example.com/a.pdf' } },
+    { type: 'tool_result', tool_use_id: 't', content: [inline] },
+    { type: 'document', source: { type: 'content', content: [inline] } },
   ]) {
     const bounded = anthropic({ ...base, messages: [{ role: 'user', content: [block] }] });
-    assert.ok(bounded.ok);
-    assert.equal(bounded.mustCount, true, JSON.stringify(block));
+    assert.equal(bounded.ok, false, JSON.stringify(block));
+    assert.equal(bounded.ok ? '' : bounded.reason, 'images and files are not allowed');
   }
   const text = anthropic({
     ...base,
@@ -97,7 +91,6 @@ test('content the bytes cannot bound must be counted first', () => {
     ],
   });
   assert.ok(text.ok);
-  assert.equal(text.mustCount, false);
 });
 
 test('context edits that only clear content are allowed; anything else is not', () => {
@@ -127,10 +120,7 @@ test('a Responses request without an output cap is sent with the model cap', () 
     input: [
       {
         role: 'user',
-        content: [
-          { type: 'input_text', text: 'go' },
-          { type: 'input_image', image_url: dataUrl(png(64, 64)) },
-        ],
+        content: [{ type: 'input_text', text: 'go' }],
       },
     ],
     stream: true,
@@ -142,7 +132,7 @@ test('a Responses request without an output cap is sent with the model cap', () 
   assert.equal(sent.max_output_tokens, 9_000);
   assert.equal(
     bounded.inputTokens,
-    bounded.body.byteLength + DEFAULT_BOUND_LIMITS.requestOverheadTokens + imageBound(64, 64),
+    bounded.body.byteLength + DEFAULT_BOUND_LIMITS.requestOverheadTokens,
   );
   const over = { model: 'codex-test', input: 'go', max_output_tokens: 9_001 };
   assert.equal(boundOpenAI(encode(over), over, table, DEFAULT_BOUND_LIMITS).ok, false);
@@ -179,29 +169,14 @@ test('a hosted shell is refused; local tools pass only in their exact shape', ()
   }
 });
 
-test('an image is bounded by its pixels, above what any detail level charges', () => {
-  const value = {
-    model: 'codex-test',
-    max_output_tokens: 100,
-    input: [
-      {
-        role: 'user',
-        content: [{ type: 'input_image', image_url: dataUrl(png(4096, 4096)), detail: 'original' }],
-      },
-    ],
-  };
-  const bounded = openai(value);
-  assert.ok(bounded.ok);
-  const forImage =
-    bounded.inputTokens - encode(value).byteLength - DEFAULT_BOUND_LIMITS.requestOverheadTokens;
-  // 4096×4096 at detail "original" is billed about 19,661 tokens; a flat 10,000 fell short.
-  assert.ok(forImage >= 19_661, `${forImage} tokens reserved for the image`);
-});
-
-test('images by URL or file, and files, are refused wherever they sit in the input', () => {
-  const remote = { type: 'input_image', image_url: 'https://example.com/huge.png', detail: 'high' };
+test('images and files are refused wherever they sit in the input, at any size or detail', () => {
+  // A 32×32 PNG: at detail "high" a tile-based model bills it 8,500 tokens, above the whole
+  // request's byte bound.
+  const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000020000000200806000000', 'hex');
+  const small = `data:image/png;base64,${png.toString('base64')}`;
   const inMessage = (part: unknown) => ({
     model: 'codex-test',
+    max_output_tokens: 100,
     input: [{ role: 'user', content: [part] }],
   });
   const inToolOutput = (part: unknown) => ({
@@ -209,21 +184,20 @@ test('images by URL or file, and files, are refused wherever they sit in the inp
     input: [{ type: 'function_call_output', call_id: 'c1', output: [part] }],
   });
   for (const value of [
-    inMessage(remote),
+    inMessage({ type: 'input_image', image_url: small, detail: 'high' }),
+    inMessage({ type: 'input_image', image_url: 'https://example.com/huge.png' }),
     inMessage({ type: 'input_image', file_id: 'file_1' }),
-    inMessage({ type: 'input_image', image_url: 'data:image/png;base64,AA' }),
-    inToolOutput(remote),
+    inToolOutput({ type: 'input_image', image_url: small }),
     inToolOutput({ type: 'input_file', file_url: 'https://example.com/a.pdf' }),
-    inToolOutput({ type: 'input_image', image_url: dataUrl(png(8, 8)), file_id: 'file_2' }),
+    inToolOutput({ type: 'computer_screenshot', image_url: small }),
   ]) {
-    assert.equal(openai(value).ok, false, JSON.stringify(value));
+    const bounded = openai(value);
+    assert.equal(bounded.ok, false, JSON.stringify(value));
+    assert.equal(bounded.ok ? '' : bounded.reason, 'images and files are not allowed');
   }
-  const inline = inToolOutput({ type: 'input_image', image_url: dataUrl(png(2048, 2048)) });
-  const bounded = openai(inline);
-  assert.ok(bounded.ok);
-  assert.ok(
-    bounded.inputTokens >= bounded.body.byteLength + imageBound(2048, 2048),
-    'an image in a tool output is bounded too',
+  assert.equal(
+    openai({ model: 'codex-test', input: [{ type: 'item_reference', id: 'x' }] }).ok,
+    false,
   );
 });
 

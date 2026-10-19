@@ -83,16 +83,16 @@ whose cost it cannot bound is refused (400), never sent.
 
 - **Input bound.** The UTF-8 byte length of the request body as tokens (no tokenizer emits more
   tokens than bytes of text), plus a fixed overhead per request (default 4,000 tokens, for the
-  vendor's hidden tool-use prompt), plus a bound per inline image from the pixel size its PNG,
-  JPEG, GIF or WebP header declares: 300 tokens plus 3 per 32×32 patch. The vendors bill an image
-  by its pixels and only ever scale it down, and 3 per patch is above every known rate at every
-  detail level (a 4096×4096 image at OpenAI's `original` detail is billed about 19,661 tokens; the
-  bound is 49,452). Images anywhere in the input count, tool outputs included. Documents, and any
-  image or file given by URL or file id or whose size cannot be read, cannot be bounded by bytes:
-  an Anthropic request with one is counted with the vendor's free token-count endpoint (plus 10%
-  and the overhead); an OpenAI request with one is refused.
+  vendor's hidden tool-use prompt).
+- **No images or files.** What a model bills for an image depends on the model and the detail
+  level (a tile-based model bills a 32×32 image at detail `high` 8,500 tokens), and no rule is
+  verified for every model. So any image or file is refused, wherever it sits (message content,
+  tool results and outputs, document content): Anthropic `image` blocks and documents whose source
+  is not text, OpenAI `input_image`, `input_file` and `computer_screenshot`. Coding and research
+  send text only. A per-model, per-detail bound can come later for models with a verified rule.
 - **When the byte bound does not fit.** Agent contexts are large and bytes overstate tokens about
-  fourfold. When the byte bound exceeds what is left, an Anthropic request is counted the same way
+  fourfold. When the byte bound exceeds what is left, an Anthropic request is counted with the
+  vendor's free token-count endpoint (plus 10% and the overhead)
   and reserved at the counted bound. Only if that does not fit either is it refused.
 - **Output bound.** Anthropic: `max_tokens` (required by the API). OpenAI: `max_output_tokens`; when
   absent the gateway sets it to the model's configured output cap, which the model cannot exceed
@@ -118,7 +118,12 @@ whose cost it cannot bound is refused (400), never sent.
   the bytes: Anthropic `message_start` (input and cache counts) and `message_delta` (output);
   OpenAI `response.completed`, `response.incomplete` or `response.failed`, or the JSON body.
 - **Settle** at the reported usage, only when its input and output counts are present and every
-  count is a non-negative number. An error status before any output (4xx, 5xx) settles at 0: the
+  count is a non-negative number. `null` is accepted only where the API documents a count as
+  nullable (the input and cache counts of an Anthropic `message_delta`, the cache counts of
+  `message_start`). A nested object that is present (the Anthropic cache-write split, OpenAI
+  `input_tokens_details` and `output_tokens_details`) must be an object with valid counts; the
+  cache-write split must give both lifetimes and add up to the aggregate; cached tokens cannot
+  exceed the input. Anything else settles at the reservation, never at an earlier count. An error status before any output (4xx, 5xx) settles at 0: the
   vendors do not bill those. A response that ends without complete, valid usage settles at the full
   reservation, since what was billed is unknown; a stream cut after a valid `message_start`
   settles at the reported input plus the full output bound.
