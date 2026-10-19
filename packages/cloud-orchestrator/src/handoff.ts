@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type ResultManifest, ResultManifestSchema, type TaskId } from './types.js';
 
@@ -32,6 +32,11 @@ export class Handoff {
     await mkdir(paths.dir, { recursive: true });
     await writeFile(paths.briefPath, brief, { flag: 'wx' });
     return paths;
+  }
+
+  /** Removes the files of a task that was never recorded. Best effort. */
+  async discard(taskId: TaskId): Promise<void> {
+    await rm(this.paths(taskId).dir, { recursive: true, force: true }).catch(() => undefined);
   }
 
   /** Returns the validated manifest, or a reason it could not be accepted. */
