@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { Gate, MINUTE, tmpDb } from '../../__tests__/harness.js';
 import { openDatabase } from '../../db.js';
 import { Store } from '../../store.js';
+import { createSourceFetcher } from '../fetcher.js';
 import {
   FakeHost,
   claimIdsOf,
@@ -275,3 +276,49 @@ test('a task has one verification: claiming it again does nothing, whatever its 
 });
 
 void MINUTE;
+
+test('a host name that never resolves does not hold the slot: stop returns and the check is aborted', {
+  timeout: 5000,
+}, async () => {
+  const w = world({
+    fetcher: createSourceFetcher({
+      resolve: () => {
+        resolving.resolve();
+        return new Promise<string[]>(() => {});
+      },
+    }),
+  });
+  const resolving = new Gate();
+  researchFiles(w, 't1');
+  const r = await verifyRig(w);
+  finishLater(r, 't1', researchManifest(), { runner: 'codex' });
+  await resolving.promise;
+  await r.stop();
+  assert.equal(r.supervisor.stats().verifications, 0);
+});
+
+test('a fetcher that ignores the abort cannot hold a check past its deadline or past stop', {
+  timeout: 5000,
+}, async () => {
+  const w = world({ deadlineMs: 15, maxAttempts: 1 });
+  researchFiles(w, 't1');
+  w.fetcher.fetchText = () => new Promise(() => {});
+  const r = await verifyRig(w);
+  await finishTask(r, 't1', researchManifest(), { runner: 'codex' });
+  assert.equal(r.supervisor.stats().verifications, 0, 'the deadline released the slot');
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /could not be completed/);
+  await r.stop();
+
+  const w2 = world();
+  researchFiles(w2, 't1');
+  const fetching = new Gate();
+  w2.fetcher.fetchText = () => {
+    fetching.resolve();
+    return new Promise(() => {});
+  };
+  const b = await verifyRig(w2);
+  finishLater(b, 't1', researchManifest(), { runner: 'codex' });
+  await fetching.promise;
+  await b.stop();
+  assert.equal(b.supervisor.stats().verifications, 0);
+});

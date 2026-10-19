@@ -72,7 +72,11 @@ export function createSourceFetcher(options: FetcherOptions = {}): SourceFetcher
   const maxRedirects = options.maxRedirects ?? DEFAULTS.maxRedirects;
 
   /** Checks a URL and the addresses behind it. Returns the one address to connect to. */
-  async function admit(raw: string, base?: URL): Promise<{ url: URL; address: string }> {
+  async function admit(
+    raw: string,
+    signal: AbortSignal,
+    base?: URL,
+  ): Promise<{ url: URL; address: string }> {
     let url: URL;
     try {
       url = new URL(raw, base);
@@ -93,8 +97,10 @@ export function createSourceFetcher(options: FetcherOptions = {}): SourceFetcher
     }
     let addresses: string[];
     try {
-      addresses = await resolve(host);
-    } catch {
+      // A resolver that hangs must not hold the fetch past its deadline or an abort.
+      addresses = await raceAbort(resolve(host), signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
       throw new Refused('unreachable', 'the host name did not resolve');
     }
     if (addresses.length === 0) throw new Refused('unreachable', 'the host name has no address');
@@ -126,7 +132,7 @@ export function createSourceFetcher(options: FetcherOptions = {}): SourceFetcher
   async function run(start: string, signal: AbortSignal): Promise<FetchOutcome> {
     let current: URL | undefined;
     for (let hop = 0; hop <= maxRedirects; hop += 1) {
-      const { url, address } = await admit(hop === 0 ? start : (current as URL).href, undefined);
+      const { url, address } = await admit(hop === 0 ? start : (current as URL).href, signal);
       current = url;
       let response: TransportResponse;
       try {
@@ -211,8 +217,14 @@ export function createSourceFetcher(options: FetcherOptions = {}): SourceFetcher
       try {
         return await run(url, combined);
       } catch (error) {
-        if (error instanceof Refused)
-          return { ok: false, reason: error.reason, detail: error.message };
+        if (error instanceof Refused) {
+          return {
+            ok: false,
+            reason: error.reason,
+            detail: error.message,
+            ...(error.status === undefined ? {} : { status: error.status }),
+          };
+        }
         if (deadline.signal.aborted)
           return { ok: false, reason: 'timeout', detail: 'the source took too long' };
         if (signal.aborted)
