@@ -100,11 +100,30 @@ CREATE TRIGGER task_cost_log_no_delete BEFORE DELETE ON task_cost_log
 BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
 `;
 
+const SCHEMA_V3 = `
+CREATE TABLE push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  invite_id TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  since_feed_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX push_subscriptions_invite ON push_subscriptions (invite_id);
+CREATE TABLE push_deliveries (
+  endpoint TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (endpoint, task_id)
+);
+`;
+
 /**
  * Step `i` takes the schema from version `i` to `i + 1`. Steps are only ever
  * appended: one that has shipped is never edited.
  */
-const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];
+const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an
