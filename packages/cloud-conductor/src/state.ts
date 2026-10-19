@@ -754,6 +754,19 @@ export class ConductorState {
     return { runId: String(row.run_id), tool: String(row.tool), state: row.state as HeldState };
   }
 
+  /** A held action's tool and the arguments it was held with. */
+  heldAction(actionId: string): { runId: string; tool: string; args: unknown } | undefined {
+    const row = this.db
+      .prepare('SELECT run_id, tool, args FROM held_actions WHERE action_id = ?')
+      .get(actionId) as Row | undefined;
+    if (!row) return undefined;
+    return {
+      runId: String(row.run_id),
+      tool: String(row.tool),
+      args: JSON.parse(String(row.args)),
+    };
+  }
+
   /** Uses an approval exactly once, for the tool, run and arguments it was given for. */
   consumeApproval(runId: string, tool: string, actionId: string, args: unknown): boolean {
     const changed = this.db

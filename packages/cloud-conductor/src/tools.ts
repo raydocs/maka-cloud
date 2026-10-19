@@ -48,6 +48,11 @@ export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
   description: string;
   parameters: P;
   irreversible?: boolean;
+  /**
+   * For an irreversible tool: what the approval card must show about a held call (what it will
+   * act on), built by code and appended to the model's question so the user sees it as is.
+   */
+  approvalDetails?(args: z.infer<P>): Promise<string> | string;
   impl(
     args: z.infer<P>,
     context: { runId: string; conversationId: string; signal: AbortSignal },
@@ -291,6 +296,7 @@ export function conductorTools(
       let recommended: string;
       let raiseToUsd: number | null = null;
       let actionRef: string | null = null;
+      let details: string | undefined;
       let check: () => { code: string; message: string } | undefined;
       switch (args.reason) {
         case 'taste': {
@@ -349,6 +355,11 @@ export function conductorTools(
               'irreversible needs the actionRef of a held action.',
             );
           actionRef = ref;
+          const held = state.heldAction(ref);
+          const spec = held && extra.find((tool) => tool.name === held.tool);
+          if (held && spec?.approvalDetails) {
+            details = await spec.approvalDetails(held.args as never);
+          }
           options = [
             { id: 'approve', label: 'Go ahead' },
             { id: 'reject', label: "Don't do it" },
@@ -377,7 +388,7 @@ export function conductorTools(
         turn.runId,
         {
           reason: args.reason,
-          question: args.question,
+          question: details ? `${args.question}\n\n${details}` : args.question,
           options: [
             ...options.filter((option) => option.id === recommended),
             ...options.filter((option) => option.id !== recommended),

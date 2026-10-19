@@ -232,6 +232,33 @@ test('an irreversible tool is held until the user approves that exact call, and 
   assert.deepEqual(published, [{ title: 'Hello' }]);
 });
 
+test('the approval card shows what the held call acts on, built by its tool', async (t) => {
+  const h = await makeHarness(t, {
+    conductor: {
+      tools: [
+        {
+          ...publish,
+          approvalDetails: async (args: { title: string }) => `Page title: ${args.title}`,
+        } as ConductorToolSpec,
+      ],
+    },
+  });
+  h.model.script('conductor', calls(tool('publish_page', { title: 'Hello' })), (request) => {
+    const actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1] ?? '';
+    return calls(
+      tool('ask_user', {
+        reason: 'irreversible',
+        question: 'Publish it?',
+        actionRef,
+        recommended: 'approve',
+      }),
+    );
+  });
+  await h.send('cnv_1', 'Publish my page.');
+  await h.conductor.idle();
+  assert.equal(h.outbox.questions[0]?.question, 'Publish it?\n\nPage title: Hello');
+});
+
 test('a rejected irreversible action never runs', async (t) => {
   published.length = 0;
   const h = await makeHarness(t, { conductor: { tools: [publish] } });
