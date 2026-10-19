@@ -1,7 +1,10 @@
 export type ReserveResult =
   | { ok: true }
-  /** `budget`: refused because the money is not there, not because spending is closed. */
-  | { ok: false; reason: string; budget?: boolean };
+  /**
+   * `budget`: refused because the money is not there, not because spending is closed.
+   * `unavailable`: the reservation could not be recorded; the same request may pass later.
+   */
+  | { ok: false; reason: string; budget?: boolean; unavailable?: boolean };
 
 /**
  * Where a grant's spend is charged. Both calls are synchronous, so nothing can spend between a

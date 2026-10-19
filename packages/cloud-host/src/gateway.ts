@@ -5,6 +5,7 @@ import {
   type GatewayServer,
   type ModelPrice,
   modelTable,
+  type SpendJournal,
   searchUrl,
   serveGateway,
   type Vendor,
@@ -102,13 +103,15 @@ export interface StackGateway {
 
 /**
  * The gateway with the vendor keys from `env`, and web search when `DEEPSEEK_API_KEY` is set,
- * listening where the config says.
+ * listening where the config says. With `journal`, the spend of every task's grants is written
+ * down as it happens.
  */
 export async function startGateway(
   config: StackConfig['gateway'],
   env: NodeJS.ProcessEnv,
   onWarning: (message: string, detail?: unknown) => void,
   models: readonly ModelPrice[] = config.models,
+  journal?: SpendJournal,
 ): Promise<StackGateway> {
   const key = (name: string): string | undefined => {
     const value = env[name]?.trim();
@@ -149,6 +152,7 @@ export async function startGateway(
             }),
           },
         }),
+    ...(journal === undefined ? {} : { journal }),
     onWarning: (message, detail) => onWarning(`model gateway: ${message}`, detail),
   });
   const server = await serveGateway(gateway, { host: config.host, port: config.port });

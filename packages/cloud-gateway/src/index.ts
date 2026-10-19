@@ -22,6 +22,12 @@ export {
   type Upstream,
 } from './gateway.js';
 export {
+  journaledPort,
+  type SpendJournal,
+  SqliteSpendJournal,
+  type UnrecordedSpend,
+} from './journal.js';
+export {
   BUILT_IN_MODELS,
   costUsd,
   type ModelPrice,

@@ -62,6 +62,12 @@ The gateway invents no ledger. A grant charges a **budget port**: `reserve(key, 
   guarantee. A run without `budgetUsd` gets no token and fails to start. What the gateway settles
   is reported back as the runner's `usage` events, so `task_cost` and the conductor's settlement of
   the delegation see the gateway's numbers.
+  Those events live only in the process, so the host also writes each runner request to a spend
+  journal (`gateway-spend.db`, SQLite, synchronous): a hold before it is sent, its cost when it
+  settles. A request the journal cannot take is refused (503) and its reservation released. At the
+  next start the orchestrator records, as `task_cost` on the tree root, what each task's grants
+  settled in earlier processes plus every hold they left open at its reserved amount, before it
+  ends the orphaned runs.
 - **Conductor.** Its requests go through `inProcess`, one grant per Maka session, closed when the
   turn or the planner ends; its own configuration holds no vendor key. Each request reserves in the
   run ledger (a `reserve` row with ref `request:<key>`) and settles there as a `model` row. A
@@ -73,8 +79,9 @@ The gateway invents no ledger. A grant charges a **budget port**: `reserve(key, 
   run budget through `Conductor.reserveSpend/settleSpend`. A check model through the gateway is
   `metered`: the supervisor stops reserving its own estimate and hands the gateway a charge, so
   the gateway reserves on the exact request body; a refusal is a check that could not run for
-  budget. The digest summary goes through the gateway on its own limit of $0.50 per UTC day, held
-  in memory (a restart starts the day afresh; at the summary's size that is cents).
+  budget. The digest summary goes through the gateway on its own limit of $0.50 per UTC day, kept
+  in the spend journal: a restart reads the day's spend back, and a reservation a crashed process
+  never settled counts in full. Without that limit the inbox does not build the summary model.
 
 ## Worst-case reservation
 

@@ -1,5 +1,5 @@
 import type { Conductor } from '@maka-cloud/conductor';
-import type { Gateway } from '@maka-cloud/gateway';
+import type { BudgetPort, Gateway } from '@maka-cloud/gateway';
 import type { InboxService, SupervisorParts } from '@maka-cloud/server';
 import {
   createSourceFetcher,
@@ -12,13 +12,7 @@ import {
 import { conductorBudget } from './budget.js';
 import type { InboxConfig } from './config.js';
 import { artifactEvidence } from './evidence.js';
-import {
-  createGatewaySummaryModel,
-  createGatewayVerifierModel,
-  dailyLimit,
-  type ModelDeps,
-  SUMMARY_DAILY_CAP_USD,
-} from './models.js';
+import { createGatewaySummaryModel, createGatewayVerifierModel, type ModelDeps } from './models.js';
 import { conductorNotifier } from './notifier.js';
 import { inboxService } from './service.js';
 
@@ -37,6 +31,11 @@ export interface InboxSetup {
    * injects every model it would build.
    */
   gateway?: Gateway;
+  /**
+   * The digest summary's limit of `SUMMARY_DAILY_CAP_USD` per day, kept where a restart reads it
+   * back. Without it the inbox does not build the summary model.
+   */
+  summaryBudget?: BudgetPort;
   /** Replaces what is built from the config, for tests. */
   override?: {
     models?: readonly VerifierModel[];
@@ -75,6 +74,9 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
   ) {
     throw new Error('The inbox needs the model gateway to call a model.');
   }
+  if (override.summary === undefined && setup.summaryBudget === undefined) {
+    throw new Error('The digest summary needs a daily limit that survives a restart.');
+  }
   const models =
     override.models ??
     setup.config.verifierModels.map((entry) =>
@@ -85,7 +87,7 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     createGatewaySummaryModel(
       setup.config.summaryModel,
       gateway as Gateway,
-      dailyLimit(SUMMARY_DAILY_CAP_USD),
+      setup.summaryBudget as BudgetPort,
       override.modelDeps,
     );
   const supervisor = await Supervisor.start({
