@@ -300,3 +300,14 @@ export async function filesContaining(dirs: string[], needles: string[]): Promis
   for (const dir of dirs) await walk(dir);
   return hits;
 }
+
+/** Every file under `dir`, recursively. Empty directories do not count. */
+export async function filesUnder(dir: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...(await filesUnder(path)));
+    else found.push(path);
+  }
+  return found;
+}

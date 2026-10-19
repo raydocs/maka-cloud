@@ -88,7 +88,7 @@ export class Fleet {
   private readonly machines = new Map<string, RemoteMachine>();
   private readonly setups = new Map<string, Promise<void>>();
   private recordChain: Promise<unknown> = Promise.resolve();
-  private lastSnapshotAt = 0;
+  private lastCaptureStamp = 0;
 
   constructor(readonly options: CloudRunnersOptions) {
     this.client = options.client;
@@ -229,6 +229,12 @@ mkdir -p "$(dirname ${shq(marker)})"
    * snapshots to the newest `keepSnapshots`. A snapshot holds the whole machine, so any task on
    * it can be restored from the newest one: records that pointed at an evicted snapshot are moved
    * to the newest, and an evicted snapshot is deleted only once no record points at it.
+   *
+   * "Newest" is the order in which the snapshots were requested, a stamp taken before the request
+   * is sent. It is not the order in which their uploads finish: a snapshot that is slow to become
+   * ready was still captured before the ones requested after it, and files written after its
+   * capture are not in it. So a record is only ever moved to a snapshot requested no earlier than
+   * the one it points at.
    */
   async snapshotTurn(
     record: RunnerSessionRecord,
@@ -240,6 +246,7 @@ mkdir -p "$(dirname ${shq(marker)})"
       .replace(/[^a-z0-9-]/gu, '-')
       .slice(0, 63)
       .replace(/-+$/u, '');
+    const capturedAt = this.captureStamp();
     const created = await this.client.createSnapshot(
       machine.machineId,
       { name, description: `task ${record.taskId}, turn ${record.turns}` },
@@ -260,7 +267,9 @@ mkdir -p "$(dirname ${shq(marker)})"
     let evicted: string[];
     let next: RunnerSessionRecord;
     try {
-      ({ next, evicted } = await this.exclusive(() => this.addSnapshot(record, machine, ready.id)));
+      ({ next, evicted } = await this.exclusive(() =>
+        this.addSnapshot(record, machine, ready.id, capturedAt),
+      ));
     } catch (error) {
       await this.deleteIfUnreferenced([ready.id]).catch(() => undefined);
       throw error;
@@ -269,21 +278,30 @@ mkdir -p "$(dirname ${shq(marker)})"
     return { record: next, snapshotId: ready.id };
   }
 
-  /** Inside `exclusive`: files `snapshotId` under the task, evicts the oldest beyond the retention. */
+  /** A stamp that is above every earlier one, taken right before a snapshot is requested. */
+  private captureStamp(): number {
+    this.lastCaptureStamp = Math.max(this.now(), this.lastCaptureStamp + 1);
+    return this.lastCaptureStamp;
+  }
+
+  /**
+   * Inside `exclusive`: files `snapshotId` (requested at `capturedAt`) under the task, evicts the
+   * oldest-requested beyond the retention.
+   */
   private async addSnapshot(
     record: RunnerSessionRecord,
     machine: RemoteMachine,
     snapshotId: string,
+    capturedAt: number,
   ): Promise<{ next: RunnerSessionRecord; evicted: string[] }> {
     const current = await this.sessions.get(record.taskId);
-    this.lastSnapshotAt = Math.max(this.now(), this.lastSnapshotAt + 1);
+    const snapshotAt = { ...(current?.snapshotAt ?? record.snapshotAt), [snapshotId]: capturedAt };
     const mine: RunnerSessionRecord = {
       ...record,
-      snapshotIds: [...(current?.snapshotIds ?? record.snapshotIds), snapshotId],
-      snapshotAt: {
-        ...(current?.snapshotAt ?? record.snapshotAt),
-        [snapshotId]: this.lastSnapshotAt,
-      },
+      snapshotIds: [...(current?.snapshotIds ?? record.snapshotIds), snapshotId].sort(
+        (a, b) => (snapshotAt[a] ?? 0) - (snapshotAt[b] ?? 0),
+      ),
+      snapshotAt,
       updatedAt: this.now(),
     };
     const onMachine = [
@@ -309,6 +327,7 @@ mkdir -p "$(dirname ${shq(marker)})"
     for (const other of onMachine) {
       const kept = other.snapshotIds.filter((id) => !evicted.includes(id));
       if (other !== mine && kept.length === other.snapshotIds.length) continue;
+      // `newest` was requested last of all of them, so it is never older than a record's own.
       const snapshotIds = kept.length > 0 ? kept : other.snapshotIds.length > 0 ? [newest] : [];
       const snapshotAt = Object.fromEntries(
         snapshotIds.map((id) => [id, takenAt.get(id) ?? 0] as const),

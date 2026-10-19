@@ -53,6 +53,11 @@ export interface LineParser {
   feed(line: string): ParsedEvent[];
 }
 
+/** Removes secrets from text. Parsers apply it to every piece of text before they shorten it. */
+export type Redact = (text: string) => string;
+
+const keep: Redact = (text) => text;
+
 export interface CommandInput {
   prompt: string;
   resumeSessionId?: string;
@@ -74,7 +79,7 @@ export interface VendorAdapter {
   readonly guard: string;
   command(input: CommandInput): string;
   env(access: ModelAccess, mcpToken: string | undefined): Record<string, string>;
-  parser(): LineParser;
+  parser(redact?: Redact): LineParser;
 }
 
 const MAX_NOTE = 200;
@@ -117,7 +122,7 @@ function guardLine(message: string): string {
 
 // -- Claude (the Claude CLI that the Agent SDK drives) ------------------------------------------
 
-function claudeParser(): LineParser {
+function claudeParser(redact: Redact = keep): LineParser {
   return {
     feed(line) {
       const event = parseJson(line);
@@ -149,9 +154,9 @@ function claudeParser(): LineParser {
             const b = obj(block);
             if (!b) continue;
             if (b.type === 'text' && str(b.text))
-              out.push({ kind: 'progress', note: clip(b.text as string) });
+              out.push({ kind: 'progress', note: clip(redact(b.text as string)) });
             if (b.type === 'tool_use' && str(b.name)) {
-              out.push({ kind: 'progress', note: `tool: ${clip(String(b.name), 80)}` });
+              out.push({ kind: 'progress', note: `tool: ${clip(redact(String(b.name)), 80)}` });
             }
           }
         }
@@ -165,7 +170,7 @@ function claudeParser(): LineParser {
         out.push({
           kind: 'result',
           ok: event.is_error !== true && !String(event.subtype ?? '').startsWith('error'),
-          ...(text ? { text: clip(text) } : {}),
+          ...(text ? { text: clip(redact(text)) } : {}),
         });
       }
       return out;
@@ -232,7 +237,7 @@ export const claudeAdapter: VendorAdapter = {
 
 // -- Codex ---------------------------------------------------------------------------------------
 
-function codexParser(): LineParser {
+function codexParser(redact: Redact = keep): LineParser {
   return {
     feed(line) {
       const event = parseJson(line);
@@ -246,17 +251,20 @@ function codexParser(): LineParser {
         const item = obj(event.item);
         const itemType = str(item?.type);
         if (type === 'item.completed' && itemType === 'agent_message' && str(item?.text)) {
-          out.push({ kind: 'progress', note: clip(item?.text as string) });
+          out.push({ kind: 'progress', note: clip(redact(item?.text as string)) });
         } else if (
           type === 'item.started' &&
           itemType === 'command_execution' &&
           str(item?.command)
         ) {
-          out.push({ kind: 'progress', note: `run: ${clip(item?.command as string, 120)}` });
+          out.push({
+            kind: 'progress',
+            note: `run: ${clip(redact(item?.command as string), 120)}`,
+          });
         } else if (type === 'item.started' && itemType === 'mcp_tool_call') {
           out.push({
             kind: 'progress',
-            note: `tool: ${clip(`${str(item?.server) ?? 'mcp'}.${str(item?.tool) ?? '?'}`, 80)}`,
+            note: `tool: ${clip(redact(`${str(item?.server) ?? 'mcp'}.${str(item?.tool) ?? '?'}`), 80)}`,
           });
         } else if (type === 'item.completed' && itemType === 'file_change') {
           out.push({ kind: 'progress', note: 'edited files' });
@@ -280,10 +288,18 @@ function codexParser(): LineParser {
         out.push({ kind: 'result', ok: true });
       } else if (type === 'turn.failed') {
         const message = str(obj(event.error)?.message);
-        out.push({ kind: 'result', ok: false, ...(message ? { text: clip(message) } : {}) });
+        out.push({
+          kind: 'result',
+          ok: false,
+          ...(message ? { text: clip(redact(message)) } : {}),
+        });
       } else if (type === 'error') {
         const message = str(event.message);
-        out.push({ kind: 'result', ok: false, ...(message ? { text: clip(message) } : {}) });
+        out.push({
+          kind: 'result',
+          ok: false,
+          ...(message ? { text: clip(redact(message)) } : {}),
+        });
       }
       return out;
     },

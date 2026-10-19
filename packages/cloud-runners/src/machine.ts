@@ -144,17 +144,27 @@ export class RemoteMachine {
   /**
    * Stops every live run of a task and whatever they started, and deletes their raw output. Returns
    * the runs that had something to stop. Throws when a process survived KILL. `cancelRuns` names
-   * runs that may be about to start (a launch in flight); they will not.
+   * runs that may be about to start (a launch in flight); they will not. With `runs`, only those
+   * runs are touched (processes, lock, raw output): a run that is done uses this, because a later
+   * turn of the same task may already be running.
    */
   async kill(
     dirName: string,
-    options: { signal?: AbortSignal; graceTenths?: number; cancelRuns?: string[] } = {},
+    options: {
+      signal?: AbortSignal;
+      graceTenths?: number;
+      cancelRuns?: string[];
+      runs?: string[];
+    } = {},
   ): Promise<string[]> {
     const result = await this.exec(KILL_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
         MAKA_LOG_DIR: this.logDir(dirName),
         MAKA_GRACE_TENTHS: String(options.graceTenths ?? 30),
+        ...(options.runs
+          ? { MAKA_ONLY_RUNS: options.runs.map((run) => assertSafeId('run', run)).join(' ') }
+          : {}),
         ...(options.cancelRuns?.length
           ? {
               MAKA_CANCEL_RUNS: options.cancelRuns.map((run) => assertSafeId('run', run)).join(' '),

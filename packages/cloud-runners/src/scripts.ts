@@ -180,20 +180,38 @@ done
  * and exits 1. Prints `KILLED <run>` for each run it had something to stop in, `NONE` if there
  * was nothing. Runs that have not started yet are marked (`<run>.cancel`, and the runs named in
  * `MAKA_CANCEL_RUNS`) so that they never do, and the raw output under `MAKA_LOG_DIR` is deleted.
+ *
+ * With `MAKA_ONLY_RUNS` (run names, space separated) it touches those runs alone: their process
+ * groups, locks and raw output files, never another run of the task. A run's cleanup uses this, so
+ * that it cannot reach a later turn of the same task that has started since.
  */
 export const KILL_SCRIPT = `${ALIVE_FN}${GROUP_FN}
-cleanup_logs() { if [ -n "\${MAKA_LOG_DIR:-}" ]; then rm -rf -- "$MAKA_LOG_DIR"; fi; }
+cleanup_logs() {
+  [ -n "\${MAKA_LOG_DIR:-}" ] || return 0
+  if [ -n "\${MAKA_ONLY_RUNS:-}" ]; then
+    for run in $MAKA_ONLY_RUNS; do rm -f -- "$MAKA_LOG_DIR/$run.out"; done
+  else
+    rm -rf -- "$MAKA_LOG_DIR"
+  fi
+}
 cd "$MAKA_DIR" 2>/dev/null || { cleanup_logs; echo NONE; exit 0; }
 umask 077
+locks="./*.lock"
+pids="./*.pid"
+if [ -n "\${MAKA_ONLY_RUNS:-}" ]; then
+  locks=""
+  pids=""
+  for run in $MAKA_ONLY_RUNS; do locks="$locks ./$run.lock"; pids="$pids ./$run.pid"; done
+fi
 for run in \${MAKA_CANCEL_RUNS:-}; do : > "$run.cancel"; done
-for lockf in ./*.lock; do
+for lockf in $locks; do
   [ -f "$lockf" ] || continue
   lockbase="\${lockf%.lock}"
   [ -f "$lockbase.exit" ] || : > "$lockbase.cancel"
 done
 found=0
 survivors=0
-for pidf in ./*.pid; do
+for pidf in $pids; do
   [ -f "$pidf" ] || continue
   base="\${pidf%.pid}"
   pid=$(cat "$pidf" 2>/dev/null) || continue
