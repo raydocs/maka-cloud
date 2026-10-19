@@ -166,9 +166,17 @@ export class BotController {
     } catch {
       return;
     }
+    const attemptedThrough = this.store.head();
     this.running = this.run()
       .catch((error) => {
-        if (!this.abort.signal.aborted) this.store.set('error', String(error));
+        if (!this.abort.signal.aborted) {
+          this.store.transaction(() => {
+            this.store.set('error', String(error));
+            // Mail arriving during a failed execution must still trigger a new
+            // attempt. Do not latch the failure against that newer input.
+            this.store.set('errorThrough', attemptedThrough);
+          });
+        }
       })
       .finally(() => {
         this.running = undefined;
@@ -176,7 +184,13 @@ export class BotController {
   }
   private async run() {
     await this.flush();
-    if (this.store.get('error')) return;
+    if (this.store.get('error')) {
+      const errorThrough = this.store.get<number>('errorThrough');
+      if (errorThrough !== undefined && this.store.head() <= errorThrough) return;
+      // Older versions persisted an error without an input boundary. Reconcile
+      // once on recovery; subsequent failures wait for fresh input, not a timer storm.
+      this.store.set('error', null);
+    }
     if (this.store.head() <= (this.store.get<number>('deliveredThrough') ?? 0)) {
       this.store.set('wake', null);
       this.store.set('wakeError', null);
@@ -189,8 +203,13 @@ export class BotController {
     const agent = await this.agent();
     this.activeAgent = agent;
     try {
-      const status = ((await agent.snapshot()) as any)?.agent?.status;
-      if (['blocked', 'waiting_for_user'].includes(status))
+      const snapshot: any = await agent.snapshot();
+      const status = snapshot?.agent?.status;
+      if (
+        status === 'waiting_for_user' ||
+        snapshot?.pendingInteractions > 0 ||
+        (status === 'blocked' && snapshot?.pendingInteractions !== 0)
+      )
         throw Error('Bot requires attention in its worker Session');
       let wake = this.store.get<{ messageId: string; text: string }>('wake');
       if (wake || status !== 'running') {
@@ -224,10 +243,12 @@ export class BotController {
           }
           this.store.set('wakeError', null);
           if (resolution?.state === 'owned') {
-            const currentStatus = ((await agent.snapshot()) as any)?.agent?.status;
+            const current: any = await agent.snapshot();
+            const currentStatus = current?.agent?.status;
             if (
               !this.store.get('sleepTurn') &&
-              ['idle', 'active', 'aborted'].includes(currentStatus)
+              (['idle', 'active', 'aborted'].includes(currentStatus) ||
+                (currentStatus === 'blocked' && current?.pendingInteractions === 0))
             ) {
               // An admitted wake can outlive its interrupted execution. Keep its
               // history, but persist a fresh identity before resuming unread mail.
@@ -256,8 +277,12 @@ export class BotController {
       } catch (error) {
         // A failed execution is terminal; a failed observation is not.
         if (!this.abort.signal.aborted) {
-          const stopped = ((await agent.snapshot()) as any)?.agent?.status;
-          if (['active', 'idle', 'aborted'].includes(stopped)) this.store.set('wake', null);
+          const stopped: any = await agent.snapshot();
+          if (
+            ['active', 'idle', 'aborted'].includes(stopped?.agent?.status) ||
+            (stopped?.agent?.status === 'blocked' && stopped?.pendingInteractions === 0)
+          )
+            this.store.set('wake', null);
         }
         throw error;
       }

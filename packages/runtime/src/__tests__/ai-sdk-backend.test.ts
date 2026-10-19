@@ -293,8 +293,10 @@ for (const terminal of ['gateway', 'eof', 'other'] as const) {
 }
 
 describe('AiSdkBackend HTTP 2xx transport recovery', () => {
-  for (const outcome of ['recover', 'exhaust', 'stop', 'step-limit'] as const) {
-    test(`${outcome} after a durable tool result without repeating its effect`, async () => {
+  for (const [code, outcome] of ['UND_ERR_SOCKET', 'ERR_HTTP2_STREAM_ERROR'].flatMap((code) =>
+    ['recover', 'exhaust', 'stop', 'step-limit'].map((outcome) => [code, outcome] as const),
+  )) {
+    test(`${code}: ${outcome} after a durable tool result without repeating its effect`, async () => {
       const durable = durableTurnHarness(`turn-5656-${outcome}`, 'write once and continue');
       const attempts: ModelCallAttempt[] = [];
       let calls = 0;
@@ -303,7 +305,7 @@ describe('AiSdkBackend HTTP 2xx transport recovery', () => {
         doStream: async () => {
           calls += 1;
           if (calls > 1 && (outcome !== 'recover' || calls === 2))
-            throw successfulResponseTransportFailure();
+            throw successfulResponseTransportFailure(code);
           const chunks: LanguageModelV4StreamPart[] =
             calls === 1
               ? [
@@ -423,7 +425,6 @@ describe('AiSdkBackend HTTP 2xx transport recovery', () => {
       }
     });
   }
-
   test('does not replay provider tool activity after a 2xx transport failure', async () => {
     let calls = 0;
     const model = new MockLanguageModelV4({
@@ -18478,13 +18479,13 @@ function connectionResetFailure(): Error {
   });
 }
 
-function successfulResponseTransportFailure(): APICallError {
+function successfulResponseTransportFailure(code = 'UND_ERR_SOCKET'): APICallError {
   return new APICallError({
     message: 'Failed to process successful response',
     url: 'https://provider.invalid',
     requestBodyValues: {},
     statusCode: 200,
-    cause: Object.assign(new Error('connection closed'), { code: 'UND_ERR_SOCKET' }),
+    cause: Object.assign(new Error('connection closed'), { code }),
   });
 }
 
