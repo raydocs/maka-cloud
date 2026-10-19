@@ -94,6 +94,9 @@ export class Orchestrator {
   private readonly handles = new Map<TaskId, RunHandle>();
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
+  private readonly background = new Set<Promise<void>>();
+  private readonly cancelling = new Map<TaskId, Promise<void>>();
+  private restoring = false;
   private writeChain: Promise<unknown> = Promise.resolve();
   private endpoint: string | undefined;
   /** Tasks `restore` found unfinished and ended. */
@@ -275,8 +278,7 @@ export class Orchestrator {
       if (error instanceof OrchestratorError) await this.handoff.discard(taskId);
       throw error;
     }
-    // launch records its own failures; a store failure has nowhere left to report.
-    void this.launch(taskId, input.runner, paths).catch(() => undefined);
+    this.track(this.launch(taskId, input.runner, paths));
     if (mode === 'wait') return await this.waitView(taskId, input.timeoutMs, signal);
     return this.view(taskId);
   }
@@ -305,30 +307,64 @@ export class Orchestrator {
 
   /**
    * Cancels the task and every descendant, children first. Terminal tasks keep
-   * their state, and a task that already ended does not shield its running
-   * descendants.
+   * their state. The session is checked once, where the first cancel request is
+   * accepted in the write chain; after that the cleanup runs to the end on its
+   * own, even if the session is revoked.
    */
   async cancel(session: SessionInfo, taskId: TaskId): Promise<TaskView> {
     this.visible(session, taskId);
+    await this.cancelTree(taskId, session.sessionId, session);
+    return this.view(taskId);
+  }
+
+  private async cancelTree(
+    rootId: TaskId,
+    by: SessionId | 'system',
+    session?: SessionInfo,
+  ): Promise<void> {
+    let accepted = session === undefined;
     for (;;) {
-      const targets = this.activeSubtree(taskId);
-      if (targets.length === 0) break;
+      const targets = this.activeSubtree(rootId);
+      if (targets.length === 0) return;
       // Mark everything first so nothing in the tree can start new children
       // while the tree is being torn down.
       for (const { task } of targets) {
-        await this.record({
-          type: 'task_cancel_requested',
-          taskId: task.taskId,
-          by: session.sessionId,
+        await this.record({ type: 'task_cancel_requested', taskId: task.taskId, by }, () => {
+          if (!accepted && session) {
+            this.assertSessionActive(session);
+            accepted = true;
+          }
+          if (this.isStopping(task.taskId)) throw new Superseded();
         });
       }
       targets.sort((a, b) => b.depth - a.depth);
       for (const { task } of targets) await this.cancelOne(task.taskId);
     }
-    return this.view(taskId);
+  }
+
+  /**
+   * Resolves once every runner start and cascading cancel under way has been
+   * handed off. A running task is not waited for. Tests and shutdown use it as
+   * an explicit signal that background work is done.
+   */
+  async settled(): Promise<void> {
+    while (this.background.size > 0) await Promise.all([...this.background]);
+  }
+
+  /** Background work records its own failures; a store failure has nowhere left to report. */
+  private track(work: Promise<unknown>): void {
+    const tracked: Promise<void> = work
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => this.background.delete(tracked));
+    this.background.add(tracked);
   }
 
   private async restore(): Promise<void> {
+    // Everything unfinished ends below, so no cascade is needed.
+    this.restoring = true;
     // Only unfinished tasks are loaded; everything that ended stays in the store.
     for (const taskId of this.store.activeTaskIds()) {
       const task = reduce(this.store.readTask(taskId)).get(taskId);
@@ -353,12 +389,13 @@ export class Orchestrator {
             },
       );
     }
+    this.restoring = false;
   }
 
   private async launch(taskId: TaskId, runnerName: string, paths: HandoffPaths): Promise<void> {
     const task = this.tasks.get(taskId);
     const runner = this.runners.get(runnerName);
-    if (!task || isTerminal(task.state) || !runner) return;
+    if (!task || !runner || this.isStopping(taskId) || this.ancestorStopped(taskId)) return;
     const executor = this.auth.issue({ parentTaskId: taskId });
     this.executorSessions.set(taskId, executor.sessionId);
     let handle: RunHandle;
@@ -380,13 +417,22 @@ export class Orchestrator {
       });
       return;
     }
-    if (this.isDone(taskId)) {
+    // The hand-off. A cancel or an ended ancestor may have landed while the
+    // runner was starting, and the task need not be terminal yet: a cancel in
+    // progress has no handle to stop. Anything that is stopping gets the late
+    // handle cancelled here, because nothing else knows about it.
+    if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
       await handle.cancel().catch(() => undefined);
       return;
     }
     this.handles.set(taskId, handle);
-    await this.record({ type: 'task_started', taskId });
-    await this.pump(taskId, handle);
+    const started = await this.record({ type: 'task_started', taskId }, () => {
+      if (this.isStopping(taskId) || this.ancestorStopped(taskId)) throw new Superseded();
+    });
+    // Dropped: whatever is stopping the task also holds the handle now.
+    if (!started) return;
+    // pump records its own failures; a store failure has nowhere left to report.
+    void this.pump(taskId, handle).catch(() => undefined);
   }
 
   private async pump(taskId: TaskId, handle: RunHandle): Promise<void> {
@@ -396,9 +442,11 @@ export class Orchestrator {
         if (event.type === 'progress') {
           await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
         } else if (event.type === 'failed') {
+          this.runnerOver(taskId, handle);
           await this.recordRunnerOutcome({ type: 'task_failed', taskId, reason: event.reason });
           return;
         } else {
+          this.runnerOver(taskId, handle);
           const result = await this.handoff.readManifest(taskId);
           await this.recordRunnerOutcome(
             result.ok
@@ -409,6 +457,8 @@ export class Orchestrator {
         }
       }
     } catch (error) {
+      // The stream broke; the remote run may still be alive, so the handle
+      // stays registered and is cancelled when the task ends.
       await this.recordRunnerOutcome({
         type: 'task_failed',
         taskId,
@@ -416,6 +466,7 @@ export class Orchestrator {
       });
       return;
     }
+    this.runnerOver(taskId, handle);
     await this.recordRunnerOutcome({
       type: 'task_failed',
       taskId,
@@ -423,9 +474,25 @@ export class Orchestrator {
     });
   }
 
-  private async cancelOne(taskId: TaskId): Promise<void> {
+  /** The runner reported its own end, so there is nothing left to cancel. */
+  private runnerOver(taskId: TaskId, handle: RunHandle): void {
+    if (this.handles.get(taskId) === handle) this.handles.delete(taskId);
+  }
+
+  /** Concurrent callers for one task share a single cancel. */
+  private cancelOne(taskId: TaskId): Promise<void> {
+    const inFlight = this.cancelling.get(taskId);
+    if (inFlight) return inFlight;
+    const cancelled = this.stopTask(taskId).finally(() => this.cancelling.delete(taskId));
+    this.cancelling.set(taskId, cancelled);
+    return cancelled;
+  }
+
+  private async stopTask(taskId: TaskId): Promise<void> {
     if (this.isDone(taskId)) return;
     const handle = this.handles.get(taskId);
+    // Taken out of the map first: ending the task cancels any handle left in it.
+    this.handles.delete(taskId);
     if (handle) {
       try {
         await handle.cancel();
@@ -446,19 +513,26 @@ export class Orchestrator {
    * that commits in between cannot be followed by a result.
    */
   private async recordRunnerOutcome(event: TaskEvent & { taskId: TaskId }): Promise<void> {
-    try {
-      await this.record(event, () => {
-        if (this.isStopping(event.taskId)) throw new Superseded();
-      });
-    } catch (error) {
-      if (!(error instanceof Superseded)) throw error;
-    }
+    await this.record(event, () => {
+      if (this.isStopping(event.taskId)) throw new Superseded();
+    });
   }
 
-  /** `guard` runs in the write chain right before the append and aborts it by throwing. */
-  private record(event: TaskEvent, guard?: () => void): Promise<StoredEvent> {
+  /**
+   * `guard` runs in the write chain right before the append and aborts it by
+   * throwing. Throwing `Superseded` drops the event and resolves to `undefined`.
+   * A terminal event for a task that already ended is always dropped, so the log
+   * holds exactly one per task.
+   */
+  private record(event: TaskEvent, guard?: () => void): Promise<StoredEvent | undefined> {
     const written = this.writeChain.then(async () => {
-      guard?.();
+      try {
+        if (isTerminalEvent(event) && this.isDone(event.taskId)) throw new Superseded();
+        guard?.();
+      } catch (error) {
+        if (error instanceof Superseded) return undefined;
+        throw error;
+      }
       const stored = await this.store.append(event, this.now());
       applyEvent(this.tasks, stored);
       this.afterApply(stored.event);
@@ -476,7 +550,13 @@ export class Orchestrator {
       return;
     }
     if (!isTerminal(task.state)) return;
-    this.handles.delete(task.taskId);
+    // A handle still registered when the task ends belongs to a run nobody
+    // stopped (its stream broke, say). Best effort, nothing is waiting on it.
+    const handle = this.handles.get(task.taskId);
+    if (handle) {
+      this.handles.delete(task.taskId);
+      void handle.cancel().catch(() => undefined);
+    }
     const executor = this.executorSessions.get(task.taskId);
     if (executor !== undefined) {
       this.auth.revoke(executor);
@@ -490,6 +570,8 @@ export class Orchestrator {
     // Waiters read the finished task back from the store, so it can leave memory now.
     this.activeByRoot.release(task.rootSessionId);
     this.tasks.delete(task.taskId);
+    // Nothing below a task that ended may keep running.
+    if (!this.restoring) this.track(this.cancelTree(task.taskId, 'system'));
   }
 
   private async waitView(
@@ -559,10 +641,17 @@ export class Orchestrator {
     }
   }
 
+  /** A task above it ended or is being cancelled, so it must not run. */
+  private ancestorStopped(taskId: TaskId): boolean {
+    return this.ancestry(taskId)
+      .slice(1)
+      .some((task) => isTerminal(task.state) || task.cancelRequestedBy !== undefined);
+  }
+
   /**
    * A task that is not in memory has ended (an id that never existed is turned
    * away by `visible` before it gets here), so these treat "not in memory" as
-   * "ended".
+   * "ended". Cancel requested or ended: the runner's own outcome no longer counts.
    */
   private isStopping(taskId: TaskId): boolean {
     const task = this.tasks.get(taskId);
@@ -676,6 +765,14 @@ export class Orchestrator {
 
 /** Thrown by a write guard to drop an event that no longer applies. */
 class Superseded extends Error {}
+
+function isTerminalEvent(event: TaskEvent): boolean {
+  return (
+    event.type === 'task_succeeded' ||
+    event.type === 'task_failed' ||
+    event.type === 'task_cancelled'
+  );
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

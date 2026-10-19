@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { mkdir, open, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type ResultManifest, ResultManifestSchema, type TaskId } from './types.js';
 
@@ -36,7 +36,10 @@ export class Handoff {
       throw new Error(`Brief exceeds ${MAX_BRIEF_BYTES} bytes`);
     }
     const paths = this.paths(taskId);
-    await mkdir(paths.dir, { recursive: true });
+    await mkdir(this.root, { recursive: true });
+    // Not recursive: the task dir must be new, so nothing already sitting at the
+    // path (a symlink, say) is ever written through. Owner only.
+    await mkdir(paths.dir, { mode: 0o700 });
     await writeFile(paths.briefPath, brief, { flag: 'wx' });
     return paths;
   }
@@ -46,11 +49,37 @@ export class Handoff {
     await rm(this.paths(taskId).dir, { recursive: true, force: true }).catch(() => undefined);
   }
 
+  /**
+   * O_NOFOLLOW only covers the last component of `result.json`, so the task dir
+   * is checked here: it must be a real directory, and it must resolve to where
+   * it should under the handoff root.
+   *
+   * This leaves a window between the check and the open. It is acceptable
+   * because runners never get write access to the handoff root (T6 rule), so
+   * nothing that runs inside a task can swap the directory; the check guards
+   * against a runner that was handed too much, it is not the access control.
+   */
+  private async checkTaskDir(taskId: TaskId, dir: string): Promise<string | undefined> {
+    try {
+      const info = await lstat(dir);
+      if (info.isSymbolicLink()) return 'task directory is a symbolic link';
+      if (!info.isDirectory()) return 'task directory is not a directory';
+      if ((await realpath(dir)) !== join(await realpath(this.root), taskId)) {
+        return 'task directory resolves outside the handoff root';
+      }
+    } catch {
+      return 'task directory could not be checked';
+    }
+    return undefined;
+  }
+
   /** Returns the validated manifest, or a reason it could not be accepted. */
   async readManifest(
     taskId: TaskId,
   ): Promise<{ ok: true; manifest: ResultManifest } | { ok: false; reason: string }> {
-    const { resultPath } = this.paths(taskId);
+    const { dir, resultPath } = this.paths(taskId);
+    const unsafe = await this.checkTaskDir(taskId, dir);
+    if (unsafe !== undefined) return { ok: false, reason: `invalid manifest: ${unsafe}` };
     let text: string;
     let file;
     try {

@@ -16,6 +16,7 @@ export class FakeRun implements RunHandle {
   readonly events: AsyncIterable<RunnerEvent>;
   cancelCalls = 0;
   private readonly queue: RunnerEvent[] = [];
+  private crashed: Error | undefined;
   private wake: (() => void) | undefined;
   private ended = false;
 
@@ -50,6 +51,12 @@ export class FakeRun implements RunHandle {
     this.end();
   }
 
+  /** Make the event stream throw, as a runner whose connection broke would. */
+  crash(error: Error): void {
+    this.crashed = error;
+    this.wake?.();
+  }
+
   /** Close the event stream without a terminal event. */
   end(): void {
     this.ended = true;
@@ -68,6 +75,7 @@ export class FakeRun implements RunHandle {
 
   private async *iterate(): AsyncGenerator<RunnerEvent> {
     for (;;) {
+      if (this.crashed) throw this.crashed;
       const next = this.queue.shift();
       if (next) {
         yield next;
