@@ -1,9 +1,11 @@
 import type { ModelGateway } from '@maka-cloud/conductor';
 import {
+  deepSeekSearch,
   Gateway,
   type GatewayServer,
   type ModelPrice,
   modelTable,
+  searchUrl,
   serveGateway,
   type Vendor,
   vendorBaseUrl,
@@ -20,7 +22,7 @@ function vendorOfRunner(runner: string): Vendor {
 /**
  * Model access for sandbox runs: a gateway token per run, for the runner's vendor only, bound to
  * the run's budget and its tree's pool. The vendor key never leaves the host. A run without a
- * budget gets no token.
+ * budget gets no token. When the gateway has web search, the token also pays for searches.
  */
 export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelAccessProvider {
   return {
@@ -41,6 +43,7 @@ export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelA
       return {
         apiKey: grant.token,
         baseUrl: vendorBaseUrl(sandboxUrl, vendor),
+        ...(gateway.canSearch ? { searchUrl: searchUrl(sandboxUrl) } : {}),
         revoke: () => grant.revoke(),
         meter: {
           spentUsd: () => grant.spend().spentUsd,
@@ -97,7 +100,10 @@ export interface StackGateway {
   close(): Promise<void>;
 }
 
-/** The gateway with the vendor keys from `env`, listening where the config says. */
+/**
+ * The gateway with the vendor keys from `env`, and web search when `DEEPSEEK_API_KEY` is set,
+ * listening where the config says.
+ */
 export async function startGateway(
   config: StackConfig['gateway'],
   env: NodeJS.ProcessEnv,
@@ -110,6 +116,7 @@ export async function startGateway(
   };
   const anthropic = key('ANTHROPIC_API_KEY');
   const openai = key('OPENAI_API_KEY');
+  const search = key('DEEPSEEK_API_KEY');
   const gateway = new Gateway({
     upstreams: {
       ...(anthropic === undefined
@@ -132,6 +139,16 @@ export async function startGateway(
           }),
     },
     models,
+    ...(search === undefined
+      ? {}
+      : {
+          search: {
+            provider: deepSeekSearch({
+              apiKey: search,
+              ...(config.searchBaseUrl === undefined ? {} : { baseUrl: config.searchBaseUrl }),
+            }),
+          },
+        }),
     onWarning: (message, detail) => onWarning(`model gateway: ${message}`, detail),
   });
   const server = await serveGateway(gateway, { host: config.host, port: config.port });

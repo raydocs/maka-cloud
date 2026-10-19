@@ -9,7 +9,7 @@ import { collect, deferred, reader, settles, setup, terminal } from './harness.j
 const TOKEN = 'mkg_test_task_token_abcdefghijkl';
 
 /** A stand-in for the model gateway's access: the test decides what it settled and when. */
-function gatewayAccess() {
+function gatewayAccess(options: { searchUrl?: string } = {}) {
   type State = { spentUsd: number; exhausted: boolean };
   const listeners = new Set<(state: State) => void>();
   const issued: unknown[] = [];
@@ -23,6 +23,7 @@ function gatewayAccess() {
       return {
         apiKey: TOKEN,
         baseUrl: 'https://gateway.test/openai/v1',
+        ...(options.searchUrl ? { searchUrl: options.searchUrl } : {}),
         revoke: async () => {
           counts.revoked++;
           await hooks.onRevoke?.();
@@ -117,6 +118,21 @@ test('with a metered access the CLI’s own usage lines do not count', async (t)
     new RegExp(`ANTHROPIC_API_KEY=${TOKEN}`, 'u'),
     'the sandbox gets the task token',
   );
+  assert.doesNotMatch(call.env, /MAKA_SEARCH_/u, 'no search without a search URL');
+});
+
+test('an access with web search gives the run its URL, called with the task token', async (t) => {
+  const access = gatewayAccess({ searchUrl: 'https://gateway.test/search' });
+  const h = await setup({ cloud: { modelAccess: access.provider } });
+  t.after(() => h.cleanup());
+  await h.setMode('spend');
+  const handle = await h.runners.codex.start(
+    await h.spec('tsk_gateway_search', { runner: 'codex', budgetUsd: 5 }),
+  );
+  assert.equal(terminal(await reader(handle).rest())?.type, 'finished');
+  const call = await h.cliCall('codex', 1);
+  assert.match(call.env, /MAKA_SEARCH_URL=https:\/\/gateway\.test\/search/u);
+  assert.match(call.env, new RegExp(`MAKA_SEARCH_TOKEN=${TOKEN}`, 'u'));
 });
 
 test('what settles while the access is revoked is reported before the run ends', async (t) => {

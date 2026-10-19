@@ -10,7 +10,7 @@ import {
   JsonFileCodingDeliveries,
   openPullRequestTool,
 } from '@maka-cloud/playbooks/coding';
-import { citeCheckSandboxTool } from '@maka-cloud/playbooks/sandbox-tool';
+import { citeCheckSandboxTool, webSearchSandboxTool } from '@maka-cloud/playbooks/sandbox-tool';
 import {
   type CloudRunners,
   type CloudRunnersOptions,
@@ -88,7 +88,10 @@ export async function startStack(
     const runnerOptions: Partial<CloudRunnersOptions> = {
       modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl),
       sessions: new JsonFileSessionStore(config.runnerSessionsPath),
-      sandboxTools: [await citeCheckSandboxTool()],
+      sandboxTools: [
+        await citeCheckSandboxTool(),
+        ...(gateway.gateway.canSearch ? [await webSearchSandboxTool()] : []),
+      ],
       inputs: sameConversationInputPolicy(directory),
       ...(publicUrl === undefined ? {} : { mcpUrlForSandbox: () => publicUrl }),
     };

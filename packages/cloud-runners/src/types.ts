@@ -16,6 +16,11 @@ export interface ModelAccess {
   baseUrl?: string;
   apiKey: string;
   /**
+   * The gateway's web search, called with `apiKey`. When set, the run gets it as
+   * `MAKA_SEARCH_URL` and `MAKA_SEARCH_TOKEN`, for the `web-search` sandbox tool.
+   */
+  searchUrl?: string;
+  /**
    * Called when the task ends or is cancelled. With a `meter`, it resolves once every request of
    * the access has settled, so the meter's spend after it is final.
    */

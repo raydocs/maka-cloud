@@ -40,6 +40,11 @@ async function start(
     modelKeys.push(`${req.url} ${req.headers['x-api-key'] ?? req.headers.authorization}`);
     if (req.url?.endsWith('/v1/messages')) messageArrived();
     req.resume();
+    if (req.url === '/v1/tools/search') {
+      const results = [{ title: 'Tides', url: 'https://e.test/tides', snippet: 'High at noon.' }];
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ results }));
+      return;
+    }
     if (req.url?.endsWith('/count_tokens')) {
       res.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":12}');
       return;
@@ -61,6 +66,8 @@ async function start(
   };
   config.mcp.port = 0;
   config.gateway.port = 0;
+  // The fake model server also answers as the search provider.
+  if (env.DEEPSEEK_API_KEY !== undefined) config.gateway.searchBaseUrl = modelUrl;
   const claude = new FakeRunner({
     name: 'claude-agent-sdk',
     onStart: (run) => {
@@ -151,6 +158,7 @@ test('sandbox runs get a gateway token bound to their budget, never the vendor k
   assert.ok(claude.meter, 'spend is metered per request');
   const codex = await access.issue({ taskId: 'tsk_two', runner: 'codex', budgetUsd: 1 });
   assert.equal(codex.baseUrl, `${stack.gateway.server.url}/openai/v1`);
+  assert.equal(codex.searchUrl, undefined, 'no search key, no search');
   await assert.rejects(
     access.issue({ taskId: 'tsk_three', runner: 'claude-agent-sdk' }),
     /no budget/u,
@@ -187,6 +195,32 @@ test('sandbox runs get a gateway token bound to their budget, never the vendor k
   const revoked = await ask(100);
   assert.equal(revoked.status, 401);
   await revoked.arrayBuffer();
+});
+
+test('with a search key, runs get the web-search tool and a search paid from their token', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {
+    OPENAI_API_KEY: 'sk-master-openai-not-a-key',
+    DEEPSEEK_API_KEY: 'sk-search-not-a-key',
+  });
+  assert.deepEqual(
+    options.sandboxTools?.map((tool) => tool.name),
+    ['cite-check', 'web-search'],
+  );
+  const access = options.modelAccess;
+  assert.ok(access);
+  const codex = await access.issue({ taskId: 'tsk_s', runner: 'codex', budgetUsd: 0.01 });
+  assert.equal(codex.searchUrl, `${stack.gateway.server.url}/search`);
+  const response = await fetch(codex.searchUrl ?? '', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${codex.apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ query: 'tides' }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    results: [{ title: 'Tides', url: 'https://e.test/tides', snippet: 'High at noon.' }],
+  });
+  assert.deepEqual(modelKeys, ['/v1/tools/search Bearer sk-search-not-a-key']);
+  assert.equal(codex.meter?.spentUsd(), 0.00075, 'the call is paid from the run’s budget');
 });
 
 test('the conductor’s model requests go through the gateway, which adds the vendor key', async (t) => {

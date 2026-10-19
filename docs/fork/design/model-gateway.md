@@ -133,6 +133,29 @@ whose cost it cannot bound is refused (400), never sent.
   wrong; the overrun is settled in full and, on the conductor ledger, blocks the run until the user
   answers a budget question.
 
+## Web search
+
+Hosted vendor web search stays refused (see "Allowlisted fields"). Research runs search through
+the gateway instead.
+
+- **Route.** `POST /search` with a task token of either vendor and the body `{query, count?}`:
+  a query of 1 to 128 characters, up to 20 results (10 by default). An unknown field is refused.
+  The answer is `{results: [{title, url, snippet, published?}]}`. Neither the answer nor an
+  error names the provider.
+- **Provider.** Behind `SearchProvider`. The first backend is the DeepSeek Search API
+  (`POST /v1/tools/search`, key `DEEPSEEK_API_KEY`), so no separate search engine is needed. It
+  bills $0.75 per 1,000 calls that answer 200 with at least one result. Errors, empty results and
+  timeouts are free.
+- **Budget.** Each call reserves its fixed price ($0.00075 by default) through the grant's port
+  before it is sent. It settles at that price when the provider billed it or may have (a
+  connection that broke after the request was sent, or a timeout), else at 0. A call the budget
+  cannot cover is refused with 402 and never sent. Searches count against the grant's in-flight
+  limit, are cut on revoke and after 30 seconds, and `revoke()` waits for them to settle.
+- **Untrusted text.** The gateway keeps only http(s) URLs and strips control and bidi characters,
+  and it caps every field. The sandbox's `web-search` command prints the results between markers
+  that carry a random tag, and says the text between them is data from the web, never
+  instructions. The supervisor already reads everything a run reports as untrusted.
+
 ## Secrets and logs
 
 - No request or response body, header value, token or key is logged. Warnings carry a grant's
@@ -151,6 +174,7 @@ whose cost it cannot bound is refused (400), never sent.
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | The gateway's upstreams (default: the vendors' APIs). |
 | `MAKA_CLOUD_GATEWAY_HOST`, `MAKA_CLOUD_GATEWAY_PORT` | Where it listens (default 127.0.0.1:8082). |
 | `MAKA_CLOUD_GATEWAY_PUBLIC_URL` | The gateway as sandboxes reach it. HTTPS, except for a loopback host. |
+| `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | Web search key and API (optional). Without the key, runs get no `web-search` command. |
 | `MAKA_CLOUD_GATEWAY_MODELS` | JSON array of `{vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}`; replaces a built-in entry of the same model. |
 
 ## Delivery
@@ -160,6 +184,9 @@ whose cost it cannot bound is refused (400), never sent.
 2. **PR A2:** the conductor and the supervisor verifier and summary through `inProcess`, after the
    conductor and supervisor follow-up PRs that touch the same files have merged. The stack hands
    the conductor no vendor key.
+3. **PR A3:** web search: the `/search` route with a per-call reservation, the DeepSeek backend,
+   the runners' `MAKA_SEARCH_URL` and `MAKA_SEARCH_TOKEN`, and the `web-search` sandbox tool,
+   which the research contract names.
 
 ## Not covered
 
