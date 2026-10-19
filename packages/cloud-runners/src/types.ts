@@ -56,7 +56,10 @@ export interface RunnerSessionRecord {
    * is moved to the machine's newest snapshot.
    */
   snapshotIds: string[];
-  /** When each snapshot in `snapshotIds` was taken, by id. Orders a machine's snapshots. */
+  /**
+   * When each snapshot in `snapshotIds` was requested, by id (a stamp taken before the request, not
+   * when it became ready). Orders a machine's snapshots.
+   */
   snapshotAt?: Record<string, number>;
   updatedAt: number;
 }
