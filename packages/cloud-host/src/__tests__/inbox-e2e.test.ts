@@ -142,7 +142,13 @@ async function startStack(
     handoffRoot: join(dir, 'handoff'),
     runners: new RunnerRegistry([claude, codex]),
     conductorRoot: join(dir, 'conductor'),
-    conductor: { access: { apiKey: 'sk-test-not-a-key', baseUrl: model.url } },
+    conductor: {
+      access: {
+        apiKey: 'sk-test-not-a-key',
+        baseUrl: model.url,
+        unmeteredTestAccess: true as const,
+      },
+    },
     onWarning: (message: string, detail?: unknown) => stack.warnings.push({ message, detail }),
     supervisor: (
       context: Parameters<NonNullable<Parameters<typeof startCloud>[0]['supervisor']>>[0],
@@ -190,7 +196,6 @@ async function startStack(
                       maxInputChars: 100_000,
                       maxOutputTokens: 1_000,
                     },
-                    {},
                     { generateText: generate, languageModel: () => ({}) as never },
                   ),
                 ],

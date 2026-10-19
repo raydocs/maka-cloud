@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { access } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ModelCharge, ModelGateway } from '../config.js';
+import { Conductor } from '../conductor.js';
+import { MemoryOutbox } from '../outbox.js';
 import { calls, text, tool } from './fake-model.js';
 import { makeHarness } from './harness.js';
 
@@ -127,4 +131,19 @@ test('a model request a previous process reserved and never settled is charged i
   const after = h.conductor.state.budget(runId);
   assert.equal(after.reservedUsd, 0);
   assert.ok(Math.abs(after.modelUsd - before.modelUsd - 0.3) < 1e-9, `${after.modelUsd}`);
+});
+
+test('without the gateway the conductor refuses to start, and no request reaches the vendor', async (t) => {
+  const h = await makeHarness(t);
+  const root = join(h.dir, 'no-gateway');
+  await assert.rejects(
+    Conductor.create({
+      root,
+      access: { apiKey: 'sk-a-real-looking-vendor-key-0123', baseUrl: h.model.url },
+      outbox: new MemoryOutbox(),
+    }),
+    /needs the model gateway/u,
+  );
+  assert.equal(h.model.requests.length, 0);
+  await assert.rejects(access(root), 'nothing was created for it');
 });
