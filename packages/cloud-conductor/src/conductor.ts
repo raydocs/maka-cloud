@@ -832,7 +832,8 @@ export class Conductor {
       this.state.bindTask(delegation.key, view.taskId);
     }
     if (!['succeeded', 'failed', 'cancelled'].includes(String(view.state))) return;
-    if (view.stopPending === true) {
+    // The reservation covers the whole tree: hold it while any task in it may still run.
+    if (view.stopPending === true || view.treeStopPending === true) {
       this.state.markCancelPending([delegation.key]);
       this.checkStopLater(delegation.conversationId);
       return;

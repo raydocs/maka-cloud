@@ -165,6 +165,11 @@ export interface TaskView {
    * may still be running (and spending) somewhere.
    */
   stopPending?: boolean;
+  /**
+   * A task below this one has not ended, is still starting, or owes a stop: the
+   * tree may still be running (and spending) though this task ended.
+   */
+  treeStopPending?: boolean;
 }
 
 export type OrchestratorErrorCode =
