@@ -131,7 +131,7 @@ test('a resolved cell: score 1, cost from the run, outcome and grade recorded, e
   assert.equal(result?.costUsd, 0.5);
   assert.deepEqual(
     result?.artifacts.map((artifact) => artifact.kind),
-    ['outcome', 'grade'],
+    ['gateway', 'outcome', 'grade'],
   );
   assert.equal(s.ledger.spentUsd, 0.5);
   await s.assertClean();
