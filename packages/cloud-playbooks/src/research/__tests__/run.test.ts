@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import { VerificationRecordSchema, renderFromRecord } from '../record.js';
-import { ReportSchema } from '../report-schema.js';
+import { ReportSchema, claimsOf } from '../report-schema.js';
 import { MAX_SOURCE_BYTES, runCiteCheck } from '../run.js';
 import { parseCiteCheckLine } from '../summary-line.js';
 import { PAGE_BRIDGE_HTML, PAGE_TUNNEL_TXT, sampleReport } from './fixtures.js';
@@ -54,10 +54,53 @@ describe('cite-check', () => {
     });
     assert.match(await readFile(path('out/report.md'), 'utf8'), /^# Harbor crossings/);
     assert.match(await readFile(path('out/report.html'), 'utf8'), /<h1>Harbor crossings<\/h1>/);
+    assert.deepEqual(
+      JSON.parse(await readFile(path('out/report.json'), 'utf8')),
+      JSON.parse(await readFile(path('report.json'), 'utf8')),
+    );
     const record = JSON.parse(await readFile(path('out/verification.json'), 'utf8'));
     assert.equal(record.entailment, 'not_judged');
     assert.equal(record.sources.length, 2);
     assert.match(record.sources[0].sha256, /^[0-9a-f]{64}$/);
+  });
+
+  test('out/report.json is the report that was checked, whole: dropped claims stay in it', async () => {
+    await reportWith((report) => {
+      report.sections[0]?.claims.push({
+        id: 'bad',
+        text: 'The bridge was closed for forty years.',
+        citations: [{ sourceId: 'bridge', quote: 'The bridge was closed for forty years' }],
+      });
+    });
+    const input = ReportSchema.parse(JSON.parse(await readFile(path('report.json'), 'utf8')));
+    assert.equal((await run('--drop-unsupported')).exitCode, 0);
+    const out = ReportSchema.parse(JSON.parse(await readFile(path('out/report.json'), 'utf8')));
+    assert.deepEqual(out, input);
+    assert.deepEqual(
+      claimsOf(out).map((claim) => claim.id),
+      ['c1', 'c2', 'bad', 'c3'],
+    );
+    const record = JSON.parse(await readFile(path('out/verification.json'), 'utf8'));
+    assert.deepEqual(
+      record.claims.map((claim: { id: string }) => claim.id),
+      claimsOf(out).map((claim) => claim.id),
+    );
+  });
+
+  test('--out that would overwrite the input report is refused and the input is untouched', async () => {
+    const before = await readFile(path('report.json'), 'utf8');
+    const outcome = await runCiteCheck([
+      '--report',
+      path('report.json'),
+      '--sources',
+      path('sources'),
+      '--out',
+      dir,
+    ]);
+    assert.equal(outcome.exitCode, 2);
+    assert.match(outcome.stderr, /would overwrite --report/);
+    assert.equal(await readFile(path('report.json'), 'utf8'), before);
+    await assert.rejects(readFile(path('report.md')));
   });
 
   test('a failed claim exits 1 and is named; --drop-unsupported removes it and exits 0', async () => {

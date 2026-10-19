@@ -53,7 +53,7 @@ const RESEARCH_MANIFEST = {
   notDone: [],
   confidence: 'high' as const,
   knownIssues: [],
-  artifacts: ['report.md', 'report.html', 'verification.json'],
+  artifacts: [...REPORT_ARTIFACTS],
 };
 
 type ConductorAccess = NonNullable<CloudOptions['conductor']>['access'];
