@@ -287,6 +287,117 @@ export const RESULT_CLEAN_SCRIPT = `rm -f "$MAKA_DIR/result.read"`;
 /** Removes a task's directory entry for a failed install, so the next task can try again. */
 export const REMOVE_DIR_SCRIPT = `rm -rf -- "$MAKA_DIR"`;
 
+/**
+ * Copies files of another task's workspace into this task's `workspace/inputs/<from>/`, as the
+ * sandbox user (never `GET /files`). Everything is checked before anything is copied: the source
+ * must have no live process, every requested path must be inside its workspace with no symlink on
+ * the way or below it and nothing but regular files and directories, and the count and sizes must
+ * stay under the caps. Files are copied into a temporary directory (each opened with nofollow and
+ * cut at the per-file cap) that replaces `inputs/<from>` in one rename, so a repeated stage gives
+ * the same result. Prints `OK <files> <bytes>` or `REFUSED <reason>`; nothing is left half copied.
+ * Env: MAKA_ROOT, MAKA_FROM, MAKA_DIR (target task), MAKA_PATHS (one relative path per line),
+ * MAKA_MAX_FILES, MAKA_MAX_FILE_BYTES, MAKA_MAX_TOTAL_BYTES.
+ */
+export const STAGE_INPUTS_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+umask 077
+parent="$MAKA_DIR/workspace/inputs"
+tmp="$parent/.stage-$MAKA_FROM.$$"
+list="$tmp.list"
+cleanup() { rm -rf -- "$tmp" "$list" "$list.s"; }
+trap cleanup EXIT
+refuse() { echo "REFUSED $1"; exit 0; }
+srcdir="$MAKA_ROOT/$MAKA_FROM"
+src="$srcdir/workspace"
+{ [ -d "$srcdir" ] && [ ! -L "$srcdir" ]; } || refuse "task $MAKA_FROM has no directory in this sandbox"
+{ [ -d "$src" ] && [ ! -L "$src" ]; } || refuse "task $MAKA_FROM has no workspace"
+{ [ -d "$MAKA_DIR/workspace" ] && [ ! -L "$MAKA_DIR/workspace" ]; } || refuse "this task has no workspace"
+for pidf in "$srcdir"/*.pid; do
+  [ -f "$pidf" ] || continue
+  base="\${pidf%.pid}"
+  pid=$(cat "$pidf" 2>/dev/null) || continue
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  if group_is_run "$base" "$pid" && [ -n "$(group_pids "$pid")" ]; then
+    refuse "task $MAKA_FROM still has a running process"
+  fi
+done
+[ ! -L "$parent" ] || refuse "inputs is a symbolic link"
+mkdir -p "$parent"
+: > "$list"
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  case "$p" in /*) refuse "$p is not a relative path" ;; esac
+  case "/$p/" in */../*|*/./*|*//*|*[[:cntrl:]]*) refuse "$p is not a plain relative path" ;; esac
+  cur="$src"
+  rest="$p"
+  while [ -n "$rest" ]; do
+    comp="\${rest%%/*}"
+    if [ "$comp" = "$rest" ]; then rest=""; else rest="\${rest#*/}"; fi
+    cur="$cur/$comp"
+    [ ! -L "$cur" ] || refuse "$p goes through a symbolic link"
+    [ -e "$cur" ] || refuse "$p does not exist in task $MAKA_FROM"
+  done
+  if [ -d "$cur" ]; then
+    [ -z "$(find "$cur" -type l -print -quit)" ] || refuse "$p contains a symbolic link"
+    [ -z "$(find "$cur" ! -type f ! -type d -print -quit)" ] || refuse "$p contains something that is not a regular file"
+    find "$cur" -type f -print0 >> "$list"
+  elif [ -f "$cur" ]; then
+    printf '%s\\0' "$cur" >> "$list"
+  else
+    refuse "$p is not a regular file or a directory"
+  fi
+done <<< "$MAKA_PATHS"
+sort -z -u -o "$list.s" "$list"
+n=0
+total=0
+while IFS= read -r -d '' f; do
+  n=$((n + 1))
+  [ "$n" -le "$MAKA_MAX_FILES" ] || refuse "more than $MAKA_MAX_FILES files were requested"
+  size=$(stat -c %s -- "$f") || refuse "a file could not be read"
+  [ "$size" -le "$MAKA_MAX_FILE_BYTES" ] || refuse "\${f#"$src"/} is larger than $MAKA_MAX_FILE_BYTES bytes"
+  total=$((total + size))
+  [ "$total" -le "$MAKA_MAX_TOTAL_BYTES" ] || refuse "more than $MAKA_MAX_TOTAL_BYTES bytes were requested"
+done < "$list.s"
+[ "$n" -gt 0 ] || refuse "there are no files to copy"
+mkdir -p "$tmp"
+copied=0
+while IFS= read -r -d '' f; do
+  rel="\${f#"$src"/}"
+  mkdir -p -- "$tmp/$(dirname -- "$rel")"
+  ( set -C -o pipefail; dd if="$f" iflag=nofollow,nonblock status=none 2>/dev/null | head -c $((MAKA_MAX_FILE_BYTES + 1)) > "$tmp/$rel" ) || refuse "$rel could not be read"
+  size=$(stat -c %s -- "$tmp/$rel")
+  [ "$size" -le "$MAKA_MAX_FILE_BYTES" ] || refuse "$rel grew while it was copied"
+  copied=$((copied + size))
+  [ "$copied" -le "$MAKA_MAX_TOTAL_BYTES" ] || refuse "more than $MAKA_MAX_TOTAL_BYTES bytes were copied"
+done < "$list.s"
+rm -rf -- "$parent/$MAKA_FROM"
+mv -- "$tmp" "$parent/$MAKA_FROM"
+echo "OK $n $copied"
+`;
+
+/** True (exit 0) when the tool is installed with the content that has this hash. */
+export const TOOL_CHECK_SCRIPT = `[ "$(cat "$MAKA_TOOL_MARKER" 2>/dev/null)" = "$MAKA_TOOL_HASH" ] && [ -x "$HOME/.maka-cli/bin/$MAKA_TOOL_NAME" ]`;
+
+/**
+ * One chunk (base64 on stdin) of a tool's file. The file is assembled under a temporary name next
+ * to its final place and only renamed, after its sha256 matched, by the last chunk, which also
+ * writes the marker. A tool is never seen half written.
+ */
+export const TOOL_CHUNK_SCRIPT = `set -eu
+bin="$HOME/.maka-cli/bin"
+tmp="$bin/$MAKA_TOOL_TMP"
+if [ "$MAKA_FIRST" = 1 ]; then mkdir -p "$bin"; rm -f -- "$tmp"; : > "$tmp"; fi
+base64 -d >> "$tmp"
+if [ "$MAKA_LAST" = 1 ]; then
+  [ "$(sha256sum < "$tmp" | cut -d' ' -f1)" = "$MAKA_TOOL_HASH" ] || { rm -f -- "$tmp"; echo "the tool arrived damaged" >&2; exit 1; }
+  chmod 755 "$tmp"
+  mv -f -- "$tmp" "$bin/$MAKA_TOOL_NAME"
+  mkdir -p "$(dirname "$MAKA_TOOL_MARKER")"
+  printf '%s' "$MAKA_TOOL_HASH" > "$MAKA_TOOL_MARKER"
+fi
+`;
+
+export const TOOL_ABORT_SCRIPT = `rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`;
+
 /** True (exit 0) when the CLI at the pinned version is installed. */
 export function cliCheckScript(binary: string): string {
   return `export PATH="$HOME/.maka-cli/bin:$PATH"

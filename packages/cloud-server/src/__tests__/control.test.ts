@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { OrchestratorError, type OperatorAccess } from '@maka-cloud/orchestrator';
 import { ConversationStore } from '../conversations.js';
-import { CostLedger } from '../cost.js';
 import { openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
 import { DEFAULT_HTTP_LIMITS, PublicApi } from '../http.js';
@@ -219,55 +218,49 @@ test('a task that was paused when the server stopped is ended on restart', async
   assert.equal((await act(h, taskId, 'resume')).status, 409);
 });
 
-test('cost: absent until reported, only ever grows, shows in the task list and the stream, and survives a restart', async (t) => {
+test('cost comes from the orchestrator log: absent until a run reports it, a total over the whole tree, never lowered, and the same after a restart', async (t) => {
   const { h, conversationId, start } = await setup(t);
   const taskId = await start();
   assert.ok(!('costUsd' in ((await listed(h, conversationId))[0] ?? {})));
 
-  assert.equal(h.server.reportCost(taskId, 0), false);
-  assert.equal(h.server.reportCost(taskId, -1), false);
-  assert.equal(h.server.reportCost(taskId, Number.NaN), false);
-  assert.equal(h.server.reportCost('tsk_nope', 1), false);
-  assert.equal(h.server.reportCost(taskId, 0.25), true);
-  assert.equal(h.server.reportCost(taskId, 0.1), false);
-  assert.equal(h.server.reportCost(taskId, 0.25), false);
-  assert.equal(h.server.reportCost(taskId, 0.5), true);
-  assert.equal((await listed(h, conversationId))[0]?.costUsd, 0.5);
+  const orchestrator = h.server.orchestrator;
+  const executor = orchestrator.authenticate(
+    orchestrator.issueSession({ parentTaskId: taskId }).token,
+  );
+  assert.ok(executor);
+  const before = h.fake.runs.length;
+  const child = await orchestrator.delegate(executor, { runner: 'fake', brief: 'child' });
+  await eventually(() => h.fake.runs.length > before, 'child run');
 
   const stream = await openStream(t, h, `?conversation=${conversationId}`);
-  await eventually(() => stream.events.some((e) => e.event === 'task.cost'), 'cost on the stream');
-  const costs = stream.events.filter((e) => e.event === 'task.cost');
-  assert.deepEqual(
-    costs.map((e) => [e.data.taskId, e.data.costUsd]),
-    [
-      [taskId, 0.25],
-      [taskId, 0.5],
-    ],
-  );
-  const lastSeen = stream.events.at(-1)?.id ?? 0;
-  stream.close();
+  const totals = () =>
+    stream.events
+      .filter((e) => (e.data.event as { type?: string } | undefined)?.type === 'task_cost')
+      .map((e) => e.data.totalCostUsd);
+  const report = async (id: string, usd: number) => {
+    const count = totals().length;
+    h.fake.runFor(id).usage(usd);
+    await eventually(() => totals().length === count + 1, `cost frame ${usd}`);
+  };
+  await report(taskId, 0.25);
+  await report(taskId, 0.1);
+  await report(child.taskId, 0.5);
+  await report(taskId, 0.5);
+  assert.deepEqual(totals(), [0.25, 0.25, 0.75, 1]);
+  assert.equal((await listed(h, conversationId)).find((x) => x.taskId === taskId)?.costUsd, 1);
+  assert.ok(!JSON.stringify(stream.events).includes('runner'));
 
-  assert.equal(h.server.reportCost(taskId, 0.75), true);
   await h.restart();
-  assert.equal((await listed(h, conversationId))[0]?.costUsd, 0.75);
-  const resumed = await openStream(t, h, `?conversation=${conversationId}`, {
-    'last-event-id': String(lastSeen),
-  });
-  const [next] = await resumed.until(1);
-  assert.equal(next?.event, 'task.cost');
-  assert.equal(next?.data.costUsd, 0.75);
-});
-
-test('cost is append-only in the database', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'cost-test-'));
-  const db = openDatabase(join(dir, 'server.sqlite'));
-  t.after(async () => {
-    db.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-  db.prepare('INSERT INTO task_cost_log (task_id, usd, at) VALUES (?, ?, ?)').run('tsk_1', 1, 1);
-  assert.throws(() => db.exec('UPDATE task_cost_log SET usd = 0'), /append-only/u);
-  assert.throws(() => db.exec('DELETE FROM task_cost_log'), /append-only/u);
+  assert.equal((await listed(h, conversationId)).find((x) => x.taskId === taskId)?.costUsd, 1);
+  const again = await openStream(t, h, `?conversation=${conversationId}`);
+  await eventually(
+    () => again.events.filter((e) => e.event === 'task.event').length >= stream.events.length,
+    'replay',
+  );
+  const replayed = again.events
+    .filter((e) => (e.data.event as { type?: string } | undefined)?.type === 'task_cost')
+    .map((e) => e.data.totalCostUsd);
+  assert.deepEqual(replayed, [0.25, 0.25, 0.75, 1]);
 });
 
 // The orchestrator's own suite proves `authorize` runs in the write chain. This
@@ -313,7 +306,6 @@ test('the access handed to the orchestrator re-checks the invite when the orches
       pauseAs: () => Promise.reject(new Error('unused')),
       resumeAs: () => Promise.reject(new Error('unused')),
     },
-    costs: new CostLedger(db, hub),
     artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
     artifactLimiter: new RateLimiter(1_000_000),
     limits: DEFAULT_HTTP_LIMITS,

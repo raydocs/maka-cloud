@@ -40,7 +40,6 @@ One SQLite file (`node:sqlite`), opened by exactly one process.
 | `conversations`, `messages` | Append-only. `messages` has a unique `(conversation_id, client_message_id)` so a retried POST stores once. A conversation owns one orchestrator session id. |
 | `feed(id, kind, conversation_id, ref, at)` | The order of everything a client can stream. A conversation row, a message or a `task_log` row is inserted together with its `feed` row in one transaction. |
 | `sessions(session_id, token_sha256, parent_task_id, created_at)` | The orchestrator's `SessionStore`. Digests only. |
-| `task_cost_log(id, task_id, usd, at)` | Cost figures reported for tasks, append-only. A figure is kept only if it is above the last one. Schema step 2. |
 
 Invite tokens (`invites`: id, SHA-256 digest, label, created and revoked times)
 live in a second SQLite file. The main database belongs to the one running
@@ -89,7 +88,7 @@ capped at 32,000 bytes.
 
 Task views and `task_created` events leave out `runner`: the runner id names the
 vendor behind a run, and clients have no use for it. `costUsd` is present only
-once a figure was reported, never `0`. Titles, progress and manifests are written
+once a run reported spend, never `0`. Titles, progress and manifests are written
 by models and pass through unchanged.
 
 ### Artifacts
@@ -121,16 +120,19 @@ arrives and again inside the orchestrator's write chain through
 `OperatorAccess.authorize`, together with the conversation, so the check and the
 action are one step.
 
-Cost reaches the server through `CloudServer.reportCost(taskId, usd)`. The
-adapter that reads the conductor's ledger lives with the conductor (T5); until a
-per-task figure exists it can report the sum of a task's runs. A figure that is
-not above the last one is ignored, so a late report cannot move the number back.
+Cost is per task. The orchestrator records each run's spend as `task_cost`
+events on the top-level task of its tree, and the task view's `costUsd` is the sum
+of the most each run reported, so it never goes down. The server only reads it:
+`costUsd` on task views is absent until the first event, never `0`. A `task_cost`
+frame on the stream carries the one run's figure and `totalCostUsd`, the task's
+total as of that event, computed from the log the way the reducer does it.
 
 ### Event stream
 
-Events are `conversation.created`, `message.posted`, `task.event` (the
-`TaskEvent` plus its log `seq`) and `task.cost` (`{taskId, costUsd, at}`). Resume with the `Last-Event-ID` header (what a
-browser sends on reconnect) or `?after=`; the header wins.
+Events are `conversation.created`, `message.posted` and `task.event` (the
+`TaskEvent` plus its log `seq`). A `task_cost` event also carries
+`totalCostUsd`, what the task has cost so far. Resume with the `Last-Event-ID`
+header (what a browser sends on reconnect) or `?after=`; the header wins.
 
 A connection holds a position, not a buffer. It reads the next page of rows
 after that position from SQLite, writes them, and repeats while the table moves.
