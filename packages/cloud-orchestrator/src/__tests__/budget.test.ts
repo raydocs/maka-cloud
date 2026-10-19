@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { FakeRun } from '../fake-runner.js';
-import { OrchestratorError } from '../types.js';
+import { MemoryTaskStore } from '../store.js';
+import { OrchestratorError, type StoredEvent, type TaskEvent } from '../types.js';
 import { eventQueued, eventually, GatedStore, makeHarness } from './harness.js';
 
 test('a task tree shares its budget: the runner gets it, crossing it cancels the whole tree', async (t) => {
@@ -256,4 +257,43 @@ test('spend a run reports after its start was dropped is recorded', async (t) =>
     () => h.orchestrator.status(conductor, top.taskId).costUsd === 2.3,
     'the child spend settled during its cancel',
   );
+});
+
+/** A store whose next append of one kind fails once, as a transient store error would. */
+class FlakyStore extends MemoryTaskStore {
+  failNext: TaskEvent['type'] | undefined;
+
+  override async append(event: TaskEvent, at: number): Promise<StoredEvent> {
+    if (event.type === this.failNext) {
+      this.failNext = undefined;
+      throw new Error('the store is unavailable');
+    }
+    return super.append(event, at);
+  }
+}
+
+test('a run whose start cannot be recorded is cancelled, and what it spent is still read', async (t) => {
+  const store = new FlakyStore();
+  store.failNext = 'task_started';
+  const h = await makeHarness(t, {
+    store,
+    fake: {
+      onStart: (run: FakeRun) => {
+        // Spend reported before the start is written, and spend that settles during the cancel.
+        run.usage(0.2);
+        settlesOnCancel(run, 0.5);
+      },
+    },
+  });
+  const conductor = h.session();
+  const task = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'the run');
+  await h.orchestrator.settled();
+  assert.equal(h.fake.runFor(task.taskId).cancelCalls, 1, 'the unrecorded run is stopped');
+  await eventually(
+    () => h.orchestrator.status(conductor, task.taskId).costUsd === 0.5,
+    'the final spend is read after the start failed',
+  );
+  const status = h.orchestrator.status(conductor, task.taskId);
+  assert.equal(status.state, 'failed');
 });

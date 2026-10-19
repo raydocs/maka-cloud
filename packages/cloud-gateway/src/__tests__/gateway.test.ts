@@ -447,7 +447,7 @@ test('a request with an image or a file is refused and never sent', async () => 
   });
   const refused = await post(client, value);
   assert.equal(refused.status, 400);
-  assert.match(await text(refused), /images and files are not allowed/u);
+  assert.match(await text(refused), /only text, thinking, tool calls and text tool results/u);
   assert.equal(upstream.requests.length, 0);
 });
 
@@ -580,7 +580,7 @@ test('each way a request ends releases its slot and settles once', async (t) => 
   });
 });
 
-test('usage with a count that is not a number settles at the reservation', async () => {
+test('usage that breaks the schema settles at the reservation, streamed or not', async () => {
   const { gateway, upstream } = rig();
   const claude = recordingPort(1);
   const claudeClient = gateway.inProcess({
@@ -590,31 +590,29 @@ test('usage with a count that is not a number settles at the reservation', async
   });
   const codex = recordingPort(1);
   const codexClient = gateway.inProcess({ vendor: 'openai', subject: 'u', budget: codex.port });
-  const malformed = [
-    () => json({ type: 'message', usage: { input_tokens: 'invalid', output_tokens: null } }),
-    () => json({ type: 'message', usage: { input_tokens: 10 } }),
+  const events = (...list: Array<Record<string, unknown>>) =>
+    new Response(sse(list), { headers: { 'content-type': 'text/event-stream' } });
+  const start = (usage: Record<string, unknown>) =>
+    anthropicStart({ input_tokens: 12, output_tokens: 1, ...usage });
+  const bodies = [
+    { input_tokens: 'invalid', output_tokens: null },
+    { input_tokens: 10 },
+    { input_tokens: 10, output_tokens: 2.5 },
+    { input_tokens: 10, output_tokens: 3, cache_creation: {} },
+    { input_tokens: 10, output_tokens: 3, server_tool_use: { web_fetch_requests: 1 } },
+    { input_tokens: 10, output_tokens: 3, audio_input_tokens: 400 },
+  ];
+  const streams = [
     () =>
-      new Response(
-        sse([
-          anthropicStart({ input_tokens: '12', output_tokens: 1 }),
-          ...anthropicEnd({ output_tokens: 5 }),
-        ]),
-        { headers: { 'content-type': 'text/event-stream' } },
+      events(
+        anthropicStart({ input_tokens: '12', output_tokens: 1 }),
+        ...anthropicEnd({ output_tokens: 5 }),
       ),
-    () =>
-      new Response(
-        sse([
-          anthropicStart({ input_tokens: 12, output_tokens: 1 }),
-          ...anthropicEnd({ output_tokens: -5 }),
-        ]),
-        { headers: { 'content-type': 'text/event-stream' } },
-      ),
+    () => stream(start({}), { output_tokens: -5 }),
     // A split that leaves a lifetime out drops the 1,000 written tokens.
     () =>
       stream(
-        anthropicStart({
-          input_tokens: 12,
-          output_tokens: 1,
+        start({
           cache_creation_input_tokens: 1_000,
           cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: null },
         }),
@@ -623,66 +621,122 @@ test('usage with a count that is not a number settles at the reservation', async
     // A split that does not add up to the aggregate.
     () =>
       stream(
-        anthropicStart({
-          input_tokens: 12,
-          output_tokens: 1,
+        start({
           cache_creation_input_tokens: 1_000,
           cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 },
         }),
         { output_tokens: 5 },
       ),
+    () => stream(start({ cache_creation: 'split' }), { output_tokens: 5 }),
+    () => stream(start({ cache_creation: {} }), { output_tokens: 5 }),
+    // A split without an aggregate to match.
     () =>
-      stream(anthropicStart({ input_tokens: 12, output_tokens: 1, cache_creation: 'split' }), {
+      stream(
+        start({ cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } }),
+        { output_tokens: 5 },
+      ),
+    // A delta that leaves the aggregate unchanged but zeroes the split would erase 40,000 writes.
+    () =>
+      stream(
+        start({
+          cache_creation_input_tokens: 40_000,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 40_000 },
+        }),
+        {
+          cache_creation_input_tokens: null,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+          output_tokens: 5,
+        },
+      ),
+    // Cumulative counts never go down.
+    () =>
+      stream(start({ cache_read_input_tokens: 500 }), {
+        cache_read_input_tokens: 0,
         output_tokens: 5,
       }),
+    () =>
+      stream(start({ cache_creation_input_tokens: 500 }), {
+        cache_creation_input_tokens: 1,
+        output_tokens: 5,
+      }),
+    () => stream(start({ input_tokens: 9_000 }), { input_tokens: 12, output_tokens: 5 }),
+    () => stream(start({ output_tokens: 50 }), { output_tokens: 5 }),
+    () => stream(start({}), { output_tokens: 5, server_tool_use: { web_search_requests: 2 } }),
+    () => stream(start({}), { output_tokens: 5, iterations: [{ input_tokens: 9_000 }] }),
     // A final delta without a count keeps no earlier one.
     () =>
-      new Response(
-        sse([
-          anthropicStart({ input_tokens: 12, output_tokens: 1 }),
-          { type: 'message_delta', delta: {}, usage: { output_tokens: 5 } },
-          ...anthropicEnd({ output_tokens: null }),
-        ]),
-        { headers: { 'content-type': 'text/event-stream' } },
+      events(
+        start({}),
+        { type: 'message_delta', delta: {}, usage: { output_tokens: 5 } },
+        ...anthropicEnd({ output_tokens: null }),
       ),
     () =>
-      new Response(
-        sse([
-          anthropicStart({ input_tokens: 12, output_tokens: 1 }),
-          { type: 'message_delta', delta: {}, usage: { output_tokens: 5 } },
-          { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
-          { type: 'message_stop' },
-        ]),
-        { headers: { 'content-type': 'text/event-stream' } },
+      events(
+        start({}),
+        { type: 'message_delta', delta: {}, usage: { output_tokens: 5 } },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        { type: 'message_stop' },
       ),
   ];
-  for (const script of malformed) {
-    upstream.next(script);
+  for (const usage of bodies) {
+    upstream.next(() => json({ type: 'message', usage }));
     await text(await post(claudeClient, body({ stream: false })));
   }
-  for (const usage of [
+  for (const script of streams) {
+    upstream.next(script);
+    await text(await post(claudeClient, body({ stream: true })));
+  }
+  const usages = [
     { input_tokens: 10, output_tokens: 'many' },
     { input_tokens: 10, input_tokens_details: { cached_tokens: {} }, output_tokens: 3 },
     { output_tokens: 3 },
+    { input_tokens: 10.5, output_tokens: 3 },
     { input_tokens: 10, input_tokens_details: 'not-an-object', output_tokens: 3 },
     { input_tokens: 10, input_tokens_details: { cached_tokens: null }, output_tokens: 3 },
     { input_tokens: 10, input_tokens_details: { cached_tokens: 11 }, output_tokens: 3 },
+    // A details object without its count is not complete.
+    { input_tokens: 10, input_tokens_details: {}, output_tokens: 3 },
+    { input_tokens: 10, output_tokens: 3, output_tokens_details: {} },
     { input_tokens: 10, output_tokens: 3, output_tokens_details: [] },
     { input_tokens: 10, output_tokens: 3, output_tokens_details: { reasoning_tokens: 4 } },
-  ]) {
-    upstream.next(
-      () =>
-        new Response(sse([{ type: 'response.completed', response: { id: 'r', usage } }]), {
-          headers: { 'content-type': 'text/event-stream' },
-        }),
-    );
+    {
+      input_tokens: 10,
+      input_tokens_details: { cached_tokens: 0, cache_write_tokens: 9_000 },
+      output_tokens: 3,
+    },
+    { input_tokens: 10, output_tokens: 3, total_tokens: 12 },
+    { input_tokens: 10, output_tokens: 3, image_tokens: 9_000 },
+  ];
+  const completed = (usage: unknown) => ({
+    type: 'response.completed',
+    response: { id: 'r', usage },
+  });
+  const codexStreams = [
+    ...usages.map((usage) => () => events(completed(usage))),
+    // Two final usages: which one billed cannot be known.
+    () =>
+      events(
+        completed({ input_tokens: 10, output_tokens: 3 }),
+        completed({ input_tokens: 1, output_tokens: 1 }),
+      ),
+  ];
+  for (const script of codexStreams) {
+    upstream.next(script);
     await text(
       await post(
         codexClient,
         { model: 'codex-test', input: 'go', stream: true, max_output_tokens: 100 },
-        {
-          path: '/responses',
-        },
+        { path: '/responses' },
+      ),
+    );
+  }
+  for (const usage of usages.slice(0, 3)) {
+    upstream.next(() => json({ id: 'r', usage }));
+    await text(
+      await post(
+        codexClient,
+        { model: 'codex-test', input: 'go', max_output_tokens: 100 },
+        { path: '/responses' },
       ),
     );
   }
@@ -690,8 +744,79 @@ test('usage with a count that is not a number settles at the reservation', async
     assert.deepEqual(ledger.settled, ledger.reserved, 'each settled at what it reserved');
     assert.ok(ledger.settled.every(([, usd]) => usd > 0));
   }
-  assert.equal(claude.settled.length, 9);
-  assert.equal(codex.settled.length, 8);
+  assert.equal(claude.settled.length, bodies.length + streams.length);
+  assert.equal(codex.settled.length, codexStreams.length + 3);
+});
+
+test('usage within the schema settles at what it reports, streamed or not', async () => {
+  const { gateway, upstream } = rig();
+  const claude = recordingPort(1);
+  const claudeClient = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'u',
+    budget: claude.port,
+  });
+  const codex = recordingPort(1);
+  const codexClient = gateway.inProcess({ vendor: 'openai', subject: 'u', budget: codex.port });
+  upstream.next(() =>
+    stream(
+      anthropicStart({
+        input_tokens: 12,
+        output_tokens: 1,
+        cache_read_input_tokens: 30,
+        cache_creation_input_tokens: 100,
+        cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 },
+        server_tool_use: { web_search_requests: 0 },
+        service_tier: 'standard',
+      }),
+      { input_tokens: 12, cache_creation_input_tokens: 150, output_tokens: 5 },
+    ),
+  );
+  await text(await post(claudeClient, body({ stream: true })));
+  upstream.next(() =>
+    json({
+      type: 'message',
+      usage: {
+        input_tokens: 7,
+        output_tokens: 3,
+        cache_read_input_tokens: null,
+        service_tier: 'standard',
+      },
+    }),
+  );
+  await text(await post(claudeClient, body({ stream: false })));
+  assert.deepEqual(
+    claude.settled.map(([, usd]) => usd),
+    [
+      // The 50 writes the split does not cover are charged at the 5-minute rate the request allows.
+      costUsd(OPUS, { input: 12, cacheRead: 30, cacheWrite5m: 150, cacheWrite1h: 0, output: 5 }),
+      costUsd(OPUS, { input: 7, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 3 }),
+    ],
+  );
+  const usage = {
+    input_tokens: 10,
+    input_tokens_details: { cached_tokens: 4, cache_write_tokens: 0 },
+    output_tokens: 3,
+    output_tokens_details: { reasoning_tokens: 2 },
+    total_tokens: 13,
+  };
+  upstream.next(
+    () =>
+      new Response(sse([{ type: 'response.completed', response: { id: 'r', usage } }]), {
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+  );
+  await text(
+    await post(
+      codexClient,
+      { model: 'codex-test', input: 'go', stream: true, max_output_tokens: 100 },
+      { path: '/responses' },
+    ),
+  );
+  assert.deepEqual(
+    codex.settled.map(([, usd]) => usd),
+    [costUsd(CODEX, { input: 6, cacheRead: 4, cacheWrite5m: 0, cacheWrite1h: 0, output: 3 })],
+  );
 });
 
 test('the counts the Messages API leaves null in a delta settle at the reported usage', async () => {

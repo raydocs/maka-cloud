@@ -2,7 +2,7 @@ import type { SignalManifest } from '../events.js';
 import { clip } from '../text.js';
 import { raceAbort } from './abort.js';
 import { type Prepared, prepareCoding, prepareResearch } from './checks.js';
-import { isLink, listsBothKinds, refsFor, type VerificationKind } from './kind.js';
+import { acceptedKindOf, refsFor, type VerificationKind } from './kind.js';
 import { buildRequest, chooseVerifier, collectVerdicts, costUsd, upperBoundUsd } from './model.js';
 import type { CheckCharge, Mismatch, Outcome, VerificationOptions } from './ports.js';
 
@@ -57,8 +57,8 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
     const refs = refsFor(manifest, name);
     const ref = refs[0];
     if (ref === undefined) return { ok: false, reason: 'not_listed' };
-    // Two artifacts of one name, or one that is a link: which one the human is shown cannot be told.
-    if (refs.length > 1 || refs.some(isLink)) return { ok: false, reason: 'ambiguous' };
+    // Two artifacts of one name: which one the human is shown cannot be told.
+    if (refs.length > 1) return { ok: false, reason: 'ambiguous' };
     if (signal.aborted) return { ok: false, reason: 'unavailable' };
     try {
       return await raceAbort(options.evidence.readArtifact(task, ref, signal), signal);
@@ -67,11 +67,12 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
     }
   };
 
-  // One kind of check cannot stand for a task that delivers both a change and a report.
-  if (listsBothKinds(manifest)) {
+  // Only a manifest made entirely of the files this kind of check reads and reproduces can be independently
+  // checked; a link, a name spelled any other way, or a file of the other kind leaves nothing that can stand for it.
+  if (acceptedKindOf(manifest) !== input.kind) {
     return cannot(
       'unverified',
-      'checks reported by agent (unverified): the task lists both a change and a report, and one check cannot stand for both',
+      'checks reported by agent (unverified): the task lists artifacts this check cannot read and reproduce',
       false,
     );
   }

@@ -159,8 +159,11 @@ export function deepSeekSearch(options: DeepSeekSearchOptions): SearchProvider {
         // A 200 whose body did not arrive whole: it may have been billed.
         return { ok: false, billed: 'unknown', retryable: true };
       }
-      const results = (body as { results?: unknown })?.results;
-      const found = Array.isArray(results) ? results : [];
+      const results = (body as { results?: unknown } | null)?.results;
+      // Only a valid empty list means nothing was found, and nothing billed. An answer without
+      // one may have been billed, so it keeps the reservation.
+      if (!Array.isArray(results)) return { ok: false, billed: 'unknown', retryable: false };
+      const found = results;
       const hits: SearchHit[] = [];
       for (const raw of found) {
         if (typeof raw !== 'object' || raw === null) continue;

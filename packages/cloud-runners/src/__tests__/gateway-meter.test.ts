@@ -223,6 +223,42 @@ test('a cancel while the end’s revoke is settling waits for it: the final cost
   assert.equal(access.counts.unsubscribed, 1);
 });
 
+test('a cost seen after the run ended is still reported by the final settle', async (t) => {
+  const access = gatewayAccess();
+  const acquiring = deferred();
+  const lease = deferred<{ machineId: string; release: () => void }>();
+  const h = await setup({
+    cloud: {
+      modelAccess: access.provider,
+      sandboxes: {
+        acquire: () => {
+          acquiring.resolve();
+          return lease.promise;
+        },
+        knownMachines: () => [h.fake.machineId],
+      },
+    },
+  });
+  t.after(async () => {
+    lease.resolve({ machineId: h.fake.machineId, release: () => undefined });
+    await h.cleanup();
+  });
+  access.hooks.onRevoke = async () => {
+    // By the next turn of the event loop the cancelled run has marked itself ended, so the meter
+    // sees this settlement only after the end.
+    await new Promise((resolve) => setImmediate(resolve));
+    access.settle({ spentUsd: 0.4, exhausted: false });
+  };
+  const handle = await h.runners.claude.start(await h.spec('tsk_prepare_cancel', { budgetUsd: 5 }));
+  const events = reader(handle);
+  await acquiring.promise;
+  await handle.cancel();
+  const all = await events.rest();
+  assert.equal(terminal(all), undefined);
+  assert.deepEqual(costs(all), [0.4], 'the late settlement is reported once, at the end');
+  assert.equal(access.counts.unsubscribed, 1);
+});
+
 test('a revoke past the cleanup time limit is still waited for before the stream closes', async (t) => {
   const access = gatewayAccess();
   const timedOut = deferred();

@@ -11,16 +11,16 @@ function isObject(value: unknown): value is Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** A count that is not a finite, non-negative number. */
+/** A count that is not a non-negative integer. */
 const INVALID = Symbol('invalid');
 
 type Count = number | undefined | typeof INVALID;
 
 function isCount(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-/** A count the field must carry: anything but a number (absent and `null` included) is invalid. */
+/** A count the field must carry: anything but a count (absent and `null` included) is invalid. */
 function required(value: unknown): number | typeof INVALID {
   return isCount(value) ? value : INVALID;
 }
@@ -35,6 +35,37 @@ function optional(value: unknown): Count {
 }
 
 /**
+ * A field the schema does not list is allowed only if it cannot carry a charge: a string, a
+ * boolean, `null` or a zero. A count above zero or an object could bill what nothing prices.
+ */
+function harmless(value: unknown): boolean {
+  return value === null || value === 0 || typeof value === 'string' || typeof value === 'boolean';
+}
+
+function unlisted(raw: Json, listed: ReadonlySet<string>): boolean {
+  return Object.entries(raw).some(([key, value]) => !listed.has(key) && !harmless(value));
+}
+
+const ANTHROPIC_USAGE = new Set([
+  'input_tokens',
+  'output_tokens',
+  'cache_read_input_tokens',
+  'cache_creation_input_tokens',
+  'cache_creation',
+  'server_tool_use',
+]);
+const ANTHROPIC_SPLIT = new Set(['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens']);
+const OPENAI_USAGE = new Set([
+  'input_tokens',
+  'input_tokens_details',
+  'output_tokens',
+  'output_tokens_details',
+  'total_tokens',
+]);
+const OPENAI_INPUT_DETAILS = new Set(['cached_tokens']);
+const OPENAI_OUTPUT_DETAILS = new Set(['reasoning_tokens']);
+
+/**
  * Reads the vendor's usage from a response while its bytes pass through unchanged. For an
  * Anthropic stream the input counts are known at `message_start`, before any output.
  */
@@ -46,8 +77,12 @@ export class UsageTracker {
   private output = false;
   /** The vendor's final usage was seen. */
   private final = false;
-  /** A count the vendor gave was not a number: what it billed cannot be known. */
+  /** A count the vendor gave broke the schema: what it billed cannot be known. */
   private malformed = false;
+  /** The cache-write aggregate the vendor gave, if it gave one. */
+  private written: number | undefined;
+  /** The highest output count seen, the start's placeholder included. */
+  private outputSeen = 0;
   private readonly decoder = new TextDecoder();
   private line = '';
   private skipping = false;
@@ -159,90 +194,118 @@ export class UsageTracker {
   }
 
   /**
-   * An Anthropic usage object: at `message_start`, in a `message_delta` (cumulative counts, so
-   * they replace; the input fields may be `null` there, meaning unchanged), or in a whole JSON
-   * body. The output count is required wherever usage appears. A cache-write split that is
-   * present must give both lifetimes and add up to the aggregate count.
+   * Moves a cumulative count forward. A count below the one seen before cannot be right, so it
+   * marks the usage malformed.
+   */
+  private advance(before: number, value: number | undefined): number {
+    if (value === undefined) return before;
+    if (value < before) this.malformed = true;
+    return Math.max(before, value);
+  }
+
+  /**
+   * An Anthropic usage object: at `message_start`, in a `message_delta` (cumulative counts), or in
+   * a whole JSON body. The schema, for every mode:
+   * - `output_tokens` is required; `input_tokens` too, except in a delta, where `null` means
+   *   unchanged. The cache counts may be `null` (unchanged, or none).
+   * - every count is a non-negative integer, and none goes down from one event to the next;
+   * - a cache-write split, when present, gives both lifetimes, each at least what it was, and adds
+   *   up to the aggregate count (given here or earlier); without one, new writes are charged at
+   *   the dearest rate the request allows;
+   * - hosted-tool counts, refused in the request, must be zero, and an unlisted field may not
+   *   carry a charge.
+   * Anything else marks the usage malformed, and the request settles at its reservation.
    */
   private anthropic(raw: unknown, where: 'start' | 'delta' | 'body'): void {
     if (where === 'body') this.final = true;
-    if (!isObject(raw)) {
+    if (!isObject(raw) || unlisted(raw, ANTHROPIC_USAGE)) {
       this.malformed = true;
       return;
+    }
+    if (raw.server_tool_use !== undefined && raw.server_tool_use !== null) {
+      const tools = raw.server_tool_use;
+      if (!isObject(tools) || Object.values(tools).some((value) => !harmless(value))) {
+        this.malformed = true;
+      }
     }
     const u = this.usage;
     const input = this.take(
       where === 'delta' ? optional(raw.input_tokens) : required(raw.input_tokens),
     );
     if (input !== undefined) {
-      u.input = input;
+      u.input = this.advance(this.input ? u.input : 0, input);
       this.input = true;
     }
-    const read = this.take(optional(raw.cache_read_input_tokens));
-    if (read !== undefined) u.cacheRead = read;
-    const written = this.take(optional(raw.cache_creation_input_tokens));
+    u.cacheRead = this.advance(u.cacheRead, this.take(optional(raw.cache_read_input_tokens)));
+    const given = this.take(optional(raw.cache_creation_input_tokens));
+    if (given !== undefined) this.written = this.advance(this.written ?? 0, given);
     if (raw.cache_creation !== undefined && raw.cache_creation !== null) {
-      const split = isObject(raw.cache_creation) ? raw.cache_creation : {};
-      const fiveMinutes = this.take(required(split.ephemeral_5m_input_tokens));
-      const oneHour = this.take(required(split.ephemeral_1h_input_tokens));
-      if (fiveMinutes !== undefined && oneHour !== undefined) {
-        if (written !== undefined && fiveMinutes + oneHour !== written) this.malformed = true;
-        u.cacheWrite5m = fiveMinutes;
-        u.cacheWrite1h = oneHour;
+      const split = raw.cache_creation;
+      if (!isObject(split) || unlisted(split, ANTHROPIC_SPLIT)) this.malformed = true;
+      else {
+        const fiveMinutes = this.take(required(split.ephemeral_5m_input_tokens));
+        const oneHour = this.take(required(split.ephemeral_1h_input_tokens));
+        if (fiveMinutes !== undefined && oneHour !== undefined) {
+          u.cacheWrite5m = this.advance(u.cacheWrite5m, fiveMinutes);
+          u.cacheWrite1h = this.advance(u.cacheWrite1h, oneHour);
+          if (this.written !== fiveMinutes + oneHour) this.malformed = true;
+        }
       }
-    } else if (written !== undefined) {
-      u.cacheWrite5m = this.oneHourCache ? 0 : written;
-      u.cacheWrite1h = this.oneHourCache ? written : 0;
+    }
+    const unsplit = (this.written ?? 0) - u.cacheWrite5m - u.cacheWrite1h;
+    if (unsplit > 0) {
+      if (this.oneHourCache) u.cacheWrite1h += unsplit;
+      else u.cacheWrite5m += unsplit;
     }
     const output = this.take(required(raw.output_tokens));
+    if (output !== undefined) this.outputSeen = this.advance(this.outputSeen, output);
     if (where === 'start') {
       // The start's output count is a placeholder; the final one comes in `message_delta`.
       this.output = false;
       return;
     }
     if (output !== undefined) {
-      u.output = output;
+      u.output = this.outputSeen;
       this.output = true;
     }
   }
 
-  /** An OpenAI final usage object; the cached and reasoning details must be valid when present. */
+  /**
+   * An OpenAI final usage object, read once. The schema: `input_tokens` and `output_tokens` are
+   * required; each details object, when present, carries its count (`cached_tokens`,
+   * `reasoning_tokens`), no larger than the total it is part of; `total_tokens`, when present, is
+   * their sum; every count is a non-negative integer, and an unlisted field may not carry a
+   * charge. Anything else marks the usage malformed, and the request settles at its reservation.
+   */
   private openAI(raw: unknown): void {
+    if (this.final) this.malformed = true;
     this.final = true;
-    if (!isObject(raw)) {
+    if (!isObject(raw) || unlisted(raw, OPENAI_USAGE)) {
       this.malformed = true;
       return;
     }
     const u = this.usage;
     const input = this.take(required(raw.input_tokens));
     const output = this.take(required(raw.output_tokens));
-    let cached = 0;
-    const inputDetails = raw.input_tokens_details;
-    if (inputDetails !== undefined) {
-      if (!isObject(inputDetails)) this.malformed = true;
-      else if (inputDetails.cached_tokens !== undefined) {
-        cached = this.take(required(inputDetails.cached_tokens)) ?? 0;
+    const detail = (value: unknown, listed: ReadonlySet<string>, key: string): number => {
+      if (value === undefined) return 0;
+      if (!isObject(value) || unlisted(value, listed)) {
+        this.malformed = true;
+        return 0;
       }
+      return this.take(required(value[key])) ?? 0;
+    };
+    const cached = detail(raw.input_tokens_details, OPENAI_INPUT_DETAILS, 'cached_tokens');
+    const reasoning = detail(raw.output_tokens_details, OPENAI_OUTPUT_DETAILS, 'reasoning_tokens');
+    const total = this.take(optional(raw.total_tokens));
+    if (input === undefined || output === undefined) return;
+    if (cached > input || reasoning > output || (total !== undefined && total !== input + output)) {
+      this.malformed = true;
     }
-    const outputDetails = raw.output_tokens_details;
-    if (outputDetails !== undefined) {
-      if (!isObject(outputDetails)) this.malformed = true;
-      else if (outputDetails.reasoning_tokens !== undefined) {
-        const reasoning = this.take(required(outputDetails.reasoning_tokens));
-        if (reasoning !== undefined && output !== undefined && reasoning > output) {
-          this.malformed = true;
-        }
-      }
-    }
-    if (input !== undefined) {
-      if (cached > input) this.malformed = true;
-      u.input = input - Math.min(input, cached);
-      u.cacheRead = Math.min(input, cached);
-      this.input = true;
-    }
-    if (output !== undefined) {
-      u.output = output;
-      this.output = true;
-    }
+    u.input = input - Math.min(input, cached);
+    u.cacheRead = Math.min(input, cached);
+    u.output = output;
+    this.input = true;
+    this.output = true;
   }
 }
