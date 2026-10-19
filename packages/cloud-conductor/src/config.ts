@@ -28,9 +28,15 @@ export interface ModelAccess {
    * The model gateway in this process. With it, every model request is reserved in the run ledger
    * at its worst-case cost before it is sent and settled there at what it cost; the reported
    * usage is not charged again. Without it, requests go to `baseUrl` and spend is metered from
-   * the reported usage after each call.
+   * the reported usage after each call, which only tests may do: see `unmeteredTestAccess`.
    */
   gateway?: ModelGateway;
+  /**
+   * Only for tests: lets the conductor start without the gateway, sending requests to `baseUrl`
+   * with `apiKey` and metering them after the fact. Without it, a conductor with no gateway
+   * refuses to start, so a production key never reaches a vendor unreserved.
+   */
+  unmeteredTestAccess?: true;
 }
 
 /** Where the gateway charges one request. Both calls are synchronous: nothing spends between the check and the hold. */

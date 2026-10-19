@@ -33,7 +33,7 @@ test('the minimal environment gives the data layout and the defaults', () => {
   assert.equal(config.host, '127.0.0.1');
   assert.equal(config.port, 8080);
   assert.deepEqual(config.mcp, { host: '127.0.0.1', port: 8081 });
-  assert.deepEqual(config.conductor, { apiKey: 'sk-secret-anthropic' });
+  assert.deepEqual(config.conductor, {});
   assert.deepEqual(config.instabox, { machineId: 'mch_1' });
   assert.equal(config.openAiKeySet, false);
   assert.equal(config.searchKeySet, false);
@@ -79,13 +79,27 @@ test('optional settings are read', () => {
     port: 9001,
     publicUrl: 'https://mcp.example.test/mcp',
   });
-  assert.deepEqual(config.conductor, {
-    apiKey: 'sk-secret-anthropic',
-    baseUrl: 'https://gateway.example.test',
-    connectionId: 'conn-prod',
-  });
+  assert.deepEqual(config.conductor, { connectionId: 'conn-prod' });
+  assert.equal(config.gateway.anthropicBaseUrl, 'https://gateway.example.test');
   assert.deepEqual(config.instabox, { machineId: 'mch_1', apiUrl: 'https://sandbox.example.test' });
   assert.equal(config.openAiKeySet, true);
+});
+
+test('the config the stack passes on carries no key, so only the gateway reads one', () => {
+  const env = {
+    ...ENV,
+    OPENAI_API_KEY: 'sk-secret-openai',
+    DEEPSEEK_API_KEY: 'sk-secret-search',
+  };
+  const serialized = JSON.stringify(readStackConfig(env));
+  for (const name of [
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+    'DEEPSEEK_API_KEY',
+    'INSTABOX_API_KEY',
+  ]) {
+    assert.ok(!serialized.includes(env[name as keyof typeof env]), `${name} is not in the config`);
+  }
 });
 
 test('every missing required variable is reported at once', () => {
