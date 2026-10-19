@@ -61,6 +61,8 @@ export interface ConductorOptions {
     beforeSend?(turn: { runId: string; conversationId: string }): Promise<void>;
     /** Hands over the turn's timeout, so a test can fire it at a chosen point. */
     turnTimer?(fire: () => void): void;
+    /** When a conversation's outbox is found empty, before its sender is released. */
+    outboxDrained?(conversationId: string): void;
   };
 }
 
@@ -1025,6 +1027,11 @@ export class Conductor {
       return;
     const sending = this.drainOutbox(conversationId).finally(() => {
       this.sending.delete(conversationId);
+      // A row written after the drain found the queue empty, but while this
+      // sender was still registered, did not start a sender of its own.
+      if (this.state.db.isOpen && this.state.nextOutbox(conversationId)) {
+        this.sendOutbox(conversationId);
+      }
     });
     this.sending.set(conversationId, sending);
   }
@@ -1033,7 +1040,10 @@ export class Conductor {
     for (;;) {
       if (!this.state.db.isOpen) return;
       const row = this.state.nextOutbox(conversationId);
-      if (!row) return;
+      if (!row) {
+        this.hooks.outboxDrained?.(conversationId);
+        return;
+      }
       try {
         await this.deliver(row);
       } catch (error) {
