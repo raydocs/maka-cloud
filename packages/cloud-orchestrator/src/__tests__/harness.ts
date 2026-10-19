@@ -38,6 +38,9 @@ export async function makeHarness(
     store,
     runners: new RunnerRegistry([fake]),
     handoffRoot: dir,
+    // Cold by default: a finished task is always read back from the store, the
+    // way a durable archive serves it, so every test also covers that path.
+    caches: { archivedTasks: { maxEntries: 0 } },
     ...options.orchestrator,
   });
   const fromToken = (token: string): SessionInfo => {

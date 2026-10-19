@@ -1,4 +1,12 @@
-export { type IssuedSession, SessionAuth, type SessionInfo } from './auth.js';
+export {
+  type IssuedSession,
+  MemorySessionStore,
+  SessionAuth,
+  type SessionInfo,
+  type SessionStore,
+  type StoredSession,
+} from './auth.js';
+export { BoundedCache, type CacheLimits } from './cache.js';
 export {
   DEFAULT_FAKE_MANIFEST,
   FakeRun,
@@ -7,13 +15,16 @@ export {
 } from './fake-runner.js';
 export { Handoff, type HandoffPaths, MAX_BRIEF_BYTES, MAX_MANIFEST_BYTES } from './handoff.js';
 export {
+  DEFAULT_ARCHIVE_CACHE,
   DEFAULT_MAX_DEPTH,
   DEFAULT_WAIT_MS,
   type DelegateInput,
   MAX_WAIT_MS,
   Orchestrator,
   type OrchestratorOptions,
+  type OrchestratorStats,
 } from './orchestrator.js';
+export { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits } from './quota.js';
 export { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
 export {
   claudeAgentSdkRunner,

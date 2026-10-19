@@ -19,7 +19,8 @@ pulling in the runtime.
 | `task_cancel {taskId}` | Cancels the task and every descendant, children first. A task that already ended keeps its state. |
 
 Errors are tool results with `isError` and a code: `not_found`,
-`invalid_request`, `unknown_runner`, `depth_exceeded`.
+`invalid_request`, `unknown_runner`, `depth_exceeded`, `unauthorized`,
+`quota_exceeded`.
 
 ## State is a log
 
@@ -36,6 +37,25 @@ restart, so every task still `queued` or `running` gets an event appended:
 `task_failed` ("orphaned"), or `task_cancelled` when a cancel was already
 requested. History is never edited. T4 supplies the SQLite `TaskStore`.
 
+### Only unfinished tasks live in memory
+
+The same store answers four synchronous index lookups (`readTask`,
+`childrenOf`, `activeTaskIds`, `taskIds`) and one count
+(`countCreatedSince`). The index is derived from the log and changes in the
+same step as the append. A task leaves the in-memory map on its terminal event,
+after its waiters were woken, and is read back from the store when someone asks
+for it. A finished task never changes, so the small LRU in front of those reads
+(512 entries, 4 MiB by default) needs no invalidation.
+
+- `restore()` loads `activeTaskIds()` only, so a restart does not read the
+  finished history. The ids it ended are in `orphanedTaskIds`.
+- Anything that needs "has this ended?" treats "not in memory" as ended: a
+  delegate under an ended ancestor is refused, a wait on a finished task
+  returns at once, and `task_cancel` and the cascade walk `childrenOf` through
+  ended tasks to reach running descendants.
+- The lookups are synchronous because an indexed point read in an embedded
+  database is, and `status` must stay synchronous.
+
 ## Sessions and tokens
 
 Each agent session holds a bearer token. The server keeps only its SHA-256 and
@@ -47,6 +67,15 @@ does not exist.
 When a task starts, the orchestrator issues an executor session for it and
 passes `{url, token}` to the runner in `RunSpec.mcp`. Tasks that executor
 delegates become its children. The session is revoked when the task ends.
+
+Digests live in a `SessionStore` (memory by default; T4 supplies a SQLite one),
+so a token survives a restart. A token reads `mko_<sessionId>.<secret>`; the id
+picks the entry and the digest is compared with `timingSafeEqual`. A small LRU
+sits in front of the store, and every revoke, rotate and task end evicts first,
+so a cached entry cannot outlive a revocation. `rotateSession(sessionId)`
+replaces the secret for a holder that lost its token; the session keeps its id,
+so it still sees its tasks. After a restart, `restore()` revokes the sessions a
+durable store still holds for the tasks it just ended.
 
 ## Handoff
 
@@ -116,6 +145,26 @@ have been handed off. It does not wait for running tasks.
 Streamable HTTP, stateless: each request is authenticated, then served by a
 fresh MCP server bound to that session. Missing, unknown or revoked tokens get
 401 before any MCP handling. Bodies over 320 KiB get 413.
+
+## Quotas
+
+One `QuotaLimits` object, all values configurable; exceeding one is
+`quota_exceeded` (HTTP 429 with `Retry-After` at the MCP endpoint) and records
+nothing.
+
+| Quota | Counted per | Default |
+|---|---|---|
+| Unfinished tasks | the tree, keyed by the conductor session that started it | 32 |
+| Tasks created | the same tree, rolling window | 200 per hour |
+| Blocking waits (`task_wait`, wait-mode `delegate_task`) | session | 8 (executor 2) |
+| Open MCP connections | session | 8 (executor 2) |
+| Open MCP connections | whole server | 256 |
+
+The task limits are checked once early, to fail before a brief is written, and
+again inside the write chain right before `task_created` is appended. Counting
+and appending are one step of the chain, so concurrent delegates at limit - 1
+create exactly one task. A wait that finds the task already ended takes no slot.
+Counters delete a key when it returns to zero.
 
 ## Limits and choices
 
