@@ -26,7 +26,11 @@ import type {
 export { CONVERSATION, Clock, FakeHost, firstItem, rig };
 export type { Rig };
 
-type FileEntry = string | { fail: 'not_found' | 'too_large' | 'unavailable' } | { throws: Error };
+type FileEntry =
+  | string
+  | { bytes: Uint8Array }
+  | { fail: 'not_found' | 'too_large' | 'unavailable' }
+  | { throws: Error };
 
 /** Artifacts by task and file name. Reads are recorded. */
 export class FakeEvidence implements EvidenceSource {
@@ -49,7 +53,10 @@ export class FakeEvidence implements EvidenceSource {
     const entry =
       this.files.get(`${task.taskId}/${ref}`) ?? this.files.get(`${task.taskId}/${name}`);
     if (entry === undefined) return { ok: false, reason: 'not_found' };
-    if (typeof entry === 'string') return { ok: true, text: entry };
+    if (typeof entry === 'string') return { ok: true, text: entry, bytes: Buffer.from(entry) };
+    if ('bytes' in entry) {
+      return { ok: true, text: Buffer.from(entry.bytes).toString('utf8'), bytes: entry.bytes };
+    }
     if ('throws' in entry) throw entry.throws;
     return { ok: false, reason: entry.fail };
   }

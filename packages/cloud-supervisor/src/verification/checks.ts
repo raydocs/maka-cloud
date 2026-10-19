@@ -86,7 +86,7 @@ function unreadable(
 } {
   if (read.reason === 'ambiguous') {
     return {
-      unverified: `${name} is listed more than once, so which one was delivered is unknown`,
+      unverified: `${name} is listed more than once or as a link, so which one was delivered is unknown`,
     };
   }
   if (read.reason === 'not_found' || read.reason === 'not_listed') {
@@ -253,19 +253,21 @@ const RENDERINGS = ['report.md', 'report.html'] as const;
  * right now is worth another attempt.
  */
 async function deliveredRenderings(read: ReadArtifact): Promise<{
-  texts: Map<(typeof RENDERINGS)[number], string>;
+  delivered: Map<(typeof RENDERINGS)[number], Uint8Array>;
   problems: string[];
   unavailable: Unavailable[];
 }> {
-  const texts = new Map<(typeof RENDERINGS)[number], string>();
+  const delivered = new Map<(typeof RENDERINGS)[number], Uint8Array>();
   const problems: string[] = [];
   const unavailable: Unavailable[] = [];
   for (const name of RENDERINGS) {
     const file = await read(name);
     if (file.ok) {
-      texts.set(name, file.text);
+      delivered.set(name, file.bytes);
     } else if (file.reason === 'ambiguous') {
-      problems.push(`${name} is listed more than once, so which one was delivered is unknown`);
+      problems.push(
+        `${name} is listed more than once or as a link, so which one was delivered is unknown`,
+      );
     } else if (file.reason === 'unavailable') {
       unavailable.push({ reason: `${name} could not be read`, transient: true });
     } else if (file.reason !== 'not_listed') {
@@ -274,21 +276,21 @@ async function deliveredRenderings(read: ReadArtifact): Promise<{
       );
     }
   }
-  return { texts, problems, unavailable };
+  return { delivered, problems, unavailable };
 }
 
 /**
  * Ties the delivered renderings to the report data. The record is written by
  * the agent, so it is only believed as far as it reproduces: the trusted
  * renderer, given report.json and the statuses the record states, must make
- * every delivered rendering exactly, byte for byte. Then, and only then, the
- * claims the record removed are the claims the human is not shown.
+ * every delivered rendering exactly, byte for byte. The claims it returns as
+ * removed are the ones the human is not shown, not ones that go unchecked.
  */
 function reproduceDelivery(
   report: Report,
   all: readonly Claim[],
   record: VerificationRecord | undefined,
-  delivered: ReadonlyMap<(typeof RENDERINGS)[number], string>,
+  delivered: ReadonlyMap<(typeof RENDERINGS)[number], Uint8Array>,
 ): { removed: Set<string> } | { problem: string } {
   if (!record) return { problem: 'verification.json is missing or unreadable' };
   const ids = new Set(all.map((claim) => claim.id));
@@ -311,8 +313,9 @@ function reproduceDelivery(
     return { problem: 'report.json cannot be rendered' };
   }
   const expected = { 'report.md': rendered.markdown, 'report.html': rendered.html };
-  for (const [name, text] of delivered) {
-    if (text !== expected[name]) {
+  for (const [name, bytes] of delivered) {
+    // Raw bytes: decoded text would equate an invalid byte with the replacement character.
+    if (Buffer.compare(Buffer.from(bytes), Buffer.from(expected[name], 'utf8')) !== 0) {
       return { problem: `${name} is not what the renderer makes from report.json` };
     }
   }
@@ -355,11 +358,10 @@ export async function prepareResearch(input: {
   }
   const report: Report = parsedJson;
 
-  // report.json is the source of truth: every claim in it is checked, and the one
-  // thing that takes a claim out is the playbook having dropped it from the
-  // report the human reads. verification.json and the renderings are written by
-  // the agent, so that is only believed when the trusted renderer reproduces the
-  // delivered renderings from report.json and the record, exactly.
+  // report.json is the source of truth and every claim in it is checked.
+  // verification.json and the renderings are written by the agent, so the
+  // renderings count only when the trusted renderer reproduces them from
+  // report.json and the record, exactly.
   const all = claimsOf(report);
   if (all.length === 0) {
     failures.push({ claim: 'the report makes claims', found: 'the report has no claims to check' });
@@ -381,7 +383,7 @@ export async function prepareResearch(input: {
   const delivery = await deliveredRenderings(read);
   unverified.push(...delivery.problems);
   unavailable.push(...delivery.unavailable);
-  if (delivery.texts.size > 0 && unverified.length === 0 && unavailable.length === 0) {
+  if (delivery.delivered.size > 0 && unverified.length === 0 && unavailable.length === 0) {
     const exported = await read('verification.json');
     if (!exported.ok && exported.reason === 'unavailable') {
       unavailable.push({ reason: 'verification.json could not be read', transient: true });
@@ -390,7 +392,7 @@ export async function prepareResearch(input: {
         report,
         all,
         exported.ok ? parseJson(exported.text, VerificationRecordSchema) : undefined,
-        delivery.texts,
+        delivery.delivered,
       );
       if ('problem' in proven) unverified.push(proven.problem);
       else removed = proven.removed;
@@ -398,11 +400,13 @@ export async function prepareResearch(input: {
   }
   if (unverified.length > 0 || unavailable.length > 0) return empty();
 
-  const claims: Claim[] = all.filter((claim) => !removed.has(claim.id));
-  if (claims.length === 0) {
+  // The checked set is exactly the claims of report.json. The record only says what the
+  // playbook left out of the renderings: it can never take a claim out of the check.
+  const claims: Claim[] = all;
+  if (removed.size >= all.length) {
     failures.push({
       claim: 'the report keeps claims',
-      found: 'no claim is left after the removals',
+      found: 'no claim is left in the delivered report',
     });
     return empty();
   }

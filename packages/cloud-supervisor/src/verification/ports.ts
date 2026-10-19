@@ -3,7 +3,8 @@ import type { SourceFetcher } from './fetcher.js';
 /** What the supervisor needs from the server to check a finished task. Declared here, implemented by the server. */
 
 export type ArtifactRead =
-  | { ok: true; text: string }
+  /** `text` is `bytes` decoded, lossily: a comparison that must be exact uses `bytes`. */
+  | { ok: true; text: string; bytes: Uint8Array }
   | { ok: false; reason: 'not_found' | 'too_large' | 'unavailable' };
 
 export interface EvidenceSource {
