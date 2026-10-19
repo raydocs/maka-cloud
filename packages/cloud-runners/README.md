@@ -34,10 +34,15 @@ key (and gateway base URL) and is told to revoke it when the run ends, `sessions
 4. Streams output by polling (one `exec` per sandbox per tick for every watched run).
 5. Copies `result.json` back with `exec` as the sandbox user, validates it, writes `resultPath`
    on the host, reports `finished`. A missing or invalid result gets one repair turn by resume.
-6. Snapshots the sandbox after each successful turn (best effort; keeps 2 per task).
+6. Snapshots the sandbox after each successful turn (best effort; keeps the newest 2 per sandbox,
+   across its tasks).
 
-Cancel, failure and unreachable sandboxes all stop the CLI, delete the activity lease, revoke
-model access and release the sandbox. `resume(taskId, { prompt, spec })` continues a session.
+The CLI's raw output is kept in `/dev/shm/maka-logs` (`logRoot`), which must be memory-backed so
+that snapshots never contain it, and is deleted when the turn ends. A turn that finishes stops
+every process it started.
+
+Cancel, failure and unreachable sandboxes all stop the CLI and its children, delete the activity
+lease, revoke model access and release the sandbox, each step independently and within a time limit. `resume(taskId, { prompt, spec })` continues a session.
 
 ## Tests
 

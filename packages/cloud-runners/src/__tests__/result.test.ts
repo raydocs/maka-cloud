@@ -121,3 +121,41 @@ test('a result copied back in several chunks arrives byte for byte', async (t) =
   assert.ok(read.ok && read.bytes.equals(payload));
   await assert.rejects(fs.stat(join(h.root, 'tsk_chunks', 'result.read')));
 });
+
+test('a result.json left by an earlier turn is not taken for the result of a resumed turn', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_stale');
+  assert.equal(terminal(await collect(await h.runners.claude.start(spec)))?.type, 'finished');
+  await fs.rm(spec.resultPath);
+
+  // The resumed turn does no work and writes nothing.
+  await h.setMode('noresult');
+  const events = await collect(
+    await h.runners.claude.resume('tsk_stale', { prompt: 'Do more.', spec }),
+  );
+  assert.match(reasonOf(events), /invalid result: result\.json was not written/);
+  await assert.rejects(fs.stat(spec.resultPath), 'nothing was reported as the result');
+});
+
+test('a retried start does not delete the result a running turn already wrote', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const machine = h.runners.fleet.machine(h.fake.machineId);
+  await machine.prepare('tsk_keep');
+  const input = {
+    dirName: 'tsk_keep',
+    run: 't1',
+    script: 'exit 0\n',
+    envs: {},
+    runToken: 'token-keep',
+    workdir: join(h.root, 'tsk_keep'),
+  };
+  assert.equal(await machine.launch(input), 'started');
+  await fs.writeFile(join(h.root, 'tsk_keep', 'result.json'), '{"fresh":true}');
+  assert.equal(await machine.launch(input), 'already');
+  assert.equal(
+    await fs.readFile(join(h.root, 'tsk_keep', 'result.json'), 'utf8'),
+    '{"fresh":true}',
+  );
+});
