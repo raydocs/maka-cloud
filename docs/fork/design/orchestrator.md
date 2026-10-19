@@ -143,6 +143,34 @@ error kept as a progress note.
   ancestor stopping) gets the new handle cancelled and is never recorded as
   started. `task_started` goes through the same check in the write chain.
 
+## Pause and resume
+
+A task is `paused` between `task_paused` and `task_resumed`. Events:
+`task_pause_requested{by}`, `task_paused`, `task_pause_failed{reason}` and the
+same three for resume. `RunHandle.pause()` and `resume()` are optional; a run
+without them answers `unsupported` and nothing is recorded. A paused task is
+unfinished: it holds its slots and counts against the quotas, and a restart ends
+it as an orphan like a running one. `cancel` works on a paused task and wins over
+any pause or resume that is still under way.
+
+- **Check-then-act.** Authorization, visibility, "still running", "not already
+  asked" and "the run has a handle" are one guard inside the write chain, in
+  front of `task_pause_requested`. Asking twice records one request.
+- **Runner call.** It happens after the request is recorded, with a timeout
+  (`controlTimeoutMs`, 15 s). A throw or a timeout records `*_failed`, so the task
+  reads as it did before, and can be asked again. A pause that fails or times out
+  is undone with `resume()` (when the runner answers late, as soon as it does),
+  so a run never stays held while the task says it runs. That late undo is not
+  tracked by `settled()`: a runner that never answers must not hold up shutdown.
+- **Racing a cancel.** `task_paused` and `task_resumed` are guarded by "the task
+  is not stopping", so a cancel that landed first leaves the task cancelled.
+
+`cancelAs`, `pauseAs` and `resumeAs` take an `OperatorAccess` instead of a
+session: the server's public API acts for the root session of a conversation after
+checking the user's invite. `authorize()` runs in the write chain with the other
+guards, so an invite revoked while the request waits changes nothing. The
+operator sees the tree its conversation session started and nothing else.
+
 ## Ending a task ends what is below it
 
 When any task ends, whether `succeeded`, `failed` or `cancelled`, the

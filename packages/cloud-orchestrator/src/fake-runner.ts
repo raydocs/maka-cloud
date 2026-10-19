@@ -11,17 +11,75 @@ export const DEFAULT_FAKE_MANIFEST: ResultManifest = {
   knownIssues: [],
 };
 
+/** Holds one pause or resume call open until the test lets it finish or fail. */
+export interface FakeHold {
+  release(): void;
+  fail(error: Error): void;
+}
+
+function newHold(): { hold: FakeHold; settled: Promise<void> } {
+  let release!: () => void;
+  let fail!: (error: Error) => void;
+  const settled = new Promise<void>((resolve, reject) => {
+    release = resolve;
+    fail = reject;
+  });
+  return { hold: { release, fail }, settled };
+}
+
 /** One scripted run. Tests drive it with `progress`, `complete`, `fail` and `end`. */
 export class FakeRun implements RunHandle {
   readonly events: AsyncIterable<RunnerEvent>;
   cancelCalls = 0;
+  pauseCalls = 0;
+  resumeCalls = 0;
+  /** True between a pause that finished and the resume that undid it. */
+  paused = false;
+  /** Absent on a run whose runner is not pausable. */
+  readonly pause?: () => Promise<void>;
+  readonly resume?: () => Promise<void>;
+  private pauseWait: Promise<void> | undefined;
+  private resumeWait: Promise<void> | undefined;
   private readonly queue: RunnerEvent[] = [];
   private crashed: Error | undefined;
   private wake: (() => void) | undefined;
   private ended = false;
 
-  constructor(readonly spec: RunSpec) {
+  constructor(
+    readonly spec: RunSpec,
+    pausable = true,
+  ) {
     this.events = this.iterate();
+    if (pausable) {
+      this.pause = async () => {
+        this.pauseCalls += 1;
+        const wait = this.pauseWait;
+        this.pauseWait = undefined;
+        await wait;
+        this.paused = true;
+      };
+      this.resume = async () => {
+        this.resumeCalls += 1;
+        const wait = this.resumeWait;
+        this.resumeWait = undefined;
+        await wait;
+        this.paused = false;
+      };
+    }
+  }
+
+  /** The next `pause` call stays open until the returned hold is released or failed. */
+  holdPause(): FakeHold {
+    const { hold, settled } = newHold();
+    this.pauseWait = settled;
+    return hold;
+  }
+
+  /** The same for the next `resume` call. */
+  holdResume(): FakeHold {
+    const { hold, settled } = newHold();
+    this.resumeWait = settled;
+    return hold;
   }
 
   get cancelled(): boolean {
@@ -101,6 +159,8 @@ export interface FakeRunnerOptions {
   onStart?: (run: FakeRun) => void | Promise<void>;
   /** Make `start` reject. */
   startError?: Error;
+  /** Whether runs offer `pause` and `resume`. Default true. */
+  pausable?: boolean;
   /** Gives the runner a `stopOrphaned` that calls this. Without it the runner has none. */
   stopOrphaned?: (taskId: string, options: { signal?: AbortSignal }) => Promise<void>;
 }
@@ -126,7 +186,7 @@ export class FakeRunner implements Runner {
 
   async start(spec: RunSpec): Promise<RunHandle> {
     if (this.options.startError) throw this.options.startError;
-    const run = new FakeRun(spec);
+    const run = new FakeRun(spec, this.options.pausable ?? true);
     this.runs.push(run);
     await this.options.onStart?.(run);
     return run;

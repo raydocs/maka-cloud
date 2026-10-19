@@ -28,6 +28,7 @@ export const DEFAULT_WAIT_MS = 60_000;
 export const MAX_WAIT_MS = 10 * 60_000;
 export const DEFAULT_MAX_DEPTH = 5;
 export const DEFAULT_ORPHAN_STOP_TIMEOUT_MS = 10_000;
+export const DEFAULT_CONTROL_TIMEOUT_MS = 15_000;
 const MAX_TITLE_LENGTH = 200;
 const MAX_KEY_LENGTH = 200;
 /** Keys cancelled before their task existed, remembered so a late delegation is refused. */
@@ -56,6 +57,22 @@ export interface OrchestratorOptions {
   };
   /** How long restore waits for one runner to stop a leftover run. Default 10 s. */
   orphanStopTimeoutMs?: number;
+  /** How long a pause or resume waits for the runner to answer. Default 15 s. */
+  controlTimeoutMs?: number;
+}
+
+/**
+ * A caller that acts for a whole conversation without holding one of its session
+ * tokens: the server's public API, after it checked the user's own credential.
+ */
+export interface OperatorAccess {
+  /** The conversation's session: the operator reaches the tree it started and nothing else. */
+  sessionId: SessionId;
+  /**
+   * Runs in the write chain right before the first event of a request is appended,
+   * so a credential revoked in between is refused. Throws to refuse.
+   */
+  authorize(): void;
 }
 
 /** Sizes of the structures that must stay bounded, for tests and diagnostics. */
@@ -100,6 +117,7 @@ export class Orchestrator {
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
+  private readonly controlTimeoutMs: number;
   private readonly newTaskId: () => TaskId;
   private readonly auth: SessionAuth;
   private readonly quotas: QuotaLimits;
@@ -140,6 +158,7 @@ export class Orchestrator {
     );
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
+    this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.newTaskId =
       options.newTaskId ?? (() => `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`);
   }
@@ -386,7 +405,7 @@ export class Orchestrator {
    */
   async cancel(session: SessionInfo, taskId: TaskId): Promise<TaskView> {
     this.visible(session, taskId);
-    await this.cancelTree(taskId, session.sessionId, session);
+    await this.cancelTree(taskId, session.sessionId, () => this.assertSessionActive(session));
     return this.view(taskId);
   }
 
@@ -408,12 +427,134 @@ export class Orchestrator {
     return this.cancel(session, taskId);
   }
 
+  /** `cancel` for the public API: the operator is checked once, in the write chain, like a session. */
+  async cancelAs(access: OperatorAccess, taskId: TaskId): Promise<TaskView> {
+    this.visibleToRoot(access.sessionId, taskId);
+    await this.cancelTree(taskId, access.sessionId, () => {
+      access.authorize();
+      this.visibleToRoot(access.sessionId, taskId);
+    });
+    return this.view(taskId);
+  }
+
+  /**
+   * Asks the run to hold. The request is recorded first, in the write chain with
+   * every check, then the runner is asked; the task reads `paused` once it
+   * answers. Asking again while it holds or is being paused changes nothing.
+   */
+  pauseAs(access: OperatorAccess, taskId: TaskId): Promise<TaskView> {
+    return this.trackControl(this.pauseTask(access, taskId));
+  }
+
+  /** The reverse of `pauseAs`; only a task that is `paused` can be resumed. */
+  resumeAs(access: OperatorAccess, taskId: TaskId): Promise<TaskView> {
+    return this.trackControl(this.resumeTask(access, taskId));
+  }
+
+  private trackControl(work: Promise<TaskView>): Promise<TaskView> {
+    this.track(work);
+    return work;
+  }
+
+  private async pauseTask(access: OperatorAccess, taskId: TaskId): Promise<TaskView> {
+    this.visibleToRoot(access.sessionId, taskId);
+    let handle: RunHandle | undefined;
+    const requested = await this.record(
+      { type: 'task_pause_requested', taskId, by: access.sessionId },
+      () => {
+        access.authorize();
+        const task = this.visibleToRoot(access.sessionId, taskId);
+        this.assertControllable(task);
+        if (task.resumeRequested) throw invalidState('The task is being resumed');
+        if (task.pauseRequested) throw new Superseded();
+        if (task.state !== 'running') throw invalidState('The task has not started');
+        handle = this.handles.get(taskId);
+        if (!handle) throw invalidState('The task is ending');
+        if (!handle.pause || !handle.resume) {
+          throw new OrchestratorError('unsupported', 'This task cannot be paused');
+        }
+      },
+    );
+    if (!requested || !handle) return this.view(taskId);
+    const attempt = Promise.resolve().then(() => handle?.pause?.());
+    try {
+      await this.withControlTimeout(attempt);
+    } catch (error) {
+      await this.record({ type: 'task_pause_failed', taskId, reason: errorMessage(error) }, () => {
+        if (this.isStopping(taskId)) throw new Superseded();
+      });
+      // The task now says it runs, so a pause that took effect, now or when the runner
+      // finally answers, is undone. Not tracked: a runner that never answers must not hold up `settled`.
+      const undo = () => Promise.resolve().then(() => handle?.resume?.());
+      if (error instanceof ControlTimeout) void attempt.then(undo, undo).catch(() => undefined);
+      else this.track(undo());
+      throw invalidState('The task could not be paused');
+    }
+    await this.record({ type: 'task_paused', taskId }, () => {
+      if (this.isStopping(taskId)) throw new Superseded();
+    });
+    return this.view(taskId);
+  }
+
+  private async resumeTask(access: OperatorAccess, taskId: TaskId): Promise<TaskView> {
+    this.visibleToRoot(access.sessionId, taskId);
+    let handle: RunHandle | undefined;
+    const requested = await this.record(
+      { type: 'task_resume_requested', taskId, by: access.sessionId },
+      () => {
+        access.authorize();
+        const task = this.visibleToRoot(access.sessionId, taskId);
+        this.assertControllable(task);
+        if (task.state !== 'paused') {
+          throw invalidState(
+            task.pauseRequested ? 'The task is still being paused' : 'The task is not paused',
+          );
+        }
+        if (task.resumeRequested) throw new Superseded();
+        handle = this.handles.get(taskId);
+        if (!handle?.resume) throw invalidState('The task is ending');
+      },
+    );
+    if (!requested || !handle) return this.view(taskId);
+    try {
+      await this.withControlTimeout(Promise.resolve().then(() => handle?.resume?.()));
+    } catch (error) {
+      await this.record({ type: 'task_resume_failed', taskId, reason: errorMessage(error) }, () => {
+        if (this.isStopping(taskId)) throw new Superseded();
+      });
+      throw invalidState('The task could not be resumed');
+    }
+    await this.record({ type: 'task_resumed', taskId }, () => {
+      if (this.isStopping(taskId)) throw new Superseded();
+    });
+    return this.view(taskId);
+  }
+
+  /** Runs in the write chain: a task that ended or is being cancelled takes no pause or resume. */
+  private assertControllable(task: TaskRecord): void {
+    if (isTerminal(task.state)) throw invalidState('The task has ended');
+    if (task.cancelRequestedBy !== undefined || this.ancestorStopped(task.taskId)) {
+      throw invalidState('The task is being cancelled');
+    }
+  }
+
+  private withControlTimeout<T>(work: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new ControlTimeout(`no answer after ${this.controlTimeoutMs} ms`)),
+        this.controlTimeoutMs,
+      );
+    });
+    return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+  }
+
   private async cancelTree(
     rootId: TaskId,
     by: SessionId | 'system',
-    session?: SessionInfo,
+    authorize?: () => void,
   ): Promise<void> {
-    let accepted = session === undefined;
+    let accepted = authorize === undefined;
     for (;;) {
       const targets = this.activeSubtree(rootId);
       if (targets.length === 0) return;
@@ -421,8 +562,8 @@ export class Orchestrator {
       // while the tree is being torn down.
       for (const { task } of targets) {
         await this.record({ type: 'task_cancel_requested', taskId: task.taskId, by }, () => {
-          if (!accepted && session) {
-            this.assertSessionActive(session);
+          if (!accepted && authorize) {
+            authorize();
             accepted = true;
           }
           if (this.isStopping(task.taskId)) throw new Superseded();
@@ -927,6 +1068,20 @@ export class Orchestrator {
     return session.parentTaskId === undefined ? conductor : executor;
   }
 
+  /** The tree a conversation's session started: every task whose root is that session. */
+  private visibleToRoot(rootSessionId: SessionId, taskId: TaskId): TaskRecord {
+    const task = this.lookup(taskId);
+    if (!task || task.rootSessionId !== rootSessionId) {
+      throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
+    }
+    return task;
+  }
+
+  /** The conversation session whose tree holds the task, if the task exists. */
+  rootSessionOfTask(taskId: TaskId): SessionId | undefined {
+    return this.lookup(taskId)?.rootSessionId;
+  }
+
   /** A session sees tasks it created and everything beneath them, nothing else. */
   private visible(session: SessionInfo, taskId: TaskId): TaskRecord {
     const task = this.lookup(taskId);
@@ -986,6 +1141,13 @@ function keyedTaskId(sessionId: SessionId, key: string): TaskId {
 function roundUsd(usd: number): number {
   return Math.round(usd * 1e9) / 1e9;
 }
+
+function invalidState(message: string): OrchestratorError {
+  return new OrchestratorError('invalid_state', message);
+}
+
+/** A runner did not answer a pause or resume in time. */
+class ControlTimeout extends Error {}
 
 /** Thrown by a write guard to drop an event that no longer applies. */
 class Superseded extends Error {}

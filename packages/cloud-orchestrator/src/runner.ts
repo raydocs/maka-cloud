@@ -29,8 +29,15 @@ export type RunnerEvent =
 export interface RunHandle {
   /** Ends when the run is over. An iterator that ends without `finished` or `failed` fails the task. */
   readonly events: AsyncIterable<RunnerEvent>;
-  /** Stop the run. Must be safe to call after the run has ended. */
+  /** Stop the run. Must be safe to call after the run has ended, and while the run is paused. */
   cancel(): Promise<void>;
+  /**
+   * Hold the run without losing its work. Resolves once the run no longer makes progress.
+   * Optional: a runner that cannot do it leaves both out, and a pause request is refused.
+   * Must be idempotent; `resume` undoes it.
+   */
+  pause?(): Promise<void>;
+  resume?(): Promise<void>;
 }
 
 export interface Runner {
