@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { FakeRun } from '@maka-cloud/orchestrator';
+import type { FakeRun, TaskView } from '@maka-cloud/orchestrator';
 import { calls, lastUserText, refusal, text, tool, toolResults } from './fake-model.js';
 import { gate, type Harness, makeHarness } from './harness.js';
 
@@ -471,4 +471,91 @@ test('a task that ended while its run may still be going keeps its reservation u
   const budget = h.conductor.state.budget(delegation.runId);
   assert.equal(budget.reservedUsd, 0);
   assert.equal(budget.taskUsd, 2, 'no spend was reported, so the whole reservation is charged');
+});
+
+test('a delegation keeps its reservation while a task below its task may still run, though its own task stopped', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    orchestrator: { stopRetry: { firstMs: 1, maxMs: 1 } },
+    conductor: { limits: { stopCheckMs: 5 } },
+  });
+  // The parent's run stops; the child's sandbox cannot be reached until `reachable`.
+  let childId = '';
+  let reachable = false;
+  h.claude.stopOrphaned = async (taskId) => {
+    if (taskId === childId && !reachable) throw new Error('sandbox unreachable');
+  };
+  let starts = 0;
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    const run = (await realStart(spec)) as FakeRun;
+    starts += 1;
+    if (starts > 1) {
+      run.cancel = async () => {
+        throw new Error('sandbox unreachable');
+      };
+    }
+    return run;
+  };
+  const cancelled = gate();
+  const askedAgain = gate();
+  let parentViews = 0;
+  let firstView: TaskView | undefined;
+  const realCancel = h.orchestrator.cancel.bind(h.orchestrator);
+  h.orchestrator.cancel = async (session, taskId) => {
+    const view = await realCancel(session, taskId);
+    if (view.state === 'cancelled') {
+      parentViews += 1;
+      if (parentViews === 1) {
+        firstView = view;
+        cancelled.open();
+      }
+      if (parentViews === 2) askedAgain.open();
+    }
+    return view;
+  };
+  const settled = gate();
+  const realSettle = h.conductor.state.settleDelegation.bind(h.conductor.state);
+  h.conductor.state.settleDelegation = (key, actualUsd) => {
+    const result = realSettle(key, actualUsd);
+    settled.open();
+    return result;
+  };
+  h.model.script('planner', plan);
+  h.model.script('conductor', startResearch, calls(delegate(2)), async () => {
+    // The delegated task starts a child before the run ends.
+    const [delegation] = h.conductor.state.unsettledDelegations();
+    assert.ok(delegation?.taskId);
+    const executor = h.orchestrator.authenticate(
+      h.orchestrator.issueSession({ parentTaskId: delegation.taskId }).token,
+    );
+    assert.ok(executor);
+    const child = await h.orchestrator.delegate(executor, {
+      runner: 'claude-agent-sdk',
+      brief: 'child',
+    });
+    childId = child.taskId;
+    return text('Done.');
+  });
+  await h.send('cnv_1', 'Research.');
+  // The run is over, so its task is cancelled. The parent stops; the child does not.
+  await cancelled.promise;
+  await h.conductor.idle();
+  const [delegation] = h.conductor.state.unsettledDelegations();
+  assert.ok(delegation, 'the delegation is not settled');
+  assert.equal(firstView?.stopPending, undefined, 'the parent itself stopped');
+  assert.equal(
+    h.conductor.state.budget(delegation.runId).reservedUsd,
+    2,
+    'the reservation is held',
+  );
+  // Asked again, the tree still may run: still held.
+  await askedAgain.promise;
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.unsettledDelegations().length, 1);
+
+  reachable = true;
+  await settled.promise;
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+  assert.equal(h.conductor.state.budget(delegation.runId).reservedUsd, 0);
 });

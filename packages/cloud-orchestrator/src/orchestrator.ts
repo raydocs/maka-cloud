@@ -635,18 +635,18 @@ export class Orchestrator {
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(orphans.map((task) => this.stopLeftover(task)));
     for (const [index, task] of orphans.entries()) {
-      const problem = stops[index];
-      if (problem !== undefined) {
+      const stop = stops[index] ?? 'none';
+      if (typeof stop === 'object') {
         await this.record({
           type: 'task_progress',
           taskId: task.taskId,
-          note: `could not stop the leftover runner: ${problem}`,
+          note: `could not stop the leftover runner: ${stop.problem}`,
         });
         // Ending the task does not stop its run: the stop stays owed and is retried.
         if (!task.stopPending) {
           await this.record({ type: 'task_stop_pending', taskId: task.taskId, cause: 'restart' });
         }
-      } else if (task.stopPending) {
+      } else if (stop === 'stopped' && task.stopPending) {
         await this.record({ type: 'task_stopped', taskId: task.taskId });
       }
       // Nothing is running after a restart. History is never edited, so the
@@ -670,10 +670,15 @@ export class Orchestrator {
     for (const taskId of this.store.stopPendingTaskIds()) this.retryStop(taskId);
   }
 
-  /** Resolves to a description of what went wrong, or undefined when the leftover is stopped (or none exists). */
-  private async stopLeftover(task: TaskRecord): Promise<string | undefined> {
+  /**
+   * Stops what a runner left of the task. Only `stopped` is a confirmation; `none`
+   * means its runner is registered and cannot leave work behind (it has no
+   * `stopOrphaned`). A runner that is not registered is unknown, never stopped.
+   */
+  private async stopLeftover(task: TaskRecord): Promise<LeftoverStop> {
     const runner = this.runners.get(task.runner);
-    if (!runner?.stopOrphaned) return undefined;
+    if (!runner) return { problem: 'its runner is not registered' };
+    if (!runner.stopOrphaned) return 'none';
     const timeoutMs = this.orphanStopTimeoutMs;
     const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
@@ -687,9 +692,9 @@ export class Orchestrator {
           }, timeoutMs);
         }),
       ]);
-      return undefined;
+      return 'stopped';
     } catch (error) {
-      return error instanceof Error ? error.message : String(error);
+      return { problem: error instanceof Error ? error.message : String(error) };
     } finally {
       clearTimeout(timer);
     }
@@ -752,7 +757,9 @@ export class Orchestrator {
       // A start still under way may yet hand back a run: try again after it.
       if (this.starting.has(taskId)) continue;
       try {
-        if ((await this.stopLeftover(task)) !== undefined || signal.aborted) continue;
+        // Only a confirmed stop clears the obligation: a runner that is gone or
+        // can no longer stop by id leaves it owed.
+        if ((await this.stopLeftover(task)) !== 'stopped' || signal.aborted) continue;
         await this.recordStopped(taskId);
       } catch {
         // The store failed; the obligation is still in the log, so try again.
@@ -1061,7 +1068,28 @@ export class Orchestrator {
   private view(taskId: TaskId): TaskView {
     const task = this.lookup(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
-    return toView(task);
+    const view = toView(task);
+    return this.belowStillRuns(taskId) ? { ...view, treeStopPending: true } : view;
+  }
+
+  /** True when a task below `rootId` has not ended, is still starting, or owes a stop. */
+  private belowStillRuns(rootId: TaskId): boolean {
+    const seen = new Set<TaskId>([rootId]);
+    let level = this.store.childrenOf(rootId);
+    while (level.length > 0) {
+      const next: TaskId[] = [];
+      for (const id of level) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const task = this.lookup(id);
+        if (!task || !isTerminal(task.state) || task.stopPending || this.starting.has(id)) {
+          return true;
+        }
+        next.push(...this.store.childrenOf(id));
+      }
+      level = next;
+    }
+    return false;
   }
 
   // Budgets. A top-level task delegated with `budgetUsd` caps the spend its
@@ -1298,6 +1326,9 @@ function isTerminalEvent(event: TaskEvent): boolean {
     event.type === 'task_cancelled'
   );
 }
+
+/** What stopping a task's leftover run came to; see `stopLeftover`. */
+type LeftoverStop = 'stopped' | 'none' | { problem: string };
 
 /** A cancel that throws, synchronously or not, must not stop the cleanup around it. True when it succeeded. */
 function cancelHandle(handle: RunHandle): Promise<boolean> {
