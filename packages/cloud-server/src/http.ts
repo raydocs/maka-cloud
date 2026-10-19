@@ -42,6 +42,36 @@ export interface PostedMessage {
   sessionId: string;
 }
 
+export interface PostedAnswer {
+  conversationId: string;
+  questionId: string;
+  optionId: string;
+  text?: string;
+  sessionId: string;
+}
+
+/**
+ * The handler's verdict on an answer. Answers are idempotent per question: the
+ * same option again is a duplicate, a different one a conflict.
+ */
+export type AnswerOutcome =
+  | { accepted: true; duplicate: boolean }
+  | {
+      accepted: false;
+      reason: 'not_found' | 'not_open' | 'unknown_option' | 'conflict' | 'closed' | 'text_too_long';
+    };
+
+export const MAX_ANSWER_TEXT_LENGTH = 4000;
+
+const ANSWER_STATUS: Record<Extract<AnswerOutcome, { accepted: false }>['reason'], number> = {
+  not_found: 404,
+  not_open: 409,
+  conflict: 409,
+  closed: 409,
+  unknown_option: 400,
+  text_too_long: 400,
+};
+
 export interface PublicApiDeps {
   db: DatabaseSync;
   invites: InviteStore;
@@ -51,6 +81,8 @@ export interface PublicApiDeps {
   messageLimiter: RateLimiter;
   limits: HttpLimits;
   onMessage: (message: PostedMessage) => void;
+  /** Absent when no handler takes answers; the route then answers 404. */
+  onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
 }
 
 const createConversation = z
@@ -60,6 +92,13 @@ const postMessage = z
   .object({
     text: z.string().min(1),
     clientMessageId: z.string().min(1).max(128).optional(),
+  })
+  .strict();
+const postAnswer = z
+  .object({
+    questionId: z.string().min(1).max(128),
+    optionId: z.string().min(1).max(128),
+    text: z.string().max(MAX_ANSWER_TEXT_LENGTH).optional(),
   })
   .strict();
 
@@ -135,6 +174,11 @@ export class PublicApi {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
       return this.postMessage(req, res, invite, decodeURIComponent(messages[1] ?? ''));
     }
+    const answers = /^\/v1\/conversations\/([^/]+)\/answers$/u.exec(path);
+    if (answers && this.deps.onAnswer) {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
+      return this.postAnswer(req, res, invite, decodeURIComponent(answers[1] ?? ''));
+    }
     const tasks = /^\/v1\/conversations\/([^/]+)\/tasks$/u.exec(path);
     if (tasks) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
@@ -186,6 +230,33 @@ export class PublicApi {
         sessionId: result.sessionId,
       });
     }
+  }
+
+  private async postAnswer(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    conversationId: string,
+  ): Promise<void> {
+    const body = postAnswer.safeParse(await readJson(req, false));
+    if (!body.success) throw new HttpError(400, 'invalid_request');
+    const sessionId = this.deps.conversations.sessionOf(conversationId);
+    if (sessionId === undefined) throw new HttpError(404, 'not_found');
+    const allowed = this.deps.messageLimiter.take(invite.inviteId);
+    if (!allowed.ok) {
+      throw new HttpError(429, 'quota_exceeded', {
+        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
+      });
+    }
+    const outcome = await (this.deps.onAnswer as NonNullable<PublicApiDeps['onAnswer']>)({
+      conversationId,
+      questionId: body.data.questionId,
+      optionId: body.data.optionId,
+      ...(body.data.text === undefined ? {} : { text: body.data.text }),
+      sessionId,
+    });
+    if (!outcome.accepted) throw new HttpError(ANSWER_STATUS[outcome.reason], outcome.reason);
+    respond(res, 200, { accepted: true, duplicate: outcome.duplicate });
   }
 
   private listTasks(res: ServerResponse, url: URL, conversationId: string): void {

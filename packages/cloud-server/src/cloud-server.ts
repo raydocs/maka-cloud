@@ -8,10 +8,11 @@ import {
   type OrchestratorServerOptions,
   type RunnerRegistry,
 } from '@maka-cloud/orchestrator';
+import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
 import { ConversationStore } from './conversations.js';
 import { openDatabase } from './db.js';
 import { FeedHub } from './feed.js';
-import { DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
+import { type AnswerOutcome, DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
 import { InviteStore } from './invites.js';
 import { RateLimiter } from './rate-limit.js';
 import { SqliteSessionStore } from './sqlite-session-store.js';
@@ -36,6 +37,13 @@ export interface ConversationHandler {
     message: { conversationId: string; messageId: string; text: string },
     conductor: ConductorAccess,
   ): void | Promise<void>;
+  /** Applies an answer to a question the handler posted. Without it the answers route is 404. */
+  onAnswer?(
+    answer: { conversationId: string; questionId: string; optionId: string; text?: string },
+    conductor: ConductorAccess,
+  ): Promise<AnswerOutcome>;
+  /** Called on shutdown while the orchestrator endpoint is still up. */
+  close?(): void | Promise<void>;
 }
 
 export interface CloudServerOptions {
@@ -52,6 +60,13 @@ export interface CloudServerOptions {
   http?: Partial<HttpLimits>;
   orchestrator?: Pick<OrchestratorOptions, 'quotas' | 'caches' | 'maxDepth' | 'now'>;
   handler?: ConversationHandler;
+  /**
+   * Builds the handler once the database is open, with the publisher it posts
+   * assistant messages, notices and questions through. Wins over `handler`.
+   */
+  createHandler?: (context: {
+    publisher: ConversationPublisher;
+  }) => ConversationHandler | Promise<ConversationHandler>;
   sweepOrphans?: SweepOrphans;
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
@@ -63,6 +78,8 @@ export interface CloudServer {
   mcpUrl: string;
   orchestrator: Orchestrator;
   invites: InviteStore;
+  /** Where conductor output enters the conversation feed. */
+  publisher: ConversationPublisher;
   /** Event streams currently open. */
   openStreams(): number;
   close(): Promise<void>;
@@ -78,6 +95,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   let invites: InviteStore | undefined;
   let mcp: OrchestratorServer | undefined;
   let http: Server | undefined;
+  let handler: ConversationHandler | undefined;
   try {
     const hub = new FeedHub();
     const store = new SqliteTaskStore(db, hub);
@@ -106,6 +124,17 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       () => orchestrator.issueSession(),
       options.orchestrator?.now,
     );
+    const publisher = new ConductorFeed(db, hub, options.orchestrator?.now);
+    handler = options.createHandler ? await options.createHandler({ publisher }) : options.handler;
+    const ownHandler = handler;
+    const accessFor = (sessionId: string): ConductorAccess => ({
+      mcpUrl,
+      rotateToken: () => {
+        const rotated = orchestrator.rotateSession(sessionId);
+        if (!rotated) throw new Error('The conversation has no session');
+        return rotated.token;
+      },
+    });
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
     const api = new PublicApi({
       db,
@@ -116,19 +145,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       messageLimiter: new RateLimiter(limits.messagesPerMinute),
       limits,
       onMessage: (message) => {
-        const handler = options.handler;
-        if (!handler) return;
-        const conductor: ConductorAccess = {
-          mcpUrl,
-          rotateToken: () => {
-            const rotated = orchestrator.rotateSession(message.sessionId);
-            if (!rotated) throw new Error('The conversation has no session');
-            return rotated.token;
-          },
-        };
+        if (!ownHandler) return;
+        const conductor = accessFor(message.sessionId);
         void Promise.resolve()
           .then(() =>
-            handler.onUserMessage(
+            ownHandler.onUserMessage(
               {
                 conversationId: message.conversationId,
                 messageId: message.messageId,
@@ -139,6 +160,20 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           )
           .catch((error: unknown) => warn('The conversation handler failed', error));
       },
+      ...(ownHandler?.onAnswer
+        ? {
+            onAnswer: (answer) =>
+              (ownHandler.onAnswer as NonNullable<ConversationHandler['onAnswer']>)(
+                {
+                  conversationId: answer.conversationId,
+                  questionId: answer.questionId,
+                  optionId: answer.optionId,
+                  ...(answer.text === undefined ? {} : { text: answer.text }),
+                },
+                accessFor(answer.sessionId),
+              ),
+          }
+        : {}),
     });
     const server = createServer((req, res) => {
       void api.handle(req, res);
@@ -156,6 +191,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       server.closeAllConnections();
       try {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        try {
+          await ownHandler?.close?.();
+        } catch (error) {
+          warn('The conversation handler failed to close', error);
+        }
         await mcp?.close();
       } finally {
         // The database goes last and always: its lock is what keeps a second server out.
@@ -168,6 +208,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       mcpUrl,
       orchestrator,
       invites: ownInvites,
+      publisher,
       openStreams: () => api.openStreams,
       close: () => {
         closing ??= shutdown();
@@ -177,6 +218,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   } catch (error) {
     http?.closeAllConnections();
     http?.close();
+    await Promise.resolve(handler?.close?.()).catch(() => undefined);
     await mcp?.close().catch(() => undefined);
     try {
       invites?.close();

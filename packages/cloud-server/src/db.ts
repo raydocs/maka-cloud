@@ -8,7 +8,7 @@ export class DatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE task_log (
@@ -88,6 +88,30 @@ BEGIN SELECT RAISE(ABORT, '${table} is append-only'); END;`,
 `;
 
 /**
+ * v2: what the conductor publishes into a conversation (notices, questions,
+ * answers), one row per event, keyed by the event's stable id so a retried
+ * publish is a no-op. Assistant messages also record their event id here and
+ * live in `messages` with role 'assistant'.
+ */
+const CONDUCTOR_SCHEMA = `
+CREATE TABLE conductor_events (
+  event_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER conductor_events_no_update BEFORE UPDATE ON conductor_events
+BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
+CREATE TRIGGER conductor_events_no_delete BEFORE DELETE ON conductor_events
+BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
+`;
+
+/** Migration i takes the schema from version i to i + 1. */
+export const MIGRATIONS: readonly string[] = [SCHEMA, CONDUCTOR_SCHEMA];
+
+/**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an
  * immediate write transaction takes the lock now, so a second server over the
  * same file fails here instead of corrupting assumptions later. The lock is the
@@ -119,12 +143,14 @@ function isBusy(error: unknown): boolean {
 function migrate(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
   if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version !== 0) {
+  if (row.user_version > SCHEMA_VERSION) {
     throw new Error(`Unsupported database schema version ${row.user_version}`);
   }
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.exec(SCHEMA);
+    for (let version = row.user_version; version < SCHEMA_VERSION; version += 1) {
+      db.exec(MIGRATIONS[version] as string);
+    }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {

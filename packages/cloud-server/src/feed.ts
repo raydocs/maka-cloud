@@ -1,7 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
 
-export type FeedKind = 'conversation.created' | 'message.posted' | 'task.event';
+export type FeedKind =
+  | 'conversation.created'
+  | 'message.posted'
+  | 'task.event'
+  | 'conductor.notice'
+  | 'conductor.question'
+  | 'conductor.answered';
 
 /** What a client receives. `id` is the position in the feed and the SSE event id. */
 export interface FeedEntry {
@@ -58,17 +64,20 @@ interface FeedRow {
   m_at: number | null;
   title: string | null;
   c_at: number | null;
+  e_data: string | null;
 }
 
 const PAGE_SQL = `
 SELECT f.id, f.kind, f.conversation_id, f.at,
   t.seq AS t_seq, t.at AS t_at, t.event AS t_event,
   m.message_id, m.role, m.text, m.at AS m_at,
-  c.title, c.created_at AS c_at
+  c.title, c.created_at AS c_at,
+  e.data AS e_data
 FROM feed f
 LEFT JOIN task_log t ON f.kind = 'task.event' AND t.seq = CAST(f.ref AS INTEGER)
 LEFT JOIN messages m ON f.kind = 'message.posted' AND m.message_id = f.ref
 LEFT JOIN conversations c ON f.kind = 'conversation.created' AND c.conversation_id = f.ref
+LEFT JOIN conductor_events e ON f.kind LIKE 'conductor.%' AND e.event_id = f.ref
 WHERE f.id > ? AND (? IS NULL OR f.conversation_id = ?)
 ORDER BY f.id
 LIMIT ?`;
@@ -103,5 +112,9 @@ function payload(row: FeedRow): unknown {
       return { messageId: row.message_id, role: row.role, text: row.text, at: row.m_at };
     case 'conversation.created':
       return { title: row.title, at: row.c_at };
+    case 'conductor.notice':
+    case 'conductor.question':
+    case 'conductor.answered':
+      return { ...(JSON.parse(row.e_data ?? '{}') as object), at: row.at };
   }
 }
