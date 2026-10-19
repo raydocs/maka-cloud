@@ -15,19 +15,35 @@ process per storage root (`tryAcquireRuntimeHostLaunch`; a second owner gets
 starts that owner and talks to it over its authenticated transport. Embedding
 the runtime inside the HTTP process would need new hosting code for lifecycle,
 ownership and crash handling that runtime-host already has, and it would tie the
-server's restarts to the runtime's. So the conductor (T5) is a client of a
-runtime-host owner, and this package only exposes a port for it:
+server's restarts to the runtime's. So this package only exposes a port for the
+conductor (T5):
 
 ```ts
 interface ConversationHandler {
   onUserMessage(message: { conversationId; messageId; text }, conductor: ConductorAccess): void | Promise<void>;
+  onAnswer?(answer: { conversationId; questionId; optionId; text? }, conductor: ConductorAccess): Promise<AnswerOutcome>;
+  close?(): void | Promise<void>;
 }
 ```
 
+The conductor turned out not to be a runtime-host client: runtime-host adds a
+per-turn runtime context and reactive compaction, and T3 requires neither (the
+history must stay append-only). T5 runs Maka in-process (SessionManager and the
+AI SDK backend) inside the handler instead, and still has no import edge into
+this package.
+
 `ConductorAccess` gives T5 the orchestrator MCP URL and a conductor token for
 that conversation (rotated on request, never sent over the public API). With no
-handler the server stores the message and nothing replies. Wiring T5 is T5's
-job.
+handler the server stores the message and nothing replies. `createHandler`
+builds the handler after the database opens and hands it a
+`ConversationPublisher`. Through it, the conductor posts assistant messages
+(`message.posted`, role `assistant`), notices (`conductor.notice`), questions
+(`conductor.question`) and answers (`conductor.answered`) into the feed, each
+idempotent by the event's stable id. `POST /v1/conversations/:id/answers`
+(`{questionId, optionId, text?}`) exists only when the handler has `onAnswer`,
+and maps its outcome to 200 `{accepted, duplicate}`, 404, 409 or 400. On
+shutdown `close()` runs while the orchestrator endpoint is still up, so the
+conductor can cancel its tasks.
 
 ## Storage
 

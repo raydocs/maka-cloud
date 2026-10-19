@@ -104,7 +104,28 @@ BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
  * Step `i` takes the schema from version `i` to `i + 1`. Steps are only ever
  * appended: one that has shipped is never edited.
  */
-const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];
+/**
+ * v3: what the conductor publishes into a conversation (notices, questions,
+ * answers), one row per event, keyed by the event's stable id so a retried
+ * publish is a no-op. Assistant messages also record their event id here and
+ * live in `messages` with role 'assistant'.
+ */
+const SCHEMA_V3 = `
+CREATE TABLE conductor_events (
+  event_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER conductor_events_no_update BEFORE UPDATE ON conductor_events
+BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
+CREATE TRIGGER conductor_events_no_delete BEFORE DELETE ON conductor_events
+BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
+`;
+
+export const MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an
