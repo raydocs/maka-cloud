@@ -54,18 +54,27 @@ samples of one vendor's attempt, is a loop: the run is cancelled and the task ha
 run what is left of the task's `budgetUsd`. When the total reaches the budget, it stops the agent run and fails the
 task with the reason. A spent budget is not a vendor failure, so the task is not handed over.
 
-**Checks.** Each check launch gets an id and a nonce from the host, chosen after the agent's run has stopped. Its
-control files (nonce, output, exit record) go in a fresh directory under the task's memory-backed log directory,
-outside the task directory the agent works in, created exclusively: a launch that finds that directory, or pid or
-token files under its id, refuses, unless the nonce is its own (a retried launch, which starts nothing new). The exit
-record carries the nonce and whether the time limit stopped the check, and a status whose nonce does not match counts
-as a check that did not finish. When a check ends, its process group and session are stopped, so nothing it started
-runs into the next check.
+**Checks.** A check is one sandbox `exec` that runs the command to its end, and its exit status is the exec's own,
+which the instabox API returns to the host. Nothing the check writes (files, output) is read as its result. The command
+runs in a new user and PID namespace (`unshare --user --map-current-user --pid --fork --kill-child`) whose first
+process is the runner's: when the command ends, that process exits and the kernel kills everything left in the
+namespace. A process inside cannot leave it (`setsid`, `env -u`, double forks and `nohup` all stay inside), cannot
+signal processes outside it, and, being in a child user namespace, cannot trace or read the memory, file descriptors
+or environment of processes outside it. So nothing a check started is alive when its exec returns, and the next check
+starts clean. Each check carries a tag (`maka-check:<taskId>:<n>-<random>`) in the arguments of the processes that
+hold its namespace, so a stop finds them without anything the check could rewrite: after every check the runner
+kills what carries the check's tag and waits until its namespace is empty, which also covers an exec whose connection
+dropped. The command gets `timeout` (TERM, then KILL 5 s later) inside the namespace and a KILL of the namespace
+10 s after that outside it; a check whose exit is 124 or 137 after its whole limit timed out. Because exec ends after
+10 minutes, a check may run at most 9.5 minutes (default 9).
 
-**Exits.** Every exit (end, cancel, throw, check timeout) cancels the agent run, stops every process of the task,
-finished checks included, through the runners' task-wide stop (checks record their pid and run token the way runner scripts do), restores a reverted
-workspace, and releases the sandbox lease. The terminal event is published only after that. After a restart,
-`stopOrphaned` stops a task's leftovers by id.
+Where the sandbox cannot create the namespace (no unprivileged user namespaces), the check does not run and the task
+fails with that reason: a check is never run unisolated, and no result is reported as verified without it.
+
+**Exits.** Every exit (end, cancel, throw, check timeout) cancels the agent run, stops every process of the task
+(the runners' task-wide stop for agent runs, and every namespace tagged with the task's id for checks), restores a
+reverted workspace, and releases the sandbox lease. The terminal event is published only after that. After a restart,
+`stopOrphaned` stops a task's leftovers by id, checks included.
 
 ## Opening the pull request
 
@@ -97,12 +106,17 @@ Decided by win (2026-10-19):
 
 ## Not covered yet
 
-- Checks run as the same sandbox user as the agent, because instabox `exec` has no other user. Unpredictable ids
-  and nonces stop results laid out in advance, but a process the agent left running that escaped the runners'
-  task-wide stop (one that cleared `MAKA_RUN_TOKEN` from its environment) could still interfere with a check while
-  it runs. Running checks as a separate user needs sandbox support.
+- Checks run as the same sandbox user as the agent (instabox `exec` has no other user). The namespace keeps a check
+  from reaching out, but not the reverse: an agent-run process that escaped the runners' task-wide stop (which still
+  finds agent runs by `MAKA_RUN_TOKEN`) could change the workspace while a check runs, and, where the kernel lets a
+  process trace unrelated processes of its user (Yama `ptrace_scope` 0 or no Yama), trace the check. Agent runs need
+  the same namespace in the runners' launch to close this.
+- A test can change the workspace while it runs; the delivered change is what the working tree holds after the
+  checks.
+- Tests that need privileges outside the namespace (sudo, setuid programs, mounting) fail inside it.
 - Private repositories (they need a read credential in the sandbox; a separate decision).
-- A check longer than its timeout (default 15 min) fails; long suites need a higher limit per task.
+- A check longer than its timeout (default 9 min, at most 9.5) fails; suites longer than that need exec streaming or
+  splitting.
 - Build outputs ignored by git stay in place during the base check, so a test that reads a stale build could pass on
   the base commit; the check then reports "does not reproduce" rather than a false pass.
 - The agent can rewrite the repository's git metadata. Delivered contents are what git would commit from the working

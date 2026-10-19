@@ -1,30 +1,25 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CHECK_START_SCRIPT } from '../scripts.js';
 import {
   type AgentTurn,
   collect,
   FIXED_ADD,
   fixes,
   isAlive,
+  isCheck,
+  REPRO_TEST,
   readJson,
+  recordedPids,
+  recordPid,
   setup,
   terminal,
   testOnly,
   writeRepro,
   zeroStats,
 } from './harness.js';
-
-async function pidsOf(dir: string, prefix: string): Promise<number[]> {
-  const names = (await fs.readdir(dir)).filter((name) => name.startsWith(prefix));
-  return Promise.all(
-    names.map(async (name) => Number((await fs.readFile(join(dir, name), 'utf8')).trim())),
-  );
-}
 
 test('check results the agent wrote ahead of time are ignored: every check really runs', async (t) => {
   const h = await setup(t);
@@ -55,47 +50,6 @@ test('check results the agent wrote ahead of time are ignored: every check reall
   zeroStats(h.runner);
 });
 
-test('a check launch refuses state it did not create, and a retried launch starts nothing new', async (t) => {
-  const dir = await fs.mkdtemp(join(tmpdir(), 'check-launch-'));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  await fs.mkdir(join(dir, 'workspace'));
-  const launch = (nonce: string) =>
-    execFileSync('bash', ['-c', CHECK_START_SCRIPT], {
-      encoding: 'utf8',
-      env: {
-        PATH: process.env.PATH ?? '',
-        MAKA_DIR: dir,
-        MAKA_CTL_ROOT: join(dir, 'control'),
-        MAKA_CHECK: 'check-1-abc-repro',
-        MAKA_NONCE: nonce,
-        MAKA_CWD: join(dir, 'workspace'),
-        MAKA_CMD: 'echo ran >> ../runs',
-        MAKA_TIMEOUT: '10',
-        MAKA_RUN_TOKEN: 'tok',
-      },
-    }).trim();
-  assert.equal(launch('n1'), 'STARTED');
-  assert.equal(launch('n1'), 'ALREADY');
-  assert.equal(launch('n2'), 'EXISTS');
-  // A pid file the launch did not write is refused too.
-  await fs.writeFile(join(dir, 'check-2-abc-tests.pid'), '1\n');
-  const other = execFileSync('bash', ['-c', CHECK_START_SCRIPT], {
-    encoding: 'utf8',
-    env: {
-      PATH: process.env.PATH ?? '',
-      MAKA_DIR: dir,
-      MAKA_CTL_ROOT: join(dir, 'control'),
-      MAKA_CHECK: 'check-2-abc-tests',
-      MAKA_NONCE: 'n3',
-      MAKA_CWD: join(dir, 'workspace'),
-      MAKA_CMD: 'true',
-      MAKA_TIMEOUT: '10',
-      MAKA_RUN_TOKEN: 'tok',
-    },
-  }).trim();
-  assert.equal(other, 'EXISTS');
-});
-
 /** A reproduction test that passes when add() is fixed and does `onBase` otherwise. */
 async function reproThatOnBase(turn: AgentTurn, onBase: string): Promise<void> {
   await writeRepro(turn, `source lib/add.sh\n[ "$(add 2 3)" = 5 ] && exit 0\n${onBase}\n`);
@@ -124,31 +78,147 @@ for (const [label, onBase, why] of [
   });
 }
 
-test('a process a passing check leaves behind is stopped when that check ends', async (t) => {
+test('a check cannot forge its result: an exit record it writes while it runs is not read', async (t) => {
   const h = await setup(t);
   h.claude.script = async (turn) => {
-    await fixes(turn);
-    // One of the repository's tests passes and leaves a process running.
-    await fs.writeFile(
-      join(turn.workspace, 'tests', 'test_bg.sh'),
-      'sleep 300 &\necho $! > "$MAKA_TEST_PIDS/bg-$RANDOM"\n',
+    if (turn.n > 1) return fixes(turn);
+    // The change does not fix add(), so the reproduction test fails. While it runs, it forges a
+    // pass for itself and the tests and a failure for the base check, wherever a check's control
+    // files are, then waits for its forgery to be read.
+    await writeRepro(
+      turn,
+      [
+        'c="${MAKA_CTL_ROOT:-/nonexistent}/${MAKA_CHECK:-none}"',
+        'if [ -f "$c/nonce" ]; then',
+        '  case "$MAKA_CHECK" in *-repro-base) forged=1 ;; *) forged=0 ;; esac',
+        '  echo "$(cat "$c/nonce") $forged 0" > "$c/exit"',
+        '  sleep 30',
+        'fi',
+        REPRO_TEST,
+      ].join('\n'),
     );
     return 'ok';
   };
-  let before: number[] | undefined;
+  const spec = await h.spec('tsk_forge_live');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  assert.equal(h.claude.turns.length, 2, 'the forged results did not verify the first run');
+  assert.match(h.claude.turns[1]?.prompt ?? '', /fails with your change \(exit 1\)/);
+  const verification = await readJson(join(h.handoff, 'tsk_forge_live', 'verification.json'));
+  assert.deepEqual(
+    verification.attempts[0].turns.map((turn: { outcome: string }) => turn.outcome),
+    ['check_failed', 'verified'],
+  );
+  assert.equal(verification.attempts[0].turns[0].checks[0].exitCode, 1);
+  zeroStats(h.runner);
+});
+
+/**
+ * A test that starts `sleep 300` the way `how` says, waits until it has recorded its pid under
+ * `name`, and passes.
+ */
+function escapee(name: string, how: (cmd: string) => string): string {
+  return [
+    `export MAKA_PIDFILE="$MAKA_TEST_PIDS/${name}-$RANDOM$RANDOM"`,
+    how(`bash -c '${recordPid(name, '"$MAKA_PIDFILE"')}; exec sleep 300'`),
+    'until [ -s "$MAKA_PIDFILE" ]; do sleep 0.01; done',
+    '',
+  ].join('\n');
+}
+
+test('a process that clears its run token and leaves its session is stopped before the next check', async (t) => {
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    await fixes(turn);
+    await fs.writeFile(
+      join(turn.workspace, 'tests', 'test_bg.sh'),
+      escapee('notoken', (cmd) => `env -u MAKA_RUN_TOKEN setsid ${cmd} > /dev/null 2>&1 &`),
+    );
+    return 'ok';
+  };
+  let alive: boolean[] | undefined;
   h.hook = async (call, phase) => {
-    if (
-      phase === 'before' &&
-      call.script === CHECK_START_SCRIPT &&
-      call.envs.MAKA_CHECK?.endsWith('repro-base')
-    ) {
-      before = await pidsOf(h.pids, 'bg-');
+    if (phase === 'before' && isCheck(call) && alive === undefined) {
+      const pids = await recordedPids(h, 'notoken');
+      if (pids.length > 0) alive = pids.map(isAlive);
     }
   };
-  const spec = await h.spec('tsk_bg');
+  const spec = await h.spec('tsk_notoken');
   assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
-  assert.equal(before?.length, 1, 'the tests check left one process');
-  assert.equal(isAlive(before?.[0] ?? 0), false, 'it was stopped before the next check');
+  assert.deepEqual(
+    alive,
+    [false],
+    'the tests check started one, and it was gone before the next check',
+  );
+  zeroStats(h.runner);
+});
+
+test('no process a check started is alive when the next check starts, however it was started', async (t) => {
+  const h = await setup(t);
+  const ways: Record<string, (cmd: string) => string> = {
+    plain: (cmd) => `${cmd} &`,
+    notoken: (cmd) => `env -u MAKA_RUN_TOKEN setsid ${cmd} > /dev/null 2>&1 &`,
+    doublefork: (cmd) => `( ( ${cmd} > /dev/null 2>&1 & ) & )`,
+    nohup: (cmd) => `nohup setsid ${cmd} > /dev/null 2>&1 & disown`,
+  };
+  h.claude.script = async (turn) => {
+    await writeRepro(
+      turn,
+      [...Object.entries(ways).map(([name, how]) => escapee(`repro${name}`, how)), REPRO_TEST].join(
+        '\n',
+      ),
+    );
+    await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), FIXED_ADD);
+    for (const [name, how] of Object.entries(ways)) {
+      await fs.writeFile(join(turn.workspace, 'tests', `test_${name}.sh`), escapee(name, how));
+    }
+    return 'ok';
+  };
+  const names = Object.keys(ways).flatMap((name) => [name, `repro${name}`]);
+  const allPids = async () =>
+    (await Promise.all(names.map((name) => recordedPids(h, name)))).flat();
+  const seen: { check: number; recorded: number; alive: number[] }[] = [];
+  let checks = 0;
+  h.hook = async (call, phase) => {
+    if (phase !== 'before' || !isCheck(call)) return;
+    checks++;
+    const pids = await allPids();
+    seen.push({ check: checks, recorded: pids.length, alive: pids.filter(isAlive) });
+  };
+  const spec = await h.spec('tsk_escapes');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const n = Object.keys(ways).length;
+  // Before the tests check: the reproduction test's; before the base check: the tests' as well
+  // (the tests run the reproduction test too).
+  assert.deepEqual(seen, [
+    { check: 1, recorded: 0, alive: [] },
+    { check: 2, recorded: n, alive: [] },
+    { check: 3, recorded: 3 * n, alive: [] },
+  ]);
+  const all = await allPids();
+  assert.equal(all.length, 4 * n, 'the base check started its own');
+  assert.deepEqual(all.filter(isAlive), [], 'nothing is left once the task ended');
+  zeroStats(h.runner);
+});
+
+test('a sandbox that cannot isolate a check fails the task, and the check never counts', async (t) => {
+  const bin = await fs.mkdtemp(join(tmpdir(), 'no-unshare-'));
+  t.after(() => fs.rm(bin, { recursive: true, force: true }));
+  // An unshare that fails the way it does where user namespaces are off.
+  await fs.writeFile(
+    join(bin, 'unshare'),
+    '#!/bin/sh\necho "unshare: unshare failed: Operation not permitted" >&2\nexit 1\n',
+    { mode: 0o755 },
+  );
+  const h = await setup(t, {}, { execPath: `${bin}:${process.env.PATH ?? ''}` });
+  h.claude.script = fixes;
+  const spec = await h.spec('tsk_noiso');
+  const last = terminal(await collect(await h.runner.start(spec)));
+  assert.equal(last?.type, 'failed');
+  assert.match(
+    (last as { reason: string }).reason,
+    /the check repro could not run: the sandbox could not start the check in its own user and PID namespace/,
+  );
+  assert.equal(await h.deliveries.get('tsk_noiso'), undefined);
   zeroStats(h.runner);
 });
 

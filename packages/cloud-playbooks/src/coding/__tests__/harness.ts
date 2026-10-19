@@ -9,7 +9,12 @@ import type { RunHandle, RunnerEvent, RunSpec } from '@maka-cloud/orchestrator';
 import { Fleet, FixedMachineProvider } from '@maka-cloud/runners';
 import { MemoryCodingDeliveries } from '../deliveries.js';
 import { type AgentRunner, CodingRunner, type CodingRunnerOptions } from '../runner.js';
-import { type CodingSandbox, FleetCodingSandbox, type SandboxWorkspace } from '../sandbox.js';
+import {
+  type CodingSandbox,
+  type ExecResult,
+  FleetCodingSandbox,
+  type SandboxWorkspace,
+} from '../sandbox.js';
 import type { Vendor } from '../task.js';
 
 /** A one-shot latch: `wait()` resolves once `open()` is called. */
@@ -53,6 +58,26 @@ export interface ExecCall {
 
 /** Intercepts the coding runner's sandbox calls, so tests can hold one at a known point. */
 export type ExecHook = (call: ExecCall, phase: 'before' | 'after') => Promise<void> | void;
+
+/** Stands in for one sandbox call; `run` makes the real one. */
+export type ExecReplace = (
+  call: ExecCall,
+  run: () => Promise<ExecResult>,
+) => Promise<ExecResult> | undefined;
+
+/** Whether a sandbox call runs a check (the test command or the reproduction test). */
+export function isCheck(call: ExecCall): boolean {
+  return call.envs.MAKA_CMD !== undefined;
+}
+
+/**
+ * Shell that records the pid of the shell running it, as the host sees it, in
+ * `$MAKA_TEST_PIDS/<name>-<random>` (or `file`): inside a PID namespace `$$` is the namespace's pid, while
+ * /proc (the host's) gives the host's.
+ */
+export function recordPid(name: string, file = `"$MAKA_TEST_PIDS/${name}-$RANDOM$RANDOM"`): string {
+  return `read -r pid _ < /proc/self/stat; f=${file}; echo "$pid" > "$f.tmp" && mv "$f.tmp" "$f"`;
+}
 
 export class FakeAgent implements AgentRunner {
   readonly turns: AgentTurn[] = [];
@@ -190,6 +215,7 @@ export interface Harness {
   /** Sandbox calls made by the runner, in order. */
   calls: ExecCall[];
   hook: ExecHook | undefined;
+  replace: ExecReplace | undefined;
   leases: { acquired: number; released: number };
   /** Resolves after the next workspace sample finishes. */
   nextSample(): Promise<void>;
@@ -218,18 +244,18 @@ class RecordingSandbox implements CodingSandbox {
     const { h, samples } = this;
     return {
       dir: ws.dir,
-      controlDir: ws.controlDir,
       async exec(script, options = {}) {
         const call = { script, envs: options.envs ?? {} };
         h.calls.push(call);
         await h.hook?.(call, 'before');
-        const result = await ws.exec(script, options);
+        const result =
+          (await h.replace?.(call, () => ws.exec(script, options))) ??
+          (await ws.exec(script, options));
         await h.hook?.(call, 'after');
         if (script.includes('hash-object --no-filters')) samples.splice(0).forEach((fn) => fn());
         return result;
       },
       stopAll: (s) => ws.stopAll(s),
-      stopRuns: (names, s) => ws.stopRuns(names, s),
       agentOnSameMachine: () => ws.agentOnSameMachine(),
       async release() {
         h.leases.released++;
@@ -246,6 +272,7 @@ class RecordingSandbox implements CodingSandbox {
 export async function setup(
   t: TestContext,
   options: Partial<CodingRunnerOptions> = {},
+  sandbox: { execPath?: string } = {},
 ): Promise<Harness> {
   const tmp = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'coding-test-')));
   const home = join(tmp, 'home');
@@ -277,7 +304,11 @@ export async function setup(
 
   const pids = join(tmp, 'pids');
   await fs.mkdir(pids);
-  const fake = await new FakeInstabox({ home, env: { MAKA_TEST_PIDS: pids } }).start();
+  const fake = await new FakeInstabox({
+    home,
+    env: { MAKA_TEST_PIDS: pids },
+    ...(sandbox.execPath ? { execPath: sandbox.execPath } : {}),
+  }).start();
   const client = new InstaboxClient({
     apiKey: fake.apiKey,
     baseUrl: fake.url,
@@ -302,21 +333,21 @@ export async function setup(
     pids,
     calls: [],
     hook: undefined,
+    replace: undefined,
     leases: { acquired: 0, released: 0 },
     nextSample: () => new Promise<void>((resolve) => samples.push(resolve)),
   } as unknown as Harness;
   h.deliveries = new MemoryCodingDeliveries();
   h.claude = new FakeAgent('claude-agent-sdk', h);
   h.codex = new FakeAgent('codex', h);
-  const sandbox = new RecordingSandbox(new FleetCodingSandbox(fleet), h, samples);
+  const recording = new RecordingSandbox(new FleetCodingSandbox(fleet), h, samples);
   h.makeRunner = (overrides = {}) =>
     new CodingRunner({
       agents: { 'claude-agent-sdk': h.claude, codex: h.codex },
-      sandbox,
+      sandbox: recording,
       deliveries: h.deliveries,
       repoUrl: () => `file://${bare}`,
       sampleIntervalMs: 60_000,
-      checkPollMs: 5,
       ...options,
       ...overrides,
     });
@@ -359,6 +390,20 @@ export async function setup(
     await fs.rm(tmp, { recursive: true, force: true });
   });
   return h;
+}
+
+/** Pids recorded with recordPid under `name`, waiting until there are at least `count`. */
+export async function recordedPids(h: Harness, name: string, count = 0): Promise<number[]> {
+  for (;;) {
+    const files = (await fs.readdir(h.pids)).filter(
+      (file) => file.startsWith(`${name}-`) && !file.endsWith('.tmp'),
+    );
+    const pids = (await Promise.all(files.map((file) => fs.readFile(join(h.pids, file), 'utf8'))))
+      .map((text) => Number(text.trim()))
+      .filter((pid) => pid > 0);
+    if (pids.length >= count) return pids;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 /** Everything a run reports, up to the end of its stream. */

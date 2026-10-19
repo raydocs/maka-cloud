@@ -19,8 +19,9 @@ import {
   BASE_REVERT_SCRIPT,
   BLOB_CHUNK_SCRIPT,
   CHANGES_SCRIPT,
-  CHECK_START_SCRIPT,
-  CHECK_STATUS_SCRIPT,
+  CHECK_SCRIPT,
+  CHECK_STOP_SCRIPT,
+  checkTagPrefix,
   CLONE_SCRIPT,
   PATCH_CHUNK_SCRIPT,
   READ_SMALL_SCRIPT,
@@ -44,7 +45,10 @@ export interface AgentRunner {
 }
 
 export interface CodingLimits {
-  /** How long one check (the test command, the reproduction test) may run. Default 15 min. */
+  /**
+   * How long one check (the test command, the reproduction test) may run. Default 9 min, at most
+   * 9.5 min: a check is one sandbox exec, which ends after 10 minutes.
+   */
   checkTimeoutMs: number;
   /** Bytes of a check's output kept for the agent and the verification record. Default 8 KiB. */
   outputTailBytes: number;
@@ -61,7 +65,7 @@ export interface CodingLimits {
 }
 
 export const DEFAULT_CODING_LIMITS: CodingLimits = {
-  checkTimeoutMs: 15 * 60_000,
+  checkTimeoutMs: 9 * 60_000,
   outputTailBytes: 8 * 1024,
   maxFiles: 300,
   maxFileBytes: 2 * 1024 * 1024,
@@ -82,8 +86,6 @@ export interface CodingRunnerOptions {
   loop?: Partial<LoopLimits>;
   /** How often the workspace is sampled for edit loops while an agent runs. Default 15 s. */
   sampleIntervalMs?: number;
-  /** How often a running check is polled. Default 2 s. */
-  checkPollMs?: number;
   /** A cleanup step that failed. Cleanup goes on; this is how it is seen. */
   onCleanupError?(failure: { taskId: TaskId; step: string; error: unknown }): void;
 }
@@ -102,7 +104,10 @@ const MAX_NOTE_CHARS = 500;
 const MAX_REASON_CHARS = 2_000;
 const BLOB_CHUNK_BYTES = 192 * 1024;
 const MAX_REPRO_BYTES = 16 * 1024;
-const STARTING_LIMIT_MS = 60_000;
+/** The longest check: its exec (the check, its kill grace and the outer stop) ends within 10 minutes. */
+const MAX_CHECK_MS = 570_000;
+/** Seconds an exec of CHECK_SCRIPT may take beyond the check's own limit. */
+const CHECK_EXEC_SLACK_SECONDS = 30;
 
 class CancelledError extends Error {}
 
@@ -162,6 +167,11 @@ export class CodingRunner implements Runner {
 
   constructor(readonly options: CodingRunnerOptions) {
     this.limits = { ...DEFAULT_CODING_LIMITS, ...options.limits };
+    if (!(this.limits.checkTimeoutMs > 0 && this.limits.checkTimeoutMs <= MAX_CHECK_MS)) {
+      throw new Error(
+        `checkTimeoutMs must be above 0 and at most ${MAX_CHECK_MS} (a check is one sandbox exec, which ends after 10 minutes)`,
+      );
+    }
     this.loopLimits = { ...DEFAULT_LOOP_LIMITS, ...options.loop };
   }
 
@@ -273,7 +283,6 @@ class CodingRun implements RunHandle {
   private workspace: SandboxWorkspace | undefined;
   private agentHandle: RunHandle | undefined;
   private readonly agentReleases = new WeakMap<RunHandle, Promise<void>>();
-  private checkRunning = false;
   private baseCheckActive = false;
   private runs = 0;
   private checkCount = 0;
@@ -757,94 +766,55 @@ class CodingRun implements RunHandle {
   }
 
   /**
-   * Starts a check detached in the sandbox and polls it until it exits, then stops whatever it
-   * left running. Each launch has a fresh id and nonce, so results laid out in advance are never
-   * read as its own.
+   * Runs a check in the sandbox as one exec, in its own PID namespace, and takes its exit status
+   * from the exec's result, which the sandbox API reports: nothing the check writes is read as its
+   * result. When the exec returns normally the namespace is gone, and with it everything the check
+   * started; the stop that follows also ends a check whose exec did not return normally.
    */
   private async runCheck(name: string, command: string): Promise<CheckResult> {
     const { stats } = this.runner;
-    const check = `check-${++this.checkCount}-${randomBytes(8).toString('hex')}-${name}`;
-    const nonce = randomBytes(16).toString('hex');
+    const tag = `${checkTagPrefix(this.spec.taskId)}${++this.checkCount}-${randomBytes(8).toString('hex')}`;
     const timeoutSeconds = Math.max(1, Math.ceil(this.limits.checkTimeoutMs / 1000));
-    const ended = (exitCode: number, output: string): CheckResult => ({
-      name,
-      command,
-      exitCode,
-      outputBytes: 0,
-      output,
-    });
     stats.checks++;
-    this.checkRunning = true;
-    let exited = false;
     try {
-      const control = { MAKA_CHECK: check, MAKA_CTL_ROOT: this.ws.controlDir };
-      const start = await this.exec(CHECK_START_SCRIPT, {
-        ...control,
-        MAKA_NONCE: nonce,
-        MAKA_CWD: `${this.ws.dir}/workspace`,
-        MAKA_CMD: command,
-        MAKA_TIMEOUT: String(timeoutSeconds),
-        MAKA_RUN_TOKEN: randomBytes(16).toString('hex'),
-      });
-      const started = start.stdout.trim();
-      if (started === 'EXISTS' || started === 'BADROOT') {
-        exited = true;
-        return ended(
-          -1,
-          `the check could not start: its control files were there before it (${started})`,
-        );
-      }
-      if (started !== 'STARTED' && started !== 'ALREADY') {
-        throw new Error(`the check ${name} did not start: ${clipText(start.stderr.trim(), 300)}`);
-      }
-      const pollMs = this.options.checkPollMs ?? 2_000;
-      let startingSince: number | undefined;
-      for (;;) {
-        await this.delay(pollMs);
-        const status = await this.exec(CHECK_STATUS_SCRIPT, {
-          ...control,
-          MAKA_NONCE: nonce,
-          MAKA_TAIL: String(this.limits.outputTailBytes),
-        });
-        const lines = status.stdout.split('\n');
-        const head = lines[0]?.trim() ?? '';
-        const exit = /^EXIT (\d+) ([01]) (\d+)$/u.exec(head);
-        if (exit) {
-          exited = true;
-          return {
-            name,
-            command,
-            exitCode: Number(exit[1]),
-            ...(exit[2] === '1' ? { timedOut: true } : {}),
-            outputBytes: Number(exit[3]),
-            output: Buffer.from(lines[1] ?? '', 'base64').toString('utf8'),
-          };
-        }
-        if (head === 'STARTING') {
-          startingSince ??= Date.now();
-          if (Date.now() - startingSince < STARTING_LIMIT_MS) continue;
-        } else if (head === 'RUNNING') {
-          continue;
-        }
-        exited = true;
-        return ended(
-          -1,
-          head === 'FOREIGN'
-            ? "the check's control files were changed while it ran"
-            : 'the check died before it exited',
-        );
-      }
-    } finally {
+      const startedAt = Date.now();
+      let out: Awaited<ReturnType<SandboxWorkspace['exec']>>;
       try {
-        if (exited) {
-          // Whatever the check started and left running goes with it.
-          await this.ws.stopRuns([check]);
-          this.checkRunning = false;
-        }
+        out = await this.exec(
+          CHECK_SCRIPT,
+          {
+            MAKA_CHECK_TAG: tag,
+            MAKA_CMD: command,
+            MAKA_TIMEOUT: String(timeoutSeconds),
+            MAKA_TAIL: String(this.limits.outputTailBytes),
+          },
+          timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
+        );
       } finally {
-        // A check left running by an error or a cancel is stopped by the cleanup.
-        stats.checks--;
+        // On a cancel the cleanup stops every check of the task.
+        if (!this.signal.aborted) await this.stopCheck(tag);
       }
+      const elapsedMs = Date.now() - startedAt;
+      const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
+      if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
+      const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
+      const result = { name, command, outputBytes: Number(bytes?.[1] ?? 0), output: out.stdout };
+      if (out.timedOut) {
+        return { ...result, exitCode: -1, timedOut: true };
+      }
+      const timedOut =
+        (out.exitCode === 124 || out.exitCode === 137) && elapsedMs >= timeoutSeconds * 1000;
+      return { ...result, exitCode: out.exitCode, ...(timedOut ? { timedOut: true } : {}) };
+    } finally {
+      stats.checks--;
+    }
+  }
+
+  /** Stops one check's namespace, whatever its exec did. */
+  private async stopCheck(tag: string): Promise<void> {
+    const out = (await this.exec(CHECK_STOP_SCRIPT, { MAKA_CHECK_TAG: tag })).stdout.trim();
+    if (out !== 'NONE' && out !== 'STOPPED') {
+      throw new Error(`a check's processes could not be stopped (${clipText(out, 200)})`);
     }
   }
 
@@ -1129,28 +1099,6 @@ class CodingRun implements RunHandle {
     } finally {
       this.runner.stats.workspaces--;
     }
-  }
-
-  private delay(ms: number): Promise<void> {
-    const { stats } = this.runner;
-    return new Promise<void>((resolve, reject) => {
-      if (this.signal.aborted) return reject(new CancelledError());
-      stats.timers++;
-      const done = (): void => {
-        stats.timers--;
-        this.signal.removeEventListener('abort', onAbort);
-      };
-      const timer = setTimeout(() => {
-        done();
-        resolve();
-      }, ms);
-      const onAbort = (): void => {
-        clearTimeout(timer);
-        done();
-        reject(new CancelledError());
-      };
-      this.signal.addEventListener('abort', onAbort, { once: true });
-    });
   }
 
   /** Waits for `promise`, but not past a cancel. */
