@@ -49,6 +49,8 @@ export interface FakeModel {
   readonly failures: unknown[];
   script(lane: Lane, ...steps: Step[]): void;
   pending(lane: Lane): number;
+  /** Drops the steps still scripted for `lane`. */
+  reset(lane: Lane): void;
   close(): Promise<void>;
 }
 
@@ -181,6 +183,9 @@ export async function startFakeModel(): Promise<FakeModel> {
       scripts[lane].push(...steps);
     },
     pending: (lane) => scripts[lane].length,
+    reset: (lane) => {
+      scripts[lane] = [];
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.closeAllConnections();

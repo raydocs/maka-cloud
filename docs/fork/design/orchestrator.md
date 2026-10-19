@@ -13,14 +13,29 @@ pulling in the runtime.
 
 | Tool | Behavior |
 |---|---|
-| `delegate_task {runner, brief, title?, mode?, timeoutMs?}` | Writes the brief file, creates a child task, starts the runner. `mode: "async"` (default) returns the task; `"wait"` blocks until it ends or the timeout passes. |
+| `delegate_task {runner, brief, title?, mode?, timeoutMs?, budgetUsd?, idempotencyKey?}` | Writes the brief file, creates a child task, starts the runner. `mode: "async"` (default) returns the task; `"wait"` blocks until it ends or the timeout passes. `budgetUsd` caps the tree (see Budgets). With `idempotencyKey` the task id is derived from the session and the key, so a repeat returns the same task. |
 | `task_status {taskId}` | State, progress notes, and the result manifest once finished. |
 | `task_wait {taskId, timeoutMs?}` | Blocks until the task ends. Default 60 s, at most 10 min. A timeout returns `waitTimedOut: true` and does not cancel the task. |
-| `task_cancel {taskId}` | Cancels the task and every descendant, children first. A task that already ended keeps its state. |
+| `task_cancel {taskId}` or `{idempotencyKey}` | Cancels the task and every descendant, children first. A task that already ended keeps its state. By key, when no task exists yet, the key is remembered (in memory, last 10k) so a delegation still on its way is refused with `cancelled`, and the result is `{created: false}`. |
 
 Errors are tool results with `isError` and a code: `not_found`,
 `invalid_request`, `unknown_runner`, `depth_exceeded`, `unauthorized`,
-`quota_exceeded`.
+`quota_exceeded`, `budget_exceeded`, `cancelled`.
+
+## Budgets
+
+A top-level task delegated with `budgetUsd` caps what its whole tree spends;
+a child cannot set its own cap. Each runner gets what is left of the cap in
+`RunSpec.budgetUsd`, meters its CLI's reported usage, and pushes cumulative
+`usage` events. The orchestrator records them as `task_cost` on the top-level
+task, in the write chain, and cancels the tree once the total reaches the cap.
+The same guards that refuse creates and starts under a stopped ancestor
+refuse them in a tree whose recorded spend reached its cap. Views carry
+`costUsd`, `budgetUsd` and `budgetExceeded` for the tree.
+
+This is a soft cap: spend is known only as the CLI reports it, so a run can
+overshoot by what one model call costs. A hard cap at the model gateway comes
+with T17.
 
 ## State is a log
 

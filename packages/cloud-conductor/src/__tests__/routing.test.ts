@@ -68,5 +68,7 @@ test('a research request runs the research playbook: plan at high effort, delega
     planners: 0,
     timers: 0,
     openClients: 0,
+    outboxSending: 0,
+    outboxRetrying: 0,
   });
 });

@@ -232,33 +232,6 @@ test('an irreversible tool is held until the user approves that exact call, and 
   assert.deepEqual(published, [{ title: 'Hello' }]);
 });
 
-test('the approval card shows what the held call acts on, built by its tool', async (t) => {
-  const h = await makeHarness(t, {
-    conductor: {
-      tools: [
-        {
-          ...publish,
-          approvalDetails: async (args: { title: string }) => `Page title: ${args.title}`,
-        } as ConductorToolSpec,
-      ],
-    },
-  });
-  h.model.script('conductor', calls(tool('publish_page', { title: 'Hello' })), (request) => {
-    const actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1] ?? '';
-    return calls(
-      tool('ask_user', {
-        reason: 'irreversible',
-        question: 'Publish it?',
-        actionRef,
-        recommended: 'approve',
-      }),
-    );
-  });
-  await h.send('cnv_1', 'Publish my page.');
-  await h.conductor.idle();
-  assert.equal(h.outbox.questions[0]?.question, 'Publish it?\n\nPage title: Hello');
-});
-
 test('a rejected irreversible action never runs', async (t) => {
   published.length = 0;
   const h = await makeHarness(t, { conductor: { tools: [publish] } });
@@ -328,4 +301,88 @@ test("an answer can carry the user's own words, which reach the model with the o
     ),
     { accepted: false, reason: 'text_too_long' },
   );
+});
+
+const deleted: unknown[] = [];
+const deleteAccount: ConductorToolSpec = {
+  name: 'delete_account',
+  description: 'Delete a customer account.',
+  parameters: z.object({ accountId: z.string(), reason: z.string() }),
+  irreversible: true,
+  impl: async (args) => {
+    deleted.push(args);
+    return { deleted: true };
+  },
+};
+
+test('the approval card shows the held call, built by code; the model text is only supplementary', async (t) => {
+  deleted.length = 0;
+  const h = await makeHarness(t, { conductor: { tools: [deleteAccount] } });
+  h.model.script(
+    'conductor',
+    calls(tool('delete_account', { accountId: 'acc_42', reason: 'closed by owner' })),
+    (request) => {
+      const actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1];
+      return calls(
+        tool('ask_user', {
+          reason: 'irreversible',
+          // The model describes the call as something harmless.
+          question: 'Generate a read-only preview?',
+          actionRef,
+          recommended: 'approve',
+        }),
+      );
+    },
+  );
+  await h.send('cnv_1', 'Tidy up my accounts.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0]!;
+  assert.equal(question.reason, 'irreversible');
+  assert.doesNotMatch(question.question, /read-only preview/);
+  assert.match(question.question, /delete_account/);
+  assert.match(question.question, /cannot be undone/);
+  assert.deepEqual(question.action, {
+    tool: 'delete_account',
+    args: { accountId: 'acc_42', reason: 'closed by owner' },
+  });
+  assert.equal(question.note, 'Generate a read-only preview?');
+  assert.match(question.question, /accountId: "acc_42"/);
+  assert.deepEqual(deleted, []);
+});
+
+test('an irreversible tool can add code-built details to the approval card, under the held call', async (t) => {
+  const h = await makeHarness(t, {
+    conductor: {
+      tools: [
+        {
+          ...deleteAccount,
+          approvalDetails: async (args: { accountId: string }) =>
+            `Account ${args.accountId} has 3 open invoices.`,
+        } as ConductorToolSpec,
+      ],
+    },
+  });
+  h.model.script(
+    'conductor',
+    calls(tool('delete_account', { accountId: 'acc_42', reason: 'closed by owner' })),
+    (request) => {
+      const actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1];
+      return calls(
+        tool('ask_user', {
+          reason: 'irreversible',
+          question: 'Delete it?',
+          actionRef,
+          recommended: 'approve',
+        }),
+      );
+    },
+  );
+  await h.send('cnv_1', 'Delete acc_42.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0]!;
+  assert.match(
+    question.question,
+    /^Allow delete_account\(accountId: "acc_42", reason: "closed by owner"\)\? It cannot be undone\.\n\nAccount acc_42 has 3 open invoices\.$/,
+  );
+  assert.equal(question.note, 'Delete it?');
 });

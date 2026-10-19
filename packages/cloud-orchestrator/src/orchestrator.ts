@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   type IssuedSession,
   MemorySessionStore,
@@ -29,6 +30,9 @@ export const DEFAULT_MAX_DEPTH = 5;
 export const DEFAULT_ORPHAN_STOP_TIMEOUT_MS = 10_000;
 export const DEFAULT_CONTROL_TIMEOUT_MS = 15_000;
 const MAX_TITLE_LENGTH = 200;
+const MAX_KEY_LENGTH = 200;
+/** Keys cancelled before their task existed, remembered so a late delegation is refused. */
+const MAX_TOMBSTONES = 10_000;
 export const DEFAULT_ARCHIVE_CACHE: CacheLimits = { maxEntries: 512, maxBytes: 4 * 1024 * 1024 };
 
 export interface OrchestratorOptions {
@@ -93,6 +97,17 @@ export interface DelegateInput {
   title?: string;
   mode?: TaskMode;
   timeoutMs?: number;
+  /**
+   * Dollar cap for the tree this task starts. Honoured for a root session only: a task an
+   * executor delegates shares the cap of the tree it is in.
+   */
+  budgetUsd?: number;
+  /**
+   * Makes the delegation idempotent per session: the task id is derived from the key, a repeat
+   * returns the task the first call created, and `cancelByKey` can stop it without ever having
+   * seen its id.
+   */
+  idempotencyKey?: string;
 }
 
 export class Orchestrator {
@@ -118,6 +133,9 @@ export class Orchestrator {
   private readonly waiters = new Map<TaskId, Set<() => void>>();
   private readonly background = new Set<Promise<void>>();
   private readonly cancelling = new Map<TaskId, Promise<void>>();
+  /** Keyed delegations being created, so a repeat waits for the first instead of writing twice. */
+  private readonly keyed = new Map<TaskId, Promise<void>>();
+  private readonly tombstones = new Set<TaskId>();
   private restoring = false;
   private writeChain: Promise<unknown> = Promise.resolve();
   private endpoint: string | undefined;
@@ -226,22 +244,59 @@ export class Orchestrator {
   ): Promise<TaskView> {
     this.assertSessionActive(session);
     const mode = input.mode ?? 'async';
+    if (
+      input.budgetUsd !== undefined &&
+      !(Number.isFinite(input.budgetUsd) && input.budgetUsd > 0)
+    ) {
+      throw new OrchestratorError('invalid_request', 'budgetUsd must be a positive number');
+    }
+    const key = input.idempotencyKey;
+    if (key !== undefined && (key.length === 0 || key.length > MAX_KEY_LENGTH)) {
+      throw new OrchestratorError(
+        'invalid_request',
+        `idempotencyKey must be 1 to ${MAX_KEY_LENGTH} characters`,
+      );
+    }
     // A wait-mode delegate holds its wait slot from the start, so it is refused
     // before a task is created rather than after.
     const releaseWait = mode === 'wait' ? this.acquireWait(session) : undefined;
     try {
-      return await this.delegateTask(session, input, mode, signal);
+      const taskId =
+        key === undefined
+          ? await this.delegateTask(session, input, mode, this.newTaskId(), false)
+          : await this.delegateOnce(session, input, mode, keyedTaskId(session.sessionId, key));
+      if (mode === 'wait') return await this.waitView(taskId, input.timeoutMs, signal);
+      return this.view(taskId);
     } finally {
       releaseWait?.();
     }
+  }
+
+  /** A keyed delegation: the first call creates the task, every repeat gets that task. */
+  private async delegateOnce(
+    session: SessionInfo,
+    input: DelegateInput,
+    mode: TaskMode,
+    taskId: TaskId,
+  ): Promise<TaskId> {
+    let creating = this.keyed.get(taskId);
+    if (!creating) {
+      if (this.lookup(taskId)) return taskId;
+      const created = this.delegateTask(session, input, mode, taskId, true).then(() => undefined);
+      creating = created.finally(() => this.keyed.delete(taskId));
+      this.keyed.set(taskId, creating);
+    }
+    await creating;
+    return taskId;
   }
 
   private async delegateTask(
     session: SessionInfo,
     input: DelegateInput,
     mode: TaskMode,
-    signal: AbortSignal | undefined,
-  ): Promise<TaskView> {
+    taskId: TaskId,
+    keyed: boolean,
+  ): Promise<TaskId> {
     const runner = this.runners.get(input.runner);
     if (!runner) {
       throw new OrchestratorError(
@@ -266,9 +321,12 @@ export class Orchestrator {
       }
     }
     const rootSessionId = this.rootSessionOf(session);
-    // Fail early under overload; the check that counts is the one in the write chain below.
+    // Fail early under overload; the checks that count are the ones in the write chain below.
     this.assertTaskQuota(rootSessionId);
-    const taskId = this.newTaskId();
+    if (parent !== undefined) this.assertUnderBudget(parent);
+    if (keyed) this.assertNotTombstoned(taskId);
+    // Only a root session sets a tree's cap; below it, the tree's cap applies.
+    const budgetUsd = parent === undefined ? input.budgetUsd : undefined;
     let paths: HandoffPaths;
     try {
       paths = await this.handoff.writeBrief(taskId, input.brief);
@@ -289,10 +347,21 @@ export class Orchestrator {
           runner: input.runner,
           ...(input.title === undefined ? {} : { title: input.title }),
           mode,
+          ...(budgetUsd === undefined ? {} : { budgetUsd }),
+          ...(keyed && input.idempotencyKey !== undefined
+            ? { idempotencyKey: input.idempotencyKey }
+            : {}),
         },
         () => {
           this.assertSessionActive(session);
-          if (parent !== undefined) this.assertParentActive(parent);
+          if (parent !== undefined) {
+            this.assertParentActive(parent);
+            // Spend is recorded in this chain too, so no task joins a tree whose
+            // reported spend has reached its cap, even before the cancel lands.
+            this.assertUnderBudget(parent);
+          }
+          // A cancel by key that found nothing left a tombstone, also in this chain.
+          if (keyed) this.assertNotTombstoned(taskId);
           // Counting and appending happen in the same step of the chain, so
           // concurrent delegates cannot all pass at limit - 1.
           this.assertTaskQuota(rootSessionId);
@@ -303,8 +372,7 @@ export class Orchestrator {
       throw error;
     }
     this.track(this.launch(taskId, input.runner, paths));
-    if (mode === 'wait') return await this.waitView(taskId, input.timeoutMs, signal);
-    return this.view(taskId);
+    return taskId;
   }
 
   status(session: SessionInfo, taskId: TaskId): TaskView {
@@ -339,6 +407,24 @@ export class Orchestrator {
     this.visible(session, taskId);
     await this.cancelTree(taskId, session.sessionId, () => this.assertSessionActive(session));
     return this.view(taskId);
+  }
+
+  /**
+   * Cancels the task a keyed delegation of this session created. When none
+   * exists yet, the key is remembered so that a delegation still on its way
+   * is refused, and this returns undefined. The check runs in the write chain,
+   * behind any create already queued there.
+   */
+  async cancelByKey(session: SessionInfo, key: string): Promise<TaskView | undefined> {
+    this.assertSessionActive(session);
+    const taskId = keyedTaskId(session.sessionId, key);
+    const exists = await this.inChain(() => {
+      if (this.lookup(taskId)) return true;
+      this.tombstone(taskId);
+      return false;
+    });
+    if (!exists) return undefined;
+    return this.cancel(session, taskId);
   }
 
   /** `cancel` for the public API: the operator is checked once, in the write chain, like a session. */
@@ -578,7 +664,15 @@ export class Orchestrator {
   private async launch(taskId: TaskId, runnerName: string, paths: HandoffPaths): Promise<void> {
     const task = this.tasks.get(taskId);
     const runner = this.runners.get(runnerName);
-    if (!task || !runner || this.isStopping(taskId) || this.ancestorStopped(taskId)) return;
+    if (
+      !task ||
+      !runner ||
+      this.isStopping(taskId) ||
+      this.ancestorStopped(taskId) ||
+      this.overBudget(taskId)
+    )
+      return;
+    const left = this.budgetLeft(taskId);
     const executor = this.auth.issue({ parentTaskId: taskId });
     this.executorSessions.set(taskId, executor.sessionId);
     let handle: RunHandle;
@@ -588,6 +682,7 @@ export class Orchestrator {
         runner: runnerName,
         briefPath: paths.briefPath,
         resultPath: paths.resultPath,
+        ...(left === undefined ? {} : { budgetUsd: left }),
         ...(this.endpoint === undefined
           ? {}
           : { mcp: { url: this.endpoint, token: executor.token } }),
@@ -610,7 +705,8 @@ export class Orchestrator {
     }
     this.handles.set(taskId, handle);
     const started = await this.record({ type: 'task_started', taskId }, () => {
-      if (this.isStopping(taskId) || this.ancestorStopped(taskId)) throw new Superseded();
+      if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
+        throw new Superseded();
     });
     // Dropped: whatever is stopping the task also holds the handle now.
     if (!started) return;
@@ -624,6 +720,9 @@ export class Orchestrator {
         if (this.isStopping(taskId)) return;
         if (event.type === 'progress') {
           await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
+        } else if (event.type === 'usage') {
+          if (!Number.isFinite(event.costUsd) || event.costUsd < 0) continue;
+          await this.recordSpend(taskId, event.costUsd);
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
           await this.recordRunnerOutcome({ type: 'task_failed', taskId, reason: event.reason });
@@ -696,10 +795,38 @@ export class Orchestrator {
    * ended the report is dropped, checked inside the write chain so a cancel
    * that commits in between cannot be followed by a result.
    */
-  private async recordRunnerOutcome(event: TaskEvent & { taskId: TaskId }): Promise<void> {
-    await this.record(event, () => {
+  private recordRunnerOutcome(
+    event: TaskEvent & { taskId: TaskId },
+  ): Promise<StoredEvent | undefined> {
+    return this.record(event, () => {
       if (this.isStopping(event.taskId)) throw new Superseded();
     });
+  }
+
+  /**
+   * Records a runner's spend on the top-level task of its tree, and cancels the
+   * tree when that reaches its cap. Dropped once the reporting task is stopping
+   * or the top-level task has ended.
+   */
+  private async recordSpend(taskId: TaskId, costUsd: number): Promise<void> {
+    const root = this.treeRoot(taskId);
+    if (!root) return;
+    const recorded = await this.record(
+      { type: 'task_cost', taskId: root.taskId, fromTaskId: taskId, costUsd },
+      () => {
+        if (this.isStopping(taskId) || this.isDone(root.taskId)) throw new Superseded();
+      },
+    );
+    if (recorded && this.overBudget(root.taskId)) {
+      this.track(this.cancelTree(root.taskId, 'system'));
+    }
+  }
+
+  /** Runs `fn` in the write chain, after every append queued before it. */
+  private inChain<T>(fn: () => T): Promise<T> {
+    const done = this.writeChain.then(fn);
+    this.writeChain = done.catch(() => undefined);
+    return done;
   }
 
   /**
@@ -801,6 +928,50 @@ export class Orchestrator {
     const task = this.lookup(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
     return toView(task);
+  }
+
+  // Budgets. A top-level task delegated with `budgetUsd` caps the spend its
+  // whole tree reports. Spend is recorded in the write chain, so the checks
+  // below see it in the same order as creates and starts.
+
+  /** The top-level task of the tree `taskId` is in. */
+  private treeRoot(taskId: TaskId): TaskRecord | undefined {
+    return this.ancestry(taskId).at(-1);
+  }
+
+  /** Dollars left under the cap of the tree `taskId` is in; undefined when it has none. */
+  private budgetLeft(taskId: TaskId): number | undefined {
+    const root = this.treeRoot(taskId);
+    if (root?.budgetUsd === undefined) return undefined;
+    return roundUsd(Math.max(0, root.budgetUsd - (root.costUsd ?? 0)));
+  }
+
+  private overBudget(taskId: TaskId): boolean {
+    const left = this.budgetLeft(taskId);
+    return left !== undefined && left <= 0;
+  }
+
+  private assertUnderBudget(taskId: TaskId): void {
+    if (this.overBudget(taskId)) {
+      throw new OrchestratorError(
+        'budget_exceeded',
+        'The budget of this task tree is spent; it is being cancelled',
+      );
+    }
+  }
+
+  private assertNotTombstoned(taskId: TaskId): void {
+    if (this.tombstones.has(taskId)) {
+      throw new OrchestratorError('cancelled', 'This delegation was cancelled before it started');
+    }
+  }
+
+  private tombstone(taskId: TaskId): void {
+    this.tombstones.add(taskId);
+    if (this.tombstones.size > MAX_TOMBSTONES) {
+      const oldest = this.tombstones.values().next().value;
+      if (oldest !== undefined) this.tombstones.delete(oldest);
+    }
   }
 
   /**
@@ -959,6 +1130,16 @@ export class Orchestrator {
     }
     return found;
   }
+}
+
+/** The id of the task a session's keyed delegation creates: the same key always gives the same id. */
+function keyedTaskId(sessionId: SessionId, key: string): TaskId {
+  const digest = createHash('sha256').update(`${sessionId}\0${key}`).digest('hex');
+  return `tsk_${digest.slice(0, 32)}`;
+}
+
+function roundUsd(usd: number): number {
+  return Math.round(usd * 1e9) / 1e9;
 }
 
 function invalidState(message: string): OrchestratorError {

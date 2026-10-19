@@ -8,6 +8,7 @@ import {
   type OrchestratorServerOptions,
   type RunnerRegistry,
 } from '@maka-cloud/orchestrator';
+import { type ArtifactSource, FileArtifactSource } from './artifacts.js';
 import { ConversationStore } from './conversations.js';
 import { CostLedger } from './cost.js';
 import { openDatabase } from './db.js';
@@ -53,6 +54,8 @@ export interface CloudServerOptions {
   http?: Partial<HttpLimits>;
   orchestrator?: Pick<OrchestratorOptions, 'quotas' | 'caches' | 'maxDepth' | 'now'>;
   handler?: ConversationHandler;
+  /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
+  artifacts?: ArtifactSource;
   sweepOrphans?: SweepOrphans;
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
@@ -124,6 +127,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       controlLimiter: new RateLimiter(limits.controlPerMinute),
       orchestrator,
       costs,
+      artifacts: options.artifacts ?? new FileArtifactSource(options.handoffRoot),
+      artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
       limits,
       onMessage: (message) => {
         const handler = options.handler;

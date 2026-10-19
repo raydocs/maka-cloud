@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import type { MakaTool, MakaToolContext } from '@maka/runtime/tool-runtime';
 import { z } from 'zod';
 import type { ConductorLimits } from './config.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook } from './playbooks.js';
-import type { BudgetView, ConductorState, QuestionOption, QuestionRow } from './state.js';
+import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
 
 /** A tool call the conductor refuses. The model sees `code: message` as the tool error. */
 export class ToolRefusal extends Error {
@@ -37,9 +38,12 @@ export interface ToolHost {
     signal: AbortSignal,
   ): Promise<string>;
   /** Opens the code-built budget question for a step that does not fit. */
-  askBudget(turn: ActiveTurn, needUsd: number): Promise<QuestionRow | undefined>;
-  postQuestion(question: QuestionRow): Promise<void>;
-  postNotice(turn: ActiveTurn, text: string): Promise<void>;
+  askBudget(turn: ActiveTurn, needUsd: number): QuestionRow | undefined;
+  /** Sends a question already written to the outbox with it. */
+  postQuestion(question: QuestionRow): void;
+  postNotice(turn: ActiveTurn, text: string): void;
+  /** Settles the delegation behind a task view once the view shows the task ended. */
+  settleTask(view: Record<string, unknown> | undefined): void;
 }
 
 /** A tool a playbook adds. `irreversible` tools are held until the user approves the call. */
@@ -49,8 +53,8 @@ export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
   parameters: P;
   irreversible?: boolean;
   /**
-   * For an irreversible tool: what the approval card must show about a held call (what it will
-   * act on), built by code and appended to the model's question so the user sees it as is.
+   * For an irreversible tool: what the approval card must also show about a held call (what it
+   * will act on), built by code from the held arguments and shown under the call itself.
    */
   approvalDetails?(args: z.infer<P>): Promise<string> | string;
   impl(
@@ -114,6 +118,7 @@ export function conductorTools(
   ) => {
     const result = await turn.link.call(name, args, signalOf(turn, ctx));
     if (result.isError) throw new ToolRefusal('orchestrator_error', result.text);
+    host.settleTask(result.structured);
     return verifyView(turn, result.structured);
   };
 
@@ -166,7 +171,7 @@ export function conductorTools(
   }> = {
     name: 'delegate_task',
     description:
-      'Start a child task on a runner with a self-contained brief. budgetUsd is reserved from the run budget. mode "async" (default) returns the task at once; "wait" blocks until it ends or timeoutMs passes.',
+      'Start a child task on a runner with a self-contained brief. budgetUsd is reserved from the run budget and caps what the task and everything it delegates may spend: the task is cancelled when its spend reaches it. mode "async" (default) returns the task at once; "wait" blocks until it ends or timeoutMs passes.',
     parameters: z.object({
       runner: z.string().min(1).describe('A runner the playbook allows'),
       brief: z.string().min(1).max(200_000).describe('What the runner must do, self-contained'),
@@ -190,8 +195,11 @@ export function conductorTools(
           `The ${playbook.id} playbook delegates only to: ${playbook.allowedRunners.join(', ')}.`,
         );
       }
-      // Check and reserve in one synchronous transaction, before any await.
-      const reserved = host.state.tryReserve(turn.runId, args.budgetUsd, 'delegate_task');
+      // Check, reserve and store the delegation in one synchronous transaction,
+      // before any await. From here on a stop finds the task by this key, even
+      // if the response that names it never arrives.
+      const key = `dlg_${randomUUID().replaceAll('-', '')}`;
+      const reserved = host.state.reserveDelegation(turn.runId, args.budgetUsd, key);
       if (!reserved.ok) {
         if (reserved.reason === 'question_open') {
           throw new ToolRefusal(
@@ -199,25 +207,46 @@ export function conductorTools(
             'A question is waiting for the user. End your turn now.',
           );
         }
-        const question = await host.askBudget(turn, args.budgetUsd);
+        const question = host.askBudget(turn, args.budgetUsd);
         throw new ToolRefusal(
           'budget_exceeded',
           `This delegation needs ${money(args.budgetUsd)} but the run has ${money(reserved.budget.remainingUsd)} left.${question ? ' The user has been asked whether to raise the budget.' : ''} End your turn now.`,
         );
       }
-      const { budgetUsd: _budget, ...forwarded } = args;
-      // If this call throws (abort, broken connection) the task may exist, so
-      // the reservation stays spent.
-      const result = await turn.link.call('delegate_task', forwarded, signalOf(turn, ctx));
+      const { mode, timeoutMs, ...forwarded } = args;
+      const signal = signalOf(turn, ctx);
+      // Always async, so the task id comes back (and is stored) at once; a
+      // "wait" is a separate task_wait the stop can interrupt with the id known.
+      // If this call throws (abort, broken connection) the task may exist: the
+      // reservation stays spent until a cancel by key settles it.
+      const result = await turn.link.call(
+        'delegate_task',
+        { ...forwarded, mode: 'async', idempotencyKey: key },
+        signal,
+      );
       if (result.isError) {
         // Refused by the orchestrator: no task exists, the money comes back.
-        host.state.release(turn.runId, reserved.reservation);
+        host.state.settleDelegation(key, 0);
         throw new ToolRefusal('orchestrator_error', result.text);
       }
       const taskId = result.structured?.taskId;
-      if (typeof taskId === 'string') host.state.bindTask(taskId, turn.runId, reserved.reservation);
+      if (typeof taskId !== 'string') {
+        throw new ToolRefusal('orchestrator_error', 'The orchestrator returned no task id.');
+      }
+      host.state.bindTask(key, taskId);
+      let view = result.structured;
+      if (mode === 'wait') {
+        const waited = await turn.link.call(
+          'task_wait',
+          { taskId, ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+          signal,
+        );
+        if (waited.isError) throw new ToolRefusal('orchestrator_error', waited.text);
+        view = waited.structured;
+      }
+      host.settleTask(view);
       return {
-        task: verifyView(turn, result.structured),
+        task: verifyView(turn, view),
         budget: budgetSummary(host.state.budget(turn.runId)),
       };
     },
@@ -292,11 +321,13 @@ export function conductorTools(
     impl: async (args, ctx) => {
       const turn = host.turnFor(ctx);
       const { state } = host;
+      let question = args.question;
+      let note: string | null = null;
+      let action: HeldCall | null = null;
       let options: QuestionOption[];
       let recommended: string;
       let raiseToUsd: number | null = null;
       let actionRef: string | null = null;
-      let details: string | undefined;
       let check: () => { code: string; message: string } | undefined;
       switch (args.reason) {
         case 'taste': {
@@ -355,11 +386,6 @@ export function conductorTools(
               'irreversible needs the actionRef of a held action.',
             );
           actionRef = ref;
-          const held = state.heldAction(ref);
-          const spec = held && extra.find((tool) => tool.name === held.tool);
-          if (held && spec?.approvalDetails) {
-            details = await spec.approvalDetails(held.args as never);
-          }
           options = [
             { id: 'approve', label: 'Go ahead' },
             { id: 'reject', label: "Don't do it" },
@@ -371,6 +397,20 @@ export function conductorTools(
             );
           }
           recommended = args.recommended;
+          // The card shows the held call as it will run, built here; the
+          // model's words are only a note under it.
+          const held = state.heldCall(ref);
+          if (held && held.runId === turn.runId) {
+            action = { tool: held.tool, args: held.args };
+            const spec = extra.find((tool) => tool.name === held.tool);
+            const details = spec?.approvalDetails
+              ? await spec.approvalDetails(held.args as never)
+              : undefined;
+            question = details
+              ? `${approvalQuestion(action)}\n\n${details}`
+              : approvalQuestion(action);
+            note = args.question;
+          }
           check = () => {
             const held = state.heldState(ref);
             return held && held.runId === turn.runId && held.state === 'held'
@@ -388,7 +428,9 @@ export function conductorTools(
         turn.runId,
         {
           reason: args.reason,
-          question: details ? `${args.question}\n\n${details}` : args.question,
+          question,
+          note,
+          action,
           options: [
             ...options.filter((option) => option.id === recommended),
             ...options.filter((option) => option.id !== recommended),
@@ -400,7 +442,7 @@ export function conductorTools(
         check,
       );
       if (!opened.ok) throw new ToolRefusal(opened.code, opened.message);
-      await host.postQuestion(opened.question);
+      host.postQuestion(opened.question);
       return {
         questionId: opened.question.questionId,
         posted: true,
@@ -415,10 +457,11 @@ export function conductorTools(
     parameters: z.object({ text: z.string().min(1).max(2000) }),
     impl: async (args, ctx) => {
       const turn = host.turnFor(ctx);
+      gate(host, turn);
       if (!host.state.takeNotice(turn.runId, host.limits.maxNoticesPerRun)) {
         throw new ToolRefusal('notice_limit', 'This run has posted all the notes it may.');
       }
-      await host.postNotice(turn, args.text);
+      host.postNotice(turn, args.text);
       return { posted: true };
     },
   };
@@ -435,6 +478,25 @@ export function conductorTools(
     notify,
     ...extraTools,
   ];
+}
+
+const MAX_ARG_CHARS = 200;
+const MAX_CALL_CHARS = 1500;
+
+/**
+ * The approval question for a held call: the tool and every argument it will
+ * run with, from the held row. Long values are cut, and the cut is marked.
+ */
+export function approvalQuestion(call: HeldCall): string {
+  const parts = Object.keys(call.args)
+    .sort()
+    .map((name) => {
+      const value = JSON.stringify(call.args[name]) ?? 'undefined';
+      return `${name}: ${value.length > MAX_ARG_CHARS ? `${value.slice(0, MAX_ARG_CHARS)}… (cut)` : value}`;
+    });
+  let shown = parts.join(', ');
+  if (shown.length > MAX_CALL_CHARS) shown = `${shown.slice(0, MAX_CALL_CHARS)}… (cut)`;
+  return `Allow ${call.tool}(${shown})? It cannot be undone.`;
 }
 
 /**
