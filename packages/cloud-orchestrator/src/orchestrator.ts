@@ -422,7 +422,7 @@ export class Orchestrator {
     // progress has no handle to stop. Anything that is stopping gets the late
     // handle cancelled here, because nothing else knows about it.
     if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
-      await handle.cancel().catch(() => undefined);
+      await cancelQuietly(handle);
       return;
     }
     this.handles.set(taskId, handle);
@@ -466,7 +466,8 @@ export class Orchestrator {
       });
       return;
     }
-    this.runnerOver(taskId, handle);
+    // A clean end of the stream does not prove the remote run stopped, so the
+    // handle stays registered and is cancelled when the task ends.
     await this.recordRunnerOutcome({
       type: 'task_failed',
       taskId,
@@ -555,7 +556,7 @@ export class Orchestrator {
     const handle = this.handles.get(task.taskId);
     if (handle) {
       this.handles.delete(task.taskId);
-      void handle.cancel().catch(() => undefined);
+      void cancelQuietly(handle);
     }
     const executor = this.executorSessions.get(task.taskId);
     if (executor !== undefined) {
@@ -755,7 +756,7 @@ export class Orchestrator {
         seen.add(id);
         const task = this.tasks.get(id);
         if (task) found.push({ task, depth });
-        next.push(...this.store.childrenOf(id));
+        for (const child of this.store.childrenOf(id)) next.push(child);
       }
       level = next;
     }
@@ -772,6 +773,13 @@ function isTerminalEvent(event: TaskEvent): boolean {
     event.type === 'task_failed' ||
     event.type === 'task_cancelled'
   );
+}
+
+/** A cancel that throws, synchronously or not, must not stop the cleanup around it. */
+function cancelQuietly(handle: RunHandle): Promise<void> {
+  return Promise.resolve()
+    .then(() => handle.cancel())
+    .catch(() => undefined);
 }
 
 function errorMessage(error: unknown): string {
