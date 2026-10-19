@@ -48,6 +48,10 @@ this runner.
 read-only git with no index lock). A file returning to an earlier version three times, or changing in more than 30
 samples of one vendor's attempt, is a loop: the run is cancelled and the task handed over.
 
+**Budget.** The runner reports one running total of its agent runs' spend as `usage` events, and gives each agent
+run what is left of the task's `budgetUsd`. When the total reaches the budget, it stops the agent run and fails the
+task with the reason. A spent budget is not a vendor failure, so the task is not handed over.
+
 **Exits.** Every exit (end, cancel, throw, check timeout) cancels the agent run, stops running checks through the
 runners' task-wide stop (checks record their pid and run token the way runner scripts do), restores a reverted
 workspace, and releases the sandbox lease. The terminal event is published only after that. After a restart,
@@ -56,8 +60,8 @@ workspace, and releases the sandbox lease. The terminal event is published only 
 ## Opening the pull request
 
 `open_pull_request {taskId, title}` is irreversible, so T5 holds every call until the user approves it. Its
-`approvalDetails` puts the repository, the branch (`maka/<taskId>`) and the title on the approval card, built by code
-under the model's question. After approval it:
+`approvalDetails` adds the repository, the branch (`maka/<taskId>`) and the title to the approval card, under the
+held call that T5 builds from the call itself. After approval it:
 
 - refuses a task the run did not delegate, a task without a verified delivery, or a `changes.json` whose sha256 changed;
 - builds the commit on the host with the Git Data API: blobs (GitHub's blob sha must equal ours), a tree on the base

@@ -225,6 +225,14 @@ function clipText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+function roundUsd(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+function budgetReached(budget: number, spent: number): string {
+  return `budget of $${budget.toFixed(2)} reached ($${spent.toFixed(2)} spent)`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -247,6 +255,11 @@ class CodingRun implements RunHandle {
   private baseCheckActive = false;
   private runs = 0;
   private checkCount = 0;
+  /** Dollars the agent runs that already ended have spent. */
+  private spentBefore = 0;
+  private lastReportedUsd: number | undefined;
+  /** Set once the task has spent its budget: the reason it stops. */
+  private budgetStop: string | undefined;
   private readonly hostDir: string;
 
   constructor(
@@ -450,12 +463,16 @@ class CodingRun implements RunHandle {
     brief: () => string,
   ): Promise<TurnOutcome> {
     const { stats } = this.runner;
+    const budget = this.spec.budgetUsd;
+    if (this.budgetStop) throw new Error(this.budgetStop);
     const n = ++this.runs;
     const spec: RunSpec = {
       taskId: this.spec.taskId,
       runner: vendor,
       briefPath: join(this.hostDir, `agent-${n}-brief.md`),
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
+      // Each agent run may spend what is left of the task's budget.
+      ...(budget === undefined ? {} : { budgetUsd: roundUsd(budget - this.spentBefore) }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
     };
     if (prompt === undefined) await this.guard(writeHostFile(spec.briefPath, brief()));
@@ -475,6 +492,7 @@ class CodingRun implements RunHandle {
       void handle.cancel().catch(() => undefined);
     });
     let terminal: RunnerEvent | undefined;
+    let runCost = 0;
     try {
       const iterator = handle.events[Symbol.asyncIterator]();
       for (;;) {
@@ -482,14 +500,22 @@ class CodingRun implements RunHandle {
         if (next.done) break;
         const event = next.value;
         if (event.type === 'progress') this.progress(event.note);
-        else terminal ??= event;
+        else if (event.type === 'usage') {
+          runCost = event.costUsd;
+          if (this.meter(this.spentBefore + runCost)) {
+            void handle.cancel().catch(() => undefined);
+          }
+        } else terminal ??= event;
       }
     } finally {
+      this.spentBefore += runCost;
       await sampler.stop();
       // Wait for the agent run's own cleanup before anything else touches the task directory.
       await this.releaseAgent(handle);
     }
     this.checkCancelled();
+    // A spent budget ends the task: it is not a vendor failure, so nothing is handed over.
+    if (this.budgetStop) throw new Error(this.budgetStop);
     if (loop !== undefined) return { loop };
     if (!(await this.ws.agentOnSameMachine())) {
       throw new Error('the agent ran on a different machine than the task workspace');
@@ -1088,6 +1114,23 @@ class CodingRun implements RunHandle {
 
   private checkCancelled(): void {
     if (this.signal.aborted) throw new CancelledError();
+  }
+
+  /**
+   * Reports what the task has spent so far, as the total of its agent runs. Returns true once
+   * that reaches the task's budget.
+   */
+  private meter(total: number): boolean {
+    const spent = roundUsd(total);
+    if (spent !== this.lastReportedUsd && !this.ended) {
+      this.lastReportedUsd = spent;
+      this.events.push({ type: 'usage', costUsd: spent });
+    }
+    const budget = this.spec.budgetUsd;
+    if (budget === undefined || spent < budget || this.budgetStop) return false;
+    this.budgetStop = budgetReached(budget, spent);
+    this.progress(this.budgetStop);
+    return true;
   }
 
   private progress(note: string): void {

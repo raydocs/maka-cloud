@@ -40,6 +40,8 @@ export interface AgentTurn {
   dir: string;
   signal: AbortSignal;
   progress(note: string): void;
+  /** Reports what this run has spent so far, like a real runner (cumulative per run). */
+  usage(costUsd: number): void;
 }
 
 export type AgentScript = (turn: AgentTurn) => Promise<'ok' | { failed: string }>;
@@ -106,6 +108,7 @@ export class FakeAgent implements AgentRunner {
       dir,
       signal: abort.signal,
       progress: (note) => push({ type: 'progress', note }),
+      usage: (costUsd) => push({ type: 'usage', costUsd }),
     };
     this.turns.push(turn);
     this.open++;
