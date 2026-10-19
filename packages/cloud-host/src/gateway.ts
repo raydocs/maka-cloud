@@ -1,6 +1,9 @@
+import type { ModelGateway } from '@maka-cloud/conductor';
 import {
   Gateway,
   type GatewayServer,
+  type ModelPrice,
+  modelTable,
   serveGateway,
   type Vendor,
   vendorBaseUrl,
@@ -49,6 +52,43 @@ export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelA
   };
 }
 
+/** The conductor's requests through the gateway, each charged to the run ledger by the conductor's `charge`. */
+export function conductorGateway(gateway: Gateway): ModelGateway {
+  return {
+    open(charge, subject) {
+      const client = gateway.inProcess({ vendor: 'anthropic', subject, budget: charge });
+      return { fetch: client.fetch, close: () => client.revoke() };
+    },
+  };
+}
+
+/**
+ * The gateway's prices: the configured ones, plus the price of each check model the
+ * configuration and the built-in table do not already price.
+ */
+export function gatewayPrices(
+  configured: readonly ModelPrice[],
+  checks: readonly {
+    vendor: Vendor;
+    model: string;
+    inputPerMTokUsd: number;
+    outputPerMTokUsd: number;
+    maxOutputTokens: number;
+  }[],
+): ModelPrice[] {
+  const known = modelTable(configured);
+  const added = checks
+    .filter((entry) => !known.has(`${entry.vendor}:${entry.model}`))
+    .map((entry) => ({
+      vendor: entry.vendor,
+      model: entry.model,
+      inputPerMTokUsd: entry.inputPerMTokUsd,
+      outputPerMTokUsd: entry.outputPerMTokUsd,
+      maxOutputTokens: entry.maxOutputTokens,
+    }));
+  return [...configured, ...added];
+}
+
 export interface StackGateway {
   gateway: Gateway;
   server: GatewayServer;
@@ -62,6 +102,7 @@ export async function startGateway(
   config: StackConfig['gateway'],
   env: NodeJS.ProcessEnv,
   onWarning: (message: string, detail?: unknown) => void,
+  models: readonly ModelPrice[] = config.models,
 ): Promise<StackGateway> {
   const key = (name: string): string | undefined => {
     const value = env[name]?.trim();
@@ -90,7 +131,7 @@ export async function startGateway(
             },
           }),
     },
-    models: config.models,
+    models,
     onWarning: (message, detail) => onWarning(`model gateway: ${message}`, detail),
   });
   const server = await serveGateway(gateway, { host: config.host, port: config.port });

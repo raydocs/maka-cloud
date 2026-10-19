@@ -1,4 +1,5 @@
 import type { Conductor } from '@maka-cloud/conductor';
+import type { Gateway } from '@maka-cloud/gateway';
 import type { InboxService, SupervisorParts } from '@maka-cloud/server';
 import {
   createSourceFetcher,
@@ -11,7 +12,15 @@ import {
 import { conductorBudget } from './budget.js';
 import type { InboxConfig } from './config.js';
 import { artifactEvidence } from './evidence.js';
-import { createSummaryModel, createVerifierModel, type ModelDeps } from './models.js';
+import {
+  createGatewaySummaryModel,
+  createGatewayVerifierModel,
+  createSummaryModel,
+  createVerifierModel,
+  dailyLimit,
+  type ModelDeps,
+  SUMMARY_DAILY_CAP_USD,
+} from './models.js';
 import { conductorNotifier } from './notifier.js';
 import { inboxService } from './service.js';
 
@@ -27,6 +36,12 @@ export interface InboxSetup {
   env: NodeJS.ProcessEnv;
   /** Base URL of the Messages API for the summary model, when a gateway is used. */
   anthropicBaseUrl?: string;
+  /**
+   * The model gateway. With it, the checks and the digest summary reach the vendors through it,
+   * each request reserved at its worst case first; without it they call the vendors with the
+   * keys in `env`.
+   */
+  gateway?: Gateway;
   /** Replaces what is built from the config, for tests. */
   override?: {
     models?: readonly VerifierModel[];
@@ -56,19 +71,29 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     messages: parts.messages,
     onWarning: parts.onWarning,
   };
+  const gateway = setup.gateway;
   const models =
     override.models ??
     setup.config.verifierModels.map((entry) =>
-      createVerifierModel(entry, setup.env, override.modelDeps),
+      gateway
+        ? createGatewayVerifierModel(entry, gateway, override.modelDeps)
+        : createVerifierModel(entry, setup.env, override.modelDeps),
     );
   const summary =
     override.summary ??
-    createSummaryModel(
-      setup.config.summaryModel,
-      setup.env,
-      setup.anthropicBaseUrl,
-      override.modelDeps,
-    );
+    (gateway
+      ? createGatewaySummaryModel(
+          setup.config.summaryModel,
+          gateway,
+          dailyLimit(SUMMARY_DAILY_CAP_USD),
+          override.modelDeps,
+        )
+      : createSummaryModel(
+          setup.config.summaryModel,
+          setup.env,
+          setup.anthropicBaseUrl,
+          override.modelDeps,
+        ));
   const supervisor = await Supervisor.start({
     dbPath: setup.dbPath,
     host,

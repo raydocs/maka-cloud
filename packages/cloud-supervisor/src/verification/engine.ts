@@ -4,7 +4,7 @@ import { raceAbort } from './abort.js';
 import { type Prepared, prepareCoding, prepareResearch } from './checks.js';
 import { refsFor, type VerificationKind } from './kind.js';
 import { buildRequest, chooseVerifier, collectVerdicts, costUsd, upperBoundUsd } from './model.js';
-import type { Mismatch, Outcome, VerificationOptions } from './ports.js';
+import type { CheckCharge, Mismatch, Outcome, VerificationOptions } from './ports.js';
 
 /** The two limits a model check is gated by, before any request. */
 export interface SpendGate {
@@ -124,36 +124,52 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
     );
   }
   const request = buildRequest(model, prepared.claims, prepared.evidence);
-  const bound = upperBoundUsd(model, request);
-  if (bound === undefined) {
-    return cannot(
+  const budgetRefusal = (refused: 'daily_cap' | 'conversation_budget') =>
+    cannot(
       'budget',
-      'the cost of the check could not be bounded safely, so the model check did not run',
-      false,
-    );
-  }
-  const reserved = input.spend.reserve(input.attemptKey, bound, task.conversationId, task.taskId);
-  if (reserved !== undefined) {
-    return cannot(
-      'budget',
-      reserved === 'daily_cap'
+      refused === 'daily_cap'
         ? 'the daily limit for independent checks is used up, so the model check did not run'
         : "this conversation's budget is used up, so the model check did not run",
       false,
     );
+  let bound: number | undefined;
+  let charge: CheckCharge | undefined;
+  let refused: 'daily_cap' | 'conversation_budget' | undefined;
+  if (model.metered) {
+    // The model reserves the exact request it sends, through the same gate.
+    charge = {
+      reserve: (usd) => {
+        refused = input.spend.reserve(input.attemptKey, usd, task.conversationId, task.taskId);
+        return refused;
+      },
+      settle: (usd) => input.spend.settle(input.attemptKey, usd),
+    };
+  } else {
+    bound = upperBoundUsd(model, request);
+    if (bound === undefined) {
+      return cannot(
+        'budget',
+        'the cost of the check could not be bounded safely, so the model check did not run',
+        false,
+      );
+    }
+    const reserved = input.spend.reserve(input.attemptKey, bound, task.conversationId, task.taskId);
+    if (reserved !== undefined) return budgetRefusal(reserved);
   }
 
   let reply: Awaited<ReturnType<typeof model.verify>>;
   try {
-    reply = await raceAbort(model.verify(request, signal), signal);
+    reply = await raceAbort(model.verify(request, signal, charge), signal);
   } catch {
-    // Whether tokens were billed is unknown: the reservation stands as the charge.
-    input.spend.settle(input.attemptKey, bound);
+    if (refused !== undefined) return budgetRefusal(refused);
+    // Whether tokens were billed is unknown: the reservation stands as the charge. A metered
+    // model settled its request itself.
+    if (bound !== undefined) input.spend.settle(input.attemptKey, bound);
     return signal.aborted
       ? cannot('aborted', 'the check was stopped', true)
       : cannot('model_error', 'the checking model did not answer', true);
   }
-  input.spend.settle(input.attemptKey, costUsd(model, reply.usage));
+  if (bound !== undefined) input.spend.settle(input.attemptKey, costUsd(model, reply.usage));
 
   const verdicts = collectVerdicts(reply.output, prepared.claims);
   if (!verdicts) return cannot('model_error', 'the checking model gave an unusable answer', true);

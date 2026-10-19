@@ -1,6 +1,8 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
+import { Allowance, type BudgetPort, type Gateway, LimitPort } from '@maka-cloud/gateway';
 import {
+  type CheckCharge,
   inputTokenBound,
   type SummaryModel,
   type VerifierModel,
@@ -134,17 +136,155 @@ export function createSummaryModel(
         maxRetries: 0,
         abortSignal: signal,
       });
-      const reply = parseReply(result.text) as { order?: unknown; summary?: unknown };
-      if (
-        typeof reply !== 'object' ||
-        reply === null ||
-        !Array.isArray(reply.order) ||
-        !reply.order.every((id) => typeof id === 'string') ||
-        typeof reply.summary !== 'string'
-      ) {
-        throw new Error('The summary model did not return an order and a summary');
+      return summaryOf(result.text);
+    },
+  };
+}
+
+function summaryOf(text: string): { order: string[]; summary: string } {
+  const reply = parseReply(text) as { order?: unknown; summary?: unknown };
+  if (
+    typeof reply !== 'object' ||
+    reply === null ||
+    !Array.isArray(reply.order) ||
+    !reply.order.every((id) => typeof id === 'string') ||
+    typeof reply.summary !== 'string'
+  ) {
+    throw new Error('The summary model did not return an order and a summary');
+  }
+  return { order: reply.order as string[], summary: reply.summary };
+}
+
+/** What the SDK sends as its key to the in-process gateway. The gateway ignores it and adds the vendor key itself. */
+const IN_PROCESS_KEY = 'gateway-in-process';
+
+/** The SDK model for an entry, sending its requests through `send` (a gateway client's fetch). */
+function gatewayLanguageModel(
+  entry: { vendor: 'anthropic' | 'openai'; model: string },
+  send: typeof fetch,
+): LanguageModel {
+  if (entry.vendor === 'anthropic') {
+    return createAnthropic({ apiKey: IN_PROCESS_KEY, fetch: send }).chat(entry.model);
+  }
+  return createOpenAI({ apiKey: IN_PROCESS_KEY, fetch: send }).responses(entry.model);
+}
+
+type GatewayClients = Pick<Gateway, 'inProcess'>;
+
+/**
+ * A pool entry as a verifier whose request goes through the model gateway. The gateway reserves
+ * the worst case of the exact request it sends against the check's charge (the day's cap, then
+ * the conversation's budget) before sending it, and settles what the vendor reported. The
+ * supervisor makes no estimate of its own. The grant lives for one request.
+ */
+export function createGatewayVerifierModel(
+  entry: VerifierPoolEntry,
+  gateway: GatewayClients,
+  deps: Pick<ModelDeps, 'generateText'> = {},
+): VerifierModel {
+  const generate = deps.generateText ?? (generateText as unknown as GenerateText);
+  return {
+    id: `${entry.vendor}:${entry.model}`,
+    vendor: entry.vendor,
+    price: { inputPerMTokUsd: entry.inputPerMTokUsd, outputPerMTokUsd: entry.outputPerMTokUsd },
+    maxInputChars: entry.maxInputChars,
+    maxOutputTokens: entry.maxOutputTokens,
+    metered: true,
+    async verify(request: VerifierRequest, signal: AbortSignal, charge?: CheckCharge) {
+      const client = gateway.inProcess({
+        vendor: entry.vendor,
+        subject: 'verification',
+        budget: {
+          reserve: (_key, usd) => {
+            if (!charge) return { ok: false, reason: 'the check has no budget' };
+            const refused = charge.reserve(usd);
+            return refused === undefined
+              ? { ok: true }
+              : { ok: false, budget: true, reason: 'the check budget cannot cover this request' };
+          },
+          settle: (_key, usd) => charge?.settle(usd),
+        },
+      });
+      try {
+        const result = await generate({
+          model: gatewayLanguageModel(entry, client.fetch),
+          system: request.instructions,
+          prompt: request.prompt,
+          maxOutputTokens: request.maxOutputTokens,
+          maxRetries: 0,
+          abortSignal: signal,
+        });
+        return {
+          output: parseReply(result.text),
+          usage: {
+            inputTokens: result.usage.inputTokens ?? 0,
+            outputTokens: result.usage.outputTokens ?? 0,
+          },
+        };
+      } finally {
+        client.revoke();
       }
-      return { order: reply.order as string[], summary: reply.summary };
+    },
+  };
+}
+
+/** The digest summary's daily limit. */
+export const SUMMARY_DAILY_CAP_USD = 0.5;
+
+/**
+ * A dollar limit per UTC day, in memory, for the digest summary. A request settles on the day
+ * it was reserved. A restart starts the day afresh, so a day with a restart can spend the cap
+ * twice; at the summary's size that is cents.
+ */
+export function dailyLimit(capUsd: number, now: () => number = Date.now): BudgetPort {
+  let day = '';
+  let port = new LimitPort([new Allowance(capUsd)]);
+  const held = new Map<string, LimitPort>();
+  return {
+    reserve(key, usd) {
+      const today = new Date(now()).toISOString().slice(0, 10);
+      if (today !== day) {
+        day = today;
+        port = new LimitPort([new Allowance(capUsd)]);
+      }
+      const reserved = port.reserve(key, usd);
+      if (reserved.ok) held.set(key, port);
+      return reserved;
+    },
+    settle(key, usd) {
+      const owner = held.get(key);
+      if (!owner) return;
+      held.delete(key);
+      owner.settle(key, usd);
+    },
+  };
+}
+
+/** The digest summary through the model gateway, charged to `budget`. */
+export function createGatewaySummaryModel(
+  modelId: string,
+  gateway: GatewayClients,
+  budget: BudgetPort,
+  deps: Pick<ModelDeps, 'generateText'> = {},
+): SummaryModel {
+  const generate = deps.generateText ?? (generateText as unknown as GenerateText);
+  return {
+    async summarize(input, signal) {
+      const client = gateway.inProcess({ vendor: 'anthropic', subject: 'digest summary', budget });
+      let result: Awaited<ReturnType<GenerateText>>;
+      try {
+        result = await generate({
+          model: gatewayLanguageModel({ vendor: 'anthropic', model: modelId }, client.fetch),
+          system: SUMMARY_INSTRUCTIONS,
+          prompt: JSON.stringify(input.items),
+          maxOutputTokens: 600,
+          maxRetries: 0,
+          abortSignal: signal,
+        });
+      } finally {
+        client.revoke();
+      }
+      return summaryOf(result.text);
     },
   };
 }
