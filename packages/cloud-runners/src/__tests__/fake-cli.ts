@@ -10,6 +10,13 @@
  *   symlink       make result.json a symlink to $HOME/fake-cli/secret.txt
  *   big           write a result.json larger than 1 MiB
  *   leakfail      print the API key it was given, then exit 1
+ *   leakout       print the API key and MCP token to stdout and stderr, then behave like ok
+ *   flood         print 3 MB without a newline first, then behave like ok
+ *   floodfail     print 3 MB without a newline, then exit 1
+ *   longfail      print a 100 kB line, then exit 1
+ *
+ * When `$HOME/fake-cli/orphan` exists, the CLI also leaves a child behind in its process group
+ * that ignores TERM; its pid is appended to `$HOME/fake-cli/children`.
  */
 
 const COMMON = String.raw`
@@ -28,9 +35,20 @@ resumed=0
 for a in "$@"; do [ "$a" = "--resume" ] || [ "$a" = "resume" ] && resumed=1; done
 good='{"summary":"fake run complete","done":["the brief"],"notDone":[],"confidence":"high","knownIssues":[]}'
 if [ "$mode" = "leakfail" ]; then echo "key is $ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
+if [ -e "$ctl/orphan" ]; then
+  bash -c 'trap "" TERM; while :; do sleep 1; done' > /dev/null 2>&1 &
+  echo $! >> "$ctl/children"
+fi
+if [ "$mode" = "leakout" ]; then
+  echo "key=$ANTHROPIC_API_KEY$OPENAI_API_KEY token=$MAKA_MCP_TOKEN"
+  echo "stderr key=$ANTHROPIC_API_KEY$OPENAI_API_KEY token=$MAKA_MCP_TOKEN" >&2
+fi
+if [ "$mode" = "flood" ]; then head -c 3000000 /dev/zero | tr '\0' x; echo; fi
+if [ "$mode" = "floodfail" ]; then head -c 3000000 /dev/zero | tr '\0' x; exit 1; fi
+if [ "$mode" = "longfail" ]; then head -c 100000 /dev/zero | tr '\0' y; echo; exit 1; fi
 write_result() {
   case "$mode" in
-    ok) printf '%s' "$good" > "$result" ;;
+    ok|leakout|flood) printf '%s' "$good" > "$result" ;;
     badthengood) if [ "$resumed" = 1 ]; then printf '%s' "$good" > "$result"; else printf '%s' '{"summary":""}' > "$result"; fi ;;
     symlink) rm -f "$result"; ln -s "$ctl/secret.txt" "$result" ;;
     big) head -c 1100000 /dev/zero | tr '\0' 'a' > "$result" ;;

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { InstaboxClient } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
-import { RemoteMachine } from './machine.js';
+import { DEFAULT_LOG_ROOT, RemoteMachine } from './machine.js';
 import { MachinePoller } from './poller.js';
 import { DEFAULT_TENANT, envModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
@@ -26,6 +26,12 @@ export interface CloudRunnersOptions {
   sessions?: RunnerSessionStore;
   /** Directory in the sandbox that holds one folder per task. Default `/data/work`. */
   workRoot?: string;
+  /**
+   * Directory in the sandbox for the raw output of the CLI, which can contain secrets. It must be
+   * memory-backed (tmpfs), so that a snapshot of the sandbox's files never holds it: a run
+   * refuses to start otherwise. Default `/dev/shm/maka-logs`.
+   */
+  logRoot?: string;
   /** Which tenant a task belongs to. Default: the single tenant. */
   tenantOf?: (taskId: TaskId) => string;
   /** Maps the orchestrator's MCP URL to one the sandbox can reach. Default: unchanged. */
@@ -39,7 +45,7 @@ export interface CloudRunnersOptions {
   /** Consecutive failed polls before a run fails with "sandbox unreachable". */
   pollMaxFailures?: number;
   leaseTtlSeconds?: number;
-  /** Snapshots kept per task. Default 2. */
+  /** Snapshots kept per machine, across all its tasks. Default 2. */
   keepSnapshots?: number;
   /** Snapshot the sandbox after each turn. Default true. */
   snapshots?: boolean;
@@ -49,6 +55,12 @@ export interface CloudRunnersOptions {
   setupTimeoutMs?: number;
   /** Progress notes reported per run. Default 300. */
   maxProgressNotes?: number;
+  /** How long one step of a run's cleanup may take before the next one goes ahead. Default 20 s. */
+  cleanupTimeoutMs?: number;
+  /** How long a stopped run's processes get to exit on TERM before they are killed. Default 3 s. */
+  stopGraceMs?: number;
+  /** A cleanup step that failed or timed out. Cleanup goes on; this is how it is seen. */
+  onCleanupError?(failure: { taskId: TaskId; step: string; error: unknown }): void;
   now?: () => number;
 }
 
@@ -65,8 +77,13 @@ export class Fleet {
   readonly now: () => number;
   /** Runs between their start and their cleanup. Zero when nothing is in flight. */
   openRuns = 0;
+  /** Activity lease renewal timers running. Zero when nothing is in flight. */
+  leaseRenewals = 0;
+  readonly logRoot: string;
   private readonly machines = new Map<string, RemoteMachine>();
   private readonly setups = new Map<string, Promise<void>>();
+  private recordChain: Promise<unknown> = Promise.resolve();
+  private lastSnapshotAt = 0;
 
   constructor(readonly options: CloudRunnersOptions) {
     this.client = options.client;
@@ -74,6 +91,9 @@ export class Fleet {
     this.modelAccess = options.modelAccess ?? envModelAccess();
     this.sessions = options.sessions ?? new MemorySessionStore();
     this.root = (options.workRoot ?? '/data/work').replace(/\/+$/u, '');
+    this.logRoot = (options.logRoot ?? DEFAULT_LOG_ROOT).replace(/\/+$/u, '');
+    // The log directory of a task is deleted as a whole, so it must be a path of its own.
+    if (!this.logRoot.startsWith('/')) throw new Error('logRoot must be an absolute path');
     this.now = options.now ?? Date.now;
     this.poller = new MachinePoller({
       intervalMs: options.pollIntervalMs ?? 2_000,
@@ -88,7 +108,7 @@ export class Fleet {
   machine(machineId: string): RemoteMachine {
     let machine = this.machines.get(machineId);
     if (!machine) {
-      machine = new RemoteMachine(this.client, machineId, this.root);
+      machine = new RemoteMachine(this.client, machineId, this.root, this.logRoot);
       this.machines.set(machineId, machine);
     }
     return machine;
@@ -140,6 +160,7 @@ mkdir -p "$(dirname ${shq(marker)})"
       envs: {},
       runToken: randomUUID(),
       workdir: machine.taskDir(dirName),
+      rawLogs: false,
     });
 
     const watch = this.poller.watch(machine, { dir: dirName, run });
@@ -171,12 +192,38 @@ mkdir -p "$(dirname ${shq(marker)})"
     }
   }
 
+  // -- session records ------------------------------------------------------------------------
+
+  /**
+   * Runs `work` after every earlier exclusive section has ended. Every read-modify-write of the
+   * session records goes through here, so two runs on one machine never overwrite each other's
+   * record (retention edits the records of other tasks).
+   */
+  private exclusive<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.recordChain.catch(() => undefined).then(work);
+    this.recordChain = run;
+    return run;
+  }
+
+  /** Reads a task's record, changes it, and writes it back, with nobody in between. */
+  updateRecord(
+    taskId: TaskId,
+    change: (current: RunnerSessionRecord | undefined) => RunnerSessionRecord,
+  ): Promise<RunnerSessionRecord> {
+    return this.exclusive(async () => {
+      const next = change(await this.sessions.get(taskId));
+      await this.sessions.put(next);
+      return next;
+    });
+  }
+
   // -- snapshots -----------------------------------------------------------------------------
 
   /**
-   * Snapshots the machine, records the snapshot in the task's record, and deletes older ones of
-   * this task beyond the retention. A snapshot some record still points at is never deleted:
-   * retention covers a whole machine, shared by every task on it.
+   * Snapshots the machine, records the snapshot in the task's record, and trims the machine's
+   * snapshots to the newest `keepSnapshots`. A snapshot holds the whole machine, so any task on
+   * it can be restored from the newest one: records that pointed at an evicted snapshot are moved
+   * to the newest, and an evicted snapshot is deleted only once no record points at it.
    */
   async snapshotTurn(
     record: RunnerSessionRecord,
@@ -193,25 +240,89 @@ mkdir -p "$(dirname ${shq(marker)})"
       { name, description: `task ${record.taskId}, turn ${record.turns}` },
       signal ? { signal } : {},
     );
-    const ready = await this.client.waitForSnapshot(created.id, {
-      deadlineMs: this.options.snapshotTimeoutMs ?? 5 * 60_000,
-      ...(signal ? { signal } : {}),
-    });
-    const keep = Math.max(1, this.options.keepSnapshots ?? 2);
-    const ids = [...record.snapshotIds, ready.id];
-    const dropped = ids.slice(0, Math.max(0, ids.length - keep));
-    const next: RunnerSessionRecord = {
+    let ready;
+    try {
+      ready = await this.client.waitForSnapshot(created.id, {
+        deadlineMs: this.options.snapshotTimeoutMs ?? 5 * 60_000,
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      // No record points at it and none ever will; it would sit in the account forever.
+      await this.client.deleteSnapshot(created.id).catch(() => undefined);
+      throw error;
+    }
+
+    let evicted: string[];
+    let next: RunnerSessionRecord;
+    try {
+      ({ next, evicted } = await this.exclusive(() => this.addSnapshot(record, machine, ready.id)));
+    } catch (error) {
+      await this.deleteIfUnreferenced([ready.id]).catch(() => undefined);
+      throw error;
+    }
+    await this.deleteIfUnreferenced(evicted).catch(() => undefined);
+    return { record: next, snapshotId: ready.id };
+  }
+
+  /** Inside `exclusive`: files `snapshotId` under the task, evicts the oldest beyond the retention. */
+  private async addSnapshot(
+    record: RunnerSessionRecord,
+    machine: RemoteMachine,
+    snapshotId: string,
+  ): Promise<{ next: RunnerSessionRecord; evicted: string[] }> {
+    const current = await this.sessions.get(record.taskId);
+    this.lastSnapshotAt = Math.max(this.now(), this.lastSnapshotAt + 1);
+    const mine: RunnerSessionRecord = {
       ...record,
-      snapshotIds: ids.slice(dropped.length),
+      snapshotIds: [...(current?.snapshotIds ?? record.snapshotIds), snapshotId],
+      snapshotAt: {
+        ...(current?.snapshotAt ?? record.snapshotAt),
+        [snapshotId]: this.lastSnapshotAt,
+      },
       updatedAt: this.now(),
     };
-    await this.sessions.put(next);
-    const referenced = referencedSnapshotIds(await this.sessions.list());
-    for (const id of dropped) {
+    const onMachine = [
+      mine,
+      ...(await this.sessions.list()).filter(
+        (other) => other.taskId !== mine.taskId && other.machineId === machine.machineId,
+      ),
+    ];
+    const takenAt = new Map<string, number>();
+    for (const other of onMachine) {
+      for (const id of other.snapshotIds) {
+        takenAt.set(id, Math.max(takenAt.get(id) ?? 0, other.snapshotAt?.[id] ?? 0));
+      }
+    }
+    const oldestFirst = [...takenAt.keys()].sort(
+      (a, b) => (takenAt.get(a) ?? 0) - (takenAt.get(b) ?? 0),
+    );
+    const keep = Math.max(1, this.options.keepSnapshots ?? 2);
+    const evicted = oldestFirst.slice(0, Math.max(0, oldestFirst.length - keep));
+    const newest = oldestFirst.at(-1) as string;
+
+    let next = mine;
+    for (const other of onMachine) {
+      const kept = other.snapshotIds.filter((id) => !evicted.includes(id));
+      if (other !== mine && kept.length === other.snapshotIds.length) continue;
+      const snapshotIds = kept.length > 0 ? kept : other.snapshotIds.length > 0 ? [newest] : [];
+      const snapshotAt = Object.fromEntries(
+        snapshotIds.map((id) => [id, takenAt.get(id) ?? 0] as const),
+      );
+      const updated: RunnerSessionRecord = { ...other, snapshotIds, snapshotAt };
+      await this.sessions.put(updated);
+      if (other === mine) next = updated;
+    }
+    return { next, evicted };
+  }
+
+  /** Deletes snapshots no record points at (any machine's record counts). */
+  private async deleteIfUnreferenced(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const referenced = referencedSnapshotIds(await this.exclusive(() => this.sessions.list()));
+    for (const id of ids) {
       if (referenced.has(id)) continue;
       await this.client.deleteSnapshot(id).catch(() => undefined);
     }
-    return { record: next, snapshotId: ready.id };
   }
 
   // -- leftovers after a restart ---------------------------------------------------------------
