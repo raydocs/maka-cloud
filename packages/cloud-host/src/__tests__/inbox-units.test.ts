@@ -301,6 +301,7 @@ test('evidence is the artifact text; what the server cannot read keeps its reaso
   assert.deepEqual(await evidence.readArtifact(task, 'a.json', signal), {
     ok: true,
     text: 'héllo',
+    bytes: Buffer.from('héllo'),
   });
   assert.deepEqual(await evidence.readArtifact(task, 'missing', signal), {
     ok: false,
@@ -314,7 +315,12 @@ test('evidence is the artifact text; what the server cannot read keeps its reaso
     ok: false,
     reason: 'unavailable',
   });
-  assert.deepEqual(await evidence.readArtifact(task, 'binary', signal), { ok: true, text: '�A' });
+  // The text of an invalid byte is the replacement character, but the bytes stay what they were.
+  assert.deepEqual(await evidence.readArtifact(task, 'binary', signal), {
+    ok: true,
+    text: '�A',
+    bytes: Buffer.from([0xff, 0x41]),
+  });
   assert.deepEqual(reads[0], [task, 'a.json']);
 });
 

@@ -595,27 +595,32 @@ before the fix.
   anything or calling the model. The host's fallback for a provider that reports no
   usage charges the same bound. A model gateway's reservation replaces
   `inputTokenBound`; nothing else computes the estimate.
-- **An empty check is never a pass.** A research report with no claims, or with no
-  claim left after the removals, is a failure. The engine also refuses to pass with
+- **An empty check is never a pass.** A research report with no claims, or whose
+  renderings show no claim, is a failure. The engine also refuses to pass with
   zero claims left (`incomplete`): a guard for future preparers, not reachable by
   the two built in.
 - **Text the agent wrote is never matched, it is reproduced.** `report.json` is the
-  source of truth and the checked set is every claim in it. Claim ids must be
-  unique, else the report is rejected. The one thing that takes a claim out is the
-  playbook having dropped it from the report the human reads, and that is believed
-  only if `renderFromRecord` (exported from `@maka-cloud/playbooks/citations`, the
-  same renderer `cite-check` uses) makes every delivered `report.md` and
-  `report.html` byte for byte from `report.json` and `verification.json`. The record
-  must list exactly the claims of the report, and its `removed` flags must be what
-  its own statuses give in `drop_unsupported` mode. Anything else, including a
-  rendering edited after it was made, a rendering listed twice (a decoy
-  `out/decoy/report.md`), a listed rendering that is missing, or a rendering with no
-  usable record, ends `could_not_check` with code `unverified` and the reason
-  "checks reported by agent (unverified)": never "independently checked", and no
-  fetch or model call is spent past it. With no rendering listed the record
-  narrows nothing and every claim is checked. Any artifact name listed more than
-  once is ambiguous and treated the same way. A contract test in the playbooks
-  (`run.test.ts`) keeps the record able to reproduce what `cite-check` delivers.
+  source of truth and the checked set is exactly the claims in it. Claim ids must be
+  unique, else the report is rejected. `verification.json` and the renderings are
+  written by the agent, so they never take a claim out of the check: a claim the
+  record calls removed is still checked (a report that should not contain a failing
+  claim must not contain it in `report.json`). They are only tied to the report: the
+  record must list exactly the claims of `report.json`, its `removed` flags must be
+  what its own statuses give in `drop_unsupported` mode, and every delivered
+  `report.md` and `report.html` must equal, as raw bytes, what `renderFromRecord`
+  (exported from `@maka-cloud/playbooks/citations`, the renderer `cite-check` uses)
+  makes from them. Anything else ends `could_not_check` with code `unverified` and
+  the reason "checks reported by agent (unverified)": never "independently
+  checked", and no fetch or model call is spent past it. That covers a rendering
+  edited after it was made, a missing or unusable record, a listed rendering that
+  does not exist, an artifact name listed twice, and an artifact listed as a link
+  (a link cannot be read here and reproduced, so it is never skipped). A task that
+  lists both a change (`changes.json`, `change.patch`) and a report is `unverified`
+  too, since one kind of check cannot stand for both. With no rendering listed
+  there is nothing to reproduce and every claim is checked. A contract test in the
+  playbooks (`run.test.ts`) keeps the record able to reproduce what `cite-check`
+  delivers. `ArtifactRead` carries the raw `bytes` next to the decoded `text` for
+  this comparison.
 - **Nothing waits on a hung resolver or fetcher.** The source fetcher races its
   name resolution with the fetch's abort signal (the deadline or the caller's
   stop), and `prepareResearch` races each `fetchText` with the check's signal, so a

@@ -6,6 +6,7 @@ import {
   FakeFetcher,
   TUNNEL_QUOTE,
   claimIdsOf,
+  codingFiles,
   defaultClaims,
   finishTask,
   itemsOf,
@@ -104,15 +105,16 @@ test('the model judging a quote as not supporting its claim fails the report wit
   await r.stop();
 });
 
-test('claims the playbook already dropped are not checked', async () => {
+test('a claim the record says the playbook dropped is still checked: the checked set is report.json', async () => {
   const w = world();
   const claims = defaultClaims();
   (claims[1] as { citations: unknown[] }).citations = [];
   researchFiles(w, 't1', { claims, removed: ['c2'] });
   const r = await verifyRig(w);
   await finishTask(r, 't1', researchManifest(), { runner: 'codex' });
-  assert.equal(itemsOf(r, 'verification_failed').length, 0);
-  assert.deepEqual(claimIdsOf(w.anthropic.requests[0] as never), ['c1']);
+  assert.equal(itemsOf(r, 'finished').length, 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /cites no source/);
+  assert.equal(w.anthropic.requests.length, 0);
   await r.stop();
 });
 
@@ -588,20 +590,118 @@ test('a listed rendering that is missing or cannot be read is not independently 
   await none.r.stop();
 });
 
-test('one rendering that is exactly what the renderer makes is enough, and a dropped claim may be listed under "Not verified"', async () => {
-  const w = world();
-  researchFiles(w, 't1', { claims: uncitedFreight(), removed: ['c2'] });
-  const r = await verifyRig(w);
-  await finishTask(
-    r,
-    't1',
-    researchManifest({ artifacts: ['out/report.md', 'out/report.json', 'out/verification.json'] }),
-    { runner: 'codex' },
+test('a record never takes a claim out of report.json, however exactly the renderings match', async () => {
+  // The uncited c2 is in report.json, the record calls it removed, and the renderings are exactly
+  // what the renderer makes: only c1 would have been checked. Now c2 is, and it fails.
+  const dropped = await checkedResearch(
+    (w) => researchFiles(w, 't1', { claims: uncitedFreight(), removed: ['c2'] }),
+    ['out/report.md', 'out/report.json', 'out/verification.json'],
   );
-  assert.equal(itemsOf(r, 'verification_failed').length, 0);
-  assert.deepEqual(claimIdsOf(w.anthropic.requests[0] as never), ['c1']);
-  assert.equal(itemsOf(r, 'finished').length, 1);
-  await r.stop();
+  assert.equal(itemsOf(dropped.r, 'finished').length, 0);
+  const [item] = itemsOf(dropped.r, 'verification_failed');
+  assert.match(item?.ask ?? '', /Traffic is mostly freight/);
+  assert.match(item?.ask ?? '', /cites no source/);
+  assert.equal(dropped.w.anthropic.requests.length, 0);
+  await dropped.r.stop();
+
+  // A claim the record calls dropped because a reviewer found it unsupported is still judged by the other vendor.
+  const judged = await checkedResearch((w) =>
+    researchFiles(w, 't1', { removed: ['c2'], statuses: { c2: 'unsupported' } }),
+  );
+  assert.deepEqual(claimIdsOf(judged.w.anthropic.requests[0] as never), ['c1', 'c2']);
+  assert.equal(itemsOf(judged.r, 'finished').length, 1);
+  await judged.r.stop();
+});
+
+const ALL_REPORT_FILES = [
+  'out/report.md',
+  'out/report.html',
+  'out/report.json',
+  'out/verification.json',
+];
+
+test('a task that lists both a change and a report is not independently checked: one kind of check cannot stand for both', async () => {
+  const result = await checkedResearch(
+    (w) => {
+      researchFiles(w, 't1');
+      codingFiles(w, 't1');
+      // One verification.json that passes either check, so only the mix is wrong.
+      w.evidence.set(
+        't1',
+        'verification.json',
+        JSON.stringify({
+          result: 'verified',
+          testCommand: 'npm test',
+          version: 1,
+          mode: 'drop_unsupported',
+          claims: [
+            { id: 'c1', status: 'quote_verified', removed: false },
+            { id: 'c2', status: 'quote_verified', removed: false },
+          ],
+        }),
+      );
+      // The report is the part that would fail: c2 is uncited.
+      const report = JSON.parse(w.evidence.files.get('t1/report.json') as string);
+      report.sections[0].claims[1].citations = [];
+      w.evidence.set('t1', 'report.json', JSON.stringify(report));
+    },
+    ['out/change.patch', 'out/changes.json', ...ALL_REPORT_FILES],
+  );
+  await assertUnverified(result, 'a change and a report');
+  assert.equal(result.w.openai.requests.length, 0);
+});
+
+test('a report artifact listed as a link is never skipped: it makes the check unverified', async () => {
+  for (const link of [
+    'https://example.com/untrusted/report.md',
+    'https://example.com/untrusted/report.html',
+    'https://example.com/untrusted/report.json',
+    'https://example.com/untrusted/verification.json',
+  ]) {
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [...ALL_REPORT_FILES, link]),
+      link,
+    );
+  }
+  // As the only copy of a rendering, a link cannot be read here and reproduced either.
+  await assertUnverified(
+    await checkedResearch(
+      (w) => researchFiles(w, 't1'),
+      [
+        'https://example.com/untrusted/report.md',
+        'out/report.html',
+        'out/report.json',
+        'out/verification.json',
+      ],
+    ),
+    'a link in place of report.md',
+  );
+});
+
+test('a rendering is compared byte for byte, not as decoded text: an invalid byte is not U+FFFD', async () => {
+  const claims = defaultClaims();
+  (claims[0] as { text: string }).text = 'The tunnel opened in 1994 \uFFFD.';
+  const replacement = Buffer.from([0xef, 0xbf, 0xbd]);
+  const result = await checkedResearch((w) => {
+    researchFiles(w, 't1', { claims });
+    const honest = Buffer.from(w.evidence.files.get('t1/report.md') as string);
+    const at = honest.indexOf(replacement);
+    assert.ok(at > 0, 'the rendering carries the replacement character');
+    // The same text when decoded, different bytes: one invalid byte in place of EF BF BD.
+    const edited = Buffer.concat([
+      honest.subarray(0, at),
+      Buffer.from([0xff]),
+      honest.subarray(at + 3),
+    ]);
+    assert.equal(edited.toString('utf8').includes('\uFFFD'), true);
+    w.evidence.set('t1', 'report.md', { bytes: edited });
+  });
+  await assertUnverified(result, 'an invalid byte');
+
+  // The honest bytes of the same report pass.
+  const honest = await checkedResearch((w) => researchFiles(w, 't1', { claims }));
+  assert.equal(itemsOf(honest.r, 'finished').length, 1);
+  await honest.r.stop();
 });
 
 test('a real 404 or 410 from the fetcher is a deterministic failure, not a source that is merely down', async () => {
