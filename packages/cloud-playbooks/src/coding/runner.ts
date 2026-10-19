@@ -178,10 +178,32 @@ export class CodingRunner implements Runner {
 interface CheckResult {
   name: string;
   command: string;
+  /** -1 when the check ended without an exit code of its own. */
   exitCode: number;
+  /** The check ran past its time limit and was stopped. */
+  timedOut?: boolean;
   /** The end of the output. */
   output: string;
   outputBytes: number;
+}
+
+/**
+ * Why a check that did not pass is not a test failure (it timed out, died, was killed by a
+ * signal, or could not run its command), or undefined when it is one: a non-zero exit below 125
+ * of its own.
+ */
+function notATestFailure(check: CheckResult): string | undefined {
+  if (check.timedOut) return 'timed out';
+  if (check.exitCode < 0) return `did not finish (${check.output})`;
+  if (check.exitCode >= 128) return `was killed by signal ${check.exitCode - 128}`;
+  if (check.exitCode >= 125) return `could not run (exit ${check.exitCode})`;
+  return undefined;
+}
+
+function describeEnd(check: CheckResult): string {
+  if (check.timedOut) return 'timed out';
+  if (check.exitCode < 0) return check.output;
+  return `exit ${check.exitCode}`;
 }
 
 interface TurnRecord {
@@ -475,7 +497,8 @@ class CodingRun implements RunHandle {
       ...(budget === undefined ? {} : { budgetUsd: roundUsd(budget - this.spentBefore) }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
     };
-    if (prompt === undefined) await this.guard(writeHostFile(spec.briefPath, brief()));
+    // Every run reads its brief, a resume included.
+    await this.guard(writeHostFile(spec.briefPath, brief()));
     const agent = this.options.agents[vendor];
     this.progress(`${vendor} ${prompt === undefined ? 'starts' : 'continues'} (run ${n})`);
     const starting =
@@ -613,7 +636,7 @@ class CodingRun implements RunHandle {
     if (onChange.exitCode !== 0) {
       return {
         ok: false,
-        problem: `the reproduction test \`${repro.command}\` fails with your change (exit ${onChange.exitCode})`,
+        problem: `the reproduction test \`${repro.command}\` fails with your change (${describeEnd(onChange)})`,
         output: onChange.output,
       };
     }
@@ -624,7 +647,7 @@ class CodingRun implements RunHandle {
     if (tests.exitCode !== 0) {
       return {
         ok: false,
-        problem: `\`${task.testCommand}\` fails (exit ${tests.exitCode})`,
+        problem: `\`${task.testCommand}\` fails (${describeEnd(tests)})`,
         output: tests.output,
       };
     }
@@ -639,6 +662,16 @@ class CodingRun implements RunHandle {
       return {
         ok: false,
         problem: `the reproduction test \`${repro.command}\` also passes with your changes outside its files reverted, so it does not reproduce the problem`,
+        output: onBase.output,
+      };
+    }
+    // Only a failure of the test itself shows the problem: not a timeout, a crash or a command
+    // that could not run.
+    const why = notATestFailure(onBase);
+    if (why !== undefined) {
+      return {
+        ok: false,
+        problem: `the reproduction test \`${repro.command}\` ${why} with your changes outside its files reverted, so it does not show the problem; it must fail by itself there, with an exit code from 1 to 124, within the time limit`,
         output: onBase.output,
       };
     }
@@ -723,23 +756,45 @@ class CodingRun implements RunHandle {
     this.baseCheckActive = false;
   }
 
-  /** Starts a check detached in the sandbox and polls it until it exits. */
+  /**
+   * Starts a check detached in the sandbox and polls it until it exits, then stops whatever it
+   * left running. Each launch has a fresh id and nonce, so results laid out in advance are never
+   * read as its own.
+   */
   private async runCheck(name: string, command: string): Promise<CheckResult> {
     const { stats } = this.runner;
-    const check = `check-${++this.checkCount}-${name}`;
+    const check = `check-${++this.checkCount}-${randomBytes(8).toString('hex')}-${name}`;
+    const nonce = randomBytes(16).toString('hex');
     const timeoutSeconds = Math.max(1, Math.ceil(this.limits.checkTimeoutMs / 1000));
+    const ended = (exitCode: number, output: string): CheckResult => ({
+      name,
+      command,
+      exitCode,
+      outputBytes: 0,
+      output,
+    });
     stats.checks++;
     this.checkRunning = true;
     let exited = false;
     try {
+      const control = { MAKA_CHECK: check, MAKA_CTL_ROOT: this.ws.controlDir };
       const start = await this.exec(CHECK_START_SCRIPT, {
-        MAKA_CHECK: check,
+        ...control,
+        MAKA_NONCE: nonce,
         MAKA_CWD: `${this.ws.dir}/workspace`,
         MAKA_CMD: command,
         MAKA_TIMEOUT: String(timeoutSeconds),
         MAKA_RUN_TOKEN: randomBytes(16).toString('hex'),
       });
-      if (!/STARTED|ALREADY/u.test(start.stdout)) {
+      const started = start.stdout.trim();
+      if (started === 'EXISTS' || started === 'BADROOT') {
+        exited = true;
+        return ended(
+          -1,
+          `the check could not start: its control files were there before it (${started})`,
+        );
+      }
+      if (started !== 'STARTED' && started !== 'ALREADY') {
         throw new Error(`the check ${name} did not start: ${clipText(start.stderr.trim(), 300)}`);
       }
       const pollMs = this.options.checkPollMs ?? 2_000;
@@ -747,19 +802,21 @@ class CodingRun implements RunHandle {
       for (;;) {
         await this.delay(pollMs);
         const status = await this.exec(CHECK_STATUS_SCRIPT, {
-          MAKA_CHECK: check,
+          ...control,
+          MAKA_NONCE: nonce,
           MAKA_TAIL: String(this.limits.outputTailBytes),
         });
         const lines = status.stdout.split('\n');
         const head = lines[0]?.trim() ?? '';
-        const exit = /^EXIT (-?\d+) (\d+)$/u.exec(head);
+        const exit = /^EXIT (\d+) ([01]) (\d+)$/u.exec(head);
         if (exit) {
           exited = true;
           return {
             name,
             command,
             exitCode: Number(exit[1]),
-            outputBytes: Number(exit[2]),
+            ...(exit[2] === '1' ? { timedOut: true } : {}),
+            outputBytes: Number(exit[3]),
             output: Buffer.from(lines[1] ?? '', 'base64').toString('utf8'),
           };
         }
@@ -770,18 +827,24 @@ class CodingRun implements RunHandle {
           continue;
         }
         exited = true;
-        return {
-          name,
-          command,
-          exitCode: -1,
-          outputBytes: 0,
-          output: 'the check died before it exited',
-        };
+        return ended(
+          -1,
+          head === 'FOREIGN'
+            ? "the check's control files were changed while it ran"
+            : 'the check died before it exited',
+        );
       }
     } finally {
-      // A check left running by an error or a cancel is stopped by the cleanup.
-      if (exited) this.checkRunning = false;
-      stats.checks--;
+      try {
+        if (exited) {
+          // Whatever the check started and left running goes with it.
+          await this.ws.stopRuns([check]);
+          this.checkRunning = false;
+        }
+      } finally {
+        // A check left running by an error or a cancel is stopped by the cleanup.
+        stats.checks--;
+      }
     }
   }
 
@@ -1155,9 +1218,8 @@ class CodingRun implements RunHandle {
       const handle = this.agentHandle;
       if (handle) await this.releaseAgent(handle);
       const workspace = this.workspace;
-      if (workspace && (this.checkRunning || this.cancelled)) {
-        await this.step('stop checks', () => workspace.stopAll());
-      }
+      // Everything the task's agent runs and checks started is stopped, however the task ended.
+      if (workspace) await this.step('stop checks', () => workspace.stopAll());
       if (workspace && this.baseCheckActive) {
         await this.step('restore the change', () => this.restoreBase(undefined));
       }
