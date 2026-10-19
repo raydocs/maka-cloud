@@ -10,7 +10,11 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./testing": {
+      "types": "./dist/__tests__/fake-instabox.d.ts",
+      "default": "./dist/__tests__/fake-instabox.js"
+    }
   },
   "scripts": {
     "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",

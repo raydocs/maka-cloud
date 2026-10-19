@@ -28,6 +28,13 @@ export interface RunHandle {
 export interface Runner {
   readonly name: string;
   start(spec: RunSpec): Promise<RunHandle>;
+  /**
+   * Called on restart for every task the log shows as still running. The runner that started it
+   * is gone from memory, but its work may still run somewhere else (a remote sandbox), so stop
+   * whatever is left for `taskId`, finding it by id alone. Must be idempotent and may be a no-op
+   * for an unknown task. `signal` aborts when the orchestrator stops waiting.
+   */
+  stopOrphaned?(taskId: TaskId, options?: { signal?: AbortSignal }): Promise<void>;
 }
 
 export class RunnerRegistry {
