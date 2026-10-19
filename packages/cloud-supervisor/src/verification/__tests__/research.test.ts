@@ -817,3 +817,51 @@ test('a research task is independently checked only if every artifact is a local
     assert.equal(result.w.fetcher.fetched.length, 0, extra);
   }
 });
+
+function requestClaims(request: { prompt: string }): Array<{ id: string; text: string }> {
+  const match = /CLAIMS\n(DATA-[0-9a-f]+)\n(.*)\n\1\nEVIDENCE/su.exec(request.prompt);
+  if (!match) throw new Error('no claims block in the request');
+  return JSON.parse(match[2] as string);
+}
+
+const LONG_FILLER = ' It is a long and busy tunnel.'.repeat(60);
+
+test('the model is given every claim whole: text past the old clip is judged too', async () => {
+  const claims = defaultClaims();
+  (claims[0] as { text: string }).text = `The tunnel opened in 1994.${LONG_FILLER}`;
+  const { w, r } = await checkedResearch((w) => researchFiles(w, 't1', { claims }));
+  const sent = requestClaims(w.anthropic.requests[0] as never);
+  assert.equal(sent.find((claim) => claim.id === 'c1')?.text, claims[0]?.text);
+  assert.equal(itemsOf(r, 'finished').length, 1);
+  await r.stop();
+});
+
+test('claims that do not fit the model whole are not sent cut: the check could not be completed', async () => {
+  // 40 claims of 1,900+ characters are more than the verifier takes in one request (60,000).
+  const claims = Array.from({ length: 40 }, (_, index) => ({
+    id: `c${index}`,
+    text: `The tunnel opened in 1994.${' It is a long and busy tunnel.'.repeat(64)}`,
+    citations: [{ sourceId: 's1', quote: TUNNEL_QUOTE }],
+  }));
+  const { w, r } = await checkedResearch((w) => researchFiles(w, 't1', { claims }));
+  assert.equal(w.anthropic.requests.length, 0, 'nothing was sent cut');
+  assert.equal(itemsOf(r, 'finished').length, 0, 'never "independently checked"');
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /too large/);
+  await r.stop();
+});
+
+test('quotes that do not fit the model whole are not sent cut either', async () => {
+  const quote = `${TUNNEL_QUOTE}${' The line carries mostly freight.'.repeat(58)}`;
+  const claims = Array.from({ length: 40 }, (_, index) => ({
+    id: `c${index}`,
+    text: 'The tunnel opened in 1994.',
+    citations: [{ sourceId: 's1', quote }],
+  }));
+  const { w, r } = await checkedResearch((w) =>
+    researchFiles(w, 't1', { claims, pages: { s1: quote } }),
+  );
+  assert.equal(w.anthropic.requests.length, 0, 'nothing was sent cut');
+  assert.equal(itemsOf(r, 'finished').length, 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /too large/);
+  await r.stop();
+});
