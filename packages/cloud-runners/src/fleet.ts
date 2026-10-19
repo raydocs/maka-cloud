@@ -30,8 +30,7 @@ export interface CloudRunnersOptions {
   sandboxes: SandboxProvider;
   /**
    * Where each run gets its model key: the model gateway, with a token per run. Default: none, so
-   * every run fails to start. `envModelAccess` hands the vendor keys to the sandbox and is for the
-   * live smoke test only.
+   * every run fails to start. Nothing in this package hands a sandbox a vendor key.
    */
   modelAccess?: ModelAccessProvider;
   /** Default: in memory. Use `JsonFileSessionStore` for resume across restarts. */

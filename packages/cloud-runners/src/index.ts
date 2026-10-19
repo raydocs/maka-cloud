@@ -24,7 +24,6 @@ export {
 } from './machine.js';
 export {
   DEFAULT_TENANT,
-  envModelAccess,
   FixedMachineProvider,
   noModelAccess,
   TenantMachineProvider,
