@@ -36,18 +36,29 @@ function failure(error: unknown): CallToolResult {
   return { isError: true, content: [{ type: 'text', text }] };
 }
 
-async function guarded(run: () => Promise<unknown> | unknown): Promise<CallToolResult> {
+async function guarded(
+  orchestrator: Orchestrator,
+  session: SessionInfo,
+  run: () => Promise<unknown> | unknown,
+): Promise<CallToolResult> {
   try {
+    // The token was checked when the request arrived; it may have been revoked since.
+    orchestrator.assertSessionActive(session);
     return ok(await run());
   } catch (error) {
     return failure(error);
   }
 }
 
-/** One MCP server per request, bound to the session that authenticated it. */
+/**
+ * One MCP server per request, bound to the session that authenticated it.
+ * `connection` aborts when the caller's connection goes away, which ends a
+ * blocking wait without touching the task.
+ */
 export function createSessionMcpServer(
   orchestrator: Orchestrator,
   session: SessionInfo,
+  connection?: AbortSignal,
 ): McpServer {
   const server = new McpServer({ name: 'maka-cloud-orchestrator', version: '0.1.0' });
   server.registerTool(
@@ -66,7 +77,8 @@ export function createSessionMcpServer(
         timeoutMs: waitMs,
       }),
     },
-    (input) => guarded(() => orchestrator.delegate(session, input)),
+    (input) =>
+      guarded(orchestrator, session, () => orchestrator.delegate(session, input, connection)),
   );
   server.registerTool(
     'task_status',
@@ -74,7 +86,7 @@ export function createSessionMcpServer(
       description: 'Current state of a task you created or one of its descendants.',
       inputSchema: taskIdInput,
     },
-    ({ taskId }) => guarded(() => orchestrator.status(session, taskId)),
+    ({ taskId }) => guarded(orchestrator, session, () => orchestrator.status(session, taskId)),
   );
   server.registerTool(
     'task_wait',
@@ -83,7 +95,10 @@ export function createSessionMcpServer(
         'Block until the task ends or the timeout passes. A timeout returns the current state with waitTimedOut true and does not cancel the task.',
       inputSchema: taskIdInput.extend({ timeoutMs: waitMs }),
     },
-    ({ taskId, timeoutMs }) => guarded(() => orchestrator.wait(session, taskId, timeoutMs)),
+    ({ taskId, timeoutMs }) =>
+      guarded(orchestrator, session, () =>
+        orchestrator.wait(session, taskId, timeoutMs, connection),
+      ),
   );
   server.registerTool(
     'task_cancel',
@@ -92,7 +107,7 @@ export function createSessionMcpServer(
         'Cancel a task and everything it delegated. A task that already ended keeps its final state.',
       inputSchema: taskIdInput,
     },
-    ({ taskId }) => guarded(() => orchestrator.cancel(session, taskId)),
+    ({ taskId }) => guarded(orchestrator, session, () => orchestrator.cancel(session, taskId)),
   );
   return server;
 }
@@ -170,9 +185,11 @@ export class OrchestratorServer {
       body = parsed.value;
     }
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = createSessionMcpServer(this.orchestrator, session);
+    const gone = new AbortController();
+    const server = createSessionMcpServer(this.orchestrator, session, gone.signal);
     await server.connect(transport);
     res.once('close', () => {
+      gone.abort();
       void transport.close();
       void server.close();
     });
