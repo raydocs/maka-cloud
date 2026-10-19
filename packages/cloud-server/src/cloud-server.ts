@@ -18,6 +18,7 @@ import { type FeedEntry, FeedHub, readFeed } from './feed.js';
 import { type AnswerOutcome, DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { InviteStore } from './invites.js';
+import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
 import { SqliteSessionStore } from './sqlite-session-store.js';
 import { SqliteTaskStore } from './sqlite-task-store.js';
@@ -158,6 +159,8 @@ export interface CloudServerOptions {
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
   sweepOrphans?: SweepOrphans;
+  /** Web Push settings (see `pushConfigFromEnv`). Without them the push routes answer 404. */
+  push?: PushConfig & Pick<PushOptions, 'transport' | 'retryDelayMs' | 'maxAttempts' | 'timeoutMs'>;
   /** Retry timing for handing user messages to the handler. */
   delivery?: DeliveryOptions;
   /**
@@ -195,6 +198,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   let invites: InviteStore | undefined;
   let mcp: OrchestratorServer | undefined;
   let http: Server | undefined;
+  let push: PushService | undefined;
   let handler: ConversationHandler | undefined;
   let inbox: InboxService | undefined;
   let deliveries: MessageDeliveries | undefined;
@@ -232,6 +236,18 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       () => orchestrator.issueSession(),
       options.orchestrator?.now,
     );
+    if (options.push) {
+      const { transport, retryDelayMs, maxAttempts, timeoutMs, ...config } = options.push;
+      push = new PushService(db, hub, invites, {
+        config,
+        ...(transport ? { transport } : {}),
+        ...(retryDelayMs === undefined ? {} : { retryDelayMs }),
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        now: options.orchestrator?.now,
+        onWarning: warn,
+      });
+    }
     const publisher = new ConductorFeed(db, hub, options.orchestrator?.now);
     const accessFor = (sessionId: string): ConductorAccess => ({
       mcpUrl,
@@ -370,6 +386,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       messageLimiter: new RateLimiter(limits.messagesPerMinute),
       controlLimiter: new RateLimiter(limits.controlPerMinute),
       orchestrator,
+      ...(push ? { push } : {}),
       artifacts,
       artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
       limits,
@@ -396,6 +413,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     });
     const { port } = server.address() as AddressInfo;
     const ownInvites = invites;
+    const ownPush = push;
+    ownPush?.start();
     const ownInbox = inbox;
     let closing: Promise<void> | undefined;
     const shutdown = async (): Promise<void> => {
@@ -403,6 +422,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       api.closeStreams();
       server.closeAllConnections();
       try {
+        await ownPush?.close();
         await new Promise<void>((resolve) => server.close(() => resolve()));
         try {
           await ownInbox?.stop();
@@ -440,6 +460,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     deliveries?.stop();
     http?.closeAllConnections();
     http?.close();
+    await push?.close().catch(() => undefined);
     await Promise.resolve(inbox?.stop()).catch(() => undefined);
     await Promise.resolve(handler?.close?.()).catch(() => undefined);
     await mcp?.close().catch(() => undefined);

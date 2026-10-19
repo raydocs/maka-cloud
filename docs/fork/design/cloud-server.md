@@ -56,6 +56,7 @@ One SQLite file (`node:sqlite`), opened by exactly one process.
 | `conversations`, `messages` | Append-only. `messages` has a unique `(conversation_id, client_message_id)` so a retried POST stores once. A conversation owns one orchestrator session id. |
 | `feed(id, kind, conversation_id, ref, at)` | The order of everything a client can stream. A conversation row, a message or a `task_log` row is inserted together with its `feed` row in one transaction. |
 | `sessions(session_id, token_sha256, parent_task_id, created_at)` | The orchestrator's `SessionStore`. Digests only. |
+| `push_subscriptions(endpoint, invite_id, p256dh, auth, since_feed_id, created_at)`, `push_deliveries(endpoint, task_id, state, at)` | Web Push. Mutable, unlike the log tables. `since_feed_id` is the feed position when the device subscribed. Schema step 7. |
 
 Invite tokens (`invites`: id, SHA-256 digest, label, created and revoked times)
 live in a second SQLite file. The main database belongs to the one running
@@ -108,6 +109,9 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
 | `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`. |
 | `GET /v1/tasks/:taskId/artifacts/:index` | A file's bytes as an attachment, or `{url}` for a link. 404 for anything that is not readable (one answer for every reason), 413 over 2 MiB, 429 over the download limit. |
+| `GET /v1/push/key` | `{publicKey}`, the VAPID public key. 404 when push is not configured (so are the next two). |
+| `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
+| `DELETE /v1/push/subscriptions` | `{endpoint}` -> 204. Only the invite that registered it can remove it; otherwise 404. |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
 Unknown or malformed ids are 404. Bodies over 64 KiB are 413; message text is
@@ -139,6 +143,39 @@ Bytes are sent as `text/plain` (`application/json` for `.json`) with
 `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and a
 sandboxing CSP, so a browser never renders them. At most 8 reads run at once
 (429 beyond), and each invite gets 60 downloads a minute.
+
+### Web Push
+
+Off unless `CloudServerOptions.push` is set; `pushConfigFromEnv()` builds it from
+`CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` and
+optionally `CLOUD_PUSH_ALLOWED_HOSTS`. The private key lives in memory only: it is
+not logged, not stored, and bad settings fail startup with a message that does
+not contain them. Encryption (RFC 8291) and VAPID signing (RFC 8292) are the
+`web-push` package's; the server only builds the request with it and sends it
+itself.
+
+When a top-level task (no parent) ends, every device registered by the invite
+that owns its conversation gets one message, while that invite is active:
+`{type: "task.finished", conversationId, taskId, state}`. A conversation another
+invite owns, or one nobody owns yet (before `conversation adopt`), reaches no
+device. Nothing a task or a model wrote goes in it, and there is no title, model
+name or vendor name.
+
+What is left to send is computed from the database: a terminal event of a
+top-level task that came after the subscription (`since_feed_id`) and has no
+`push_deliveries` row. A restart therefore sends what it missed and never sends
+twice. A `404`/`410` deletes the subscription; `429`, `5xx`, a timeout and a network
+error are retried (3 attempts, 5 s times the attempt number apart); other `4xx`
+and an exhausted retry record the message as `dropped`. A revoke made through this
+server's invite store deletes the invite's devices and aborts sends to them that are
+under way; one made from the command line is seen at the next send, which records
+`revoked` instead of sending.
+
+The server fetches a URL a client chose, so: the endpoint must be `https`, on port
+443, without credentials, on a host in the allow-list (FCM, Mozilla autopush,
+Apple, Windows by default); no redirect is followed; the address is checked when
+the socket connects (non-public addresses are refused, and so are IP literals); a
+send ends after 10 s or when the server closes; and the response is read to 4 KiB.
 
 ### Control and cost
 

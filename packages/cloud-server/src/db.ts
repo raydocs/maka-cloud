@@ -181,6 +181,31 @@ ALTER TABLE task_index ADD COLUMN stop_pending INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX task_index_stop_pending ON task_index (n) WHERE stop_pending = 1;
 `;
 
+/**
+ * v7: Web Push. A subscription belongs to the invite that registered it;
+ * `since_feed_id` is where the feed stood when the device subscribed, so only
+ * tasks that end after that are sent. `push_deliveries` records each message
+ * once, so a restart neither loses nor repeats one.
+ */
+const SCHEMA_V7 = `
+CREATE TABLE push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  invite_id TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  since_feed_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX push_subscriptions_invite ON push_subscriptions (invite_id);
+CREATE TABLE push_deliveries (
+  endpoint TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (endpoint, task_id)
+);
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -188,6 +213,7 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V4,
   SCHEMA_V5,
   SCHEMA_V6,
+  SCHEMA_V7,
 ];
 
 /**
