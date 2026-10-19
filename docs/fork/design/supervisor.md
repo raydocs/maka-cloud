@@ -593,7 +593,11 @@ before the fix.
   record that removes every claim, a removal of an id the delivered `report.json`
   does not have, and a removal the record does not itself show as failing (status
   not one of the cite-check failures) are failures. `verification.json` is written
-  by the agent, so it only ever narrows the check when it agrees with the report.
+  by the agent, so on its own it never narrows the check: a removal also needs the
+  delivered `report.md` or `report.html`, read in full, not to show the claim in its
+  body (above the "Not verified" list, which names what was left out). If no
+  rendering is listed, or a listed one cannot be read, every claim stays checked,
+  so an uncited claim that is still in the report fails whatever the record says.
   The engine also refuses to pass with zero claims left (`incomplete`): a guard
   for future preparers, not reachable by the two built in.
 - **Nothing waits on a hung resolver or fetcher.** The source fetcher races its

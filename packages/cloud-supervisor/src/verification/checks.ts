@@ -9,6 +9,7 @@ import {
   checkCitations,
   claimsOf,
   htmlToText,
+  normalizeText,
   passed,
 } from '@maka-cloud/playbooks/citations';
 import { z } from 'zod';
@@ -281,8 +282,9 @@ export async function prepareResearch(input: {
   const report: Report = parsedJson;
 
   // Claims the playbook already dropped are not in the report the human reads.
-  // verification.json is written by the agent, so a removal counts only when
-  // the delivered report has that claim and the record itself shows it failing.
+  // verification.json is written by the agent, so it never narrows the check by
+  // itself: a removal counts only when the record shows the claim failing and the
+  // delivered report, which the human reads, does not show it in its body.
   const all = claimsOf(report);
   if (all.length === 0) {
     failures.push({ claim: 'the report makes claims', found: 'the report has no claims to check' });
@@ -290,6 +292,7 @@ export async function prepareResearch(input: {
   }
   const inReport = new Map(all.map((claim) => [claim.id, claim]));
   const removed = new Set<string>();
+  const candidates: Claim[] = [];
   const exported = await read('verification.json');
   if (exported.ok) {
     const record = parseJson(exported.text, RemovedRecord);
@@ -306,8 +309,18 @@ export async function prepareResearch(input: {
           claim: clip(claim.text, 240),
           found: 'it was removed from the check, but the record does not show it failing',
         });
+      } else {
+        candidates.push(claim);
+        continue;
       }
       removed.add(entry.id);
+    }
+  }
+  if (candidates.length > 0) {
+    // Without a rendering that can be read in full, nothing shows a claim is gone: all stay checked.
+    const shown = await shownInDelivery(read, candidates);
+    if (shown) {
+      for (const claim of candidates) if (!shown.has(claim.id)) removed.add(claim.id);
     }
   }
   const claims: Claim[] = all.filter((claim) => !removed.has(claim.id));
@@ -448,6 +461,41 @@ export async function prepareResearch(input: {
         }));
     },
   };
+}
+
+/**
+ * The ids of `claims` that a delivered rendering (report.md, report.html) shows
+ * in its body, above the "Not verified" list that names what was left out. Or
+ * undefined when no rendering is listed, or a listed one cannot be read: then
+ * the delivered text proves nothing about what the human reads.
+ */
+async function shownInDelivery(
+  read: ReadArtifact,
+  claims: readonly Claim[],
+): Promise<Set<string> | undefined> {
+  const bodies: string[] = [];
+  for (const [name, cutAt, toText] of [
+    ['report.md', /^##\s+Not verified\s*$/mu, (text: string) => text],
+    ['report.html', /<h2>\s*Not verified\s*<\/h2>/iu, htmlToText],
+  ] as const) {
+    const file = await read(name);
+    if (!file.ok) {
+      if (file.reason === 'not_listed') continue;
+      return undefined;
+    }
+    const cut = file.text.search(cutAt);
+    bodies.push(normalizeText(toText(cut < 0 ? file.text : file.text.slice(0, cut))));
+  }
+  if (bodies.length === 0) return undefined;
+  const shown = new Set<string>();
+  for (const claim of claims) {
+    // Markdown escapes angle brackets; HTML text is decoded, so it matches the plain form.
+    const forms = [claim.text, claim.text.replace(/</gu, '&lt;').replace(/>/gu, '&gt;')].map(
+      normalizeText,
+    );
+    if (bodies.some((body) => forms.some((form) => body.includes(form)))) shown.add(claim.id);
+  }
+  return shown;
 }
 
 function hostOf(url: string): string {
