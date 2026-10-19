@@ -27,6 +27,7 @@ export {
   Orchestrator,
   type OperatorAccess,
   type OrchestratorOptions,
+  type RecoveredSpend,
   type OrchestratorStats,
 } from './orchestrator.js';
 export { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits } from './quota.js';

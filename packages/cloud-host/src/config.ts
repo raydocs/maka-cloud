@@ -17,6 +17,8 @@ export interface StackConfig {
   codingDeliveriesPath: string;
   /** The supervisor's own database. */
   supervisorDbPath: string;
+  /** The model gateway's journal of what tasks spent, read back after a restart. */
+  gatewaySpendPath: string;
   host: string;
   port: number;
   mcp: {
@@ -165,6 +167,7 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
     codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
     supervisorDbPath: join(dataDir, 'supervisor.db'),
+    gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
     host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
     port: port('MAKA_CLOUD_PORT', 8080),
     mcp: {

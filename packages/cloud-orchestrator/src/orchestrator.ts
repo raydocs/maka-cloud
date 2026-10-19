@@ -65,6 +65,18 @@ export interface OrchestratorOptions {
   controlTimeoutMs?: number;
   /** Backoff for retrying a stop a task is owed. Default `DEFAULT_STOP_RETRY`. */
   stopRetry?: { firstMs?: number; maxMs?: number };
+  /**
+   * Spend an earlier process wrote down but may not have recorded (the model gateway's journal).
+   * Restore records it on each task's tree before anything else, then calls `recorded`.
+   */
+  recoveredSpend?: RecoveredSpend;
+}
+
+export interface RecoveredSpend {
+  /** Per task, everything its runs spent in earlier processes, open reservations in full. */
+  unrecorded(): ReadonlyArray<{ taskId: TaskId; usd: number }>;
+  /** Called once all of it is in the task log. */
+  recorded(): void;
 }
 
 /**
@@ -125,6 +137,7 @@ export class Orchestrator {
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
+  private readonly recoveredSpend: RecoveredSpend | undefined;
   private readonly controlTimeoutMs: number;
   private readonly stopRetry: { firstMs: number; maxMs: number };
   private readonly newTaskId: () => TaskId;
@@ -178,6 +191,7 @@ export class Orchestrator {
     );
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
+    this.recoveredSpend = options.recoveredSpend;
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
@@ -639,6 +653,7 @@ export class Orchestrator {
       this.tasks.set(taskId, task);
       this.activeByRoot.add(task.rootSessionId);
     }
+    await this.recordRecoveredSpend();
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
@@ -677,6 +692,28 @@ export class Orchestrator {
     this.restoring = false;
     // Ended tasks whose stop an earlier process could not confirm.
     for (const taskId of this.store.stopPendingTaskIds()) this.retryStop(taskId);
+  }
+
+  /**
+   * Records what runs of an earlier process spent, before any task here ends or settles. A run's
+   * spend is recorded as its total (`task_cost` keeps the highest per task), so recording again
+   * after a crash in between changes nothing. Its tree is not cancelled for it here: every task
+   * still running is ended just below.
+   */
+  private async recordRecoveredSpend(): Promise<void> {
+    const recovered = this.recoveredSpend?.unrecorded() ?? [];
+    for (const { taskId, usd } of recovered) {
+      if (!Number.isFinite(usd) || usd <= 0) continue;
+      const root = this.treeRoot(taskId);
+      if (!root) continue;
+      await this.record({
+        type: 'task_cost',
+        taskId: root.taskId,
+        fromTaskId: taskId,
+        costUsd: usd,
+      });
+    }
+    if (recovered.length > 0) this.recoveredSpend?.recorded();
   }
 
   /**
