@@ -314,6 +314,8 @@ test('the access handed to the orchestrator re-checks the invite when the orches
       resumeAs: () => Promise.reject(new Error('unused')),
     },
     costs: new CostLedger(db, hub),
+    artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
+    artifactLimiter: new RateLimiter(1_000_000),
     limits: DEFAULT_HTTP_LIMITS,
     onMessage: () => undefined,
   });
