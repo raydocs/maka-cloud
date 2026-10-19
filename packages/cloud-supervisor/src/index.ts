@@ -24,3 +24,12 @@ export {
   type SupervisorStats,
 } from './supervisor.js';
 export * from './types.js';
+export { isPublicAddress } from './verification/address.js';
+export {
+  createSourceFetcher,
+  type FetchOutcome,
+  type FetchRefusal,
+  type FetcherOptions,
+  type SourceFetcher,
+} from './verification/fetcher.js';
+export { nodeTransport, type Transport } from './verification/transport.js';

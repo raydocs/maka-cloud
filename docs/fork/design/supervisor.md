@@ -428,3 +428,15 @@ Where the package differs from the sketches above, now that T5 has merged:
 - Task history from before the supervisor's first start updates the projection
   but raises no items; a question that is still open does.
 - The digest's `open` count excludes `finished` items, which never ask anything of the human.
+
+## As built (PR 2a, source fetcher)
+
+`createSourceFetcher` (`src/verification/fetcher.ts`) is the only code that makes
+an outbound request. A host name is resolved once per hop; if any answer is not
+public the fetch is refused (a mixed answer is not trusted), and the connection
+goes to the first checked address with the certificate verified for the URL's
+host name (`nodeTransport`, no agent, so no cookie or credential is ever sent).
+Address literals and every spelling the URL parser normalizes (decimal, hex,
+short forms, IPv4-mapped IPv6) are judged by `isPublicAddress`. Only text types
+are read, identity encoding only, 2 MiB and 15 s by default. Nothing calls it
+until the verification engine (PR 2b) is wired.
