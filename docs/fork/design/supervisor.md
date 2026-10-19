@@ -615,13 +615,19 @@ before the fix.
   edited after it was made, a missing or unusable record, a listed rendering that
   does not exist, an artifact name listed twice, and an artifact listed as a link
   (a link cannot be read here and reproduced, so it is never skipped). A task that
-  lists both a change (`changes.json`, `change.patch`) and any report artifact
-  (`report.json`, `report.md`, `report.html`) is `unverified` too, since one kind of
-  check cannot stand for both, and so is a rendering listed without `report.json`.
-  Every artifact name comes from one helper (`artifactName` in `kind.ts`): the path
-  of a link or a local path without query or fragment, percent-decoded,
-  NFKC-normalized and case-folded. Classifying, counting and reading use it alone,
-  and any report artifact, in any form, puts the research check in scope. With no
+  lists a change beside any report file, and any task whose artifacts are not
+  exactly the files one check reads, is `unverified` too. That is decided by
+  allowlists, not by matching names: coding is accepted only if every artifact is
+  a plain local path whose file name is exactly `changes.json`, `change.patch` or
+  `verification.json` (a change among them); research only if every artifact is
+  exactly `report.json`, `report.md`, `report.html` or `verification.json`
+  (`report.json` among them). "Plain" means ASCII letters, digits, `.`, `_`, `-`
+  and `/` with no empty, `.` or `..` part, so a link, an encoding, a query or
+  fragment, a backslash, a look-alike letter or a different case is never
+  accepted. A manifest that resembles a change or a report by a loose reading
+  (links, percent-decoding, case-folding) but is not accepted gets the research
+  check, which ends unverified before anything is read; the loose reading only
+  ever widens suspicion. With no
   rendering listed there is nothing to reproduce and every claim is checked. A contract test in the
   playbooks (`run.test.ts`) keeps the record able to reproduce what `cite-check`
   delivers. `ArtifactRead` carries the raw `bytes` next to the decoded `text` for
