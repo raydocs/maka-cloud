@@ -37,8 +37,8 @@ async function hangingRepro(turn: AgentTurn, onlyOnBase = false): Promise<void> 
 }
 
 /** The pid of the hanging reproduction test, once it runs. */
-async function hangingPid(h: Harness): Promise<number> {
-  const [pid] = await recordedPids(h, 'hang', 1);
+async function hangingPid(h: Harness, until?: Promise<unknown>): Promise<number> {
+  const [pid] = await recordedPids(h, 'hang', 1, until);
   return pid as number;
 }
 
@@ -124,7 +124,7 @@ test('cancel during a check stops the check process', async (t) => {
   };
   const handle = await h.runner.start(await h.spec('tsk_ccheck'));
   const events = collect(handle);
-  const pid = await hangingPid(h);
+  const pid = await hangingPid(h, events);
   assert.equal(isAlive(pid), true);
   await handle.cancel();
   assert.equal(terminal(await events), undefined);
@@ -145,7 +145,7 @@ test('cancel during the base check stops it and puts the change back', async (t)
   });
   const handle = await h.runner.start(await h.spec('tsk_cbase'));
   const events = collect(handle);
-  const pid = await hangingPid(h);
+  const pid = await hangingPid(h, events);
   const workspace = join(h.root, 'tsk_cbase', 'workspace');
   assert.notEqual(
     await fs.readFile(join(workspace, 'lib', 'add.sh'), 'utf8'),
@@ -176,7 +176,7 @@ test('a sandbox error during a check fails the task and still stops the check', 
   h.replace = (call, run) => {
     if (!isCheck(call)) return undefined;
     running = run().catch(() => undefined);
-    return hangingPid(h).then(() => {
+    return hangingPid(h, running).then(() => {
       throw new Error('socket hang up');
     });
   };
@@ -219,7 +219,7 @@ test('after a restart, stopOrphaned stops a check the old process left running',
   };
   const old = await h.runner.start(await h.spec('tsk_orphan'));
   const events = collect(old);
-  const pid = await hangingPid(h);
+  const pid = await hangingPid(h, events);
 
   // A new process knows the task only by id.
   await h.makeRunner().stopOrphaned('tsk_orphan');

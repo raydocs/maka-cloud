@@ -392,9 +392,23 @@ export async function setup(
   return h;
 }
 
-/** Pids recorded with recordPid under `name`, waiting until there are at least `count`. */
-export async function recordedPids(h: Harness, name: string, count = 0): Promise<number[]> {
+/**
+ * Pids recorded with recordPid under `name`, waiting until there are at least `count`; fails
+ * instead when `until` settles first (the task or the check ended without recording them).
+ */
+export async function recordedPids(
+  h: Harness,
+  name: string,
+  count = 0,
+  until?: Promise<unknown>,
+): Promise<number[]> {
+  let ended = false;
+  until?.then(
+    () => (ended = true),
+    () => (ended = true),
+  );
   for (;;) {
+    const settled = ended;
     const files = (await fs.readdir(h.pids)).filter(
       (file) => file.startsWith(`${name}-`) && !file.endsWith('.tmp'),
     );
@@ -402,6 +416,7 @@ export async function recordedPids(h: Harness, name: string, count = 0): Promise
       .map((text) => Number(text.trim()))
       .filter((pid) => pid > 0);
     if (pids.length >= count) return pids;
+    if (settled) throw new Error(`ended before ${count} ${name} pid(s) were recorded`);
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
