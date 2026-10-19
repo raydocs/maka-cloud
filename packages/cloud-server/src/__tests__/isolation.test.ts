@@ -448,6 +448,50 @@ test('error text in tasks and events carries no model or vendor names', async (t
   assert.doesNotMatch(JSON.stringify(stream.events), /codex|claude|openai/iu);
 });
 
+test('inbox asks built from failure reasons carry no model or vendor names', async (t) => {
+  const ask =
+    'The step “x” has failed 2 times. Last reason: “codex exited; Claude/OpenAI unavailable”';
+  let conversationId = '';
+  let parts: SupervisorParts | undefined;
+  const item = () => ({ itemId: 'itm_v', conversationId, ask, state: 'open' });
+  const service: InboxService = {
+    list: async () => ({ items: [item()], next: null }),
+    answer: async () => ({ ok: false, reason: 'stale', item: item() }),
+    setMute: () => ({ ok: false }),
+    settings: () => ({}),
+    updateSettings: () => ({ ok: false }),
+    digest: async () => ({}),
+    stop: async () => undefined,
+  };
+  const h = await startHarness(t, {
+    supervisor: (given) => {
+      parts = given;
+      return service;
+    },
+  });
+  conversationId = await newConversation(h);
+  const stream = await openStream(t, h, `?conversation=${conversationId}`);
+  (parts as SupervisorParts).publish({ kind: 'inbox.item', conversationId, data: item() });
+  await stream.until(2, 'the item');
+  const listed = await (await h.api('/v1/inbox/items')).text();
+  const refused = await (
+    await postJson(h, '/v1/inbox/items/itm_v/answer', {
+      answerId: 'ans_1',
+      optionId: 'retry',
+      preconditionHash: 'h',
+    })
+  ).text();
+  for (const seen of [listed, refused, JSON.stringify(stream.events)]) {
+    assert.match(seen, /exited; assistant\/assistant unavailable/u);
+    assert.doesNotMatch(seen, /codex|claude|openai/iu);
+  }
+  // The supervisor's own reads stay as written.
+  const internal = (parts as SupervisorParts).feed
+    .read(0, 100)
+    .find((e) => e.kind === 'inbox.item');
+  assert.equal((internal?.data as { ask?: string } | undefined)?.ask, ask);
+});
+
 test('a queued inbox answer takes effect only while its caller is active and owns the conversation', async (t) => {
   const { handler, answers, messages } = fullHandler();
   let parts: SupervisorParts | undefined;

@@ -347,6 +347,30 @@ test('a single item becomes one notice with the ask, a batch one notice per conv
   assert.deepEqual(notices[2], { conversationId: 'c2', text: 'Needs you: two' });
 });
 
+test('a notice carries no model or vendor names from the ask', async () => {
+  const notices: Array<{ conversationId: string; text: string }> = [];
+  const notifier = conductorNotifier({
+    postNotice: async (notice) => void notices.push(notice as never),
+  });
+  await notifier.interrupt({
+    items: [
+      {
+        itemId: 'i-1',
+        conversationId: 'c1',
+        kind: 'blocked',
+        ask: 'Last reason: “codex exited; Claude/OpenAI unavailable”',
+      },
+    ],
+    batch: false,
+  } satisfies Interrupt);
+  assert.deepEqual(notices, [
+    {
+      conversationId: 'c1',
+      text: 'Needs you: Last reason: “assistant exited; assistant/assistant unavailable”',
+    },
+  ]);
+});
+
 test('a notice that cannot be posted fails the interrupt, so the supervisor reports it', async () => {
   const notifier = conductorNotifier({
     postNotice: async () => {
