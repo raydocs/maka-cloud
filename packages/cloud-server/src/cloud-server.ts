@@ -15,6 +15,7 @@ import { openDatabase } from './db.js';
 import { FeedHub } from './feed.js';
 import { DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
 import { InviteStore } from './invites.js';
+import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
 import { SqliteSessionStore } from './sqlite-session-store.js';
 import { SqliteTaskStore } from './sqlite-task-store.js';
@@ -57,6 +58,8 @@ export interface CloudServerOptions {
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
   sweepOrphans?: SweepOrphans;
+  /** Web Push settings (see `pushConfigFromEnv`). Without them the push routes answer 404. */
+  push?: PushConfig & Pick<PushOptions, 'transport' | 'retryDelayMs' | 'maxAttempts' | 'timeoutMs'>;
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
 }
@@ -87,6 +90,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   let invites: InviteStore | undefined;
   let mcp: OrchestratorServer | undefined;
   let http: Server | undefined;
+  let push: PushService | undefined;
   try {
     const hub = new FeedHub();
     const store = new SqliteTaskStore(db, hub);
@@ -115,6 +119,18 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       () => orchestrator.issueSession(),
       options.orchestrator?.now,
     );
+    if (options.push) {
+      const { transport, retryDelayMs, maxAttempts, timeoutMs, ...config } = options.push;
+      push = new PushService(db, hub, invites, {
+        config,
+        ...(transport ? { transport } : {}),
+        ...(retryDelayMs === undefined ? {} : { retryDelayMs }),
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        now: options.orchestrator?.now,
+        onWarning: warn,
+      });
+    }
     const costs = new CostLedger(db, hub, options.orchestrator?.now);
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
     const api = new PublicApi({
@@ -127,6 +143,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       controlLimiter: new RateLimiter(limits.controlPerMinute),
       orchestrator,
       costs,
+      ...(push ? { push } : {}),
       artifacts: options.artifacts ?? new FileArtifactSource(options.handoffRoot),
       artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
       limits,
@@ -165,11 +182,14 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     });
     const { port } = server.address() as AddressInfo;
     const ownInvites = invites;
+    const ownPush = push;
+    ownPush?.start();
     let closing: Promise<void> | undefined;
     const shutdown = async (): Promise<void> => {
       api.closeStreams();
       server.closeAllConnections();
       try {
+        await ownPush?.close();
         await new Promise<void>((resolve) => server.close(() => resolve()));
         await mcp?.close();
       } finally {
@@ -193,6 +213,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   } catch (error) {
     http?.closeAllConnections();
     http?.close();
+    await push?.close().catch(() => undefined);
     await mcp?.close().catch(() => undefined);
     try {
       invites?.close();

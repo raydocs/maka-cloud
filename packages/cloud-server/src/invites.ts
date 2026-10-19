@@ -90,6 +90,14 @@ export class InviteStore {
     }));
   }
 
+  /** True while the invite exists and is not revoked. */
+  isActive(inviteId: string): boolean {
+    const row = this.db
+      .prepare('SELECT revoked_at FROM invites WHERE invite_id = ?')
+      .get(inviteId) as { revoked_at: number | null } | undefined;
+    return row !== undefined && row.revoked_at === null;
+  }
+
   /** The invite a token belongs to, or nothing for a missing, malformed, unknown or revoked one. */
   resolve(token: string): InviteInfo | undefined {
     const inviteId = inviteIdOf(token);
