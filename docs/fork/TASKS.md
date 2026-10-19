@@ -208,6 +208,51 @@ Depends on: T6, T8.
 - Hidden tests only grade; agents never see them.
 - Dry-run with a fake subject. Live runs need an approved budget; do not run.
 
+## T20: supervisor and "needs you" inbox
+
+Depends on: T4, T5.
+
+Why: a user running dozens of agent sessions cannot watch them all, and an
+agent's own report of success is not proof. A supervisor watches every
+conversation, checks results independently, and asks the human only when it
+matters. Pulled forward from batch 4 because users ask for it first.
+
+- Package: `packages/cloud-supervisor`. It runs beside the conductor, not
+  inside it, and reads the T4 event stream for all of the user's
+  conversations and tasks.
+- Attention items: kind (decision, approval, blocked, verification failed,
+  budget, finished), the conversation and task, a one-line ask, options with
+  the recommended one first, and evidence links (manifest, test output, PR,
+  citations).
+- Escalation policy, deterministic rules first: interrupt the human for a
+  conductor `ask_user`, a step that would exceed its budget, an irreversible
+  action waiting, the same step failing twice, a failed verification, a task
+  with no progress for a configurable time, or a manifest with low confidence.
+  Everything else goes into a digest. A model (Claude Haiku 5.5) may only
+  summarize and rank items; it never decides to skip a rule.
+- Independent verification: when a task ends, check the manifest's claims
+  against the evidence (tests and CI for code, every citation for research)
+  with a model other than the one that did the work. A mismatch becomes a
+  "verification failed" item instead of a finished one.
+- Delivery: interrupts at once (through the conductor's `notify`, and web push
+  once T9 has it); the digest on a schedule or on request. Noise limits:
+  one open item per task and kind, an hourly cap on interrupts, quiet hours,
+  and per-kind mute.
+- Answers: approve, reject or a free-text reply goes back to the right
+  conversation exactly once (idempotent). Each item stores a precondition hash
+  of the state it was based on; if the state changed, refresh the item instead
+  of acting (same rule as T16).
+- API on the T4 server: list items, answer an item, mute a kind, and an SSE
+  event for new items. If T9 is merged, add an inbox view to `cloud-web`;
+  otherwise ship the API only and note the view as a follow-up.
+- Tests with fake event streams and a scripted fake model: every escalation
+  rule fires and nothing else interrupts; duplicates are suppressed; the
+  hourly cap and quiet hours hold; an answer reaches its conversation exactly
+  once; a stale item refreshes; a manifest that claims passing tests while
+  the evidence shows failures becomes "verification failed".
+- Check: package typecheck and tests, plus the T4 server tests for the new
+  routes.
+
 ---
 
 # Batch 3: personal assistant feel
@@ -278,7 +323,8 @@ Gmail scopes.
 
 ## T16: proactive suggestion cards
 
-Depends on: T11, T12, T13.
+Depends on: T11, T12, T13, T20 (cards reuse its item store, delivery and
+noise limits).
 
 - A background job on Claude Haiku 5.5 scans the user's own signals (task
   history, schedules, memory, GitHub notifications through the GitHub App) and
