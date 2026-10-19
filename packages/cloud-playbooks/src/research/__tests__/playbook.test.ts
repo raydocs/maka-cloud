@@ -135,6 +135,9 @@ test('the research playbook has the conductor Playbook shape and tells the condu
     '--drop-unsupported',
     'runner-reported',
     'judgments.json',
+    'maka-inputs: <drafterTaskId> report.json sources',
+    'maka-inputs: <reviewerTaskId> judgments.json',
+    '--judgments inputs/<reviewerTaskId>/judgments.json',
   ]) {
     assert.ok(steps.includes(needle), needle);
   }

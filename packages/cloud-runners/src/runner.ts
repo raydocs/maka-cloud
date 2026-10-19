@@ -12,6 +12,7 @@ import {
 } from '@maka-cloud/orchestrator';
 import type { Fleet } from './fleet.js';
 import type { RemoteMachine } from './machine.js';
+import { type InputRequest, parseInputRequests } from './inputs.js';
 import { LineSplitter } from './lines.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage } from './shell.js';
@@ -187,19 +188,30 @@ class Run implements RunHandle {
       this.startActivityLease(machine);
 
       await this.guard(fleet.ensureCli(machine, vendor));
+      await this.guard(fleet.ensureTools(machine));
       this.checkCancelled();
 
       const dir = machine.taskDir(spec.taskId);
       const resumed = this.resumePrompt !== undefined;
+      let staged = '';
       if (resumed) {
         await machine.prepare(spec.taskId, undefined, this.signal);
       } else {
         const brief = await this.guard(readFile(spec.briefPath, 'utf8'));
+        const inputs = parseInputRequests(brief);
+        if (!inputs.ok) return this.fail(inputs.reason);
         await machine.prepare(spec.taskId, brief, this.signal);
+        if (inputs.requests.length > 0) {
+          const copied = await this.guard(this.stageInputs(machine, inputs.requests));
+          if (!copied.ok) return this.fail(copied.reason);
+          staged = copied.note;
+        }
       }
 
       let outcome = await this.turn(
-        resumed ? this.resumedPrompt(dir, this.resumePrompt ?? '') : this.initialPrompt(dir),
+        resumed
+          ? this.resumedPrompt(dir, this.resumePrompt ?? '')
+          : this.initialPrompt(dir, staged),
         resumed ? record.sessionId : undefined,
       );
       record = this.record ?? record;
@@ -343,9 +355,69 @@ class Run implements RunHandle {
     }
   }
 
-  private initialPrompt(dir: string): string {
+  /**
+   * Copies the files the brief asked for from other tasks of the same tenant and sandbox into this
+   * task's workspace. Nothing is copied unless the deployment's policy allows each source, and
+   * a refusal ends the task before the CLI starts: an agent that is missing its inputs would
+   * otherwise report on files it never saw. The checks that depend on shared state run again in
+   * the sandbox (`STAGE_INPUTS_SCRIPT`), next to the copy.
+   */
+  private async stageInputs(
+    machine: RemoteMachine,
+    requests: InputRequest[],
+  ): Promise<{ ok: true; note: string } | { ok: false; reason: string }> {
+    const { fleet, spec } = this;
+    const policy = fleet.options.inputs;
+    if (!policy) {
+      return {
+        ok: false,
+        reason: 'the brief asks for files of other tasks, which this deployment does not provide',
+      };
+    }
+    const target = fleet.tenantOf(spec.taskId);
+    const notes: string[] = [];
+    for (const { source, paths } of requests) {
+      const refusal = await this.inputRefusal(machine, policy, source, target);
+      if (refusal !== undefined) return { ok: false, reason: `inputs from ${source}: ${refusal}` };
+      const copied = await machine.stageInputs({
+        fromDir: source,
+        toDir: spec.taskId,
+        paths,
+        limits: fleet.stageLimits,
+        signal: this.signal,
+      });
+      if (!copied.ok) return { ok: false, reason: `inputs from ${source}: ${copied.reason}` };
+      notes.push(
+        `${paths.join(', ')} of task ${source} (${copied.files} files) in inputs/${source}/`,
+      );
+    }
+    return {
+      ok: true,
+      note: `Files of other tasks were copied into ${machine.taskDir(spec.taskId)}/workspace/: ${notes.join('; ')}. Read them there.`,
+    };
+  }
+
+  private async inputRefusal(
+    machine: RemoteMachine,
+    policy: NonNullable<Fleet['options']['inputs']>,
+    source: TaskId,
+    targetTenant: string,
+  ): Promise<string | undefined> {
+    const { fleet, spec } = this;
+    if (source === spec.taskId) return 'a task cannot take its own files as inputs';
+    if (fleet.tenantOf(source) !== targetTenant) return 'that task belongs to another tenant';
+    const record = await fleet.sessions.get(source);
+    if (!record) return 'no sandbox is recorded for that task';
+    if (record.machineId !== machine.machineId) {
+      return 'its files are on another sandbox, and copying between sandboxes is not supported';
+    }
+    return await policy.check({ target: spec.taskId, source });
+  }
+
+  private initialPrompt(dir: string, staged = ''): string {
     return [
       `Read the brief at ${dir}/brief.md and carry it out. Work in ${dir}/workspace.`,
+      ...(staged ? [staged] : []),
       `When you are finished, write ${dir}/result.json as ${manifestShape()}.`,
       'Write that file as the very last step, then stop. Report only what you actually did and checked.',
     ].join(' ');

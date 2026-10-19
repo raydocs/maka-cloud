@@ -1,7 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { InstaboxClient } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
-import { DEFAULT_LOG_ROOT, RemoteMachine } from './machine.js';
+import type { InputPolicy } from './inputs.js';
+import {
+  DEFAULT_LOG_ROOT,
+  DEFAULT_STAGE_LIMITS,
+  RemoteMachine,
+  type StageLimits,
+} from './machine.js';
 import { MachinePoller } from './poller.js';
 import { DEFAULT_TENANT, envModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
@@ -12,6 +18,7 @@ import type {
   RunnerSessionRecord,
   RunnerSessionStore,
   SandboxProvider,
+  SandboxTool,
 } from './types.js';
 import type { TokenPrices, VendorAdapter } from './vendors.js';
 
@@ -42,6 +49,19 @@ export interface CloudRunnersOptions {
   installCommands?: Partial<Record<RunnerName, string>>;
   models?: Partial<Record<RunnerName, string>>;
   /**
+   * Programs to put on every run's PATH in the sandbox (for example `cite-check`), installed once
+   * per sandbox before a run starts and again when their content changes.
+   */
+  sandboxTools?: SandboxTool[];
+  /**
+   * Lets a task start with files of other tasks (`maka-inputs:` lines at the start of its brief).
+   * Without it a brief that asks for inputs fails the task. `sameConversationInputPolicy` is the
+   * usual choice.
+   */
+  inputs?: InputPolicy;
+  /** Caps on the files one task may take from others. Defaults: 200 files, 5 MiB each, 32 MiB in all. */
+  inputLimits?: Partial<StageLimits>;
+  /**
    * Token prices for metering each run's spend against its budget, per runner. Defaults:
    * `DEFAULT_PRICES`. Claude's CLI also reports its own total at the end of each invocation.
    */
@@ -70,6 +90,14 @@ export interface CloudRunnersOptions {
 }
 
 const SETUP_TIMEOUT_MS = 15 * 60_000;
+const TOOL_NAME = /^[a-z][a-z0-9-]{0,40}$/u;
+const MAX_TOOL_BYTES = 8 * 1024 * 1024;
+
+interface PreparedTool {
+  name: string;
+  content: Buffer;
+  hash: string;
+}
 
 /** State shared by the runners of one deployment. */
 export class Fleet {
@@ -87,6 +115,7 @@ export class Fleet {
   readonly logRoot: string;
   private readonly machines = new Map<string, RemoteMachine>();
   private readonly setups = new Map<string, Promise<void>>();
+  private readonly tools: PreparedTool[];
   private recordChain: Promise<unknown> = Promise.resolve();
   private lastCaptureStamp = 0;
 
@@ -100,6 +129,7 @@ export class Fleet {
     // The log directory of a task is deleted as a whole, so it must be a path of its own.
     if (!this.logRoot.startsWith('/')) throw new Error('logRoot must be an absolute path');
     this.now = options.now ?? Date.now;
+    this.tools = prepareTools(options.sandboxTools ?? []);
     this.poller = new MachinePoller({
       intervalMs: options.pollIntervalMs ?? 2_000,
       ...(options.pollMaxFailures === undefined ? {} : { maxFailures: options.pollMaxFailures }),
@@ -194,6 +224,41 @@ mkdir -p "$(dirname ${shq(marker)})"
       );
     } finally {
       watch.stop();
+    }
+  }
+
+  /** Installs the sandbox tools the machine does not have yet. Concurrent callers share each install. */
+  async ensureTools(machine: RemoteMachine): Promise<void> {
+    for (const tool of this.tools) await this.ensureTool(machine, tool);
+  }
+
+  get stageLimits(): StageLimits {
+    return { ...DEFAULT_STAGE_LIMITS, ...this.options.inputLimits };
+  }
+
+  private ensureTool(machine: RemoteMachine, tool: PreparedTool): Promise<void> {
+    const key = `${machine.machineId}|tool|${tool.name}`;
+    let pending = this.setups.get(key);
+    if (!pending) {
+      pending = this.installTool(machine, tool).finally(() => this.setups.delete(key));
+      this.setups.set(key, pending);
+    }
+    return pending;
+  }
+
+  private async installTool(machine: RemoteMachine, tool: PreparedTool): Promise<void> {
+    const marker = `${machine.root}/.setup/tool-${tool.name}.sha256`;
+    try {
+      if (await machine.hasTool(tool.name, tool.hash, marker)) return;
+      await machine.installTool({
+        name: tool.name,
+        content: tool.content,
+        hash: tool.hash,
+        marker,
+        tmpName: `.${tool.name}.${randomUUID()}.tmp`,
+      });
+    } catch (error) {
+      throw new Error(`installing ${tool.name} in the sandbox failed (${errorMessage(error)})`);
     }
   }
 
@@ -411,6 +476,22 @@ mkdir -p "$(dirname ${shq(marker)})"
     );
     return result;
   }
+}
+
+function prepareTools(tools: readonly SandboxTool[]): PreparedTool[] {
+  const seen = new Set<string>(['claude', 'codex']);
+  return tools.map((tool) => {
+    if (!TOOL_NAME.test(tool.name)) throw new Error(`Invalid sandbox tool name: ${tool.name}`);
+    if (seen.has(tool.name)) throw new Error(`Sandbox tool name is taken: ${tool.name}`);
+    seen.add(tool.name);
+    const content = Buffer.from(tool.content);
+    if (content.length === 0 || content.length > MAX_TOOL_BYTES) {
+      throw new Error(
+        `Sandbox tool ${tool.name} must be between 1 byte and ${MAX_TOOL_BYTES} bytes`,
+      );
+    }
+    return { name: tool.name, content, hash: createHash('sha256').update(content).digest('hex') };
+  });
 }
 
 export interface SweepResult {

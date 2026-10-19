@@ -23,7 +23,9 @@ export type ExecAction =
   /** Run the command, then drop the connection without answering. */
   | { dropResponse: true }
   | { status: number; error: { code: string; message: string; retryable: boolean } }
-  | { stdin: string };
+  | { stdin: string }
+  /** Wait for this before running the command, so a test can act while a call is in flight. */
+  | { hold: Promise<void> };
 
 export interface FakeInstaboxOptions {
   apiKey?: string;
@@ -398,6 +400,7 @@ export class FakeInstabox {
       return this.json(res, 409, this.envelope('machine_not_running', 'sandbox is paused', false));
     }
     const action = this.onExec?.(recorded, index);
+    if (action && 'hold' in action) await action.hold;
     if (action && 'drop' in action) {
       res.socket?.destroy();
       return;

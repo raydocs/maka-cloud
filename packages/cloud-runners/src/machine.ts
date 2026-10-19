@@ -12,13 +12,36 @@ import {
   RESULT_CHUNK_SCRIPT,
   RESULT_CLEAN_SCRIPT,
   RESULT_STAGE_SCRIPT,
+  STAGE_INPUTS_SCRIPT,
   SWEEP_SCRIPT,
+  TOOL_ABORT_SCRIPT,
+  TOOL_CHECK_SCRIPT,
+  TOOL_CHUNK_SCRIPT,
 } from './scripts.js';
 import { assertSafeId } from './shell.js';
 
 export const MAX_RESULT_BYTES = 1024 * 1024;
 export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
 const RESULT_CHUNK_BYTES = 256 * 1024;
+
+const TOOL_CHUNK_BYTES = 256 * 1024;
+
+/** Caps on what one task may copy from another's workspace. */
+export interface StageLimits {
+  maxFiles: number;
+  maxFileBytes: number;
+  maxTotalBytes: number;
+}
+
+export const DEFAULT_STAGE_LIMITS: StageLimits = {
+  maxFiles: 200,
+  maxFileBytes: 5 * 1024 * 1024,
+  maxTotalBytes: 32 * 1024 * 1024,
+};
+
+export type StageResult =
+  | { ok: true; files: number; bytes: number }
+  | { ok: false; reason: string };
 
 export type ResultRead = { ok: true; bytes: Buffer } | { ok: false; reason: string };
 
@@ -245,6 +268,87 @@ export class RemoteMachine {
       return { ok: true, bytes };
     } finally {
       await this.exec(RESULT_CLEAN_SCRIPT, callOptions({})).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Copies `paths` of task `fromDir`'s workspace into `toDir`'s `workspace/inputs/<fromDir>/`. All
+   * checks and the copy happen in the sandbox as the sandbox user (see `STAGE_INPUTS_SCRIPT`); the
+   * answer is a refusal with its reason, or the number of files and bytes copied. Repeating it
+   * replaces the earlier copy.
+   */
+  async stageInputs(input: {
+    fromDir: string;
+    toDir: string;
+    paths: string[];
+    limits?: StageLimits;
+    signal?: AbortSignal;
+  }): Promise<StageResult> {
+    const limits = input.limits ?? DEFAULT_STAGE_LIMITS;
+    const out = await this.execOk(STAGE_INPUTS_SCRIPT, {
+      envs: {
+        MAKA_ROOT: this.root,
+        MAKA_FROM: assertSafeId('task id', input.fromDir),
+        MAKA_DIR: this.taskDir(input.toDir),
+        MAKA_PATHS: input.paths.join('\n'),
+        MAKA_MAX_FILES: String(limits.maxFiles),
+        MAKA_MAX_FILE_BYTES: String(limits.maxFileBytes),
+        MAKA_MAX_TOTAL_BYTES: String(limits.maxTotalBytes),
+      },
+      timeoutSeconds: 120,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const line = out.trim().split('\n').pop() ?? '';
+    const ok = /^OK (\d+) (\d+)$/u.exec(line);
+    if (ok) return { ok: true, files: Number(ok[1]), bytes: Number(ok[2]) };
+    if (line.startsWith('REFUSED ')) return { ok: false, reason: line.slice('REFUSED '.length) };
+    return { ok: false, reason: 'the copy did not report a result' };
+  }
+
+  /** Whether the tool is installed with exactly this content (`hash` is its sha256, hex). */
+  async hasTool(name: string, hash: string, marker: string): Promise<boolean> {
+    const result = await this.exec(TOOL_CHECK_SCRIPT, {
+      envs: { MAKA_TOOL_NAME: name, MAKA_TOOL_HASH: hash, MAKA_TOOL_MARKER: marker },
+    });
+    return result.exitCode === 0;
+  }
+
+  /**
+   * Writes the tool to `$HOME/.maka-cli/bin/<name>` in chunks, checks its sha256 in the sandbox and
+   * renames it into place, so a run never starts a half-written file. A failed install removes its
+   * temporary file.
+   */
+  async installTool(input: {
+    name: string;
+    content: Buffer;
+    hash: string;
+    marker: string;
+    tmpName: string;
+  }): Promise<void> {
+    const chunks = Math.max(1, Math.ceil(input.content.length / TOOL_CHUNK_BYTES));
+    try {
+      for (let index = 0; index < chunks; index++) {
+        const slice = input.content.subarray(
+          index * TOOL_CHUNK_BYTES,
+          (index + 1) * TOOL_CHUNK_BYTES,
+        );
+        await this.execOk(TOOL_CHUNK_SCRIPT, {
+          envs: {
+            MAKA_TOOL_NAME: input.name,
+            MAKA_TOOL_HASH: input.hash,
+            MAKA_TOOL_MARKER: input.marker,
+            MAKA_TOOL_TMP: input.tmpName,
+            MAKA_FIRST: index === 0 ? '1' : '0',
+            MAKA_LAST: index === chunks - 1 ? '1' : '0',
+          },
+          stdin: slice.toString('base64'),
+        });
+      }
+    } catch (error) {
+      await this.exec(TOOL_ABORT_SCRIPT, { envs: { MAKA_TOOL_TMP: input.tmpName } }).catch(
+        () => undefined,
+      );
+      throw error;
     }
   }
 }
