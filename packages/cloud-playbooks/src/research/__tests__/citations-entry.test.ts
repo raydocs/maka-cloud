@@ -10,13 +10,23 @@ test('the citations entry exports the pure checker and nothing that touches file
     'normalizeText',
     'parseCiteCheckLine',
     'ReportSchema',
+    'renderReport',
+    'renderFromRecord',
+    'VerificationRecordSchema',
   ]) {
     assert.ok(name in citations, name);
   }
-  for (const name of ['runCiteCheck', 'researchPlaybook', 'renderReport']) {
+  for (const name of ['runCiteCheck', 'researchPlaybook']) {
     assert.ok(!(name in citations), name);
   }
-  for (const file of ['check', 'report-schema', 'source-text', 'summary-line']) {
+  for (const file of [
+    'check',
+    'record',
+    'render',
+    'report-schema',
+    'source-text',
+    'summary-line',
+  ]) {
     const source = await readFile(new URL(`../${file}.js`, import.meta.url), 'utf8');
     assert.doesNotMatch(source, /from ['"](?:node:|@maka)/, file);
   }

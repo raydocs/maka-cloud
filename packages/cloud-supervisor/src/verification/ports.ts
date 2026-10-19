@@ -82,7 +82,14 @@ export type Outcome =
   | { state: 'failed'; mismatches: Mismatch[] }
   | {
       state: 'could_not_check';
-      code: 'budget' | 'no_verifier' | 'unavailable' | 'model_error' | 'incomplete' | 'aborted';
+      code:
+        | 'budget'
+        | 'no_verifier'
+        | 'unavailable'
+        | 'model_error'
+        | 'incomplete'
+        | 'aborted'
+        | 'unverified';
       reason: string;
       /** A later attempt may succeed without anyone changing anything. */
       transient: boolean;

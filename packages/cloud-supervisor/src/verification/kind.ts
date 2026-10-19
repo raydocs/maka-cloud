@@ -18,7 +18,7 @@ export function verificationKindOf(manifest: SignalManifest): VerificationKind |
   return undefined;
 }
 
-/** The reference a manifest lists for an artifact name, if any. Links are never read. */
-export function refFor(manifest: SignalManifest, name: string): string | undefined {
-  return (manifest.artifacts ?? []).find((ref) => !isLink(ref) && basename(ref) === name);
+/** Every reference a manifest lists for an artifact name. Links are never read. */
+export function refsFor(manifest: SignalManifest, name: string): string[] {
+  return (manifest.artifacts ?? []).filter((ref) => !isLink(ref) && basename(ref) === name);
 }

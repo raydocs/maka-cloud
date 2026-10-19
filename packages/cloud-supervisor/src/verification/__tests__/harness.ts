@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { type ClaimStatus, passed, renderReport } from '@maka-cloud/playbooks/citations';
 import type { SignalManifest } from '../../events.js';
 import {
   CONVERSATION,
@@ -44,7 +45,8 @@ export class FakeEvidence implements EvidenceSource {
     const name = ref.split('/').pop() as string;
     this.reads.push(`${task.taskId}/${name}`);
     await this.onRead?.(task.taskId, name, signal);
-    const entry = this.files.get(`${task.taskId}/${name}`);
+    const entry =
+      this.files.get(`${task.taskId}/${ref}`) ?? this.files.get(`${task.taskId}/${name}`);
     if (entry === undefined) return { ok: false, reason: 'not_found' };
     if (typeof entry === 'string') return { ok: true, text: entry };
     if ('throws' in entry) throw entry.throws;
@@ -314,7 +316,11 @@ export function defaultClaims(): ReportClaim[] {
   ];
 }
 
-/** report.json, the exported cite-check record and the cited pages, consistent with each other. */
+/**
+ * report.json, the exported cite-check record, the delivered renderings and the
+ * cited pages, consistent with each other: the renderings are the playbook's own
+ * output for the record's statuses.
+ */
 export function researchFiles(
   w: World,
   taskId: string,
@@ -323,83 +329,52 @@ export function researchFiles(
     removed?: string[];
     /** The status the exported record gives a claim; a removed claim defaults to a failing one. */
     statuses?: Record<string, string>;
-    /** Removed claims a delivered rendering still shows in its body, by file. */
-    shown?: { md?: string[]; html?: string[] };
+    /** Edits the delivered renderings after they were rendered. */
+    tamper?: { md?: (text: string) => string; html?: (text: string) => string };
+    /** Replaces the report's sections, for a report that is not one section of all the claims. */
+    sections?: Array<{ heading: string; claims: ReportClaim[] }>;
     pages?: Record<string, string>;
   } = {},
 ): ReportClaim[] {
   const claims = options.claims ?? defaultClaims();
   const sourceIds = [...new Set(claims.flatMap((claim) => claim.citations.map((c) => c.sourceId)))];
-  w.evidence.set(
-    taskId,
-    'report.json',
-    JSON.stringify({
-      title: 'The link',
-      sections: [{ heading: 'Facts', claims }],
-      sources: sourceIds.map((id) => ({ id, url: `https://example.com/${id}` })),
-    }),
-  );
+  const report = {
+    title: 'The link',
+    sections: options.sections ?? [{ heading: 'Facts', claims }],
+    sources: sourceIds.map((id) => ({ id, url: `https://example.com/${id}` })),
+  };
+  w.evidence.set(taskId, 'report.json', JSON.stringify(report));
+  const rows = claims.map((claim) => ({
+    id: claim.id,
+    status: (options.statuses?.[claim.id] ??
+      (options.removed?.includes(claim.id) ? 'no_citation' : 'quote_verified')) as ClaimStatus,
+    reasons: [] as string[],
+    judged: false,
+  }));
+  const count = (status: ClaimStatus) => rows.filter((row) => row.status === status).length;
+  const result = {
+    claims: rows,
+    counts: {
+      total: rows.length,
+      verified: count('verified'),
+      quoteVerified: count('quote_verified'),
+      failed: rows.filter((row) => !passed(row.status)).length,
+      judged: 0,
+    },
+    unknownJudgments: [],
+  };
   w.evidence.set(
     taskId,
     'verification.json',
     JSON.stringify({
       version: 1,
-      claims: claims.map((claim) => {
-        const removed = options.removed?.includes(claim.id) ?? false;
-        return {
-          id: claim.id,
-          status: options.statuses?.[claim.id] ?? (removed ? 'quote_not_found' : 'quote_verified'),
-          removed,
-        };
-      }),
+      mode: 'drop_unsupported',
+      claims: rows.map((row) => ({ ...row, removed: !passed(row.status) })),
     }),
   );
-  const removedIds = options.removed ?? [];
-  const body = (shown: string[] = []) =>
-    claims.filter((claim) => !removedIds.includes(claim.id) || shown.includes(claim.id));
-  const dropped = claims.filter((claim) => removedIds.includes(claim.id));
-  w.evidence.set(
-    taskId,
-    'report.md',
-    [
-      '# The link',
-      '',
-      '## Facts',
-      '',
-      ...body(options.shown?.md).map((claim) => `- ${claim.text} [1]`),
-      '',
-      ...(dropped.length > 0
-        ? [
-            '## Not verified',
-            '',
-            'These claims were left out because they failed the citation check.',
-            '',
-            ...dropped.map((claim) => `- ${claim.text} (no source cited)`),
-            '',
-          ]
-        : []),
-      '## How this was checked',
-      '',
-    ].join('\n'),
-  );
-  w.evidence.set(
-    taskId,
-    'report.html',
-    [
-      '<!doctype html><html><head><title>The link</title></head><body><h1>The link</h1>',
-      '<h2>Facts</h2><ul>',
-      ...body(options.shown?.html).map((claim) => `<li>${claim.text} [1]</li>`),
-      '</ul>',
-      ...(dropped.length > 0
-        ? [
-            '<h2>Not verified</h2><ul>',
-            ...dropped.map((claim) => `<li>${claim.text} (no source cited)</li>`),
-            '</ul>',
-          ]
-        : []),
-      '<h2>How this was checked</h2></body></html>',
-    ].join('\n'),
-  );
+  const rendered = renderReport(report, result, { dropFailed: true });
+  w.evidence.set(taskId, 'report.md', options.tamper?.md?.(rendered.markdown) ?? rendered.markdown);
+  w.evidence.set(taskId, 'report.html', options.tamper?.html?.(rendered.html) ?? rendered.html);
   const pages = options.pages ?? {
     s1: `<html><body><p>${TUNNEL_QUOTE}</p></body></html>`,
     s2: 'Most of the traffic through the link is freight rather than passengers. More text.',
