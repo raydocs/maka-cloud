@@ -389,4 +389,73 @@ test('a real 404 or 410 from the fetcher is a deterministic failure, not a sourc
   }
 });
 
+test('a claim the record removes but the delivered report still shows is checked anyway, in either rendering', async () => {
+  // The forgery: a claim with no citation stays in the report the human reads, and the
+  // agent marks it {status: "no_citation", removed: true} in its own record.
+  for (const shown of [{ md: ['c2'] }, { html: ['c2'] }, { md: ['c2'], html: ['c2'] }]) {
+    const claims = defaultClaims();
+    (claims[1] as { citations: unknown[] }).citations = [];
+    const { w, r } = await checkedResearch((w) =>
+      researchFiles(w, 't1', { claims, removed: ['c2'], shown }),
+    );
+    const label = JSON.stringify(shown);
+    assert.equal(itemsOf(r, 'finished').length, 0, label);
+    const [item] = itemsOf(r, 'verification_failed');
+    assert.match(item?.ask ?? '', /Traffic is mostly freight/, label);
+    assert.match(item?.ask ?? '', /cites no source/, label);
+    assert.equal(w.anthropic.requests.length, 0, label);
+    await r.stop();
+  }
+});
+
+test('a removal is trusted only when a delivered rendering can be read and does not show the claim', async () => {
+  const claims = defaultClaims();
+  (claims[1] as { citations: unknown[] }).citations = [];
+  const cases: Array<[string, string[], (w: ReturnType<typeof world>) => void]> = [
+    ['no rendering is listed', ['out/report.json', 'out/verification.json'], () => {}],
+    [
+      'the only rendering cannot be read',
+      ['out/report.md', 'out/report.json', 'out/verification.json'],
+      (w) => w.evidence.set('t1', 'report.md', { fail: 'unavailable' }),
+    ],
+    [
+      'one rendering cannot be read, though the other is honest',
+      ['out/report.md', 'out/report.html', 'out/report.json', 'out/verification.json'],
+      (w) => w.evidence.set('t1', 'report.md', { fail: 'unavailable' }),
+    ],
+  ];
+  for (const [label, artifacts, tweak] of cases) {
+    const w = world();
+    researchFiles(w, 't1', { claims, removed: ['c2'] });
+    tweak(w);
+    const r = await verifyRig(w);
+    await finishTask(r, 't1', researchManifest({ artifacts }), { runner: 'codex' });
+    assert.equal(itemsOf(r, 'finished').length, 0, label);
+    assert.match(
+      itemsOf(r, 'verification_failed')[0]?.ask ?? '',
+      /cites no source|could not be completed/,
+      label,
+    );
+    await r.stop();
+  }
+});
+
+test('one delivered rendering that is honest is enough, and the claim may be listed under "Not verified"', async () => {
+  const claims = defaultClaims();
+  (claims[1] as { citations: unknown[] }).citations = [];
+  const w = world();
+  researchFiles(w, 't1', { claims, removed: ['c2'] });
+  const r = await verifyRig(w);
+  await finishTask(
+    r,
+    't1',
+    researchManifest({ artifacts: ['out/report.md', 'out/report.json', 'out/verification.json'] }),
+    { runner: 'codex' },
+  );
+  assert.equal(itemsOf(r, 'verification_failed').length, 0);
+  assert.deepEqual(claimIdsOf(w.anthropic.requests[0] as never), ['c1']);
+  assert.equal(itemsOf(r, 'finished').length, 1);
+  await r.stop();
+});
+
 void FakeFetcher;

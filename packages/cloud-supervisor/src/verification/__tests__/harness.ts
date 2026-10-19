@@ -323,6 +323,8 @@ export function researchFiles(
     removed?: string[];
     /** The status the exported record gives a claim; a removed claim defaults to a failing one. */
     statuses?: Record<string, string>;
+    /** Removed claims a delivered rendering still shows in its body, by file. */
+    shown?: { md?: string[]; html?: string[] };
     pages?: Record<string, string>;
   } = {},
 ): ReportClaim[] {
@@ -351,6 +353,52 @@ export function researchFiles(
         };
       }),
     }),
+  );
+  const removedIds = options.removed ?? [];
+  const body = (shown: string[] = []) =>
+    claims.filter((claim) => !removedIds.includes(claim.id) || shown.includes(claim.id));
+  const dropped = claims.filter((claim) => removedIds.includes(claim.id));
+  w.evidence.set(
+    taskId,
+    'report.md',
+    [
+      '# The link',
+      '',
+      '## Facts',
+      '',
+      ...body(options.shown?.md).map((claim) => `- ${claim.text} [1]`),
+      '',
+      ...(dropped.length > 0
+        ? [
+            '## Not verified',
+            '',
+            'These claims were left out because they failed the citation check.',
+            '',
+            ...dropped.map((claim) => `- ${claim.text} (no source cited)`),
+            '',
+          ]
+        : []),
+      '## How this was checked',
+      '',
+    ].join('\n'),
+  );
+  w.evidence.set(
+    taskId,
+    'report.html',
+    [
+      '<!doctype html><html><head><title>The link</title></head><body><h1>The link</h1>',
+      '<h2>Facts</h2><ul>',
+      ...body(options.shown?.html).map((claim) => `<li>${claim.text} [1]</li>`),
+      '</ul>',
+      ...(dropped.length > 0
+        ? [
+            '<h2>Not verified</h2><ul>',
+            ...dropped.map((claim) => `<li>${claim.text} (no source cited)</li>`),
+            '</ul>',
+          ]
+        : []),
+      '<h2>How this was checked</h2></body></html>',
+    ].join('\n'),
   );
   const pages = options.pages ?? {
     s1: `<html><body><p>${TUNNEL_QUOTE}</p></body></html>`,
