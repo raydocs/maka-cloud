@@ -91,6 +91,7 @@ export class FakeSandbox implements CodingSandbox {
 
 class FakeWorkspace implements SandboxWorkspace {
   readonly dir = '/data/work/tsk_fake';
+  readonly controlDir = '/dev/shm/maka-logs/tsk_fake/checks';
   private done = false;
 
   constructor(private readonly sandbox: FakeSandbox) {}
@@ -137,6 +138,10 @@ class FakeWorkspace implements SandboxWorkspace {
       throw new Error('survivors');
     }
     o.log.push('stopAll:done');
+  }
+
+  async stopRuns(): Promise<void> {
+    throw new Error('unexpected stopRuns');
   }
 
   async agentOnSameMachine(): Promise<boolean> {
