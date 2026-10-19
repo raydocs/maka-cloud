@@ -85,6 +85,68 @@ results. Restarting onto the same stores keeps everything (run G).
   thinking events in `isHistoryCompactContentEvent`. It belongs upstream (apache/maka), not in a
   fork patch.
 
+## Upstream candidates
+
+These two are to be filed with apache/maka. Each repro is a small script you run from
+`packages/runtime` after `npm run build -w @maka/runtime`. Both were run on the code measured above.
+
+### Redacted thinking is dropped from compaction replay (path 5)
+
+`isHistoryCompactContentEvent` (`history-compact-checkpoint.ts:863-865`) keeps an event only if
+`estimateRuntimeEventChars` (`model-history.ts:414-418`) is above zero. That function counts only
+`content.text`. A redacted_thinking block is stored as a thinking event with empty text and the
+opaque data in `providerOptions.anthropic.redactedData`, so it counts as zero. Checkpoint replay
+filters events with this predicate (`history-compaction.ts:520`, mid-turn `ai-sdk-turn.ts:1370`),
+so every redacted_thinking block after a checkpoint is dropped from the request.
+
+```js
+import { isHistoryCompactContentEvent } from './dist/history-compact-checkpoint.js';
+
+const base = { id: 'e1', invocationId: 'i1', runId: 'r1', sessionId: 's1', turnId: 't1', ts: 1,
+  partial: false, role: 'assistant', author: 'model' };
+const signed = { ...base, content: { kind: 'thinking', text: 'step 1', signature: 'sig' } };
+const redacted = { ...base, id: 'e2', content: { kind: 'thinking', text: '',
+  providerOptions: { anthropic: { redactedData: 'opaque' } } } };
+
+console.log(isHistoryCompactContentEvent(signed));   // true
+console.log(isHistoryCompactContentEvent(redacted)); // false: dropped after a checkpoint
+```
+
+To reproduce end to end, use run F in `packages/cloud-conductor-checks`: compact once, then every
+later redacted_thinking block is missing from the next request. Suggested fix: count
+`providerOptions.anthropic.redactedData` in `estimateRuntimeEventChars`, or keep thinking events
+in `isHistoryCompactContentEvent` whatever their text length.
+
+### A session without `llmConnectionId` drops all earlier thinking (path 6)
+
+`runtimeInvocationRouteForHeader` (`runtime-invocation-route.ts:24-58`) returns
+`provenance: 'unknown'` for a non-plugin backend whose header has no `llmConnectionId`. That
+happens even when the backend passes a `providerStateIdentity`, and the identity is not carried on
+the unknown route. `compatibleProviderReasoningReplayEventIds` (`model-history.ts:307-330`) admits
+earlier runs' reasoning only for `provenance: 'runtime'`. So every thinking block from earlier
+turns is stripped at each turn boundary, with no diagnostic. This may be a deliberate fail-closed
+choice. If it is, a header without `llmConnectionId` should be rejected or warned about rather than
+silently degrading Anthropic replay.
+
+```js
+import { runtimeInvocationRouteForHeader } from './dist/runtime-invocation-route.js';
+import { compatibleProviderReasoningReplayEventIds } from './dist/model-history.js';
+
+const identity = `sha256:${'5'.repeat(64)}`;
+const header = { backend: 'ai-sdk', llmConnectionSlug: 'anthropic', model: 'claude-opus-5-5' };
+for (const h of [header, { ...header, llmConnectionId: 'conn-1' }]) {
+  const route = runtimeInvocationRouteForHeader(h, identity);
+  const kept = compatibleProviderReasoningReplayEventIds([{ id: 'think-1', runId: 'run-1' }],
+    [{ runId: 'run-1', opening: { route } }], identity, 'claude-opus-5-5', 'run-2');
+  console.log(h.llmConnectionId ?? 'unset', route.provenance, kept.has('think-1'));
+}
+// unset unknown false
+// conn-1 runtime true
+```
+
+To reproduce end to end, use run H in `packages/cloud-conductor-checks`: 68 of 70 thinking blocks
+are missing from later requests.
+
 ## What was not verified
 
 - Live mode (`src/__tests__/live-opus.test.ts`) was written but not run. It needs both
