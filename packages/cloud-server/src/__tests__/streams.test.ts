@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, ServerResponse } from 'node:http';
 import net from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,13 +16,14 @@ import { SqliteTaskStore } from '../sqlite-task-store.js';
 import { eventually } from './harness.js';
 
 const HEARTBEAT_MS = 7777;
+const REVOKE_CHECK_MS = 8888;
 
 /** The public API on its own, without the orchestrator, so a stream's inner workings can be broken on purpose. */
 async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = new FeedHub()) {
   const dir = await mkdtemp(join(tmpdir(), 'streams-test-'));
   const db = openDatabase(join(dir, 'server.sqlite'));
   const invites = new InviteStore(join(dir, 'invites.sqlite'));
-  const token = invites.create('test').token;
+  const { token, inviteId } = invites.create('test');
   let n = 0;
   const conversations = new ConversationStore(db, hub, () => ({
     sessionId: `ses_${n++}`,
@@ -44,7 +45,12 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
     },
     artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
     artifactLimiter: new RateLimiter(1_000_000),
-    limits: { ...DEFAULT_HTTP_LIMITS, heartbeatMs: HEARTBEAT_MS, ...limits },
+    limits: {
+      ...DEFAULT_HTTP_LIMITS,
+      heartbeatMs: HEARTBEAT_MS,
+      revokeCheckMs: REVOKE_CHECK_MS,
+      ...limits,
+    },
     onMessage: () => undefined,
   });
   const server: Server = createServer((req, res) => {
@@ -74,6 +80,8 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
     db,
     conversations,
     token,
+    inviteId,
+    invites,
     port,
     server,
     get connections() {
@@ -126,6 +134,7 @@ const exits: Array<{
       api.hub.notify();
     },
   },
+  { name: 'the invite is revoked', end: (api) => void api.invites.revoke(api.inviteId) },
   {
     name: 'the client stops reading and the drain times out',
     end: () => undefined,
@@ -134,14 +143,16 @@ const exits: Array<{
 ];
 
 for (const exit of exits) {
-  test(`when ${exit.name}, the stream frees its slots, its feed subscription and its heartbeat timer`, async (t) => {
+  test(`when ${exit.name}, the stream frees its slots, its feed subscription, its heartbeat and its revoke watch`, async (t) => {
     const timers: NodeJS.Timeout[] = [];
+    const watches: NodeJS.Timeout[] = [];
     const cleared = new Set<unknown>();
     const realSet = globalThis.setInterval;
     const realClear = globalThis.clearInterval;
     mock.method(globalThis, 'setInterval', (handler: () => void, ms?: number, ...rest: []) => {
       const timer = realSet(handler, ms, ...rest);
       if (ms === HEARTBEAT_MS) timers.push(timer);
+      if (ms === REVOKE_CHECK_MS) watches.push(timer);
       return timer;
     });
     mock.method(globalThis, 'clearInterval', (timer?: NodeJS.Timeout) => {
@@ -153,13 +164,15 @@ for (const exit of exits) {
     const api = await startApi(t, { streamsPerInvite: 1, ...exit.options?.limits });
     if (exit.options?.fill) {
       const big = 'x'.repeat(30_000);
-      const { conversationId } = api.conversations.create();
+      const { conversationId } = api.conversations.create(api.inviteId);
       for (let i = 0; i < 400; i += 1) api.conversations.post(conversationId, `${i} ${big}`);
     }
     const socket = await rawStream(t, api, { paused: exit.options?.paused ?? false });
     await eventually(() => api.api.openStreams === 1, 'stream opened');
     assert.equal(api.hub.listening, 1);
     assert.equal(timers.length, 1, 'one heartbeat timer per stream');
+    assert.equal(watches.length, 1, 'one revoke watch while a stream is open');
+    assert.equal(api.api.watchingRevokes, true);
 
     await exit.end(api, socket);
     await eventually(() => api.api.openStreams === 0, 'stream released', 5000);
@@ -169,8 +182,14 @@ for (const exit of exits) {
       timers.every((timer) => cleared.has(timer)),
       'the heartbeat timer was cleared',
     );
+    assert.ok(
+      watches.every((timer) => cleared.has(timer)),
+      'the revoke watch timer was cleared',
+    );
+    assert.equal(api.api.watchingRevokes, false, 'the revoke listener is gone');
     // The per-invite slot is free again: with a limit of one, the next stream is not turned away
-    // (its connection may still be cut at once when the exit was a broken feed).
+    // (its connection may still be cut at once when the exit was a broken feed, and a revoked
+    // invite is turned away at the door).
     assert.notEqual(await streamStatus(api), 429);
   });
 }
@@ -178,7 +197,7 @@ for (const exit of exits) {
 test('a client that stops reading loses its connection as well as its slot', async (t) => {
   const api = await startApi(t, { drainTimeoutMs: 100 });
   const big = 'x'.repeat(30_000);
-  const { conversationId } = api.conversations.create();
+  const { conversationId } = api.conversations.create(api.inviteId);
   for (let i = 0; i < 400; i += 1) api.conversations.post(conversationId, `${i} ${big}`);
   await rawStream(t, api, { paused: true });
   await eventually(() => api.api.openStreams === 1, 'stream opened');
@@ -197,4 +216,24 @@ test('a stream that fails while it is being set up gives its slot back and answe
   assert.equal(api.api.openStreams, 0);
   mock.method(hub, 'subscribe', subscribe);
   assert.equal(await streamStatus(api), 200, 'the per-invite slot was released');
+});
+
+test('heartbeats wait for the client too: an idle stream whose client stopped taking data is dropped', async (t) => {
+  // Every heartbeat reports a full buffer, as on a client that stopped reading,
+  // and no 'drain' ever comes.
+  const write = ServerResponse.prototype.write;
+  mock.method(
+    ServerResponse.prototype,
+    'write',
+    function (this: ServerResponse, chunk: unknown, ...rest: unknown[]) {
+      const accepted = (write as (...args: unknown[]) => boolean).call(this, chunk, ...rest);
+      return chunk === ': keep-alive\n\n' ? false : accepted;
+    },
+  );
+  t.after(() => mock.restoreAll());
+  const api = await startApi(t, { heartbeatMs: 10, drainTimeoutMs: 50 });
+  await rawStream(t, api);
+  await eventually(() => api.api.openStreams === 1, 'stream opened');
+  await eventually(() => api.api.openStreams === 0, 'idle stalled stream dropped', 2000);
+  await eventually(() => api.connections === 0, 'socket dropped');
 });

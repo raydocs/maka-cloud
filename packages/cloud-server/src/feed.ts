@@ -84,9 +84,14 @@ LEFT JOIN messages m ON f.kind = 'message.posted' AND m.message_id = f.ref
 LEFT JOIN conversations c ON f.kind = 'conversation.created' AND c.conversation_id = f.ref
 LEFT JOIN conductor_events e ON f.kind LIKE 'conductor.%' AND e.event_id = f.ref
 LEFT JOIN extension_events x ON f.kind LIKE 'inbox.%' AND x.event_id = CAST(f.ref AS INTEGER)
-WHERE f.id > ? AND (? IS NULL OR f.conversation_id = ?)
+WHERE f.id > ? AND f.id <= ? AND (? IS NULL OR f.conversation_id = ?)
+  AND (? IS NULL OR f.conversation_id IN (SELECT conversation_id FROM conversations WHERE owner = ?))
 ORDER BY f.id
 LIMIT ?`;
+
+/** The last feed id among the next `limit` rows after `after`, of every conversation. */
+const WINDOW_SQL =
+  'SELECT MAX(id) AS last FROM (SELECT id FROM feed WHERE id > ? ORDER BY id LIMIT ?)';
 
 export interface ReadFeedOptions {
   /**
@@ -104,8 +109,44 @@ export function readFeed(
   conversationId?: string,
   options: ReadFeedOptions = {},
 ): FeedEntry[] {
-  const scope = conversationId ?? null;
-  const rows = db.prepare(PAGE_SQL).all(after, scope, scope, limit) as unknown as FeedRow[];
+  return readRows(db, after, Number.MAX_SAFE_INTEGER, limit, conversationId ?? null, null, options);
+}
+
+/**
+ * What one invite may read: entries of the conversations it owns, after `after`,
+ * at most `limit`, optionally of one of them. Rows of other owners, of no
+ * conversation and of unowned conversations are skipped. `scannedTo` is how far
+ * the read looked, so a stream that skips other owners' rows never reads them
+ * again.
+ */
+export function readOwnFeed(
+  db: DatabaseSync,
+  owner: string,
+  after: number,
+  limit: number,
+  conversationId?: string,
+): { entries: FeedEntry[]; scannedTo: number } {
+  if (conversationId !== undefined) {
+    const entries = readRows(db, after, Number.MAX_SAFE_INTEGER, limit, conversationId, owner);
+    return { entries, scannedTo: entries.at(-1)?.id ?? after };
+  }
+  const { last } = db.prepare(WINDOW_SQL).get(after, limit) as { last: number | null };
+  if (last === null) return { entries: [], scannedTo: after };
+  return { entries: readRows(db, after, last, limit, null, owner), scannedTo: last };
+}
+
+function readRows(
+  db: DatabaseSync,
+  after: number,
+  upTo: number,
+  limit: number,
+  conversationId: string | null,
+  owner: string | null,
+  options: ReadFeedOptions = {},
+): FeedEntry[] {
+  const rows = db
+    .prepare(PAGE_SQL)
+    .all(after, upTo, conversationId, conversationId, owner, owner, limit) as unknown as FeedRow[];
   return rows.map((row) => ({
     id: row.id,
     kind: row.kind,

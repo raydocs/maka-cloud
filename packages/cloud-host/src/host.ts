@@ -76,13 +76,16 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
           },
         }
       : {}),
-    createHandler: async ({ publisher, orchestrator, conductorAccess }) => {
+    createHandler: async ({ publisher, orchestrator, conductorAccess, authorized }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
         ...conductorOptions,
         root: conductorRoot,
         outbox: new ServerOutbox(publisher, warn),
         orchestratorAccess: conductorAccess,
+        // An approved irreversible call runs only while its approver's invite is active and owns the conversation.
+        approverAuthorized: (approvedBy, conversationId) =>
+          approvedBy !== null && authorized(approvedBy, conversationId),
         onWarning: warn,
       });
       conductor = created;

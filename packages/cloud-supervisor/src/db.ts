@@ -8,7 +8,7 @@ export class SupervisorDatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const APPEND_ONLY = ['item_events', 'answer_log', 'verifier_spend'];
 
@@ -170,6 +170,14 @@ BEGIN SELECT RAISE(ABORT, 'verifier_spend is append-only'); END;
 `;
 
 /**
+ * Added in schema 3: who answered. The server checks that invite again when
+ * the answer is delivered; an answer from before (NULL) is not delivered.
+ */
+const SCHEMA_V3 = `
+ALTER TABLE answers ADD COLUMN caller TEXT;
+`;
+
+/**
  * Opens the supervisor's own database for this process alone. The write paths
  * (answer claims, the hourly cap, digest slots) check and write inside one
  * transaction and assume nobody else writes, so a second opener fails at once.
@@ -204,13 +212,14 @@ function isBusy(error: unknown): boolean {
 function migrate(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
   if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version !== 0 && row.user_version !== 1) {
+  if (row.user_version > SCHEMA_VERSION) {
     throw new Error(`Unsupported supervisor database schema version ${row.user_version}`);
   }
   db.exec('BEGIN IMMEDIATE');
   try {
     if (row.user_version === 0) db.exec(SCHEMA);
-    db.exec(SCHEMA_V2);
+    if (row.user_version < 2) db.exec(SCHEMA_V2);
+    db.exec(SCHEMA_V3);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {

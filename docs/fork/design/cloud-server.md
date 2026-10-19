@@ -84,13 +84,26 @@ Invite tokens read `mki_<inviteId>.<secret>`; the id picks the row and digests
 are compared with `timingSafeEqual`. Missing, malformed, unknown and revoked
 tokens all get the same 401. There is no route that creates invites; the CLI
 (`cloud-server invite create|list|revoke`) does, and prints the token once.
-Single tenant: every invite sees every conversation. Accounts replace this in T17.
+
+Each invite is a principal and sees only what it owns. A conversation stores the
+invite that created it (`conversations.owner`, schema v5); its tasks, artifacts,
+inbox items and feed rows belong to that owner. Every list, read and stream is
+filtered by owner, and every write is checked against it. Another owner's object
+answers 404 exactly like a missing one, never 403. Writes check the invite again
+after the body is read and right before their effect; control operations check
+invite and owner once more inside the orchestrator's write chain; an approved
+irreversible call checks its approver once more right before it runs (the
+conductor's `approverAuthorized`, fed by `createHandler`'s `authorized`). Feed
+rows of no conversation (the supervisor's digest) belong to nobody and are not
+streamed. Conversations from before v5 have no owner and are invisible until
+`cloud-server conversation adopt --db <file> --invites <file> <inviteId>`, run
+with the server stopped, gives them to an invite. Accounts replace invites in T17.
 
 | Route | Behavior |
 |---|---|
 | `POST /v1/conversations` | `{title?}` -> `{conversationId}`. Creates the conversation and its orchestrator session. |
-| `GET /v1/conversations` | Conversations, oldest first. |
-| `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores, emits, then calls the handler. A repeated `clientMessageId` returns the first message's id and emits nothing. |
+| `GET /v1/conversations` | The caller's conversations, oldest first. |
+| `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores the message with a pending delivery, emits, then hands it to the handler. A repeated `clientMessageId` returns the first message's id, emits nothing, and retries a delivery still pending. |
 | `GET /v1/conversations/:id/tasks?after=&limit=` | Task views for the conversation's trees, in creation order, paged. |
 | `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
 | `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`. |
@@ -159,7 +172,24 @@ sent twice, whether it arrives during replay or after.
 
 Backpressure is the memory bound: the next page is not read until the socket
 drained. A client that does not drain within 30 s is closed and resumes later
-from its last id. A comment line goes out every 15 s.
+from its last id. A comment line goes out every 15 s, through the same drain
+wait, so a stalled idle client is dropped too.
+
+A stream belongs to its invite. Before each frame and each heartbeat the invite
+is read again; a revoke through the server's own store ends its streams at once,
+and one from the command line (another process) is seen within
+`revokeCheckMs` (1 s) through SQLite's `data_version`, so no frame goes out
+after the revoke is visible.
+
+### Message delivery
+
+The message and a `message_deliveries` row are committed in one transaction.
+The row is marked delivered only when the handler's promise resolves; a failure
+is retried with a doubling delay (1 s up to 60 s), and whatever is pending at
+start is tried again, so a crash between the commit and the handler loses
+nothing. One attempt per message runs at a time and the handler dedupes by
+`messageId` (the conductor admits a message id once). Messages from before v5
+have no row and are not replayed.
 
 ## Limits
 

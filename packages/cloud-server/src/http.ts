@@ -12,7 +12,7 @@ import {
 import { z } from 'zod';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
 import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
-import { type FeedEntry, type FeedHub, readFeed } from './feed.js';
+import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { InboxRoutes } from './inbox.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import { toPublicView } from './public-view.js';
@@ -42,6 +42,12 @@ export interface HttpLimits {
   /** How long a stream may leave a write undrained before it is closed. */
   drainTimeoutMs: number;
   heartbeatMs: number;
+  /**
+   * How often open streams look for revokes made by another process (the
+   * command line). A revoke made through this server's own store closes its
+   * streams at once, and every frame is preceded by a check either way.
+   */
+  revokeCheckMs: number;
 }
 
 export const DEFAULT_HTTP_LIMITS: HttpLimits = {
@@ -53,6 +59,7 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = {
   artifactReadsInFlight: 8,
   drainTimeoutMs: 30_000,
   heartbeatMs: HEARTBEAT_MS,
+  revokeCheckMs: 1000,
 };
 
 export interface PostedMessage {
@@ -68,6 +75,8 @@ export interface PostedAnswer {
   optionId: string;
   text?: string;
   sessionId: string;
+  /** The invite that answered. It owns the conversation; it is checked again where the answer takes effect. */
+  caller: string;
 }
 
 /**
@@ -104,6 +113,10 @@ export interface PublicApiDeps {
   artifacts: ArtifactSource;
   artifactLimiter: RateLimiter;
   limits: HttpLimits;
+  /**
+   * Called after a post, a retried one included: the message is stored with a
+   * pending delivery, and this asks for an attempt now.
+   */
   onMessage: (message: PostedMessage) => void;
   /** Absent when no handler takes answers; the route then answers 404. */
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
@@ -138,11 +151,21 @@ export class HttpError extends Error {
   }
 }
 
-/** The public routes. Every one of them, the event stream included, needs a valid invite. */
+/**
+ * The public routes. Every one of them, the event stream included, needs a
+ * valid invite, and each invite sees only what it owns: the conversations it
+ * created and the tasks, artifacts, inbox items and feed rows that belong to
+ * them. Anything else answers 404, never 403, so a client cannot tell another
+ * owner's object from one that does not exist. Writes check the invite again
+ * once the body is read, right before their effect.
+ */
 export class PublicApi {
   private readonly streamsByInvite = new KeyedCounter<string>();
   private streams = 0;
   private readonly open = new Set<ServerResponse>();
+  /** How to end each open stream, by the invite it was opened with. */
+  private readonly streamEnds = new Map<string, Set<() => void>>();
+  private stopWatching: (() => void) | undefined;
   private artifactReads = 0;
 
   constructor(private readonly deps: PublicApiDeps) {}
@@ -151,9 +174,49 @@ export class PublicApi {
     return this.streams;
   }
 
+  /** Whether streams are watching for revokes (a listener and a timer); only while a stream is open. */
+  get watchingRevokes(): boolean {
+    return this.stopWatching !== undefined;
+  }
+
   /** Ends every open event stream; clients reconnect with their last id. */
   closeStreams(): void {
     for (const res of [...this.open]) res.end();
+  }
+
+  /** Ends the streams of invites that are no longer active. */
+  private endRevokedStreams(only?: string): void {
+    for (const [inviteId, ends] of [...this.streamEnds]) {
+      if (only !== undefined && inviteId !== only) continue;
+      if (this.deps.invites.active(inviteId)) continue;
+      for (const end of [...ends]) end();
+    }
+  }
+
+  /** Starts watching for revokes with the first open stream; `unwatch` stops with the last. */
+  private watch(): void {
+    if (this.stopWatching) return;
+    const { invites, limits } = this.deps;
+    const unsubscribe = invites.onRevoke((inviteId) => this.endRevokedStreams(inviteId));
+    invites.changedElsewhere();
+    const timer = setInterval(() => {
+      try {
+        if (invites.changedElsewhere()) this.endRevokedStreams();
+      } catch {
+        // The invites file is closing with the server; the streams end with it.
+      }
+    }, limits.revokeCheckMs);
+    timer.unref();
+    this.stopWatching = () => {
+      unsubscribe();
+      clearInterval(timer);
+    };
+  }
+
+  private unwatch(): void {
+    if (this.streams > 0) return;
+    this.stopWatching?.();
+    this.stopWatching = undefined;
   }
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -181,6 +244,41 @@ export class PublicApi {
     return invite;
   }
 
+  /**
+   * The invite again, after the body was read and right before a side effect:
+   * one revoked while its request was still arriving does nothing.
+   */
+  reauthenticate(invite: InviteInfo): void {
+    if (!this.deps.invites.active(invite.inviteId)) {
+      throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+    }
+  }
+
+  /** The conversation's orchestrator session, or 404 when the invite does not own it. */
+  private ownSession(invite: InviteInfo, conversationId: string): string {
+    const { conversations } = this.deps;
+    const sessionId = conversations.sessionOf(conversationId);
+    if (sessionId === undefined || !conversations.owns(invite.inviteId, conversationId)) {
+      throw new HttpError(404, 'not_found');
+    }
+    return sessionId;
+  }
+
+  /** The root session of a task in a conversation the invite owns, or 404. */
+  private ownTaskSession(invite: InviteInfo, taskId: string): string {
+    const sessionId = this.deps.orchestrator.rootSessionOfTask(taskId);
+    const conversationId =
+      sessionId === undefined ? undefined : this.deps.conversations.conversationOf(sessionId);
+    if (
+      sessionId === undefined ||
+      conversationId === undefined ||
+      !this.deps.conversations.owns(invite.inviteId, conversationId)
+    ) {
+      throw new HttpError(404, 'not_found');
+    }
+    return sessionId;
+  }
+
   private async route(
     req: IncomingMessage,
     res: ServerResponse,
@@ -190,9 +288,9 @@ export class PublicApi {
     const path = url.pathname;
     const method = req.method ?? 'GET';
     if (path === '/v1/conversations') {
-      if (method === 'POST') return this.createConversation(req, res);
+      if (method === 'POST') return this.createConversation(req, res, invite);
       if (method === 'GET') {
-        return respond(res, 200, { conversations: this.deps.conversations.list() });
+        return respond(res, 200, { conversations: this.deps.conversations.list(invite.inviteId) });
       }
       throw new HttpError(405, 'method_not_allowed', { allow: 'GET, POST' });
     }
@@ -209,7 +307,7 @@ export class PublicApi {
     const tasks = /^\/v1\/conversations\/([^/]+)\/tasks$/u.exec(path);
     if (tasks) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
-      return this.listTasks(res, url, decodeURIComponent(tasks[1] ?? ''));
+      return this.listTasks(res, url, invite, decodeURIComponent(tasks[1] ?? ''));
     }
     const control = /^\/v1\/tasks\/([^/]+)\/(cancel|pause|resume)$/u.exec(path);
     if (control) {
@@ -221,7 +319,7 @@ export class PublicApi {
     if (artifacts) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
       const taskId = decodeURIComponent(artifacts[1] ?? '');
-      if (artifacts[2] === undefined) return this.listArtifacts(res, taskId);
+      if (artifacts[2] === undefined) return this.listArtifacts(res, invite, taskId);
       return this.readArtifact(res, invite, taskId, decodeURIComponent(artifacts[2]));
     }
     if (this.deps.inbox && path.startsWith('/v1/inbox/')) {
@@ -234,10 +332,15 @@ export class PublicApi {
     throw new HttpError(404, 'not_found');
   }
 
-  private async createConversation(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async createConversation(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+  ): Promise<void> {
     const body = createConversation.safeParse(await readJson(req, true));
     if (!body.success) throw new HttpError(400, 'invalid_request');
-    const conversation = this.deps.conversations.create(body.data.title);
+    this.reauthenticate(invite);
+    const conversation = this.deps.conversations.create(invite.inviteId, body.data.title);
     respond(res, 201, { conversationId: conversation.conversationId });
   }
 
@@ -247,17 +350,14 @@ export class PublicApi {
     invite: InviteInfo,
     conversationId: string,
   ): Promise<void> {
+    // Before the body: a client over its rate does not get to send one.
+    take(this.deps.messageLimiter, invite);
     const body = postMessage.safeParse(await readJson(req, false));
     if (!body.success || Buffer.byteLength(body.data.text) > MAX_MESSAGE_BYTES) {
       throw new HttpError(400, 'invalid_request');
     }
-    if (!this.deps.conversations.exists(conversationId)) throw new HttpError(404, 'not_found');
-    const allowed = this.deps.messageLimiter.take(invite.inviteId);
-    if (!allowed.ok) {
-      throw new HttpError(429, 'quota_exceeded', {
-        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
-      });
-    }
+    this.reauthenticate(invite);
+    this.ownSession(invite, conversationId);
     const result = this.deps.conversations.post(
       conversationId,
       body.data.text,
@@ -265,14 +365,13 @@ export class PublicApi {
     );
     if (!result.found) throw new HttpError(404, 'not_found');
     respond(res, 202, { messageId: result.messageId });
-    if (!result.duplicate) {
-      this.deps.onMessage({
-        conversationId,
-        messageId: result.messageId,
-        text: result.text,
-        sessionId: result.sessionId,
-      });
-    }
+    // A retry with the same client id asks again: the first delivery may have failed.
+    this.deps.onMessage({
+      conversationId,
+      messageId: result.messageId,
+      text: result.text,
+      sessionId: result.sessionId,
+    });
   }
 
   private async postAnswer(
@@ -281,30 +380,31 @@ export class PublicApi {
     invite: InviteInfo,
     conversationId: string,
   ): Promise<void> {
+    take(this.deps.messageLimiter, invite);
     const body = postAnswer.safeParse(await readJson(req, false));
     if (!body.success) throw new HttpError(400, 'invalid_request');
-    const sessionId = this.deps.conversations.sessionOf(conversationId);
-    if (sessionId === undefined) throw new HttpError(404, 'not_found');
-    const allowed = this.deps.messageLimiter.take(invite.inviteId);
-    if (!allowed.ok) {
-      throw new HttpError(429, 'quota_exceeded', {
-        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
-      });
-    }
+    // Nothing is awaited between this check and the hand-over, so a revoke cannot land in between.
+    this.reauthenticate(invite);
+    const sessionId = this.ownSession(invite, conversationId);
     const outcome = await (this.deps.onAnswer as NonNullable<PublicApiDeps['onAnswer']>)({
       conversationId,
       questionId: body.data.questionId,
       optionId: body.data.optionId,
       ...(body.data.text === undefined ? {} : { text: body.data.text }),
       sessionId,
+      caller: invite.inviteId,
     });
     if (!outcome.accepted) throw new HttpError(ANSWER_STATUS[outcome.reason], outcome.reason);
     respond(res, 200, { accepted: true, duplicate: outcome.duplicate });
   }
 
-  private listTasks(res: ServerResponse, url: URL, conversationId: string): void {
-    const sessionId = this.deps.conversations.sessionOf(conversationId);
-    if (sessionId === undefined) throw new HttpError(404, 'not_found');
+  private listTasks(
+    res: ServerResponse,
+    url: URL,
+    invite: InviteInfo,
+    conversationId: string,
+  ): void {
+    const sessionId = this.ownSession(invite, conversationId);
     const after = parseCount(url.searchParams.get('after'), 0);
     const limit = Math.min(
       parseCount(url.searchParams.get('limit'), TASK_PAGE_DEFAULT),
@@ -322,21 +422,15 @@ export class PublicApi {
     });
   }
 
-  /** The artifact references of a task's manifest; 404 for a task that belongs to no conversation. */
-  private artifactRefs(taskId: string): string[] {
-    const sessionId = this.deps.orchestrator.rootSessionOfTask(taskId);
-    if (
-      sessionId === undefined ||
-      this.deps.conversations.conversationOf(sessionId) === undefined
-    ) {
-      throw new HttpError(404, 'not_found');
-    }
+  /** The artifact references of a task's manifest; 404 for a task of a conversation the invite does not own. */
+  private artifactRefs(invite: InviteInfo, taskId: string): string[] {
+    this.ownTaskSession(invite, taskId);
     const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
     return record?.manifest?.artifacts ?? [];
   }
 
-  private listArtifacts(res: ServerResponse, taskId: string): void {
-    const refs = this.artifactRefs(taskId);
+  private listArtifacts(res: ServerResponse, invite: InviteInfo, taskId: string): void {
+    const refs = this.artifactRefs(invite, taskId);
     respond(res, 200, {
       artifacts: refs.slice(0, MAX_LISTED_ARTIFACTS).map((ref, index) => listArtifact(ref, index)),
       total: refs.length,
@@ -355,17 +449,12 @@ export class PublicApi {
     taskId: string,
     rawIndex: string,
   ): Promise<void> {
-    const refs = this.artifactRefs(taskId);
+    const refs = this.artifactRefs(invite, taskId);
     const ref = /^\d{1,6}$/u.test(rawIndex) ? refs[Number(rawIndex)] : undefined;
     if (ref === undefined) throw new HttpError(404, 'not_found');
     const link = linkOf(ref);
     if (link !== undefined) return respond(res, 200, { url: link });
-    const allowed = this.deps.artifactLimiter.take(invite.inviteId);
-    if (!allowed.ok) {
-      throw new HttpError(429, 'quota_exceeded', {
-        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
-      });
-    }
+    take(this.deps.artifactLimiter, invite);
     if (this.artifactReads >= this.deps.limits.artifactReadsInFlight) {
       throw new HttpError(429, 'quota_exceeded', { 'retry-after': '1' });
     }
@@ -396,9 +485,10 @@ export class PublicApi {
   }
 
   /**
-   * Acts on a task for the conversation it belongs to. The invite is checked here
-   * and again inside the orchestrator's write chain, so a revoke that lands while
-   * the request waits stops it; the credentials the conductor holds are not involved.
+   * Acts on a task of a conversation the invite owns. The invite and the
+   * ownership are checked here and again inside the orchestrator's write chain,
+   * so a revoke that lands while the request waits stops it; the credentials the
+   * conductor holds are not involved.
    */
   private async control(
     req: IncomingMessage,
@@ -408,17 +498,10 @@ export class PublicApi {
     action: ControlAction,
   ): Promise<void> {
     const { orchestrator, conversations } = this.deps;
+    take(this.deps.controlLimiter, invite);
     await discard(req);
-    const sessionId = orchestrator.rootSessionOfTask(taskId);
-    if (sessionId === undefined || conversations.conversationOf(sessionId) === undefined) {
-      throw new HttpError(404, 'not_found');
-    }
-    const allowed = this.deps.controlLimiter.take(invite.inviteId);
-    if (!allowed.ok) {
-      throw new HttpError(429, 'quota_exceeded', {
-        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
-      });
-    }
+    this.reauthenticate(invite);
+    const sessionId = this.ownTaskSession(invite, taskId);
     const token = bearerToken(req);
     const access: OperatorAccess = {
       sessionId,
@@ -427,7 +510,8 @@ export class PublicApi {
         if (!current || current.inviteId !== invite.inviteId) {
           throw new OrchestratorError('unauthorized', 'The invite is no longer valid');
         }
-        if (conversations.conversationOf(sessionId) === undefined) {
+        const conversationId = conversations.conversationOf(sessionId);
+        if (conversationId === undefined || !conversations.owns(invite.inviteId, conversationId)) {
           throw new OrchestratorError('not_found', 'The conversation no longer exists');
         }
       },
@@ -445,17 +529,21 @@ export class PublicApi {
     }
   }
 
+  /**
+   * The event stream of what the invite owns. It belongs to its invite: a
+   * revoke ends it (at once through this server's store, within
+   * `revokeCheckMs` from another process), and every frame and heartbeat is
+   * preceded by a check, so nothing is sent after the revoke is seen.
+   */
   private async stream(
     req: IncomingMessage,
     res: ServerResponse,
     url: URL,
     invite: InviteInfo,
   ): Promise<void> {
-    const { db, hub, limits } = this.deps;
+    const { db, hub, limits, invites } = this.deps;
     const conversationId = url.searchParams.get('conversation') ?? undefined;
-    if (conversationId !== undefined && !this.deps.conversations.exists(conversationId)) {
-      throw new HttpError(404, 'not_found');
-    }
+    if (conversationId !== undefined) this.ownSession(invite, conversationId);
     const header = req.headers['last-event-id'];
     const raw = (Array.isArray(header) ? header[0] : header) ?? url.searchParams.get('after');
     let position = parseCount(raw, 0);
@@ -468,10 +556,17 @@ export class PublicApi {
     }
     this.streams += 1;
     this.open.add(res);
+    let ends = this.streamEnds.get(invite.inviteId);
+    if (!ends) {
+      ends = new Set();
+      this.streamEnds.set(invite.inviteId, ends);
+    }
+    const ownEnds = ends;
 
     let closed = false;
     let dirty = true;
     let running = false;
+    let draining = false;
     let unsubscribe = () => {};
     let heartbeat: NodeJS.Timeout | undefined;
     // `abandon` drops the socket instead of ending politely: a client that stopped
@@ -484,12 +579,28 @@ export class PublicApi {
       this.streams -= 1;
       this.streamsByInvite.release(invite.inviteId);
       this.open.delete(res);
+      ownEnds.delete(end);
+      if (ownEnds.size === 0 && this.streamEnds.get(invite.inviteId) === ownEnds) {
+        this.streamEnds.delete(invite.inviteId);
+      }
+      this.unwatch();
       return true;
     };
     const finish = (abandon = false) => {
       if (!release()) return;
       if (abandon) res.destroy();
       else if (!res.writableEnded) res.end();
+    };
+    function end() {
+      finish();
+    }
+    ownEnds.add(end);
+    this.watch();
+    /** False once the invite is revoked; the stream is then ended. */
+    const stillValid = (): boolean => {
+      if (invites.active(invite.inviteId)) return true;
+      finish();
+      return false;
     };
     const drained = async (): Promise<boolean> => {
       const timeout = AbortSignal.timeout(limits.drainTimeoutMs);
@@ -500,8 +611,18 @@ export class PublicApi {
         return false;
       }
     };
-    const write = async (chunk: string): Promise<boolean> =>
-      res.write(chunk) || (!closed && (await drained()));
+    // Every write, heartbeats included, waits for the client to take what is
+    // buffered; one that is not taken within the drain timeout ends the stream.
+    const write = async (chunk: string): Promise<boolean> => {
+      if (res.write(chunk)) return true;
+      if (closed) return false;
+      draining = true;
+      try {
+        return await drained();
+      } finally {
+        draining = false;
+      }
+    };
     // Reads the feed after `position` until it is empty. A commit that lands
     // while a pass runs sets `dirty`, so the loop goes around again; nothing
     // is buffered per connection beyond the page being written.
@@ -512,13 +633,14 @@ export class PublicApi {
         while (dirty && !closed) {
           dirty = false;
           for (;;) {
-            const entries = readFeed(db, position, FEED_PAGE, conversationId);
-            if (entries.length === 0) break;
-            for (const entry of entries) {
-              if (closed) return;
+            const page = readOwnFeed(db, invite.inviteId, position, FEED_PAGE, conversationId);
+            if (page.scannedTo === position) break;
+            for (const entry of page.entries) {
+              if (closed || !stillValid()) return;
               if (!(await write(frame(entry)))) return finish(true);
               position = entry.id;
             }
+            position = page.scannedTo;
           }
         }
       } catch {
@@ -533,7 +655,15 @@ export class PublicApi {
         void pump();
       });
       heartbeat = setInterval(() => {
-        if (!closed) res.write(': keep-alive\n\n');
+        if (closed || draining) return;
+        try {
+          if (!stillValid()) return;
+        } catch {
+          return finish(true);
+        }
+        void write(': keep-alive\n\n').then((ok) => {
+          if (!ok) finish(true);
+        });
       }, limits.heartbeatMs);
       heartbeat.unref();
       res.once('close', () => finish());
@@ -554,6 +684,16 @@ export class PublicApi {
 }
 
 type ControlAction = 'cancel' | 'pause' | 'resume';
+
+/** Takes one token from the invite's bucket or answers 429. */
+export function take(limiter: RateLimiter, invite: InviteInfo): void {
+  const allowed = limiter.take(invite.inviteId);
+  if (!allowed.ok) {
+    throw new HttpError(429, 'quota_exceeded', {
+      'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
+    });
+  }
+}
 
 function bearerToken(req: IncomingMessage): string | undefined {
   return /^Bearer\s+(\S+)$/iu.exec(req.headers.authorization ?? '')?.[1];

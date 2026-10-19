@@ -228,6 +228,35 @@ test('the item log and the answer log are append-only', async () => {
   }
 });
 
+test('a schema 2 database gains the answer caller column and keeps its rows', () => {
+  const dbPath = tmpDb();
+  openDatabase(dbPath).close();
+  const raw = new DatabaseSync(dbPath);
+  raw.exec('ALTER TABLE answers DROP COLUMN caller');
+  raw.exec('PRAGMA user_version = 2');
+  raw.exec(
+    "INSERT INTO answers (answer_id, item_id, option_id, delivery, next_attempt_at, created_at) VALUES ('ans_old', 'itm_old', 'a', 'pending', 0, 0)",
+  );
+  raw.close();
+  const db = openDatabase(dbPath);
+  try {
+    assert.equal(
+      (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
+      3,
+    );
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare("SELECT answer_id, caller FROM answers WHERE answer_id = 'ans_old'")
+          .get() as object),
+      },
+      { answer_id: 'ans_old', caller: null },
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test('a newer schema version is refused rather than opened', () => {
   const dbPath = tmpDb();
   const raw = new DatabaseSync(dbPath);

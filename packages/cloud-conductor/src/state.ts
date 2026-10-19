@@ -275,7 +275,8 @@ CREATE TABLE IF NOT EXISTS held_actions (
   tool TEXT NOT NULL,
   args TEXT NOT NULL,
   state TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  approved_by TEXT
 );
 `;
 
@@ -293,6 +294,11 @@ export class ConductorState {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
+    // Who approved a held action; files from before it existed gain the column empty.
+    const columns = this.db.prepare('PRAGMA table_info(held_actions)').all() as Row[];
+    if (!columns.some((column) => column.name === 'approved_by')) {
+      this.db.exec('ALTER TABLE held_actions ADD COLUMN approved_by TEXT');
+    }
   }
 
   close(): void {
@@ -973,11 +979,13 @@ export class ConductorState {
    * approval or rejection of the held action. The caller then appends the
    * answer to the conversation (or stops the run).
    */
+  /** `caller` is who answered, as the server names them; an approval records it. */
   answer(
     conversationId: string,
     questionId: string,
     optionId: string,
     text?: string,
+    caller?: string,
   ): AnswerResult {
     return this.transaction((): AnswerResult => {
       const question = this.question(questionId);
@@ -1010,8 +1018,14 @@ export class ConductorState {
       }
       if (question.reason === 'irreversible' && question.actionRef) {
         this.db
-          .prepare("UPDATE held_actions SET state = ? WHERE action_id = ? AND state = 'held'")
-          .run(optionId === 'approve' ? 'approved' : 'rejected', question.actionRef);
+          .prepare(
+            "UPDATE held_actions SET state = ?, approved_by = ? WHERE action_id = ? AND state = 'held'",
+          )
+          .run(
+            optionId === 'approve' ? 'approved' : 'rejected',
+            caller ?? null,
+            question.actionRef,
+          );
       }
       this.db
         .prepare(
@@ -1091,14 +1105,40 @@ export class ConductorState {
     return { runId: String(row.run_id), tool: String(row.tool), state: row.state as HeldState };
   }
 
-  /** Uses an approval exactly once, for the tool, run and arguments it was given for. */
-  consumeApproval(runId: string, tool: string, actionId: string, args: unknown): boolean {
-    const changed = this.db
-      .prepare(
-        "UPDATE held_actions SET state = 'used' WHERE action_id = ? AND run_id = ? AND tool = ? AND args = ? AND state = 'approved'",
-      )
-      .run(actionId, runId, tool, canonicalJson(args)).changes;
-    return Number(changed) === 1;
+  /**
+   * Uses an approval exactly once, for the tool, run and arguments it was given
+   * for. `approverOk` is asked about who approved, in the same transaction as
+   * the use: an approver it refuses (a revoked invite) expires the approval.
+   */
+  consumeApproval(
+    runId: string,
+    tool: string,
+    actionId: string,
+    args: unknown,
+    approverOk: (approvedBy: string | null) => boolean = () => true,
+  ): boolean {
+    return this.transaction(() => {
+      const row = this.db
+        .prepare(
+          "SELECT approved_by FROM held_actions WHERE action_id = ? AND run_id = ? AND tool = ? AND args = ? AND state = 'approved'",
+        )
+        .get(actionId, runId, tool, canonicalJson(args)) as Row | undefined;
+      if (!row) return false;
+      if (!approverOk(row.approved_by === null ? null : String(row.approved_by))) {
+        this.db
+          .prepare(
+            "UPDATE held_actions SET state = 'expired' WHERE action_id = ? AND state = 'approved'",
+          )
+          .run(actionId);
+        return false;
+      }
+      this.db
+        .prepare(
+          "UPDATE held_actions SET state = 'used' WHERE action_id = ? AND state = 'approved'",
+        )
+        .run(actionId);
+      return true;
+    });
   }
 
   /** Held and approved-but-unused actions of a run stop being usable. */

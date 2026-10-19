@@ -26,7 +26,8 @@ export class ConversationStore {
     private readonly now: () => number = Date.now,
   ) {}
 
-  create(title?: string): ConversationInfo {
+  /** `owner` is the invite id of the caller; everything in the conversation belongs to it. */
+  create(owner: string, title?: string): ConversationInfo {
     const conversationId = `cnv_${randomUUID().replaceAll('-', '')}`;
     const createdAt = this.now();
     transaction(this.db, () => {
@@ -40,19 +41,22 @@ export class ConversationStore {
       ).n;
       this.db
         .prepare(
-          'INSERT INTO conversations (conversation_id, n, title, session_id, created_at) VALUES (?, ?, ?, ?, ?)',
+          'INSERT INTO conversations (conversation_id, n, title, session_id, created_at, owner) VALUES (?, ?, ?, ?, ?, ?)',
         )
-        .run(conversationId, n, title ?? null, session.sessionId, createdAt);
+        .run(conversationId, n, title ?? null, session.sessionId, createdAt, owner);
       appendFeed(this.db, 'conversation.created', conversationId, conversationId, createdAt);
     });
     this.hub.notify();
     return { conversationId, title: title ?? null, createdAt };
   }
 
-  list(): ConversationInfo[] {
+  /** The conversations of one owner, oldest first. */
+  list(owner: string): ConversationInfo[] {
     const rows = this.db
-      .prepare('SELECT conversation_id, title, created_at FROM conversations ORDER BY n')
-      .all() as unknown as Array<{
+      .prepare(
+        'SELECT conversation_id, title, created_at FROM conversations WHERE owner = ? ORDER BY n',
+      )
+      .all(owner) as unknown as Array<{
       conversation_id: string;
       title: string | null;
       created_at: number;
@@ -82,6 +86,35 @@ export class ConversationStore {
 
   exists(conversationId: string): boolean {
     return this.sessionOf(conversationId) !== undefined;
+  }
+
+  /** The invite that owns the conversation; undefined for an unknown or unowned one. */
+  ownerOf(conversationId: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT owner FROM conversations WHERE conversation_id = ?')
+      .get(conversationId) as { owner: string | null } | undefined;
+    return row?.owner ?? undefined;
+  }
+
+  /** Whether `owner` owns the conversation. False for an unknown or unowned one. */
+  owns(owner: string, conversationId: string): boolean {
+    return this.ownerOf(conversationId) === owner;
+  }
+
+  /** The ids of an owner's conversations. */
+  idsOf(owner: string): string[] {
+    const rows = this.db
+      .prepare('SELECT conversation_id FROM conversations WHERE owner = ? ORDER BY n')
+      .all(owner) as unknown as Array<{ conversation_id: string }>;
+    return rows.map((row) => row.conversation_id);
+  }
+
+  /** Gives every unowned conversation to `owner`. For the command line, with the server stopped. */
+  adoptUnowned(owner: string): number {
+    const result = this.db
+      .prepare('UPDATE conversations SET owner = ? WHERE owner IS NULL')
+      .run(owner);
+    return Number(result.changes);
   }
 
   post(conversationId: string, text: string, clientMessageId?: string): PostResult {
@@ -118,6 +151,12 @@ export class ConversationStore {
         )
         .run(n, messageId, conversationId, text, clientMessageId ?? null, at);
       appendFeed(this.db, 'message.posted', conversationId, messageId, at);
+      // Committed with the message, so a crash before the handler acks leaves it to retry.
+      this.db
+        .prepare(
+          'INSERT INTO message_deliveries (message_id, conversation_id, next_attempt_at) VALUES (?, ?, ?)',
+        )
+        .run(messageId, conversationId, at);
       return { found: true, messageId, duplicate: false, text, sessionId };
     });
     if (result.found && !result.duplicate) this.hub.notify();

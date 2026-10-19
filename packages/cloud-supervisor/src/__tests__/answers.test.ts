@@ -362,3 +362,80 @@ test('an answer after stop is refused', async () => {
   });
   assert.equal(!result.ok && result.reason, 'stopped');
 });
+
+test('the caller is stored with the answer and handed to the host with every delivery attempt', async () => {
+  const r = await rig();
+  await r.question('q1');
+  let failures = 1;
+  r.host.script.deliver = async (delivery) => {
+    if (failures-- > 0) throw new Error('the conductor is busy');
+    return r.host.conductor(delivery);
+  };
+  const item = await firstItem(r);
+  const first = await r.supervisor.answer({
+    itemId: item.itemId,
+    answerId: answerId(),
+    optionId: 'a',
+    preconditionHash: item.preconditionHash,
+    caller: 'inv_a',
+  });
+  assert.equal(first.ok && first.item.state, 'answering');
+  r.clock.advance(MINUTE);
+  await r.supervisor.tick();
+  assert.deepEqual(
+    r.host.deliveries.map((delivery) => delivery.caller),
+    ['inv_a', 'inv_a'],
+  );
+  assert.equal(r.supervisor.getItem(item.itemId)?.closeReason, 'answered');
+  await r.stop();
+});
+
+test('outside the caller conversations an item is not listed and answering it is not_found', async () => {
+  const r = await rig();
+  await r.question('q1');
+  const item = await firstItem(r);
+  assert.deepEqual(r.supervisor.listItems({ conversations: ['cnv_other'] }).items, []);
+  assert.deepEqual(r.supervisor.listItems({ conversations: [] }).items, []);
+  assert.equal(r.supervisor.listItems({ conversations: [CONVERSATION] }).items.length, 1);
+  const refused = await r.supervisor.answer({
+    itemId: item.itemId,
+    answerId: answerId(),
+    optionId: 'a',
+    preconditionHash: item.preconditionHash,
+    caller: 'inv_b',
+    conversations: ['cnv_other'],
+  });
+  assert.deepEqual(refused, { ok: false, reason: 'not_found' });
+  assert.deepEqual(r.host.deliveries, []);
+  assert.equal(r.supervisor.getItem(item.itemId)?.state, 'open');
+  const accepted = await r.supervisor.answer({
+    itemId: item.itemId,
+    answerId: answerId(),
+    optionId: 'a',
+    preconditionHash: item.preconditionHash,
+    caller: 'inv_a',
+    conversations: [CONVERSATION],
+  });
+  assert.equal(accepted.ok && accepted.item.closeReason, 'answered');
+  await r.stop();
+});
+
+test('a message the host refuses for its caller closes the item without delivery', async () => {
+  const r = await rig();
+  await r.taskCreated('t', { title: 'job' });
+  await r.taskEvent({ type: 'task_started', taskId: 't' });
+  r.clock.advance(31 * MINUTE);
+  await r.supervisor.tick();
+  const item = await firstItem(r, (i) => i.kind === 'blocked');
+  r.host.refusedCallers.add('inv_gone');
+  const result = await r.supervisor.answer({
+    itemId: item.itemId,
+    answerId: 'msg_refused',
+    optionId: 'check',
+    preconditionHash: item.preconditionHash,
+    caller: 'inv_gone',
+  });
+  assert.equal(result.ok && result.item.closeReason, 'condition_cleared');
+  assert.deepEqual(r.host.posted, []);
+  await r.stop();
+});
