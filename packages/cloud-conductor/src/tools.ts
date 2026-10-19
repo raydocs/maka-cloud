@@ -44,6 +44,8 @@ export interface ToolHost {
   postNotice(turn: ActiveTurn, text: string): void;
   /** Settles the delegation behind a task view once the view shows the task ended. */
   settleTask(view: Record<string, unknown> | undefined): void;
+  /** Whether who approved a held call may still have it run (their invite is active and owns the conversation). */
+  approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
 }
 
 /** A tool a playbook adds. `irreversible` tools are held until the user approves the call. */
@@ -531,7 +533,11 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
             `This action cannot be undone. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
           );
         }
-        if (!host.state.consumeApproval(turn.runId, spec.name, actionRef, args)) {
+        if (
+          !host.state.consumeApproval(turn.runId, spec.name, actionRef, args, (approvedBy) =>
+            host.approverAuthorized(approvedBy, turn.conversationId),
+          )
+        ) {
           throw new ToolRefusal(
             'not_approved',
             `Action ${actionRef} is not approved for this call.`,

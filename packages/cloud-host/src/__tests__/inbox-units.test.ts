@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { Interrupt } from '@maka-cloud/supervisor';
+import { type Interrupt, inputTokenBound } from '@maka-cloud/supervisor';
 import { ConfigError, describeConfig, readStackConfig } from '../config.js';
 import { conductorBudget } from '../inbox/budget.js';
 import { readInboxConfig } from '../inbox/config.js';
@@ -129,16 +129,19 @@ test('usage the provider does not report is charged at the bound, never at zero'
     {},
     { generateText: generate, languageModel: () => ({}) as never },
   );
-  const out = await model.verify(
-    { instructions: 'abcd', prompt: 'efghij', maxOutputTokens: 40 },
-    new AbortController().signal,
-  );
+  const request = { instructions: 'abcd', prompt: 'efghij', maxOutputTokens: 40 };
+  const out = await model.verify(request, new AbortController().signal);
   assert.equal(
     out.output,
     'not json',
     'text that is not JSON is passed on for the supervisor to refuse',
   );
-  assert.deepEqual(out.usage, { inputTokens: 5, outputTokens: 40 });
+  assert.deepEqual(out.usage, { inputTokens: inputTokenBound(request), outputTokens: 40 });
+
+  // Dense text is charged by its bytes, not by half a token per character.
+  const dense = { instructions: 'abcd', prompt: '漢'.repeat(3000), maxOutputTokens: 40 };
+  const denseOut = await model.verify(dense, new AbortController().signal);
+  assert.ok(denseOut.usage.inputTokens >= 9000, `charged ${denseOut.usage.inputTokens}`);
 });
 
 test('a provider error reaches the supervisor, which charges the reservation', async () => {

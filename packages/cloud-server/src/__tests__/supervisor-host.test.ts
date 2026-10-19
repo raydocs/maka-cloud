@@ -41,19 +41,24 @@ test('an inbox event reaches open streams in order and a client resumes after it
   const conversationId = await newConversation(h);
   const stream = await openStream(t, h);
   parts.publish({ kind: 'inbox.item', conversationId, data: { itemId: 'itm_1', version: 1 } });
+  // A digest belongs to no conversation, so no invite owns it: it stays off client streams.
   parts.publish({ kind: 'inbox.digest', conversationId: null, data: { digestId: 'dig_1' } });
+  parts.publish({ kind: 'inbox.item', conversationId, data: { itemId: 'itm_1', version: 2 } });
   const events = await stream.until(3, 'events');
   assert.deepEqual(
     events.map((event) => event.event),
-    ['conversation.created', 'inbox.item', 'inbox.digest'],
+    ['conversation.created', 'inbox.item', 'inbox.item'],
   );
   assert.deepEqual(events[1]?.data, { conversationId, itemId: 'itm_1', version: 1 });
-  assert.deepEqual(events[2]?.data, { conversationId: null, digestId: 'dig_1' });
+  assert.deepEqual(
+    parts.feed.read(0, 100).map((entry) => entry.kind),
+    ['conversation.created', 'inbox.item', 'inbox.digest', 'inbox.item'],
+  );
 
   const resumed = await openStream(t, h, '', { 'last-event-id': String(events[1]?.id) });
   assert.deepEqual(
-    (await resumed.until(1, 'events')).map((event) => event.event),
-    ['inbox.digest'],
+    (await resumed.until(1, 'events')).map((event) => event.data.version),
+    [2],
   );
 });
 
@@ -104,11 +109,12 @@ test('an event for an unknown conversation or with data that cannot be stored is
       }),
     /missing or too large/u,
   );
+  const conversationId = await newConversation(h);
   const stream = await openStream(t, h);
-  parts.publish({ kind: 'inbox.digest', conversationId: null, data: { ok: true } });
+  parts.publish({ kind: 'inbox.item', conversationId, data: { ok: true } });
   assert.deepEqual(
-    (await stream.until(1, 'events')).map((event) => event.event),
-    ['inbox.digest'],
+    (await stream.until(2, 'events')).map((event) => event.event),
+    ['conversation.created', 'inbox.item'],
   );
 });
 
@@ -155,31 +161,42 @@ test('a message the supervisor posts is stored once, reaches the handler once, a
   const { h, parts } = await withParts(t, handler);
   const conversationId = await newConversation(h);
   const signal = new AbortController().signal;
+  const caller = h.inviteId;
   const first = await parts.messages.post(
-    { conversationId, text: 'please retry the failed step', clientMessageId: 'ans_1' },
+    { conversationId, text: 'please retry the failed step', clientMessageId: 'ans_1', caller },
     signal,
   );
   const again = await parts.messages.post(
-    { conversationId, text: 'please retry the failed step', clientMessageId: 'ans_1' },
+    { conversationId, text: 'please retry the failed step', clientMessageId: 'ans_1', caller },
     signal,
   );
+  assert.ok('messageId' in first && 'messageId' in again);
   assert.equal(again.messageId, first.messageId);
   await eventually(() => messages.length >= 1, 'handler call');
   // A later message arrives after the duplicate would have, so one call means no duplicate dispatch.
-  await parts.messages.post({ conversationId, text: 'marker', clientMessageId: 'ans_2' }, signal);
+  await parts.messages.post(
+    { conversationId, text: 'marker', clientMessageId: 'ans_2', caller },
+    signal,
+  );
   await eventually(() => messages.length >= 2, 'marker');
   assert.deepEqual(
     messages.map((message) => message.text),
     ['please retry the failed step', 'marker'],
   );
   await assert.rejects(
-    parts.messages.post({ conversationId: 'conv_nope', text: 'x', clientMessageId: 'k' }, signal),
+    parts.messages.post(
+      { conversationId: 'conv_nope', text: 'x', clientMessageId: 'k', caller },
+      signal,
+    ),
     /does not exist/u,
   );
   const aborted = new AbortController();
   aborted.abort();
   await assert.rejects(
-    parts.messages.post({ conversationId, text: 'late', clientMessageId: 'ans_3' }, aborted.signal),
+    parts.messages.post(
+      { conversationId, text: 'late', clientMessageId: 'ans_3', caller },
+      aborted.signal,
+    ),
   );
   const texts = parts.feed
     .read(0, 100)
@@ -212,15 +229,17 @@ test('an answer goes to the handler for the conversation, and is not_found for a
   const signal = new AbortController().signal;
   assert.deepEqual(
     await parts.answers.deliver(
-      { conversationId, questionId: 'q1', optionId: 'go', text: 'ok' },
+      { conversationId, questionId: 'q1', optionId: 'go', text: 'ok', caller: h.inviteId },
       signal,
     ),
     { accepted: true, duplicate: false },
   );
-  assert.deepEqual(calls, [{ conversationId, questionId: 'q1', optionId: 'go', text: 'ok' }]);
+  assert.deepEqual(calls, [
+    { conversationId, questionId: 'q1', optionId: 'go', text: 'ok', caller: h.inviteId },
+  ]);
   assert.deepEqual(
     await parts.answers.deliver(
-      { conversationId: 'conv_nope', questionId: 'q1', optionId: 'go' },
+      { conversationId: 'conv_nope', questionId: 'q1', optionId: 'go', caller: h.inviteId },
       signal,
     ),
     { accepted: false, reason: 'not_found' },
@@ -229,7 +248,10 @@ test('an answer goes to the handler for the conversation, and is not_found for a
   const aborted = new AbortController();
   aborted.abort();
   await assert.rejects(
-    parts.answers.deliver({ conversationId, questionId: 'q2', optionId: 'go' }, aborted.signal),
+    parts.answers.deliver(
+      { conversationId, questionId: 'q2', optionId: 'go', caller: h.inviteId },
+      aborted.signal,
+    ),
   );
   assert.equal(calls.length, 1);
 });
@@ -239,7 +261,7 @@ test('without a handler that takes answers every question is not_found', async (
   const conversationId = await newConversation(h);
   assert.deepEqual(
     await parts.answers.deliver(
-      { conversationId, questionId: 'q1', optionId: 'go' },
+      { conversationId, questionId: 'q1', optionId: 'go', caller: h.inviteId },
       new AbortController().signal,
     ),
     { accepted: false, reason: 'not_found' },

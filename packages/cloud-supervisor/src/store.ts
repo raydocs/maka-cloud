@@ -85,6 +85,8 @@ export interface AnswerRecord {
   attempts: number;
   nextAttemptAt: number;
   createdAt: number;
+  /** Who answered, as the host named them; null for an answer from before schema 3. */
+  caller: string | null;
 }
 
 export type VerificationState =
@@ -460,12 +462,23 @@ export class Store {
     ).map(toItem);
   }
 
-  listItems(filter: { states: ItemState[]; afterN: number; limit: number }): ItemRecord[] {
+  /** `conversations`, when given, keeps only the items of those conversations. */
+  listItems(filter: {
+    states: ItemState[];
+    afterN: number;
+    limit: number;
+    conversations?: readonly string[];
+  }): ItemRecord[] {
     const marks = filter.states.map(() => '?').join(', ');
+    const scope = filter.conversations === undefined ? null : JSON.stringify(filter.conversations);
     return this.all(
-      `SELECT * FROM items WHERE state IN (${marks}) AND n > ? ORDER BY n LIMIT ?`,
+      `SELECT * FROM items WHERE state IN (${marks}) AND n > ?
+         AND (? IS NULL OR conversation_id IN (SELECT value FROM json_each(?)))
+       ORDER BY n LIMIT ?`,
       ...filter.states,
       filter.afterN,
+      scope,
+      scope,
       filter.limit,
     ).map(toItem);
   }
@@ -552,11 +565,12 @@ export class Store {
     optionId: string;
     text: string | null;
     delivery: AnswerRecord['delivery'];
+    caller: string | null;
     at: number;
   }): void {
     this.run(
-      `INSERT INTO answers (answer_id, item_id, option_id, text, delivery, in_flight, attempts, next_attempt_at, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+      `INSERT INTO answers (answer_id, item_id, option_id, text, delivery, in_flight, attempts, next_attempt_at, created_at, caller)
+       VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
       answer.answerId,
       answer.itemId,
       answer.optionId,
@@ -564,6 +578,7 @@ export class Store {
       answer.delivery,
       answer.at,
       answer.at,
+      answer.caller,
     );
     this.logAnswer(answer.answerId, `claimed:${answer.delivery}`, answer.at);
   }
@@ -918,5 +933,6 @@ function toAnswer(row: Row): AnswerRecord {
     attempts: Number(row.attempts),
     nextAttemptAt: Number(row.next_attempt_at),
     createdAt: Number(row.created_at),
+    caller: optional(row.caller),
   };
 }

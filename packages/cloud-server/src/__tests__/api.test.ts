@@ -146,10 +146,13 @@ test('message posts are limited per invite and the limit comes back with Retry-A
   const refused = await postJson(h, path, { text: 'one too many' });
   assert.equal(refused.status, 429);
   assert.ok(Number(refused.headers.get('retry-after')) >= 1);
-  // Another invite has its own budget; the refused message was not stored.
+  // Another invite has its own budget, in a conversation of its own; the refused message was not stored.
   const other = h.server.invites.create('other');
-  assert.equal((await postJson(h, path, { text: 'fine' }, other.token)).status, 202);
+  const created = await postJson(h, '/v1/conversations', {}, other.token);
+  const { conversationId: theirs } = (await created.json()) as { conversationId: string };
+  const theirPath = `/v1/conversations/${theirs}/messages`;
+  assert.equal((await postJson(h, theirPath, { text: 'fine' }, other.token)).status, 202);
   const stream = await openStream(t, h, `?conversation=${conversationId}`);
-  await stream.until(5);
-  assert.equal(stream.events.filter((e) => e.event === 'message.posted').length, 4);
+  await stream.until(4);
+  assert.equal(stream.events.filter((e) => e.event === 'message.posted').length, 3);
 });

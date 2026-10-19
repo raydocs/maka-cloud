@@ -335,6 +335,12 @@ check (T5, inside its write chain) is the final arbiter for question answers.
 | `POST /v1/inbox/digest` | Build and return a digest now. |
 | SSE `inbox.item` on `GET /v1/events` | Item snapshot with `version`. Clients list on connect, then apply events by `(id, version)`. |
 
+Since per-invite isolation, items are listed and answered within the caller's
+own conversations, and the answer stores its caller so delivery is refused once
+that invite is revoked. Mutes, settings and the digest are one set for the
+whole server, so the server answers 404 to them for every invite until they are
+kept per owner; digests stay off client streams.
+
 The item rows live in `supervisor.db`, the stream lives in the T4 feed. They are
 joined by `feed_outbox`: every item version is recorded with the item, and a
 publisher loop appends it to the feed through `host.publish` and marks it
@@ -572,3 +578,35 @@ supervisor still import nothing from each other.
   the host (the host now depends on it), and `packages/cloud-host` gains
   `@maka-cloud/supervisor`, `ai`, `@ai-sdk/anthropic` and `@ai-sdk/openai` at the
   versions `packages/runtime` already pins (one lockfile entry, no new package).
+
+## As built (post-merge review fixes, part C)
+
+Four findings from the post-merge review, each with a test that fails on the code
+before the fix.
+
+- **The bound is bytes, not characters.** `inputTokenBound(request)` in
+  `verification/model.ts` is the one place the input estimate lives: one token per
+  UTF-8 byte of instructions and prompt, plus a 1024-token wrapper allowance. The
+  old half-a-token-per-character guess undercounted dense text (CJK, emoji) by up
+  to three times, so the reservation, the conversation budget and the daily cap
+  could be overrun. `upperBoundUsd` adds the output cap in full and returns
+  `undefined` when a price or the output cap is not a finite, non-negative number;
+  the engine then ends `could_not_check` with code `budget` before reserving
+  anything or calling the model. The host's fallback for a provider that reports no
+  usage charges the same bound. A model gateway's reservation replaces
+  `inputTokenBound`; nothing else computes the estimate.
+- **An empty check is never a pass.** For research, a report with no claims, a
+  record that removes every claim, a removal of an id the delivered `report.json`
+  does not have, and a removal the record does not itself show as failing (status
+  not one of the cite-check failures) are failures. `verification.json` is written
+  by the agent, so it only ever narrows the check when it agrees with the report.
+  The engine also refuses to pass with zero claims left (`incomplete`): a guard
+  for future preparers, not reachable by the two built in.
+- **Nothing waits on a hung resolver or fetcher.** The source fetcher races its
+  name resolution with the fetch's abort signal (the deadline or the caller's
+  stop), and `prepareResearch` races each `fetchText` with the check's signal, so a
+  fetcher that ignores the signal cannot hold a verification slot past the deadline
+  or keep `Supervisor.stop()` from returning.
+- **A 404 or 410 stays a 404 or 410.** `fetchText` keeps the status of an error
+  answer in its failure result, so the research check reports a gone page as a
+  failure instead of as a source that is merely down.

@@ -149,13 +149,13 @@ test('the index follows owed stops, ended tasks included, across a reopen and a 
   assert.deepEqual(new SqliteTaskStore(reopened, new FeedHub()).stopPendingTaskIds(), ['a']);
 });
 
-test('a version 4 database gains the owed-stop index with its tasks owing none', async (t) => {
+test('a version 5 database gains the owed-stop index with its tasks owing none', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'store-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'db.sqlite');
   const old = new DatabaseSync(path);
-  for (const step of MIGRATIONS.slice(0, 4)) old.exec(step);
-  old.exec('PRAGMA user_version = 4');
+  for (const step of MIGRATIONS.slice(0, 5)) old.exec(step);
+  old.exec('PRAGMA user_version = 5');
   old
     .prepare(
       "INSERT INTO task_index (task_id, session_id, root_session_id, state, created_at) VALUES ('a', 's1', 's1', 'failed', 1)",

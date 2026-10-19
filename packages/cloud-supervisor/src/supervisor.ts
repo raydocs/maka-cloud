@@ -54,6 +54,10 @@ export interface AnswerRequest {
   text?: string;
   /** The `preconditionHash` of the item as the human saw it. */
   preconditionHash: string;
+  /** Who answers, as the host names them. Stored with the answer and handed back on delivery. */
+  caller?: string;
+  /** When given, an item of any other conversation is `not_found`: the caller may act on these only. */
+  conversations?: readonly string[];
 }
 
 export type AnswerResult =
@@ -496,7 +500,15 @@ export class Supervisor {
   // -------------------------------------------------------------- reads
 
   /** Items in creation order after `afterN`; `state` picks the open inbox (default) or history. */
-  listItems(query: { state?: 'open' | 'closed' | 'all'; after?: number; limit?: number } = {}): {
+  listItems(
+    query: {
+      state?: 'open' | 'closed' | 'all';
+      after?: number;
+      limit?: number;
+      /** When given, only items of these conversations. */
+      conversations?: readonly string[];
+    } = {},
+  ): {
     items: Array<ItemView & { n: number }>;
     next: number | null;
   } {
@@ -508,7 +520,12 @@ export class Supervisor {
           ? (['open', 'answering', 'closed'] as const)
           : (['open', 'answering'] as const);
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
-    const rows = this.store.listItems({ states: [...states], afterN: query.after ?? 0, limit });
+    const rows = this.store.listItems({
+      states: [...states],
+      afterN: query.after ?? 0,
+      limit,
+      ...(query.conversations === undefined ? {} : { conversations: query.conversations }),
+    });
     return {
       items: rows.map((row) => ({ ...toView(row, this.store.answerOfItem(row.itemId)), n: row.n })),
       next: rows.length === limit ? (rows.at(-1)?.n ?? null) : null,
@@ -593,6 +610,10 @@ export class Supervisor {
       });
       let item = this.store.item(request.itemId);
       if (!item) return fail('not_found');
+      // Another caller's item is not found, and nothing about it is shown.
+      if (request.conversations && !request.conversations.includes(item.conversationId)) {
+        return fail('not_found');
+      }
       const earlier = this.store.answerOfItem(item.itemId);
       if (earlier) {
         const same =
@@ -631,6 +652,7 @@ export class Supervisor {
         optionId: option.id,
         text: text ?? null,
         delivery: option.effect === 'local' ? 'closed_without_delivery' : 'pending',
+        caller: request.caller ?? null,
         at,
       });
       if (option.effect === 'local') {
@@ -673,6 +695,7 @@ export class Supervisor {
             questionId: item.context.questionId ?? '',
             optionId: option.id,
             ...(answer.text === null ? {} : { text: answer.text }),
+            ...(answer.caller === null ? {} : { caller: answer.caller }),
           },
           this.abort.signal,
         );
@@ -694,9 +717,10 @@ export class Supervisor {
         });
         return;
       }
-      await this.host.messages.post(
+      const posted = await this.host.messages.post(
         {
           conversationId: item.conversationId,
+          ...(answer.caller === null ? {} : { caller: answer.caller }),
           text: buildMessage(
             option.messageKey ?? '',
             {
@@ -718,6 +742,13 @@ export class Supervisor {
       );
       this.store.tx(() => {
         const at = this.now();
+        if ('refused' in posted) {
+          // The host no longer takes this caller's word: nothing was posted.
+          this.store.finishAnswer(answerId, 'closed_without_delivery', at);
+          this.store.logAnswer(answerId, `refused:${posted.refused}`, at);
+          this.store.closeItem(item.itemId, 'condition_cleared', at);
+          return;
+        }
         this.store.finishAnswer(answerId, 'delivered', at);
         this.store.closeItem(item.itemId, 'answered', at);
       });

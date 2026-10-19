@@ -1,6 +1,11 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import type { SummaryModel, VerifierModel, VerifierRequest } from '@maka-cloud/supervisor';
+import {
+  inputTokenBound,
+  type SummaryModel,
+  type VerifierModel,
+  type VerifierRequest,
+} from '@maka-cloud/supervisor';
 import { generateText, type LanguageModel } from 'ai';
 import type { VerifierPoolEntry } from './config.js';
 
@@ -41,11 +46,6 @@ export function languageModelFromEnv(env: NodeJS.ProcessEnv) {
       ...(entry.baseUrl === undefined ? {} : { baseURL: entry.baseUrl }),
     }).responses(entry.model);
   };
-}
-
-/** What a call costs when the provider reports no usage: the same bound the reservation used. */
-function charsToTokens(chars: number): number {
-  return Math.ceil(chars / 2);
 }
 
 /** The reply as JSON when it is, as text when it is not: the supervisor validates either and treats text as no verdict. */
@@ -92,9 +92,8 @@ export function createVerifierModel(
       return {
         output: parseReply(result.text),
         usage: {
-          inputTokens:
-            result.usage.inputTokens ??
-            charsToTokens(request.instructions.length + request.prompt.length),
+          // Without reported usage a call costs the bound the reservation used.
+          inputTokens: result.usage.inputTokens ?? inputTokenBound(request),
           outputTokens: result.usage.outputTokens ?? request.maxOutputTokens,
         },
       };

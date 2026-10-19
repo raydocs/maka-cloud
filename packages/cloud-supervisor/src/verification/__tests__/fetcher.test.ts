@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { Gate } from '../../__tests__/harness.js';
 import { type FetchOutcome, createSourceFetcher } from '../fetcher.js';
 import type { Transport, TransportRequest, TransportResponse } from '../transport.js';
 
@@ -426,4 +427,42 @@ test('a connection failure is unreachable and leaks nothing', async () => {
     'internal details do not leak into the result',
   );
   assert.equal(transport.opened, 0);
+});
+
+test('an error status keeps its number, so a gone page can be told from a failing server', async () => {
+  for (const status of [404, 410, 503]) {
+    const { fetch } = setup(() => ({ status, body: 'nope' }), { 'example.com': [PUBLIC_A] });
+    const outcome = await fetch('https://example.com/');
+    refused(outcome, 'http_status');
+    assert.equal(!outcome.ok && outcome.status, status);
+  }
+  const { fetch } = setup(() => ({ status: 200 }), { 'example.com': [PUBLIC_A] });
+  assert.equal('status' in (await fetch('https://example.com/')), false);
+});
+
+test('a resolver that never answers ends at the deadline, and at an abort, instead of holding the fetch', {
+  timeout: 5000,
+}, async () => {
+  const entered = new Gate();
+  const hung = () => {
+    entered.resolve();
+    return new Promise<string[]>(() => {});
+  };
+  const slow = createSourceFetcher({
+    transport: new FakeTransport(() => ({})),
+    resolve: hung,
+    timeoutMs: 20,
+  });
+  refused(await slow.fetchText('https://example.com/', new AbortController().signal), 'timeout');
+
+  const waiting = createSourceFetcher({
+    transport: new FakeTransport(() => ({})),
+    resolve: hung,
+    timeoutMs: 60_000,
+  });
+  const controller = new AbortController();
+  const pending = waiting.fetchText('https://example.com/', controller.signal);
+  await entered.promise;
+  controller.abort();
+  refused(await pending, 'aborted');
 });

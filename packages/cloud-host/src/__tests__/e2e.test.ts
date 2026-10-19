@@ -270,6 +270,48 @@ test('a question is answered over HTTP: the card, the answer and the reply all g
   }
 });
 
+test('only the invite that owns the conversation can answer its question', async (t) => {
+  const stack = await startStack(t);
+  stack.model.script(
+    'conductor',
+    calls(
+      tool('ask_user', {
+        reason: 'taste',
+        question: 'Which tone?',
+        options: [
+          { id: 'formal', label: 'Formal' },
+          { id: 'casual', label: 'Casual' },
+        ],
+        recommended: 'casual',
+      }),
+    ),
+  );
+  const conversationId = await newConversation(stack);
+  await stack.api(`/v1/conversations/${conversationId}/messages`, { text: 'Write a note.' });
+  const asked = await readFeed(stack, conversationId, (seen) =>
+    seen.some((event) => event.event === 'conductor.question'),
+  );
+  const questionId = String(
+    asked.find((event) => event.event === 'conductor.question')?.data.questionId,
+  );
+  const path = `${stack.cloud.server.url}/v1/conversations/${conversationId}/answers`;
+  const answerAs = (token: string) =>
+    fetch(path, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ questionId, optionId: 'formal' }),
+    });
+
+  const stranger = stack.cloud.server.invites.create('someone else').token;
+  assert.equal((await answerAs(stranger)).status, 404, 'another invite cannot see the question');
+  assert.equal(stack.cloud.conductor.state.question(questionId)?.state, 'open');
+
+  stack.model.script('conductor', text('A formal note.'));
+  const own = await answerAs(stack.token);
+  assert.equal(own.status, 200);
+  assert.deepEqual(await own.json(), { accepted: true, duplicate: false });
+});
+
 test('after a restart the feed holds each conductor event once and an open question can still be answered', async (t) => {
   const stack = await startStack(t);
   stack.model.script(

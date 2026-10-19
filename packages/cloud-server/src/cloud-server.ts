@@ -12,6 +12,7 @@ import { type ArtifactRead, type ArtifactSource, FileArtifactSource } from './ar
 import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
 import { ConversationStore } from './conversations.js';
 import { openDatabase } from './db.js';
+import { type DeliveryOptions, type DeliveryStats, MessageDeliveries } from './deliveries.js';
 import { ExtensionFeed, type ExtensionEvent } from './extension-feed.js';
 import { type FeedEntry, FeedHub, readFeed } from './feed.js';
 import { type AnswerOutcome, DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
@@ -40,9 +41,21 @@ export interface ConversationHandler {
     message: { conversationId: string; messageId: string; text: string },
     conductor: ConductorAccess,
   ): void | Promise<void>;
-  /** Applies an answer to a question the handler posted. Without it the answers route is 404. */
+  /**
+   * Applies an answer to a question the handler posted. Without it the answers
+   * route is 404. `caller` is the invite that answered: it owned the
+   * conversation and was active when this was called. An answer whose effect
+   * comes later (an approved irreversible call) checks it again then, with
+   * `authorized` from `createHandler`.
+   */
   onAnswer?(
-    answer: { conversationId: string; questionId: string; optionId: string; text?: string },
+    answer: {
+      conversationId: string;
+      questionId: string;
+      optionId: string;
+      text?: string;
+      caller: string;
+    },
     conductor: ConductorAccess,
   ): Promise<AnswerOutcome>;
   /** Called on shutdown while the orchestrator endpoint is still up. */
@@ -64,19 +77,35 @@ export interface SupervisorParts {
   };
   /** Appends to the feed clients stream. Throws for an unknown conversation or unstorable data. */
   publish(event: ExtensionEvent): void;
-  /** The handler's answers route. Without a handler that takes answers, every question is `not_found`. */
+  /**
+   * The handler's answers route, for an answer a human gave through the inbox.
+   * `caller` is the invite that gave it: when it is no longer active or does not
+   * own the conversation, the answer is `not_found` and nothing is applied.
+   * Without a handler that takes answers, every question is `not_found`.
+   */
   answers: {
     deliver(
-      answer: { conversationId: string; questionId: string; optionId: string; text?: string },
+      answer: {
+        conversationId: string;
+        questionId: string;
+        optionId: string;
+        text?: string;
+        caller?: string;
+      },
       signal: AbortSignal,
     ): Promise<AnswerOutcome>;
   };
-  /** Posts a user message into a conversation, like the messages route: idempotent on `clientMessageId`. */
+  /**
+   * Posts a user message into a conversation, like the messages route:
+   * idempotent on `clientMessageId`. `caller` is the invite whose inbox answer
+   * this is; one no longer active, or not the owner, is `refused` and nothing
+   * is posted.
+   */
   messages: {
     post(
-      message: { conversationId: string; text: string; clientMessageId: string },
+      message: { conversationId: string; text: string; clientMessageId: string; caller?: string },
       signal: AbortSignal,
-    ): Promise<{ messageId: string }>;
+    ): Promise<{ messageId: string } | { refused: 'not_found' }>;
   };
   /** Reads one artifact of a task of that conversation, with the checks of the artifact route. */
   artifacts: {
@@ -116,10 +145,18 @@ export interface CloudServerOptions {
      * at start before any message arrives (retrying cancels a crash left undone).
      */
     conductorAccess(conversationId: string): ConductorAccess | undefined;
+    /**
+     * Whether `caller` (an answer's) is still an active invite that owns the
+     * conversation. Synchronous, so a check and the effect it guards can run
+     * with nothing in between.
+     */
+    authorized(caller: string, conversationId: string): boolean;
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
   sweepOrphans?: SweepOrphans;
+  /** Retry timing for handing user messages to the handler. */
+  delivery?: DeliveryOptions;
   /**
    * Starts the supervisor once the handler exists and before the server listens, and
    * stops it before the handler and the database close. Without it the `/v1/inbox`
@@ -140,6 +177,8 @@ export interface CloudServer {
   publisher: ConversationPublisher;
   /** Event streams currently open. */
   openStreams(): number;
+  /** Where handing user messages to the handler stands; undefined without a handler. */
+  deliveryStats(): DeliveryStats | undefined;
   close(): Promise<void>;
 }
 
@@ -155,6 +194,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   let http: Server | undefined;
   let handler: ConversationHandler | undefined;
   let inbox: InboxService | undefined;
+  let deliveries: MessageDeliveries | undefined;
   try {
     const hub = new FeedHub();
     const store = new SqliteTaskStore(db, hub);
@@ -198,6 +238,9 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         return rotated.token;
       },
     });
+    const ownInviteStore = invites;
+    const authorized = (caller: string, conversationId: string): boolean =>
+      ownInviteStore.active(caller) && conversations.owns(caller, conversationId);
     handler = options.createHandler
       ? await options.createHandler({
           publisher,
@@ -206,49 +249,57 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             const sessionId = conversations.sessionOf(conversationId);
             return sessionId === undefined ? undefined : accessFor(sessionId);
           },
+          authorized,
         })
       : options.handler;
     const ownHandler = handler;
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
     const artifacts = options.artifacts ?? new FileArtifactSource(options.handoffRoot);
-    const deliverMessage = (message: {
-      conversationId: string;
-      messageId: string;
-      text: string;
-      sessionId: string;
-    }): void => {
-      if (!ownHandler) return;
-      const conductor = accessFor(message.sessionId);
-      void Promise.resolve()
-        .then(() =>
-          ownHandler.onUserMessage(
-            {
-              conversationId: message.conversationId,
-              messageId: message.messageId,
-              text: message.text,
-            },
-            conductor,
-          ),
+    // Without a handler, messages stay pending until a server with one starts.
+    const ownDeliveries = ownHandler
+      ? new MessageDeliveries(
+          db,
+          (message) =>
+            ownHandler.onUserMessage(
+              {
+                conversationId: message.conversationId,
+                messageId: message.messageId,
+                text: message.text,
+              },
+              accessFor(message.sessionId),
+            ),
+          warn,
+          options.delivery,
         )
-        .catch((error: unknown) => warn('The conversation handler failed', error));
+      : undefined;
+    deliveries = ownDeliveries;
+    const deliverMessage = (message: { messageId: string }): void => {
+      ownDeliveries?.kick(message.messageId);
     };
     const deliverAnswer = ownHandler?.onAnswer
-      ? (answer: {
+      ? async (answer: {
           conversationId: string;
           questionId: string;
           optionId: string;
           text?: string;
           sessionId: string;
-        }): Promise<AnswerOutcome> =>
-          (ownHandler.onAnswer as NonNullable<ConversationHandler['onAnswer']>)(
+          caller: string;
+        }): Promise<AnswerOutcome> => {
+          // Checked here, synchronously before the handler applies it, for every route an answer takes.
+          if (!authorized(answer.caller, answer.conversationId)) {
+            return { accepted: false, reason: 'not_found' };
+          }
+          return (ownHandler.onAnswer as NonNullable<ConversationHandler['onAnswer']>)(
             {
               conversationId: answer.conversationId,
               questionId: answer.questionId,
               optionId: answer.optionId,
               ...(answer.text === undefined ? {} : { text: answer.text }),
+              caller: answer.caller,
             },
             accessFor(answer.sessionId),
-          )
+          );
+        }
       : undefined;
     if (options.supervisor) {
       const extensions = new ExtensionFeed(db, hub, options.orchestrator?.now);
@@ -262,29 +313,31 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           deliver: async (answer, signal) => {
             signal.throwIfAborted();
             const sessionId = conversations.sessionOf(answer.conversationId);
-            if (sessionId === undefined || !deliverAnswer) {
+            if (sessionId === undefined || !deliverAnswer || answer.caller === undefined) {
               return { accepted: false, reason: 'not_found' };
             }
-            return deliverAnswer({ ...answer, sessionId });
+            return deliverAnswer({ ...answer, sessionId, caller: answer.caller });
           },
         },
         messages: {
           post: async (message, signal) => {
             signal.throwIfAborted();
+            if (!conversations.exists(message.conversationId)) {
+              throw new Error('The conversation does not exist');
+            }
+            if (
+              message.caller === undefined ||
+              !authorized(message.caller, message.conversationId)
+            ) {
+              return { refused: 'not_found' };
+            }
             const result = conversations.post(
               message.conversationId,
               message.text,
               message.clientMessageId,
             );
             if (!result.found) throw new Error('The conversation does not exist');
-            if (!result.duplicate) {
-              deliverMessage({
-                conversationId: message.conversationId,
-                messageId: result.messageId,
-                text: result.text,
-                sessionId: result.sessionId,
-              });
-            }
+            deliverMessage({ messageId: result.messageId });
             return { messageId: result.messageId };
           },
         },
@@ -319,8 +372,17 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       limits,
       onMessage: deliverMessage,
       ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
-      ...(inbox ? { inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute)) } : {}),
+      ...(inbox
+        ? {
+            inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
+              active: (inviteId) => ownInviteStore.active(inviteId),
+              conversationsOf: (inviteId) => conversations.idsOf(inviteId),
+            }),
+          }
+        : {}),
     });
+    // What a previous process committed and never handed over goes first.
+    ownDeliveries?.start();
     const server = createServer((req, res) => {
       void api.handle(req, res);
     });
@@ -334,6 +396,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const ownInbox = inbox;
     let closing: Promise<void> | undefined;
     const shutdown = async (): Promise<void> => {
+      ownDeliveries?.stop();
       api.closeStreams();
       server.closeAllConnections();
       try {
@@ -364,12 +427,14 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       invites: ownInvites,
       publisher,
       openStreams: () => api.openStreams,
+      deliveryStats: () => ownDeliveries?.stats(),
       close: () => {
         closing ??= shutdown();
         return closing;
       },
     };
   } catch (error) {
+    deliveries?.stop();
     http?.closeAllConnections();
     http?.close();
     await Promise.resolve(inbox?.stop()).catch(() => undefined);

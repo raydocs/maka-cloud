@@ -14,7 +14,8 @@ import {
 import { z } from 'zod';
 import type { SignalManifest } from '../events.js';
 import { clip } from '../text.js';
-import type { SourceFetcher } from './fetcher.js';
+import { raceAbort } from './abort.js';
+import type { FetchOutcome, SourceFetcher } from './fetcher.js';
 import type { ArtifactRead, Mismatch } from './ports.js';
 
 /**
@@ -224,11 +225,29 @@ export async function prepareCoding(input: {
 
 const RemovedRecord = z
   .object({
-    claims: z.array(z.object({ id: z.string(), removed: z.boolean().optional() }).passthrough()),
+    claims: z.array(
+      z
+        .object({
+          id: z.string(),
+          status: z.string().optional(),
+          removed: z.boolean().optional(),
+        })
+        .passthrough(),
+    ),
   })
   .passthrough();
 
 const FETCH_PARALLEL = 4;
+
+/** The statuses a claim has when it failed the cite-check, the only ones a removal can rest on. */
+const FAILING = new Set([
+  'unsupported',
+  'quote_not_found',
+  'number_mismatch',
+  'source_missing',
+  'quote_too_short',
+  'no_citation',
+]);
 
 export async function prepareResearch(input: {
   read: ReadArtifact;
@@ -262,13 +281,43 @@ export async function prepareResearch(input: {
   const report: Report = parsedJson;
 
   // Claims the playbook already dropped are not in the report the human reads.
+  // verification.json is written by the agent, so a removal counts only when
+  // the delivered report has that claim and the record itself shows it failing.
+  const all = claimsOf(report);
+  if (all.length === 0) {
+    failures.push({ claim: 'the report makes claims', found: 'the report has no claims to check' });
+    return empty();
+  }
+  const inReport = new Map(all.map((claim) => [claim.id, claim]));
   const removed = new Set<string>();
   const exported = await read('verification.json');
   if (exported.ok) {
     const record = parseJson(exported.text, RemovedRecord);
-    for (const claim of record?.claims ?? []) if (claim.removed) removed.add(claim.id);
+    for (const entry of record?.claims ?? []) {
+      if (!entry.removed) continue;
+      const claim = inReport.get(entry.id);
+      if (!claim) {
+        failures.push({
+          claim: 'the record only removes claims of the report',
+          found: `the record removes "${clip(entry.id, 64)}", which is not in the report`,
+        });
+      } else if (!FAILING.has(entry.status ?? '')) {
+        failures.push({
+          claim: clip(claim.text, 240),
+          found: 'it was removed from the check, but the record does not show it failing',
+        });
+      }
+      removed.add(entry.id);
+    }
   }
-  const claims: Claim[] = claimsOf(report).filter((claim) => !removed.has(claim.id));
+  const claims: Claim[] = all.filter((claim) => !removed.has(claim.id));
+  if (claims.length === 0) {
+    failures.push({
+      claim: 'the report keeps claims',
+      found: 'no claim is left after the removals',
+    });
+    return empty();
+  }
   if (claims.length > MAX_CLAIMS) {
     unavailable.push({ reason: `more than ${MAX_CLAIMS} claims to check`, transient: false });
     return empty();
@@ -295,7 +344,14 @@ export async function prepareResearch(input: {
       const id = toFetch[next++] as string;
       const source = sourceById.get(id);
       if (!source) continue; // reported below as source_missing by the citation check
-      const outcome = await fetcher.fetchText(source.url, signal);
+      let outcome: FetchOutcome;
+      try {
+        // A fetcher that ignores the signal still cannot hold the check past it.
+        outcome = await raceAbort(fetcher.fetchText(source.url, signal), signal);
+      } catch (error) {
+        if (signal.aborted) return;
+        throw error;
+      }
       if (outcome.ok) {
         const text = outcome.contentType === 'text/plain' ? outcome.text : htmlToText(outcome.text);
         texts.push({ id, text });
