@@ -51,6 +51,10 @@ interface SupervisorHost {
   publish(entry: { kind: 'inbox.item' | 'inbox.digest'; conversationId: string | null; data: unknown }): void;
   notice(conversationId: string, text: string): void;  // the conductor's notify path (conductor.notice)
   answers: { deliver(a: QuestionAnswer): Promise<DeliveryOutcome> };   // T5's answers route
+  budget: {                                            // T5's run ledger, see "Verification spend"
+    reserve(r: { key: string; conversationId: string; taskId: string; maxUsd: number }): { ok: true } | { ok: false };
+    settle(key: string, actualUsd: number): void;      // releases the unused part
+  };
   messages: { post(conversationId: string, text: string, clientMessageId: string): Promise<{ messageId: string }> };
   onWarning(message: string, detail?: unknown): void;
 }
@@ -85,6 +89,7 @@ properties, checked against the merged code before any T20 package code:
 | The answers route is idempotent per `questionId` | Re-delivery of the same answer returns success with `applied:false`; a different answer to a closed question returns 409 `already_answered` with the stored one. T5 already checks "open question" in its write chain; this makes retries safe. |
 | An optional `text` on the answers route | The free-text reply. Option-only for `irreversible`. If T5 has no `text`, the T20 server PR adds it to the route and the handler (our files). |
 | A way for T20 to put a notice into a conversation | `host.notice`, wired to the same outbox as `notify`. |
+| A ledger entry other than model spend and child reservations: `reserve(key, conversationId, taskId, maxUsd)` and `settle(key, actualUsd)` | Verification spend counts against the budget of the run that delegated the task (win, 2026-10-19). The reservation is one synchronous check-and-reserve in T5's ledger, idempotent by `key`, and still allowed after that run's turn has ended (a task can finish after its turn). Refused when the run's remaining budget is below `maxUsd`. |
 
 The adapter that maps T5's feed payloads to the supervisor's internal events is
 one file (`conductor-events.ts`). A mismatch is fixed there, nowhere else.
@@ -104,6 +109,7 @@ touch the T4 schema. The supervisor's tables:
 | `item_events` | Append-only audit (created, refreshed, notified, answered, delivered, closed); triggers reject UPDATE and DELETE, as in T4. |
 | `answers` | One row per item (`UNIQUE(item_id)`): answer id, choice or text, delivery state, attempts. |
 | `verifications` | One row per task (`UNIQUE(task_id)`): state, attempts, structured result, internal audit of which model checked (never sent to clients). |
+| `verifier_spend` | Append-only ledger of verification spend, keyed by `verification id + attempt`: `reserve` (upper bound), `settle` (actual), `release`. The daily cap is the sum of a day's `reserve`/`settle` rows. Digest model calls are recorded here as kind `digest` for visibility; only verification is capped. |
 | `deliveries` | Each push, digest and held-back notice with time, for the hourly cap. |
 | `settings` | Mutes, quiet hours, cap, digest schedule, thresholds. |
 | `feed_outbox` | `(item_id, version)` pairs not yet published to the T4 feed. |
@@ -178,7 +184,8 @@ restart).
    a citation URL that does not resolve, a quoted passage that is not in the
    fetched text, an artifact the manifest lists that does not exist. A
    deterministic failure is final: no model output can turn it into a pass.
-4. **Model check on what is left.** Does this evidence support each claim in
+4. **Model check on what is left, if the money allows** (see "Verification
+   spend"). Does this evidence support each claim in
    `done[]` and the summary? The verifier returns a per-claim verdict
    (`supported`, `unsupported`, `contradicted`) with evidence references, under
    a zod schema. Evidence is passed as quoted data in a delimited block; the
@@ -195,10 +202,39 @@ restart).
 6. **Outcome.** `passed` creates a `finished` item. `failed` creates a
    `verification_failed` item listing the mismatches (claim, what the evidence
    showed, link). `could_not_check` (evidence source down, no eligible verifier,
-   timeouts after 3 attempts with backoff) also creates a `verification_failed`
-   item, worded as "could not check", because a pass without a check is what
-   this task exists to prevent. Both options are offered: ask the agent to fix it
-   (recommended) or accept anyway, which is recorded.
+   timeouts after 3 attempts with backoff, or `budget`) also creates a
+   `verification_failed` item, worded as "could not check", because a pass without
+   a check is what this task exists to prevent. The options are: ask the agent to
+   fix it (recommended), accept anyway (recorded), and for `could_not_check`
+   also "check again", a local route that re-queues the verification if the
+   precondition still holds.
+
+### Verification spend
+
+A model check is paid, so it is bounded twice, before any model request:
+
+1. **The conversation's budget (T5).** Verification spend counts against the
+   budget of the run that delegated the task, through `host.budget`.
+2. **A daily cap on verifier spend**, default `verifierDailyCapUsd = 5`, in
+   settings, per calendar day in the configured time zone (UTC until set).
+
+Before the model check, the supervisor computes an upper bound for the attempt
+from the configured price table, the evidence size cap and the output token cap,
+and reserves it: first against the daily cap in `verifier_spend` (one
+synchronous transaction), then in T5's ledger. If T5 refuses, the daily
+reservation is released by a compensating row. If either refuses, no model is
+called and the verification ends `could_not_check` with reason `budget` (the
+audit records which of the two), and the item says the check was not run because
+the budget is used up. It is never skipped silently and never treated as a pass.
+After the calls the actual cost from the reported token usage settles both
+ledgers down to what was used. Keys are `verification id + attempt`, so a
+restart that repeats a reservation does not charge twice, and a reservation left
+by a crash is settled or released when the verification is next claimed.
+
+Only the model check is gated. Deterministic checks cost nothing and always run,
+so a CI failure or a missing citation quote is reported as `failed` even when the
+budget is gone. A task with nothing to check is `skipped` and spends nothing.
+Retries reserve again, each attempt against both limits.
 
 ### Evidence fetching is outbound egress
 
@@ -295,7 +331,7 @@ check (T5, inside its write chain) is the final arbiter for question answers.
 | `GET /v1/inbox/items?state=open&after=&limit=` | Items, with version and precondition hash. |
 | `POST /v1/inbox/items/:id/answer` | As above. 202 on claim, 409 `stale` / `already_answered`. |
 | `PUT /v1/inbox/mutes/:kind`, `DELETE …` | Mute and unmute a kind. |
-| `GET` / `PUT /v1/inbox/settings` | Quiet hours, cap, stall time, digest schedule. |
+| `GET` / `PUT /v1/inbox/settings` | Quiet hours, hourly cap, stall time, digest schedule, daily verifier cap. |
 | `POST /v1/inbox/digest` | Build and return a digest now. |
 | SSE `inbox.item` on `GET /v1/events` | Item snapshot with `version`. Clients list on connect, then apply events by `(id, version)`. |
 
@@ -338,6 +374,13 @@ scripted fake model, a fake `EvidenceSource` and a fake clock.
   a citation whose quote is not in the page fails; same-vendor verifier is never
   chosen; `could_not_check` is not a pass; a hostile page cannot flip a
   deterministic failure.
+- Spend: over the conversation budget, and over the daily cap, each end
+  `could_not_check` with reason `budget` and the fake model is never called; a CI
+  failure is still `failed` with the budget gone; two verifications at the cap
+  reserve exactly once (handshake at the barrier); a refusal by T5 releases the
+  daily reservation; the actual cost settles down; a restart between reserve and
+  settle charges once; a retried attempt is checked against both limits again;
+  the cap rolls over at the day boundary in the configured time zone.
 - Fetcher: loopback, private, link-local, redirect-to-private, DNS answering a
   private address, oversize and slow bodies are refused.
 - Summarizer: invented, missing and duplicate ids, a timeout and bad JSON never
@@ -363,7 +406,7 @@ delta. No other upstream file.
 
 ## Not here
 
-Per-user scoping (T17 adds accounts; items then carry a user), cost accounting of
-verification calls (T17), web push (T9), suggestion cards (T16 reuses the item
+Per-user scoping (T17 adds accounts; items then carry a user), the gateway ledger
+that replaces the price table (T17), web push (T9), suggestion cards (T16 reuses the item
 store, delivery and limits), live model or network runs, and any new authority
 for the supervisor over tasks or sandboxes.
