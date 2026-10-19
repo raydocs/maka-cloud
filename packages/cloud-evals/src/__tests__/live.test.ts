@@ -1,0 +1,210 @@
+import assert from 'node:assert/strict';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
+import { test, type TestContext } from 'node:test';
+import type { CloudRunners, CloudRunnersOptions } from '@maka-cloud/runners';
+import { createLiveDeps, type EvalDeps } from '../live.js';
+import { makeSpec } from '../spec-gen.js';
+import type { SubjectId } from '../types.js';
+import { TASK, tempDir } from './fixtures.js';
+
+const ANTHROPIC_KEY = 'sk-ant-master-not-a-key';
+const OPENAI_KEY = 'sk-openai-master-not-a-key';
+const CODEX_PRICE = JSON.stringify([
+  {
+    vendor: 'openai',
+    model: 'gpt-test',
+    inputPerMTokUsd: 1,
+    outputPerMTokUsd: 4,
+    maxOutputTokens: 4096,
+  },
+]);
+
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+interface Vendor {
+  url: string;
+  /** `path key` of every model request the vendor received (token counts are free and not listed). */
+  seen: string[];
+}
+
+async function fakeVendor(t: TestContext): Promise<Vendor> {
+  const seen: string[] = [];
+  const server: Server = createServer((req, res) => {
+    req.resume();
+    if (req.url?.endsWith('/count_tokens')) {
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":12}');
+      return;
+    }
+    seen.push(`${req.url} ${req.headers['x-api-key'] ?? req.headers.authorization}`);
+    res.writeHead(500).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen };
+}
+
+interface Setup {
+  env: NodeJS.ProcessEnv;
+  stateDir: string;
+  workRoot: string;
+  built: Partial<CloudRunnersOptions>[];
+  load(subjects?: readonly SubjectId[]): Promise<EvalDeps>;
+}
+
+async function setup(
+  t: TestContext,
+  over: NodeJS.ProcessEnv = {},
+  vendorUrl?: string,
+): Promise<Setup> {
+  const dir = await tempDir(t);
+  const dataDir = join(dir, 'data');
+  await mkdir(dataDir);
+  await writeFile(
+    join(dataDir, 'swe-bench-verified.jsonl'),
+    `${JSON.stringify({
+      instance_id: 'a__a-1',
+      repo: 'a/a',
+      base_commit: 'b'.repeat(40),
+      problem_statement: 'statement',
+      test_patch: 'patch',
+      FAIL_TO_PASS: ['f'],
+      PASS_TO_PASS: ['p'],
+    })}\n`,
+  );
+  const env: NodeJS.ProcessEnv = {
+    MAKA_EVALS_DATA_DIR: dataDir,
+    MAKA_EVALS_PYTHON: 'python3',
+    INSTABOX_API_KEY: 'ibx-test-not-a-key',
+    INSTABOX_MACHINE_ID: 'mch_test',
+    ANTHROPIC_API_KEY: ANTHROPIC_KEY,
+    OPENAI_API_KEY: OPENAI_KEY,
+    MAKA_CLOUD_GATEWAY_MODELS: CODEX_PRICE,
+    MAKA_CLOUD_GATEWAY_PORT: String(await freePort()),
+    ...(vendorUrl === undefined
+      ? {}
+      : { ANTHROPIC_BASE_URL: vendorUrl, OPENAI_BASE_URL: vendorUrl }),
+    ...over,
+  };
+  const stateDir = join(dir, 'out');
+  const built: Partial<CloudRunnersOptions>[] = [];
+  return {
+    env,
+    stateDir,
+    workRoot: join(dir, 'work'),
+    built,
+    async load(subjects) {
+      const spec = makeSpec({
+        suite: 'swe-bench-verified',
+        tasks: [TASK],
+        benchmarkVersion: 'sha256:0000000000000000',
+        taskBudgetUsd: 1,
+        totalBudgetUsd: 3,
+        mode: 'live',
+        ...(subjects ? { subjects } : {}),
+      });
+      await mkdir(join(dir, 'work'), { recursive: true });
+      const deps = await createLiveDeps(spec, join(dir, 'work'), env, {
+        stateDir,
+        createRunners: (options) => {
+          built.push(options);
+          const stub = { name: 'stub' };
+          return {
+            runners: [stub, stub],
+            claude: { ...stub, name: 'claude-agent-sdk' },
+            codex: { ...stub, name: 'codex' },
+            fleet: {},
+          } as unknown as CloudRunners;
+        },
+      });
+      t.after(() => deps.close?.());
+      return deps;
+    },
+  };
+}
+
+test('a live run without a key for a subject’s vendor is refused before anything is built', async (t) => {
+  const s = await setup(t, { OPENAI_API_KEY: '' });
+  await assert.rejects(s.load(), /OPENAI_API_KEY is not set/u);
+  assert.equal(s.built.length, 0, 'no fleet was built');
+  // A Claude-only spec needs no OpenAI key.
+  await s.load(['claude-agent-sdk']);
+  assert.equal(s.built.length, 1);
+});
+
+test('a live run with Codex but no OpenAI price is refused', async (t) => {
+  const s = await setup(t, { MAKA_CLOUD_GATEWAY_MODELS: '[]' });
+  await assert.rejects(s.load(), /no OpenAI model/u);
+  assert.equal(s.built.length, 0);
+});
+
+test('a live run without the sandbox fleet or its settings is refused', async (t) => {
+  const s = await setup(t, { INSTABOX_MACHINE_ID: '' });
+  await assert.rejects(s.load(), /INSTABOX_MACHINE_ID is not set/u);
+  const bad = await setup(t, { MAKA_CLOUD_GATEWAY_MODELS: 'not json' });
+  await assert.rejects(bad.load(), /MAKA_CLOUD_GATEWAY_MODELS is not JSON/u);
+});
+
+test('sandbox runs get a gateway token for their own budget, never a vendor key', async (t) => {
+  const vendor = await fakeVendor(t);
+  const s = await setup(t, {}, vendor.url);
+  const deps = await s.load();
+  assert.equal(s.built.length, 1);
+  const access = s.built[0]?.modelAccess;
+  assert.ok(access, 'the fleet gets the gateway’s model access');
+
+  const claude = await access.issue({
+    taskId: 'tsk_a',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 0.01,
+  });
+  const codex = await access.issue({ taskId: 'tsk_b', runner: 'codex', budgetUsd: 0.5 });
+  for (const grant of [claude, codex]) {
+    assert.match(grant.apiKey, /^mkg_/u);
+    assert.ok(grant.meter, 'spend is metered by the gateway, request by request');
+    const shown = JSON.stringify({ ...grant, revoke: undefined, meter: undefined });
+    assert.ok(!shown.includes(ANTHROPIC_KEY) && !shown.includes(OPENAI_KEY));
+    assert.ok(!grant.baseUrl?.startsWith(vendor.url), 'the sandbox is pointed at the gateway');
+  }
+  await assert.rejects(
+    access.issue({ taskId: 'tsk_c', runner: 'claude-agent-sdk' }),
+    /no budget/u,
+    'a run without a budget gets no access',
+  );
+
+  const ask = (maxTokens: number) =>
+    fetch(`${claude.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': claude.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+  const tooDear = await ask(64_000);
+  assert.equal(tooDear.status, 402, 'a request the cell’s cap cannot cover is refused');
+  await tooDear.arrayBuffer();
+  assert.deepEqual(vendor.seen, [], 'and never reaches the vendor');
+  const sent = await ask(100);
+  await sent.arrayBuffer();
+  assert.deepEqual(vendor.seen, [`/v1/messages ${ANTHROPIC_KEY}`], 'the host adds the key');
+
+  await deps.close?.();
+  await assert.rejects(ask(100), 'the gateway no longer listens once the run is over');
+  assert.equal(vendor.seen.length, 1);
+});
+
+test('the spend journal lives in the experiment directory, not the scratch directory', async (t) => {
+  const s = await setup(t);
+  await s.load();
+  assert.ok((await stat(join(s.stateDir, 'gateway-spend.db'))).isFile());
+});
