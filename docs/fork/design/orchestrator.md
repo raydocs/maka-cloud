@@ -103,8 +103,10 @@ which is T6's to arrange without giving it the root.
 `finished`, `failed`) and `cancel()`. A stream that ends without `finished` or
 `failed` fails the task. Once a cancel is requested, whatever the runner does
 next is ignored. A handle that is still registered when its task ends (the
-stream broke, or the runner came up late) is cancelled, best effort; a runner
-that reported its own end is not cancelled. `FakeRunner` is scriptable for tests. `claudeAgentSdkRunner`
+stream broke or ended without a result, or the runner came up late) is
+cancelled, best effort, and a cancel that throws, even synchronously, does not
+interrupt the rest of the cleanup; a runner that reported `finished` or
+`failed` is not cancelled. `FakeRunner` is scriptable for tests. `claudeAgentSdkRunner`
 and `codexRunner` are stubs that fail the task with "not implemented yet"; T6
 replaces them.
 
@@ -173,3 +175,19 @@ Counters delete a key when it returns to zero.
 - `task_wait` cannot hold a request longer than 10 minutes.
 - Not here: real runners (T6), SQLite store and hosting (T4), the conductor
   (T5), and T3 Code's thread-management tools.
+
+## Backlog
+
+Known gaps, deliberately not fixed yet.
+
+- **Token rotation.** Rotating a session token does not invalidate a request
+  already authenticated with the old one. Bind a credential generation to the
+  auth context and check it where a tool runs.
+- **Subtree walk.** `activeSubtree` follows the store's child index, so its
+  cost grows with a tree's total history, not with its active tasks. It needs
+  an index of active branches.
+- **Archive test.** `archive.test.ts` ("a cached finished task is never served
+  after the store says otherwise") does not check the underlying log, so it
+  cannot tell a dropped late event from one that was never sent.
+- **Missing test.** Handle registered, `task_started` still queued, an ancestor
+  ends: not covered yet.
