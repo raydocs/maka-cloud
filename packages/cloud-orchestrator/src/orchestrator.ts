@@ -402,7 +402,8 @@ export class Orchestrator {
   }
 
   status(session: SessionInfo, taskId: TaskId): TaskView {
-    return toView(this.visible(session, taskId));
+    this.visible(session, taskId);
+    return this.view(taskId);
   }
 
   /** An aborted `signal` (the caller's connection dropped) stops the wait; the task is left alone. */
@@ -1098,7 +1099,9 @@ export class Orchestrator {
     const task = this.lookup(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
     const view = toView(task);
-    return this.belowStillRuns(taskId) ? { ...view, treeStopPending: true } : view;
+    // A start still under way may yet hand back a run, whether or not its runner can stop it by id.
+    const mayRun = this.starting.has(taskId) || this.belowStillRuns(taskId);
+    return mayRun ? { ...view, treeStopPending: true } : view;
   }
 
   /** True when a task below `rootId` has not ended, is still starting, or owes a stop. */
