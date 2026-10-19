@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, realpath, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   CitationInputError,
@@ -200,8 +200,13 @@ export async function runCiteCheck(argv: readonly string[]): Promise<RunOutcome>
     const rendered = renderReport(report, result, { dropFailed: args.dropUnsupported });
 
     await mkdir(args.out, { recursive: true });
+    if ((await realpath(args.report)) === join(await realpath(args.out), 'report.json')) {
+      throw new InputError('--out would overwrite --report');
+    }
     await writeOutput(args.out, 'report.md', rendered.markdown);
     await writeOutput(args.out, 'report.html', rendered.html);
+    // The report that was checked, whole: the claims a check of the delivery reads, dropped ones included.
+    await writeOutput(args.out, 'report.json', `${JSON.stringify(report, null, 2)}\n`);
     await writeOutput(
       args.out,
       'verification.json',
