@@ -125,7 +125,26 @@ CREATE TRIGGER conductor_events_no_delete BEFORE DELETE ON conductor_events
 BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
 `;
 
-export const MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+/**
+ * v4: what components that share the server process (the supervisor's inbox) put
+ * into the feed, one row per event. The feed kind says whose event it is, so
+ * nothing about a component is baked into the feed schema.
+ */
+const SCHEMA_V4 = `
+CREATE TABLE extension_events (
+  event_id INTEGER PRIMARY KEY,
+  conversation_id TEXT,
+  kind TEXT NOT NULL,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER extension_events_no_update BEFORE UPDATE ON extension_events
+BEGIN SELECT RAISE(ABORT, 'extension_events is append-only'); END;
+CREATE TRIGGER extension_events_no_delete BEFORE DELETE ON extension_events
+BEGIN SELECT RAISE(ABORT, 'extension_events is append-only'); END;
+`;
+
+export const MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
 
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an
