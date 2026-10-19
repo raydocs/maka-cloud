@@ -3,7 +3,14 @@ import { z } from 'zod';
 export type TaskId = string;
 export type SessionId = string;
 
-export const TASK_STATES = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const;
+export const TASK_STATES = [
+  'queued',
+  'running',
+  'paused',
+  'succeeded',
+  'failed',
+  'cancelled',
+] as const;
 export type TaskState = (typeof TASK_STATES)[number];
 
 export const TERMINAL_STATES: ReadonlySet<TaskState> = new Set([
@@ -51,7 +58,16 @@ export type TaskEvent =
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
   | { type: 'task_failed'; taskId: TaskId; reason: string }
   | { type: 'task_cancel_requested'; taskId: TaskId; by: SessionId | 'system' }
-  | { type: 'task_cancelled'; taskId: TaskId };
+  | { type: 'task_cancelled'; taskId: TaskId }
+  /** Someone asked for the run to pause; the task stays `running` until `task_paused`. */
+  | { type: 'task_pause_requested'; taskId: TaskId; by: SessionId }
+  | { type: 'task_paused'; taskId: TaskId }
+  /** The runner could not pause. The task keeps running. */
+  | { type: 'task_pause_failed'; taskId: TaskId; reason: string }
+  | { type: 'task_resume_requested'; taskId: TaskId; by: SessionId }
+  | { type: 'task_resumed'; taskId: TaskId }
+  /** The runner could not resume. The task stays paused. */
+  | { type: 'task_resume_failed'; taskId: TaskId; reason: string };
 
 export interface StoredEvent {
   /** Position in the log, starting at 1 and strictly increasing. */
@@ -79,6 +95,10 @@ export interface TaskRecord {
   manifest?: ResultManifest;
   failureReason?: string;
   cancelRequestedBy?: SessionId | 'system';
+  /** A pause was asked for and has neither happened nor failed yet, or has happened. Cleared by a failed pause or a resume. */
+  pauseRequested?: boolean;
+  /** A resume was asked for and has neither happened nor failed yet. */
+  resumeRequested?: boolean;
 }
 
 /** What a tool caller sees. Paths and session ids stay inside the server. */
@@ -95,6 +115,8 @@ export interface TaskView {
   manifest?: ResultManifest;
   failureReason?: string;
   cancelRequested: boolean;
+  /** A pause is under way or in effect (`state` is `running` while it is under way, `paused` once it holds). */
+  pauseRequested: boolean;
   /** Set by waiting calls that returned because the timeout elapsed, not because the task ended. */
   waitTimedOut?: boolean;
 }
@@ -105,7 +127,11 @@ export type OrchestratorErrorCode =
   | 'unknown_runner'
   | 'depth_exceeded'
   | 'unauthorized'
-  | 'quota_exceeded';
+  | 'quota_exceeded'
+  /** The task is not in a state the request applies to (finished, not started, not paused). */
+  | 'invalid_state'
+  /** The run's runner cannot do this (it has no pause). */
+  | 'unsupported';
 
 export class OrchestratorError extends Error {
   constructor(

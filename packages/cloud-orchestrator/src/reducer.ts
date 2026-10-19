@@ -56,6 +56,28 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       task.state = 'cancelled';
       task.finishedAt = at;
       return;
+    case 'task_pause_requested':
+      if (task.state === 'running') task.pauseRequested = true;
+      return;
+    case 'task_paused':
+      if (task.state === 'running' && task.pauseRequested) task.state = 'paused';
+      return;
+    case 'task_pause_failed':
+      if (task.state === 'running') delete task.pauseRequested;
+      return;
+    case 'task_resume_requested':
+      if (task.state === 'paused') task.resumeRequested = true;
+      return;
+    case 'task_resume_failed':
+      if (task.state === 'paused') delete task.resumeRequested;
+      return;
+    case 'task_resumed':
+      if (task.state === 'paused') {
+        task.state = 'running';
+        delete task.pauseRequested;
+        delete task.resumeRequested;
+      }
+      return;
   }
 }
 
@@ -79,5 +101,6 @@ export function toView(task: TaskRecord): TaskView {
     ...(task.manifest === undefined ? {} : { manifest: structuredClone(task.manifest) }),
     ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
     cancelRequested: task.cancelRequestedBy !== undefined,
+    pauseRequested: task.pauseRequested === true,
   };
 }

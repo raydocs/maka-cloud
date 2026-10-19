@@ -8,9 +8,7 @@ export class DatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 1;
-
-const SCHEMA = `
+const SCHEMA_V1 = `
 CREATE TABLE task_log (
   seq INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -87,6 +85,26 @@ BEGIN SELECT RAISE(ABORT, '${table} is append-only'); END;`,
   .join('\n')}
 `;
 
+const SCHEMA_V2 = `
+CREATE TABLE task_cost_log (
+  id INTEGER PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  usd REAL NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX task_cost_log_task ON task_cost_log (task_id, id);
+CREATE TRIGGER task_cost_log_no_update BEFORE UPDATE ON task_cost_log
+BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
+CREATE TRIGGER task_cost_log_no_delete BEFORE DELETE ON task_cost_log
+BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
+`;
+
+/**
+ * Step `i` takes the schema from version `i` to `i + 1`. Steps are only ever
+ * appended: one that has shipped is never edited.
+ */
+const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];
+
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an
  * immediate write transaction takes the lock now, so a second server over the
@@ -118,14 +136,17 @@ function isBusy(error: unknown): boolean {
 
 function migrate(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
-  if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version !== 0) {
-    throw new Error(`Unsupported database schema version ${row.user_version}`);
+  const version = row.user_version;
+  if (version > MIGRATIONS.length) {
+    throw new Error(`Unsupported database schema version ${version}`);
   }
+  if (version === MIGRATIONS.length) return;
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.exec(SCHEMA);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    for (let step = version; step < MIGRATIONS.length; step += 1) {
+      db.exec(MIGRATIONS[step] ?? '');
+      db.exec(`PRAGMA user_version = ${step + 1}`);
+    }
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
