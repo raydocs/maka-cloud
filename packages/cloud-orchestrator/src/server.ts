@@ -178,6 +178,19 @@ export class OrchestratorServer {
       res.setHeader('www-authenticate', 'Bearer');
       return respond(res, 401, { error: 'unauthorized' });
     }
+    // Quota first: a session over its limit costs one 429, not a body read and an MCP server.
+    let release: () => void;
+    try {
+      release = this.orchestrator.acquireConnection(session);
+    } catch (error) {
+      if (!(error instanceof OrchestratorError && error.code === 'quota_exceeded')) throw error;
+      res.setHeader('retry-after', '1');
+      return respond(res, 429, { error: 'quota_exceeded' });
+    }
+    // `finish` comes first, so a client that sends its next request as soon as it has read this
+    // response never finds the slot still taken.
+    res.once('finish', release);
+    res.once('close', release);
     let body: unknown;
     if (req.method === 'POST') {
       const parsed = await readJson(req);

@@ -39,6 +39,8 @@ export type TaskEvent =
       type: 'task_created';
       taskId: TaskId;
       sessionId: SessionId;
+      /** The session that started this task's tree. Absent in older logs, where it is `sessionId`. */
+      rootSessionId?: SessionId;
       parentTaskId?: TaskId;
       runner: string;
       title?: string;
@@ -63,6 +65,8 @@ export interface TaskRecord {
   taskId: TaskId;
   /** Session that created the task. Visibility is derived from this and `parentTaskId`. */
   sessionId: SessionId;
+  /** The session that started the tree this task belongs to; quotas are counted against it. */
+  rootSessionId: SessionId;
   parentTaskId?: TaskId;
   runner: string;
   title?: string;
@@ -100,7 +104,8 @@ export type OrchestratorErrorCode =
   | 'invalid_request'
   | 'unknown_runner'
   | 'depth_exceeded'
-  | 'unauthorized';
+  | 'unauthorized'
+  | 'quota_exceeded';
 
 export class OrchestratorError extends Error {
   constructor(
