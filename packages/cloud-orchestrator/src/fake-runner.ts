@@ -90,6 +90,11 @@ export class FakeRun implements RunHandle {
     this.push({ type: 'progress', note });
   }
 
+  /** Report what the run has spent so far, in dollars. */
+  usage(costUsd: number): void {
+    this.push({ type: 'usage', costUsd });
+  }
+
   /** Write the result manifest, then report `finished`. Pass `raw` to write arbitrary bytes instead. */
   async complete(manifest: ResultManifest = DEFAULT_FAKE_MANIFEST, raw?: string): Promise<void> {
     await mkdir(dirname(this.spec.resultPath), { recursive: true });

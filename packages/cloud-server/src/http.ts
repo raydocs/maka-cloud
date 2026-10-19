@@ -11,6 +11,7 @@ import {
 } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
+import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
 import type { CostSource } from './cost.js';
 import { type FeedEntry, type FeedHub, readFeed } from './feed.js';
 import type { InviteInfo, InviteStore } from './invites.js';
@@ -23,6 +24,7 @@ const FEED_PAGE = 100;
 const TASK_PAGE_DEFAULT = 50;
 const TASK_PAGE_MAX = 200;
 const HEARTBEAT_MS = 15_000;
+const MAX_LISTED_ARTIFACTS = 500;
 
 export interface HttpLimits {
   /** Open event streams per invite. */
@@ -33,6 +35,10 @@ export interface HttpLimits {
   messagesPerMinute: number;
   /** Cancel, pause and resume requests per minute per invite. */
   controlPerMinute: number;
+  /** Artifact downloads per minute per invite. */
+  artifactsPerMinute: number;
+  /** Artifact reads running at once, over all invites. */
+  artifactReadsInFlight: number;
   /** How long a stream may leave a write undrained before it is closed. */
   drainTimeoutMs: number;
   heartbeatMs: number;
@@ -43,6 +49,8 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = {
   streamsTotal: 256,
   messagesPerMinute: 30,
   controlPerMinute: 30,
+  artifactsPerMinute: 60,
+  artifactReadsInFlight: 8,
   drainTimeoutMs: 30_000,
   heartbeatMs: HEARTBEAT_MS,
 };
@@ -94,6 +102,8 @@ export interface PublicApiDeps {
   controlLimiter: RateLimiter;
   orchestrator: Pick<Orchestrator, 'cancelAs' | 'pauseAs' | 'resumeAs' | 'rootSessionOfTask'>;
   costs: CostSource;
+  artifacts: ArtifactSource;
+  artifactLimiter: RateLimiter;
   limits: HttpLimits;
   onMessage: (message: PostedMessage) => void;
   /** Absent when no handler takes answers; the route then answers 404. */
@@ -132,6 +142,7 @@ export class PublicApi {
   private readonly streamsByInvite = new KeyedCounter<string>();
   private streams = 0;
   private readonly open = new Set<ServerResponse>();
+  private artifactReads = 0;
 
   constructor(private readonly deps: PublicApiDeps) {}
 
@@ -204,6 +215,13 @@ export class PublicApi {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
       const action = control[2] as ControlAction;
       return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
+    }
+    const artifacts = /^\/v1\/tasks\/([^/]+)\/artifacts(?:\/([^/]+))?$/u.exec(path);
+    if (artifacts) {
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      const taskId = decodeURIComponent(artifacts[1] ?? '');
+      if (artifacts[2] === undefined) return this.listArtifacts(res, taskId);
+      return this.readArtifact(res, invite, taskId, decodeURIComponent(artifacts[2]));
     }
     if (path === '/v1/events') {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
@@ -298,6 +316,79 @@ export class PublicApi {
       tasks,
       ...(last !== undefined && page.length === limit ? { next: last.position } : {}),
     });
+  }
+
+  /** The artifact references of a task's manifest; 404 for a task that belongs to no conversation. */
+  private artifactRefs(taskId: string): string[] {
+    const sessionId = this.deps.orchestrator.rootSessionOfTask(taskId);
+    if (
+      sessionId === undefined ||
+      this.deps.conversations.conversationOf(sessionId) === undefined
+    ) {
+      throw new HttpError(404, 'not_found');
+    }
+    const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
+    return record?.manifest?.artifacts ?? [];
+  }
+
+  private listArtifacts(res: ServerResponse, taskId: string): void {
+    const refs = this.artifactRefs(taskId);
+    respond(res, 200, {
+      artifacts: refs.slice(0, MAX_LISTED_ARTIFACTS).map((ref, index) => listArtifact(ref, index)),
+      total: refs.length,
+    });
+  }
+
+  /**
+   * The references are strings a task wrote. A link is handed back and never
+   * fetched; anything else goes to the source, which reads inside the task's own
+   * directory only. The bytes are sent as an attachment, never as something a
+   * browser renders.
+   */
+  private async readArtifact(
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+    rawIndex: string,
+  ): Promise<void> {
+    const refs = this.artifactRefs(taskId);
+    const ref = /^\d{1,6}$/u.test(rawIndex) ? refs[Number(rawIndex)] : undefined;
+    if (ref === undefined) throw new HttpError(404, 'not_found');
+    const link = linkOf(ref);
+    if (link !== undefined) return respond(res, 200, { url: link });
+    const allowed = this.deps.artifactLimiter.take(invite.inviteId);
+    if (!allowed.ok) {
+      throw new HttpError(429, 'quota_exceeded', {
+        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
+      });
+    }
+    if (this.artifactReads >= this.deps.limits.artifactReadsInFlight) {
+      throw new HttpError(429, 'quota_exceeded', { 'retry-after': '1' });
+    }
+    this.artifactReads += 1;
+    let result: Awaited<ReturnType<ArtifactSource['read']>>;
+    try {
+      result = await this.deps.artifacts.read(taskId, ref);
+    } finally {
+      this.artifactReads -= 1;
+    }
+    if (!result.ok) {
+      throw result.reason === 'too_large'
+        ? new HttpError(413, 'artifact_too_large')
+        : new HttpError(404, 'not_found');
+    }
+    const name = displayName(ref.split('/').at(-1) ?? '');
+    res.writeHead(200, {
+      'content-type': name.endsWith('.json')
+        ? 'application/json; charset=utf-8'
+        : 'text/plain; charset=utf-8',
+      'content-length': String(result.bytes.length),
+      'content-disposition': `attachment; filename="${name}"`,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, no-store',
+    });
+    res.end(result.bytes);
   }
 
   /**

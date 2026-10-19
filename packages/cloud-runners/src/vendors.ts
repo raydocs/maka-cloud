@@ -5,7 +5,48 @@ import { shq } from './shell.js';
 export type ParsedEvent =
   | { kind: 'session'; id: string }
   | { kind: 'progress'; note: string }
+  /** Tokens of one model call. A repeat with the same `id` replaces the earlier count. */
+  | { kind: 'usage'; id: string; tokens: TokenUsage }
+  /** The CLI's own total for this invocation, in dollars; it replaces the token estimate. */
+  | { kind: 'cost'; totalUsd: number }
   | { kind: 'result'; ok: boolean; text?: string };
+
+/** Token counts of one model call. `input` excludes the cached tokens. */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** Dollars per million tokens. */
+export interface TokenPrices {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * Estimates for metering a run while it works, until the model gateway's own ledger (T17) is the
+ * source. Claude: Claude Opus 5.5 list prices (the conductor uses the same table), and the CLI's
+ * own total replaces the estimate when each invocation ends. Codex: a stand-in to override with
+ * `prices` for the model actually configured.
+ */
+export const DEFAULT_PRICES: Record<VendorAdapter['name'], TokenPrices> = {
+  'claude-agent-sdk': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+  codex: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+};
+
+export function tokenCostUsd(tokens: TokenUsage, prices: TokenPrices): number {
+  return (
+    (tokens.input * prices.input +
+      tokens.output * prices.output +
+      tokens.cacheRead * prices.cacheRead +
+      tokens.cacheWrite * prices.cacheWrite) /
+    1_000_000
+  );
+}
 
 export interface LineParser {
   /** One output line. Lines that are not JSON events return nothing. */
@@ -65,6 +106,10 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+function num(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function obj(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -88,7 +133,22 @@ function claudeParser(redact: Redact = keep): LineParser {
         const id = str(event.session_id);
         if (id) out.push({ kind: 'session', id });
       } else if (type === 'assistant') {
-        const content = obj(event.message)?.content;
+        const message = obj(event.message);
+        const id = str(message?.id);
+        const usage = obj(message?.usage);
+        if (id && usage) {
+          out.push({
+            kind: 'usage',
+            id,
+            tokens: {
+              input: num(usage.input_tokens),
+              output: num(usage.output_tokens),
+              cacheRead: num(usage.cache_read_input_tokens),
+              cacheWrite: num(usage.cache_creation_input_tokens),
+            },
+          });
+        }
+        const content = message?.content;
         if (Array.isArray(content)) {
           for (const block of content) {
             const b = obj(block);
@@ -103,6 +163,9 @@ function claudeParser(redact: Redact = keep): LineParser {
       } else if (type === 'result') {
         const id = str(event.session_id);
         if (id) out.push({ kind: 'session', id });
+        if (typeof event.total_cost_usd === 'number' && Number.isFinite(event.total_cost_usd)) {
+          out.push({ kind: 'cost', totalUsd: Math.max(0, event.total_cost_usd) });
+        }
         const text = str(event.result);
         out.push({
           kind: 'result',
@@ -207,6 +270,21 @@ function codexParser(redact: Redact = keep): LineParser {
           out.push({ kind: 'progress', note: 'edited files' });
         }
       } else if (type === 'turn.completed') {
+        const usage = obj(event.usage);
+        if (usage && (num(usage.input_tokens) > 0 || num(usage.output_tokens) > 0)) {
+          // OpenAI counts cached tokens inside input_tokens.
+          const cached = num(usage.cached_input_tokens);
+          out.push({
+            kind: 'usage',
+            id: 'turn',
+            tokens: {
+              input: Math.max(0, num(usage.input_tokens) - cached),
+              output: num(usage.output_tokens),
+              cacheRead: cached,
+              cacheWrite: 0,
+            },
+          });
+        }
         out.push({ kind: 'result', ok: true });
       } else if (type === 'turn.failed') {
         const message = str(obj(event.error)?.message);

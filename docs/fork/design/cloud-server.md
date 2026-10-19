@@ -94,6 +94,8 @@ Single tenant: every invite sees every conversation. Accounts replace this in T1
 | `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores, emits, then calls the handler. A repeated `clientMessageId` returns the first message's id and emits nothing. |
 | `GET /v1/conversations/:id/tasks?after=&limit=` | Task views for the conversation's trees, in creation order, paged. |
 | `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
+| `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`. |
+| `GET /v1/tasks/:taskId/artifacts/:index` | A file's bytes as an attachment, or `{url}` for a link. 404 for anything that is not readable (one answer for every reason), 413 over 2 MiB, 429 over the download limit. |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
 Unknown or malformed ids are 404. Bodies over 64 KiB are 413; message text is
@@ -105,6 +107,26 @@ Task views and `task_created` events leave out `runner`: the runner id names the
 vendor behind a run, and clients have no use for it. `costUsd` is present only
 once a figure was reported, never `0`. Titles, progress and manifests are written
 by models and pass through unchanged.
+
+### Artifacts
+
+A manifest's `artifacts` are strings the task wrote, so they are hostile input.
+A plain `https:` URL without credentials is a link: the client gets the URL back
+and the server never requests it, so there is no SSRF surface. Everything else is
+a path for the `ArtifactSource` port. The default source (`FileArtifactSource`)
+reads only inside `handoffRoot/<taskId>`: relative paths with no empty, `.` or
+`..` component, every component `lstat`ed (no symlinks, directories on the way,
+a regular file at the end), the resolved path inside the task directory, the file
+opened with `O_NOFOLLOW | O_NONBLOCK` and checked again on the descriptor, and a 2 MiB cap
+(read one byte past it, so a file that grew is still refused). It never goes
+through instabox `GET /files`, which reads as root. Content for runs inside a
+sandbox plugs in later through the same port, using exec as the dev user with
+symlinks refused and a size cap.
+
+Bytes are sent as `text/plain` (`application/json` for `.json`) with
+`X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and a
+sandboxing CSP, so a browser never renders them. At most 8 reads run at once
+(429 beyond), and each invite gets 60 downloads a minute.
 
 ### Control and cost
 
@@ -145,6 +167,8 @@ from its last id. A comment line goes out every 15 s.
 | Open event streams | server | 256 |
 | Message posts | invite, token bucket | 30 per minute |
 | Cancel, pause and resume | invite, token bucket | 30 per minute |
+| Artifact downloads | invite, token bucket | 60 per minute |
+| Artifact reads at once | server | 8 |
 
 Over a limit: 429 with `Retry-After`, nothing stored. Orchestrator quotas (tasks,
 waits, MCP connections) are configured through the same `quotas` option and

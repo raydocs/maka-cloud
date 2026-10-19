@@ -47,6 +47,10 @@ export interface ConductorLimits {
   maxTasteQuestionsPerRun: number;
   /** `notify` calls per run. */
   maxNoticesPerRun: number;
+  /** First wait before an outbox event that failed to send is sent again; it doubles per failure. */
+  outboxRetryMs: number;
+  /** Longest wait between two sends of one outbox event. */
+  outboxMaxRetryMs: number;
 }
 
 export const DEFAULT_LIMITS: ConductorLimits = {
@@ -60,6 +64,8 @@ export const DEFAULT_LIMITS: ConductorLimits = {
   maxRefusalsBeforeStop: 2,
   maxTasteQuestionsPerRun: 2,
   maxNoticesPerRun: 20,
+  outboxRetryMs: 1000,
+  outboxMaxRetryMs: 60_000,
 };
 
 export const CONNECTION_SLUG = 'conductor-anthropic';
