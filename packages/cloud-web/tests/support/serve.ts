@@ -27,6 +27,8 @@ async function run(body: Body): Promise<unknown> {
       return stack.ask(text('conversationId'), body.question as never);
     case 'answers':
       return stack.answers;
+    case 'pushed':
+      return stack.pushed;
     case 'delegate':
       return {
         taskId: await stack.delegate(text('conversationId'), {

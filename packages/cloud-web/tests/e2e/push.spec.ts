@@ -1,42 +1,165 @@
-import { expect, test } from '@playwright/test';
-import { control, signIn } from './support';
+import { type APIRequestContext, expect, type Page, test } from '@playwright/test';
+import { API, control, conversationsOf, signIn } from './support';
 
-async function stubPush(page: import('@playwright/test').Page) {
-  // Stub only the browser push transport. No push service is contacted.
-  await page.addInitScript(() => {
+// One endpoint per test: the stack (and what it pushed) is shared by every test.
+const device = () => `https://push.example.test/device-${crypto.randomUUID()}`;
+
+/**
+ * Stands in for the browser's push transport only: a stateful subscription with
+ * real-shaped P-256 keys, so the server can encrypt for it. No push service is
+ * contacted. `window.__push` exposes what the page did to it.
+ */
+async function stubPush(page: Page, endpoint: string) {
+  await page.addInitScript((endpoint) => {
+    const state = {
+      endpoint,
+      subscribed: false,
+      unsubscribed: 0,
+      key: '',
+      keys: { p256dh: '', auth: '' },
+    };
+    (window as unknown as { __push: typeof state }).__push = state;
     Object.defineProperty(Notification, 'requestPermission', { value: async () => 'granted' });
-    Object.defineProperty(PushManager.prototype, 'getSubscription', { value: async () => null });
-    Object.defineProperty(PushManager.prototype, 'subscribe', {
-      value: async () => ({
-        toJSON: () => ({
-          endpoint: 'https://push.example.invalid/local-test',
-          expirationTime: null,
-          keys: { auth: 'fake', p256dh: 'fake' },
-        }),
-        unsubscribe: async () => true,
-      }),
+    const subscription = {
+      endpoint,
+      unsubscribe: async () => {
+        state.subscribed = false;
+        state.unsubscribed += 1;
+        return true;
+      },
+      toJSON: () => ({ endpoint, keys: state.keys }),
+    };
+    const b64 = (bytes: ArrayBuffer | Uint8Array) =>
+      btoa(String.fromCharCode(...new Uint8Array(bytes as ArrayBuffer)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/u, '');
+    Object.defineProperty(PushManager.prototype, 'getSubscription', {
+      value: async () => (state.subscribed ? subscription : null),
     });
-  });
+    Object.defineProperty(PushManager.prototype, 'subscribe', {
+      value: async (options: { applicationServerKey: Uint8Array }) => {
+        state.subscribed = true;
+        state.key = b64(options.applicationServerKey);
+        const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
+          'deriveBits',
+        ]);
+        const p256dh = b64(await crypto.subtle.exportKey('raw', pair.publicKey));
+        const auth = b64(crypto.getRandomValues(new Uint8Array(16)));
+        state.keys = { p256dh, auth };
+        return subscription;
+      },
+    });
+  }, endpoint);
 }
 
-// Web Push is T4 PR E (#44), which is not on main: the real server answers 404 for its
-// routes, so the app must say so and never claim notifications are on.
-test('a server without push says so and never claims notifications are enabled', async ({
+async function pushed(request: APIRequestContext) {
+  return control<{ endpoint: string; bytes: number }[]>(request, 'pushed');
+}
+
+async function finishTopLevel(
+  request: APIRequestContext,
+  token: string,
+  conversationId: string,
+  title: string,
+) {
+  const { taskId } = await control<{ taskId: string }>(request, 'delegate', {
+    conversationId,
+    title,
+  });
+  await control(request, 'progress', { taskId, note: 'Working' });
+  await control(request, 'complete', { taskId });
+  return taskId;
+}
+
+async function startConversation(page: Page, request: APIRequestContext, token: string) {
+  await page.getByLabel('What would you like to get done?').fill('Hello');
+  await page.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
+  const [{ conversationId }] = await conversationsOf(request, token);
+  return conversationId;
+}
+
+// The real server (push configured with a throwaway key and a fake transport).
+test('enabling notifications registers this device with the server, and only its own invite is pushed', async ({
   page,
   request,
 }) => {
-  await stubPush(page);
-  await signIn(page, request);
-  await page.getByLabel('What would you like to get done?').fill('Hello');
-  await page.getByRole('button', { name: 'Start' }).click();
+  const endpoint = device();
+  await stubPush(page, endpoint);
+  const invite = await signIn(page, request);
+  const conversationId = await startConversation(page, request, invite.token);
   await page.getByRole('button', { name: 'Enable notifications' }).click();
-  await expect(page.getByRole('alert')).toContainText('No change was made');
-  await expect(page.getByText('Background notifications enabled')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Enable notifications' })).toHaveCount(0);
   await expect(
-    page.getByText('Background notifications are unavailable on this server.'),
+    page.getByRole('status').filter({ hasText: 'Background notifications enabled' }),
   ).toBeVisible();
-  void control;
+  // The browser was subscribed with the key the server published.
+  const key = await request.get(`${API}/v1/push/key`, {
+    headers: { authorization: `Bearer ${invite.token}` },
+  });
+  const { publicKey } = (await key.json()) as { publicKey: string };
+  expect(
+    await page.evaluate(() => (window as never as { __push: { key: string } }).__push.key),
+  ).toBe(publicKey);
+
+  // Another invite's finished task reaches no device of this one.
+  const other = await control<{ token: string }>(request, 'invite');
+  const created = await request.post(`${API}/v1/conversations`, {
+    headers: { authorization: `Bearer ${other.token}`, 'content-type': 'application/json' },
+    data: {},
+  });
+  const otherConversation = ((await created.json()) as { conversationId: string }).conversationId;
+  await finishTopLevel(request, other.token, otherConversation, 'Not yours');
+
+  // This invite's finished task reaches this device once. Ids only, encrypted.
+  // The other invite's task ended first and the server works through the feed in order,
+  // so by the time this device has its message, any message for the other task was sent.
+  await finishTopLevel(request, invite.token, conversationId, 'Mine');
+  const mine = () => pushed(request).then((all) => all.filter((m) => m.endpoint === endpoint));
+  await expect.poll(async () => (await mine()).length).toBe(1);
+  expect((await mine())[0]?.bytes).toBeGreaterThan(0);
+});
+
+test('turning notifications off removes the registration and the browser subscription', async ({
+  page,
+  request,
+}) => {
+  const endpoint = device();
+  await stubPush(page, endpoint);
+  const invite = await signIn(page, request);
+  await startConversation(page, request, invite.token);
+  await page.getByRole('button', { name: 'Enable notifications' }).click();
+  await page.getByRole('button', { name: 'Turn off notifications' }).click();
+  await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
+  await expect(page.getByText('Background notifications enabled')).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => (window as never as { __push: { unsubscribed: number } }).__push.unsubscribed,
+    ),
+  ).toBe(1);
+  // The server no longer knows the device: removing it again is a 404.
+  const again = await request.delete(`${API}/v1/push/subscriptions`, {
+    headers: { authorization: `Bearer ${invite.token}`, 'content-type': 'application/json' },
+    data: { endpoint },
+  });
+  expect(again.status()).toBe(404);
+});
+
+test('a push service the server does not accept is said plainly and leaves no subscription behind', async ({
+  page,
+  request,
+}) => {
+  await stubPush(page, `https://elsewhere.example.invalid/device-${crypto.randomUUID()}`);
+  const invite = await signIn(page, request);
+  await startConversation(page, request, invite.token);
+  await page.getByRole('button', { name: 'Enable notifications' }).click();
+  await expect(page.getByRole('alert')).toContainText('not accepted by this server');
+  await expect(page.getByText('Background notifications enabled')).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => (window as never as { __push: { subscribed: boolean } }).__push.subscribed,
+    ),
+  ).toBe(false);
 });
 
 test('the service worker shows one generic notification and ignores whatever the push carries', async ({

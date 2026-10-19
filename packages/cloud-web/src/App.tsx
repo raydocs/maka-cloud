@@ -11,7 +11,7 @@ import {
   type TaskView,
 } from './contract';
 import { displayText, dollars, publicLink } from './presentation';
-import { enablePush } from './push';
+import { disablePush, enablePush } from './push';
 import { applyEvent, type ConversationState, emptyState, mergeViews, totalCost } from './state';
 
 const ERROR_TEXT: Record<string, string> = {
@@ -23,6 +23,9 @@ const ERROR_TEXT: Record<string, string> = {
   unknown_option: 'That answer is not one of the options.',
   text_too_long: 'The additional context is too long.',
   artifact_too_large: 'This result is too large to show here.',
+  invalid_endpoint: 'This browser’s notification service is not accepted by this server.',
+  invalid_keys: 'This browser’s notification keys were not accepted.',
+  too_many_subscriptions: 'Notifications are already on for as many devices as are allowed.',
 };
 
 function errorText(error: unknown): string {
@@ -30,10 +33,11 @@ function errorText(error: unknown): string {
     return 'This action is unavailable on this server. No change was made.';
   if (error instanceof ApiError) {
     if (error.status === 401) return 'Your invite is no longer valid. Please reconnect.';
+    const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
+    if (known) return known;
     if (error.status === 429) return 'Too many requests. Try again in a moment.';
     if (error.status === 404) return 'That is no longer available.';
-    const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
-    return known ?? `Could not complete the request (${error.status}). Try again.`;
+    return `Could not complete the request (${error.status}). Try again.`;
   }
   return 'Could not complete the request. Check your connection and try again.';
 }
@@ -619,7 +623,23 @@ export function ConversationView({
                 }
               />
             )}
-            {notifications && <p role="status">Background notifications enabled</p>}
+            {notifications && (
+              <>
+                <p role="status">Background notifications enabled</p>
+                <Button
+                  label="Turn off notifications"
+                  variant="secondary"
+                  isDisabled={Boolean(busy)}
+                  onClick={() =>
+                    void act('push', async () => {
+                      await disablePush(client);
+                      setNotifications(false);
+                      setNotificationHint('');
+                    })
+                  }
+                />
+              </>
+            )}
             {client.unsupported.has('push') && (
               <p className="muted">Background notifications are unavailable on this server.</p>
             )}

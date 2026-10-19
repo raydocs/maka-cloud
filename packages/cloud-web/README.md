@@ -55,6 +55,7 @@ invite owns answers 404, the same as one that does not exist.
 | Pause, resume, cancel | `POST /v1/tasks/:id/(pause\|resume\|cancel)` |
 | Results | `GET /v1/tasks/:id/artifacts` (names and kinds), `GET /v1/tasks/:id/artifacts/:index` (a link as JSON, a file as an attachment) |
 | Answer a question | `POST /v1/conversations/:id/answers` `{questionId, optionId, text?}` |
+| Notifications | `GET /v1/push/key` → `{publicKey}`; `POST`/`DELETE /v1/push/subscriptions` with `{endpoint, keys:{p256dh, auth}}` / `{endpoint}`. All three are 404 until the server has its signing key |
 | Live updates | `GET /v1/events?conversation=` with `Last-Event-ID` |
 
 Event frames the view uses: `message.posted` (role `user` or `assistant`),
@@ -98,11 +99,13 @@ the server and the runner sent, and nothing it infers.
 
 - **Inbox ("needs you") view and the supervisor's own check label** for a
   finished task: the routes exist (`/v1/inbox/*`), the view is the next PR.
-- **Web Push.** The service worker and the registration flow are in, but the
-  server side is T4 PR E (#44), which is not on main. Its routes answer 404
-  today, so the button says notifications are unavailable and nothing claims
-  they are on. The registration paths here are the proposal that predates #44
-  and will be aligned to the merged routes.
+- **Web Push is wired to the server's routes** and tested end to end against the
+  real server with a throwaway signing key and a fake transport (nothing
+  leaves the machine). The browser's own push transport is stubbed in the
+  Playwright tests, so a real browser receiving a real message is not verified.
+  The registration state is held for the session only: after a reload the
+  button shows again, and registering again is harmless. On a server without
+  push the button is replaced by a plain sentence.
 - **Inbox settings, mutes and digest** answer 404 on the server until they are
   stored per owner; the app does not call them.
 - Conversations created before the owner column exist stay hidden until
