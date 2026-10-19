@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { SessionId, TaskId } from './types.js';
 
 export interface SessionInfo {
@@ -12,36 +12,52 @@ export interface IssuedSession extends SessionInfo {
   token: string;
 }
 
-function hashToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
+function digestToken(token: string): Buffer {
+  return createHash('sha256').update(token).digest();
 }
 
-/** In-memory session tokens. Tokens are never written to the task log. */
+const TOKEN_PREFIX = 'mko_';
+
+/** Tokens read `mko_<sessionId>.<secret>`; the id is public and only picks the entry to compare against. */
+function sessionIdOf(token: string): SessionId | undefined {
+  if (!token.startsWith(TOKEN_PREFIX)) return undefined;
+  const dot = token.indexOf('.');
+  return dot === -1 ? undefined : token.slice(TOKEN_PREFIX.length, dot);
+}
+
+interface Entry {
+  info: SessionInfo;
+  digest: Buffer;
+}
+
+/** In-memory session tokens. Tokens are never written to the task log; only digests are kept. */
 export class SessionAuth {
-  private readonly byHash = new Map<string, SessionInfo>();
-  private readonly hashBySession = new Map<SessionId, string>();
+  private readonly bySession = new Map<SessionId, Entry>();
 
   issue(options: { parentTaskId?: TaskId } = {}): IssuedSession {
     const sessionId = `ses_${randomBytes(8).toString('hex')}`;
-    const token = `mko_${randomBytes(32).toString('base64url')}`;
+    const token = `${TOKEN_PREFIX}${sessionId}.${randomBytes(32).toString('base64url')}`;
     const info: SessionInfo = {
       sessionId,
       ...(options.parentTaskId === undefined ? {} : { parentTaskId: options.parentTaskId }),
     };
-    const hash = hashToken(token);
-    this.byHash.set(hash, info);
-    this.hashBySession.set(sessionId, hash);
+    this.bySession.set(sessionId, { info, digest: digestToken(token) });
     return { ...info, token };
   }
 
   resolve(token: string): SessionInfo | undefined {
-    return this.byHash.get(hashToken(token));
+    const sessionId = sessionIdOf(token);
+    const entry = sessionId === undefined ? undefined : this.bySession.get(sessionId);
+    if (!entry) return undefined;
+    return timingSafeEqual(entry.digest, digestToken(token)) ? entry.info : undefined;
+  }
+
+  /** Whether the session still holds a valid token, for checks after the request was authenticated. */
+  isActive(sessionId: SessionId): boolean {
+    return this.bySession.has(sessionId);
   }
 
   revoke(sessionId: SessionId): void {
-    const hash = this.hashBySession.get(sessionId);
-    if (hash === undefined) return;
-    this.byHash.delete(hash);
-    this.hashBySession.delete(sessionId);
+    this.bySession.delete(sessionId);
   }
 }

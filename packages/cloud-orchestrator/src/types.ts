@@ -99,7 +99,8 @@ export type OrchestratorErrorCode =
   | 'not_found'
   | 'invalid_request'
   | 'unknown_runner'
-  | 'depth_exceeded';
+  | 'depth_exceeded'
+  | 'unauthorized';
 
 export class OrchestratorError extends Error {
   constructor(

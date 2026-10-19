@@ -1,9 +1,16 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type ResultManifest, ResultManifestSchema, type TaskId } from './types.js';
 
 export const MAX_BRIEF_BYTES = 256 * 1024;
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
+
+/**
+ * Never follow a symlink, and never block opening a FIFO. Whatever is opened is
+ * then checked through the descriptor, not through the path.
+ */
+const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 
 export interface HandoffPaths {
   dir: string;
@@ -34,20 +41,50 @@ export class Handoff {
     return paths;
   }
 
+  /** Removes the files of a task that was never recorded. Best effort. */
+  async discard(taskId: TaskId): Promise<void> {
+    await rm(this.paths(taskId).dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+
   /** Returns the validated manifest, or a reason it could not be accepted. */
   async readManifest(
     taskId: TaskId,
   ): Promise<{ ok: true; manifest: ResultManifest } | { ok: false; reason: string }> {
     const { resultPath } = this.paths(taskId);
     let text: string;
+    let file;
     try {
-      const info = await stat(resultPath);
-      if (info.size > MAX_MANIFEST_BYTES) {
+      file = await open(resultPath, READ_FLAGS);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP') {
+        return { ok: false, reason: 'invalid manifest: result.json is a symbolic link' };
+      }
+      if (code === 'ENOENT') {
+        return { ok: false, reason: 'invalid manifest: result.json was not written' };
+      }
+      return { ok: false, reason: 'invalid manifest: result.json could not be opened' };
+    }
+    try {
+      if (!(await file.stat()).isFile()) {
+        return { ok: false, reason: 'invalid manifest: result.json is not a regular file' };
+      }
+      // The file can grow while it is read, so the cap applies to the bytes read, not to a size seen earlier.
+      const buffer = Buffer.alloc(MAX_MANIFEST_BYTES + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await file.read(buffer, length, buffer.length - length, null);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+      if (length > MAX_MANIFEST_BYTES) {
         return { ok: false, reason: `invalid manifest: larger than ${MAX_MANIFEST_BYTES} bytes` };
       }
-      text = await readFile(resultPath, 'utf8');
+      text = buffer.toString('utf8', 0, length);
     } catch {
-      return { ok: false, reason: 'invalid manifest: result.json was not written' };
+      return { ok: false, reason: 'invalid manifest: result.json could not be read' };
+    } finally {
+      await file.close().catch(() => undefined);
     }
     let json: unknown;
     try {

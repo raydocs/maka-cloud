@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { readdir } from 'node:fs/promises';
 import { test } from 'node:test';
 import { OrchestratorError, type TaskId } from '../types.js';
-import { eventually, type Harness, makeHarness } from './harness.js';
+import { eventually, GatedStore, type Harness, makeHarness, sleep } from './harness.js';
 
 async function startTree(h: Harness) {
   const conductor = h.session();
@@ -89,10 +90,13 @@ test('a parent that already ended does not shield its running children from canc
   await eventually(() => h.fake.runs.length === 2, 'runs');
   await h.fake.runFor(parent.taskId).complete();
   await h.orchestrator.wait(conductor, parent.taskId, 2000);
-  // The parent is terminal, so cancelling it is a no-op, but the child can be cancelled directly.
-  await h.orchestrator.cancel(conductor, child.taskId);
+  // Cancelling the ended parent keeps its state and still stops what runs below it.
+  const view = await h.orchestrator.cancel(conductor, parent.taskId);
+  assert.equal(view.state, 'succeeded');
+  assert.equal(h.orchestrator.status(conductor, parent.taskId).state, 'succeeded');
   assert.equal(h.orchestrator.status(conductor, child.taskId).state, 'cancelled');
   assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
+  assert.equal(h.fake.runFor(parent.taskId).cancelCalls, 0);
 });
 
 test('a runner that finishes after the cancel does not change the outcome', async (t) => {
@@ -135,6 +139,156 @@ test('a task whose ancestor is being cancelled cannot delegate', async (t) => {
     h.orchestrator.delegate(parentSession, { runner: 'fake', brief: 'late child' }),
     (error: unknown) => error instanceof OrchestratorError && error.code === 'invalid_request',
   );
+});
+
+test('a cancel that finishes while a delegate is writing its brief leaves no child behind', async (t) => {
+  let cancelling: Promise<unknown> = Promise.resolve();
+  let onNewTask: () => void = () => {};
+  const h = await makeHarness(t, {
+    orchestrator: {
+      // Runs after delegate's first check and before its brief is written. The
+      // cancel needs no real I/O, so it finishes before the brief write does.
+      newTaskId: () => {
+        onNewTask();
+        return `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`;
+      },
+    },
+  });
+  const conductor = h.session();
+  const parent = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'p' });
+  const parentSession = h.executorSession(parent.taskId);
+  await eventually(() => h.fake.runs.length === 1, 'run');
+  const eventsBefore = (await h.store.read()).length;
+
+  onNewTask = () => {
+    onNewTask = () => {};
+    cancelling = h.orchestrator.cancel(conductor, parent.taskId);
+  };
+  await assert.rejects(
+    h.orchestrator.delegate(parentSession, { runner: 'fake', brief: 'late child' }),
+    (error: unknown) => error instanceof OrchestratorError && error.code === 'invalid_request',
+  );
+  await cancelling;
+
+  const created = (await h.store.read(eventsBefore)).filter(
+    ({ event }) => event.type === 'task_created',
+  );
+  assert.deepEqual(created, []);
+  assert.equal(h.fake.runs.length, 1);
+  assert.deepEqual(await readdir(h.dir), [parent.taskId]);
+});
+
+test('a task whose ancestor has ended cannot delegate', async (t) => {
+  const h = await makeHarness(t);
+  const conductor = h.session();
+  const root = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'root' });
+  const mid = await h.orchestrator.delegate(h.executorSession(root.taskId), {
+    runner: 'fake',
+    brief: 'mid',
+  });
+  const midSession = h.executorSession(mid.taskId);
+  await eventually(() => h.fake.runs.length === 2, 'runs');
+  h.fake.runFor(root.taskId).fail('done early');
+  await h.orchestrator.wait(conductor, root.taskId, 2000);
+  await assert.rejects(
+    h.orchestrator.delegate(midSession, { runner: 'fake', brief: 'late child' }),
+    (error: unknown) => error instanceof OrchestratorError && error.code === 'invalid_request',
+  );
+  assert.equal(h.fake.runs.length, 2);
+});
+
+test('an ancestor that ends while a delegate is writing its brief leaves no child behind', async (t) => {
+  let onNewTask: () => void = () => {};
+  const h = await makeHarness(t, {
+    orchestrator: {
+      newTaskId: () => {
+        onNewTask();
+        return `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`;
+      },
+    },
+  });
+  const conductor = h.session();
+  const root = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'root' });
+  const mid = await h.orchestrator.delegate(h.executorSession(root.taskId), {
+    runner: 'fake',
+    brief: 'mid',
+  });
+  const midSession = h.executorSession(mid.taskId);
+  await eventually(() => h.fake.runs.length === 2, 'runs');
+  const eventsBefore = (await h.store.read()).length;
+
+  onNewTask = () => {
+    onNewTask = () => {};
+    h.fake.runFor(root.taskId).fail('done early');
+  };
+  await assert.rejects(
+    h.orchestrator.delegate(midSession, { runner: 'fake', brief: 'late child' }),
+    (error: unknown) => error instanceof OrchestratorError && error.code === 'invalid_request',
+  );
+
+  const created = (await h.store.read(eventsBefore)).filter(
+    ({ event }) => event.type === 'task_created',
+  );
+  assert.deepEqual(created, []);
+  assert.equal(h.fake.runs.length, 2);
+  assert.deepEqual((await readdir(h.dir)).sort(), [mid.taskId, root.taskId].sort());
+});
+
+for (const outcome of ['finishes', 'fails'] as const) {
+  test(`a runner that ${outcome} after the cancel was requested cannot change the final state`, async (t) => {
+    const store = new GatedStore();
+    const h = await makeHarness(t, { store });
+    const conductor = h.session();
+    const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+    await eventually(() => h.fake.runs.length === 1, 'run');
+    const run = h.fake.runFor(taskId);
+
+    // The cancel request is on its way into the log but not applied yet, so the
+    // runner's report still sees a live task and queues up behind it.
+    const release = store.holdNext('task_cancel_requested');
+    const cancelling = h.orchestrator.cancel(conductor, taskId);
+    await eventually(() => store.held, 'cancel request held');
+    if (outcome === 'finishes') await run.complete();
+    else run.fail('boom');
+    await sleep(80);
+    release();
+
+    const view = await cancelling;
+    assert.equal(view.state, 'cancelled');
+    assert.equal(view.manifest, undefined);
+    assert.equal(view.failureReason, undefined);
+    const types = (await store.read()).map(({ event }) => event.type);
+    assert.ok(!types.includes('task_succeeded'), types.join());
+    assert.ok(!types.includes('task_failed'), types.join());
+  });
+}
+
+test('a runner that cannot start after the cancel was requested ends cancelled, not failed', async (t) => {
+  const store = new GatedStore();
+  let failStart: () => void = () => {};
+  const startGate = new Promise<void>((resolve) => {
+    failStart = resolve;
+  });
+  const h = await makeHarness(t, {
+    store,
+    fake: {
+      onStart: async () => {
+        await startGate;
+        throw new Error('no sandbox');
+      },
+    },
+  });
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'run created');
+  const release = store.holdNext('task_cancel_requested');
+  const cancelling = h.orchestrator.cancel(conductor, taskId);
+  await eventually(() => store.held, 'cancel request held');
+  failStart();
+  await sleep(80);
+  release();
+  assert.equal((await cancelling).state, 'cancelled');
+  assert.equal(h.orchestrator.status(conductor, taskId).failureReason, undefined);
 });
 
 test('a runner whose cancel throws is still recorded as cancelled', async (t) => {
