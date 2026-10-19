@@ -30,6 +30,7 @@ import {
   startGateway,
 } from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
+import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 
 /** The playbooks the stack runs: T7's research playbook, T8's coding playbook and the free one. */
@@ -153,6 +154,7 @@ export async function startStack(
             dbPath: config.supervisorDbPath,
             config: config.inbox,
             gateway: gateway.gateway,
+            summaryBudget: journal.dailyLimit('digest summary', SUMMARY_DAILY_CAP_USD),
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
           context,
