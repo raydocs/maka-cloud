@@ -1,10 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
+import { toPublicEvent } from './public-view.js';
 
 export type FeedKind =
   | 'conversation.created'
   | 'message.posted'
   | 'task.event'
+  | 'task.cost'
   | 'conductor.notice'
   | 'conductor.question'
   | 'conductor.answered';
@@ -64,6 +66,8 @@ interface FeedRow {
   m_at: number | null;
   title: string | null;
   c_at: number | null;
+  k_task: string | null;
+  k_usd: number | null;
   e_data: string | null;
 }
 
@@ -72,11 +76,13 @@ SELECT f.id, f.kind, f.conversation_id, f.at,
   t.seq AS t_seq, t.at AS t_at, t.event AS t_event,
   m.message_id, m.role, m.text, m.at AS m_at,
   c.title, c.created_at AS c_at,
+  k.task_id AS k_task, k.usd AS k_usd,
   e.data AS e_data
 FROM feed f
 LEFT JOIN task_log t ON f.kind = 'task.event' AND t.seq = CAST(f.ref AS INTEGER)
 LEFT JOIN messages m ON f.kind = 'message.posted' AND m.message_id = f.ref
 LEFT JOIN conversations c ON f.kind = 'conversation.created' AND c.conversation_id = f.ref
+LEFT JOIN task_cost_log k ON f.kind = 'task.cost' AND k.id = CAST(f.ref AS INTEGER)
 LEFT JOIN conductor_events e ON f.kind LIKE 'conductor.%' AND e.event_id = f.ref
 WHERE f.id > ? AND (? IS NULL OR f.conversation_id = ?)
 ORDER BY f.id
@@ -106,12 +112,14 @@ function payload(row: FeedRow): unknown {
       return {
         seq: row.t_seq,
         at: row.t_at,
-        event: JSON.parse(row.t_event ?? 'null') as TaskEvent,
+        event: toPublicEvent(JSON.parse(row.t_event ?? 'null') as TaskEvent),
       };
     case 'message.posted':
       return { messageId: row.message_id, role: row.role, text: row.text, at: row.m_at };
     case 'conversation.created':
       return { title: row.title, at: row.c_at };
+    case 'task.cost':
+      return { taskId: row.k_task, costUsd: row.k_usd, at: row.at };
     case 'conductor.notice':
     case 'conductor.question':
     case 'conductor.answered':

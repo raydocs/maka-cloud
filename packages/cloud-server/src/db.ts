@@ -8,9 +8,7 @@ export class DatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 2;
-
-const SCHEMA = `
+const SCHEMA_V1 = `
 CREATE TABLE task_log (
   seq INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -87,13 +85,31 @@ BEGIN SELECT RAISE(ABORT, '${table} is append-only'); END;`,
   .join('\n')}
 `;
 
+const SCHEMA_V2 = `
+CREATE TABLE task_cost_log (
+  id INTEGER PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  usd REAL NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX task_cost_log_task ON task_cost_log (task_id, id);
+CREATE TRIGGER task_cost_log_no_update BEFORE UPDATE ON task_cost_log
+BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
+CREATE TRIGGER task_cost_log_no_delete BEFORE DELETE ON task_cost_log
+BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
+`;
+
 /**
- * v2: what the conductor publishes into a conversation (notices, questions,
+ * Step `i` takes the schema from version `i` to `i + 1`. Steps are only ever
+ * appended: one that has shipped is never edited.
+ */
+/**
+ * v3: what the conductor publishes into a conversation (notices, questions,
  * answers), one row per event, keyed by the event's stable id so a retried
  * publish is a no-op. Assistant messages also record their event id here and
  * live in `messages` with role 'assistant'.
  */
-const CONDUCTOR_SCHEMA = `
+const SCHEMA_V3 = `
 CREATE TABLE conductor_events (
   event_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
@@ -108,8 +124,7 @@ CREATE TRIGGER conductor_events_no_delete BEFORE DELETE ON conductor_events
 BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
 `;
 
-/** Migration i takes the schema from version i to i + 1. */
-export const MIGRATIONS: readonly string[] = [SCHEMA, CONDUCTOR_SCHEMA];
+export const MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an
@@ -142,16 +157,17 @@ function isBusy(error: unknown): boolean {
 
 function migrate(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
-  if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version > SCHEMA_VERSION) {
-    throw new Error(`Unsupported database schema version ${row.user_version}`);
+  const version = row.user_version;
+  if (version > MIGRATIONS.length) {
+    throw new Error(`Unsupported database schema version ${version}`);
   }
+  if (version === MIGRATIONS.length) return;
   db.exec('BEGIN IMMEDIATE');
   try {
-    for (let version = row.user_version; version < SCHEMA_VERSION; version += 1) {
-      db.exec(MIGRATIONS[version] as string);
+    for (let step = version; step < MIGRATIONS.length; step += 1) {
+      db.exec(MIGRATIONS[step] ?? '');
+      db.exec(`PRAGMA user_version = ${step + 1}`);
     }
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

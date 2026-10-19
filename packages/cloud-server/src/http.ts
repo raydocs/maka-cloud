@@ -1,11 +1,20 @@
 import { once } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
-import { KeyedCounter, reduce, toView } from '@maka-cloud/orchestrator';
+import {
+  KeyedCounter,
+  type Orchestrator,
+  OrchestratorError,
+  type OperatorAccess,
+  reduce,
+  toView,
+} from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
+import type { CostSource } from './cost.js';
 import { type FeedEntry, type FeedHub, readFeed } from './feed.js';
 import type { InviteInfo, InviteStore } from './invites.js';
+import { toPublicView } from './public-view.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
 
@@ -22,6 +31,8 @@ export interface HttpLimits {
   streamsTotal: number;
   /** Message posts per minute per invite. */
   messagesPerMinute: number;
+  /** Cancel, pause and resume requests per minute per invite. */
+  controlPerMinute: number;
   /** How long a stream may leave a write undrained before it is closed. */
   drainTimeoutMs: number;
   heartbeatMs: number;
@@ -31,6 +42,7 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = {
   streamsPerInvite: 4,
   streamsTotal: 256,
   messagesPerMinute: 30,
+  controlPerMinute: 30,
   drainTimeoutMs: 30_000,
   heartbeatMs: HEARTBEAT_MS,
 };
@@ -79,6 +91,9 @@ export interface PublicApiDeps {
   tasks: SqliteTaskStore;
   hub: FeedHub;
   messageLimiter: RateLimiter;
+  controlLimiter: RateLimiter;
+  orchestrator: Pick<Orchestrator, 'cancelAs' | 'pauseAs' | 'resumeAs' | 'rootSessionOfTask'>;
+  costs: CostSource;
   limits: HttpLimits;
   onMessage: (message: PostedMessage) => void;
   /** Absent when no handler takes answers; the route then answers 404. */
@@ -148,7 +163,7 @@ export class PublicApi {
   }
 
   private authenticate(req: IncomingMessage): InviteInfo {
-    const token = /^Bearer\s+(\S+)$/iu.exec(req.headers.authorization ?? '')?.[1];
+    const token = bearerToken(req);
     const invite = token === undefined ? undefined : this.deps.invites.resolve(token);
     if (!invite) throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     return invite;
@@ -183,6 +198,12 @@ export class PublicApi {
     if (tasks) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
       return this.listTasks(res, url, decodeURIComponent(tasks[1] ?? ''));
+    }
+    const control = /^\/v1\/tasks\/([^/]+)\/(cancel|pause|resume)$/u.exec(path);
+    if (control) {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
+      const action = control[2] as ControlAction;
+      return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
     }
     if (path === '/v1/events') {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
@@ -270,13 +291,63 @@ export class PublicApi {
     const page = this.deps.tasks.tasksOfRoot(sessionId, after, limit);
     const tasks = page.flatMap(({ taskId }) => {
       const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-      return record ? [toView(record)] : [];
+      return record ? [toPublicView(toView(record), this.deps.costs.taskCostUsd(taskId))] : [];
     });
     const last = page.at(-1);
     respond(res, 200, {
       tasks,
       ...(last !== undefined && page.length === limit ? { next: last.position } : {}),
     });
+  }
+
+  /**
+   * Acts on a task for the conversation it belongs to. The invite is checked here
+   * and again inside the orchestrator's write chain, so a revoke that lands while
+   * the request waits stops it; the credentials the conductor holds are not involved.
+   */
+  private async control(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+    action: ControlAction,
+  ): Promise<void> {
+    const { orchestrator, conversations } = this.deps;
+    await discard(req);
+    const sessionId = orchestrator.rootSessionOfTask(taskId);
+    if (sessionId === undefined || conversations.conversationOf(sessionId) === undefined) {
+      throw new HttpError(404, 'not_found');
+    }
+    const allowed = this.deps.controlLimiter.take(invite.inviteId);
+    if (!allowed.ok) {
+      throw new HttpError(429, 'quota_exceeded', {
+        'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
+      });
+    }
+    const token = bearerToken(req);
+    const access: OperatorAccess = {
+      sessionId,
+      authorize: () => {
+        const current = token === undefined ? undefined : this.deps.invites.resolve(token);
+        if (!current || current.inviteId !== invite.inviteId) {
+          throw new OrchestratorError('unauthorized', 'The invite is no longer valid');
+        }
+        if (conversations.conversationOf(sessionId) === undefined) {
+          throw new OrchestratorError('not_found', 'The conversation no longer exists');
+        }
+      },
+    };
+    try {
+      const view =
+        action === 'cancel'
+          ? await orchestrator.cancelAs(access, taskId)
+          : action === 'pause'
+            ? await orchestrator.pauseAs(access, taskId)
+            : await orchestrator.resumeAs(access, taskId);
+      respond(res, 200, { task: toPublicView(view, this.deps.costs.taskCostUsd(taskId)) });
+    } catch (error) {
+      throw error instanceof OrchestratorError ? controlError(error) : error;
+    }
   }
 
   private async stream(
@@ -384,6 +455,38 @@ export class PublicApi {
       throw error;
     }
     await pump();
+  }
+}
+
+type ControlAction = 'cancel' | 'pause' | 'resume';
+
+function bearerToken(req: IncomingMessage): string | undefined {
+  return /^Bearer\s+(\S+)$/iu.exec(req.headers.authorization ?? '')?.[1];
+}
+
+function controlError(error: OrchestratorError): HttpError {
+  switch (error.code) {
+    case 'not_found':
+      return new HttpError(404, 'not_found');
+    case 'unauthorized':
+      return new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+    case 'quota_exceeded':
+      return new HttpError(429, 'quota_exceeded', { 'retry-after': '1' });
+    case 'unsupported':
+      return new HttpError(409, 'pause_unsupported');
+    case 'invalid_state':
+      return new HttpError(409, 'invalid_state');
+    default:
+      return new HttpError(400, 'invalid_request');
+  }
+}
+
+/** Reads and drops a request body, so a client that sends one is not left hanging. */
+async function discard(req: IncomingMessage): Promise<void> {
+  let size = 0;
+  for await (const chunk of req) {
+    size += Buffer.from(chunk).length;
+    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'request_too_large');
   }
 }
 

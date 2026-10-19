@@ -35,6 +35,14 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
     tasks: new SqliteTaskStore(db, hub),
     hub,
     messageLimiter: new RateLimiter(1_000_000),
+    controlLimiter: new RateLimiter(1_000_000),
+    orchestrator: {
+      rootSessionOfTask: () => undefined,
+      cancelAs: () => Promise.reject(new Error('unused')),
+      pauseAs: () => Promise.reject(new Error('unused')),
+      resumeAs: () => Promise.reject(new Error('unused')),
+    },
+    costs: { taskCostUsd: () => undefined },
     limits: { ...DEFAULT_HTTP_LIMITS, heartbeatMs: HEARTBEAT_MS, ...limits },
     onMessage: () => undefined,
   });
