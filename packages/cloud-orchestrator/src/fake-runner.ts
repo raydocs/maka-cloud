@@ -96,15 +96,27 @@ export interface FakeRunnerOptions {
   onStart?: (run: FakeRun) => void | Promise<void>;
   /** Make `start` reject. */
   startError?: Error;
+  /** Gives the runner a `stopOrphaned` that calls this. Without it the runner has none. */
+  stopOrphaned?: (taskId: string, options: { signal?: AbortSignal }) => Promise<void>;
 }
 
 /** A runner for tests: records every run and does nothing until a test drives it. */
 export class FakeRunner implements Runner {
   readonly name: string;
   readonly runs: FakeRun[] = [];
+  /** Task ids `stopOrphaned` was called for. Only filled when the runner has the method. */
+  readonly orphanStops: string[] = [];
+  stopOrphaned?: (taskId: string, options?: { signal?: AbortSignal }) => Promise<void>;
 
   constructor(private readonly options: FakeRunnerOptions = {}) {
     this.name = options.name ?? 'fake';
+    const stop = options.stopOrphaned;
+    if (stop) {
+      this.stopOrphaned = async (taskId, callOptions = {}) => {
+        this.orphanStops.push(taskId);
+        await stop(taskId, callOptions);
+      };
+    }
   }
 
   async start(spec: RunSpec): Promise<RunHandle> {

@@ -17,6 +17,7 @@ export { Handoff, type HandoffPaths, MAX_BRIEF_BYTES, MAX_MANIFEST_BYTES } from 
 export {
   DEFAULT_ARCHIVE_CACHE,
   DEFAULT_MAX_DEPTH,
+  DEFAULT_ORPHAN_STOP_TIMEOUT_MS,
   DEFAULT_WAIT_MS,
   type DelegateInput,
   MAX_WAIT_MS,

@@ -1,0 +1,81 @@
+import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox';
+import type { Runner } from '@maka-cloud/orchestrator';
+import { Fleet, type CloudRunnersOptions, type SweepResult } from './fleet.js';
+import { FixedMachineProvider } from './providers.js';
+import { SandboxCliRunner } from './runner.js';
+import { claudeAdapter, codexAdapter } from './vendors.js';
+
+export { Fleet, type CloudRunnersOptions, type RunnerName, type SweepResult } from './fleet.js';
+export { MAX_RESULT_BYTES, RemoteMachine } from './machine.js';
+export {
+  DEFAULT_TENANT,
+  envModelAccess,
+  FixedMachineProvider,
+  TenantMachineProvider,
+} from './providers.js';
+export { type ResumeInput, SandboxCliRunner } from './runner.js';
+export {
+  JsonFileSessionStore,
+  MemorySessionStore,
+  referencedSnapshotIds,
+} from './session-store.js';
+export type {
+  ModelAccess,
+  ModelAccessProvider,
+  RunnerSessionRecord,
+  RunnerSessionStore,
+  SandboxLease,
+  SandboxProvider,
+} from './types.js';
+export { claudeAdapter, codexAdapter, type VendorAdapter } from './vendors.js';
+
+export interface CloudRunners {
+  /** `claude-agent-sdk` and `codex`, ready for a `RunnerRegistry`. */
+  runners: Runner[];
+  claude: SandboxCliRunner;
+  codex: SandboxCliRunner;
+  /**
+   * Stops live runs whose task is not in `knownTaskIds`. Call once after the orchestrator has
+   * restored, with every task id in its log. An unreachable sandbox is reported, never thrown.
+   */
+  sweepOrphans(
+    knownTaskIds: Iterable<string>,
+    options?: { timeoutMs?: number },
+  ): Promise<SweepResult>;
+  fleet: Fleet;
+}
+
+export function createCloudRunners(options: CloudRunnersOptions): CloudRunners {
+  const fleet = new Fleet(options);
+  const claude = new SandboxCliRunner(fleet, claudeAdapter);
+  const codex = new SandboxCliRunner(fleet, codexAdapter);
+  return {
+    runners: [claude, codex],
+    claude,
+    codex,
+    sweepOrphans: (known, sweepOptions) => fleet.sweepOrphans(known, sweepOptions),
+    fleet,
+  };
+}
+
+/**
+ * Reads `INSTABOX_API_KEY` and `INSTABOX_MACHINE_ID` (optionally `INSTABOX_API_URL`). Model keys
+ * come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` when a task starts, not here.
+ */
+export function createCloudRunnersFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  overrides: Partial<CloudRunnersOptions> = {},
+): CloudRunners {
+  const apiKey = env.INSTABOX_API_KEY;
+  const machineId = env.INSTABOX_MACHINE_ID;
+  if (!apiKey) throw new Error('INSTABOX_API_KEY is not set.');
+  if (!machineId) throw new Error('INSTABOX_MACHINE_ID is not set.');
+  return createCloudRunners({
+    client: new InstaboxClient({
+      apiKey,
+      baseUrl: env.INSTABOX_API_URL ?? DEFAULT_INSTABOX_BASE_URL,
+    }),
+    sandboxes: new FixedMachineProvider(machineId),
+    ...overrides,
+  });
+}
