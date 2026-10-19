@@ -32,9 +32,13 @@ export class FixedMachineProvider implements SandboxProvider {
  * a table that gives one machine to two tenants is refused when it is built.
  */
 export class TenantMachineProvider implements SandboxProvider {
-  constructor(private readonly machines: Readonly<Record<string, string>>) {
+  private readonly machines: ReadonlyMap<string, string>;
+
+  constructor(machines: Readonly<Record<string, string>>) {
+    // Copy first, then check the copy: the caller keeps its object, and what is checked is what is used.
+    const table = new Map(Object.entries(machines));
     const owners = new Map<string, string>();
-    for (const [tenantId, machineId] of Object.entries(machines)) {
+    for (const [tenantId, machineId] of table) {
       if (!machineId) throw new Error(`TenantMachineProvider: empty machine id for "${tenantId}"`);
       const owner = owners.get(machineId);
       if (owner !== undefined) {
@@ -44,16 +48,17 @@ export class TenantMachineProvider implements SandboxProvider {
       }
       owners.set(machineId, tenantId);
     }
+    this.machines = table;
   }
 
   async acquire(input: { tenantId: string; taskId: TaskId }): Promise<SandboxLease> {
-    const machineId = this.machines[input.tenantId];
+    const machineId = this.machines.get(input.tenantId);
     if (!machineId) throw new Error(`No sandbox is assigned to tenant "${input.tenantId}"`);
     return { machineId, release: () => undefined };
   }
 
   knownMachines(): string[] {
-    return Object.values(this.machines);
+    return [...this.machines.values()];
   }
 }
 

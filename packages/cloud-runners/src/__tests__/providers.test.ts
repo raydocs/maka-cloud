@@ -16,6 +16,24 @@ test('a tenant table with one machine each still works', async () => {
   await assert.rejects(provider.acquire({ tenantId: 'carol', taskId: 't' }), /No sandbox/);
 });
 
+test('changing the table after it was checked does not change the provider', async () => {
+  const table: Record<string, string> = { alice: 'm_one', bob: 'm_two' };
+  const provider = new TenantMachineProvider(table);
+  table.bob = 'm_one'; // would put two tenants on one machine
+  table.carol = 'm_three';
+  delete table.alice;
+  assert.equal((await provider.acquire({ tenantId: 'alice', taskId: 't' })).machineId, 'm_one');
+  assert.equal((await provider.acquire({ tenantId: 'bob', taskId: 't' })).machineId, 'm_two');
+  await assert.rejects(provider.acquire({ tenantId: 'carol', taskId: 't' }), /No sandbox/);
+  assert.deepEqual(provider.knownMachines().sort(), ['m_one', 'm_two']);
+});
+
+test('a tenant named like an object property has no sandbox', async () => {
+  const provider = new TenantMachineProvider({ alice: 'm_one' });
+  for (const tenantId of ['constructor', 'toString', '__proto__'])
+    await assert.rejects(provider.acquire({ tenantId, taskId: 't' }), /No sandbox/);
+});
+
 test('an empty machine id is refused', () => {
   assert.throws(() => new TenantMachineProvider({ alice: '' }), /empty machine id/);
   assert.throws(() => new FixedMachineProvider(''), /empty machine id/);

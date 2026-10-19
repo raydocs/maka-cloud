@@ -14,6 +14,10 @@
  *   flood         print 3 MB without a newline first, then behave like ok
  *   floodfail     print 3 MB without a newline, then exit 1
  *   longfail      print a 100 kB line, then exit 1
+ *   wait          like ok, but first run until `$HOME/fake-cli/go` exists (`waiting` says it is running)
+ *   leakedge-plain  print the API key right where a 300-character quote would cut it, then exit 1
+ *   leakedge-guard  the same, after a MAKA_GUARD: prefix
+ *   leakedge-json   the same where a 200-character note or result text would cut it, as events
  *
  * When `$HOME/fake-cli/orphan` exists, the CLI also leaves a child behind in its process group
  * that ignores TERM; its pid is appended to `$HOME/fake-cli/children`.
@@ -35,6 +39,10 @@ resumed=0
 for a in "$@"; do [ "$a" = "--resume" ] || [ "$a" = "resume" ] && resumed=1; done
 good='{"summary":"fake run complete","done":["the brief"],"notDone":[],"confidence":"high","knownIssues":[]}'
 if [ "$mode" = "leakfail" ]; then echo "key is $ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
+pad=$(head -c 285 /dev/zero | tr '\0' x)
+jpad=$(head -c 190 /dev/zero | tr '\0' x)
+if [ "$mode" = "leakedge-plain" ]; then echo "$pad$ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
+if [ "$mode" = "leakedge-guard" ]; then echo "MAKA_GUARD: $pad$ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
 if [ -e "$ctl/orphan" ]; then
   bash -c 'trap "" TERM; while :; do sleep 1; done' > /dev/null 2>&1 &
   echo $! >> "$ctl/children"
@@ -43,12 +51,13 @@ if [ "$mode" = "leakout" ]; then
   echo "key=$ANTHROPIC_API_KEY$OPENAI_API_KEY token=$MAKA_MCP_TOKEN"
   echo "stderr key=$ANTHROPIC_API_KEY$OPENAI_API_KEY token=$MAKA_MCP_TOKEN" >&2
 fi
+if [ "$mode" = "wait" ]; then : > "$ctl/waiting"; while [ ! -e "$ctl/go" ]; do sleep 0.05; done; fi
 if [ "$mode" = "flood" ]; then head -c 3000000 /dev/zero | tr '\0' x; echo; fi
 if [ "$mode" = "floodfail" ]; then head -c 3000000 /dev/zero | tr '\0' x; exit 1; fi
 if [ "$mode" = "longfail" ]; then head -c 100000 /dev/zero | tr '\0' y; echo; exit 1; fi
 write_result() {
   case "$mode" in
-    ok|leakout|flood) printf '%s' "$good" > "$result" ;;
+    ok|leakout|flood|wait) printf '%s' "$good" > "$result" ;;
     badthengood) if [ "$resumed" = 1 ]; then printf '%s' "$good" > "$result"; else printf '%s' '{"summary":""}' > "$result"; fi ;;
     symlink) rm -f "$result"; ln -s "$ctl/secret.txt" "$result" ;;
     big) head -c 1100000 /dev/zero | tr '\0' 'a' > "$result" ;;
@@ -66,6 +75,10 @@ echo 'not json, some stderr-ish noise'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Bash","input":{}}]}}'
 case "$mode" in
   hang) sleep 300; exit 0 ;;
+  leakedge-json)
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$jpad$ANTHROPIC_API_KEY"'"}]}}'
+    echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"'"$jpad$ANTHROPIC_API_KEY"'","session_id":"'"$sid"'"}'
+    exit 1 ;;
   fail) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"model said no","session_id":"'"$sid"'"}'; exit 1 ;;
 esac
 write_result
@@ -82,6 +95,10 @@ echo '{"type":"item.started","item":{"type":"command_execution","command":"ls"}}
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"working on it"}}'
 case "$mode" in
   hang) sleep 300; exit 0 ;;
+  leakedge-json)
+    echo '{"type":"item.completed","item":{"type":"agent_message","text":"'"$jpad$OPENAI_API_KEY"'"}}'
+    echo '{"type":"turn.failed","error":{"message":"'"$jpad$OPENAI_API_KEY"'"}}'
+    exit 1 ;;
   fail) echo '{"type":"turn.failed","error":{"message":"model said no"}}'; exit 1 ;;
 esac
 write_result
