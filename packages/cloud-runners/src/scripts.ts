@@ -5,20 +5,65 @@
  *
  * Layout per task: `$MAKA_ROOT/<taskId>/` holds `brief.md`, `result.json`, a `workspace/`
  * directory, and for each CLI invocation ("run", `t1`, `t2`, ...) `<run>.lock`, `.sh`,
- * `.token`, `.pid`, `.out` (stdout and stderr together) and `.exit` (written last).
+ * `.token`, `.pid`, `.cancel` (a stop request) and `.exit` (written last). The raw stdout and
+ * stderr of a run (`<run>.out`) can hold secrets the CLI printed, so it is kept in
+ * `$MAKA_LOG_ROOT/<taskId>/`, on memory-backed storage that a snapshot of the sandbox's files
+ * does not contain, and deleted when the run is stopped.
  */
 
-/** True when `$1` is a live run whose environment carries its own token (guards pid reuse). */
+/**
+ * True when `$1` is a live run whose environment carries its own token (guards pid reuse). A
+ * zombie (killed, not yet reaped) is not alive.
+ */
 const ALIVE_FN = `
+pstate() {
+  local line
+  IFS= read -r line < "/proc/$1/stat" 2>/dev/null || return 1
+  line=\${line##*) }
+  printf '%s' "\${line%% *}"
+}
 alive() {
-  local pid tok
+  local pid tok st
   pid=$(cat "$1.pid" 2>/dev/null) || return 1
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  st=$(pstate "$pid") || return 1
+  [ "$st" = Z ] && return 1
   if [ -r "/proc/$pid/environ" ] && [ -r "$1.token" ]; then
     tok=$(cat "$1.token")
     tr '\\0' '\\n' < "/proc/$pid/environ" | grep -qxF "MAKA_RUN_TOKEN=$tok" || return 1
   fi
   return 0
+}
+`;
+
+/**
+ * Process groups. A run is its own group leader (setsid), so its children share the group id with
+ * the leader's pid, and survive the leader when they ignore TERM or are left running at its exit.
+ * `group_pids <pgid>` prints every process that is not a zombie and is in that process group or
+ * session. `group_is_run <base> <pgid>` is true when the run's leader is alive, or when one of
+ * those processes carries the run's token: the group is then the run's own, not a recycled id.
+ */
+const GROUP_FN = `
+group_pids() {
+  local stat line pid pgrp sid st
+  for stat in /proc/[0-9]*/stat; do
+    IFS= read -r line < "$stat" 2>/dev/null || continue
+    pid=\${line%% *}
+    line=\${line##*) }
+    read -r st _ pgrp sid _ <<< "$line"
+    case "$st" in Z|X) continue ;; esac
+    if [ "$pgrp" = "$1" ] || [ "$sid" = "$1" ]; then printf '%s\\n' "$pid"; fi
+  done
+}
+group_is_run() {
+  local tok pid
+  alive "$1" && return 0
+  tok=$(cat "$1.token" 2>/dev/null) || return 1
+  [ -n "$tok" ] || return 1
+  for pid in $(group_pids "$2"); do
+    if [ -r "/proc/$pid/environ" ] && tr '\\0' '\\n' < "/proc/$pid/environ" | grep -qxF "MAKA_RUN_TOKEN=$tok"; then return 0; fi
+  done
+  return 1
 }
 `;
 
@@ -35,13 +80,18 @@ fi
 /**
  * Starts one run, at most once. The exclusive create of the lock file is the guard: exec has no
  * Idempotency-Key, so a retried start finds the lock and reports ALREADY instead of launching a
- * second process. stdin: the run script.
+ * second process. A stop request that got here first (`<run>.cancel`) wins: CANCELLED, nothing
+ * starts. Whoever wins the lock also clears the previous turn's `result.json`, so a turn that
+ * writes nothing cannot be taken for one that did; a retried start never reaches that line.
+ * stdin: the run script.
  */
 export const LAUNCH_SCRIPT = `set -eu
 umask 077
 mkdir -p "$MAKA_DIR"
 cd "$MAKA_DIR"
 if ! ( set -C; : > "$MAKA_RUN.lock" ) 2>/dev/null; then echo ALREADY; exit 0; fi
+if [ -e "$MAKA_RUN.cancel" ]; then echo CANCELLED; exit 0; fi
+rm -rf -- result.json result.read
 cat > "$MAKA_RUN.sh"
 printf '%s' "$MAKA_RUN_TOKEN" > "$MAKA_RUN.token"
 setsid nohup bash "$MAKA_RUN.sh" > /dev/null 2>&1 < /dev/null &
@@ -52,8 +102,11 @@ echo STARTED
 export const INSPECT_SCRIPT = `if [ -e "$MAKA_DIR/$MAKA_RUN.lock" ]; then echo LOCKED; else echo FREE; fi`;
 
 /**
- * The script a run executes. It is its own process group leader (setsid), records its pid, and
- * writes the exit file last, so "exit file present" means every byte of output is on disk.
+ * The script a run executes. It is its own process group leader (setsid), records its pid, honours
+ * a stop request that arrived first, and writes the exit file last, so "exit file present" means
+ * every byte of output is on disk. With `MAKA_LOG_DIR` set, the raw output goes there instead of
+ * next to the run, and only if that directory is memory-backed: output can hold secrets the CLI
+ * printed, and a snapshot of the sandbox's files must never contain them.
  */
 export function buildRunScript(input: {
   /** Shell lines run before the command, e.g. unsetting variables and the credential guard. */
@@ -65,7 +118,20 @@ export function buildRunScript(input: {
 cd "$MAKA_DIR" || exit 1
 echo $$ > "$MAKA_RUN.pid.tmp" && mv -f "$MAKA_RUN.pid.tmp" "$MAKA_RUN.pid"
 finish() { echo "$1" > "$MAKA_DIR/$MAKA_RUN.exit.tmp"; mv -f "$MAKA_DIR/$MAKA_RUN.exit.tmp" "$MAKA_DIR/$MAKA_RUN.exit"; }
-exec > "$MAKA_RUN.out" 2>&1
+if [ -e "$MAKA_RUN.cancel" ]; then finish 143; exit 143; fi
+out="$MAKA_RUN.out"
+if [ -n "\${MAKA_LOG_DIR:-}" ]; then
+  umask 077
+  if mkdir -p "$MAKA_LOG_DIR" 2>/dev/null && [ -d "$MAKA_LOG_DIR" ] && [ ! -L "$MAKA_LOG_DIR" ] && [ -O "$MAKA_LOG_DIR" ] \\
+    && chmod 700 "$MAKA_LOG_DIR" && case "$(stat -f -c %T "$MAKA_LOG_DIR" 2>/dev/null)" in tmpfs|ramfs) true ;; *) false ;; esac; then
+    out="$MAKA_LOG_DIR/$MAKA_RUN.out"
+  else
+    echo "MAKA_GUARD: raw output needs memory-backed storage at $MAKA_LOG_DIR and will not be written to disk" > "$MAKA_RUN.out"
+    finish 43
+    exit 43
+  fi
+fi
+exec > "$out" 2>&1
 export PATH="$HOME/.maka-cli/bin:$PATH"
 ${input.preamble}
 cd "$MAKA_WORKDIR" || { echo "MAKA_GUARD: cannot enter the task workspace"; finish 1; exit 1; }
@@ -92,7 +158,8 @@ while IFS=' ' read -r dir run off cap; do
     else st=dead; fi
   elif [ -f "$d/$run.lock" ]; then st=starting
   else st=none; fi
-  f="$d/$run.out"
+  f="\${MAKA_LOG_ROOT:-/nonexistent}/$dir/$run.out"
+  [ -f "$f" ] || f="$d/$run.out"
   size=0; data=""
   if [ -f "$f" ]; then
     size=$(stat -c %s "$f" 2>/dev/null || echo 0)
@@ -105,41 +172,73 @@ done
 `;
 
 /**
- * Stops the runs of one task: TERM to the process group, a grace period, then KILL. Only a pid
- * whose environment carries the run's own token is signalled. Prints `KILLED <run>` per run.
+ * Stops the runs of one task, and everything they started: TERM to the process group, a grace
+ * period, then KILL to whatever is left of the group, whether or not the group's leader is still
+ * running or already exited (a child that ignores TERM outlives it). Only a group that is the
+ * run's own is signalled: its leader is alive with the run's token, or a process in the group
+ * carries it. Afterwards the group must be empty; if not, the script prints `SURVIVORS <run>`
+ * and exits 1. Prints `KILLED <run>` for each run it had something to stop in, `NONE` if there
+ * was nothing. Runs that have not started yet are marked (`<run>.cancel`, and the runs named in
+ * `MAKA_CANCEL_RUNS`) so that they never do, and the raw output under `MAKA_LOG_DIR` is deleted.
  */
-export const KILL_SCRIPT = `${ALIVE_FN}
-cd "$MAKA_DIR" 2>/dev/null || { echo NONE; exit 0; }
+export const KILL_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+cleanup_logs() { if [ -n "\${MAKA_LOG_DIR:-}" ]; then rm -rf -- "$MAKA_LOG_DIR"; fi; }
+cd "$MAKA_DIR" 2>/dev/null || { cleanup_logs; echo NONE; exit 0; }
+umask 077
+for run in \${MAKA_CANCEL_RUNS:-}; do : > "$run.cancel"; done
+for lockf in ./*.lock; do
+  [ -f "$lockf" ] || continue
+  lockbase="\${lockf%.lock}"
+  [ -f "$lockbase.exit" ] || : > "$lockbase.cancel"
+done
 found=0
+survivors=0
 for pidf in ./*.pid; do
   [ -f "$pidf" ] || continue
   base="\${pidf%.pid}"
-  [ -f "$base.exit" ] && continue
-  alive "$base" || continue
-  pid=$(cat "$pidf")
-  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  pid=$(cat "$pidf" 2>/dev/null) || continue
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  group_is_run "$base" "$pid" || continue
+  members=$(group_pids "$pid")
+  [ -n "$members" ] || continue
+  found=1
+  kill -TERM -- "-$pid" 2>/dev/null
+  for m in $members; do kill -TERM "$m" 2>/dev/null; done
   waited=0
-  while [ "$waited" -lt "\${MAKA_GRACE_TENTHS:-30}" ] && alive "$base"; do
+  while [ "$waited" -lt "\${MAKA_GRACE_TENTHS:-30}" ] && [ -n "$(group_pids "$pid")" ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  if alive "$base"; then kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; fi
-  echo "KILLED \${base#./}"
-  found=1
+  kill -KILL -- "-$pid" 2>/dev/null
+  for m in $(group_pids "$pid"); do kill -KILL "$m" 2>/dev/null; done
+  waited=0
+  while [ "$waited" -lt 30 ] && [ -n "$(group_pids "$pid")" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ -n "$(group_pids "$pid")" ]; then
+    echo "SURVIVORS \${base#./}"
+    survivors=1
+  else
+    echo "KILLED \${base#./}"
+  fi
 done
+cleanup_logs
 [ "$found" = 1 ] || echo NONE
+[ "$survivors" = 0 ]
 `;
 
-/** Prints `LIVE <dir>` for every task directory with a run still alive. */
-export const SWEEP_SCRIPT = `${ALIVE_FN}
+/** Prints `LIVE <dir>` for every task directory with a run still alive, or a leftover of one. */
+export const SWEEP_SCRIPT = `${ALIVE_FN}${GROUP_FN}
 for d in "$MAKA_ROOT"/*/; do
   [ -d "$d" ] || continue
   name=$(basename "$d")
   for pidf in "$d"*.pid; do
     [ -f "$pidf" ] || continue
     base="\${pidf%.pid}"
-    [ -f "$base.exit" ] && continue
-    if alive "$base"; then echo "LIVE $name"; break; fi
+    pid=$(cat "$pidf" 2>/dev/null) || continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if group_is_run "$base" "$pid" && [ -n "$(group_pids "$pid")" ]; then echo "LIVE $name"; break; fi
   done
 done
 echo DONE

@@ -11,7 +11,9 @@ export class FixedMachineProvider implements SandboxProvider {
   constructor(
     private readonly machineId: string,
     private readonly tenantId: string = DEFAULT_TENANT,
-  ) {}
+  ) {
+    if (!machineId) throw new Error('FixedMachineProvider: empty machine id');
+  }
 
   async acquire(input: { tenantId: string; taskId: TaskId }): Promise<SandboxLease> {
     if (input.tenantId !== this.tenantId) {
@@ -25,9 +27,24 @@ export class FixedMachineProvider implements SandboxProvider {
   }
 }
 
-/** A machine per tenant, from a fixed table. An unknown tenant never falls back to another's. */
+/**
+ * A machine per tenant, from a fixed table. An unknown tenant never falls back to another's, and
+ * a table that gives one machine to two tenants is refused when it is built.
+ */
 export class TenantMachineProvider implements SandboxProvider {
-  constructor(private readonly machines: Readonly<Record<string, string>>) {}
+  constructor(private readonly machines: Readonly<Record<string, string>>) {
+    const owners = new Map<string, string>();
+    for (const [tenantId, machineId] of Object.entries(machines)) {
+      if (!machineId) throw new Error(`TenantMachineProvider: empty machine id for "${tenantId}"`);
+      const owner = owners.get(machineId);
+      if (owner !== undefined) {
+        throw new Error(
+          `TenantMachineProvider: machine "${machineId}" is assigned to both "${owner}" and "${tenantId}"`,
+        );
+      }
+      owners.set(machineId, tenantId);
+    }
+  }
 
   async acquire(input: { tenantId: string; taskId: TaskId }): Promise<SandboxLease> {
     const machineId = this.machines[input.tenantId];
@@ -36,7 +53,7 @@ export class TenantMachineProvider implements SandboxProvider {
   }
 
   knownMachines(): string[] {
-    return [...new Set(Object.values(this.machines))];
+    return Object.values(this.machines);
   }
 }
 

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
@@ -11,14 +12,22 @@ import {
 } from '@maka-cloud/orchestrator';
 import type { Fleet } from './fleet.js';
 import type { RemoteMachine } from './machine.js';
+import { LineSplitter } from './lines.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage } from './shell.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
 import { preambleFor, type VendorAdapter } from './vendors.js';
 
 const DEFAULT_MAX_NOTES = 300;
-const CANCEL_WAIT_MS = 20_000;
+const CLEANUP_STEP_MS = 20_000;
 const RAW_TAIL_LINES = 8;
+/** Longest output line the runner holds on to; the rest of a longer one is dropped. */
+const MAX_LINE_CHARS = 1_048_576;
+/** Longest piece of CLI output quoted in a failure reason. */
+const MAX_QUOTED_CHARS = 300;
+/** Longest failure reason, and progress note, sent to the orchestrator. */
+const MAX_REASON_CHARS = 2_000;
+const MAX_NOTE_CHARS = 500;
 
 class CancelledError extends Error {}
 
@@ -101,17 +110,21 @@ type TurnOutcome = { ok: true } | { ok: false; reason: string };
 
 class Run implements RunHandle {
   readonly events = new EventQueue();
+  private readonly abort = new AbortController();
   private cancelled = false;
   private ended = false;
-  private failed = false;
   private notes = 0;
   private lastNote = '';
   private readonly secrets = new Set<string>();
   private machine: RemoteMachine | undefined;
   private record: RunnerSessionRecord | undefined;
+  private access: ModelAccess | undefined;
+  private lease: SandboxLease | undefined;
+  private runName: string | undefined;
   private stopWatch: (() => void) | undefined;
   private renewTimer: NodeJS.Timeout | undefined;
-  private finished: Promise<void> = Promise.resolve();
+  private renewing: Promise<void> | undefined;
+  private cleanupPromise: Promise<void> | undefined;
 
   constructor(
     private readonly fleet: Fleet,
@@ -122,58 +135,55 @@ class Run implements RunHandle {
   ) {}
 
   begin(): RunHandle {
-    this.finished = this.execute();
+    void this.execute();
     return this;
   }
 
+  /**
+   * Stops the run and releases everything it holds. The release does not wait for whatever the run
+   * is in the middle of (an install, a snapshot, a provider call): those waits are cut short, and a
+   * resource that turns up afterwards is released on arrival. Every call shares one cleanup.
+   */
   async cancel(): Promise<void> {
-    if (this.ended) return;
-    this.cancelled = true;
-    if (this.machine) {
-      await this.machine
-        .kill(this.spec.taskId, { signal: AbortSignal.timeout(CANCEL_WAIT_MS) })
-        .catch(() => undefined);
+    if (!this.ended) {
+      this.cancelled = true;
+      this.abort.abort();
     }
-    this.stopWatch?.();
-    await Promise.race([
-      this.finished,
-      new Promise<void>((resolve) => setTimeout(resolve, CANCEL_WAIT_MS).unref()),
-    ]);
+    await this.cleanup();
+  }
+
+  private get signal(): AbortSignal {
+    return this.abort.signal;
   }
 
   // -- the run ---------------------------------------------------------------------------------
 
   private async execute(): Promise<void> {
     const { fleet, vendor, spec } = this;
-    let access: ModelAccess | undefined;
-    let lease: SandboxLease | undefined;
     fleet.openRuns++;
     try {
-      access = await fleet.modelAccess.issue({ taskId: spec.taskId, runner: vendor.name });
-      this.secrets.add(access.apiKey);
-      if (spec.mcp) this.secrets.add(spec.mcp.token);
       this.checkCancelled();
+      await this.guard(this.issueAccess());
 
-      const acquired = await this.prepareMachine();
-      lease = acquired.lease;
+      const acquired = await this.guard(this.prepareMachine());
       const machine = (this.machine = fleet.machine(acquired.record.machineId));
       let record = (this.record = acquired.record);
       this.startActivityLease(machine);
 
-      await fleet.ensureCli(machine, vendor);
+      await this.guard(fleet.ensureCli(machine, vendor));
       this.checkCancelled();
 
       const dir = machine.taskDir(spec.taskId);
       const resumed = this.resumePrompt !== undefined;
       if (resumed) {
-        await machine.prepare(spec.taskId);
+        await machine.prepare(spec.taskId, undefined, this.signal);
       } else {
-        await machine.prepare(spec.taskId, await readFile(spec.briefPath, 'utf8'));
+        const brief = await this.guard(readFile(spec.briefPath, 'utf8'));
+        await machine.prepare(spec.taskId, brief, this.signal);
       }
 
       let outcome = await this.turn(
-        access,
-        resumed ? (this.resumePrompt ?? '') : this.initialPrompt(dir),
+        resumed ? this.resumedPrompt(dir, this.resumePrompt ?? '') : this.initialPrompt(dir),
         resumed ? record.sessionId : undefined,
       );
       record = this.record ?? record;
@@ -185,7 +195,6 @@ class Run implements RunHandle {
           `the result file was rejected (${result.reason}); asking the agent to rewrite it`,
         );
         outcome = await this.turn(
-          access,
           `The result file at ${dir}/result.json was rejected: ${result.reason}. Write it again as ${manifestShape()}. Then stop.`,
           record.sessionId,
         );
@@ -203,29 +212,74 @@ class Run implements RunHandle {
       this.fail(errorMessage(error));
     } finally {
       this.ended = true;
-      await this.cleanup(access, lease);
-      fleet.openRuns--;
-      this.events.close();
+      await this.cleanup();
     }
   }
 
+  /**
+   * Waits for `promise`, but not past a cancel: the run gets a `CancelledError` the moment it is
+   * cancelled, and `promise` goes on without it (whatever it yields later is released by whoever
+   * produced it, see `adoptAccess` and `adoptLease`).
+   */
+  private guard<T>(promise: Promise<T>): Promise<T> {
+    if (this.signal.aborted) {
+      promise.catch(() => undefined);
+      return Promise.reject(new CancelledError());
+    }
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => reject(new CancelledError());
+      this.signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => {
+          this.signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (error) => {
+          this.signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private async issueAccess(): Promise<void> {
+    const { fleet, spec, vendor } = this;
+    const access = await fleet.modelAccess.issue({ taskId: spec.taskId, runner: vendor.name });
+    this.adoptAccess(access);
+    this.checkCancelled();
+  }
+
+  /** From here on the run owns this key; if the run is already being cleaned up, it goes at once. */
+  private adoptAccess(access: ModelAccess): void {
+    this.access = access;
+    this.secrets.add(access.apiKey);
+    if (this.spec.mcp) this.secrets.add(this.spec.mcp.token);
+    if (this.cleanupPromise) void this.step('revoke model access', () => this.releaseAccess());
+  }
+
+  private adoptLease(lease: SandboxLease): void {
+    this.lease = lease;
+    if (this.cleanupPromise) void this.step('release sandbox', () => this.releaseLease());
+  }
+
   /** Picks the machine: acquired for a new task, the recorded one (or a restore) for a resume. */
-  private async prepareMachine(): Promise<{ record: RunnerSessionRecord; lease?: SandboxLease }> {
+  private async prepareMachine(): Promise<{ record: RunnerSessionRecord }> {
     const { fleet, vendor, spec } = this;
     const tenantId = fleet.tenantOf(spec.taskId);
     if (this.resumePrompt === undefined) {
-      const lease = await fleet.sandboxes.acquire({ tenantId, taskId: spec.taskId });
+      this.adoptLease(await fleet.sandboxes.acquire({ tenantId, taskId: spec.taskId }));
+      this.checkCancelled();
       const record: RunnerSessionRecord = {
         taskId: spec.taskId,
         runner: vendor.name,
         tenantId,
-        machineId: lease.machineId,
+        machineId: (this.lease as SandboxLease).machineId,
         turns: 0,
         snapshotIds: [],
         updatedAt: fleet.now(),
       };
-      await fleet.sessions.put(record);
-      return { record, lease };
+      await fleet.updateRecord(spec.taskId, () => record);
+      return { record };
     }
 
     const existing = await fleet.sessions.get(spec.taskId);
@@ -244,19 +298,26 @@ class Run implements RunHandle {
         'cannot resume: the sandbox is gone and there is no snapshot to restore it from',
       );
     }
-    const lease = await fleet.sandboxes.restoreFromSnapshot({
-      tenantId: existing.tenantId,
-      taskId: spec.taskId,
-      snapshotId,
-    });
-    const record = { ...existing, machineId: lease.machineId, updatedAt: fleet.now() };
-    await fleet.sessions.put(record);
-    return { record, lease };
+    this.adoptLease(
+      await fleet.sandboxes.restoreFromSnapshot({
+        tenantId: existing.tenantId,
+        taskId: spec.taskId,
+        snapshotId,
+      }),
+    );
+    this.checkCancelled();
+    const machineId = (this.lease as SandboxLease).machineId;
+    const record = await fleet.updateRecord(spec.taskId, (current) => ({
+      ...(current ?? existing),
+      machineId,
+      updatedAt: fleet.now(),
+    }));
+    return { record };
   }
 
   private async machineUsable(machineId: string): Promise<boolean> {
     try {
-      const machine = await this.fleet.client.getMachine(machineId);
+      const machine = await this.fleet.client.getMachine(machineId, { signal: this.signal });
       return (
         machine.state !== 'deleted' && machine.state !== 'deleting' && machine.state !== 'error'
       );
@@ -274,22 +335,35 @@ class Run implements RunHandle {
     ].join(' ');
   }
 
+  /** A turn starts without the last turn's result.json, so a resumed turn is told to write it. */
+  private resumedPrompt(dir: string, prompt: string): string {
+    return [
+      prompt,
+      `When you are finished, write ${dir}/result.json as ${manifestShape()}.`,
+      'Write that file as the very last step, then stop. Report only what you actually did and checked.',
+    ].join('\n\n');
+  }
+
   // -- one CLI invocation ------------------------------------------------------------------------
 
-  private async turn(
-    access: ModelAccess,
-    prompt: string,
-    resumeSessionId: string | undefined,
-  ): Promise<TurnOutcome> {
+  private async turn(prompt: string, resumeSessionId: string | undefined): Promise<TurnOutcome> {
     const { fleet, vendor, spec } = this;
+    const access = this.access as ModelAccess;
     const machine = this.machine as RemoteMachine;
-    let record = this.record as RunnerSessionRecord;
-    record = { ...record, turns: record.turns + 1, updatedAt: fleet.now() };
-    this.record = record;
-    await fleet.sessions.put(record);
+    // `turns` and `sessionId` are this run's; the snapshot lists belong to the fleet.
+    const turns = (this.record as RunnerSessionRecord).turns + 1;
+    this.record = await this.guard(
+      fleet.updateRecord(spec.taskId, (current) => ({
+        ...(current ?? (this.record as RunnerSessionRecord)),
+        turns,
+        updatedAt: fleet.now(),
+      })),
+    );
+    this.checkCancelled();
 
     const dir = machine.taskDir(spec.taskId);
-    const run = `t${record.turns}`;
+    const run = `t${turns}`;
+    this.runName = run;
     const runToken = randomBytes(16).toString('hex');
     this.secrets.add(runToken);
     const mcpUrl = spec.mcp
@@ -303,32 +377,33 @@ class Run implements RunHandle {
       ...(model ? { model } : {}),
       ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
     });
-    await machine.launch({
+    const launched = await machine.launch({
       dirName: spec.taskId,
       run,
       script: buildRunScript({ preamble: preambleFor(vendor), command }),
       envs: vendor.env(access, spec.mcp?.token),
       runToken,
       workdir: `${dir}/workspace`,
+      signal: this.signal,
     });
     this.checkCancelled();
+    if (launched === 'cancelled') return { ok: false, reason: 'the start was cancelled' };
 
     const parser = vendor.parser();
     const rawTail: string[] = [];
     let guardReason: string | undefined;
     let verdict: { ok: boolean; text?: string } | undefined;
-    let buffer = '';
     let consumed = 0;
     const startedAt = fleet.now();
 
     const handleLine = (line: string): void => {
       if (line.startsWith('MAKA_GUARD: ')) {
-        guardReason = line.slice('MAKA_GUARD: '.length).trim();
+        guardReason = clipQuote(line.slice('MAKA_GUARD: '.length));
         return;
       }
       const events = parser.feed(line);
       if (events.length === 0 && line.trim() !== '' && !line.trimStart().startsWith('{')) {
-        rawTail.push(line.trim());
+        rawTail.push(clipQuote(line));
         if (rawTail.length > RAW_TAIL_LINES) rawTail.shift();
       }
       for (const event of events) {
@@ -339,6 +414,10 @@ class Run implements RunHandle {
             event.text === undefined ? { ok: event.ok } : { ok: event.ok, text: event.text };
       }
     };
+    const lines = new LineSplitter(MAX_LINE_CHARS, handleLine, () =>
+      this.progress('an output line over 1 MiB was dropped'),
+    );
+    const decoder = new StringDecoder('utf8');
 
     const watch = fleet.poller.watch(machine, { dir: spec.taskId, run });
     this.stopWatch = () => watch.stop();
@@ -346,11 +425,8 @@ class Run implements RunHandle {
       for (;;) {
         const update = await watch.next();
         this.checkCancelled();
-        buffer += update.data.toString('utf8');
+        lines.push(decoder.write(update.data));
         consumed += update.data.length;
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) handleLine(line);
 
         const state = update.state;
         if (state === 'starting' || state === 'none') {
@@ -363,7 +439,8 @@ class Run implements RunHandle {
           continue;
         }
         if (state !== 'running' && consumed >= update.size) {
-          if (buffer.trim() !== '') handleLine(buffer);
+          lines.push(decoder.end());
+          lines.end();
           const exit = typeof state === 'object' ? state.exit : undefined;
           const detail = guardReason ?? verdict?.text ?? rawTail.at(-1);
           if (exit === undefined) {
@@ -392,6 +469,12 @@ class Run implements RunHandle {
       this.stopWatch = undefined;
     }
 
+    // The turn is over: nothing it started may outlive it, and its raw output goes before the
+    // snapshot. A leftover process could otherwise write the next turn's result.
+    await this.stopProcesses(false).catch((error) =>
+      this.progress(`leftover processes could not be stopped: ${errorMessage(error)}`),
+    );
+    this.checkCancelled();
     await this.snapshot(machine);
     return { ok: true };
   }
@@ -399,18 +482,28 @@ class Run implements RunHandle {
   private async rememberSession(id: string): Promise<void> {
     const record = this.record;
     if (!record || record.sessionId === id) return;
-    this.record = { ...record, sessionId: id, updatedAt: this.fleet.now() };
-    await this.fleet.sessions.put(this.record);
+    const local = { ...record, sessionId: id, updatedAt: this.fleet.now() };
+    this.record = local;
+    await this.fleet.updateRecord(record.taskId, (current) => ({
+      ...(current ?? local),
+      sessionId: id,
+      updatedAt: local.updatedAt,
+    }));
   }
 
-  /** A snapshot that cannot be taken is reported, not fatal. */
+  /** A snapshot that cannot be taken is reported, not fatal. A cancel is not a failure to report. */
   private async snapshot(machine: RemoteMachine): Promise<void> {
     if (this.fleet.options.snapshots === false || !this.record) return;
     try {
-      const { record, snapshotId } = await this.fleet.snapshotTurn(this.record, machine);
+      const { record, snapshotId } = await this.fleet.snapshotTurn(
+        this.record,
+        machine,
+        this.signal,
+      );
       this.record = { ...record, sessionId: this.record.sessionId ?? record.sessionId };
       this.progress(`snapshot ${snapshotId} saved`);
     } catch (error) {
+      this.checkCancelled();
       this.progress(`snapshot skipped: ${errorMessage(error)}`);
     }
   }
@@ -420,7 +513,7 @@ class Run implements RunHandle {
   private async collectResult(
     machine: RemoteMachine,
   ): Promise<{ ok: true; bytes: Buffer } | { ok: false; reason: string }> {
-    const read = await machine.readResult(this.spec.taskId);
+    const read = await machine.readResult(this.spec.taskId, this.signal);
     if (!read.ok) return read;
     let json: unknown;
     try {
@@ -456,36 +549,118 @@ class Run implements RunHandle {
   // -- helpers -----------------------------------------------------------------------------------
 
   private startActivityLease(machine: RemoteMachine): void {
+    // A cancel that got here first has already deleted the lease; a timer now would renew it.
+    if (this.cleanupPromise) return;
     const ttl = this.fleet.options.leaseTtlSeconds ?? 300;
     const leaseId = this.fleet.leaseId(this.spec.taskId);
     const renew = (): void => {
-      void this.fleet.client
+      this.renewing = this.fleet.client
         .putActivityLease(machine.machineId, leaseId, ttl)
+        .then(() => undefined)
         .catch(() => undefined);
     };
     renew();
+    this.fleet.leaseRenewals++;
     this.renewTimer = setInterval(renew, (ttl * 1000) / 3);
     this.renewTimer.unref();
   }
 
-  private async cleanup(
-    access: ModelAccess | undefined,
-    lease: SandboxLease | undefined,
-  ): Promise<void> {
-    if (this.renewTimer) clearInterval(this.renewTimer);
+  /**
+   * Releases everything the run holds. Runs once, whoever asks first (the end of the run, or a
+   * cancel); later callers wait for the same promise. Each step is bounded and independent: one
+   * that fails or hangs is reported and the others still happen, and the stream always closes.
+   */
+  private cleanup(): Promise<void> {
+    this.cleanupPromise ??= this.runCleanup();
+    return this.cleanupPromise;
+  }
+
+  private async runCleanup(): Promise<void> {
+    if (this.renewTimer) {
+      clearInterval(this.renewTimer);
+      this.renewTimer = undefined;
+      this.fleet.leaseRenewals--;
+    }
     this.stopWatch?.();
-    if ((this.cancelled || this.failed) && this.machine) {
-      // A start that raced with a cancel may have launched after the cancel's own kill, and a run
-      // that failed on our side (unreachable sandbox, copy-back error) may have left its CLI going.
-      await this.machine.kill(this.spec.taskId).catch(() => undefined);
+    try {
+      await Promise.all([
+        this.step('revoke model access', () => this.releaseAccess()),
+        this.stopAndRelease(),
+      ]);
+    } finally {
+      this.fleet.openRuns--;
+      this.events.close();
     }
-    if (this.machine) {
-      await this.fleet.client
-        .deleteActivityLease(this.machine.machineId, this.fleet.leaseId(this.spec.taskId))
-        .catch(() => undefined);
+  }
+
+  /** The sandbox side: stop the processes first, then the activity lease, then give the sandbox back. */
+  private async stopAndRelease(): Promise<void> {
+    const machine = this.machine;
+    if (machine) {
+      await this.step('stop processes', () => this.stopProcesses(true));
+      await this.step('delete activity lease', async () => {
+        await this.renewing;
+        await this.fleet.client.deleteActivityLease(
+          machine.machineId,
+          this.fleet.leaseId(this.spec.taskId),
+          { signal: AbortSignal.timeout(this.cleanupTimeoutMs()) },
+        );
+      });
     }
-    await Promise.resolve(access?.revoke?.()).catch(() => undefined);
-    await Promise.resolve(lease?.release()).catch(() => undefined);
+    await this.step('release sandbox', () => this.releaseLease());
+  }
+
+  /**
+   * Stops every process of the task. With `startMayBeInFlight` it also marks the current run as
+   * cancelled, so a start whose answer has not come back yet cannot slip in after this.
+   */
+  private async stopProcesses(startMayBeInFlight: boolean): Promise<void> {
+    const machine = this.machine;
+    if (!machine) return;
+    await machine.kill(this.spec.taskId, {
+      signal: AbortSignal.timeout(this.cleanupTimeoutMs()),
+      graceTenths: Math.max(1, Math.ceil((this.fleet.options.stopGraceMs ?? 3_000) / 100)),
+      ...(startMayBeInFlight && this.runName ? { cancelRuns: [this.runName] } : {}),
+    });
+  }
+
+  private async releaseAccess(): Promise<void> {
+    const access = this.access;
+    this.access = undefined;
+    await access?.revoke?.();
+  }
+
+  private async releaseLease(): Promise<void> {
+    const lease = this.lease;
+    this.lease = undefined;
+    await lease?.release();
+  }
+
+  private cleanupTimeoutMs(): number {
+    return this.fleet.options.cleanupTimeoutMs ?? CLEANUP_STEP_MS;
+  }
+
+  /** Runs one cleanup step with a time limit. A failure is reported, never thrown. */
+  private async step(name: string, work: () => Promise<void>): Promise<void> {
+    const limit = this.cleanupTimeoutMs();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        work(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`timed out after ${limit} ms`)), limit);
+          timer.unref();
+        }),
+      ]);
+    } catch (error) {
+      try {
+        this.fleet.options.onCleanupError?.({ taskId: this.spec.taskId, step: name, error });
+      } catch {
+        // A reporting hook that throws must not stop the cleanup.
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private checkCancelled(): void {
@@ -494,12 +669,11 @@ class Run implements RunHandle {
 
   private fail(reason: string): void {
     this.ended = true;
-    this.failed = true;
-    this.events.push({ type: 'failed', reason: this.redact(reason) });
+    this.events.push({ type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) });
   }
 
   private progress(note: string): void {
-    const text = this.redact(note);
+    const text = this.redact(note, MAX_NOTE_CHARS);
     if (text === this.lastNote) return;
     if (this.notes >= (this.fleet.options.maxProgressNotes ?? DEFAULT_MAX_NOTES)) return;
     this.lastNote = text;
@@ -507,10 +681,16 @@ class Run implements RunHandle {
     this.events.push({ type: 'progress', note: text });
   }
 
-  private redact(text: string): string {
+  /** Secrets out first, then the length cap, so a cut can never leave half a secret behind. */
+  private redact(text: string, max: number): string {
     let out = text;
     for (const secret of this.secrets)
       if (secret.length >= 6) out = out.split(secret).join('[redacted]');
-    return out;
+    return out.length <= max ? out : `${out.slice(0, max - 1)}…`;
   }
+}
+
+function clipQuote(text: string): string {
+  const flat = text.trim();
+  return flat.length <= MAX_QUOTED_CHARS ? flat : `${flat.slice(0, MAX_QUOTED_CHARS - 1)}…`;
 }

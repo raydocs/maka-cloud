@@ -50,8 +50,14 @@ export interface RunnerSessionRecord {
   sessionId?: string;
   /** Number of CLI runs started for this task. */
   turns: number;
-  /** Snapshots of the machine after each turn, oldest first. Retention trims from the front. */
+  /**
+   * Snapshots of the machine that can restore this task, oldest first. A snapshot holds the whole
+   * machine, so retention is per machine: when it evicts one, every record that pointed at it
+   * is moved to the machine's newest snapshot.
+   */
   snapshotIds: string[];
+  /** When each snapshot in `snapshotIds` was taken, by id. Orders a machine's snapshots. */
+  snapshotAt?: Record<string, number>;
   updatedAt: number;
 }
 

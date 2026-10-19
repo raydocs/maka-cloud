@@ -137,7 +137,7 @@ export class MachinePoller {
     const stdin = `${active.map((w) => `${w.dir} ${w.run} ${w.offset} ${cap}`).join('\n')}\n`;
     this.pollCount++;
     const out = await machine.execOk(POLL_SCRIPT, {
-      envs: { MAKA_ROOT: machine.root },
+      envs: { MAKA_ROOT: machine.root, MAKA_LOG_ROOT: machine.logRoot },
       stdin,
       timeoutSeconds: 30,
     });

@@ -16,7 +16,13 @@ test('resume continues the recorded vendor session with the new prompt', async (
   assert.equal(terminal(events)?.type, 'finished');
   const { argv } = await h.cliCall('claude', 2);
   assert.equal(argv[argv.indexOf('--resume') + 1], 'sess-1');
-  assert.equal(argv[argv.indexOf('-p') + 1], 'Also add the tests.');
+  const prompt = argv[argv.indexOf('-p') + 1] ?? '';
+  assert.ok(prompt.startsWith('Also add the tests.'));
+  assert.match(
+    prompt,
+    /write \S+\/tsk_resume\/result\.json as a JSON object/,
+    'a resumed turn is told to write the result',
+  );
   const record = await h.sessions.get('tsk_resume');
   assert.equal(record?.turns, 2);
   assert.equal(record?.snapshotIds.length, 2);

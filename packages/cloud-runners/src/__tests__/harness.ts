@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { InstaboxClient } from '@maka-cloud/instabox';
 import { FakeInstabox, type FakeInstaboxOptions } from '@maka-cloud/instabox/testing';
 import type { RunHandle, RunnerEvent, RunSpec } from '@maka-cloud/orchestrator';
@@ -29,6 +29,8 @@ export interface Harness {
   home: string;
   /** The sandbox's work root. */
   root: string;
+  /** Where raw CLI output is kept (memory-backed in the real sandbox, /dev/shm here). */
+  logRoot: string;
   /** Host side: brief and result files. */
   handoff: string;
   spec(taskId: string, extra?: Partial<RunSpec>): Promise<RunSpec>;
@@ -50,6 +52,7 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
   const tmp = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'runners-test-')));
   const home = join(tmp, 'home');
   const root = join(tmp, 'work');
+  const logRoot = join('/dev/shm', `maka-logs-${basename(tmp)}`);
   const handoff = join(tmp, 'handoff');
   await fs.mkdir(home, { recursive: true });
   await fs.mkdir(handoff, { recursive: true });
@@ -78,8 +81,10 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
     modelAccess,
     sessions,
     workRoot: root,
+    logRoot,
     versions: { 'claude-agent-sdk': '9.9.9', codex: '9.9.9' },
     pollIntervalMs: 5,
+    stopGraceMs: 200,
     mcpUrlForSandbox: (url) => url.replace('127.0.0.1', 'orchestrator.internal'),
     ...options.cloud,
   };
@@ -119,6 +124,7 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
     tmp,
     home,
     root,
+    logRoot,
     handoff,
     async spec(taskId, extra = {}) {
       const dir = join(handoff, taskId);
@@ -153,7 +159,16 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
             .kill(dir)
             .catch(() => undefined);
       }
+      for (const pid of await fs
+        .readFile(join(home, 'fake-cli', 'children'), 'utf8')
+        .then((text) => text.split('\n').filter(Boolean).map(Number))
+        .catch(() => [] as number[])) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {}
+      }
       await fake.close();
+      await fs.rm(logRoot, { recursive: true, force: true });
       await fs.rm(tmp, { recursive: true, force: true });
     },
   };
@@ -208,4 +223,80 @@ export function reader(handle: RunHandle) {
       }
     },
   };
+}
+
+export interface Deferred<T = void> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+export function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * The outcome of `promise`, or `'stuck'` when it has not settled after `ms`. A failure detector for
+ * code that must not wait, never a way to wait for something.
+ */
+export async function settles<T>(promise: Promise<T>, ms = 8_000): Promise<T | 'stuck'> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<'stuck'>((resolve) => {
+        timer = setTimeout(() => resolve('stuck'), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Polls a condition on the event loop until it holds (readiness of something the test started). */
+export async function until(
+  condition: () => boolean | Promise<boolean>,
+  ms = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!(await condition())) {
+    if (Date.now() > deadline) throw new Error('condition not reached in time');
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+export async function exists(path: string): Promise<boolean> {
+  return await fs.access(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+/** Pids the fake CLI left behind (see `orphan` in fake-cli.ts). */
+export async function children(h: Pick<Harness, 'home'>): Promise<number[]> {
+  const text = await fs.readFile(join(h.home, 'fake-cli', 'children'), 'utf8').catch(() => '');
+  return text.split('\n').filter(Boolean).map(Number);
+}
+
+/** Files under `dirs` (recursively) whose bytes contain any of `needles`. */
+export async function filesContaining(dirs: string[], needles: string[]): Promise<string[]> {
+  const hits: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile()) {
+        const bytes = await fs.readFile(path).catch(() => Buffer.alloc(0));
+        if (needles.some((needle) => bytes.includes(needle))) hits.push(path);
+      }
+    }
+  };
+  for (const dir of dirs) await walk(dir);
+  return hits;
 }
