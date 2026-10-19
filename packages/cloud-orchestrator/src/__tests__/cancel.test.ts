@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdir } from 'node:fs/promises';
 import { test } from 'node:test';
 import { OrchestratorError, type TaskId } from '../types.js';
-import { eventually, GatedStore, type Harness, makeHarness, sleep } from './harness.js';
+import { eventQueued, eventually, GatedStore, type Harness, makeHarness } from './harness.js';
 
 async function startTree(h: Harness) {
   const conductor = h.session();
@@ -79,7 +79,7 @@ test('cancel keeps the final state of tasks that already ended', async (t) => {
   assert.equal(again.state, 'succeeded');
 });
 
-test('a parent that already ended does not shield its running children from cancel', async (t) => {
+test('a task that ends cancels the children still running below it, without a cancel call', async (t) => {
   const h = await makeHarness(t);
   const conductor = h.session();
   const parent = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'p' });
@@ -87,16 +87,56 @@ test('a parent that already ended does not shield its running children from canc
     runner: 'fake',
     brief: 'c',
   });
-  await eventually(() => h.fake.runs.length === 2, 'runs');
+  const grandchild = await h.orchestrator.delegate(h.executorSession(child.taskId), {
+    runner: 'fake',
+    brief: 'g',
+  });
+  await eventually(() => h.fake.runs.length === 3, 'runs');
   await h.fake.runFor(parent.taskId).complete();
-  await h.orchestrator.wait(conductor, parent.taskId, 2000);
-  // Cancelling the ended parent keeps its state and still stops what runs below it.
-  const view = await h.orchestrator.cancel(conductor, parent.taskId);
-  assert.equal(view.state, 'succeeded');
+  // Waiting on the descendants is the signal that the cascade ran.
+  await h.orchestrator.wait(conductor, child.taskId, 2000);
+  await h.orchestrator.wait(conductor, grandchild.taskId, 2000);
   assert.equal(h.orchestrator.status(conductor, parent.taskId).state, 'succeeded');
   assert.equal(h.orchestrator.status(conductor, child.taskId).state, 'cancelled');
+  assert.equal(h.orchestrator.status(conductor, grandchild.taskId).state, 'cancelled');
   assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
+  assert.equal(h.fake.runFor(grandchild.taskId).cancelCalls, 1);
   assert.equal(h.fake.runFor(parent.taskId).cancelCalls, 0);
+  // An explicit cancel afterwards finds nothing left to do.
+  const view = await h.orchestrator.cancel(conductor, parent.taskId);
+  assert.equal(view.state, 'succeeded');
+  assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
+});
+
+test('a task that fails cancels its descendants, deepest first', async (t) => {
+  const h = await makeHarness(t);
+  const conductor = h.session();
+  const root = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'root' });
+  const mid = await h.orchestrator.delegate(h.executorSession(root.taskId), {
+    runner: 'fake',
+    brief: 'mid',
+  });
+  const leaf = await h.orchestrator.delegate(h.executorSession(mid.taskId), {
+    runner: 'fake',
+    brief: 'leaf',
+  });
+  await eventually(() => h.fake.runs.length === 3, 'runs');
+  const cancelOrder: TaskId[] = [];
+  for (const id of [mid.taskId, leaf.taskId]) {
+    const run = h.fake.runFor(id);
+    const original = run.cancel.bind(run);
+    run.cancel = async () => {
+      cancelOrder.push(id);
+      await original();
+    };
+  }
+  h.fake.runFor(root.taskId).fail('gave up');
+  await h.orchestrator.wait(conductor, mid.taskId, 2000);
+  await h.orchestrator.wait(conductor, leaf.taskId, 2000);
+  assert.equal(h.orchestrator.status(conductor, root.taskId).state, 'failed');
+  assert.equal(h.orchestrator.status(conductor, mid.taskId).state, 'cancelled');
+  assert.equal(h.orchestrator.status(conductor, leaf.taskId).state, 'cancelled');
+  assert.deepEqual(cancelOrder, [leaf.taskId, mid.taskId]);
 });
 
 test('a runner that finishes after the cancel does not change the outcome', async (t) => {
@@ -248,9 +288,10 @@ for (const outcome of ['finishes', 'fails'] as const) {
     const release = store.holdNext('task_cancel_requested');
     const cancelling = h.orchestrator.cancel(conductor, taskId);
     await eventually(() => store.held, 'cancel request held');
+    const reported = eventQueued(h, outcome === 'finishes' ? 'task_succeeded' : 'task_failed');
     if (outcome === 'finishes') await run.complete();
     else run.fail('boom');
-    await sleep(80);
+    await reported;
     release();
 
     const view = await cancelling;
@@ -284,8 +325,9 @@ test('a runner that cannot start after the cancel was requested ends cancelled, 
   const release = store.holdNext('task_cancel_requested');
   const cancelling = h.orchestrator.cancel(conductor, taskId);
   await eventually(() => store.held, 'cancel request held');
+  const reported = eventQueued(h, 'task_failed');
   failStart();
-  await sleep(80);
+  await reported;
   release();
   assert.equal((await cancelling).state, 'cancelled');
   assert.equal(h.orchestrator.status(conductor, taskId).failureReason, undefined);

@@ -67,7 +67,7 @@ test('a task whose ancestor ended and left memory cannot delegate', async (t) =>
   assert.equal(h.fake.runs.length, 1);
 });
 
-test('cancel on an ended parent that left memory still reaches its running descendants', async (t) => {
+test('a parent that ended and left memory still cancels its running descendants', async (t) => {
   const h = await makeHarness(t);
   const conductor = h.session();
   const parent = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'p' });
@@ -81,15 +81,19 @@ test('cancel on an ended parent that left memory still reaches its running desce
   });
   await eventually(() => h.fake.runs.length === 3, 'runs');
   await finish(h, conductor, parent.taskId);
-  await finish(h, conductor, child.taskId);
-  // Only the grandchild is still in memory; both ancestors above it have ended.
-  assert.equal(h.orchestrator.stats().activeTasks, 1);
+  // The cascade finds the children through the store's index; the parent is gone from memory.
+  await h.orchestrator.wait(conductor, child.taskId, 2000);
+  await h.orchestrator.wait(conductor, grandchild.taskId, 2000);
+  assert.equal(h.orchestrator.stats().activeTasks, 0);
+  assert.equal(h.orchestrator.status(conductor, parent.taskId).state, 'succeeded');
+  assert.equal(h.orchestrator.status(conductor, child.taskId).state, 'cancelled');
+  assert.equal(h.orchestrator.status(conductor, grandchild.taskId).state, 'cancelled');
+  assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
+  assert.equal(h.fake.runFor(grandchild.taskId).cancelCalls, 1);
 
+  // Cancelling the ended parent afterwards keeps its state and finds nothing left.
   const view = await h.orchestrator.cancel(conductor, parent.taskId);
   assert.equal(view.state, 'succeeded');
-  assert.equal(h.orchestrator.status(conductor, grandchild.taskId).state, 'cancelled');
-  assert.equal(h.fake.runFor(grandchild.taskId).cancelCalls, 1);
-  assert.equal(h.orchestrator.status(conductor, child.taskId).state, 'succeeded');
 });
 
 test('cancel walks only the subtree it was asked to cancel', async (t) => {
