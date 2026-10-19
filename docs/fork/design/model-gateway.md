@@ -27,7 +27,7 @@ conductor, supervisor ──in-process fetch──▶ gateway ──master key�
   get an in-process `fetch` and a placeholder key.
 - **Two routes, one pipeline.** The HTTP server serves `POST /anthropic/v1/messages`,
   `POST /anthropic/v1/messages/count_tokens` and `POST /openai/v1/responses`. Everything else is
-  404. In-process callers use `gateway.fetchFor(port)`, which runs the same pipeline without a
+  404. In-process callers use `gateway.inProcess(input)`, which runs the same pipeline without a
   socket. There is one code path for bounds, reservation, forwarding, metering and cutting.
 
 ## Tokens
@@ -137,7 +137,7 @@ whose cost it cannot bound is refused (400), never sent.
 
 1. **PR A1:** the package, the runners on gateway tokens (sandbox env has no vendor key), gateway
    metering as the runner's `usage`, `RunSpec.budgetRootId`, the host stack and config.
-2. **PR A2:** the conductor and the supervisor verifier and summary through `fetchFor`, after the
+2. **PR A2:** the conductor and the supervisor verifier and summary through `inProcess`, after the
    conductor and supervisor follow-up PRs that touch the same files have merged.
 
 ## Not covered

@@ -137,6 +137,9 @@ class Run implements RunHandle {
   private machine: RemoteMachine | undefined;
   private record: RunnerSessionRecord | undefined;
   private access: ModelAccess | undefined;
+  /** What the gateway settled for this run's access, when the access is metered. */
+  private meteredUsd: number | undefined;
+  private stopMetering: (() => void) | undefined;
   private lease: SandboxLease | undefined;
   private runName: string | undefined;
   /** Every CLI run this object started, which are the only ones its cleanup may stop. */
@@ -280,7 +283,12 @@ class Run implements RunHandle {
 
   private async issueAccess(): Promise<void> {
     const { fleet, spec, vendor } = this;
-    const access = await fleet.modelAccess.issue({ taskId: spec.taskId, runner: vendor.name });
+    const access = await fleet.modelAccess.issue({
+      taskId: spec.taskId,
+      runner: vendor.name,
+      ...(spec.budgetUsd === undefined ? {} : { budgetUsd: spec.budgetUsd }),
+      ...(spec.budgetRootId === undefined ? {} : { budgetRootId: spec.budgetRootId }),
+    });
     this.adoptAccess(access);
     this.checkCancelled();
   }
@@ -290,7 +298,25 @@ class Run implements RunHandle {
     this.access = access;
     this.secrets.add(access.apiKey);
     if (this.spec.mcp) this.secrets.add(this.spec.mcp.token);
-    if (this.cleanupPromise) void this.step('revoke model access', () => this.releaseAccess());
+    if (this.cleanupPromise) {
+      void this.step('revoke model access', () => this.releaseAccess());
+      return;
+    }
+    const meter = access.meter;
+    if (meter) {
+      // Every request is metered when it settles, so the budget acts inside a CLI turn too.
+      this.meteredUsd = meter.spentUsd();
+      this.stopMetering = meter.subscribe((state) => {
+        this.meteredUsd = state.spentUsd;
+        if (state.exhausted && !this.budgetStop) {
+          this.budgetStop =
+            this.spec.budgetUsd === undefined
+              ? 'the model budget is used up'
+              : `budget of ${usd(this.spec.budgetUsd)} reached (${usd(state.spentUsd)} spent)`;
+        }
+        this.meter();
+      });
+    }
   }
 
   private adoptLease(lease: SandboxLease): void {
@@ -510,6 +536,9 @@ class Run implements RunHandle {
       for (const event of events) {
         if (event.kind === 'session') void this.rememberSession(event.id).catch(() => undefined);
         else if (event.kind === 'progress') this.progress(event.note);
+        // A metered access is the source of the run's spend; the CLI's own numbers are not.
+        else if ((event.kind === 'usage' || event.kind === 'cost') && this.meteredUsd !== undefined)
+          continue;
         else if (event.kind === 'usage') {
           this.callCosts.set(event.id, tokenCostUsd(event.tokens, this.prices()));
           this.meter();
@@ -598,6 +627,7 @@ class Run implements RunHandle {
   }
 
   private invocationCost(): number {
+    if (this.meteredUsd !== undefined) return 0;
     if (this.reportedTotal !== undefined) return this.reportedTotal;
     let sum = 0;
     for (const usd of this.callCosts.values()) sum += usd;
@@ -606,7 +636,8 @@ class Run implements RunHandle {
 
   /** Reports what the run has spent so far, and stops it once that reaches its budget. */
   private meter(): void {
-    const spent = Math.round((this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
+    const spent =
+      Math.round(((this.meteredUsd ?? 0) + this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
     if (spent === this.lastReportedUsd) return;
     this.lastReportedUsd = spent;
     if (!this.ended) this.events.push({ type: 'usage', costUsd: spent });
@@ -796,6 +827,8 @@ class Run implements RunHandle {
   private async releaseAccess(): Promise<void> {
     const access = this.access;
     this.access = undefined;
+    this.stopMetering?.();
+    this.stopMetering = undefined;
     await access?.revoke?.();
   }
 

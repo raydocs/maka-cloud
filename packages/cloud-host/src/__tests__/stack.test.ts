@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
-import type { CloudRunners, CloudRunnersOptions } from '@maka-cloud/runners';
+import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
 import { readStackConfig } from '../config.js';
 import { STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
 
@@ -16,14 +16,27 @@ interface Started {
   options: Partial<CloudRunnersOptions>;
   claude: FakeRunner;
   modelRequests: () => number;
+  /** The path and API key of each model request. */
+  modelKeys: string[];
   sweeps: string[][];
 }
 
-async function start(t: TestContext, publicUrl?: string): Promise<Started> {
+async function start(
+  t: TestContext,
+  publicUrl?: string,
+  env: NodeJS.ProcessEnv = {},
+): Promise<Started> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
   let requests = 0;
-  const model = createServer((_req, res) => {
+  const modelKeys: string[] = [];
+  const model = createServer((req, res) => {
     requests += 1;
+    modelKeys.push(`${req.url} ${req.headers['x-api-key'] ?? req.headers.authorization}`);
+    req.resume();
+    if (req.url?.endsWith('/count_tokens')) {
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":12}');
+      return;
+    }
     res.writeHead(500).end();
   });
   await new Promise<void>((resolve) => model.listen(0, '127.0.0.1', resolve));
@@ -40,6 +53,7 @@ async function start(t: TestContext, publicUrl?: string): Promise<Started> {
     port: 0,
   };
   config.mcp.port = 0;
+  config.gateway.port = 0;
   const claude = new FakeRunner({
     name: 'claude-agent-sdk',
     onStart: (run) => {
@@ -49,31 +63,27 @@ async function start(t: TestContext, publicUrl?: string): Promise<Started> {
   const codex = new FakeRunner({ name: 'codex' });
   const sweeps: string[][] = [];
   let options: Partial<CloudRunnersOptions> = {};
-  const stack = await startStack(
-    config,
-    {},
-    {
-      createRunners: (given) => {
-        options = given;
-        return {
-          runners: [claude, codex],
-          claude,
-          codex,
-          fleet: {},
-          sweepOrphans: async (known: Iterable<string>) => {
-            sweeps.push([...known]);
-            return { stopped: [], failed: [] };
-          },
-        } as unknown as CloudRunners;
-      },
+  const stack = await startStack(config, env, {
+    createRunners: (given) => {
+      options = given;
+      return {
+        runners: [claude, codex],
+        claude,
+        codex,
+        fleet: {},
+        sweepOrphans: async (known: Iterable<string>) => {
+          sweeps.push([...known]);
+          return { stopped: [], failed: [] };
+        },
+      } as unknown as CloudRunners;
     },
-  );
+  });
   t.after(async () => {
     await stack.close();
     await new Promise<void>((resolve) => model.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   });
-  return { stack, options, claude, modelRequests: () => requests, sweeps };
+  return { stack, options, claude, modelRequests: () => requests, modelKeys, sweeps };
 }
 
 test('starting the stack runs nothing: no model request and no task until a user posts a message', async (t) => {
@@ -105,6 +115,99 @@ test('the fleet gets the bundled cite-check tool and a resumable session store',
     options.mcpUrlForSandbox,
     undefined,
     'without a public URL the task gets the local one',
+  );
+});
+
+test('sandbox runs get a gateway token bound to their budget, never the vendor key', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+    OPENAI_API_KEY: 'sk-master-openai-not-a-key',
+  });
+  const access = options.modelAccess;
+  assert.ok(access, 'the stack hands the fleet its model access');
+  const claude = await access.issue({
+    taskId: 'tsk_one',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 0.01,
+    budgetRootId: 'tsk_one',
+  });
+  assert.match(claude.apiKey, /^mkg_/u);
+  assert.equal(claude.baseUrl, `${stack.gateway.server.url}/anthropic`);
+  assert.ok(claude.meter, 'spend is metered per request');
+  const codex = await access.issue({ taskId: 'tsk_two', runner: 'codex', budgetUsd: 1 });
+  assert.equal(codex.baseUrl, `${stack.gateway.server.url}/openai/v1`);
+  await assert.rejects(
+    access.issue({ taskId: 'tsk_three', runner: 'claude-agent-sdk' }),
+    /no budget/u,
+  );
+
+  const ask = (maxTokens: number) =>
+    fetch(`${claude.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': claude.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+  const sent = await ask(100);
+  assert.equal(sent.status, 500, 'the vendor answered');
+  await sent.arrayBuffer();
+  assert.deepEqual(
+    modelKeys,
+    ['/v1/messages sk-master-not-a-key'],
+    'the vendor key is added on the host',
+  );
+  const tooDear = await ask(64_000);
+  assert.equal(tooDear.status, 402, 'a request the budget cannot cover is refused');
+  await tooDear.arrayBuffer();
+  assert.deepEqual(
+    modelKeys.filter((line) => line.startsWith('/v1/messages ')),
+    ['/v1/messages sk-master-not-a-key'],
+    'and never reaches the vendor',
+  );
+
+  await access.revokeForTask?.('tsk_one');
+  const revoked = await ask(100);
+  assert.equal(revoked.status, 401);
+  await revoked.arrayBuffer();
+});
+
+test('a stack that fails to start closes its gateway', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const config = readStackConfig({
+    MAKA_CLOUD_DATA_DIR: dir,
+    ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+    INSTABOX_API_KEY: 'ibx-test-not-a-key',
+    INSTABOX_MACHINE_ID: 'mch_test',
+  });
+  config.gateway.port = 0;
+  let issued: Promise<ModelAccess> | undefined;
+  await assert.rejects(
+    startStack(
+      config,
+      { ANTHROPIC_API_KEY: 'sk-test-not-a-key' },
+      {
+        createRunners: (given) => {
+          issued = given.modelAccess?.issue({
+            taskId: 'tsk_early',
+            runner: 'claude-agent-sdk',
+            budgetUsd: 1,
+          });
+          throw new Error('no fleet');
+        },
+      },
+    ),
+    /no fleet/u,
+  );
+  assert.ok(issued);
+  const { baseUrl } = await issued;
+  await assert.rejects(
+    fetch(`${baseUrl}/v1/messages`, { method: 'POST', body: '{}' }),
+    /fetch failed/u,
+    'the gateway no longer listens',
   );
 });
 

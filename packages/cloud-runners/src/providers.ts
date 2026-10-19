@@ -62,10 +62,19 @@ export class TenantMachineProvider implements SandboxProvider {
   }
 }
 
+/** No model access: every run fails to start. The fleet's default, so no path falls back to a vendor key. */
+export function noModelAccess(): ModelAccessProvider {
+  return {
+    async issue(): Promise<ModelAccess> {
+      throw new Error('No model gateway is configured, so the task has no model access.');
+    },
+  };
+}
+
 /**
  * Keys from the environment: `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` for the Claude runner and
- * `OPENAI_API_KEY` / `OPENAI_BASE_URL` for Codex. One shared key, not a per-task one; the model
- * gateway replaces this with a provider that issues and revokes a key per task.
+ * `OPENAI_API_KEY` / `OPENAI_BASE_URL` for Codex. The shared vendor key goes into the sandbox, so
+ * this is for the live smoke test only; the stack uses the model gateway's per-run tokens.
  */
 export function envModelAccess(env: NodeJS.ProcessEnv = process.env): ModelAccessProvider {
   return {

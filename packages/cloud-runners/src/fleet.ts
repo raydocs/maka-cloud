@@ -10,7 +10,7 @@ import {
   type StageLimits,
 } from './machine.js';
 import { MachinePoller } from './poller.js';
-import { DEFAULT_TENANT, envModelAccess } from './providers.js';
+import { DEFAULT_TENANT, noModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
 import { MemorySessionStore, referencedSnapshotIds } from './session-store.js';
 import { errorMessage, shq } from './shell.js';
@@ -28,7 +28,11 @@ export type RunnerName = 'claude-agent-sdk' | 'codex';
 export interface CloudRunnersOptions {
   client: InstaboxClient;
   sandboxes: SandboxProvider;
-  /** Default: keys from the environment. */
+  /**
+   * Where each run gets its model key: the model gateway, with a token per run. Default: none, so
+   * every run fails to start. `envModelAccess` hands the vendor keys to the sandbox and is for the
+   * live smoke test only.
+   */
   modelAccess?: ModelAccessProvider;
   /** Default: in memory. Use `JsonFileSessionStore` for resume across restarts. */
   sessions?: RunnerSessionStore;
@@ -128,7 +132,7 @@ export class Fleet {
   constructor(readonly options: CloudRunnersOptions) {
     this.client = options.client;
     this.sandboxes = options.sandboxes;
-    this.modelAccess = options.modelAccess ?? envModelAccess();
+    this.modelAccess = options.modelAccess ?? noModelAccess();
     this.sessions = options.sessions ?? new MemorySessionStore();
     this.root = (options.workRoot ?? '/data/work').replace(/\/+$/u, '');
     this.logRoot = (options.logRoot ?? DEFAULT_LOG_ROOT).replace(/\/+$/u, '');
