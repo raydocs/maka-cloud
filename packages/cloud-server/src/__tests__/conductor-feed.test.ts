@@ -306,14 +306,17 @@ test("createHandler can reach a conversation's orchestrator session before any m
     Parameters<NonNullable<CloudServerOptions['createHandler']>>[0]['conductorAccess']
   >;
   let missing: unknown = 'unset';
+  let given: unknown;
   await h.restart({
-    createHandler: ({ conductorAccess }) => {
+    createHandler: ({ conductorAccess, orchestrator }) => {
       access = conductorAccess(conversationId);
       missing = conductorAccess('cnv_none');
+      given = orchestrator;
       return { onUserMessage: () => undefined };
     },
   });
   assert.equal(missing, undefined);
+  assert.equal(given, h.server.orchestrator, 'the handler gets the restored orchestrator');
   assert.equal(access?.mcpUrl, h.server.mcpUrl);
   const session = h.server.orchestrator.authenticate(access?.rotateToken() ?? '');
   assert.ok(session, 'the token acts as the conversation');

@@ -1,0 +1,150 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { ConfigError, describeConfig, readStackConfig } from '../config.js';
+
+const ENV = {
+  MAKA_CLOUD_DATA_DIR: '/srv/maka',
+  ANTHROPIC_API_KEY: 'sk-secret-anthropic',
+  INSTABOX_API_KEY: 'ibx-secret-instabox',
+  INSTABOX_MACHINE_ID: 'mch_1',
+};
+
+function problemsOf(env: NodeJS.ProcessEnv): readonly string[] {
+  try {
+    readStackConfig(env);
+  } catch (error) {
+    assert.ok(error instanceof ConfigError);
+    return error.problems;
+  }
+  assert.fail('expected a ConfigError');
+}
+
+test('the minimal environment gives the data layout and the defaults', () => {
+  const config = readStackConfig(ENV);
+  assert.equal(config.dbPath, '/srv/maka/cloud.db');
+  assert.equal(config.invitesPath, '/srv/maka/invites.db');
+  assert.equal(config.handoffRoot, '/srv/maka/handoff');
+  assert.equal(config.conductorRoot, '/srv/maka/conductor');
+  assert.equal(config.runnerSessionsPath, '/srv/maka/runner-sessions.json');
+  assert.equal(config.host, '127.0.0.1');
+  assert.equal(config.port, 8080);
+  assert.deepEqual(config.mcp, { host: '127.0.0.1', port: 8081 });
+  assert.deepEqual(config.conductor, { apiKey: 'sk-secret-anthropic' });
+  assert.deepEqual(config.instabox, { machineId: 'mch_1' });
+  assert.equal(config.openAiKeySet, false);
+  assert.match(config.githubTokenProblem ?? '', /MAKA_GITHUB_TOKEN is not set/);
+});
+
+test('only a fine-grained MAKA_GITHUB_TOKEN can open pull requests, and GITHUB_TOKEN is ignored', () => {
+  assert.equal(
+    readStackConfig({ ...ENV, MAKA_GITHUB_TOKEN: 'github_pat_secret' }).githubTokenProblem,
+    undefined,
+  );
+  assert.match(
+    readStackConfig({ ...ENV, MAKA_GITHUB_TOKEN: 'ghp_secret' }).githubTokenProblem ?? '',
+    /not a fine-grained token/,
+  );
+  assert.match(
+    readStackConfig({ ...ENV, GITHUB_TOKEN: 'github_pat_secret' }).githubTokenProblem ?? '',
+    /MAKA_GITHUB_TOKEN is not set/,
+  );
+});
+
+test('optional settings are read', () => {
+  const config = readStackConfig({
+    ...ENV,
+    MAKA_CLOUD_HOST: '0.0.0.0',
+    MAKA_CLOUD_PORT: '9000',
+    MAKA_CLOUD_MCP_HOST: '0.0.0.0',
+    MAKA_CLOUD_MCP_PORT: '9001',
+    MAKA_CLOUD_MCP_PUBLIC_URL: 'https://mcp.example.test/mcp',
+    ANTHROPIC_BASE_URL: 'https://gateway.example.test',
+    MAKA_CLOUD_LLM_CONNECTION_ID: 'conn-prod',
+    INSTABOX_API_URL: 'https://sandbox.example.test',
+    OPENAI_API_KEY: 'sk-secret-openai',
+  });
+  assert.equal(config.host, '0.0.0.0');
+  assert.equal(config.port, 9000);
+  assert.deepEqual(config.mcp, {
+    host: '0.0.0.0',
+    port: 9001,
+    publicUrl: 'https://mcp.example.test/mcp',
+  });
+  assert.deepEqual(config.conductor, {
+    apiKey: 'sk-secret-anthropic',
+    baseUrl: 'https://gateway.example.test',
+    connectionId: 'conn-prod',
+  });
+  assert.deepEqual(config.instabox, { machineId: 'mch_1', apiUrl: 'https://sandbox.example.test' });
+  assert.equal(config.openAiKeySet, true);
+});
+
+test('every missing required variable is reported at once', () => {
+  assert.deepEqual(problemsOf({ MAKA_CLOUD_DATA_DIR: '  ' }), [
+    'MAKA_CLOUD_DATA_DIR is not set',
+    'ANTHROPIC_API_KEY is not set',
+    'INSTABOX_API_KEY is not set',
+    'INSTABOX_MACHINE_ID is not set',
+  ]);
+});
+
+test('bad ports and URLs are refused', () => {
+  assert.deepEqual(
+    problemsOf({
+      ...ENV,
+      MAKA_CLOUD_PORT: '80a',
+      MAKA_CLOUD_MCP_PORT: '70000',
+      MAKA_CLOUD_MCP_PUBLIC_URL: 'ftp://mcp.example.test',
+      ANTHROPIC_BASE_URL: 'not a url',
+      INSTABOX_API_URL: 'https://user:pass@sandbox.example.test',
+    }),
+    [
+      'MAKA_CLOUD_PORT must be a port number from 1 to 65535',
+      'MAKA_CLOUD_MCP_PORT must be a port number from 1 to 65535',
+      'MAKA_CLOUD_MCP_PUBLIC_URL must be an http or https URL',
+      'ANTHROPIC_BASE_URL is not a URL',
+      'INSTABOX_API_URL must not carry credentials',
+    ],
+  );
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_PORT: '9000', MAKA_CLOUD_MCP_PORT: '9000' }), [
+    'MAKA_CLOUD_PORT and MAKA_CLOUD_MCP_PORT must differ',
+  ]);
+});
+
+test('the printed configuration carries no secret value', () => {
+  const lines = describeConfig(
+    readStackConfig({ ...ENV, OPENAI_API_KEY: 'sk-secret-openai' }),
+  ).join('\n');
+  assert.doesNotMatch(lines, /secret/);
+  assert.match(lines, /Codex runner key: +set/);
+});
+
+const CLI = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'cli.js');
+const run = promisify(execFile);
+
+test('"check" prints the configuration without secrets and starts nothing', async () => {
+  const { stdout, stderr } = await run(process.execPath, [CLI, 'check'], { env: ENV });
+  assert.match(stdout, /data directory: +\/srv\/maka/);
+  assert.doesNotMatch(stdout + stderr, /secret/);
+  assert.doesNotMatch(stdout, /listening/);
+});
+
+test('a missing variable or an unknown command exits with 2 and says why', async () => {
+  await assert.rejects(run(process.execPath, [CLI, 'start'], { env: {} }), (error: unknown) => {
+    const failed = error as { code: number; stderr: string };
+    assert.equal(failed.code, 2);
+    assert.match(failed.stderr, /MAKA_CLOUD_DATA_DIR is not set/);
+    assert.match(failed.stderr, /INSTABOX_MACHINE_ID is not set/);
+    return true;
+  });
+  await assert.rejects(run(process.execPath, [CLI, 'serve'], { env: ENV }), (error: unknown) => {
+    const failed = error as { code: number; stderr: string };
+    assert.equal(failed.code, 2);
+    assert.match(failed.stderr, /Usage:/);
+    return true;
+  });
+});

@@ -49,9 +49,9 @@ interface SupervisorHost {
     subscribe(listener: () => void): () => void;       // FeedHub.subscribe
   };
   publish(entry: { kind: 'inbox.item' | 'inbox.digest'; conversationId: string | null; data: unknown }): void;
-  notice(conversationId: string, text: string): void;  // the conductor's notify path (conductor.notice)
-  answers: { deliver(a: QuestionAnswer): Promise<DeliveryOutcome> };   // T5's answers route
-  budget: {                                            // T5's run ledger, see "Verification spend"
+  notifier: { interrupt(i: Interrupt): void | Promise<void> };   // conversation notice now, web push later
+  answers: { deliver(a: QuestionDelivery, signal: AbortSignal): Promise<QuestionOutcome> };   // T5's answers route
+  budget: {                                            // PR 2, over T5's Conductor.reserveSpend / settleSpend
     reserve(r: { key: string; conversationId: string; taskId: string; maxUsd: number }): { ok: true } | { ok: false };
     settle(key: string, actualUsd: number): void;      // releases the unused part
   };
@@ -87,7 +87,7 @@ properties, checked against the merged code before any T20 package code:
 | `conductor.question {questionId, reason (taste \| budget_overrun \| irreversible), question, options[{id,label}], recommended, actionRef?}` | The three conductor-raised interrupt rules read `reason` as given by code. T20 never infers a reason from text. |
 | `conductor.answered {questionId, by}` when any route answers | Closes the inbox item when the human answered inline in the web app. Without it T20 would parse the "Answer to q_…" user message, which is brittle. |
 | The answers route is idempotent per `questionId` | Re-delivery of the same answer returns success with `applied:false`; a different answer to a closed question returns 409 `already_answered` with the stored one. T5 already checks "open question" in its write chain; this makes retries safe. |
-| An optional `text` on the answers route | The free-text reply. Option-only for `irreversible`. If T5 has no `text`, the T20 server PR adds it to the route and the handler (our files). |
+| Free text with an option on the answers route | **As merged:** the text accompanies a chosen option; there is no text-only answer. Option-only (no text) for `irreversible` and `budget_overrun`. |
 | A way for T20 to put a notice into a conversation | `host.notice`, wired to the same outbox as `notify`. |
 | A ledger entry other than model spend and child reservations: `reserve(key, conversationId, taskId, maxUsd)` and `settle(key, actualUsd)` | Verification spend counts against the budget of the run that delegated the task (win, 2026-10-19). The reservation is one synchronous check-and-reserve in T5's ledger, idempotent by `key`, and still allowed after that run's turn has ended (a task can finish after its turn). Refused when the run's remaining budget is below `maxUsd`. |
 
@@ -284,7 +284,7 @@ never receives interrupt flags and cannot change them.
 
 ## Answers
 
-`POST /v1/inbox/items/:id/answer` with `{answerId, optionId | text, preconditionHash}`.
+`POST /v1/inbox/items/:id/answer` with `{answerId, optionId, text?, preconditionHash}`.
 
 1. **Claim, in one synchronous transaction:** the item is `open`, the hash
    matches, no answer exists. Insert the answer, set the item `answering`. A repeat
@@ -303,7 +303,7 @@ never receives interrupt flags and cannot change them.
    with `clientMessageId = answerId`, which T4 already makes idempotent. The
    message is built by code: a fixed template, the task id and a capped, quoted
    title, and the human's text after a delimiter. A `local` route (accept,
-   acknowledge, snooze) records the decision and sends nothing.
+   acknowledge, keep waiting) records the decision and sends nothing.
 5. **Retry with backoff** while the item is `answering`; on success close it
    (`answered`). 409 `already_answered` from the conductor with a different
    choice closes it `handled_elsewhere` and shows what was chosen. The same
@@ -410,3 +410,21 @@ Per-user scoping (T17 adds accounts; items then carry a user), the gateway ledge
 that replaces the price table (T17), web push (T9), suggestion cards (T16 reuses the item
 store, delivery and limits), live model or network runs, and any new authority
 for the supervisor over tasks or sandboxes.
+
+## As built (PR 1, core inbox)
+
+Where the package differs from the sketches above, now that T5 has merged:
+
+- T5 already exposes `Conductor.reserveSpend`/`settleSpend` and a notice path, so
+  the budget port (PR 2) and the notifier are thin adapters. Text always
+  accompanies an option; a user message dismisses an open question and emits no
+  event, so the supervisor closes its question items on a user message and on
+  refused deliveries (`not_open`, `closed`), and never posts a message over an
+  open question (`question_open`).
+- The stall options are check, cancel and "keep waiting" (local, no message);
+  there is no snooze. A low-confidence manifest is a `decision` item.
+- `stop()` does not wait for a notifier or publisher that never returns: those
+  calls carry no signal, so the supervisor stops waiting for them on abort.
+- Task history from before the supervisor's first start updates the projection
+  but raises no items; a question that is still open does.
+- The digest's `open` count excludes `finished` items, which never ask anything of the human.

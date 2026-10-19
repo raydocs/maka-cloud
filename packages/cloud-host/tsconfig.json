@@ -12,6 +12,7 @@
     { "path": "../cloud-orchestrator" },
     { "path": "../cloud-conductor" },
     { "path": "../cloud-playbooks" },
+    { "path": "../cloud-runners" },
     { "path": "../cloud-server" }
   ]
 }

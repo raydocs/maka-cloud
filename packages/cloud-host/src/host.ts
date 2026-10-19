@@ -5,6 +5,7 @@ import {
   FREE_PLAYBOOK,
   type Playbook,
 } from '@maka-cloud/conductor';
+import type { Orchestrator } from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
 import { type CloudServer, type CloudServerOptions, startCloudServer } from '@maka-cloud/server';
 import { ServerOutbox } from './outbox.js';
@@ -21,6 +22,11 @@ export interface CloudOptions extends Omit<CloudServerOptions, 'handler' | 'crea
   conductorRoot: string;
   /** Passed to the conductor; `root`, `outbox` and `orchestratorAccess` are set here. */
   conductor: Omit<ConductorOptions, 'root' | 'outbox' | 'orchestratorAccess' | 'onWarning'>;
+  /**
+   * Called with the restored orchestrator and the new conductor before the server listens, so no
+   * task or tool call can reach what it sets up first.
+   */
+  onReady?(parts: { orchestrator: Orchestrator; conductor: Conductor }): void;
 }
 
 export interface Cloud {
@@ -36,12 +42,12 @@ export interface Cloud {
  * the orchestrator endpoint is still up, so it can cancel its tasks.
  */
 export async function startCloud(options: CloudOptions): Promise<Cloud> {
-  const { conductorRoot, conductor: conductorOptions, ...serverOptions } = options;
+  const { conductorRoot, conductor: conductorOptions, onReady, ...serverOptions } = options;
   const warn = options.onWarning ?? (() => undefined);
   let conductor: Conductor | undefined;
   const server = await startCloudServer({
     ...serverOptions,
-    createHandler: async ({ publisher, conductorAccess }) => {
+    createHandler: async ({ publisher, orchestrator, conductorAccess }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
         ...conductorOptions,
@@ -51,6 +57,7 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
         onWarning: warn,
       });
       conductor = created;
+      onReady?.({ orchestrator, conductor: created });
       return {
         onUserMessage: (message, access) => created.onUserMessage(message, access),
         onAnswer: (answer, access) => created.onAnswer(answer, access),
