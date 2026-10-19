@@ -62,6 +62,12 @@ The gateway invents no ledger. A grant charges a **budget port**: `reserve(key, 
   guarantee. A run without `budgetUsd` gets no token and fails to start. What the gateway settles
   is reported back as the runner's `usage` events, so `task_cost` and the conductor's settlement of
   the delegation see the gateway's numbers.
+  Those events live only in the process, so the host also writes each runner request to a spend
+  journal (`gateway-spend.db`, SQLite, synchronous): a hold before it is sent, its cost when it
+  settles. A request the journal cannot take is refused (503) and its reservation released. At the
+  next start the orchestrator records, as `task_cost` on the tree root, what each task's grants
+  settled in earlier processes plus every hold they left open at its reserved amount, before it
+  ends the orphaned runs.
 - **Conductor.** Its requests go through `inProcess`, one grant per Maka session, closed when the
   turn or the planner ends; its own configuration holds no vendor key. Each request reserves in the
   run ledger (a `reserve` row with ref `request:<key>`) and settles there as a `model` row. A

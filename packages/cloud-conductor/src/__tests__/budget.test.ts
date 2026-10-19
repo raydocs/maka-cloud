@@ -710,3 +710,75 @@ test('a delegation cancelled while its runner is still starting keeps its reserv
   assert.equal(lateRun?.cancelled, true, 'the late run is cancelled');
   assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
 });
+
+test('a late run whose cancel fails keeps spending, and its delegation is not settled until a retried cancel succeeds', async (t) => {
+  // The runner cannot stop by id, so nothing is owed in the log: only the retried cancel stops the run.
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    orchestrator: { stopRetry: { firstMs: 1, maxMs: 1 } },
+    conductor: { limits: { stopCheckMs: 5 } },
+  });
+  const held = gate();
+  const startCalled = gate();
+  const cancelFailed = gate();
+  let cancelWorks = false;
+  let lateRun: FakeRun | undefined;
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    startCalled.open();
+    await held.promise;
+    const run = (await realStart(spec)) as FakeRun;
+    const cancel = run.cancel.bind(run);
+    run.cancel = async () => {
+      if (!cancelWorks) {
+        cancelFailed.open();
+        throw new Error('sandbox unreachable');
+      }
+      await cancel();
+    };
+    lateRun = run;
+    return run;
+  };
+  const firstCancel = gate();
+  let afterFailure = 0;
+  const askedAgain = gate();
+  const realCancel = h.orchestrator.cancel.bind(h.orchestrator);
+  h.orchestrator.cancel = async (session, taskId) => {
+    const view = await realCancel(session, taskId);
+    firstCancel.open();
+    if (lateRun && ++afterFailure === 2) askedAgain.open();
+    return view;
+  };
+  const settled = gate();
+  const realSettle = h.conductor.state.settleDelegation.bind(h.conductor.state);
+  h.conductor.state.settleDelegation = (key, actualUsd) => {
+    const result = realSettle(key, actualUsd);
+    settled.open();
+    return result;
+  };
+  h.model.script('planner', plan);
+  h.model.script('conductor', startResearch, calls(delegate(2)), async () => {
+    await startCalled.promise;
+    return text('Done.');
+  });
+  await h.send('cnv_1', 'Research.');
+  // The run is over, so its task is cancelled while its runner is still starting. The late run's
+  // cancel then fails, and the run keeps spending.
+  await firstCancel.promise;
+  held.open();
+  await cancelFailed.promise;
+  lateRun?.usage(1.4);
+  const first = await Promise.race([
+    askedAgain.promise.then(() => 'held'),
+    settled.promise.then(() => 'settled'),
+  ]);
+  assert.equal(first, 'held', 'not settled while the late run may still go');
+  const [delegation] = h.conductor.state.unsettledDelegations();
+  assert.ok(delegation, 'the delegation is not settled');
+  assert.equal(h.conductor.state.budget(delegation.runId).reservedUsd, 2);
+
+  cancelWorks = true;
+  await settled.promise;
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+  assert.equal(h.conductor.state.budget(delegation.runId).taskUsd, 1.4, 'what the run spent');
+});

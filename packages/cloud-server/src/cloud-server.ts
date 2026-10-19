@@ -131,7 +131,10 @@ export interface CloudServerOptions {
   port?: number;
   mcp?: OrchestratorServerOptions;
   http?: Partial<HttpLimits>;
-  orchestrator?: Pick<OrchestratorOptions, 'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry'>;
+  orchestrator?: Pick<
+    OrchestratorOptions,
+    'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend'
+  >;
   handler?: ConversationHandler;
   /**
    * Builds the handler once the database is open, with the publisher it posts

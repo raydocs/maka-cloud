@@ -79,30 +79,27 @@ export function outputTokensFor(model: VerifierModel, claims: number): number {
 
 /**
  * The request: claims and evidence as quoted data in blocks closed by a marker
- * that evidence cannot contain. The evidence is clipped so the whole request
- * stays inside the model's input cap.
+ * that evidence cannot contain. Every claim goes whole and so does every quote:
+ * a request that would not fit the model's input cap is not made (undefined),
+ * because a claim judged on part of its text or without its quote has not been
+ * checked.
  */
 export function buildRequest(
   model: VerifierModel,
   claims: readonly ModelClaim[],
   evidence: readonly ModelEvidence[],
-): VerifierRequest {
+): VerifierRequest | undefined {
   const marker = `DATA-${randomBytes(9).toString('hex')}`;
   const header = `CLAIMS\n${marker}\n${JSON.stringify(claims)}\n${marker}\nEVIDENCE`;
-  let budget = Math.max(0, model.maxInputChars - INSTRUCTIONS.length - header.length - 200);
-  const blocks: string[] = [];
-  for (const item of evidence) {
-    if (budget <= 200) break;
-    const text = item.text.replaceAll(marker, '');
-    const overhead = marker.length * 2 + item.ref.length + 40;
-    const room = Math.max(0, budget - overhead);
-    const clipped = text.length > room ? `${text.slice(0, room)}\n[truncated]` : text;
-    blocks.push(`${item.ref}\n${marker}\n${JSON.stringify(clipped)}\n${marker}`);
-    budget -= overhead + clipped.length;
-  }
+  const blocks = evidence.map(
+    (item) =>
+      `${item.ref}\n${marker}\n${JSON.stringify(item.text.replaceAll(marker, ''))}\n${marker}`,
+  );
+  const prompt = `${header}\n${blocks.join('\n')}`;
+  if (INSTRUCTIONS.length + prompt.length > model.maxInputChars) return undefined;
   return {
     instructions: INSTRUCTIONS,
-    prompt: `${header}\n${blocks.join('\n')}`,
+    prompt,
     maxOutputTokens: outputTokensFor(model, claims.length),
   };
 }

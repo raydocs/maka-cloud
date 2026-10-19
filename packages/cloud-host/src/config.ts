@@ -17,6 +17,8 @@ export interface StackConfig {
   codingDeliveriesPath: string;
   /** The supervisor's own database. */
   supervisorDbPath: string;
+  /** The model gateway's journal of what tasks spent, read back after a restart. */
+  gatewaySpendPath: string;
   host: string;
   port: number;
   mcp: {
@@ -25,9 +27,8 @@ export interface StackConfig {
     /** The orchestrator's MCP URL as the sandbox reaches it. Without it, tasks get the local URL. */
     publicUrl?: string;
   };
+  /** The conductor reaches the model through the gateway, which alone holds the vendor key. */
   conductor: {
-    apiKey: string;
-    baseUrl?: string;
     connectionId?: string;
   };
   instabox: {
@@ -76,7 +77,10 @@ export const ENV_VARIABLES = [
   ['MAKA_CLOUD_MCP_HOST', 'orchestrator MCP host (default 127.0.0.1)'],
   ['MAKA_CLOUD_MCP_PORT', 'orchestrator MCP port (default 8081)'],
   ['MAKA_CLOUD_MCP_PUBLIC_URL', 'the MCP URL as the sandbox reaches it (http or https)'],
-  ['ANTHROPIC_API_KEY', 'required: the conductor’s key, and the model gateway’s for Claude runs'],
+  [
+    'ANTHROPIC_API_KEY',
+    'required: the model gateway’s key for Claude (the conductor, checks and runs go through it)',
+  ],
   ['ANTHROPIC_BASE_URL', 'Messages API base URL, for the conductor and the model gateway'],
   ['MAKA_CLOUD_LLM_CONNECTION_ID', 'stable id of the conductor’s model connection'],
   ['INSTABOX_API_KEY', 'required: sandbox API key'],
@@ -163,13 +167,14 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
     codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
     supervisorDbPath: join(dataDir, 'supervisor.db'),
+    gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
     host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
     port: port('MAKA_CLOUD_PORT', 8080),
     mcp: {
       host: value('MAKA_CLOUD_MCP_HOST') ?? '127.0.0.1',
       port: port('MAKA_CLOUD_MCP_PORT', 8081),
     },
-    conductor: { apiKey: required('ANTHROPIC_API_KEY') },
+    conductor: {},
     instabox: { machineId: '' },
     gateway: {
       host: value('MAKA_CLOUD_GATEWAY_HOST') ?? '127.0.0.1',
@@ -184,11 +189,10 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
   if (github !== undefined) config.githubTokenProblem = github;
   const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
   if (publicUrl !== undefined) config.mcp.publicUrl = publicUrl;
+  // Checked here, read only by the gateway: the key is kept out of the config the stack passes on.
+  required('ANTHROPIC_API_KEY');
   const baseUrl = url('ANTHROPIC_BASE_URL');
-  if (baseUrl !== undefined) {
-    config.conductor.baseUrl = baseUrl;
-    config.gateway.anthropicBaseUrl = baseUrl;
-  }
+  if (baseUrl !== undefined) config.gateway.anthropicBaseUrl = baseUrl;
   const openAiBaseUrl = url('OPENAI_BASE_URL');
   if (openAiBaseUrl !== undefined) config.gateway.openAiBaseUrl = openAiBaseUrl;
   const searchBaseUrl = url('DEEPSEEK_BASE_URL');
@@ -259,7 +263,7 @@ export function describeConfig(config: StackConfig): string[] {
     `public API:          http://${config.host}:${config.port}`,
     `orchestrator MCP:    http://${config.mcp.host}:${config.mcp.port}/mcp`,
     `MCP URL for tasks:   ${config.mcp.publicUrl ?? '(not set: tasks get the local URL)'}`,
-    `model API base URL:  ${config.conductor.baseUrl ?? '(default)'}`,
+    `model API base URL:  ${config.gateway.anthropicBaseUrl ?? '(default)'}`,
     `model connection id: ${config.conductor.connectionId ?? '(default)'}`,
     `sandbox machine:     ${config.instabox.machineId}`,
     `sandbox API URL:     ${config.instabox.apiUrl ?? '(default)'}`,

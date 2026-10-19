@@ -225,6 +225,10 @@ export class Conductor {
    * crash. Outbox events not acked yet are sent again.
    */
   static async create(options: ConductorOptions): Promise<Conductor> {
+    // Fail closed: no gateway means no worst-case reservation before a request, so no start.
+    if (!options.access.gateway && options.access.unmeteredTestAccess !== true) {
+      throw new Error('The conductor needs the model gateway to call a model.');
+    }
     const conductor = new Conductor(options);
     try {
       for (const run of conductor.state.runsInState('active')) {

@@ -13,7 +13,8 @@ const summary: CiteCheckSummary = {
   judged: 6,
 };
 
-const EXPORTED = 'runner-exported: out/report.md out/report.html out/verification.json';
+const EXPORTED =
+  'runner-exported: out/report.md out/report.html out/report.json out/verification.json';
 
 function manifest(overrides: Partial<Manifest> = {}): Manifest {
   return {
@@ -22,7 +23,7 @@ function manifest(overrides: Partial<Manifest> = {}): Manifest {
     notDone: [],
     confidence: 'high',
     knownIssues: [],
-    artifacts: ['out/report.md', 'out/report.html', 'out/verification.json'],
+    artifacts: ['out/report.md', 'out/report.html', 'out/report.json', 'out/verification.json'],
     ...overrides,
   };
 }
@@ -56,6 +57,14 @@ describe('verifyResearchManifest', () => {
     assert.equal(verdict.ok, false);
     assert.match(verdict.problems.join(), /report\.html/);
     assert.equal(verifyResearchManifest(manifest({ artifacts: undefined })).ok, false);
+  });
+
+  test('a manifest that does not list report.json fails', () => {
+    const verdict = verifyResearchManifest(
+      manifest({ artifacts: ['out/report.md', 'out/report.html', 'out/verification.json'] }),
+    );
+    assert.equal(verdict.ok, false);
+    assert.deepEqual(verdict.problems, ['artifacts do not list: report.json']);
   });
 
   test('no cite-check line fails', () => {
@@ -97,20 +106,32 @@ describe('verifyResearchManifest', () => {
       'done has more than one runner-exported line',
     ]);
     // A file the runner did not export is named, wherever the others live.
-    assert.deepEqual(problems([cite, 'runner-exported: out/report.md out/report.html']), [
-      'the runner did not export: verification.json',
-    ]);
+    assert.deepEqual(
+      problems([cite, 'runner-exported: out/report.md out/report.html out/report.json']),
+      ['the runner did not export: verification.json'],
+    );
     assert.deepEqual(problems([cite, 'runner-exported: out/verification.json']), [
-      'the runner did not export: report.md, report.html',
+      'the runner did not export: report.md, report.html, report.json',
     ]);
     assert.deepEqual(problems([cite, 'runner-exported:']), [
-      'the runner did not export: report.md, report.html, verification.json',
+      'the runner did not export: report.md, report.html, report.json, verification.json',
     ]);
+    // The checked report.json is required: a later independent check reads it.
+    assert.deepEqual(
+      problems([cite, 'runner-exported: out/report.md out/report.html out/verification.json']),
+      ['the runner did not export: report.json'],
+    );
     // Listing a file in artifacts is not the same as having it exported.
     assert.deepEqual(problems([cite, 'runner-exported: notes.md']).length, 1);
-    assert.deepEqual(problems([cite, 'x/report.md x/report.html x/verification.json']).length, 1);
     assert.deepEqual(
-      problems([cite, 'runner-exported: a/report.md b/report.html c/verification.json']),
+      problems([cite, 'x/report.md x/report.html x/report.json x/verification.json']).length,
+      1,
+    );
+    assert.deepEqual(
+      problems([
+        cite,
+        'runner-exported: a/report.md b/report.html c/report.json d/verification.json',
+      ]),
       [],
     );
   });
@@ -176,4 +197,24 @@ test('the research playbook has the conductor Playbook shape and tells the condu
     assert.ok(steps.includes(needle), needle);
   }
   assert.equal(playbook.verify(manifest()).ok, true);
+});
+
+test('every maka-artifacts line in the steps asks for out/report.json, and the contract lists it', () => {
+  const steps = researchPlaybook.steps.join('\n');
+  const lines = [...steps.matchAll(/maka-artifacts: ([^`]*)`/g)]
+    .map((match) => (match[1] as string).trim())
+    .filter((line) => line.startsWith('out/'));
+  assert.equal(lines.length, 2, 'the drafting brief and the rerun brief');
+  for (const line of lines) {
+    assert.deepEqual(line.split(' '), [
+      'out/report.md',
+      'out/report.html',
+      'out/report.json',
+      'out/verification.json',
+    ]);
+  }
+  assert.match(
+    steps,
+    /List out\/report\.md, out\/report\.html, out\/report\.json and out\/verification\.json in artifacts/,
+  );
 });

@@ -503,3 +503,54 @@ test('checking again queues a new attempt under a new key and ends in a pass whe
   assert.equal(again.ok, false);
   await r.stop();
 });
+
+test('the model is given every claim of the manifest whole, past the old 400-character clip', async () => {
+  const w = world();
+  codingFiles(w, 't1');
+  const r = await verifyRig(w);
+  const done = `added src/a.ts${' and kept every other file as it was'.repeat(30)}`;
+  await finishTask(r, 't1', manifestOf({ done: [done, 'tests pass'] }));
+  const request = w.openai.requests[0] as { prompt: string };
+  const match = /CLAIMS\n(DATA-[0-9a-f]+)\n(.*)\n\1\nEVIDENCE/su.exec(request.prompt);
+  const claims = JSON.parse(match?.[2] ?? '[]') as Array<{ id: string; text: string }>;
+  assert.equal(claims.find((claim) => claim.id === 'done1')?.text, done);
+  assert.equal(itemsOf(r, 'finished').length, 1);
+  await r.stop();
+});
+
+test('a change the check cannot read whole is not checked on part of it', async () => {
+  for (const [label, setup] of [
+    [
+      'a patch past the limit',
+      (w: ReturnType<typeof world>) =>
+        codingFiles(w, 't1', { patch: `--- /dev/null\n+++ b/src/a.ts\n${'+x\n'.repeat(14_000)}` }),
+    ],
+    [
+      'more changed files than the check lists',
+      (w: ReturnType<typeof world>) =>
+        codingFiles(w, 't1', {
+          files: Array.from({ length: 201 }, (_, i) => ({ path: `src/f${i}.ts`, content: 'x\n' })),
+        }),
+    ],
+  ] as const) {
+    const w = world();
+    setup(w);
+    const r = await verifyRig(w);
+    await finishTask(r, 't1');
+    assert.equal(w.openai.requests.length, 0, `${label}: nothing was sent cut`);
+    assert.equal(itemsOf(r, 'finished').length, 0, `${label}: never "independently checked"`);
+    assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /go unchecked/, label);
+    await r.stop();
+  }
+});
+
+test('claims that do not fit the model whole are not sent cut', async () => {
+  const w = world();
+  codingFiles(w, 't1');
+  const r = await verifyRig(w);
+  await finishTask(r, 't1', manifestOf({ summary: 'Added the constant a. '.repeat(3_000) }));
+  assert.equal(w.openai.requests.length, 0);
+  assert.equal(itemsOf(r, 'finished').length, 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /too large/);
+  await r.stop();
+});
