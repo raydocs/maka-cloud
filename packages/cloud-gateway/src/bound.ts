@@ -1,4 +1,3 @@
-import { dataUrlBytes, imageSize } from './image.js';
 import type { ModelPrice, Vendor } from './pricing.js';
 import { CACHE_WRITE_1H, CACHE_WRITE_5M } from './pricing.js';
 
@@ -6,22 +5,12 @@ import { CACHE_WRITE_1H, CACHE_WRITE_5M } from './pricing.js';
 export interface BoundLimits {
   /** Tokens added to every request for what the vendor adds and the body does not show. */
   requestOverheadTokens: number;
-  /** Tokens added to each image whatever its size. */
-  imageBaseTokens: number;
-  /**
-   * Tokens per 32×32 patch of an image at the size its file declares. With `imageBaseTokens` it
-   * covers what every model charges for an image at any detail level, since the vendors bill an
-   * image by its pixels and only ever scale it down.
-   */
-  imagePatchTokens: number;
   /** Added to a vendor's token count, as a fraction of it: the count is an estimate. */
   countMargin: number;
 }
 
 export const DEFAULT_BOUND_LIMITS: BoundLimits = {
   requestOverheadTokens: 4_000,
-  imageBaseTokens: 300,
-  imagePatchTokens: 3,
   countMargin: 0.1,
 };
 
@@ -37,8 +26,6 @@ export type Bounded =
       outputTokens: number;
       /** The dearest rate an input token can be billed at, as a multiple of the input price. */
       inputMultiplier: number;
-      /** The size cannot bound the input (a document, an image by reference): count it first. */
-      mustCount: boolean;
       /** The request asks for a one-hour cache. */
       oneHourCache: boolean;
       stream: boolean;
@@ -122,17 +109,12 @@ function localOpenAITool(tool: unknown): boolean {
   );
 }
 
-/** The input bound of an image of this size. */
-function imageTokens(width: number, height: number, limits: BoundLimits): number {
-  const patches = Math.ceil(width / 32) * Math.ceil(height / 32);
-  return limits.imageBaseTokens + patches * limits.imagePatchTokens;
-}
-
-/** The input bound of an image file, or undefined when its size cannot be read. */
-function imageFileTokens(bytes: Uint8Array | undefined, limits: BoundLimits): number | undefined {
-  const size = bytes === undefined ? undefined : imageSize(bytes);
-  return size === undefined ? undefined : imageTokens(size.width, size.height, limits);
-}
+/**
+ * Images and files are refused: what a model bills for one depends on the model and the detail
+ * level (tile-based models bill far more than their pixels suggest), and no rule is verified for
+ * every model. Coding and research send text only.
+ */
+const NO_IMAGES = 'images and files are not allowed';
 
 function unknownField(body: Json, allowed: ReadonlySet<string>): string | undefined {
   return Object.keys(body).find((key) => !allowed.has(key));
@@ -161,9 +143,8 @@ function outputCap(value: unknown, price: ModelPrice): number | string {
 }
 
 /**
- * The worst case of a Messages API request, or why it has none. Bytes bound text; an inline image
- * gets a bound from its pixel size; a document, a remote image or one whose size cannot be read
- * needs the vendor's count.
+ * The worst case of a Messages API request, or why it has none. Bytes bound text, including a
+ * document whose source is text; an image or any other document is refused.
  */
 export function boundAnthropic(
   raw: Uint8Array,
@@ -191,8 +172,6 @@ export function boundAnthropic(
     if (!ok) return { ok: false, reason: 'only context edits that clear content are allowed' };
   }
 
-  let imageBound = 0;
-  let mustCount = false;
   let oneHour = false;
   let refusal: string | undefined;
   const cached = (value: unknown): void => {
@@ -205,23 +184,16 @@ export function boundAnthropic(
     cached(block);
     const source = isObject(block.source) ? block.source : undefined;
     switch (block.type) {
-      case 'image': {
-        const tokens =
-          source?.type === 'base64' && typeof source.data === 'string'
-            ? imageFileTokens(Buffer.from(source.data, 'base64'), limits)
-            : undefined;
-        // A remote image, or one whose size the header does not give: the count covers it.
-        if (tokens === undefined) mustCount = true;
-        else imageBound += tokens;
+      case 'image':
+        refusal = NO_IMAGES;
         break;
-      }
       case 'document':
         if (source?.type === 'text') break;
         if (source?.type === 'content') {
           for (const inner of list(source.content)) visit(inner);
           break;
         }
-        mustCount = true;
+        refusal = NO_IMAGES;
         break;
       case 'tool_result':
       case 'search_result':
@@ -254,10 +226,9 @@ export function boundAnthropic(
     ok: true,
     price,
     body: raw,
-    inputTokens: raw.byteLength + limits.requestOverheadTokens + imageBound,
+    inputTokens: raw.byteLength + limits.requestOverheadTokens,
     outputTokens: output,
     inputMultiplier: oneHour ? CACHE_WRITE_1H : CACHE_WRITE_5M,
-    mustCount,
     oneHourCache: oneHour,
     stream: body.stream === true,
   };
@@ -285,8 +256,8 @@ export function boundOpenAI(
     if (!localOpenAITool(tool)) return { ok: false, reason: 'hosted tools are not allowed' };
   }
 
-  const images = openAIImages(body.input, limits);
-  if (typeof images === 'string') return { ok: false, reason: images };
+  const content = refusedContent(body.input);
+  if (content !== undefined) return { ok: false, reason: content };
 
   let sent = raw;
   let output: number | string;
@@ -302,22 +273,19 @@ export function boundOpenAI(
     ok: true,
     price,
     body: sent,
-    inputTokens: sent.byteLength + limits.requestOverheadTokens + images,
+    inputTokens: sent.byteLength + limits.requestOverheadTokens,
     outputTokens: output,
     inputMultiplier: 1,
-    mustCount: false,
     oneHourCache: false,
     stream: body.stream === true,
   };
 }
 
 /**
- * The input bound of the images anywhere in a Responses input (message content, tool outputs),
- * or why the input has none. Only inline images whose header gives their size are taken: a URL
- * or a file reference is content the body does not show.
+ * Why a Responses input cannot be bounded by its bytes, if it cannot: an image or a file anywhere
+ * (message content, tool outputs), or a stored item.
  */
-function openAIImages(input: unknown, limits: BoundLimits): number | string {
-  let tokens = 0;
+function refusedContent(input: unknown): string | undefined {
   const stack: unknown[] = [input];
   while (stack.length > 0) {
     const node = stack.pop();
@@ -330,22 +298,9 @@ function openAIImages(input: unknown, limits: BoundLimits): number | string {
       case 'item_reference':
         return 'stored items are not allowed';
       case 'input_file':
-        return 'input files are not allowed';
       case 'input_image':
-      case 'computer_screenshot': {
-        if (node.file_id !== undefined && node.file_id !== null) {
-          return 'images must be sent inline, not as a file reference';
-        }
-        const url = typeof node.image_url === 'string' ? node.image_url : '';
-        const bound = imageFileTokens(dataUrlBytes(url), limits);
-        if (bound === undefined) {
-          return url.startsWith('data:')
-            ? 'an image is not a PNG, JPEG, GIF or WebP file whose size can be read'
-            : 'images must be sent inline, not as a URL';
-        }
-        tokens += bound;
-        continue;
-      }
+      case 'computer_screenshot':
+        return NO_IMAGES;
       default:
         break;
     }
@@ -353,7 +308,7 @@ function openAIImages(input: unknown, limits: BoundLimits): number | string {
       if (typeof value === 'object' && value !== null) stack.push(value);
     }
   }
-  return tokens;
+  return undefined;
 }
 
 /** The input bound from a vendor's count of the request. */

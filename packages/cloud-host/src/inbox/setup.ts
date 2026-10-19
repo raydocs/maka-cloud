@@ -15,8 +15,6 @@ import { artifactEvidence } from './evidence.js';
 import {
   createGatewaySummaryModel,
   createGatewayVerifierModel,
-  createSummaryModel,
-  createVerifierModel,
   dailyLimit,
   type ModelDeps,
   SUMMARY_DAILY_CAP_USD,
@@ -33,13 +31,10 @@ export interface InboxSetup {
   /** The supervisor's own database. */
   dbPath: string;
   config: InboxConfig;
-  env: NodeJS.ProcessEnv;
-  /** Base URL of the Messages API for the summary model, when a gateway is used. */
-  anthropicBaseUrl?: string;
   /**
-   * The model gateway. With it, the checks and the digest summary reach the vendors through it,
-   * each request reserved at its worst case first; without it they call the vendors with the
-   * keys in `env`.
+   * The model gateway. The checks and the digest summary reach the vendors only through it, each
+   * request reserved at its worst case first. Without it the inbox does not start, unless a test
+   * injects every model it would build.
    */
   gateway?: Gateway;
   /** Replaces what is built from the config, for tests. */
@@ -72,28 +67,27 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     onWarning: parts.onWarning,
   };
   const gateway = setup.gateway;
+  // Never a vendor key as a fallback: a model the inbox builds goes through the gateway.
+  if (
+    gateway === undefined &&
+    (override.summary === undefined ||
+      (override.models === undefined && setup.config.verifierModels.length > 0))
+  ) {
+    throw new Error('The inbox needs the model gateway to call a model.');
+  }
   const models =
     override.models ??
     setup.config.verifierModels.map((entry) =>
-      gateway
-        ? createGatewayVerifierModel(entry, gateway, override.modelDeps)
-        : createVerifierModel(entry, setup.env, override.modelDeps),
+      createGatewayVerifierModel(entry, gateway as Gateway, override.modelDeps),
     );
   const summary =
     override.summary ??
-    (gateway
-      ? createGatewaySummaryModel(
-          setup.config.summaryModel,
-          gateway,
-          dailyLimit(SUMMARY_DAILY_CAP_USD),
-          override.modelDeps,
-        )
-      : createSummaryModel(
-          setup.config.summaryModel,
-          setup.env,
-          setup.anthropicBaseUrl,
-          override.modelDeps,
-        ));
+    createGatewaySummaryModel(
+      setup.config.summaryModel,
+      gateway as Gateway,
+      dailyLimit(SUMMARY_DAILY_CAP_USD),
+      override.modelDeps,
+    );
   const supervisor = await Supervisor.start({
     dbPath: setup.dbPath,
     host,

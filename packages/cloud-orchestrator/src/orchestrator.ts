@@ -813,6 +813,9 @@ export class Orchestrator {
     // progress has no handle to stop. Anything that is stopping gets the late
     // handle cancelled here, because nothing else knows about it.
     if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
+      // Its stream is read for what the run spent, the spend that settles during the cancel
+      // included; the cancel ends the stream.
+      const spend = this.drainSpend(taskId, handle);
       // Still counted as starting while the cancel is out, so a task that ends
       // meanwhile owes a stop. One that failed is owed before that is cleared.
       let cancelled = false;
@@ -822,7 +825,7 @@ export class Orchestrator {
       } finally {
         this.starting.delete(taskId);
       }
-      if (cancelled) await this.recordStopped(taskId);
+      if (cancelled) await Promise.all([spend, this.recordStopped(taskId)]);
       return;
     }
     this.handles.set(taskId, handle);
@@ -831,10 +834,27 @@ export class Orchestrator {
       if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
         throw new Superseded();
     });
-    // Dropped: whatever is stopping the task also holds the handle now.
-    if (!started) return;
+    // Dropped: whatever is stopping the task also holds the handle now and ends its stream; the
+    // spend the run reports until then is still recorded.
+    if (!started) {
+      void this.drainSpend(taskId, handle);
+      return;
+    }
     // pump records its own failures; a store failure has nowhere left to report.
     void this.pump(taskId, handle).catch(() => undefined);
+  }
+
+  /** Records the spend a run reports until its stream ends; nothing else it reports counts. */
+  private async drainSpend(taskId: TaskId, handle: RunHandle): Promise<void> {
+    try {
+      for await (const event of handle.events) {
+        if (event.type !== 'usage') continue;
+        if (!Number.isFinite(event.costUsd) || event.costUsd < 0) continue;
+        await this.recordSpend(taskId, event.costUsd);
+      }
+    } catch {
+      // The stream broke: there is nothing more to read.
+    }
   }
 
   private async pump(taskId: TaskId, handle: RunHandle): Promise<void> {

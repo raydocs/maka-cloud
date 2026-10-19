@@ -142,6 +142,12 @@ class Run implements RunHandle {
   /** What the gateway settled for this run's access, when the access is metered. */
   private meteredUsd: number | undefined;
   private stopMetering: (() => void) | undefined;
+  /**
+   * The release of a metered access, shared by every caller until it has settled: the stream
+   * stays open for its final spend, past a step's time limit too. An unmetered access has no spend
+   * to wait for, so its release is only ever waited for within the time limit.
+   */
+  private releasing: Promise<void> | undefined;
   private lease: SandboxLease | undefined;
   private runName: string | undefined;
   /** Every CLI run this object started, which are the only ones its cleanup may stop. */
@@ -254,6 +260,8 @@ class Run implements RunHandle {
       // The last requests settle and their spend is reported before the end is.
       if (this.terminal !== undefined && this.access?.meter) {
         await this.step('revoke model access', () => this.releaseAccess());
+        // A revoke past its time limit is reported, and still waited for: its cost comes first.
+        await this.releasing;
       }
       this.ended = true;
       if (this.terminal !== undefined && !this.cancelled) this.events.push(this.terminal);
@@ -794,6 +802,8 @@ class Run implements RunHandle {
         this.stopAndRelease(),
       ]);
     } finally {
+      // The final cost is queued before the stream closes, even after a step's time limit.
+      await this.releasing;
       this.fleet.openRuns--;
       this.events.close();
     }
@@ -835,21 +845,31 @@ class Run implements RunHandle {
 
   /**
    * Revokes the access. A metered revoke resolves once every request has settled, so the spend
-   * read after it is final; it is reported before the meter is let go.
+   * read after it is final; it is reported before the meter is let go. For a metered access every
+   * caller gets the same release, so none returns (and lets the stream close) before the final
+   * spend is queued.
    */
-  private async releaseAccess(): Promise<void> {
+  private releaseAccess(): Promise<void> {
     const access = this.access;
+    if (access === undefined) return this.releasing ?? Promise.resolve();
     this.access = undefined;
-    try {
-      await access?.revoke?.();
-      if (access?.meter && this.meteredUsd !== undefined) {
-        this.meteredUsd = access.meter.spentUsd();
-        this.meter(true);
+    const previous = this.releasing ?? Promise.resolve();
+    const release = (async () => {
+      await previous;
+      try {
+        await access.revoke?.();
+        if (access.meter && this.meteredUsd !== undefined) {
+          this.meteredUsd = access.meter.spentUsd();
+          this.meter(true);
+        }
+      } finally {
+        this.stopMetering?.();
+        this.stopMetering = undefined;
       }
-    } finally {
-      this.stopMetering?.();
-      this.stopMetering = undefined;
-    }
+    })();
+    // The waiters only need it to have ended; a failed revoke is reported by its step.
+    if (access.meter) this.releasing = release.catch(() => undefined);
+    return release;
   }
 
   private async releaseLease(): Promise<void> {

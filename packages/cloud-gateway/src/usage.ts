@@ -14,10 +14,24 @@ function isObject(value: unknown): value is Json {
 /** A count that is not a finite, non-negative number. */
 const INVALID = Symbol('invalid');
 
-/** A token count; absent (`undefined` or `null`) and malformed are told apart. */
-function count(value: unknown): number | undefined | typeof INVALID {
+type Count = number | undefined | typeof INVALID;
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/** A count the field must carry: anything but a number (absent and `null` included) is invalid. */
+function required(value: unknown): number | typeof INVALID {
+  return isCount(value) ? value : INVALID;
+}
+
+/**
+ * A count the vendor may leave out: absent or `null` is "not given", which is only allowed where
+ * the vendor's API documents it as nullable.
+ */
+function optional(value: unknown): Count {
   if (value === undefined || value === null) return undefined;
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : INVALID;
+  return isCount(value) ? value : INVALID;
 }
 
 /**
@@ -77,7 +91,9 @@ export class UsageTracker {
       if (this.jsonBytes > MAX_JSON_BYTES) return;
       try {
         const body: unknown = JSON.parse(Buffer.concat(this.json).toString('utf8'));
-        if (isObject(body)) this.read(body.usage, true);
+        if (!isObject(body)) return;
+        if (this.vendor === 'anthropic') this.anthropic(body.usage, 'body');
+        else this.openAI(body.usage);
       } catch {
         // Not JSON: no usage, so the reservation stands as the charge.
       }
@@ -116,73 +132,110 @@ export class UsageTracker {
     }
     if (!isObject(data)) return;
     if (this.vendor === 'anthropic') {
-      if (data.type === 'message_start' && isObject(data.message)) {
-        this.read(data.message.usage, false);
-        // The start's output count is a placeholder; the final one comes in `message_delta`.
-        this.output = false;
+      if (data.type === 'message_start') {
+        this.anthropic(isObject(data.message) ? data.message.usage : undefined, 'start');
         if (this.inputKnown) this.onInputKnown();
       } else if (data.type === 'message_delta') {
-        this.read(data.usage, false);
+        this.anthropic(data.usage, 'delta');
       } else if (data.type === 'message_stop') {
         this.final = true;
       }
       return;
     }
     if (
-      (data.type === 'response.completed' ||
-        data.type === 'response.incomplete' ||
-        data.type === 'response.failed') &&
-      isObject(data.response)
+      data.type === 'response.completed' ||
+      data.type === 'response.incomplete' ||
+      data.type === 'response.failed'
     ) {
-      this.read(data.response.usage, true);
+      this.openAI(isObject(data.response) ? data.response.usage : undefined);
     }
   }
 
+  /** Records `value`, or marks the usage malformed for good when it is invalid. */
+  private take(value: Count): number | undefined {
+    if (value !== INVALID) return value;
+    this.malformed = true;
+    return undefined;
+  }
+
   /**
-   * Takes the counts present in `raw`; counts the vendor repeats are cumulative, so they replace.
-   * A count that is present but not a number marks the usage malformed for good.
+   * An Anthropic usage object: at `message_start`, in a `message_delta` (cumulative counts, so
+   * they replace; the input fields may be `null` there, meaning unchanged), or in a whole JSON
+   * body. The output count is required wherever usage appears. A cache-write split that is
+   * present must give both lifetimes and add up to the aggregate count.
    */
-  private read(raw: unknown, final: boolean): void {
-    if (!isObject(raw)) return;
-    const take = (value: unknown): number | undefined => {
-      const n = count(value);
-      if (n !== INVALID) return n;
+  private anthropic(raw: unknown, where: 'start' | 'delta' | 'body'): void {
+    if (where === 'body') this.final = true;
+    if (!isObject(raw)) {
       this.malformed = true;
-      return undefined;
-    };
-    const u = this.usage;
-    if (this.vendor === 'anthropic') {
-      const input = take(raw.input_tokens);
-      if (input !== undefined) {
-        u.input = input;
-        this.input = true;
-      }
-      const read = take(raw.cache_read_input_tokens);
-      if (read !== undefined) u.cacheRead = read;
-      const split = isObject(raw.cache_creation) ? raw.cache_creation : undefined;
-      const fiveMinutes = take(split?.ephemeral_5m_input_tokens);
-      const oneHour = take(split?.ephemeral_1h_input_tokens);
-      const written = take(raw.cache_creation_input_tokens);
-      if (fiveMinutes !== undefined || oneHour !== undefined) {
-        u.cacheWrite5m = fiveMinutes ?? 0;
-        u.cacheWrite1h = oneHour ?? 0;
-      } else if (written !== undefined) {
-        u.cacheWrite5m = this.oneHourCache ? 0 : written;
-        u.cacheWrite1h = this.oneHourCache ? written : 0;
-      }
-      const output = take(raw.output_tokens);
-      if (output !== undefined) {
-        u.output = output;
-        this.output = true;
-      }
-      if (final) this.final = true;
       return;
     }
-    const input = take(raw.input_tokens);
-    const details = isObject(raw.input_tokens_details) ? raw.input_tokens_details : undefined;
-    const cached = take(details?.cached_tokens) ?? 0;
-    const output = take(raw.output_tokens);
+    const u = this.usage;
+    const input = this.take(
+      where === 'delta' ? optional(raw.input_tokens) : required(raw.input_tokens),
+    );
     if (input !== undefined) {
+      u.input = input;
+      this.input = true;
+    }
+    const read = this.take(optional(raw.cache_read_input_tokens));
+    if (read !== undefined) u.cacheRead = read;
+    const written = this.take(optional(raw.cache_creation_input_tokens));
+    if (raw.cache_creation !== undefined && raw.cache_creation !== null) {
+      const split = isObject(raw.cache_creation) ? raw.cache_creation : {};
+      const fiveMinutes = this.take(required(split.ephemeral_5m_input_tokens));
+      const oneHour = this.take(required(split.ephemeral_1h_input_tokens));
+      if (fiveMinutes !== undefined && oneHour !== undefined) {
+        if (written !== undefined && fiveMinutes + oneHour !== written) this.malformed = true;
+        u.cacheWrite5m = fiveMinutes;
+        u.cacheWrite1h = oneHour;
+      }
+    } else if (written !== undefined) {
+      u.cacheWrite5m = this.oneHourCache ? 0 : written;
+      u.cacheWrite1h = this.oneHourCache ? written : 0;
+    }
+    const output = this.take(required(raw.output_tokens));
+    if (where === 'start') {
+      // The start's output count is a placeholder; the final one comes in `message_delta`.
+      this.output = false;
+      return;
+    }
+    if (output !== undefined) {
+      u.output = output;
+      this.output = true;
+    }
+  }
+
+  /** An OpenAI final usage object; the cached and reasoning details must be valid when present. */
+  private openAI(raw: unknown): void {
+    this.final = true;
+    if (!isObject(raw)) {
+      this.malformed = true;
+      return;
+    }
+    const u = this.usage;
+    const input = this.take(required(raw.input_tokens));
+    const output = this.take(required(raw.output_tokens));
+    let cached = 0;
+    const inputDetails = raw.input_tokens_details;
+    if (inputDetails !== undefined) {
+      if (!isObject(inputDetails)) this.malformed = true;
+      else if (inputDetails.cached_tokens !== undefined) {
+        cached = this.take(required(inputDetails.cached_tokens)) ?? 0;
+      }
+    }
+    const outputDetails = raw.output_tokens_details;
+    if (outputDetails !== undefined) {
+      if (!isObject(outputDetails)) this.malformed = true;
+      else if (outputDetails.reasoning_tokens !== undefined) {
+        const reasoning = this.take(required(outputDetails.reasoning_tokens));
+        if (reasoning !== undefined && output !== undefined && reasoning > output) {
+          this.malformed = true;
+        }
+      }
+    }
+    if (input !== undefined) {
+      if (cached > input) this.malformed = true;
       u.input = input - Math.min(input, cached);
       u.cacheRead = Math.min(input, cached);
       this.input = true;
@@ -191,6 +244,5 @@ export class UsageTracker {
       u.output = output;
       this.output = true;
     }
-    if (final) this.final = true;
   }
 }

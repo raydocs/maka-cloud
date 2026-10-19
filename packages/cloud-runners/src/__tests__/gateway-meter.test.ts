@@ -169,6 +169,74 @@ test('a cancelled run still reports what settled while its access was revoked', 
   assert.equal(access.counts.unsubscribed, 1);
 });
 
+test('a cancel while the end’s revoke is settling waits for it: the final cost is not dropped', async (t) => {
+  const access = gatewayAccess();
+  const released = deferred();
+  const h = await setup({
+    cloud: {
+      modelAccess: access.provider,
+      // Tells the test when the cancel's cleanup has given the sandbox back.
+      sandboxes: {
+        acquire: async () => ({ machineId: h.fake.machineId, release: () => released.resolve() }),
+        knownMachines: () => [h.fake.machineId],
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  await h.setMode('spend');
+  const revoking = deferred();
+  const inFlight = deferred();
+  access.hooks.onRevoke = async () => {
+    revoking.resolve();
+    await inFlight.promise;
+    access.settle({ spentUsd: 0.4, exhausted: false });
+  };
+  const handle = await h.runners.claude.start(await h.spec('tsk_end_cancel', { budgetUsd: 5 }));
+  const events = reader(handle);
+  await revoking.promise;
+  // The run's own end is revoking; a cancel arrives and asks for the same release.
+  const cancelled = handle.cancel();
+  await released.promise;
+  // What is left of the cancel's cleanup runs in this turn of the event loop.
+  await new Promise((resolve) => setImmediate(resolve));
+  inFlight.resolve();
+  await cancelled;
+  const all = await events.rest();
+  assert.deepEqual(costs(all).at(-1), 0.4, 'the cost settled during the revoke is reported');
+  assert.equal(access.counts.revoked, 1);
+  assert.equal(access.counts.unsubscribed, 1);
+});
+
+test('a revoke past the cleanup time limit is still waited for before the stream closes', async (t) => {
+  const access = gatewayAccess();
+  const timedOut = deferred();
+  const h = await setup({
+    cloud: {
+      modelAccess: access.provider,
+      cleanupTimeoutMs: 1,
+      onCleanupError: ({ step }) => {
+        if (step === 'revoke model access') timedOut.resolve();
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  await h.setMode('spend');
+  access.hooks.onRevoke = async () => {
+    // Settles only once its step has given up on it, and the run has moved on if it does not wait.
+    await timedOut.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    access.settle({ spentUsd: 0.4, exhausted: false });
+  };
+  const handle = await h.runners.claude.start(await h.spec('tsk_end_slow', { budgetUsd: 5 }));
+  const all = await reader(handle).rest();
+  assert.deepEqual(
+    all.filter((event) => event.type === 'usage' || event.type === 'finished').slice(-2),
+    [{ type: 'usage', costUsd: 0.4 }, { type: 'finished' }],
+    'the final spend comes before the end',
+  );
+  assert.equal(access.counts.unsubscribed, 1);
+});
+
 test('a fleet built without a model access gives no run a key', async (t) => {
   const h = await setup();
   t.after(() => h.cleanup());

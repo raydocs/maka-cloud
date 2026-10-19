@@ -135,7 +135,6 @@ export async function startStack(
           {
             dbPath: config.supervisorDbPath,
             config: config.inbox,
-            env,
             gateway: gateway.gateway,
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
