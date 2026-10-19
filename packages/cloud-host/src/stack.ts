@@ -20,7 +20,13 @@ import {
   type TaskDirectory,
 } from '@maka-cloud/runners';
 import type { StackConfig } from './config.js';
-import { gatewayModelAccess, type StackGateway, startGateway } from './gateway.js';
+import {
+  conductorGateway,
+  gatewayModelAccess,
+  gatewayPrices,
+  type StackGateway,
+  startGateway,
+} from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 
@@ -67,7 +73,12 @@ export async function startStack(
     taskStateOf: (taskId: TaskId) => orchestrator?.taskStateOf(taskId),
   };
   const warn = dependencies.onWarning ?? (() => undefined);
-  const gateway = await startGateway(config.gateway, env, warn);
+  const gateway = await startGateway(
+    config.gateway,
+    env,
+    warn,
+    gatewayPrices(config.gateway.models, config.inbox.verifierModels),
+  );
   // Every exit from here on closes the gateway: a failed start, or the stack's close.
   let runners: CloudRunners;
   let coding: CodingRunner;
@@ -107,16 +118,25 @@ export async function startStack(
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
       conductorRoot: config.conductorRoot,
-      conductor: { access: config.conductor, playbooks: STACK_PLAYBOOKS, tools: [pullRequests] },
+      conductor: {
+        // The vendor key stays in the gateway: the conductor's requests go through it in process.
+        access: {
+          apiKey: 'gateway-in-process',
+          ...(config.conductor.connectionId === undefined
+            ? {}
+            : { connectionId: config.conductor.connectionId }),
+          gateway: conductorGateway(gateway.gateway),
+        },
+        playbooks: STACK_PLAYBOOKS,
+        tools: [pullRequests],
+      },
       supervisor: (context) =>
         startInbox(
           {
             dbPath: config.supervisorDbPath,
             config: config.inbox,
             env,
-            ...(config.conductor.baseUrl === undefined
-              ? {}
-              : { anthropicBaseUrl: config.conductor.baseUrl }),
+            gateway: gateway.gateway,
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
           context,

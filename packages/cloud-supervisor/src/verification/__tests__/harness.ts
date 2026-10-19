@@ -15,6 +15,7 @@ import type { FetchOutcome, SourceFetcher } from '../fetcher.js';
 import type {
   ArtifactRead,
   BudgetPort,
+  CheckCharge,
   EvidenceSource,
   VerificationOptions,
   Vendor,
@@ -87,6 +88,7 @@ export interface ModelScript {
   (
     request: VerifierRequest,
     signal: AbortSignal,
+    charge?: CheckCharge,
   ): Promise<{
     output: unknown;
     usage: { inputTokens: number; outputTokens: number };
@@ -118,6 +120,8 @@ export class FakeModel implements VerifierModel {
   inflight = 0;
   maxInflight = 0;
   script: ModelScript = async (request) => allSupported(request);
+  /** Set: the script reserves and settles through the charge it is given. */
+  metered?: boolean;
   constructor(
     readonly id: string,
     readonly vendor: Vendor,
@@ -125,12 +129,12 @@ export class FakeModel implements VerifierModel {
     readonly maxInputChars = 60_000,
     readonly maxOutputTokens = 4_000,
   ) {}
-  async verify(request: VerifierRequest, signal: AbortSignal) {
+  async verify(request: VerifierRequest, signal: AbortSignal, charge?: CheckCharge) {
     this.requests.push(request);
     this.inflight += 1;
     this.maxInflight = Math.max(this.maxInflight, this.inflight);
     try {
-      return await this.script(request, signal);
+      return await this.script(request, signal, charge);
     } finally {
       this.inflight -= 1;
     }

@@ -640,7 +640,7 @@ export class ConductorState {
   private settleReservation(
     runId: string,
     reservation: number,
-    kind: 'task' | 'external',
+    kind: 'task' | 'external' | 'model',
     actualUsd: number,
     ref: string,
     what: string,
@@ -813,6 +813,57 @@ export class ConductorState {
           .run(runId, usd, ref, this.now());
       }
       return this.budget(runId);
+    });
+  }
+
+  /**
+   * Replaces a model request's reservation (`tryReserve` with ref `request:<key>`) with what the
+   * request cost, in one transaction. Above the reservation the full amount is charged and the
+   * run's spend is blocked until the user answers a budget question.
+   */
+  settleModelRequest(
+    runId: string,
+    reservation: number,
+    actualUsd: number,
+    key: string,
+  ): BudgetView {
+    return this.transaction(() => {
+      this.settleReservation(
+        runId,
+        reservation,
+        'model',
+        actualUsd,
+        `request:${key}`,
+        'A model request',
+      );
+      return this.budget(runId);
+    });
+  }
+
+  /**
+   * Charges the model requests a previous process reserved and never settled at what was
+   * reserved for them: whether the provider billed them is unknown. Returns how many.
+   */
+  settleOpenModelRequests(): number {
+    return this.transaction(() => {
+      const open = this.db
+        .prepare(
+          `SELECT n, run_id, usd, ref FROM ledger l
+           WHERE l.kind = 'reserve' AND l.ref LIKE 'request:%'
+             AND NOT EXISTS (SELECT 1 FROM ledger r WHERE r.kind = 'release' AND r.run_id = l.run_id AND r.ref = CAST(l.n AS TEXT))`,
+        )
+        .all() as Row[];
+      for (const row of open) {
+        this.settleReservation(
+          String(row.run_id),
+          Number(row.n),
+          'model',
+          Number(row.usd),
+          String(row.ref),
+          'A model request',
+        );
+      }
+      return open.length;
     });
   }
 

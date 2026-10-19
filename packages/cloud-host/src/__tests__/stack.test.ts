@@ -18,6 +18,8 @@ interface Started {
   modelRequests: () => number;
   /** The path and API key of each model request. */
   modelKeys: string[];
+  /** Resolves at the first Messages request the model server gets. */
+  firstMessage: Promise<void>;
   sweeps: string[][];
 }
 
@@ -29,9 +31,14 @@ async function start(
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
   let requests = 0;
   const modelKeys: string[] = [];
+  let messageArrived = (): void => undefined;
+  const firstMessage = new Promise<void>((resolve) => {
+    messageArrived = resolve;
+  });
   const model = createServer((req, res) => {
     requests += 1;
     modelKeys.push(`${req.url} ${req.headers['x-api-key'] ?? req.headers.authorization}`);
+    if (req.url?.endsWith('/v1/messages')) messageArrived();
     req.resume();
     if (req.url?.endsWith('/count_tokens')) {
       res.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":12}');
@@ -83,7 +90,15 @@ async function start(
     await new Promise<void>((resolve) => model.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   });
-  return { stack, options, claude, modelRequests: () => requests, modelKeys, sweeps };
+  return {
+    stack,
+    options,
+    claude,
+    modelRequests: () => requests,
+    modelKeys,
+    firstMessage,
+    sweeps,
+  };
 }
 
 test('starting the stack runs nothing: no model request and no task until a user posts a message', async (t) => {
@@ -172,6 +187,33 @@ test('sandbox runs get a gateway token bound to their budget, never the vendor k
   const revoked = await ask(100);
   assert.equal(revoked.status, 401);
   await revoked.arrayBuffer();
+});
+
+test('the conductor’s model requests go through the gateway, which adds the vendor key', async (t) => {
+  const { stack, modelKeys, firstMessage } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const token = stack.cloud.server.invites.create('test').token;
+  const api = (path: string, body: unknown) =>
+    fetch(`${stack.cloud.server.url}${path}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const created = (await (await api('/v1/conversations', {})).json()) as {
+    conversationId: string;
+  };
+  const posted = await api(`/v1/conversations/${created.conversationId}/messages`, {
+    text: 'Hello.',
+  });
+  assert.equal(posted.status, 202);
+  await firstMessage;
+  const messages = modelKeys.filter((line) => line.startsWith('/v1/messages '));
+  assert.ok(messages.length >= 1);
+  assert.ok(
+    messages.every((line) => line === '/v1/messages sk-master-not-a-key'),
+    `the vendor gets the gateway's key only: ${messages.join(', ')}`,
+  );
 });
 
 test('a stack that fails to start closes its gateway', async (t) => {

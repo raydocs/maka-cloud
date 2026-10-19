@@ -62,13 +62,19 @@ The gateway invents no ledger. A grant charges a **budget port**: `reserve(key, 
   guarantee. A run without `budgetUsd` gets no token and fails to start. What the gateway settles
   is reported back as the runner's `usage` events, so `task_cost` and the conductor's settlement of
   the delegation see the gateway's numbers.
-- **Conductor.** Each request reserves in the run ledger (`ledger` rows `reserve`/`release`/`model`
-  in one SQLite transaction) and settles there. The conductor stops adding spend from
-  `recordModelCallAttempt`, which would count it twice; its request gate stays.
+- **Conductor.** Its requests go through `inProcess`, one grant per Maka session, closed when the
+  turn or the planner ends; its own configuration holds no vendor key. Each request reserves in the
+  run ledger (a `reserve` row with ref `request:<key>`) and settles there as a `model` row. A
+  request the run cannot cover is refused before it is sent and opens a budget question for what
+  it needs. The conductor stops adding spend from `recordModelCallAttempt`, which would count it
+  twice; its request gate stays. A reservation a crashed process never settled is charged in full
+  at the next start.
 - **Supervisor.** The verifier's port is the existing gate: the day's cap, then the conversation's
-  run budget through `Conductor.reserveSpend/settleSpend`. The supervisor stops reserving its own
-  estimate; the gateway reserves on the exact request body. The digest summary is charged to the
-  day's cap.
+  run budget through `Conductor.reserveSpend/settleSpend`. A check model through the gateway is
+  `metered`: the supervisor stops reserving its own estimate and hands the gateway a charge, so
+  the gateway reserves on the exact request body; a refusal is a check that could not run for
+  budget. The digest summary goes through the gateway on its own limit of $0.50 per UTC day, held
+  in memory (a restart starts the day afresh; at the summary's size that is cents).
 
 ## Worst-case reservation
 
@@ -147,7 +153,8 @@ whose cost it cannot bound is refused (400), never sent.
 1. **PR A1:** the package, the runners on gateway tokens (sandbox env has no vendor key), gateway
    metering as the runner's `usage`, `RunSpec.budgetRootId`, the host stack and config.
 2. **PR A2:** the conductor and the supervisor verifier and summary through `inProcess`, after the
-   conductor and supervisor follow-up PRs that touch the same files have merged.
+   conductor and supervisor follow-up PRs that touch the same files have merged. The stack hands
+   the conductor no vendor key.
 
 ## Not covered
 
