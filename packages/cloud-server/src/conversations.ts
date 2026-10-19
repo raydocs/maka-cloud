@@ -72,6 +72,14 @@ export class ConversationStore {
     return row?.session_id;
   }
 
+  /** The conversation a session belongs to, if it belongs to one. */
+  conversationOf(sessionId: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT conversation_id FROM conversations WHERE session_id = ?')
+      .get(sessionId) as { conversation_id: string } | undefined;
+    return row?.conversation_id;
+  }
+
   exists(conversationId: string): boolean {
     return this.sessionOf(conversationId) !== undefined;
   }

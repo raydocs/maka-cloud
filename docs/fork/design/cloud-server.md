@@ -40,6 +40,7 @@ One SQLite file (`node:sqlite`), opened by exactly one process.
 | `conversations`, `messages` | Append-only. `messages` has a unique `(conversation_id, client_message_id)` so a retried POST stores once. A conversation owns one orchestrator session id. |
 | `feed(id, kind, conversation_id, ref, at)` | The order of everything a client can stream. A conversation row, a message or a `task_log` row is inserted together with its `feed` row in one transaction. |
 | `sessions(session_id, token_sha256, parent_task_id, created_at)` | The orchestrator's `SessionStore`. Digests only. |
+| `task_cost_log(id, task_id, usd, at)` | Cost figures reported for tasks, append-only. A figure is kept only if it is above the last one. Schema step 2. |
 
 Invite tokens (`invites`: id, SHA-256 digest, label, created and revoked times)
 live in a second SQLite file. The main database belongs to the one running
@@ -76,15 +77,37 @@ Single tenant: every invite sees every conversation. Accounts replace this in T1
 | `GET /v1/conversations` | Conversations, oldest first. |
 | `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores, emits, then calls the handler. A repeated `clientMessageId` returns the first message's id and emits nothing. |
 | `GET /v1/conversations/:id/tasks?after=&limit=` | Task views for the conversation's trees, in creation order, paged. |
+| `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
 Unknown or malformed ids are 404. Bodies over 64 KiB are 413; message text is
 capped at 32,000 bytes.
 
+### Public view
+
+Task views and `task_created` events leave out `runner`: the runner id names the
+vendor behind a run, and clients have no use for it. `costUsd` is present only
+once a figure was reported, never `0`. Titles, progress and manifests are written
+by models and pass through unchanged.
+
+### Control and cost
+
+The server acts on a task as the conversation that owns it (the root session
+found from the task id), never with the conductor's MCP token, which nothing in
+the public API reads, rotates or returns. The invite is checked when the request
+arrives and again inside the orchestrator's write chain through
+`OperatorAccess.authorize`, together with the conversation, so the check and the
+action are one step.
+
+Cost reaches the server through `CloudServer.reportCost(taskId, usd)`. The
+adapter that reads the conductor's ledger lives with the conductor (T5); until a
+per-task figure exists it can report the sum of a task's runs. A figure that is
+not above the last one is ignored, so a late report cannot move the number back.
+
 ### Event stream
 
-Events are `conversation.created`, `message.posted` and `task.event` (the
-`TaskEvent` plus its log `seq`). Resume with the `Last-Event-ID` header (what a
+Events are `conversation.created`, `message.posted`, `task.event` (the
+`TaskEvent` plus its log `seq`) and `task.cost` (`{taskId, costUsd, at}`). Resume with the `Last-Event-ID` header (what a
 browser sends on reconnect) or `?after=`; the header wins.
 
 A connection holds a position, not a buffer. It reads the next page of rows
@@ -105,6 +128,7 @@ from its last id. A comment line goes out every 15 s.
 | Open event streams | invite | 4 |
 | Open event streams | server | 256 |
 | Message posts | invite, token bucket | 30 per minute |
+| Cancel, pause and resume | invite, token bucket | 30 per minute |
 
 Over a limit: 429 with `Retry-After`, nothing stored. Orchestrator quotas (tasks,
 waits, MCP connections) are configured through the same `quotas` option and
