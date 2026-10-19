@@ -280,7 +280,7 @@ test('more sources than the cap, or more claims than a check can hold, cannot be
   await r2.stop();
 });
 
-test('report data that is listed but missing or unreadable fails; one that is not listed means nothing to check', async () => {
+test('report data that is listed but missing or unreadable fails; a rendering listed without it is unverified', async () => {
   const missing = world();
   researchFiles(missing, 't1');
   missing.evidence.files.delete('t1/report.json');
@@ -306,7 +306,9 @@ test('report data that is listed but missing or unreadable fails; one that is no
     researchManifest({ artifacts: ['out/report.md', 'out/report.html', 'out/verification.json'] }),
     { runner: 'codex' },
   );
-  assert.match(itemsOf(c, 'finished')[0]?.ask ?? '', /not independently checked/);
+  // Renderings with no report.json to reproduce them from are not "nothing to check": they are unverified.
+  assert.equal(itemsOf(c, 'finished').length, 0);
+  assert.match(itemsOf(c, 'verification_failed')[0]?.ask ?? '', UNVERIFIED);
   assert.equal(unlisted.fetcher.fetched.length, 0);
   await c.stop();
 });
@@ -729,3 +731,46 @@ test('a real 404 or 410 from the fetcher is a deterministic failure, not a sourc
 });
 
 void FakeFetcher;
+
+test('a link with a query or fragment is still a report: it is never classified away from the research check', async () => {
+  for (const link of [
+    'https://example.com/report.json?download=1',
+    'https://example.com/report.md#view',
+    'https://example.com/out/REPORT.HTML?x=1#y',
+    'https://example.com/out%2Freport.json',
+    'https://example.com/%72eport.md',
+  ]) {
+    // Beside a local report, and as the only report artifact.
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [...ALL_REPORT_FILES, link]),
+      `${link} beside a report`,
+    );
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [link]),
+      `${link} alone`,
+    );
+  }
+});
+
+test('a local path with a query or fragment is cut the same way: a second report.json is ambiguous', async () => {
+  for (const second of ['out/report.json?download=1', 'out/Report.JSON', 'out/report.md#view']) {
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [...ALL_REPORT_FILES, second]),
+      second,
+    );
+  }
+});
+
+test('a change beside a rendering but no report.json still runs both kinds of check, so it is unverified', async () => {
+  for (const rendering of ['out/report.md', 'out/report.html', 'out/Report.MD']) {
+    const result = await checkedResearch(
+      (w) => {
+        researchFiles(w, 't1');
+        codingFiles(w, 't1');
+      },
+      ['out/change.patch', 'out/changes.json', rendering],
+    );
+    await assertUnverified(result, `a change and ${rendering}`);
+    assert.equal(result.w.openai.requests.length, 0, rendering);
+  }
+});

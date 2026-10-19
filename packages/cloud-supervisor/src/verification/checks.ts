@@ -345,6 +345,12 @@ export async function prepareResearch(input: {
 
   const reportFile = await read('report.json');
   if (!reportFile.ok) {
+    // The research check is in scope only because a report artifact is listed: without report.json
+    // there is nothing to reproduce it from.
+    if (reportFile.reason === 'not_listed') {
+      unverified.push('a report is listed without report.json, so it cannot be reproduced');
+      return empty();
+    }
     const problem = unreadable('report.json', reportFile);
     if (problem.failure) failures.push(problem.failure);
     if (problem.unavailable) unavailable.push(problem.unavailable);
