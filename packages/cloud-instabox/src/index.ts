@@ -11,6 +11,7 @@ export {
   type InstaboxMachine,
   type InstaboxMachineState,
   type InstaboxOperation,
+  type InstaboxSnapshot,
 } from './client.js';
 export {
   InstaboxApiError,
