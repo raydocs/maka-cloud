@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "allowJs": true,
+    "noEmit": true,
+    "types": ["vite/client", "node"],
+    "paths": {
+      "@maka/ui": ["../ui/src/choice-panel.tsx"],
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "@astryxdesign/core": ["./node_modules/@astryxdesign/core"]
+    }
+  },
+  "include": ["src", "tests", "mock", "*.ts"]
+}
