@@ -98,6 +98,8 @@ export const DEFAULT_SESSION_CACHE: CacheLimits = { maxEntries: 1024 };
  */
 export class SessionAuth {
   private readonly cache: BoundedCache<SessionId, StoredSession>;
+  /** The digest each info handed out by `resolve` was authenticated with. */
+  private readonly resolvedWith = new WeakMap<SessionInfo, Buffer>();
 
   constructor(
     private readonly store: SessionStore = new MemorySessionStore(),
@@ -138,13 +140,23 @@ export class SessionAuth {
   resolve(token: string): SessionInfo | undefined {
     const sessionId = sessionIdOf(token);
     const entry = sessionId === undefined ? undefined : this.lookup(sessionId);
-    if (!entry) return undefined;
-    return timingSafeEqual(entry.digest, digestToken(token)) ? entry.info : undefined;
+    if (!entry || !timingSafeEqual(entry.digest, digestToken(token))) return undefined;
+    const info = { ...entry.info };
+    this.resolvedWith.set(info, entry.digest);
+    return info;
   }
 
-  /** Whether the session still holds a valid token, for checks after the request was authenticated. */
-  isActive(sessionId: SessionId): boolean {
-    return this.lookup(sessionId) !== undefined;
+  /**
+   * Whether the session still holds a valid token, for checks after the request
+   * was authenticated. For an info `resolve` returned, the token it was resolved
+   * from must also still be the current one, so a rotate retires requests that
+   * are already under way with the old token, as a revoke does.
+   */
+  isActive(session: SessionInfo): boolean {
+    const entry = this.lookup(session.sessionId);
+    if (!entry) return false;
+    const digest = this.resolvedWith.get(session);
+    return digest === undefined || digest.equals(entry.digest);
   }
 
   revoke(sessionId: SessionId): void {

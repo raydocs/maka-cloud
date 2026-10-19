@@ -1,0 +1,103 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { FixedMachineProvider } from '../providers.js';
+import type { SandboxLease } from '../types.js';
+import { collect, notes, setup, terminal } from './harness.js';
+
+test('resume continues the recorded vendor session with the new prompt', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_resume');
+  assert.equal(terminal(await collect(await h.runners.claude.start(spec)))?.type, 'finished');
+
+  const events = await collect(
+    await h.runners.claude.resume('tsk_resume', { prompt: 'Also add the tests.', spec }),
+  );
+  assert.equal(terminal(events)?.type, 'finished');
+  const { argv } = await h.cliCall('claude', 2);
+  assert.equal(argv[argv.indexOf('--resume') + 1], 'sess-1');
+  assert.equal(argv[argv.indexOf('-p') + 1], 'Also add the tests.');
+  const record = await h.sessions.get('tsk_resume');
+  assert.equal(record?.turns, 2);
+  assert.equal(record?.snapshotIds.length, 2);
+});
+
+test('codex resumes with exec resume <thread>', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_cresume', { runner: 'codex' });
+  await collect(await h.runners.codex.start(spec));
+  const events = await collect(
+    await h.runners.codex.resume('tsk_cresume', { prompt: 'Continue.', spec }),
+  );
+  assert.equal(terminal(events)?.type, 'finished');
+  const { argv } = await h.cliCall('codex', 2);
+  assert.deepEqual(argv.slice(0, 3), ['exec', 'resume', 'thr-1']);
+});
+
+test('resuming a task that has no recorded session fails clearly', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_nothing');
+  const events = await collect(await h.runners.claude.resume('tsk_nothing', { prompt: 'x', spec }));
+  const last = terminal(events);
+  assert.equal(last?.type, 'failed');
+  assert.match(last?.type === 'failed' ? last.reason : '', /nothing to resume/);
+  assert.equal(h.runners.fleet.openRuns, 0);
+});
+
+test('a resume with a mismatched task id is rejected up front', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  await assert.rejects(
+    h.runners.claude.resume('tsk_a', { prompt: 'x', spec: await h.spec('tsk_b') }),
+    /does not match/,
+  );
+});
+
+test('when the machine is gone, resume restores one from the last snapshot', async (t) => {
+  const restored: { tenantId: string; snapshotId: string }[] = [];
+  const h = await setup({
+    cloud: {
+      sandboxes: new (class extends FixedMachineProvider {
+        async restoreFromSnapshot(input: {
+          tenantId: string;
+          taskId: string;
+          snapshotId: string;
+        }): Promise<SandboxLease> {
+          restored.push({ tenantId: input.tenantId, snapshotId: input.snapshotId });
+          // Stand-in for creating a machine from the snapshot: the fake has one machine, bring it back.
+          h.fake.machineState = 'running';
+          return { machineId: h.fake.machineId, release: () => undefined };
+        }
+      })('m_aaaaaaaaaaaaaaaaaaaaaaaaaa'),
+    },
+  });
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_gone');
+  await collect(await h.runners.claude.start(spec));
+  const lastSnapshot = (await h.sessions.get('tsk_gone'))?.snapshotIds.at(-1);
+  assert.ok(lastSnapshot);
+
+  h.fake.machineState = 'deleted';
+  const events = await collect(
+    await h.runners.claude.resume('tsk_gone', { prompt: 'again', spec }),
+  );
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  assert.deepEqual(restored, [{ tenantId: 'default', snapshotId: lastSnapshot }]);
+});
+
+test('when the machine is gone and nothing can restore it, resume fails without a guess', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_lost');
+  await collect(await h.runners.claude.start(spec));
+  h.fake.machineState = 'deleted';
+  const events = await collect(
+    await h.runners.claude.resume('tsk_lost', { prompt: 'again', spec }),
+  );
+  const last = terminal(events);
+  assert.equal(last?.type, 'failed');
+  assert.match(last?.type === 'failed' ? last.reason : '', /cannot resume: the sandbox is gone/);
+  assert.equal(h.runners.fleet.openRuns, 0);
+});

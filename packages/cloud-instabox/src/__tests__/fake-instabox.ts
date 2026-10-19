@@ -20,6 +20,8 @@ export interface RecordedRequest {
 
 export type ExecAction =
   | { drop: true }
+  /** Run the command, then drop the connection without answering. */
+  | { dropResponse: true }
   | { status: number; error: { code: string; message: string; retryable: boolean } }
   | { stdin: string };
 
@@ -28,6 +30,20 @@ export interface FakeInstaboxOptions {
   machineId?: string;
   /** Replaces PATH for exec'd commands. */
   execPath?: string;
+  /** HOME for exec'd commands. Defaults to /tmp. */
+  home?: string;
+  /** Extra environment for exec'd commands, before the request's own `envs`. */
+  env?: Record<string, string>;
+}
+
+export interface FakeSnapshot {
+  id: string;
+  name: string;
+  status: 'pending' | 'ready' | 'failed';
+  error?: string;
+  /** Polls it stays `pending` before reaching `finalStatus`. */
+  polls: number;
+  finalStatus: 'ready' | 'failed';
 }
 
 interface Operation {
@@ -69,18 +85,32 @@ export class FakeInstabox {
   dropMutationResponseOnce = false;
   /** Answer the next mutation with this error before doing any work. */
   failNextMutation: { status: number; code: string; retryable: boolean } | undefined;
+  readonly snapshots = new Map<string, FakeSnapshot>();
+  readonly leases = new Map<string, number>();
+  /** Polls a new snapshot stays `pending`. */
+  snapshotPolls = 1;
+  /** Answer the next snapshot create with this error. */
+  failNextSnapshotCreate: { status: number; code: string; retryable: boolean } | undefined;
+  /** The next snapshot ends `failed`. */
+  failNextSnapshot = false;
 
   private readonly server: Server;
   private readonly idempotency = new Map<string, { fingerprint: string; operationId: string }>();
   private execCount = 0;
   private operationCount = 0;
   private readonly execPath: string | undefined;
+  private readonly home: string;
+  private readonly baseEnv: Record<string, string>;
+  private snapshotCount = 0;
+  private readonly snapshotKeys = new Map<string, string>();
   url = '';
 
   constructor(options: FakeInstaboxOptions = {}) {
     this.apiKey = options.apiKey ?? 'ibk_test_key';
     this.machineId = options.machineId ?? 'm_aaaaaaaaaaaaaaaaaaaaaaaaaa';
     this.execPath = options.execPath;
+    this.home = options.home ?? '/tmp';
+    this.baseEnv = options.env ?? {};
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
         if (!res.headersSent) this.json(res, 500, this.envelope('internal', String(error), false));
@@ -155,6 +185,28 @@ export class FakeInstabox {
       this.autoSuspendedAt = undefined;
       return this.json(res, 200, this.machineBody());
     }
+    if (req.method === 'POST' && machine.test(path) && path.endsWith('/snapshots')) {
+      return this.createSnapshot(recorded, req, res);
+    }
+    const snapshot = /^\/v1\/snapshots\/(sn_\d+)$/.exec(path);
+    if (snapshot) return this.snapshotRoute(req, snapshot[1] ?? '', res);
+    const lease = /\/activity-leases\/([^/]+)$/.exec(path);
+    if (lease && machine.test(path)) {
+      const id = decodeURIComponent(lease[1] ?? '');
+      if (req.method === 'PUT') {
+        this.leases.set(id, recorded.body?.ttlSeconds ?? 300);
+        return this.json(res, 200, {
+          id,
+          machineId: this.machineId,
+          expiresAt: new Date(Date.now() + 300_000).toISOString(),
+        });
+      }
+      if (req.method === 'DELETE') {
+        this.leases.delete(id);
+        res.writeHead(204);
+        return void res.end();
+      }
+    }
     const op = /^\/v1\/operations\/(op_\d+)$/.exec(path);
     if (req.method === 'GET' && op) {
       const operation = this.operations.get(op[1] ?? '');
@@ -163,6 +215,61 @@ export class FakeInstabox {
       return this.pollOperation(operation, res);
     }
     this.json(res, 404, this.envelope('not_found', `no route ${req.method} ${path}`, false));
+  }
+
+  private createSnapshot(recorded: RecordedRequest, req: IncomingMessage, res: ServerResponse) {
+    const key = req.headers['idempotency-key'];
+    if (typeof key !== 'string' || key.length === 0) {
+      return this.json(res, 400, this.envelope('bad_request', 'Idempotency-Key required', false));
+    }
+    if (this.failNextSnapshotCreate) {
+      const { status, code, retryable } = this.failNextSnapshotCreate;
+      this.failNextSnapshotCreate = undefined;
+      return this.json(res, status, this.envelope(code, 'injected failure', retryable));
+    }
+    const seen = this.snapshotKeys.get(key);
+    let snapshot = seen ? this.snapshots.get(seen) : undefined;
+    if (!snapshot) {
+      const name = String(recorded.body?.name ?? '');
+      if ([...this.snapshots.values()].some((existing) => existing.name === name)) {
+        return this.json(res, 409, this.envelope('conflict', 'snapshot name in use', false));
+      }
+      snapshot = {
+        id: `sn_${++this.snapshotCount}`,
+        name,
+        status: 'pending',
+        polls: 0,
+        finalStatus: this.failNextSnapshot ? 'failed' : 'ready',
+      };
+      this.failNextSnapshot = false;
+      this.snapshots.set(snapshot.id, snapshot);
+      this.snapshotKeys.set(key, snapshot.id);
+    }
+    this.json(res, 202, this.snapshotBody(snapshot));
+  }
+
+  private snapshotRoute(req: IncomingMessage, id: string, res: ServerResponse) {
+    const snapshot = this.snapshots.get(id);
+    if (!snapshot)
+      return this.json(res, 404, this.envelope('not_found', 'no such snapshot', false));
+    if (req.method === 'DELETE') {
+      this.snapshots.delete(id);
+      res.writeHead(204);
+      return void res.end();
+    }
+    if (snapshot.status === 'pending') {
+      snapshot.polls++;
+      if (snapshot.polls >= this.snapshotPolls) {
+        snapshot.status = snapshot.finalStatus;
+        if (snapshot.status === 'failed') snapshot.error = 'upload failed';
+      }
+    }
+    this.json(res, 200, this.snapshotBody(snapshot));
+  }
+
+  private snapshotBody(snapshot: FakeSnapshot) {
+    const { polls: _polls, finalStatus: _final, ...body } = snapshot;
+    return body;
   }
 
   private machineBody() {
@@ -295,6 +402,17 @@ export class FakeInstabox {
       res.socket?.destroy();
       return;
     }
+    if (action && 'dropResponse' in action) {
+      const body = recorded.body as {
+        cmd: string;
+        cwd?: string;
+        envs?: Record<string, string>;
+        stdin?: string;
+      };
+      await this.runCommand(body, body.stdin ?? '');
+      res.socket?.destroy();
+      return;
+    }
     if (action && 'status' in action)
       return this.json(res, action.status, {
         error: { ...action.error, requestId: 'req_fake', operationId: null },
@@ -323,7 +441,12 @@ export class FakeInstabox {
     return new Promise((resolve) => {
       const child = spawn(BASH, ['-c', body.cmd], {
         cwd: body.cwd ?? '/',
-        env: { PATH: this.execPath ?? process.env.PATH ?? '', HOME: '/tmp', ...body.envs },
+        env: {
+          PATH: this.execPath ?? process.env.PATH ?? '',
+          HOME: this.home,
+          ...this.baseEnv,
+          ...body.envs,
+        },
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

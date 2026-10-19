@@ -26,6 +26,7 @@ import {
 export const DEFAULT_WAIT_MS = 60_000;
 export const MAX_WAIT_MS = 10 * 60_000;
 export const DEFAULT_MAX_DEPTH = 5;
+export const DEFAULT_ORPHAN_STOP_TIMEOUT_MS = 10_000;
 const MAX_TITLE_LENGTH = 200;
 export const DEFAULT_ARCHIVE_CACHE: CacheLimits = { maxEntries: 512, maxBytes: 4 * 1024 * 1024 };
 
@@ -49,6 +50,8 @@ export interface OrchestratorOptions {
     archivedTasks?: CacheLimits;
     sessions?: CacheLimits;
   };
+  /** How long restore waits for one runner to stop a leftover run. Default 10 s. */
+  orphanStopTimeoutMs?: number;
 }
 
 /** Sizes of the structures that must stay bounded, for tests and diagnostics. */
@@ -81,6 +84,7 @@ export class Orchestrator {
   private readonly handoff: Handoff;
   private readonly now: () => number;
   private readonly maxDepth: number;
+  private readonly orphanStopTimeoutMs: number;
   private readonly newTaskId: () => TaskId;
   private readonly auth: SessionAuth;
   private readonly quotas: QuotaLimits;
@@ -117,6 +121,7 @@ export class Orchestrator {
       (record) => JSON.stringify(record).length,
     );
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
     this.newTaskId =
       options.newTaskId ?? (() => `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`);
   }
@@ -372,7 +377,19 @@ export class Orchestrator {
       this.tasks.set(taskId, task);
       this.activeByRoot.add(task.rootSessionId);
     }
-    for (const task of [...this.tasks.values()]) {
+    const orphans = [...this.tasks.values()];
+    // A runner may have left work behind (a remote sandbox keeps running when we restart).
+    // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
+    const stops = await Promise.all(orphans.map((task) => this.stopLeftover(task)));
+    for (const [index, task] of orphans.entries()) {
+      const problem = stops[index];
+      if (problem !== undefined) {
+        await this.record({
+          type: 'task_progress',
+          taskId: task.taskId,
+          note: `could not stop the leftover runner: ${problem}`,
+        });
+      }
       // Nothing is running after a restart. History is never edited, so the
       // outcome is appended.
       this.orphans.push(task.taskId);
@@ -390,6 +407,31 @@ export class Orchestrator {
       );
     }
     this.restoring = false;
+  }
+
+  /** Resolves to a description of what went wrong, or undefined when the leftover is stopped (or none exists). */
+  private async stopLeftover(task: TaskRecord): Promise<string | undefined> {
+    const runner = this.runners.get(task.runner);
+    if (!runner?.stopOrphaned) return undefined;
+    const timeoutMs = this.orphanStopTimeoutMs;
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        runner.stopOrphaned(task.taskId, { signal: controller.signal }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`no answer after ${timeoutMs} ms`));
+          }, timeoutMs);
+        }),
+      ]);
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async launch(taskId: TaskId, runnerName: string, paths: HandoffPaths): Promise<void> {
@@ -626,7 +668,7 @@ export class Orchestrator {
    * calls it again right before it records a task.
    */
   assertSessionActive(session: SessionInfo): void {
-    if (!this.auth.isActive(session.sessionId)) {
+    if (!this.auth.isActive(session)) {
       throw new OrchestratorError('unauthorized', 'The session token is no longer valid');
     }
   }

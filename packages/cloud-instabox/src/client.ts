@@ -66,6 +66,14 @@ export interface InstaboxOperation {
   error?: { code: string; message: string } | null;
 }
 
+export interface InstaboxSnapshot {
+  id: string;
+  name: string;
+  /** `pending` while a snapshot of a running sandbox uploads. */
+  status: 'pending' | 'ready' | 'failed';
+  error?: string;
+}
+
 export interface InstaboxClientOptions {
   apiKey: string;
   baseUrl?: string;
@@ -81,7 +89,7 @@ export interface InstaboxClientOptions {
 }
 
 interface RequestSpec {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   path: string;
   query?: Record<string, string>;
   body?: unknown;
@@ -262,6 +270,99 @@ export class InstaboxClient {
       }
     }
     throw new Error(`instabox sandbox ${machine} did not reach running.`);
+  }
+
+  /**
+   * Snapshots the sandbox's system files and storage. A running sandbox answers `pending`
+   * (its files are frozen for well under a second); poll with `waitForSnapshot`.
+   */
+  async createSnapshot(
+    machine: string,
+    request: { name: string; description?: string; rootOnly?: boolean },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<InstaboxSnapshot> {
+    return await this.send<InstaboxSnapshot>({
+      method: 'POST',
+      path: `/v1/machines/${encodeURIComponent(machine)}/snapshots`,
+      body: request,
+      idempotencyKey: `maka-snapshot-${randomUUID()}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  async getSnapshot(id: string, options: { signal?: AbortSignal } = {}): Promise<InstaboxSnapshot> {
+    return await this.send<InstaboxSnapshot>({
+      method: 'GET',
+      path: `/v1/snapshots/${encodeURIComponent(id)}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  async deleteSnapshot(id: string, options: { signal?: AbortSignal } = {}): Promise<void> {
+    await this.send<unknown>({
+      method: 'DELETE',
+      path: `/v1/snapshots/${encodeURIComponent(id)}`,
+      idempotencyKey: `maka-snapshot-delete-${randomUUID()}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  /** Polls until the snapshot is `ready`; throws when it fails or the deadline passes. */
+  async waitForSnapshot(
+    id: string,
+    options: { signal?: AbortSignal; deadlineMs?: number; pollMs?: number } = {},
+  ): Promise<InstaboxSnapshot> {
+    const deadline = this.now() + (options.deadlineMs ?? OPERATION_DEADLINE_MS);
+    for (;;) {
+      const snapshot = await this.getSnapshot(id, options.signal ? { signal: options.signal } : {});
+      if (snapshot.status === 'ready') return snapshot;
+      if (snapshot.status === 'failed') {
+        throw new Error(`instabox snapshot ${id} failed: ${snapshot.error ?? 'no error detail'}`);
+      }
+      if (this.now() >= deadline) {
+        throw new Error(
+          `instabox snapshot ${id} still ${snapshot.status} after the wait deadline.`,
+        );
+      }
+      await this.sleep(options.pollMs ?? 2_000, options.signal);
+    }
+  }
+
+  /** Keeps a sandbox from idle-pausing while a task works. Renew before it expires. */
+  async putActivityLease(
+    machine: string,
+    leaseId: string,
+    ttlSeconds: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    await this.send<unknown>({
+      method: 'PUT',
+      path: `/v1/machines/${encodeURIComponent(machine)}/activity-leases/${encodeURIComponent(leaseId)}`,
+      body: { ttlSeconds },
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  async deleteActivityLease(
+    machine: string,
+    leaseId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    await this.send<unknown>({
+      method: 'DELETE',
+      path: `/v1/machines/${encodeURIComponent(machine)}/activity-leases/${encodeURIComponent(leaseId)}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
   }
 
   private async settle(operation: InstaboxOperation, signal?: AbortSignal): Promise<void> {
