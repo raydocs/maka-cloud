@@ -7,7 +7,13 @@ import {
 } from '@maka-cloud/conductor';
 import type { Orchestrator } from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
-import { type CloudServer, type CloudServerOptions, startCloudServer } from '@maka-cloud/server';
+import {
+  type CloudServer,
+  type CloudServerOptions,
+  type InboxService,
+  startCloudServer,
+  type SupervisorParts,
+} from '@maka-cloud/server';
 import { ServerOutbox } from './outbox.js';
 
 /** The playbooks the product runs: T7's research playbook, and the conductor's own coding and free ones. */
@@ -17,7 +23,8 @@ export const PRODUCT_PLAYBOOKS: readonly Playbook[] = [
   FREE_PLAYBOOK,
 ];
 
-export interface CloudOptions extends Omit<CloudServerOptions, 'handler' | 'createHandler'> {
+export interface CloudOptions
+  extends Omit<CloudServerOptions, 'handler' | 'createHandler' | 'supervisor'> {
   /** The conductor's own storage: its database and Maka's sessions. One process owns it. */
   conductorRoot: string;
   /** Passed to the conductor; `root`, `outbox` and `orchestratorAccess` are set here. */
@@ -27,6 +34,14 @@ export interface CloudOptions extends Omit<CloudServerOptions, 'handler' | 'crea
    * task or tool call can reach what it sets up first.
    */
   onReady?(parts: { orchestrator: Orchestrator; conductor: Conductor }): void;
+  /**
+   * Starts the supervisor with the server's in-process parts and the conductor, after the
+   * conductor exists and before the server listens; it stops before the conductor closes.
+   */
+  supervisor?: (context: {
+    parts: SupervisorParts;
+    conductor: Conductor;
+  }) => InboxService | Promise<InboxService>;
 }
 
 export interface Cloud {
@@ -42,11 +57,25 @@ export interface Cloud {
  * the orchestrator endpoint is still up, so it can cancel its tasks.
  */
 export async function startCloud(options: CloudOptions): Promise<Cloud> {
-  const { conductorRoot, conductor: conductorOptions, onReady, ...serverOptions } = options;
+  const {
+    conductorRoot,
+    conductor: conductorOptions,
+    onReady,
+    supervisor,
+    ...serverOptions
+  } = options;
   const warn = options.onWarning ?? (() => undefined);
   let conductor: Conductor | undefined;
   const server = await startCloudServer({
     ...serverOptions,
+    ...(supervisor
+      ? {
+          supervisor: (parts: SupervisorParts) => {
+            if (!conductor) throw new Error('The supervisor started before the conductor');
+            return supervisor({ parts, conductor });
+          },
+        }
+      : {}),
     createHandler: async ({ publisher, orchestrator, conductorAccess }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
