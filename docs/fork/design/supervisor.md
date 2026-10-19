@@ -632,6 +632,12 @@ before the fix.
   playbooks (`run.test.ts`) keeps the record able to reproduce what `cite-check`
   delivers. `ArtifactRead` carries the raw `bytes` next to the decoded `text` for
   this comparison.
+- **A claim is judged whole, or not at all.** The model receives every claim's full
+  text and every quote in full. A request that would not fit the verifier's input
+  cap is not made (`incomplete`, "too large"), and the coding check does the same for
+  a record, a list of changed files or a patch longer than it reads ("would go
+  unchecked"): nothing is clipped, because a clipped claim or quote is a part of the
+  result that no one checked.
 - **Nothing waits on a hung resolver or fetcher.** The source fetcher races its
   name resolution with the fetch's abort signal (the deadline or the caller's
   stop), and `prepareResearch` races each `fetchText` with the check's signal, so a

@@ -134,6 +134,13 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
     );
   }
   const request = buildRequest(model, prepared.claims, prepared.evidence);
+  if (!request) {
+    return cannot(
+      'incomplete',
+      'the claims and their quotes are too large to be checked in one request',
+      false,
+    );
+  }
   const budgetRefusal = (refused: 'daily_cap' | 'conversation_budget') =>
     cannot(
       'budget',

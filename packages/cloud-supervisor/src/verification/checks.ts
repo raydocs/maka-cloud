@@ -161,7 +161,13 @@ export async function prepareCoding(input: {
           found: `the test run is recorded as "${parsed.result}"${parsed.testCommand ? ` (command: ${clip(parsed.testCommand, 120)})` : ''}`,
         });
       }
-      evidence.push({ ref: 'verification.json', text: clip(record.text, MAX_RECORD_CHARS) });
+      evidence.push({ ref: 'verification.json', text: record.text });
+      if (record.text.length > MAX_RECORD_CHARS) {
+        unavailable.push({
+          reason: `verification.json is larger than the ${MAX_RECORD_CHARS} characters the check reads, so part of it would go unchecked`,
+          transient: false,
+        });
+      }
     }
   }
 
@@ -191,16 +197,15 @@ export async function prepareCoding(input: {
           });
         }
       }
-      const listed = parsed.files
-        .slice(0, MAX_CHANGED_FILES)
-        .map((file) => `${file.status} ${file.path}`);
-      evidence.push({
-        ref: 'changes.json',
-        text: clip(
-          `${parsed.files.length} files changed in ${parsed.repo}:\n${listed.join('\n')}`,
-          MAX_RECORD_CHARS,
-        ),
-      });
+      const listed = parsed.files.map((file) => `${file.status} ${file.path}`);
+      const text = `${parsed.files.length} files changed in ${parsed.repo}:\n${listed.join('\n')}`;
+      evidence.push({ ref: 'changes.json', text });
+      if (parsed.files.length > MAX_CHANGED_FILES || text.length > MAX_RECORD_CHARS) {
+        unavailable.push({
+          reason: `the list of changed files is longer than the check reads (${MAX_CHANGED_FILES} files, ${MAX_RECORD_CHARS} characters), so part of the change would go unchecked`,
+          transient: false,
+        });
+      }
     }
   }
 
@@ -213,14 +218,18 @@ export async function prepareCoding(input: {
   } else if (patch.text.trim() === '') {
     failures.push({ claim: 'the task made a change', found: 'change.patch is empty' });
   } else {
-    evidence.push({ ref: 'change.patch', text: patch.text.slice(0, MAX_PATCH_CHARS) });
+    evidence.push({ ref: 'change.patch', text: patch.text });
+    if (patch.text.length > MAX_PATCH_CHARS) {
+      unavailable.push({
+        reason: `change.patch is larger than the ${MAX_PATCH_CHARS} characters the check reads, so part of the change would go unchecked`,
+        transient: false,
+      });
+    }
   }
 
   const claims: ModelClaim[] = [
-    { id: 'summary', text: clip(manifest.summary, 400) },
-    ...manifest.done
-      .slice(0, MAX_CLAIMS)
-      .map((text, index) => ({ id: `done${index + 1}`, text: clip(text, 400) })),
+    { id: 'summary', text: manifest.summary },
+    ...manifest.done.slice(0, MAX_CLAIMS).map((text, index) => ({ id: `done${index + 1}`, text })),
   ];
   if (manifest.done.length > MAX_CLAIMS) {
     unavailable.push({ reason: `more than ${MAX_CLAIMS} claims to check`, transient: false });
@@ -514,11 +523,11 @@ export async function prepareResearch(input: {
     .map((result) => byId.get(result.id) as Claim);
   const modelClaims: ModelClaim[] = toJudge.map((claim) => ({
     id: claim.id,
-    text: clip(claim.text, 500),
+    text: claim.text,
   }));
   const evidence: ModelEvidence[] = toJudge.map((claim) => ({
     ref: claim.id,
-    text: claim.citations.map((citation) => clip(citation.quote, 1000)).join('\n---\n'),
+    text: claim.citations.map((citation) => citation.quote).join('\n---\n'),
   }));
   return {
     failures,
