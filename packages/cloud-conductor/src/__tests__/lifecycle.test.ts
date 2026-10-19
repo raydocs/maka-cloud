@@ -125,11 +125,15 @@ test('exit by shutdown during a blocking task_wait: the run is interrupted and e
 });
 
 test('exit by timeout: the turn is stopped, the run fails with a notice, its tasks are cancelled', async (t) => {
+  // The timeout fires once the model call is under way, not at a wall-clock guess.
+  const timeouts: Array<() => void> = [];
   const h = await makeHarness(t, {
     autoComplete: false,
-    conductor: { limits: { turnTimeoutMs: 300 } },
+    conductor: { hooks: { turnTimer: (fire) => timeouts.push(fire) } },
   });
   const held = await startedTaskTurn(h);
+  assert.equal(timeouts.length, 1);
+  timeouts[0]!();
   await h.conductor.idle();
   held.release();
   const [run] = h.conductor.state.runsInState('failed');

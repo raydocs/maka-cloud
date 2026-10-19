@@ -59,6 +59,8 @@ export interface ConductorOptions {
   hooks?: {
     /** After a turn is registered and before its message is sent. */
     beforeSend?(turn: { runId: string; conversationId: string }): Promise<void>;
+    /** Hands over the turn's timeout, so a test can fire it at a chosen point. */
+    turnTimer?(fire: () => void): void;
   };
 }
 
@@ -494,8 +496,10 @@ export class Conductor {
       const active: Turn = turn;
       lane.current = active;
       this.turns.set(makaSessionId, active);
-      timer = setTimeout(() => this.requestStop(active, 'timeout'), this.limits.turnTimeoutMs);
+      const fire = () => this.requestStop(active, 'timeout');
+      timer = setTimeout(fire, this.limits.turnTimeoutMs);
       this.counters.timers += 1;
+      this.hooks.turnTimer?.(fire);
       await this.hooks.beforeSend?.({ runId: job.runId, conversationId: lane.conversationId });
       // Checked after the turn is registered: a stop that ran before this saw
       // no turn and ended the run, so this sees it; one that runs after sees the turn.
