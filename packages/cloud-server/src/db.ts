@@ -172,12 +172,22 @@ CREATE INDEX message_deliveries_pending ON message_deliveries (next_attempt_at)
   WHERE delivered_at IS NULL;
 `;
 
+/**
+ * v6: which tasks owe a stop (`task_stop_pending` with no `task_stopped` after
+ * it), ended or not, so a restart finds the stops it must retry.
+ */
+const SCHEMA_V6 = `
+ALTER TABLE task_index ADD COLUMN stop_pending INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX task_index_stop_pending ON task_index (n) WHERE stop_pending = 1;
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
   SCHEMA_V3,
   SCHEMA_V4,
   SCHEMA_V5,
+  SCHEMA_V6,
 ];
 
 /**

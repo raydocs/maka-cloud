@@ -70,5 +70,6 @@ test('a research request runs the research playbook: plan at high effort, delega
     openClients: 0,
     outboxSending: 0,
     outboxRetrying: 0,
+    stopChecks: 0,
   });
 });

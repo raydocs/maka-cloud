@@ -104,3 +104,32 @@ test('events of one conversation are delivered in order, and a stuck conversatio
   );
   assert.equal(h.conductor.state.runsInState('done').length, 1);
 });
+
+test('an event written just as the sender finds the queue empty is still sent', {
+  timeout: 20_000,
+}, async (t) => {
+  // The handshake: the second notice is written after the drain has found no
+  // more rows, while its sender is still registered for the conversation.
+  const late = { posted: false, post: (_conversationId: string) => {} };
+  const h = await makeHarness(t, {
+    conductor: {
+      hooks: {
+        outboxDrained: (conversationId) => {
+          if (late.posted) return;
+          late.posted = true;
+          late.post(conversationId);
+        },
+      },
+    },
+  });
+  late.post = (conversationId) =>
+    void h.conductor.postNotice({ conversationId, text: 'Written at the end.' });
+  await h.conductor.postNotice({ conversationId: 'cnv_1', text: 'First.' });
+  await h.conductor.idle();
+  assert.ok(late.posted, 'the second notice was written in the window');
+  assert.deepEqual(
+    h.outbox.notices.map((notice) => notice.text),
+    ['First.', 'Written at the end.'],
+  );
+  assert.equal(h.conductor.stats().outboxSending, 0);
+});

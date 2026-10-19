@@ -23,6 +23,8 @@ export interface TaskStore {
   activeTaskIds(): TaskId[];
   /** Every task id in the log. */
   taskIds(): Iterable<TaskId>;
+  /** Tasks, ended or not, with a `task_stop_pending` and no `task_stopped` after it. */
+  stopPendingTaskIds(): TaskId[];
   /** Tasks created in the tree started by `rootSessionId` at or after `sinceMs`. */
   countCreatedSince(rootSessionId: SessionId, sinceMs: number): number;
 }
@@ -43,6 +45,7 @@ export class MemoryTaskStore implements TaskStore {
   private readonly rows = new Map<TaskId, TaskRow>();
   private readonly children = new Map<TaskId, TaskId[]>();
   private readonly active = new Set<TaskId>();
+  private readonly stopPending = new Set<TaskId>();
   private readonly createdByRoot = new Map<SessionId, number[]>();
 
   async append(event: TaskEvent, at: number): Promise<StoredEvent> {
@@ -76,6 +79,10 @@ export class MemoryTaskStore implements TaskStore {
     return [...this.rows.keys()];
   }
 
+  stopPendingTaskIds(): TaskId[] {
+    return [...this.stopPending];
+  }
+
   countCreatedSince(rootSessionId: SessionId, sinceMs: number): number {
     return (this.createdByRoot.get(rootSessionId) ?? []).filter((at) => at >= sinceMs).length;
   }
@@ -100,6 +107,8 @@ export class MemoryTaskStore implements TaskStore {
     const row = this.rows.get(event.taskId);
     if (!row) return;
     row.events.push(stored);
+    if (event.type === 'task_stop_pending') this.stopPending.add(event.taskId);
+    if (event.type === 'task_stopped') this.stopPending.delete(event.taskId);
     if (!row.terminal && TERMINAL_EVENTS.has(event.type)) {
       row.terminal = true;
       this.active.delete(event.taskId);

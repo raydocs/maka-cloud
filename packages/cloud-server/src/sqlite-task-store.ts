@@ -35,6 +35,7 @@ export class SqliteTaskStore implements TaskStore {
   private readonly insertTask: StatementSync;
   private readonly startTask: StatementSync;
   private readonly endTask: StatementSync;
+  private readonly markStop: StatementSync;
   private readonly rootOfTask: StatementSync;
   private readonly conversationOfSession: StatementSync;
 
@@ -57,6 +58,7 @@ export class SqliteTaskStore implements TaskStore {
     this.endTask = db.prepare(
       "UPDATE task_index SET state = ? WHERE task_id = ? AND state IN ('queued', 'running')",
     );
+    this.markStop = db.prepare('UPDATE task_index SET stop_pending = ? WHERE task_id = ?');
     this.rootOfTask = db.prepare(
       'SELECT root_session_id AS root FROM task_index WHERE task_id = ?',
     );
@@ -121,6 +123,13 @@ export class SqliteTaskStore implements TaskStore {
     }
   }
 
+  stopPendingTaskIds(): TaskId[] {
+    const rows = this.db
+      .prepare('SELECT task_id AS id FROM task_index WHERE stop_pending = 1 ORDER BY n')
+      .all() as unknown as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   countCreatedSince(rootSessionId: SessionId, sinceMs: number): number {
     const row = this.db
       .prepare(
@@ -162,6 +171,8 @@ export class SqliteTaskStore implements TaskStore {
       );
     } else if (event.type === 'task_started') {
       this.startTask.run(event.taskId);
+    } else if (event.type === 'task_stop_pending' || event.type === 'task_stopped') {
+      this.markStop.run(event.type === 'task_stop_pending' ? 1 : 0, event.taskId);
     } else {
       const state = TERMINAL[event.type];
       if (state !== undefined) this.endTask.run(state, event.taskId);

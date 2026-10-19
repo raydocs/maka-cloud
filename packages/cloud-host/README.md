@@ -15,7 +15,9 @@ The required ones are `MAKA_CLOUD_DATA_DIR`, `ANTHROPIC_API_KEY`, `INSTABOX_API_
 
 Starting runs nothing by itself: no model request is made and no task starts until a user posts a
 message. At start the server stops sandbox runs whose task its log does not know, and the
-conductor retries cancels that a shutdown left undone.
+conductor retries cancels that a shutdown left undone. A task whose run could not be stopped
+(an unreachable sandbox, say) ends but keeps owing the stop: the orchestrator retries it until
+the sandbox confirms, across restarts, and the conductor holds the task's reservation until then.
 
 Users need an invite: `cloud-server invite create --invites $MAKA_CLOUD_DATA_DIR/invites.db --label <text>`.
 

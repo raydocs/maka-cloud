@@ -3,9 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
-import { openDatabase } from '../db.js';
+import { MIGRATIONS, openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
 import { SqliteTaskStore } from '../sqlite-task-store.js';
 
@@ -130,6 +130,49 @@ function manifest() {
     knownIssues: [],
   };
 }
+
+test('the index follows owed stops, ended tasks included, across a reopen and a rebuild', async (t) => {
+  const { db, store, path } = await openStore(t);
+  await store.append(created('a', 's1'), 1);
+  await store.append(created('b', 's1'), 2);
+  await store.append({ type: 'task_stop_pending', taskId: 'a', cause: 'restart' }, 3);
+  await store.append({ type: 'task_failed', taskId: 'a', reason: 'orphaned' }, 4);
+  await store.append({ type: 'task_stop_pending', taskId: 'b', cause: 'cancel_failed' }, 5);
+  await store.append({ type: 'task_stopped', taskId: 'b' }, 6);
+  assert.deepEqual(store.stopPendingTaskIds(), ['a']);
+  assert.deepEqual(store.activeTaskIds(), ['b']);
+  store.rebuildTaskIndex();
+  assert.deepEqual(store.stopPendingTaskIds(), ['a']);
+  db.close();
+  const reopened = openDatabase(path);
+  t.after(() => reopened.close());
+  assert.deepEqual(new SqliteTaskStore(reopened, new FeedHub()).stopPendingTaskIds(), ['a']);
+});
+
+test('a version 5 database gains the owed-stop index with its tasks owing none', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'store-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'db.sqlite');
+  const old = new DatabaseSync(path);
+  for (const step of MIGRATIONS.slice(0, 5)) old.exec(step);
+  old.exec('PRAGMA user_version = 5');
+  old
+    .prepare(
+      "INSERT INTO task_index (task_id, session_id, root_session_id, state, created_at) VALUES ('a', 's1', 's1', 'failed', 1)",
+    )
+    .run();
+  old.close();
+  const db = openDatabase(path);
+  t.after(() => db.close());
+  assert.equal(
+    (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
+    MIGRATIONS.length,
+  );
+  const store = new SqliteTaskStore(db, new FeedHub());
+  assert.deepEqual(store.stopPendingTaskIds(), []);
+  await store.append({ type: 'task_stop_pending', taskId: 'a', cause: 'restart' }, 2);
+  assert.deepEqual(store.stopPendingTaskIds(), ['a']);
+});
 
 test('taskIds pages through more tasks than one page holds', async (t) => {
   const { store } = await openStore(t);
