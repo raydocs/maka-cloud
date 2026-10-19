@@ -679,3 +679,22 @@ test("a revoke forgets the invite's devices and cuts off a send in flight, and o
   assert.equal(recorded.n, 0);
   assert.equal(fake.calls.filter((call) => call.endpoint === d.endpoint).length, 1);
 });
+
+test('an invite revoked from another process is seen at the next send, which is not made', async (t) => {
+  const { service, fake, control, finish } = await serviceOnly(t);
+  const d = device();
+  const other = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  service.register('inv_2', { endpoint: other.endpoint, ...other.keys });
+  service.start();
+  // The revoke happened in the command line's process: no listener hears of it.
+  control.revoked.add('inv_1');
+  await finish('ses_1');
+  const own = await finish('ses_2');
+  await eventually(() => fake.calls.length >= 1, 'the other invite');
+  assert.deepEqual(
+    fake.calls.map((call) => call.endpoint),
+    [other.endpoint],
+  );
+  assert.equal(payloadOf(fake.calls[0] as Call, other).taskId, own);
+});
