@@ -20,6 +20,15 @@ export function scrubErrorText(value: string): string {
     .replace(HIDDEN_NAMES, 'assistant');
 }
 
+/**
+ * An inbox item as clients see it. The supervisor builds its ask from agent-written
+ * text (a failure reason, a summary), so it is scrubbed like error text.
+ */
+export function toPublicItem(item: unknown): unknown {
+  if (typeof item !== 'object' || item === null || !('ask' in item)) return item;
+  return typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
+}
+
 export function toPublicView(view: TaskView): PublicTaskView {
   const { runner: _runner, ...rest } = view;
   return rest.failureReason === undefined

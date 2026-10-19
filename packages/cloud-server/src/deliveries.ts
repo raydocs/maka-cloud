@@ -113,9 +113,13 @@ export class MessageDeliveries {
         'UPDATE message_deliveries SET attempts = ?, next_attempt_at = ? WHERE message_id = ?',
       )
       .run(attempts, this.now() + this.backoff(attempts), messageId);
-    const run = (async () => {
+    // Registered before the handler is called: the call runs a microtask later, so even a
+    // handler that throws synchronously settles through the cleanup below, never before it.
+    const run = Promise.resolve().then(async () => {
       let failed = false;
       try {
+        // Stopped before the call came round: it stays pending for the next start.
+        if (this.stopped) return;
         await this.target({
           conversationId: row.conversation_id,
           messageId: row.message_id,
@@ -137,7 +141,7 @@ export class MessageDeliveries {
         this.inFlight.delete(messageId);
       }
       if (failed) this.arm();
-    })();
+    });
     this.inFlight.set(messageId, run);
   }
 

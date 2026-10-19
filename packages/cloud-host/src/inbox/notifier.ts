@@ -1,4 +1,5 @@
 import type { Conductor } from '@maka-cloud/conductor';
+import { scrubErrorText } from '@maka-cloud/server';
 import type { Interrupt } from '@maka-cloud/supervisor';
 
 const MAX_ASK_CHARS = 300;
@@ -23,7 +24,8 @@ export function conductorNotifier(conductor: NoticeApi): {
       const byConversation = new Map<string, string[]>();
       for (const item of interrupt.items) {
         const asks = byConversation.get(item.conversationId) ?? [];
-        asks.push(clip(item.ask));
+        // The ask quotes agent-written text; the notice lands in the conversation clients see.
+        asks.push(clip(scrubErrorText(item.ask)));
         byConversation.set(item.conversationId, asks);
       }
       for (const [conversationId, asks] of byConversation) {
