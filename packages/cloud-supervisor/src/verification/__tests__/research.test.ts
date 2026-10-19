@@ -774,3 +774,46 @@ test('a change beside a rendering but no report.json still runs both kinds of ch
     assert.equal(result.w.openai.requests.length, 0, rendering);
   }
 });
+
+const CODING_FILES_LISTED = ['out/change.patch', 'out/changes.json', 'out/verification.json'];
+
+test('a coding task is independently checked only if every artifact is one the coding check reads', async () => {
+  for (const extra of [
+    'out/report.json.md',
+    'out/r\u0435port.json', // Cyrillic e
+    'out/report.json',
+    'out/notes.txt',
+    'out/Report.json',
+    'https://example.com/screenshot.png',
+  ]) {
+    const result = await checkedResearch(
+      (w) => codingFiles(w, 't1'),
+      [...CODING_FILES_LISTED, extra],
+    );
+    await assertUnverified(result, `a change beside ${extra}`);
+    assert.equal(result.w.openai.requests.length, 0, extra);
+  }
+});
+
+test('a research task is independently checked only if every artifact is a local file the check reads', async () => {
+  for (const extra of [
+    'https://example.com/untrusted%EF%BC%8Freport.json', // a fullwidth slash before NFKC
+    'https://example.com/%2525252572eport.json', // still encoded after four decodes
+    'https://example.com/shot.png',
+    'out/notes.txt',
+    'out/change.patch',
+    'out/r\u0435port.html',
+    'out/%72eport.html',
+    'out\\report.md',
+    'out/report.md?x=1',
+    'out/\u0000report.md',
+    '../out/report.md',
+  ]) {
+    const result = await checkedResearch(
+      (w) => researchFiles(w, 't1'),
+      [...ALL_REPORT_FILES, extra],
+    );
+    await assertUnverified(result, `a report beside ${JSON.stringify(extra)}`);
+    assert.equal(result.w.fetcher.fetched.length, 0, extra);
+  }
+});
