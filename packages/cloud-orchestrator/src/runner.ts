@@ -8,12 +8,20 @@ export interface RunSpec {
   briefPath: string;
   /** Where the runner must write its result manifest (JSON) before it reports `finished`. */
   resultPath: string;
+  /**
+   * Dollars this run may spend: what is left of its tree's cap when it starts. The runner stops
+   * itself when it spends this much; the orchestrator also cancels the tree when the tree's
+   * reported spend reaches the cap. Absent: the tree has no cap.
+   */
+  budgetUsd?: number;
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
 }
 
 export type RunnerEvent =
   | { type: 'progress'; note: string }
+  /** Dollars this run has spent so far, as its CLI reports them. Cumulative: each replaces the last. */
+  | { type: 'usage'; costUsd: number }
   /** The runner wrote `resultPath`. The orchestrator validates it. */
   | { type: 'finished' }
   | { type: 'failed'; reason: string };

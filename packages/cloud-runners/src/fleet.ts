@@ -13,7 +13,7 @@ import type {
   RunnerSessionStore,
   SandboxProvider,
 } from './types.js';
-import type { VendorAdapter } from './vendors.js';
+import type { TokenPrices, VendorAdapter } from './vendors.js';
 
 export type RunnerName = 'claude-agent-sdk' | 'codex';
 
@@ -41,6 +41,11 @@ export interface CloudRunnersOptions {
   /** Replaces the install step (it must leave the CLI on PATH, in `$HOME/.maka-cli/bin`). */
   installCommands?: Partial<Record<RunnerName, string>>;
   models?: Partial<Record<RunnerName, string>>;
+  /**
+   * Token prices for metering each run's spend against its budget, per runner. Defaults:
+   * `DEFAULT_PRICES`. Claude's CLI also reports its own total at the end of each invocation.
+   */
+  prices?: Partial<Record<RunnerName, TokenPrices>>;
   pollIntervalMs?: number;
   /** Consecutive failed polls before a run fails with "sandbox unreachable". */
   pollMaxFailures?: number;

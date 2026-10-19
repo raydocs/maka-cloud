@@ -11,11 +11,24 @@ import {
 } from './config.js';
 import { MakaHost } from './maka-host.js';
 import { type ConductorAccess, OrchestratorLink } from './orchestrator-link.js';
-import type { ConductorOutbox, OutboxNotice } from './outbox.js';
+import type {
+  ConductorOutbox,
+  OutboxAnswered,
+  OutboxMessage,
+  OutboxNotice,
+  OutboxQuestion,
+} from './outbox.js';
 import { DEFAULT_PLAYBOOKS, type Playbook } from './playbooks.js';
 import { callCostUsd } from './pricing.js';
 import { conductorSystemPrompt, PLANNER_SYSTEM_PROMPT, plannerInput } from './prompts.js';
-import { ConductorState, OPEN_RUN_STATES, type QuestionRow, type RunRow } from './state.js';
+import {
+  ConductorState,
+  type DelegationRow,
+  OPEN_RUN_STATES,
+  type OutboxRow,
+  type QuestionRow,
+  type RunRow,
+} from './state.js';
 import {
   type ActiveTurn,
   type ConductorToolSpec,
@@ -29,6 +42,11 @@ export interface ConductorOptions {
   root: string;
   access: ModelAccess;
   outbox: ConductorOutbox;
+  /**
+   * The orchestrator access of a conversation when no message has brought it
+   * in this process: used to retry cancels a shutdown or crash left undone.
+   */
+  orchestratorAccess?: (conversationId: string) => ConductorAccess | undefined;
   playbooks?: readonly Playbook[];
   /** Tools playbooks add; `irreversible` ones are held for approval. */
   tools?: readonly ConductorToolSpec[];
@@ -81,9 +99,17 @@ export interface ConductorStats {
   planners: number;
   timers: number;
   openClients: number;
+  /** Conversations whose outbox events are being sent. */
+  outboxSending: number;
+  /** Conversations waiting to retry an outbox event that failed. */
+  outboxRetrying: number;
 }
 
-type StopReason = 'user' | 'timeout' | 'shutdown' | 'refusals';
+/**
+ * `gated`: a model request was refused before it was sent (budget spent or
+ * blocked, a question open, the run ended); the turn ends without a failure.
+ */
+type StopReason = 'user' | 'timeout' | 'shutdown' | 'refusals' | 'gated';
 
 interface Turn extends ActiveTurn {
   readonly makaSessionId: string;
@@ -98,11 +124,13 @@ interface Turn extends ActiveTurn {
   finalText: string[];
   errors: string[];
   completeReason?: string;
-  /** Async work started from event handlers (question posts), awaited before settling. */
-  readonly pending: Set<Promise<void>>;
 }
 
-type Job = { kind: 'turn'; runId: string; text: string } | { kind: 'cancel_tasks'; runId: string };
+type Job =
+  | { kind: 'turn'; runId: string; text: string }
+  | { kind: 'cancel_tasks'; runId: string }
+  /** Retries the conversation's cancels that have not succeeded yet. */
+  | { kind: 'cancel_pending'; runId?: undefined };
 
 interface Lane {
   readonly conversationId: string;
@@ -138,6 +166,9 @@ export class Conductor {
   private readonly tokens = new Map<string, string>();
   private readonly counters = { openClients: 0, timers: 0, planners: 0 };
   private readonly closing = new AbortController();
+  private readonly orchestratorAccess: ConductorOptions['orchestratorAccess'];
+  private readonly sending = new Map<string, Promise<void>>();
+  private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -151,6 +182,7 @@ export class Conductor {
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
     this.hooks = options.hooks ?? {};
+    this.orchestratorAccess = options.orchestratorAccess;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
       root: join(options.root, 'maka'),
@@ -158,32 +190,45 @@ export class Conductor {
       state: this.state,
       toolsFor: (kind) => (kind === 'conductor' ? tools : []),
       onModelCall: (makaSessionId, attempt) => this.meter(makaSessionId, attempt),
+      beforeModelRequest: (makaSessionId) => this.gateModelRequest(makaSessionId),
       now: this.now,
     });
   }
 
   /**
    * Opens the conductor over its root. Runs a previous process left active are
-   * ended as interrupted (their orchestrator tasks were already failed by the
-   * orchestrator's own restore) and their users are told; runs waiting for an
-   * answer keep waiting.
+   * ended as interrupted and their users are told; runs waiting for an answer
+   * keep waiting. No turn runs yet, so every task not known to have ended is
+   * cancelled: those a shutdown could not cancel, and all of them after a
+   * crash. Outbox events not acked yet are sent again.
    */
   static async create(options: ConductorOptions): Promise<Conductor> {
     const conductor = new Conductor(options);
     try {
       for (const run of conductor.state.runsInState('active')) {
-        if (conductor.state.endRun(run.runId, 'interrupted', 'restart')) {
-          await conductor.notice(
-            run,
-            'This run was interrupted by a restart. Send the request again to start over.',
-          );
-        }
+        conductor.state.endRun(
+          run.runId,
+          'interrupted',
+          'restart',
+          'This run was interrupted by a restart. Send the request again to start over.',
+        );
       }
+      conductor.state.markCancelPending(
+        conductor.state.unsettledDelegations().map((delegation) => delegation.key),
+      );
       await conductor.host.recoverInterrupted();
     } catch (error) {
       await conductor.host.close().catch(() => undefined);
       conductor.state.close();
       throw error;
+    }
+    for (const conversationId of conductor.state.conversationsWithPendingCancels()) {
+      const access = conductor.orchestratorAccess?.(conversationId);
+      // Taking the access queues the retry.
+      if (access) conductor.lane(conversationId, access);
+    }
+    for (const conversationId of conductor.state.outboxConversations()) {
+      conductor.sendOutbox(conversationId);
     }
     return conductor;
   }
@@ -193,12 +238,11 @@ export class Conductor {
     if (this.closing.signal.aborted) throw new Error('The conductor is closed');
     const lane = this.lane(message.conversationId, access);
     if (lane.queue.length >= this.limits.maxQueuedPerConversation) {
-      this.safe(() =>
-        this.outbox.notice({
-          conversationId: message.conversationId,
-          text: 'Too many messages are waiting. Wait for the current run to answer, then send this again.',
-        }),
+      this.state.enqueueNotice(
+        { conversationId: message.conversationId },
+        'Too many messages are waiting. Wait for the current run to answer, then send this again.',
       );
+      this.sendOutbox(message.conversationId);
       return;
     }
     const admitted = this.state.admitMessage(
@@ -220,19 +264,17 @@ export class Conductor {
       return { accepted: false, reason: 'text_too_long' };
     }
     const lane = this.lane(answer.conversationId, access);
-    const result = this.state.answer(answer.conversationId, answer.questionId, answer.optionId);
+    const result = this.state.answer(
+      answer.conversationId,
+      answer.questionId,
+      answer.optionId,
+      answer.text,
+    );
     if (!result.accepted) return result;
     if (result.duplicate) return { accepted: true, duplicate: true };
     const { question, option, run } = result;
-    this.safe(() =>
-      this.outbox.answered?.({
-        conversationId: question.conversationId,
-        runId: question.runId,
-        questionId: question.questionId,
-        optionId: option.id,
-        ...(answer.text ? { text: answer.text } : {}),
-      }),
-    );
+    // The answered event was written with the answer; send it.
+    this.sendOutbox(question.conversationId);
     if (!OPEN_RUN_STATES.includes(run.state)) return { accepted: false, reason: 'closed' };
     if (question.reason === 'budget_overrun' && option.id === 'stop') {
       this.stopRun(lane, run.runId, 'user_stop');
@@ -271,14 +313,24 @@ export class Conductor {
     return this.state.reserveExternal(key, conversationId, taskId, maxUsd);
   }
 
-  /** Settles a reservation made with reserveSpend at what was actually spent. */
+  /**
+   * Settles a reservation made with reserveSpend at what was actually spent.
+   * Above the reservation the full amount is charged, `overrunUsd` says by how
+   * much, and the run spends nothing more until the user answers a budget question.
+   */
   settleSpend(key: string, actualUsd: number) {
     return this.state.settleExternal(key, actualUsd);
   }
 
-  /** Posts a notice to the conversation's feed for a caller in the same process. */
-  async postNotice(notice: OutboxNotice): Promise<void> {
-    await this.safe(() => this.outbox.notice(notice));
+  /** Posts a notice to the conversation's feed for a caller in the same process. Durable once this returns. */
+  async postNotice(notice: Omit<OutboxNotice, 'eventId'>): Promise<void> {
+    this.state.enqueueNotice(
+      notice.runId === undefined
+        ? { conversationId: notice.conversationId }
+        : { conversationId: notice.conversationId, runId: notice.runId },
+      notice.text,
+    );
+    this.sendOutbox(notice.conversationId);
   }
 
   stats(): ConductorStats {
@@ -291,19 +343,30 @@ export class Conductor {
       planners: this.counters.planners,
       timers: this.counters.timers,
       openClients: this.counters.openClients,
+      outboxSending: this.sending.size,
+      outboxRetrying: this.retryTimers.size,
     };
   }
 
-  /** Resolves once no conversation has work queued or running. */
+  /**
+   * Resolves once no conversation has work queued or running and no outbox
+   * event is being sent. An event waiting to be retried does not count.
+   */
   async idle(): Promise<void> {
     for (;;) {
       const pumps = [...this.lanes.values()].flatMap((lane) => (lane.pump ? [lane.pump] : []));
-      if (pumps.length === 0) return;
-      await Promise.all(pumps);
+      const work = [...pumps, ...this.sending.values()];
+      if (work.length === 0) return;
+      await Promise.all(work);
     }
   }
 
-  /** Stops every turn, waits for each to give back what it holds, then closes the stores. */
+  /**
+   * Stops every turn and waits for each to give back what it holds. Then,
+   * while the orchestrator can still be reached, cancels every task not known
+   * to have ended, those of runs waiting for an answer included; a cancel that
+   * fails is kept and retried on the next start. Then closes the stores.
+   */
   close(): Promise<void> {
     this.closed ??= (async () => {
       this.closing.abort();
@@ -313,6 +376,14 @@ export class Conductor {
         lane.queue = [];
         if (lane.current) this.requestStop(lane.current, 'shutdown');
       }
+      await this.idle();
+      try {
+        await this.cancelEverything();
+      } catch (error) {
+        this.warn('Cancelling tasks at shutdown failed', error);
+      }
+      for (const timer of this.retryTimers.values()) clearTimeout(timer);
+      this.retryTimers.clear();
       await this.idle();
       try {
         await this.host.close();
@@ -331,7 +402,17 @@ export class Conductor {
       lane = { conversationId, queue: [] };
       this.lanes.set(conversationId, lane);
     }
-    if (access) lane.access = access;
+    if (access) {
+      lane.access = access;
+      // With access for this conversation, retry the cancels it is owed first.
+      if (
+        !this.closing.signal.aborted &&
+        this.state.hasPendingCancels(conversationId) &&
+        !lane.queue.some((job) => job.kind === 'cancel_pending')
+      ) {
+        this.enqueue(lane, { kind: 'cancel_pending' });
+      }
+    }
     return lane;
   }
 
@@ -409,7 +490,6 @@ export class Conductor {
         planners: new Set(),
         finalText: [],
         errors: [],
-        pending: new Set(),
       };
       const active: Turn = turn;
       lane.current = active;
@@ -423,9 +503,10 @@ export class Conductor {
       const run = this.state.run(job.runId) as RunRow;
       if (!OPEN_RUN_STATES.includes(run.state) && !active.stopReason)
         this.requestStop(active, 'user');
-      if (!active.stopReason && this.state.budget(job.runId).remainingUsd <= 0) {
-        // Spent before this input arrived (a dismissed budget question): ask again, send nothing.
-        await this.askBudget(active, 0);
+      const budget = this.state.budget(job.runId);
+      if (!active.stopReason && (budget.remainingUsd <= 0 || budget.blockedReason !== null)) {
+        // Spent or blocked before this input arrived (a dismissed budget question): ask again, send nothing.
+        this.askBudget(active, 0);
       } else if (!active.stopReason) {
         const text = this.turnText(job.runId, job.text);
         for await (const event of this.host.send(
@@ -448,7 +529,6 @@ export class Conductor {
         this.turns.delete(turn.makaSessionId);
         if (lane.current === turn) lane.current = undefined;
         await turn.stopping;
-        await Promise.allSettled(turn.pending);
       }
       try {
         const queued = lane.queue.some((next) => next.kind === 'turn' && next.runId === job.runId);
@@ -512,8 +592,9 @@ export class Conductor {
     const run = this.state.run(runId);
     if (!run) return;
     if (turn?.stopReason === 'shutdown') {
-      // The orchestrator's restore fails the run's tasks when the server comes back.
+      // Stop what it started while the orchestrator can still be reached.
       this.state.endRun(runId, 'interrupted', 'shutdown');
+      await this.cancelRunTasks(runId, link);
       return;
     }
     if (!OPEN_RUN_STATES.includes(run.state)) {
@@ -523,13 +604,32 @@ export class Conductor {
     }
     const failure = this.failureOf(turn, setupError);
     if (failure) {
-      if (this.state.endRun(runId, 'failed', failure.reason)) await this.notice(run, failure.text);
+      this.state.endRun(runId, 'failed', failure.reason, failure.text);
+      this.sendOutbox(run.conversationId);
       await this.cancelRunTasks(runId, link);
       return;
     }
     const text = turn?.finalText.join('\n\n').trim();
-    if (text)
-      this.safe(() => this.outbox.message({ conversationId: run.conversationId, runId, text }));
+    const ends =
+      !(queued && (turn?.stopReason !== 'refusals' || this.state.openQuestion(runId))) &&
+      !this.state.openQuestion(runId) &&
+      turn?.stopReason !== 'refusals';
+    if (text && ends) {
+      // The final message: the run is done once the outbox has delivered it.
+      if (this.state.deliverRun(runId, text)) {
+        this.sendOutbox(run.conversationId);
+        await this.cancelRunTasks(runId, link);
+      }
+      return;
+    }
+    if (text) {
+      this.state.enqueueOutbox('message', run.conversationId, {
+        conversationId: run.conversationId,
+        runId,
+        text,
+      });
+      this.sendOutbox(run.conversationId);
+    }
     if (queued && (turn?.stopReason !== 'refusals' || this.state.openQuestion(runId))) {
       // A message sent during this turn continues the run; it was written
       // without seeing a question this turn asked, so it stands in for the answer.
@@ -542,12 +642,13 @@ export class Conductor {
       return;
     }
     if (turn?.stopReason === 'refusals') {
-      if (this.state.endRun(runId, 'failed', 'stopped')) {
-        await this.notice(
-          run,
-          'The run was stopped because it kept calling tools after it had to stop.',
-        );
-      }
+      this.state.endRun(
+        runId,
+        'failed',
+        'stopped',
+        'The run was stopped because it kept calling tools after it had to stop.',
+      );
+      this.sendOutbox(run.conversationId);
       await this.cancelRunTasks(runId, link);
       return;
     }
@@ -565,6 +666,8 @@ export class Conductor {
       };
     }
     if (!turn) return { reason: 'setup_failed', text: 'The run could not start.' };
+    // A refused request ends the turn; the budget question or the stop says why.
+    if (turn.stopReason === 'gated') return undefined;
     if (turn.stopReason === 'timeout') {
       return {
         reason: 'timeout',
@@ -613,25 +716,98 @@ export class Conductor {
     return true;
   }
 
-  private async cancelTasks(lane: Lane, runId: string): Promise<void> {
-    if (!lane.access || this.state.tasksOf(runId).length === 0) return;
+  /** A run's tasks, or (without a run) the cancels the conversation is still owed. */
+  private async cancelTasks(lane: Lane, runId: string | undefined): Promise<void> {
+    const delegations =
+      runId === undefined
+        ? this.state
+            .unsettledDelegations({ conversationId: lane.conversationId })
+            .filter((delegation) => delegation.cancelPending)
+        : this.state.unsettledDelegations({ runId });
+    if (!lane.access || delegations.length === 0) return;
     const link = new OrchestratorLink(lane.conversationId, lane.access, this.tokens, this.counters);
     try {
-      await this.cancelRunTasks(runId, link);
+      await this.cancelDelegations(delegations, link);
     } finally {
       await link.close().catch(() => undefined);
     }
   }
 
   private async cancelRunTasks(runId: string, link: OrchestratorLink): Promise<void> {
-    for (const taskId of this.state.tasksOf(runId)) {
+    await this.cancelDelegations(this.state.unsettledDelegations({ runId }), link);
+  }
+
+  /**
+   * Cancels each delegation's task, found by its id or, when the response with
+   * the id was lost, by its idempotency key. Each is marked before it is tried
+   * and unmarked only once the orchestrator confirms, so a failure is retried.
+   */
+  private async cancelDelegations(
+    delegations: readonly DelegationRow[],
+    link: OrchestratorLink,
+  ): Promise<void> {
+    this.state.markCancelPending(delegations.map((delegation) => delegation.key));
+    for (const delegation of delegations) {
+      const target =
+        delegation.taskId === null
+          ? { idempotencyKey: delegation.key }
+          : { taskId: delegation.taskId };
       try {
-        const result = await link.call('task_cancel', { taskId });
-        if (result.isError) this.warn(`Cancelling task ${taskId} failed`, result.text);
+        const result = await link.call('task_cancel', target);
+        if (result.isError) {
+          this.warn(`Cancelling delegation ${delegation.key} failed`, result.text);
+          continue;
+        }
+        this.settleView(delegation, result.structured);
       } catch (error) {
-        this.warn(`Cancelling task ${taskId} failed`, error);
+        this.warn(`Cancelling delegation ${delegation.key} failed`, error);
       }
     }
+  }
+
+  /** At shutdown: every task not known to have ended, in every conversation that has access. */
+  private async cancelEverything(): Promise<void> {
+    const byConversation = new Map<string, DelegationRow[]>();
+    for (const delegation of this.state.unsettledDelegations()) {
+      const list = byConversation.get(delegation.conversationId) ?? [];
+      list.push(delegation);
+      byConversation.set(delegation.conversationId, list);
+    }
+    await Promise.all(
+      [...byConversation].map(async ([conversationId, delegations]) => {
+        const access =
+          this.lanes.get(conversationId)?.access ?? this.orchestratorAccess?.(conversationId);
+        if (!access) {
+          this.state.markCancelPending(delegations.map((delegation) => delegation.key));
+          return;
+        }
+        const link = new OrchestratorLink(conversationId, access, this.tokens, this.counters);
+        try {
+          await this.cancelDelegations(delegations, link);
+        } finally {
+          await link.close().catch(() => undefined);
+        }
+      }),
+    );
+  }
+
+  /**
+   * Settles a delegation from a task view once the task has ended: at what its
+   * tree reported spending, or at the whole reservation when no runner in it
+   * reports spend. A cancel by key that found no task settles at 0.
+   */
+  private settleView(delegation: DelegationRow, view: Record<string, unknown> | undefined): void {
+    if (!view) return;
+    if (view.created === false) {
+      this.state.settleDelegation(delegation.key, 0);
+      return;
+    }
+    if (typeof view.taskId === 'string' && delegation.taskId === null) {
+      this.state.bindTask(delegation.key, view.taskId);
+    }
+    if (!['succeeded', 'failed', 'cancelled'].includes(String(view.state))) return;
+    const actual = typeof view.costUsd === 'number' ? view.costUsd : delegation.reservedUsd;
+    this.state.settleDelegation(delegation.key, actual);
   }
 
   // Budget
@@ -645,20 +821,51 @@ export class Conductor {
       callCostUsd(attempt, this.prices),
       attempt.attemptId,
     );
-    if (turn && budget.remainingUsd <= 0 && !this.state.openQuestion(runId)) {
-      const asked = this.askBudget(turn, 0).then(() => undefined);
-      turn.pending.add(asked);
-      void asked.finally(() => turn.pending.delete(asked));
+    if (turn && (budget.remainingUsd <= 0 || budget.blockedReason !== null)) {
+      this.askBudget(turn, 0);
     }
   }
 
-  /** Opens the code-built budget question. `needUsd` 0 means the model spend ran out. */
-  private async askBudget(turn: ActiveTurn, needUsd: number): Promise<QuestionRow | undefined> {
+  /**
+   * Called before every model request of a conductor or planner session, the
+   * retries of one included. A run that spent its budget, whose spend is
+   * blocked, that has a question open or that ended sends no paid request: the
+   * turn stops here and, when money is the reason, the user is asked.
+   */
+  private gateModelRequest(makaSessionId: string): void {
+    const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+    if (!turn) throw new Error('No conductor turn is running for this session.');
+    let refusal: string | undefined;
+    if (turn.stopReason) refusal = 'the run is stopping';
+    else {
+      const run = this.state.run(turn.runId);
+      const budget = this.state.budget(turn.runId);
+      if (!run || !OPEN_RUN_STATES.includes(run.state)) refusal = 'the run has ended';
+      else if (this.state.openQuestion(turn.runId)) refusal = 'a question is waiting for the user';
+      else if (budget.remainingUsd <= 0 || budget.blockedReason !== null) {
+        refusal = 'the run budget is spent';
+        this.askBudget(turn, 0);
+      }
+    }
+    if (!refusal) return;
+    this.requestStop(turn, 'gated');
+    throw new Error(`Model request not sent: ${refusal}.`);
+  }
+
+  /**
+   * Opens the code-built budget question. `needUsd` 0 means the spend ran out,
+   * or was blocked because something spent more than was reserved for it.
+   */
+  private askBudget(turn: ActiveTurn, needUsd: number): QuestionRow | undefined {
     const budget = this.state.budget(turn.runId);
     const target =
       needUsd > 0
         ? (budget.spentUsd + needUsd) * 1.2
-        : Math.max(budget.budgetUsd * 1.5, budget.budgetUsd + this.limits.defaultRunBudgetUsd);
+        : Math.max(
+            budget.budgetUsd * 1.5,
+            budget.budgetUsd + this.limits.defaultRunBudgetUsd,
+            budget.spentUsd * 1.2,
+          );
     const raiseToUsd = Math.ceil(target * 100) / 100;
     const opened = this.state.openQuestionIf(
       turn.runId,
@@ -667,7 +874,9 @@ export class Conductor {
         question:
           needUsd > 0
             ? `The next step needs ${money(needUsd)}, but this run has ${money(Math.max(0, budget.remainingUsd))} of its ${money(budget.budgetUsd)} budget left. Raise the budget?`
-            : `This run has used its ${money(budget.budgetUsd)} budget. Raise it to keep going?`,
+            : budget.blockedReason !== null
+              ? `${budget.blockedReason} Spending is paused. Raise the budget to ${money(raiseToUsd)} and keep going?`
+              : `This run has used its ${money(budget.budgetUsd)} budget. Raise it to keep going?`,
         options: [
           { id: 'raise', label: `Raise the budget to ${money(raiseToUsd)}` },
           { id: 'stop', label: 'Stop here' },
@@ -679,7 +888,7 @@ export class Conductor {
       () => undefined,
     );
     if (!opened.ok) return undefined;
-    await this.postQuestion(opened.question);
+    this.sendOutbox(opened.question.conversationId);
     return opened.question;
   }
 
@@ -698,10 +907,16 @@ export class Conductor {
       mustStop: (active) => this.mustStop(active as Turn),
       plan: (active, input, signal) => this.plan(active as Turn, input, signal),
       askBudget: (active, needUsd) => this.askBudget(active, needUsd),
-      postQuestion: (question) => this.postQuestion(question),
-      postNotice: async (active, text) => {
-        const run = this.state.run(active.runId);
-        if (run) await this.notice(run, text);
+      postQuestion: (question) => this.sendOutbox(question.conversationId),
+      postNotice: (active, text) => {
+        this.state.enqueueNotice(active, text);
+        this.sendOutbox(active.conversationId);
+      },
+      settleTask: (view) => {
+        const taskId = view?.taskId;
+        if (typeof taskId !== 'string') return;
+        const delegation = this.state.delegationOfTask(taskId);
+        if (delegation && delegation.state !== 'settled') this.settleView(delegation, view);
       },
     };
   }
@@ -796,33 +1011,59 @@ export class Conductor {
     return plan;
   }
 
-  // Outbox
+  // Outbox. Events are rows in the conductor's database, written with the
+  // change they report. Each conversation sends its rows in order, one at a
+  // time; a row is acked when the outbox call resolves, and a failed one is
+  // retried with backoff, holding up only its own conversation.
 
-  private async postQuestion(question: QuestionRow): Promise<void> {
-    await this.safe(() =>
-      this.outbox.question({
-        conversationId: question.conversationId,
-        runId: question.runId,
-        questionId: question.questionId,
-        reason: question.reason,
-        question: question.question,
-        options: question.options,
-        recommended: question.recommended,
-      }),
-    );
+  private sendOutbox(conversationId: string): void {
+    if (this.closed || this.sending.has(conversationId) || this.retryTimers.has(conversationId))
+      return;
+    const sending = this.drainOutbox(conversationId).finally(() => {
+      this.sending.delete(conversationId);
+    });
+    this.sending.set(conversationId, sending);
   }
 
-  private async notice(run: RunRow, text: string): Promise<void> {
-    await this.safe(() =>
-      this.outbox.notice({ conversationId: run.conversationId, runId: run.runId, text }),
-    );
+  private async drainOutbox(conversationId: string): Promise<void> {
+    for (;;) {
+      if (!this.state.db.isOpen) return;
+      const row = this.state.nextOutbox(conversationId);
+      if (!row) return;
+      try {
+        await this.deliver(row);
+      } catch (error) {
+        this.warn('The outbox failed; the event will be sent again', error);
+        if (!this.state.db.isOpen) return;
+        const attempts = this.state.outboxFailed(row.eventId);
+        if (this.closed) return;
+        const delay = Math.min(
+          this.limits.outboxRetryMs * 2 ** Math.min(attempts - 1, 16),
+          this.limits.outboxMaxRetryMs,
+        );
+        const timer = setTimeout(() => {
+          this.retryTimers.delete(conversationId);
+          this.sendOutbox(conversationId);
+        }, delay);
+        timer.unref();
+        this.retryTimers.set(conversationId, timer);
+        return;
+      }
+      if (!this.state.db.isOpen) return;
+      this.state.ackOutbox(row.eventId);
+    }
   }
 
-  private async safe(fn: () => void | Promise<void>): Promise<void> {
-    try {
-      await fn();
-    } catch (error) {
-      this.warn('The outbox failed', error);
+  private async deliver(row: OutboxRow): Promise<void> {
+    switch (row.kind) {
+      case 'message':
+        return this.outbox.message(row.payload as unknown as OutboxMessage);
+      case 'question':
+        return this.outbox.question(row.payload as unknown as OutboxQuestion);
+      case 'notice':
+        return this.outbox.notice(row.payload as unknown as OutboxNotice);
+      case 'answered':
+        return this.outbox.answered?.(row.payload as unknown as OutboxAnswered);
     }
   }
 }

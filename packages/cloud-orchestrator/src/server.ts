@@ -75,6 +75,21 @@ export function createSessionMcpServer(
         title: z.string().max(200).optional(),
         mode: z.enum(['async', 'wait']).optional().describe('Defaults to "async"'),
         timeoutMs: waitMs,
+        budgetUsd: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            'Dollar cap for this task and everything it delegates; the tree is cancelled when its reported spend reaches it. Only a top-level delegation sets it.',
+          ),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe(
+            'Makes the call idempotent: a repeat with the same key returns the same task, and task_cancel can stop it by this key.',
+          ),
       }),
     },
     (input) =>
@@ -104,10 +119,26 @@ export function createSessionMcpServer(
     'task_cancel',
     {
       description:
-        'Cancel a task and everything it delegated. A task that already ended keeps its final state.',
-      inputSchema: taskIdInput,
+        'Cancel a task and everything it delegated. A task that already ended keeps its final state. Name the task by taskId, or by the idempotencyKey of the delegate_task call that created it: a key with no task yet stops that delegation from ever creating one.',
+      inputSchema: z.object({
+        taskId: z.string().min(1).optional().describe('Id returned by delegate_task'),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe('The idempotencyKey of the delegate_task call'),
+      }),
     },
-    ({ taskId }) => guarded(orchestrator, session, () => orchestrator.cancel(session, taskId)),
+    ({ taskId, idempotencyKey }) =>
+      guarded(orchestrator, session, async () => {
+        if (taskId !== undefined) return orchestrator.cancel(session, taskId);
+        if (idempotencyKey === undefined) {
+          throw new OrchestratorError('invalid_request', 'Give taskId or idempotencyKey');
+        }
+        const view = await orchestrator.cancelByKey(session, idempotencyKey);
+        return view ?? { idempotencyKey, created: false };
+      }),
   );
   return server;
 }

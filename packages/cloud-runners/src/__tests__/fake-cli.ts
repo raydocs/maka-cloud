@@ -14,6 +14,8 @@
  *   flood         print 3 MB without a newline first, then behave like ok
  *   floodfail     print 3 MB without a newline, then exit 1
  *   longfail      print a 100 kB line, then exit 1
+ *   spend         report token usage for each model call and, for claude, the total cost; then ok
+ *   spendhang     report the same usage, then run until killed
  *
  * When `$HOME/fake-cli/orphan` exists, the CLI also leaves a child behind in its process group
  * that ignores TERM; its pid is appended to `$HOME/fake-cli/children`.
@@ -33,6 +35,8 @@ for a in "$@"; do case "$a" in *result.json*) prompt="$a" ;; esac; done
 result=$(printf '%s' "$prompt" | grep -o '/[^ ]*result\.json' | head -1)
 resumed=0
 for a in "$@"; do [ "$a" = "--resume" ] || [ "$a" = "resume" ] && resumed=1; done
+cost=""
+[ "$mode" = "spend" ] && cost=',"total_cost_usd":0.5'
 good='{"summary":"fake run complete","done":["the brief"],"notDone":[],"confidence":"high","knownIssues":[]}'
 if [ "$mode" = "leakfail" ]; then echo "key is $ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
 if [ -e "$ctl/orphan" ]; then
@@ -48,7 +52,7 @@ if [ "$mode" = "floodfail" ]; then head -c 3000000 /dev/zero | tr '\0' x; exit 1
 if [ "$mode" = "longfail" ]; then head -c 100000 /dev/zero | tr '\0' y; echo; exit 1; fi
 write_result() {
   case "$mode" in
-    ok|leakout|flood) printf '%s' "$good" > "$result" ;;
+    ok|leakout|flood|spend) printf '%s' "$good" > "$result" ;;
     badthengood) if [ "$resumed" = 1 ]; then printf '%s' "$good" > "$result"; else printf '%s' '{"summary":""}' > "$result"; fi ;;
     symlink) rm -f "$result"; ln -s "$ctl/secret.txt" "$result" ;;
     big) head -c 1100000 /dev/zero | tr '\0' 'a' > "$result" ;;
@@ -65,11 +69,19 @@ echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
 echo 'not json, some stderr-ish noise'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Bash","input":{}}]}}'
 case "$mode" in
-  hang) sleep 300; exit 0 ;;
+  spend|spendhang)
+    # One model call can come as several events with the same message id and usage.
+    echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":100000,"output_tokens":50000},"content":[{"type":"text","text":"step one"}]}}'
+    echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":100000,"output_tokens":50000},"content":[{"type":"tool_use","name":"Bash","input":{}}]}}'
+    echo '{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":200000,"output_tokens":0},"content":[{"type":"text","text":"step two"}]}}'
+    ;;
+esac
+case "$mode" in
+  hang|spendhang) sleep 300; exit 0 ;;
   fail) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"model said no","session_id":"'"$sid"'"}'; exit 1 ;;
 esac
 write_result
-echo '{"type":"result","subtype":"success","is_error":false,"result":"all done","session_id":"'"$sid"'"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"all done","session_id":"'"$sid"'"'"$cost"'}'
 `;
 
 export const CODEX_CLI = `#!/usr/bin/env bash
@@ -80,10 +92,15 @@ for a in "$@"; do [ "$prev" = "resume" ] && sid="$a"; prev="$a"; done
 echo '{"type":"thread.started","thread_id":"'"$sid"'"}'
 echo '{"type":"item.started","item":{"type":"command_execution","command":"ls"}}'
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"working on it"}}'
+usage='{}'
+case "$mode" in
+  spend|spendhang) usage='{"input_tokens":300000,"cached_input_tokens":100000,"output_tokens":50000}' ;;
+esac
 case "$mode" in
   hang) sleep 300; exit 0 ;;
+  spendhang) echo '{"type":"turn.completed","usage":'"$usage"'}'; sleep 300; exit 0 ;;
   fail) echo '{"type":"turn.failed","error":{"message":"model said no"}}'; exit 1 ;;
 esac
 write_result
-echo '{"type":"turn.completed","usage":{}}'
+echo '{"type":"turn.completed","usage":'"$usage"'}'
 `;

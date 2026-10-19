@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { FakeRun } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import type { Conductor } from '../conductor.js';
 import type { ConductorToolSpec } from '../tools.js';
@@ -25,6 +26,8 @@ function assertReleased(conductor: Conductor): void {
     planners: 0,
     timers: 0,
     openClients: 0,
+    outboxSending: 0,
+    outboxRetrying: 0,
   });
 }
 
@@ -403,4 +406,167 @@ test('race: an answer followed at once by a stop runs no turn', async (t) => {
   await h.conductor.idle();
   assert.equal(conductorRequests(h).length, before);
   assertReleased(h.conductor);
+});
+
+/** No task is left running in the orchestrator. */
+async function assertNoTasks(h: Harness): Promise<void> {
+  await h.orchestrator.settled();
+  assert.equal(h.orchestrator.stats().activeTasks, 0, 'no task is left running');
+  for (const run of [...h.claude.runs, ...h.codex.runs]) assert.equal(run.cancelled, true);
+}
+
+/** Resolves with each task run as its runner starts it. */
+function onRunStart(h: Harness) {
+  const started = gate<FakeRun>();
+  const realStart = h.codex.start.bind(h.codex);
+  h.codex.start = async (spec) => {
+    const run = (await realStart(spec)) as FakeRun;
+    started.open(run);
+    return run;
+  };
+  return started.promise;
+}
+
+const delegateFree = (extra: Record<string, unknown> = {}) => [
+  calls(tool('start_playbook', { playbook: 'free', goal: 'g' })),
+  calls(tool('delegate_task', { runner: 'codex', brief: 'b', budgetUsd: 1, ...extra })),
+];
+
+test('a stop while delegate_task waits for its task cancels that task', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  const started = onRunStart(h);
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree({ mode: 'wait', timeoutMs: 600_000 }));
+  await h.send('cnv_1', 'Go.');
+  await started;
+  assert.equal(await h.conductor.stop('cnv_1'), true);
+  await h.conductor.idle();
+  await assertNoTasks(h);
+  assertReleased(h.conductor);
+});
+
+test('a stop while the delegation response is lost cancels the task by its idempotency key', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  const created = gate();
+  const respond = gate();
+  const delegate = h.orchestrator.delegate.bind(h.orchestrator);
+  h.orchestrator.delegate = async (...args) => {
+    const view = await delegate(...args);
+    created.open();
+    await respond.promise;
+    return view;
+  };
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree());
+  await h.send('cnv_1', 'Go.');
+  await created.promise;
+  assert.equal(await h.conductor.stop('cnv_1'), true);
+  await h.conductor.idle();
+  respond.open();
+  await assertNoTasks(h);
+  assert.equal(h.orchestrator.stats().activeTasks, 0);
+  assertReleased(h.conductor);
+});
+
+test('a stop before the delegation reaches the orchestrator: the task is never created', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  const arrived = gate();
+  const proceed = gate();
+  const outcome = gate<string>();
+  const delegate = h.orchestrator.delegate.bind(h.orchestrator);
+  h.orchestrator.delegate = async (...args) => {
+    arrived.open();
+    await proceed.promise;
+    try {
+      const view = await delegate(...args);
+      outcome.open('created');
+      return view;
+    } catch (error) {
+      outcome.open(String(error));
+      throw error;
+    }
+  };
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree());
+  await h.send('cnv_1', 'Go.');
+  await arrived.promise;
+  assert.equal(await h.conductor.stop('cnv_1'), true);
+  await h.conductor.idle();
+  proceed.open();
+  // The held request goes on after the cancel and is refused.
+  assert.match(await outcome.promise, /cancelled/);
+  assert.equal(h.codex.runs.length, 0);
+  await assertNoTasks(h);
+  const runId = h.conductor.state.runsInState('cancelled')[0]!.runId;
+  assert.equal(
+    h.conductor.state.budget(runId).reservedUsd,
+    0,
+    'nothing ran, so nothing is charged',
+  );
+});
+
+test('shutdown cancels the tasks of a running turn and of a run waiting for an answer', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  // cnv_wait delegated a task, then asked a question and waits.
+  h.model.script('planner', text('1. Do it.'), text('1. Do it.'));
+  h.model.script(
+    'conductor',
+    ...delegateFree(),
+    calls(
+      tool('ask_user', {
+        reason: 'taste',
+        question: 'A or B?',
+        options: [
+          { id: 'a', label: 'A' },
+          { id: 'b', label: 'B' },
+        ],
+        recommended: 'a',
+      }),
+    ),
+  );
+  await h.send('cnv_wait', 'Go.');
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.runsInState('waiting').length, 1);
+  assert.equal(h.codex.runs.length, 1);
+  // cnv_run has a task running and a model call in flight.
+  const held = heldStep();
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_run', 'Go.');
+  await held.started;
+  assert.equal(h.codex.runs.length, 2);
+
+  await h.conductor.close();
+  held.release();
+  await assertNoTasks(h);
+  assertReleased(h.conductor);
+  const reopened = await h.restart();
+  assert.equal(reopened.state.runsInState('interrupted')[0]?.endReason, 'shutdown');
+  assert.equal(reopened.state.runsInState('waiting').length, 1, 'the question survives');
+});
+
+test('a cancel that fails at shutdown is kept and retried on the next start', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  const cancel = h.orchestrator.cancel.bind(h.orchestrator);
+  let failing = true;
+  h.orchestrator.cancel = async (...args) => {
+    if (failing) throw new Error('orchestrator unavailable');
+    return cancel(...args);
+  };
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_1', 'Go.');
+  await held.started;
+  await h.conductor.close();
+  held.release();
+  await h.orchestrator.settled();
+  assert.equal(h.orchestrator.stats().activeTasks, 1, 'the failed cancel left the task running');
+  failing = false;
+
+  const reopened = await h.restart({
+    orchestratorAccess: (conversationId) => h.access(conversationId),
+  });
+  await reopened.idle();
+  await assertNoTasks(h);
+  assertReleased(reopened);
 });

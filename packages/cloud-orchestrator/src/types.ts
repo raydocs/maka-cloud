@@ -45,8 +45,17 @@ export type TaskEvent =
       runner: string;
       title?: string;
       mode: TaskMode;
+      /** Dollar cap of the tree this task starts. Only a task a root session delegated has one. */
+      budgetUsd?: number;
+      /** The caller's key for this delegation; the task id is derived from it. */
+      idempotencyKey?: string;
     }
   | { type: 'task_started'; taskId: TaskId }
+  /**
+   * What the runner of `fromTaskId` has spent so far, in dollars, recorded on the top-level task
+   * of its tree (`taskId`). Cumulative per runner: each report replaces that runner's last one.
+   */
+  | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number }
   | { type: 'task_progress'; taskId: TaskId; note: string }
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
   | { type: 'task_failed'; taskId: TaskId; reason: string }
@@ -71,6 +80,12 @@ export interface TaskRecord {
   runner: string;
   title?: string;
   mode: TaskMode;
+  /** Set on a top-level task: the cap its whole tree shares. */
+  budgetUsd?: number;
+  /** On a top-level task: what the runners of its tree reported spending, by task. */
+  spendByTask?: Record<TaskId, number>;
+  /** On a top-level task: the sum of `spendByTask`. */
+  costUsd?: number;
   state: TaskState;
   createdAt: number;
   startedAt?: number;
@@ -95,6 +110,12 @@ export interface TaskView {
   manifest?: ResultManifest;
   failureReason?: string;
   cancelRequested: boolean;
+  /** On a top-level task: what its whole tree reported spending. Absent when no runner reported any. */
+  costUsd?: number;
+  /** The cap of the tree this task starts, on a top-level task delegated with a budget. */
+  budgetUsd?: number;
+  /** The tree's spend reached its cap, so the tree was cancelled. */
+  budgetExceeded?: boolean;
   /** Set by waiting calls that returned because the timeout elapsed, not because the task ended. */
   waitTimedOut?: boolean;
 }
@@ -105,7 +126,9 @@ export type OrchestratorErrorCode =
   | 'unknown_runner'
   | 'depth_exceeded'
   | 'unauthorized'
-  | 'quota_exceeded';
+  | 'quota_exceeded'
+  | 'budget_exceeded'
+  | 'cancelled';
 
 export class OrchestratorError extends Error {
   constructor(
