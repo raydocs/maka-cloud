@@ -37,6 +37,7 @@ export { nodeTransport, type Transport } from './verification/transport.js';
 export {
   type ArtifactRead,
   type BudgetPort,
+  type CheckCharge,
   type EvidenceSource,
   type Mismatch,
   type Outcome,

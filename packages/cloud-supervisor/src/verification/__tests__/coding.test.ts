@@ -336,11 +336,7 @@ test('a task with nothing to check against is shown as finished, marked not inde
   const r = await verifyRig(w);
   await finishTask(r, 't1', manifestOf({ artifacts: ['notes.txt'] }));
   await finishTask(r, 't2', manifestOf({ artifacts: undefined }));
-  await finishTask(
-    r,
-    't3',
-    manifestOf({ artifacts: ['https://example.com/report.json', 'report.md'] }),
-  );
+  await finishTask(r, 't3', manifestOf({ artifacts: ['notes.txt', 'https://example.com/a.md'] }));
   const finished = itemsOf(r, 'finished');
   assert.equal(finished.length, 3);
   for (const item of finished) assert.match(item.ask, /\(not independently checked\)/);

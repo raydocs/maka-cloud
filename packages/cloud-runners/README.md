@@ -8,9 +8,9 @@ only. Design and decisions: `docs/fork/design/cloud-runners.md`.
 ```ts
 import { createCloudRunnersFromEnv } from '@maka-cloud/runners';
 
-// INSTABOX_API_KEY, INSTABOX_MACHINE_ID, optional INSTABOX_API_URL,
-// ANTHROPIC_API_KEY (+ ANTHROPIC_BASE_URL for a gateway), OPENAI_API_KEY
-const cloud = createCloudRunnersFromEnv();
+// INSTABOX_API_KEY, INSTABOX_MACHINE_ID, optional INSTABOX_API_URL. Without a `modelAccess`
+// every run fails to start: the stack passes the model gateway's (`@maka-cloud/gateway`).
+const cloud = createCloudRunnersFromEnv(process.env, { modelAccess });
 const orchestrator = await Orchestrator.create({
   store,
   runners: new RunnerRegistry(cloud.runners), // names: claude-agent-sdk, codex
@@ -23,7 +23,8 @@ await cloud.sweepOrphans(knownTaskIds);
 
 For production pass `createCloudRunners({ client, sandboxes, modelAccess, sessions })`:
 `sandboxes` decides which sandbox a tenant's task runs in, `modelAccess` issues the per-task
-key (and gateway base URL) and is told to revoke it when the run ends, `sessions` (use
+gateway token and base URL, meters each request's spend, and is told to revoke the token when the
+run ends, `sessions` (use
 `JsonFileSessionStore`) remembers session ids and snapshots so a task can resume after a restart.
 
 ## What one run does

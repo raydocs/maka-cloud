@@ -5,7 +5,7 @@ import {
   JsonFileCodingDeliveries,
   createCodingRunner,
 } from '@maka-cloud/playbooks/coding';
-import { createCloudRunnersFromEnv } from '@maka-cloud/runners';
+import { createCloudRunnersFromEnv, envModelAccess } from '@maka-cloud/runners';
 import { PlaybookDriver, VendorAloneDriver } from './drivers.js';
 import { SweBenchDataset } from './suites.js';
 import { SweBenchGrader } from './swebench-grader.js';
@@ -69,7 +69,8 @@ export async function createLiveDeps(
   if (!python) throw new Error('MAKA_EVALS_PYTHON is not set.');
   const datasetPath = join(dataDir, 'swe-bench-verified.jsonl');
   const dataset = await SweBenchDataset.read(datasetPath);
-  const cloud = createCloudRunnersFromEnv(env);
+  // A live benchmark run hands the vendor keys to its sandbox; the product stack never does.
+  const cloud = createCloudRunnersFromEnv(env, { modelAccess: envModelAccess(env) });
   const sandbox = new FleetCodingSandbox(cloud.fleet);
   const deliveries = new JsonFileCodingDeliveries(join(workRoot, 'deliveries.json'));
   const coding = createCodingRunner(cloud, { deliveries });

@@ -3,7 +3,8 @@ import type { SourceFetcher } from './fetcher.js';
 /** What the supervisor needs from the server to check a finished task. Declared here, implemented by the server. */
 
 export type ArtifactRead =
-  | { ok: true; text: string }
+  /** `text` is `bytes` decoded, lossily: a comparison that must be exact uses `bytes`. */
+  | { ok: true; text: string; bytes: Uint8Array }
   | { ok: false; reason: 'not_found' | 'too_large' | 'unavailable' };
 
 export interface EvidenceSource {
@@ -38,6 +39,16 @@ export interface VerifierRequest {
 }
 
 /** One model that can check evidence. A stateless one-shot request; API key only. */
+/**
+ * Charges one check's model request for a model that reserves its own cost: it reserves the
+ * worst case of the exact request it sends, before sending it, and settles what it cost.
+ */
+export interface CheckCharge {
+  /** Reserves against the day's cap, then the conversation's budget. Returns why it was refused, or undefined. */
+  reserve(usd: number): 'daily_cap' | 'conversation_budget' | undefined;
+  settle(usd: number): void;
+}
+
 export interface VerifierModel {
   /** Internal name. Never shown to the user. */
   id: string;
@@ -45,10 +56,16 @@ export interface VerifierModel {
   price: { inputPerMTokUsd: number; outputPerMTokUsd: number };
   maxInputChars: number;
   maxOutputTokens: number;
+  /**
+   * The model reserves and settles its request through `charge` itself (the model gateway).
+   * The supervisor then makes no cost estimate of its own and charges nothing else.
+   */
+  metered?: boolean;
   /** Returns the parsed JSON of the reply as `output`; the supervisor validates it. */
   verify(
     request: VerifierRequest,
     signal: AbortSignal,
+    charge?: CheckCharge,
   ): Promise<{ output: unknown; usage: { inputTokens: number; outputTokens: number } }>;
 }
 
@@ -82,7 +99,14 @@ export type Outcome =
   | { state: 'failed'; mismatches: Mismatch[] }
   | {
       state: 'could_not_check';
-      code: 'budget' | 'no_verifier' | 'unavailable' | 'model_error' | 'incomplete' | 'aborted';
+      code:
+        | 'budget'
+        | 'no_verifier'
+        | 'unavailable'
+        | 'model_error'
+        | 'incomplete'
+        | 'aborted'
+        | 'unverified';
       reason: string;
       /** A later attempt may succeed without anyone changing anything. */
       transient: boolean;

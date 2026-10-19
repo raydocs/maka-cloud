@@ -6,6 +6,7 @@ import {
   type ConductorLimits,
   DEFAULT_LIMITS,
   type ModelAccess,
+  type ModelCharge,
   type ModelPrices,
   OPUS_5_5_PRICES,
 } from './config.js';
@@ -178,6 +179,8 @@ export class Conductor {
   private readonly lanes = new Map<string, Lane>();
   private readonly turns = new Map<string, Turn>();
   private readonly plannerTurns = new Map<string, Turn>();
+  /** Model requests the gateway reserved and has not settled yet, by its request key. */
+  private readonly requestHolds = new Map<string, { runId: string; reservation: number }>();
   private readonly tokens = new Map<string, string>();
   private readonly counters = { openClients: 0, timers: 0, planners: 0 };
   private readonly closing = new AbortController();
@@ -209,6 +212,7 @@ export class Conductor {
       toolsFor: (kind) => (kind === 'conductor' ? tools : []),
       onModelCall: (makaSessionId, attempt) => this.meter(makaSessionId, attempt),
       beforeModelRequest: (makaSessionId) => this.gateModelRequest(makaSessionId),
+      chargeFor: (makaSessionId) => this.modelCharge(makaSessionId),
       now: this.now,
     });
   }
@@ -234,6 +238,7 @@ export class Conductor {
       conductor.state.markCancelPending(
         conductor.state.unsettledDelegations().map((delegation) => delegation.key),
       );
+      conductor.state.settleOpenModelRequests();
       await conductor.host.recoverInterrupted();
     } catch (error) {
       await conductor.host.close().catch(() => undefined);
@@ -553,6 +558,7 @@ export class Conductor {
         this.turns.delete(turn.makaSessionId);
         if (lane.current === turn) lane.current = undefined;
         await turn.stopping;
+        this.host.releaseModelAccess(turn.makaSessionId);
       }
       try {
         const queued = lane.queue.some((next) => next.kind === 'turn' && next.runId === job.runId);
@@ -832,7 +838,8 @@ export class Conductor {
       this.state.bindTask(delegation.key, view.taskId);
     }
     if (!['succeeded', 'failed', 'cancelled'].includes(String(view.state))) return;
-    if (view.stopPending === true) {
+    // The reservation covers the whole tree: hold it while any task in it may still run.
+    if (view.stopPending === true || view.treeStopPending === true) {
       this.state.markCancelPending([delegation.key]);
       this.checkStopLater(delegation.conversationId);
       return;
@@ -862,11 +869,10 @@ export class Conductor {
     const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
     const runId = turn?.runId ?? this.state.session(makaSessionId)?.runId;
     if (!runId) return;
-    const budget = this.state.addModelSpend(
-      runId,
-      callCostUsd(attempt, this.prices),
-      attempt.attemptId,
-    );
+    // Through the gateway the request was charged when it settled: count it once.
+    const budget = this.host.gatewayCharged
+      ? this.state.budget(runId)
+      : this.state.addModelSpend(runId, callCostUsd(attempt, this.prices), attempt.attemptId);
     if (turn && (budget.remainingUsd <= 0 || budget.blockedReason !== null)) {
       this.askBudget(turn, 0);
     }
@@ -896,6 +902,58 @@ export class Conductor {
     if (!refusal) return;
     this.requestStop(turn, 'gated');
     throw new Error(`Model request not sent: ${refusal}.`);
+  }
+
+  /**
+   * Where the gateway charges a session's model requests: the run ledger, at the request's
+   * worst-case cost before it is sent, replaced by what it cost once it ends. A request the run
+   * cannot cover is not sent: the turn stops and the user is asked to raise the budget.
+   */
+  private modelCharge(makaSessionId: string): ModelCharge {
+    return {
+      reserve: (key, usd) => {
+        const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+        if (!turn) return { ok: false, reason: 'no conductor turn is running' };
+        const reserved = this.state.tryReserve(turn.runId, usd, `request:${key}`);
+        if (reserved.ok) {
+          this.requestHolds.set(key, { runId: turn.runId, reservation: reserved.reservation });
+          return { ok: true };
+        }
+        if (reserved.reason === 'question_open') {
+          this.requestStop(turn, 'gated');
+          return { ok: false, reason: 'a question is waiting for the user' };
+        }
+        const remaining = Math.max(0, reserved.budget.remainingUsd);
+        this.askBudget(turn, reserved.budget.blockedReason === null ? usd - remaining : 0);
+        this.requestStop(turn, 'gated');
+        return {
+          ok: false,
+          budget: true,
+          reason: `the run budget has ${money(remaining)} left, and this request could cost up to ${money(usd)}`,
+        };
+      },
+      settle: (key, usd) => {
+        const hold = this.requestHolds.get(key);
+        if (!hold) return;
+        this.requestHolds.delete(key);
+        let budget: ReturnType<ConductorState['budget']>;
+        try {
+          budget = this.state.settleModelRequest(hold.runId, hold.reservation, usd, key);
+        } catch (error) {
+          // The reservation stands; a restart charges it in full.
+          this.warn('Settling a model request failed', error);
+          return;
+        }
+        const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+        if (
+          turn &&
+          turn.runId === hold.runId &&
+          (budget.remainingUsd <= 0 || budget.blockedReason !== null)
+        ) {
+          this.askBudget(turn, 0);
+        }
+      },
+    };
   }
 
   /**
@@ -1036,6 +1094,7 @@ export class Conductor {
       this.counters.timers -= 1;
       signal.removeEventListener('abort', stop);
       await stopping;
+      this.host.releaseModelAccess(makaSessionId);
       turn.planners.delete(makaSessionId);
       this.plannerTurns.delete(makaSessionId);
       this.counters.planners -= 1;

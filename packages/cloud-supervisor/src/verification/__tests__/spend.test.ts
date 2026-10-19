@@ -6,6 +6,7 @@ import {
   Barrier,
   FakeBudget,
   FakeHost,
+  allSupported,
   claimIdsOf,
   codingFiles,
   finishLater,
@@ -472,5 +473,61 @@ test('a price or limit that gives no safe bound refuses the model check: no call
   assert.equal(w.openai.requests.length, 0);
   assert.equal(w.budget.reserveCalls, 0);
   assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /could not be bounded/);
+  await r.stop();
+});
+
+test('a metered model reserves its own request through both limits and is charged only what it settled', async () => {
+  const w = world();
+  codingFiles(w, 't1');
+  w.openai.metered = true;
+  w.openai.script = async (request, _signal, charge) => {
+    assert.ok(charge, 'a metered model is given the charge');
+    assert.equal(charge.reserve(0.02), undefined);
+    charge.settle(0.005);
+    return { ...allSupported(request), usage: usage(9_999_999, 9_999_999) };
+  };
+  const r = await verifyRig(w);
+  await finishTask(r, 't1');
+  const [[key, reserved]] = [...w.budget.reserved.entries()];
+  assert.equal(reserved, 0.02, 'the reservation is the model’s own, not the supervisor’s estimate');
+  assert.deepEqual(w.budget.settleCalls, [[key, 0.005]], 'settled once, by the model');
+  assert.equal(r.supervisor.verifierSpentToday(), 0.005);
+  assert.equal(itemsOf(r, 'finished').length, 1);
+  await r.stop();
+});
+
+test('a metered model refused by the conversation budget ends the check as a budget matter', async () => {
+  const w = world();
+  codingFiles(w, 't1');
+  w.budget.refuse = true;
+  w.openai.metered = true;
+  w.openai.script = async (_request, _signal, charge) => {
+    if (charge?.reserve(0.02) !== undefined) throw new Error('refused');
+    throw new Error('unreachable');
+  };
+  const r = await verifyRig(w);
+  await finishTask(r, 't1');
+  const [item] = itemsOf(r, 'verification_failed');
+  assert.match(item?.ask ?? '', /budget is used up, so the model check did not run/);
+  assert.equal(r.supervisor.verifierSpentToday(), 0, 'the refused reservation was released');
+  assert.equal(w.budget.settleCalls.length, 0);
+  await r.stop();
+});
+
+test('a metered model that fails after settling is not charged again at a bound', async () => {
+  const w = world({ maxAttempts: 1 });
+  codingFiles(w, 't1');
+  w.openai.metered = true;
+  w.openai.script = async (_request, _signal, charge) => {
+    charge?.reserve(0.02);
+    charge?.settle(0);
+    throw new Error('provider error');
+  };
+  const r = await verifyRig(w);
+  await finishTask(r, 't1');
+  const [[key]] = [...w.budget.reserved.entries()];
+  assert.deepEqual(w.budget.settleCalls, [[key, 0]]);
+  assert.equal(r.supervisor.verifierSpentToday(), 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /did not answer/);
   await r.stop();
 });

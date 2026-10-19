@@ -595,17 +595,43 @@ before the fix.
   anything or calling the model. The host's fallback for a provider that reports no
   usage charges the same bound. A model gateway's reservation replaces
   `inputTokenBound`; nothing else computes the estimate.
-- **An empty check is never a pass.** For research, a report with no claims, a
-  record that removes every claim, a removal of an id the delivered `report.json`
-  does not have, and a removal the record does not itself show as failing (status
-  not one of the cite-check failures) are failures. `verification.json` is written
-  by the agent, so on its own it never narrows the check: a removal also needs the
-  delivered `report.md` or `report.html`, read in full, not to show the claim in its
-  body (above the "Not verified" list, which names what was left out). If no
-  rendering is listed, or a listed one cannot be read, every claim stays checked,
-  so an uncited claim that is still in the report fails whatever the record says.
-  The engine also refuses to pass with zero claims left (`incomplete`): a guard
-  for future preparers, not reachable by the two built in.
+- **An empty check is never a pass.** A research report with no claims, or whose
+  renderings show no claim, is a failure. The engine also refuses to pass with
+  zero claims left (`incomplete`): a guard for future preparers, not reachable by
+  the two built in.
+- **Text the agent wrote is never matched, it is reproduced.** `report.json` is the
+  source of truth and the checked set is exactly the claims in it. Claim ids must be
+  unique, else the report is rejected. `verification.json` and the renderings are
+  written by the agent, so they never take a claim out of the check: a claim the
+  record calls removed is still checked (a report that should not contain a failing
+  claim must not contain it in `report.json`). They are only tied to the report: the
+  record must list exactly the claims of `report.json`, its `removed` flags must be
+  what its own statuses give in `drop_unsupported` mode, and every delivered
+  `report.md` and `report.html` must equal, as raw bytes, what `renderFromRecord`
+  (exported from `@maka-cloud/playbooks/citations`, the renderer `cite-check` uses)
+  makes from them. Anything else ends `could_not_check` with code `unverified` and
+  the reason "checks reported by agent (unverified)": never "independently
+  checked", and no fetch or model call is spent past it. That covers a rendering
+  edited after it was made, a missing or unusable record, a listed rendering that
+  does not exist, an artifact name listed twice, and an artifact listed as a link
+  (a link cannot be read here and reproduced, so it is never skipped). A task that
+  lists a change beside any report file, and any task whose artifacts are not
+  exactly the files one check reads, is `unverified` too. That is decided by
+  allowlists, not by matching names: coding is accepted only if every artifact is
+  a plain local path whose file name is exactly `changes.json`, `change.patch` or
+  `verification.json` (a change among them); research only if every artifact is
+  exactly `report.json`, `report.md`, `report.html` or `verification.json`
+  (`report.json` among them). "Plain" means ASCII letters, digits, `.`, `_`, `-`
+  and `/` with no empty, `.` or `..` part, so a link, an encoding, a query or
+  fragment, a backslash, a look-alike letter or a different case is never
+  accepted. A manifest that resembles a change or a report by a loose reading
+  (links, percent-decoding, case-folding) but is not accepted gets the research
+  check, which ends unverified before anything is read; the loose reading only
+  ever widens suspicion. With no
+  rendering listed there is nothing to reproduce and every claim is checked. A contract test in the
+  playbooks (`run.test.ts`) keeps the record able to reproduce what `cite-check`
+  delivers. `ArtifactRead` carries the raw `bytes` next to the decoded `text` for
+  this comparison.
 - **Nothing waits on a hung resolver or fetcher.** The source fetcher races its
   name resolution with the fetch's abort signal (the deadline or the caller's
   stop), and `prepareResearch` races each `fetchText` with the check's signal, so a

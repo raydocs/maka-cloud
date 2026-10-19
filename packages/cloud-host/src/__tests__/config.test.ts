@@ -36,6 +36,7 @@ test('the minimal environment gives the data layout and the defaults', () => {
   assert.deepEqual(config.conductor, { apiKey: 'sk-secret-anthropic' });
   assert.deepEqual(config.instabox, { machineId: 'mch_1' });
   assert.equal(config.openAiKeySet, false);
+  assert.equal(config.searchKeySet, false);
   assert.match(config.githubTokenProblem ?? '', /MAKA_GITHUB_TOKEN is not set/);
 });
 
@@ -66,7 +67,11 @@ test('optional settings are read', () => {
     MAKA_CLOUD_LLM_CONNECTION_ID: 'conn-prod',
     INSTABOX_API_URL: 'https://sandbox.example.test',
     OPENAI_API_KEY: 'sk-secret-openai',
+    DEEPSEEK_API_KEY: 'sk-secret-search',
+    DEEPSEEK_BASE_URL: 'https://search.example.test',
   });
+  assert.equal(config.searchKeySet, true);
+  assert.equal(config.gateway.searchBaseUrl, 'https://search.example.test');
   assert.equal(config.host, '0.0.0.0');
   assert.equal(config.port, 9000);
   assert.deepEqual(config.mcp, {
@@ -115,9 +120,66 @@ test('bad ports and URLs are refused', () => {
   ]);
 });
 
+test('the model gateway listens on the host by default, and its settings are checked', () => {
+  assert.deepEqual(readStackConfig(ENV).gateway, { host: '127.0.0.1', port: 8082, models: [] });
+  const codex = {
+    vendor: 'openai',
+    model: 'codex-test',
+    inputPerMTokUsd: 1,
+    outputPerMTokUsd: 10,
+    maxOutputTokens: 9_000,
+  };
+  assert.deepEqual(
+    readStackConfig({
+      ...ENV,
+      ANTHROPIC_BASE_URL: 'https://anthropic.example.test',
+      OPENAI_BASE_URL: 'https://openai.example.test/v1',
+      MAKA_CLOUD_GATEWAY_HOST: '10.0.0.2',
+      MAKA_CLOUD_GATEWAY_PORT: '9002',
+      MAKA_CLOUD_GATEWAY_PUBLIC_URL: 'https://models.example.test',
+      MAKA_CLOUD_GATEWAY_MODELS: JSON.stringify([codex]),
+    }).gateway,
+    {
+      host: '10.0.0.2',
+      port: 9002,
+      publicUrl: 'https://models.example.test',
+      models: [codex],
+      anthropicBaseUrl: 'https://anthropic.example.test',
+      openAiBaseUrl: 'https://openai.example.test/v1',
+    },
+  );
+  assert.equal(
+    readStackConfig({ ...ENV, MAKA_CLOUD_GATEWAY_PUBLIC_URL: 'http://127.0.0.1:8082' }).gateway
+      .publicUrl,
+    'http://127.0.0.1:8082',
+    'plain http only on a loopback host',
+  );
+  assert.deepEqual(
+    problemsOf({
+      ...ENV,
+      MAKA_CLOUD_GATEWAY_PORT: '8081',
+      MAKA_CLOUD_GATEWAY_PUBLIC_URL: 'http://models.example.test',
+      MAKA_CLOUD_GATEWAY_MODELS: JSON.stringify([{ ...codex, maxOutputTokens: 0 }, 'opus']),
+    }),
+    [
+      'MAKA_CLOUD_GATEWAY_MODELS entry 1: maxOutputTokens must be a positive whole number',
+      'MAKA_CLOUD_GATEWAY_MODELS entry 2: must be an object',
+      'MAKA_CLOUD_GATEWAY_PUBLIC_URL must be https, except on a loopback host',
+      'MAKA_CLOUD_GATEWAY_PORT and MAKA_CLOUD_MCP_PORT must differ',
+    ],
+  );
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_GATEWAY_MODELS: '{' }), [
+    'MAKA_CLOUD_GATEWAY_MODELS is not JSON',
+  ]);
+});
+
 test('the printed configuration carries no secret value', () => {
   const lines = describeConfig(
-    readStackConfig({ ...ENV, OPENAI_API_KEY: 'sk-secret-openai' }),
+    readStackConfig({
+      ...ENV,
+      OPENAI_API_KEY: 'sk-secret-openai',
+      DEEPSEEK_API_KEY: 'sk-secret-search',
+    }),
   ).join('\n');
   assert.doesNotMatch(lines, /secret/);
   assert.match(lines, /Codex runner key: +set/);

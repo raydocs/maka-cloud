@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
-import { toPublicEvent } from './public-view.js';
+import { toPublicEvent, toPublicItem } from './public-view.js';
 
 export type FeedKind =
   | 'conversation.created'
@@ -193,7 +193,10 @@ function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
     case 'conductor.question':
     case 'conductor.answered':
       return { ...(JSON.parse(row.e_data ?? '{}') as object), at: row.at };
-    case 'inbox.item':
+    case 'inbox.item': {
+      const item = JSON.parse(row.x_data ?? 'null') as unknown;
+      return internal ? item : toPublicItem(item);
+    }
     case 'inbox.digest':
       return JSON.parse(row.x_data ?? 'null') as unknown;
   }

@@ -80,6 +80,8 @@ async function startStack(
     verifierVendor?: 'anthropic' | 'openai';
     price?: { inputPerMTokUsd: number; outputPerMTokUsd: number };
     dailyCapUsd?: number;
+    /** Starts the inbox with no gateway and no injected models, and a vendor key at hand. */
+    noGateway?: boolean;
   } = {},
 ): Promise<Stack> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-inbox-'));
@@ -145,40 +147,73 @@ async function startStack(
     supervisor: (
       context: Parameters<NonNullable<Parameters<typeof startCloud>[0]['supervisor']>>[0],
     ) =>
-      startInbox(
-        {
-          dbPath: join(dir, 'supervisor.db'),
-          config: { verifierModels: [], summaryModel: 'm', dailyCapUsd: options.dailyCapUsd ?? 5 },
-          env: {},
-          override: {
-            models: [
-              createVerifierModel(
-                {
-                  vendor: options.verifierVendor ?? 'openai',
-                  model: 'verifier-x',
-                  inputPerMTokUsd: options.price?.inputPerMTokUsd ?? 1,
-                  outputPerMTokUsd: options.price?.outputPerMTokUsd ?? 5,
-                  maxInputChars: 100_000,
-                  maxOutputTokens: 1_000,
+      options.noGateway
+        ? startInbox(
+            {
+              dbPath: join(dir, 'supervisor.db'),
+              config: {
+                verifierModels: [
+                  {
+                    vendor: 'openai',
+                    model: 'verifier-x',
+                    inputPerMTokUsd: 1,
+                    outputPerMTokUsd: 5,
+                    maxInputChars: 100_000,
+                    maxOutputTokens: 1_000,
+                  },
+                ],
+                summaryModel: 'm',
+                dailyCapUsd: 5,
+              },
+              // What an earlier version read its fallback keys from.
+              env: { OPENAI_API_KEY: 'sk-not-a-key', ANTHROPIC_API_KEY: 'sk-not-a-key' },
+              override: { fetcher, tickMs: 0 },
+            } as Parameters<typeof startInbox>[0],
+            context,
+          )
+        : startInbox(
+            {
+              dbPath: join(dir, 'supervisor.db'),
+              config: {
+                verifierModels: [],
+                summaryModel: 'm',
+                dailyCapUsd: options.dailyCapUsd ?? 5,
+              },
+              override: {
+                models: [
+                  createVerifierModel(
+                    {
+                      vendor: options.verifierVendor ?? 'openai',
+                      model: 'verifier-x',
+                      inputPerMTokUsd: options.price?.inputPerMTokUsd ?? 1,
+                      outputPerMTokUsd: options.price?.outputPerMTokUsd ?? 5,
+                      maxInputChars: 100_000,
+                      maxOutputTokens: 1_000,
+                    },
+                    {},
+                    { generateText: generate, languageModel: () => ({}) as never },
+                  ),
+                ],
+                summary: {
+                  summarize: async (input) => ({
+                    order: input.items.map((item) => item.id),
+                    summary: 'ok',
+                  }),
                 },
-                {},
-                { generateText: generate, languageModel: () => ({}) as never },
-              ),
-            ],
-            summary: {
-              summarize: async (input) => ({
-                order: input.items.map((item) => item.id),
-                summary: 'ok',
-              }),
+                fetcher,
+                tickMs: 0,
+              },
             },
-            fetcher,
-            tickMs: 0,
-          },
-        },
-        context,
-      ),
+            context,
+          ),
   };
-  stack.cloud = await startCloud(startOptions);
+  try {
+    stack.cloud = await startCloud(startOptions);
+  } catch (error) {
+    await model.close();
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
   stack.token = stack.cloud.server.invites.create('test').token;
   stack.api = (path, init = {}) =>
     fetch(`${stack.cloud.server.url}${path}`, {
@@ -475,6 +510,24 @@ test('a restart keeps the inbox and checks nothing twice', async (t) => {
   assert.equal(stack.verifier.requests.length, 1);
   assert.deepEqual(stack.fetched, [PAGE_URL]);
   assert.deepEqual(stack.warnings, []);
+});
+
+test('without the model gateway the inbox does not start, and calls no vendor with a key it finds', async (t) => {
+  const sent: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new Request(input, init).url;
+    if (!url.startsWith('http://127.0.0.1') && !url.startsWith('http://localhost')) {
+      sent.push(url);
+      throw new TypeError('no network in this test');
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  await assert.rejects(startStack(t, { noGateway: true }), /needs the model gateway/u);
+  assert.deepEqual(sent, []);
 });
 
 test('the inbox routes need an invite, and closing the cloud stops the supervisor without a warning', async (t) => {

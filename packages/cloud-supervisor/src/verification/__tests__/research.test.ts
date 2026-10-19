@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { renderReport } from '@maka-cloud/playbooks/citations';
 import { createSourceFetcher } from '../fetcher.js';
 import {
   FakeFetcher,
   TUNNEL_QUOTE,
   claimIdsOf,
+  codingFiles,
   defaultClaims,
   finishTask,
   itemsOf,
@@ -103,15 +105,16 @@ test('the model judging a quote as not supporting its claim fails the report wit
   await r.stop();
 });
 
-test('claims the playbook already dropped are not checked', async () => {
+test('a claim the record says the playbook dropped is still checked: the checked set is report.json', async () => {
   const w = world();
   const claims = defaultClaims();
   (claims[1] as { citations: unknown[] }).citations = [];
   researchFiles(w, 't1', { claims, removed: ['c2'] });
   const r = await verifyRig(w);
   await finishTask(r, 't1', researchManifest(), { runner: 'codex' });
-  assert.equal(itemsOf(r, 'verification_failed').length, 0);
-  assert.deepEqual(claimIdsOf(w.anthropic.requests[0] as never), ['c1']);
+  assert.equal(itemsOf(r, 'finished').length, 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /cites no source/);
+  assert.equal(w.anthropic.requests.length, 0);
   await r.stop();
 });
 
@@ -277,7 +280,7 @@ test('more sources than the cap, or more claims than a check can hold, cannot be
   await r2.stop();
 });
 
-test('report data that is listed but missing or unreadable fails; one that is not listed means nothing to check', async () => {
+test('report data that is listed but missing or unreadable fails; a rendering listed without it is unverified', async () => {
   const missing = world();
   researchFiles(missing, 't1');
   missing.evidence.files.delete('t1/report.json');
@@ -303,17 +306,39 @@ test('report data that is listed but missing or unreadable fails; one that is no
     researchManifest({ artifacts: ['out/report.md', 'out/report.html', 'out/verification.json'] }),
     { runner: 'codex' },
   );
-  assert.match(itemsOf(c, 'finished')[0]?.ask ?? '', /not independently checked/);
+  // Renderings with no report.json to reproduce them from are not "nothing to check": they are unverified.
+  assert.equal(itemsOf(c, 'finished').length, 0);
+  assert.match(itemsOf(c, 'verification_failed')[0]?.ask ?? '', UNVERIFIED);
   assert.equal(unlisted.fetcher.fetched.length, 0);
   await c.stop();
 });
 
-async function checkedResearch(setup: (w: ReturnType<typeof world>) => void) {
+const UNVERIFIED = /checks reported by agent \(unverified\)/;
+
+function uncitedFreight() {
+  const claims = defaultClaims();
+  (claims[1] as { citations: unknown[] }).citations = [];
+  return claims;
+}
+
+async function checkedResearch(setup: (w: ReturnType<typeof world>) => void, artifacts?: string[]) {
   const w = world();
   setup(w);
   const r = await verifyRig(w);
-  await finishTask(r, 't1', researchManifest(), { runner: 'codex' });
+  await finishTask(r, 't1', researchManifest(artifacts ? { artifacts } : {}), { runner: 'codex' });
   return { w, r };
+}
+
+/** The check ended without a pass, without a model call, and said the agent's own checks are unverified. */
+async function assertUnverified(
+  result: Awaited<ReturnType<typeof checkedResearch>>,
+  label: string,
+) {
+  const { w, r } = result;
+  assert.equal(itemsOf(r, 'finished').length, 0, `${label}: never "independently checked"`);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', UNVERIFIED, label);
+  assert.equal(w.anthropic.requests.length, 0, label);
+  await r.stop();
 }
 
 test('a report with no claims is a failure, not a pass: nothing was checked', async () => {
@@ -325,7 +350,7 @@ test('a report with no claims is a failure, not a pass: nothing was checked', as
   await r.stop();
 });
 
-test('a record that removes every claim leaves nothing to check and is a failure', async () => {
+test('a report whose every claim the record removes leaves nothing to check and is a failure', async () => {
   const { w, r } = await checkedResearch((w) => researchFiles(w, 't1', { removed: ['c1', 'c2'] }));
   assert.equal(itemsOf(r, 'finished').length, 0);
   assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /no claim is left/);
@@ -334,35 +359,351 @@ test('a record that removes every claim leaves nothing to check and is a failure
   await r.stop();
 });
 
-test('a removal the record does not back with a failing status, or of a claim the report does not have, fails', async () => {
-  // c2 is removed from the check while the record itself calls it verified.
-  const forged = await checkedResearch((w) =>
-    researchFiles(w, 't1', { removed: ['c2'], statuses: { c2: 'quote_verified' } }),
-  );
-  assert.equal(itemsOf(forged.r, 'finished').length, 0);
-  assert.match(itemsOf(forged.r, 'verification_failed')[0]?.ask ?? '', /Traffic is mostly freight/);
-  assert.equal(forged.w.anthropic.requests.length, 0);
-  await forged.r.stop();
+test('claim ids that are not unique reject the report, whatever the record removes', async () => {
+  for (const removed of [[], ['c2']]) {
+    const claims = [...defaultClaims(), { ...uncitedFreight()[1]!, id: 'c2' }];
+    const { w, r } = await checkedResearch((w) => researchFiles(w, 't1', { claims, removed }));
+    assert.equal(itemsOf(r, 'finished').length, 0, JSON.stringify(removed));
+    const ask = itemsOf(r, 'verification_failed')[0]?.ask ?? '';
+    assert.match(ask, /used more than once/, JSON.stringify(removed));
+    assert.equal(w.fetcher.fetched.length, 0);
+    assert.equal(w.anthropic.requests.length, 0);
+    await r.stop();
+  }
+});
 
-  // A removal naming an id that is not in the delivered report.
-  const unknown = await checkedResearch((w) => {
-    researchFiles(w, 't1');
-    w.evidence.set(
-      't1',
-      'verification.json',
-      JSON.stringify({
-        version: 1,
-        claims: [
-          { id: 'c1', status: 'quote_verified', removed: false },
-          { id: 'c2', status: 'quote_verified', removed: false },
-          { id: 'ghost', status: 'quote_not_found', removed: true },
-        ],
+const C1_LINE = '- The tunnel opened in 1994. [1]';
+const C1_ITEM = '<li>The tunnel opened in 1994. [1]</li>';
+
+test('a delivered report that still shows an uncited claim its record removes is never independently checked, however the text is dressed', async () => {
+  const shownInMarkdown: Array<[string, string]> = [
+    ['bold', 'Traffic is **mostly** freight.'],
+    ['inline code', 'Traffic is `mostly` freight.'],
+    ['a link', '[Traffic is mostly freight.](https://example.com/x)'],
+    ['a non-breaking space', 'Traffic is mostly&nbsp;freight.'],
+    ['no final period', 'Traffic is mostly freight'],
+    ['light rewording', 'Most of the traffic is freight.'],
+    ['verbatim', 'Traffic is mostly freight.'],
+  ];
+  for (const [label, shown] of shownInMarkdown) {
+    const result = await checkedResearch((w) =>
+      researchFiles(w, 't1', {
+        claims: uncitedFreight(),
+        removed: ['c2'],
+        tamper: { md: (text) => text.replace(C1_LINE, `${C1_LINE}\n- ${shown} [2]`) },
       }),
     );
+    await assertUnverified(result, `markdown, ${label}`);
+  }
+  const result = await checkedResearch((w) =>
+    researchFiles(w, 't1', {
+      claims: uncitedFreight(),
+      removed: ['c2'],
+      tamper: {
+        html: (text) =>
+          text.replace(C1_ITEM, `${C1_ITEM}<li>Traffic is <b>mostly</b> freight.</li>`),
+      },
+    }),
+  );
+  await assertUnverified(result, 'html');
+});
+
+test('a forged "Not verified" marker, in a comment or in a section heading, hides nothing', async () => {
+  const forged = '- Traffic is mostly freight. [2]';
+  await assertUnverified(
+    await checkedResearch((w) =>
+      researchFiles(w, 't1', {
+        claims: uncitedFreight(),
+        removed: ['c2'],
+        tamper: {
+          html: (text) =>
+            `<!-- <h2>Not verified</h2> -->${text.replace(C1_ITEM, `${C1_ITEM}<li>Traffic is mostly freight.</li>`)}`,
+        },
+      }),
+    ),
+    'an HTML comment before the body',
+  );
+  await assertUnverified(
+    await checkedResearch((w) =>
+      researchFiles(w, 't1', {
+        claims: uncitedFreight(),
+        removed: ['c2'],
+        tamper: {
+          md: (text) =>
+            `<!--\n## Not verified\n-->\n${text.replace(C1_LINE, `${C1_LINE}\n${forged}`)}`,
+        },
+      }),
+    ),
+    'a Markdown comment before the body',
+  );
+  const claims = uncitedFreight();
+  await assertUnverified(
+    await checkedResearch((w) =>
+      researchFiles(w, 't1', {
+        claims,
+        removed: ['c2'],
+        sections: [
+          { heading: 'Facts', claims: [claims[0]!] },
+          { heading: 'Not verified', claims: [claims[1]!] },
+        ],
+        tamper: {
+          md: (text) =>
+            `${text.replace('## How this was checked', `## Not verified\n\n${forged}\n\n## How this was checked`)}`,
+        },
+      }),
+    ),
+    'a section called "Not verified"',
+  );
+});
+
+test('a decoy rendering listed before the real one cannot stand in for it', async () => {
+  const artifacts = [
+    'out/decoy/report.md',
+    'out/report.md',
+    'out/report.html',
+    'out/report.json',
+    'out/verification.json',
+  ];
+  const result = await checkedResearch((w) => {
+    researchFiles(w, 't1', {
+      claims: uncitedFreight(),
+      removed: ['c2'],
+      tamper: {
+        md: (text) => text.replace(C1_LINE, `${C1_LINE}\n- Traffic is mostly freight. [2]`),
+      },
+    });
+    // The decoy is an honest rendering; the one the human is shown is not.
+    const honest = world();
+    researchFiles(honest, 't1', { claims: uncitedFreight(), removed: ['c2'] });
+    w.evidence.set(
+      't1',
+      'out/decoy/report.md',
+      honest.evidence.files.get('t1/report.md') as string,
+    );
+  }, artifacts);
+  await assertUnverified(result, 'decoy');
+});
+
+test('a rendering edited after it was rendered, or a record that does not match the report, is not independently checked', async () => {
+  const edits: Array<[string, (w: ReturnType<typeof world>) => void]> = [
+    [
+      'markdown with a sentence added',
+      (w) =>
+        researchFiles(w, 't1', {
+          tamper: { md: (text) => `${text}\nAll of this was checked twice.\n` },
+        }),
+    ],
+    [
+      'html with a number changed',
+      (w) =>
+        researchFiles(w, 't1', {
+          tamper: { html: (text) => text.replace('2 claims', '3 claims') },
+        }),
+    ],
+    [
+      'a record that removes a claim it calls verified',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.set(
+          't1',
+          'verification.json',
+          JSON.stringify({
+            version: 1,
+            mode: 'drop_unsupported',
+            claims: [
+              { id: 'c1', status: 'quote_verified', removed: false },
+              { id: 'c2', status: 'quote_verified', removed: true },
+            ],
+          }),
+        );
+      },
+    ],
+    [
+      'a record that names a claim the report does not have',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.set(
+          't1',
+          'verification.json',
+          JSON.stringify({
+            version: 1,
+            mode: 'drop_unsupported',
+            claims: [
+              { id: 'c1', status: 'quote_verified', removed: false },
+              { id: 'c2', status: 'quote_verified', removed: false },
+              { id: 'ghost', status: 'no_citation', removed: true },
+            ],
+          }),
+        );
+      },
+    ],
+    [
+      'a record that leaves out a claim, with renderings made to match it',
+      (w) => {
+        researchFiles(w, 't1');
+        const report = JSON.parse(w.evidence.files.get('t1/report.json') as string);
+        const result = {
+          claims: [{ id: 'c1', status: 'quote_verified' as const, reasons: [], judged: false }],
+          counts: { total: 1, verified: 0, quoteVerified: 1, failed: 0, judged: 0 },
+          unknownJudgments: [],
+        };
+        const rendered = renderReport(report, result, { dropFailed: true });
+        w.evidence.set('t1', 'report.md', rendered.markdown);
+        w.evidence.set('t1', 'report.html', rendered.html);
+        w.evidence.set(
+          't1',
+          'verification.json',
+          JSON.stringify({
+            version: 1,
+            mode: 'drop_unsupported',
+            claims: [{ id: 'c1', status: 'quote_verified', removed: false }],
+          }),
+        );
+      },
+    ],
+    [
+      'a record that is missing next to a rendering',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.files.delete('t1/verification.json');
+      },
+    ],
+  ];
+  for (const [label, setup] of edits) {
+    const result = await checkedResearch(setup);
+    await assertUnverified(result, label);
+  }
+});
+
+test('a listed rendering that is missing or cannot be read is not independently checked; none listed means every claim is checked', async () => {
+  const missing = await checkedResearch((w) => {
+    researchFiles(w, 't1');
+    w.evidence.files.delete('t1/report.html');
   });
-  assert.equal(itemsOf(unknown.r, 'finished').length, 0);
-  assert.match(itemsOf(unknown.r, 'verification_failed')[0]?.ask ?? '', /not in the report/);
-  await unknown.r.stop();
+  await assertUnverified(missing, 'a listed rendering that does not exist');
+
+  // Without a rendering the record cannot narrow the check: the uncited claim is checked and fails.
+  const none = await checkedResearch(
+    (w) => researchFiles(w, 't1', { claims: uncitedFreight(), removed: ['c2'] }),
+    ['out/report.json', 'out/verification.json'],
+  );
+  assert.equal(itemsOf(none.r, 'finished').length, 0);
+  assert.match(itemsOf(none.r, 'verification_failed')[0]?.ask ?? '', /cites no source/);
+  await none.r.stop();
+});
+
+test('a record never takes a claim out of report.json, however exactly the renderings match', async () => {
+  // The uncited c2 is in report.json, the record calls it removed, and the renderings are exactly
+  // what the renderer makes: only c1 would have been checked. Now c2 is, and it fails.
+  const dropped = await checkedResearch(
+    (w) => researchFiles(w, 't1', { claims: uncitedFreight(), removed: ['c2'] }),
+    ['out/report.md', 'out/report.json', 'out/verification.json'],
+  );
+  assert.equal(itemsOf(dropped.r, 'finished').length, 0);
+  const [item] = itemsOf(dropped.r, 'verification_failed');
+  assert.match(item?.ask ?? '', /Traffic is mostly freight/);
+  assert.match(item?.ask ?? '', /cites no source/);
+  assert.equal(dropped.w.anthropic.requests.length, 0);
+  await dropped.r.stop();
+
+  // A claim the record calls dropped because a reviewer found it unsupported is still judged by the other vendor.
+  const judged = await checkedResearch((w) =>
+    researchFiles(w, 't1', { removed: ['c2'], statuses: { c2: 'unsupported' } }),
+  );
+  assert.deepEqual(claimIdsOf(judged.w.anthropic.requests[0] as never), ['c1', 'c2']);
+  assert.equal(itemsOf(judged.r, 'finished').length, 1);
+  await judged.r.stop();
+});
+
+const ALL_REPORT_FILES = [
+  'out/report.md',
+  'out/report.html',
+  'out/report.json',
+  'out/verification.json',
+];
+
+test('a task that lists both a change and a report is not independently checked: one kind of check cannot stand for both', async () => {
+  const result = await checkedResearch(
+    (w) => {
+      researchFiles(w, 't1');
+      codingFiles(w, 't1');
+      // One verification.json that passes either check, so only the mix is wrong.
+      w.evidence.set(
+        't1',
+        'verification.json',
+        JSON.stringify({
+          result: 'verified',
+          testCommand: 'npm test',
+          version: 1,
+          mode: 'drop_unsupported',
+          claims: [
+            { id: 'c1', status: 'quote_verified', removed: false },
+            { id: 'c2', status: 'quote_verified', removed: false },
+          ],
+        }),
+      );
+      // The report is the part that would fail: c2 is uncited.
+      const report = JSON.parse(w.evidence.files.get('t1/report.json') as string);
+      report.sections[0].claims[1].citations = [];
+      w.evidence.set('t1', 'report.json', JSON.stringify(report));
+    },
+    ['out/change.patch', 'out/changes.json', ...ALL_REPORT_FILES],
+  );
+  await assertUnverified(result, 'a change and a report');
+  assert.equal(result.w.openai.requests.length, 0);
+});
+
+test('a report artifact listed as a link is never skipped: it makes the check unverified', async () => {
+  for (const link of [
+    'https://example.com/untrusted/report.md',
+    'https://example.com/untrusted/report.html',
+    'https://example.com/untrusted/report.json',
+    'https://example.com/untrusted/verification.json',
+  ]) {
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [...ALL_REPORT_FILES, link]),
+      link,
+    );
+  }
+  // As the only copy of a rendering, a link cannot be read here and reproduced either.
+  await assertUnverified(
+    await checkedResearch(
+      (w) => researchFiles(w, 't1'),
+      [
+        'https://example.com/untrusted/report.md',
+        'out/report.html',
+        'out/report.json',
+        'out/verification.json',
+      ],
+    ),
+    'a link in place of report.md',
+  );
+});
+
+test('a rendering is compared byte for byte, not as decoded text: an invalid byte is not U+FFFD', async () => {
+  const claims = defaultClaims();
+  (claims[0] as { text: string }).text = 'The tunnel opened in 1994 \uFFFD.';
+  const replacement = Buffer.from([0xef, 0xbf, 0xbd]);
+  const result = await checkedResearch((w) => {
+    researchFiles(w, 't1', { claims });
+    const honest = Buffer.from(w.evidence.files.get('t1/report.md') as string);
+    const at = honest.indexOf(replacement);
+    assert.ok(at > 0, 'the rendering carries the replacement character');
+    // The same text when decoded, different bytes: one invalid byte in place of EF BF BD.
+    const edited = Buffer.concat([
+      honest.subarray(0, at),
+      Buffer.from([0xff]),
+      honest.subarray(at + 3),
+    ]);
+    assert.equal(edited.toString('utf8').includes('\uFFFD'), true);
+    w.evidence.set('t1', 'report.md', { bytes: edited });
+  });
+  await assertUnverified(result, 'an invalid byte');
+
+  // The honest bytes of the same report pass.
+  const honest = await checkedResearch((w) => researchFiles(w, 't1', { claims }));
+  assert.equal(itemsOf(honest.r, 'finished').length, 1);
+  await honest.r.stop();
 });
 
 test('a real 404 or 410 from the fetcher is a deterministic failure, not a source that is merely down', async () => {
@@ -389,73 +730,90 @@ test('a real 404 or 410 from the fetcher is a deterministic failure, not a sourc
   }
 });
 
-test('a claim the record removes but the delivered report still shows is checked anyway, in either rendering', async () => {
-  // The forgery: a claim with no citation stays in the report the human reads, and the
-  // agent marks it {status: "no_citation", removed: true} in its own record.
-  for (const shown of [{ md: ['c2'] }, { html: ['c2'] }, { md: ['c2'], html: ['c2'] }]) {
-    const claims = defaultClaims();
-    (claims[1] as { citations: unknown[] }).citations = [];
-    const { w, r } = await checkedResearch((w) =>
-      researchFiles(w, 't1', { claims, removed: ['c2'], shown }),
-    );
-    const label = JSON.stringify(shown);
-    assert.equal(itemsOf(r, 'finished').length, 0, label);
-    const [item] = itemsOf(r, 'verification_failed');
-    assert.match(item?.ask ?? '', /Traffic is mostly freight/, label);
-    assert.match(item?.ask ?? '', /cites no source/, label);
-    assert.equal(w.anthropic.requests.length, 0, label);
-    await r.stop();
-  }
-});
-
-test('a removal is trusted only when a delivered rendering can be read and does not show the claim', async () => {
-  const claims = defaultClaims();
-  (claims[1] as { citations: unknown[] }).citations = [];
-  const cases: Array<[string, string[], (w: ReturnType<typeof world>) => void]> = [
-    ['no rendering is listed', ['out/report.json', 'out/verification.json'], () => {}],
-    [
-      'the only rendering cannot be read',
-      ['out/report.md', 'out/report.json', 'out/verification.json'],
-      (w) => w.evidence.set('t1', 'report.md', { fail: 'unavailable' }),
-    ],
-    [
-      'one rendering cannot be read, though the other is honest',
-      ['out/report.md', 'out/report.html', 'out/report.json', 'out/verification.json'],
-      (w) => w.evidence.set('t1', 'report.md', { fail: 'unavailable' }),
-    ],
-  ];
-  for (const [label, artifacts, tweak] of cases) {
-    const w = world();
-    researchFiles(w, 't1', { claims, removed: ['c2'] });
-    tweak(w);
-    const r = await verifyRig(w);
-    await finishTask(r, 't1', researchManifest({ artifacts }), { runner: 'codex' });
-    assert.equal(itemsOf(r, 'finished').length, 0, label);
-    assert.match(
-      itemsOf(r, 'verification_failed')[0]?.ask ?? '',
-      /cites no source|could not be completed/,
-      label,
-    );
-    await r.stop();
-  }
-});
-
-test('one delivered rendering that is honest is enough, and the claim may be listed under "Not verified"', async () => {
-  const claims = defaultClaims();
-  (claims[1] as { citations: unknown[] }).citations = [];
-  const w = world();
-  researchFiles(w, 't1', { claims, removed: ['c2'] });
-  const r = await verifyRig(w);
-  await finishTask(
-    r,
-    't1',
-    researchManifest({ artifacts: ['out/report.md', 'out/report.json', 'out/verification.json'] }),
-    { runner: 'codex' },
-  );
-  assert.equal(itemsOf(r, 'verification_failed').length, 0);
-  assert.deepEqual(claimIdsOf(w.anthropic.requests[0] as never), ['c1']);
-  assert.equal(itemsOf(r, 'finished').length, 1);
-  await r.stop();
-});
-
 void FakeFetcher;
+
+test('a link with a query or fragment is still a report: it is never classified away from the research check', async () => {
+  for (const link of [
+    'https://example.com/report.json?download=1',
+    'https://example.com/report.md#view',
+    'https://example.com/out/REPORT.HTML?x=1#y',
+    'https://example.com/out%2Freport.json',
+    'https://example.com/%72eport.md',
+  ]) {
+    // Beside a local report, and as the only report artifact.
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [...ALL_REPORT_FILES, link]),
+      `${link} beside a report`,
+    );
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [link]),
+      `${link} alone`,
+    );
+  }
+});
+
+test('a local path with a query or fragment is cut the same way: a second report.json is ambiguous', async () => {
+  for (const second of ['out/report.json?download=1', 'out/Report.JSON', 'out/report.md#view']) {
+    await assertUnverified(
+      await checkedResearch((w) => researchFiles(w, 't1'), [...ALL_REPORT_FILES, second]),
+      second,
+    );
+  }
+});
+
+test('a change beside a rendering but no report.json still runs both kinds of check, so it is unverified', async () => {
+  for (const rendering of ['out/report.md', 'out/report.html', 'out/Report.MD']) {
+    const result = await checkedResearch(
+      (w) => {
+        researchFiles(w, 't1');
+        codingFiles(w, 't1');
+      },
+      ['out/change.patch', 'out/changes.json', rendering],
+    );
+    await assertUnverified(result, `a change and ${rendering}`);
+    assert.equal(result.w.openai.requests.length, 0, rendering);
+  }
+});
+
+const CODING_FILES_LISTED = ['out/change.patch', 'out/changes.json', 'out/verification.json'];
+
+test('a coding task is independently checked only if every artifact is one the coding check reads', async () => {
+  for (const extra of [
+    'out/report.json.md',
+    'out/r\u0435port.json', // Cyrillic e
+    'out/report.json',
+    'out/notes.txt',
+    'out/Report.json',
+    'https://example.com/screenshot.png',
+  ]) {
+    const result = await checkedResearch(
+      (w) => codingFiles(w, 't1'),
+      [...CODING_FILES_LISTED, extra],
+    );
+    await assertUnverified(result, `a change beside ${extra}`);
+    assert.equal(result.w.openai.requests.length, 0, extra);
+  }
+});
+
+test('a research task is independently checked only if every artifact is a local file the check reads', async () => {
+  for (const extra of [
+    'https://example.com/untrusted%EF%BC%8Freport.json', // a fullwidth slash before NFKC
+    'https://example.com/%2525252572eport.json', // still encoded after four decodes
+    'https://example.com/shot.png',
+    'out/notes.txt',
+    'out/change.patch',
+    'out/r\u0435port.html',
+    'out/%72eport.html',
+    'out\\report.md',
+    'out/report.md?x=1',
+    'out/\u0000report.md',
+    '../out/report.md',
+  ]) {
+    const result = await checkedResearch(
+      (w) => researchFiles(w, 't1'),
+      [...ALL_REPORT_FILES, extra],
+    );
+    await assertUnverified(result, `a report beside ${JSON.stringify(extra)}`);
+    assert.equal(result.w.fetcher.fetched.length, 0, extra);
+  }
+});

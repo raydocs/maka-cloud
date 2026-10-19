@@ -10,7 +10,7 @@ import {
   JsonFileCodingDeliveries,
   openPullRequestTool,
 } from '@maka-cloud/playbooks/coding';
-import { citeCheckSandboxTool } from '@maka-cloud/playbooks/sandbox-tool';
+import { citeCheckSandboxTool, webSearchSandboxTool } from '@maka-cloud/playbooks/sandbox-tool';
 import {
   type CloudRunners,
   type CloudRunnersOptions,
@@ -20,6 +20,13 @@ import {
   type TaskDirectory,
 } from '@maka-cloud/runners';
 import type { StackConfig } from './config.js';
+import {
+  conductorGateway,
+  gatewayModelAccess,
+  gatewayPrices,
+  type StackGateway,
+  startGateway,
+} from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 
@@ -38,6 +45,8 @@ export interface Stack {
   cloud: Cloud;
   runners: CloudRunners;
   coding: CodingRunner;
+  /** The model gateway: sandbox runs get a token for it, never a vendor key. */
+  gateway: StackGateway;
   close(): Promise<void>;
 }
 
@@ -63,59 +72,99 @@ export async function startStack(
     rootSessionOfTask: (taskId: TaskId) => orchestrator?.rootSessionOfTask(taskId),
     taskStateOf: (taskId: TaskId) => orchestrator?.taskStateOf(taskId),
   };
-  const publicUrl = config.mcp.publicUrl;
-  const runnerOptions: Partial<CloudRunnersOptions> = {
-    sessions: new JsonFileSessionStore(config.runnerSessionsPath),
-    sandboxTools: [await citeCheckSandboxTool()],
-    inputs: sameConversationInputPolicy(directory),
-    ...(publicUrl === undefined ? {} : { mcpUrlForSandbox: () => publicUrl }),
-  };
-  const runners = (
-    dependencies.createRunners ?? ((options) => createCloudRunnersFromEnv(env, options))
-  )(runnerOptions);
-
   const warn = dependencies.onWarning ?? (() => undefined);
-  const deliveries = new JsonFileCodingDeliveries(config.codingDeliveriesPath);
-  const coding = createCodingRunner(runners, {
-    deliveries,
-    onCleanupError: (failure) => warn('A coding task cleanup step failed', failure),
-  });
-  const pullRequests = openPullRequestTool({
-    deliveries,
-    // The token is read from MAKA_GITHUB_TOKEN when a pull request is opened, never earlier.
-    publisher: new GitHubPublisher({ env }),
-    ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
-  });
+  const gateway = await startGateway(
+    config.gateway,
+    env,
+    warn,
+    gatewayPrices(config.gateway.models, config.inbox.verifierModels),
+  );
+  // Every exit from here on closes the gateway: a failed start, or the stack's close.
+  let runners: CloudRunners;
+  let coding: CodingRunner;
+  let cloud: Cloud;
+  try {
+    const publicUrl = config.mcp.publicUrl;
+    const runnerOptions: Partial<CloudRunnersOptions> = {
+      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl),
+      sessions: new JsonFileSessionStore(config.runnerSessionsPath),
+      sandboxTools: [
+        await citeCheckSandboxTool(),
+        ...(gateway.gateway.canSearch ? [await webSearchSandboxTool()] : []),
+      ],
+      inputs: sameConversationInputPolicy(directory),
+      ...(publicUrl === undefined ? {} : { mcpUrlForSandbox: () => publicUrl }),
+    };
+    runners = (
+      dependencies.createRunners ?? ((options) => createCloudRunnersFromEnv(env, options))
+    )(runnerOptions);
 
-  const cloud = await startCloud({
-    dbPath: config.dbPath,
-    invitesPath: config.invitesPath,
-    handoffRoot: config.handoffRoot,
-    runners: new RunnerRegistry([...runners.runners, coding]),
-    host: config.host,
-    port: config.port,
-    mcp: { host: config.mcp.host, port: config.mcp.port },
-    sweepOrphans: (known) => runners.sweepOrphans(known),
-    conductorRoot: config.conductorRoot,
-    conductor: { access: config.conductor, playbooks: STACK_PLAYBOOKS, tools: [pullRequests] },
-    supervisor: (context) =>
-      startInbox(
-        {
-          dbPath: config.supervisorDbPath,
-          config: config.inbox,
-          env,
-          ...(config.conductor.baseUrl === undefined
+    const deliveries = new JsonFileCodingDeliveries(config.codingDeliveriesPath);
+    coding = createCodingRunner(runners, {
+      deliveries,
+      onCleanupError: (failure) => warn('A coding task cleanup step failed', failure),
+    });
+    const pullRequests = openPullRequestTool({
+      deliveries,
+      // The token is read from MAKA_GITHUB_TOKEN when a pull request is opened, never earlier.
+      publisher: new GitHubPublisher({ env }),
+      ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
+    });
+
+    cloud = await startCloud({
+      dbPath: config.dbPath,
+      invitesPath: config.invitesPath,
+      handoffRoot: config.handoffRoot,
+      runners: new RunnerRegistry([...runners.runners, coding]),
+      host: config.host,
+      port: config.port,
+      mcp: { host: config.mcp.host, port: config.mcp.port },
+      sweepOrphans: (known) => runners.sweepOrphans(known),
+      conductorRoot: config.conductorRoot,
+      conductor: {
+        // The vendor key stays in the gateway: the conductor's requests go through it in process.
+        access: {
+          apiKey: 'gateway-in-process',
+          ...(config.conductor.connectionId === undefined
             ? {}
-            : { anthropicBaseUrl: config.conductor.baseUrl }),
-          ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
+            : { connectionId: config.conductor.connectionId }),
+          gateway: conductorGateway(gateway.gateway),
         },
-        context,
-      ),
-    onReady: (parts) => {
-      orchestrator = parts.orchestrator;
-      conductor = parts.conductor;
+        playbooks: STACK_PLAYBOOKS,
+        tools: [pullRequests],
+      },
+      supervisor: (context) =>
+        startInbox(
+          {
+            dbPath: config.supervisorDbPath,
+            config: config.inbox,
+            gateway: gateway.gateway,
+            ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
+          },
+          context,
+        ),
+      onReady: (parts) => {
+        orchestrator = parts.orchestrator;
+        conductor = parts.conductor;
+      },
+      onWarning: warn,
+    });
+  } catch (error) {
+    await gateway.close();
+    throw error;
+  }
+  return {
+    cloud,
+    runners,
+    coding,
+    gateway,
+    // The runs stop first, then the gateway cuts whatever is still in flight.
+    close: async () => {
+      try {
+        await cloud.close();
+      } finally {
+        await gateway.close();
+      }
     },
-    onWarning: warn,
-  });
-  return { cloud, runners, coding, close: () => cloud.close() };
+  };
 }

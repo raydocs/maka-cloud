@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { type ModelPrice, priceProblem } from '@maka-cloud/gateway';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
@@ -33,9 +34,24 @@ export interface StackConfig {
     machineId: string;
     apiUrl?: string;
   };
+  /** The model gateway sandbox runs reach the vendors through. It reads the vendor keys itself. */
+  gateway: {
+    host: string;
+    port: number;
+    /** The gateway as sandboxes reach it. Without it, sandboxes get the local URL. */
+    publicUrl?: string;
+    /** Prices beyond the built-in Claude ones; Codex models need an entry here. */
+    models: ModelPrice[];
+    anthropicBaseUrl?: string;
+    openAiBaseUrl?: string;
+    /** The web search provider's API, when not its default. */
+    searchBaseUrl?: string;
+  };
   inbox: InboxConfig;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
+  /** With it, research runs get a `web-search` command, paid per call from their budget. */
+  searchKeySet: boolean;
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
@@ -60,13 +76,26 @@ export const ENV_VARIABLES = [
   ['MAKA_CLOUD_MCP_HOST', 'orchestrator MCP host (default 127.0.0.1)'],
   ['MAKA_CLOUD_MCP_PORT', 'orchestrator MCP port (default 8081)'],
   ['MAKA_CLOUD_MCP_PUBLIC_URL', 'the MCP URL as the sandbox reaches it (http or https)'],
-  ['ANTHROPIC_API_KEY', 'required: the conductor’s and the Claude runner’s API key'],
-  ['ANTHROPIC_BASE_URL', 'Messages API base URL, for a gateway'],
+  ['ANTHROPIC_API_KEY', 'required: the conductor’s key, and the model gateway’s for Claude runs'],
+  ['ANTHROPIC_BASE_URL', 'Messages API base URL, for the conductor and the model gateway'],
   ['MAKA_CLOUD_LLM_CONNECTION_ID', 'stable id of the conductor’s model connection'],
   ['INSTABOX_API_KEY', 'required: sandbox API key'],
   ['INSTABOX_MACHINE_ID', 'required: the sandbox machine tasks run in'],
   ['INSTABOX_API_URL', 'sandbox API base URL'],
-  ['OPENAI_API_KEY', 'the Codex runner’s API key, read when a task starts'],
+  ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
+  ['OPENAI_BASE_URL', 'Responses API base URL for the model gateway'],
+  ['DEEPSEEK_API_KEY', 'the model gateway’s key for web search (DeepSeek Search API)'],
+  ['DEEPSEEK_BASE_URL', 'DeepSeek API base URL for web search'],
+  ['MAKA_CLOUD_GATEWAY_HOST', 'model gateway host (default 127.0.0.1)'],
+  ['MAKA_CLOUD_GATEWAY_PORT', 'model gateway port (default 8082)'],
+  [
+    'MAKA_CLOUD_GATEWAY_PUBLIC_URL',
+    'the model gateway as the sandbox reaches it (https, or http on a loopback host)',
+  ],
+  [
+    'MAKA_CLOUD_GATEWAY_MODELS',
+    'JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one',
+  ],
   [
     'MAKA_CLOUD_VERIFIER_MODELS',
     'JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run',
@@ -142,15 +171,37 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     },
     conductor: { apiKey: required('ANTHROPIC_API_KEY') },
     instabox: { machineId: '' },
+    gateway: {
+      host: value('MAKA_CLOUD_GATEWAY_HOST') ?? '127.0.0.1',
+      port: port('MAKA_CLOUD_GATEWAY_PORT', 8082),
+      models: gatewayModels(value('MAKA_CLOUD_GATEWAY_MODELS'), problems),
+    },
     inbox: readInboxConfig(value, problems),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
+    searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
   };
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
   const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
   if (publicUrl !== undefined) config.mcp.publicUrl = publicUrl;
   const baseUrl = url('ANTHROPIC_BASE_URL');
-  if (baseUrl !== undefined) config.conductor.baseUrl = baseUrl;
+  if (baseUrl !== undefined) {
+    config.conductor.baseUrl = baseUrl;
+    config.gateway.anthropicBaseUrl = baseUrl;
+  }
+  const openAiBaseUrl = url('OPENAI_BASE_URL');
+  if (openAiBaseUrl !== undefined) config.gateway.openAiBaseUrl = openAiBaseUrl;
+  const searchBaseUrl = url('DEEPSEEK_BASE_URL');
+  if (searchBaseUrl !== undefined) config.gateway.searchBaseUrl = searchBaseUrl;
+  const gatewayUrl = url('MAKA_CLOUD_GATEWAY_PUBLIC_URL');
+  if (gatewayUrl !== undefined) {
+    // The task token travels in every request: in the clear only on the host itself.
+    if (new URL(gatewayUrl).protocol === 'https:' || isLoopback(new URL(gatewayUrl).hostname)) {
+      config.gateway.publicUrl = gatewayUrl;
+    } else {
+      problems.push('MAKA_CLOUD_GATEWAY_PUBLIC_URL must be https, except on a loopback host');
+    }
+  }
   const connectionId = value('MAKA_CLOUD_LLM_CONNECTION_ID');
   if (connectionId !== undefined) config.conductor.connectionId = connectionId;
   required('INSTABOX_API_KEY');
@@ -160,8 +211,45 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
   if (config.port === config.mcp.port && config.host === config.mcp.host) {
     problems.push('MAKA_CLOUD_PORT and MAKA_CLOUD_MCP_PORT must differ');
   }
+  for (const [name, other] of [
+    ['MAKA_CLOUD_PORT', config],
+    ['MAKA_CLOUD_MCP_PORT', config.mcp],
+  ] as const) {
+    if (config.gateway.port === other.port && config.gateway.host === other.host) {
+      problems.push(`MAKA_CLOUD_GATEWAY_PORT and ${name} must differ`);
+    }
+  }
   if (problems.length > 0) throw new ConfigError(problems);
   return config;
+}
+
+function isLoopback(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/u.test(hostname);
+}
+
+function gatewayModels(raw: string | undefined, problems: string[]): ModelPrice[] {
+  if (raw === undefined) return [];
+  let list: unknown;
+  try {
+    list = JSON.parse(raw);
+  } catch {
+    problems.push('MAKA_CLOUD_GATEWAY_MODELS is not JSON');
+    return [];
+  }
+  if (!Array.isArray(list)) {
+    problems.push('MAKA_CLOUD_GATEWAY_MODELS must be a JSON array');
+    return [];
+  }
+  const models: ModelPrice[] = [];
+  list.forEach((entry: unknown, index) => {
+    const problem =
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+        ? priceProblem(entry as ModelPrice)
+        : 'must be an object';
+    if (problem === undefined) models.push(entry as ModelPrice);
+    else problems.push(`MAKA_CLOUD_GATEWAY_MODELS entry ${index + 1}: ${problem}`);
+  });
+  return models;
 }
 
 /** The resolved configuration without secret values, one setting per line. */
@@ -176,11 +264,20 @@ export function describeConfig(config: StackConfig): string[] {
     `sandbox machine:     ${config.instabox.machineId}`,
     `sandbox API URL:     ${config.instabox.apiUrl ?? '(default)'}`,
     `Codex runner key:    ${config.openAiKeySet ? 'set' : 'not set (Codex tasks will fail)'}`,
+    `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
+    `gateway for tasks:   ${config.gateway.publicUrl ?? '(not set: tasks get the local URL)'}`,
+    `gateway models:      ${describeModels(config.gateway.models)}`,
+    `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,
     `digest summary:      ${config.inbox.summaryModel}`,
   ];
+}
+
+function describeModels(models: readonly ModelPrice[]): string {
+  if (models.length === 0) return 'built-in Claude prices only (Codex tasks will be refused)';
+  return `built-in Claude prices and ${models.length} configured`;
 }
 
 function describeVerifiers(inbox: InboxConfig): string {

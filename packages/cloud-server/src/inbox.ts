@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { HttpError, parseCount, readJson, respond, take } from './http.js';
 import type { InviteInfo } from './invites.js';
+import { toPublicItem } from './public-view.js';
 import type { RateLimiter } from './rate-limit.js';
 
 /**
@@ -127,7 +128,10 @@ export class InboxRoutes {
       limit,
       conversations: this.owners.conversationsOf(invite.inviteId),
     });
-    respond(res, 200, { items: page.items, ...(page.next === null ? {} : { next: page.next }) });
+    respond(res, 200, {
+      items: page.items.map(toPublicItem),
+      ...(page.next === null ? {} : { next: page.next }),
+    });
   }
 
   private async answer(
@@ -158,14 +162,14 @@ export class InboxRoutes {
       if (status === undefined) throw new Error(`Unknown answer failure ${result.reason}`);
       respond(res, status, {
         error: result.reason,
-        ...(result.item === undefined ? {} : { item: result.item }),
+        ...(result.item === undefined ? {} : { item: toPublicItem(result.item) }),
       });
       return;
     }
     // 202 while the delivery to the conversation is still being retried.
     respond(res, result.item.state === 'answering' ? 202 : 200, {
       duplicate: result.duplicate,
-      item: result.item,
+      item: toPublicItem(result.item),
     });
   }
 }

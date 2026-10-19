@@ -301,6 +301,7 @@ test('evidence is the artifact text; what the server cannot read keeps its reaso
   assert.deepEqual(await evidence.readArtifact(task, 'a.json', signal), {
     ok: true,
     text: 'héllo',
+    bytes: Buffer.from('héllo'),
   });
   assert.deepEqual(await evidence.readArtifact(task, 'missing', signal), {
     ok: false,
@@ -314,7 +315,12 @@ test('evidence is the artifact text; what the server cannot read keeps its reaso
     ok: false,
     reason: 'unavailable',
   });
-  assert.deepEqual(await evidence.readArtifact(task, 'binary', signal), { ok: true, text: '�A' });
+  // The text of an invalid byte is the replacement character, but the bytes stay what they were.
+  assert.deepEqual(await evidence.readArtifact(task, 'binary', signal), {
+    ok: true,
+    text: '�A',
+    bytes: Buffer.from([0xff, 0x41]),
+  });
   assert.deepEqual(reads[0], [task, 'a.json']);
 });
 
@@ -345,6 +351,30 @@ test('a single item becomes one notice with the ask, a batch one notice per conv
   assert.match(notices[1]?.text ?? '', /^Needs you \(2 items\):\n- one\n- three x+…$/u);
   assert.ok((notices[1]?.text.length ?? 0) < 400);
   assert.deepEqual(notices[2], { conversationId: 'c2', text: 'Needs you: two' });
+});
+
+test('a notice carries no model or vendor names from the ask', async () => {
+  const notices: Array<{ conversationId: string; text: string }> = [];
+  const notifier = conductorNotifier({
+    postNotice: async (notice) => void notices.push(notice as never),
+  });
+  await notifier.interrupt({
+    items: [
+      {
+        itemId: 'i-1',
+        conversationId: 'c1',
+        kind: 'blocked',
+        ask: 'Last reason: “codex exited; Claude/OpenAI unavailable”',
+      },
+    ],
+    batch: false,
+  } satisfies Interrupt);
+  assert.deepEqual(notices, [
+    {
+      conversationId: 'c1',
+      text: 'Needs you: Last reason: “assistant exited; assistant/assistant unavailable”',
+    },
+  ]);
 });
 
 test('a notice that cannot be posted fails the interrupt, so the supervisor reports it', async () => {

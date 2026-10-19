@@ -99,6 +99,28 @@ test('a retry with the same client id delivers a message whose first delivery fa
   assert.equal(stepped.calls.length, 2);
 });
 
+test('a handler that throws synchronously is retried, and the message is delivered once', async (t) => {
+  let calls = 0;
+  const stepped = steppedHandler();
+  const handler: ConversationHandler = {
+    onUserMessage(message, access) {
+      calls += 1;
+      if (calls === 1) throw new Error('thrown before any promise');
+      return stepped.handler.onUserMessage(message, access);
+    },
+  };
+  const h = await startHarness(t, { handler, delivery: { retryBaseMs: 5 } });
+  const conversationId = await newConversation(h);
+  const posted = await postJson(h, `/v1/conversations/${conversationId}/messages`, { text: 'go' });
+  assert.equal(posted.status, 202);
+  const retried = await stepped.call(1);
+  assert.equal(retried.message.text, 'go');
+  retried.settle.resolve();
+  await eventually(() => h.server.deliveryStats()?.pending === 0, 'acknowledged');
+  assert.equal(calls, 2);
+  assert.deepEqual(h.server.deliveryStats(), { pending: 0, inFlight: 0, timerArmed: false });
+});
+
 test('a crash between the commit and the delivery loses nothing: the next start delivers it', async (t) => {
   const stepped = steppedHandler();
   const h = await startHarness(t, { handler: stepped.handler });
@@ -140,7 +162,7 @@ test('messages posted while no handler runs wait for the first server that has o
 });
 
 /** The delivery loop on its own, over a real database, so each way out can be checked. */
-async function rig(t: TestContext) {
+async function rig(t: TestContext, options: { syncThrows?: number; retryBaseMs?: number } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'deliveries-test-'));
   const db = openDatabase(join(dir, 'server.sqlite'));
   let n = 0;
@@ -157,13 +179,17 @@ async function rig(t: TestContext) {
     db,
     (message) => {
       calls.push(message);
+      if (calls.length <= (options.syncThrows ?? 0)) {
+        for (const wake of waiters.splice(0)) wake();
+        throw new Error('thrown before any promise');
+      }
       const step = deferred();
       steps.push(step);
       for (const wake of waiters.splice(0)) wake();
       return step.promise;
     },
     (message) => warnings.push(message),
-    { retryBaseMs: 5 },
+    { retryBaseMs: options.retryBaseMs ?? 5 },
   );
   t.after(async () => {
     deliveries.stop();
@@ -249,4 +275,41 @@ test('one attempt per message runs at a time, however often it is asked for', as
   await r.deliveries.settled();
   r.deliveries.kick(id);
   assert.equal(r.calls.length, 1, 'a delivered message is not handed over again');
+});
+
+test('when the handler throws synchronously, the attempt is released and the retry delivers it once', async (t) => {
+  const r = await rig(t, { syncThrows: 1 });
+  const id = r.post('a');
+  r.deliveries.kick(id);
+  // The first call threw before returning a promise; the timer's retry is the first stepped one.
+  (await r.step(1)).resolve();
+  await r.deliveries.settled();
+  assert.equal(r.calls.length, 2);
+  assert.deepEqual(r.deliveries.stats(), { pending: 0, inFlight: 0, timerArmed: false });
+  assert.deepEqual(r.warnings, ['The conversation handler failed']);
+  r.deliveries.kick(id);
+  assert.equal(r.calls.length, 2, 'a delivered message is not handed over again');
+});
+
+test('when the handler throws synchronously, a retry asked for by the client is not skipped', async (t) => {
+  // The timer would only retry in a minute: the second kick, as a client retry makes, delivers it.
+  const r = await rig(t, { syncThrows: 1, retryBaseMs: 60_000 });
+  const id = r.post('a');
+  r.deliveries.kick(id);
+  await r.deliveries.settled();
+  assert.equal(r.deliveries.stats().inFlight, 0, 'the failed attempt let go of the message');
+  r.deliveries.kick(id);
+  (await r.step(1)).resolve();
+  await r.deliveries.settled();
+  assert.equal(r.calls.length, 2);
+  assert.equal(r.deliveries.stats().pending, 0);
+});
+
+test('when stopped before a started attempt reaches the handler, nothing is called and it stays pending', async (t) => {
+  const r = await rig(t);
+  r.deliveries.kick(r.post('a'));
+  r.deliveries.stop();
+  await r.deliveries.settled();
+  assert.equal(r.calls.length, 0);
+  assert.deepEqual(r.deliveries.stats(), { pending: 1, inFlight: 0, timerArmed: false });
 });

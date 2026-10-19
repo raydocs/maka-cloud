@@ -11,7 +11,7 @@ const VIEW_PROGRESS_NOTES = 10;
  * Fold one log entry into `tasks`. This is the only place task state is
  * computed, for live updates and for replay alike. The first terminal event for
  * a task wins; anything after it (a runner finishing after a cancel) is ignored,
- * except whether its run is known to have stopped.
+ * except whether its run is known to have stopped and what its tree spent.
  */
 export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
   if (event.type === 'task_created') {
@@ -41,19 +41,20 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     delete task.stopPending;
     return;
   }
+  // Spend settles after a cancel or an end too (a request in flight when the run stopped).
+  if (event.type === 'task_cost') {
+    const spend = (task.spendByTask ??= {});
+    spend[event.fromTaskId] = Math.max(spend[event.fromTaskId] ?? 0, event.costUsd);
+    const total = Object.values(spend).reduce((sum, usd) => sum + usd, 0);
+    task.costUsd = Math.round(total * 1e9) / 1e9;
+    return;
+  }
   if (isTerminal(task.state)) return;
   switch (event.type) {
     case 'task_started':
       task.state = 'running';
       task.startedAt = at;
       return;
-    case 'task_cost': {
-      const spend = (task.spendByTask ??= {});
-      spend[event.fromTaskId] = Math.max(spend[event.fromTaskId] ?? 0, event.costUsd);
-      const total = Object.values(spend).reduce((sum, usd) => sum + usd, 0);
-      task.costUsd = Math.round(total * 1e9) / 1e9;
-      return;
-    }
     case 'task_progress':
       task.progress.push(event.note);
       if (task.progress.length > MAX_PROGRESS_NOTES) task.progress.shift();
