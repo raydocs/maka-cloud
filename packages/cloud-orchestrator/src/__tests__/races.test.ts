@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isTerminal, OrchestratorError, type TaskEvent, type TaskId } from '../types.js';
+import { MemoryTaskStore } from '../store.js';
+import {
+  isTerminal,
+  OrchestratorError,
+  type SessionId,
+  type TaskEvent,
+  type TaskId,
+} from '../types.js';
+import type { FakeRun } from '../fake-runner.js';
 import { eventually, GatedStore, type Harness, makeHarness } from './harness.js';
 
 function deferred() {
@@ -239,4 +247,107 @@ test('a runner that comes up under an ancestor that already ended is cancelled a
   assert.equal(terminalEvents(log).length, 1);
   assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
   assert.ok(isTerminal(h.orchestrator.status(conductor, child.taskId).state));
+});
+
+// A runner's own failures must not cut the cleanup short.
+
+/** A runner whose cancel throws before it returns a promise, as a bad adapter would. */
+function throwOnCancel(run: FakeRun): void {
+  run.cancel = () => {
+    run.cancelCalls += 1;
+    throw new Error('cancel exploded');
+  };
+}
+
+test('a runner whose cancel throws synchronously does not stop the terminal cleanup', async (t) => {
+  const h = await makeHarness(t, {
+    // The first run is the root's; the child's cancel behaves.
+    fake: { onStart: (run) => (run === h.fake.runs[0] ? throwOnCancel(run) : undefined) },
+  });
+  const conductor = h.session();
+  const root = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'root' });
+  const executor = h.executorSession(root.taskId);
+  const child = await h.orchestrator.delegate(executor, { runner: 'fake', brief: 'child' });
+  await eventually(() => h.fake.runs.length === 2, 'both runs created');
+  const run = h.fake.runFor(root.taskId);
+  await eventually(
+    () => (h.orchestrator as unknown as { handles: Map<TaskId, unknown> }).handles.has(root.taskId),
+    'handle registered',
+  );
+
+  // The stream breaks, so the root ends with its handle still registered and
+  // the cleanup calls the cancel that throws.
+  const internals = h.orchestrator as unknown as {
+    executorSessions: Map<TaskId, SessionId>;
+  };
+  const launched = internals.executorSessions.get(root.taskId);
+  assert.ok(launched !== undefined, 'the root was given an executor session');
+  const ended = h.orchestrator.wait(conductor, root.taskId, 2000);
+  run.crash(new Error('connection lost'));
+  const view = await ended;
+  assert.equal(view.state, 'failed');
+  assert.equal(view.waitTimedOut, undefined, 'the waiter was woken, not timed out');
+  assert.equal(run.cancelCalls, 1);
+
+  await h.orchestrator.settled();
+  assert.throws(() => h.orchestrator.assertSessionActive({ sessionId: launched }), isUnauthorized);
+  assert.equal(h.orchestrator.status(conductor, child.taskId).state, 'cancelled');
+  assert.equal(h.fake.runFor(child.taskId).cancelCalls, 1);
+  assert.equal(h.orchestrator.stats().activeTasks, 0);
+  assert.equal(h.orchestrator.stats().treesCounted, 0);
+});
+
+test('a cancel whose runner throws synchronously still ends the task as cancelled', async (t) => {
+  const h = await makeHarness(t, { fake: { onStart: throwOnCancel } });
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(
+    () => (h.orchestrator as unknown as { handles: Map<TaskId, unknown> }).handles.has(taskId),
+    'handle registered',
+  );
+  const view = await h.orchestrator.cancel(conductor, taskId);
+  assert.equal(view.state, 'cancelled');
+  assert.equal(h.fake.runFor(taskId).cancelCalls, 1);
+  assert.equal(h.orchestrator.stats().activeTasks, 0);
+});
+
+test('a runner whose event stream ends without a result is cancelled when the task fails', async (t) => {
+  const h = await makeHarness(t);
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'run created');
+  const run = h.fake.runFor(taskId);
+  const ended = h.orchestrator.wait(conductor, taskId, 2000);
+  // A clean end of the stream does not prove the remote process stopped.
+  run.end();
+  const view = await ended;
+  assert.equal(view.state, 'failed');
+  assert.match(view.failureReason ?? '', /without reporting a result/u);
+  assert.equal(run.cancelCalls, 1);
+});
+
+// The cascade has to cope with any number of children.
+
+class WideStore extends MemoryTaskStore {
+  /** Extra ended children reported for one parent. */
+  wide: { parent: TaskId; count: number } | undefined;
+
+  override childrenOf(taskId: TaskId): TaskId[] {
+    const own = super.childrenOf(taskId);
+    if (this.wide?.parent !== taskId) return own;
+    // Ended children stay in the index, so a busy parent can have far more than
+    // an argument list can carry.
+    return [...own, ...Array.from({ length: this.wide.count }, (_, i) => `old-${i}`)];
+  }
+}
+
+test('cancelling a task with a very large number of historical children still cancels it', async (t) => {
+  const store = new WideStore();
+  const h = await makeHarness(t, { store });
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'run created');
+  store.wide = { parent: taskId, count: 500_000 };
+  const view = await h.orchestrator.cancel(conductor, taskId);
+  assert.equal(view.state, 'cancelled');
 });
