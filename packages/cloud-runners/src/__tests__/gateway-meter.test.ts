@@ -4,7 +4,7 @@ import type { RunnerEvent } from '@maka-cloud/orchestrator';
 import { InstaboxClient } from '@maka-cloud/instabox';
 import { createCloudRunners, FixedMachineProvider } from '../index.js';
 import type { ModelAccessProvider } from '../types.js';
-import { collect, reader, settles, setup, terminal } from './harness.js';
+import { collect, deferred, reader, settles, setup, terminal } from './harness.js';
 
 const TOKEN = 'mkg_test_task_token_abcdefghijkl';
 
@@ -15,13 +15,18 @@ function gatewayAccess() {
   const issued: unknown[] = [];
   const counts = { revoked: 0, unsubscribed: 0 };
   let spent = 0;
+  /** What the revoke does before it resolves, as the gateway's does while requests settle. */
+  const hooks: { onRevoke?: () => Promise<void> } = {};
   const provider: ModelAccessProvider = {
     async issue(input) {
       issued.push(input);
       return {
         apiKey: TOKEN,
         baseUrl: 'https://gateway.test/openai/v1',
-        revoke: () => void counts.revoked++,
+        revoke: async () => {
+          counts.revoked++;
+          await hooks.onRevoke?.();
+        },
         meter: {
           spentUsd: () => spent,
           subscribe: (listener) => {
@@ -39,6 +44,7 @@ function gatewayAccess() {
     provider,
     issued,
     counts,
+    hooks,
     listening: () => listeners.size > 0,
     settle(state: State) {
       spent = state.spentUsd;
@@ -111,6 +117,56 @@ test('with a metered access the CLI’s own usage lines do not count', async (t)
     new RegExp(`ANTHROPIC_API_KEY=${TOKEN}`, 'u'),
     'the sandbox gets the task token',
   );
+});
+
+test('what settles while the access is revoked is reported before the run ends', async (t) => {
+  const access = gatewayAccess();
+  const h = await setup({ cloud: { modelAccess: access.provider } });
+  t.after(() => h.cleanup());
+  await h.setMode('spend');
+  const revoking = deferred();
+  const inFlight = deferred();
+  access.hooks.onRevoke = async () => {
+    revoking.resolve();
+    // A request still streaming when the CLI exited settles during the revoke.
+    await inFlight.promise;
+    access.settle({ spentUsd: 0.3, exhausted: false });
+  };
+  const handle = await h.runners.claude.start(await h.spec('tsk_settle_end', { budgetUsd: 5 }));
+  const events = reader(handle);
+  await events.until((event) => event.type === 'progress');
+  access.settle({ spentUsd: 0.05, exhausted: false });
+  await revoking.promise;
+  inFlight.resolve();
+  const all = await events.rest();
+  assert.deepEqual(
+    all.filter((event) => event.type === 'usage' || event.type === 'finished'),
+    [{ type: 'usage', costUsd: 0.05 }, { type: 'usage', costUsd: 0.3 }, { type: 'finished' }],
+    'the final spend comes before the end',
+  );
+  assert.equal(access.counts.unsubscribed, 1);
+  assert.equal(access.listening(), false);
+});
+
+test('a cancelled run still reports what settled while its access was revoked', async (t) => {
+  const access = gatewayAccess();
+  const h = await setup({ cloud: { modelAccess: access.provider } });
+  t.after(() => h.cleanup());
+  await h.setMode('hang');
+  access.hooks.onRevoke = async () => access.settle({ spentUsd: 0.4, exhausted: false });
+  const handle = await h.runners.codex.start(
+    await h.spec('tsk_settle_cancel', { runner: 'codex', budgetUsd: 5 }),
+  );
+  const events = reader(handle);
+  await events.until((event) => event.type === 'progress' && event.note.includes('working on it'));
+  access.settle({ spentUsd: 0.1, exhausted: false });
+  await events.until((event) => event.type === 'usage');
+  await handle.cancel();
+  const all = await events.rest();
+  assert.equal(terminal(all), undefined, 'a cancelled run reports no end of its own');
+  assert.deepEqual(costs(all), [0.1, 0.4]);
+  assert.equal(access.counts.revoked, 1);
+  assert.equal(access.counts.unsubscribed, 1);
 });
 
 test('a fleet built without a model access gives no run a key', async (t) => {

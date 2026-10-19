@@ -39,7 +39,7 @@ function rig(options: Partial<GatewayOptions> = {}) {
   const gateway = new Gateway({
     upstreams: { anthropic: { apiKey: MASTER }, openai: { apiKey: OPENAI_MASTER } },
     models: [CODEX],
-    limits: { requestOverheadTokens: 0, imageTokens: 1_000 },
+    limits: { requestOverheadTokens: 0, imageBaseTokens: 1_000 },
     fetch: upstream.fetch,
     onWarning: (message, detail) => warnings.push({ message, detail }),
     ...options,
@@ -89,6 +89,7 @@ function post(
 
 function recordingPort(limitUsd: number) {
   const held = new Map<string, number>();
+  const reserved: Array<[string, number]> = [];
   const settled: Array<[string, number]> = [];
   let spent = 0;
   const port: BudgetPort = {
@@ -97,6 +98,7 @@ function recordingPort(limitUsd: number) {
       for (const value of held.values()) heldUsd += value;
       if (spent + heldUsd + usd > limitUsd) return { ok: false, budget: true, reason: 'over' };
       held.set(key, usd);
+      reserved.push([key, usd]);
       return { ok: true };
     },
     settle(key, usd) {
@@ -105,7 +107,7 @@ function recordingPort(limitUsd: number) {
       settled.push([key, usd]);
     },
   };
-  return { port, held, settled, spent: () => spent };
+  return { port, held, reserved, settled, spent: () => spent };
 }
 
 test('the vendor gets the master key and never the caller’s; the caller never sees it', async () => {
@@ -571,9 +573,136 @@ test('each way a request ends releases its slot and settles once', async (t) => 
   });
 });
 
+test('usage with a count that is not a number settles at the reservation', async () => {
+  const { gateway, upstream } = rig();
+  const claude = recordingPort(1);
+  const claudeClient = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'u',
+    budget: claude.port,
+  });
+  const codex = recordingPort(1);
+  const codexClient = gateway.inProcess({ vendor: 'openai', subject: 'u', budget: codex.port });
+  const malformed = [
+    () => json({ type: 'message', usage: { input_tokens: 'invalid', output_tokens: null } }),
+    () => json({ type: 'message', usage: { input_tokens: 10 } }),
+    () =>
+      new Response(
+        sse([
+          anthropicStart({ input_tokens: '12', output_tokens: 1 }),
+          ...anthropicEnd({ output_tokens: 5 }),
+        ]),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+    () =>
+      new Response(
+        sse([
+          anthropicStart({ input_tokens: 12, output_tokens: 1 }),
+          ...anthropicEnd({ output_tokens: -5 }),
+        ]),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+  ];
+  for (const script of malformed) {
+    upstream.next(script);
+    await text(await post(claudeClient, body({ stream: false })));
+  }
+  for (const usage of [
+    { input_tokens: 10, output_tokens: 'many' },
+    { input_tokens: 10, input_tokens_details: { cached_tokens: {} }, output_tokens: 3 },
+    { output_tokens: 3 },
+  ]) {
+    upstream.next(
+      () =>
+        new Response(sse([{ type: 'response.completed', response: { id: 'r', usage } }]), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    await text(
+      await post(
+        codexClient,
+        { model: 'codex-test', input: 'go', stream: true, max_output_tokens: 100 },
+        {
+          path: '/responses',
+        },
+      ),
+    );
+  }
+  for (const ledger of [claude, codex]) {
+    assert.deepEqual(ledger.settled, ledger.reserved, 'each settled at what it reserved');
+    assert.ok(ledger.settled.every(([, usd]) => usd > 0));
+  }
+  assert.equal(claude.settled.length, 4);
+  assert.equal(codex.settled.length, 3);
+});
+
+test('revoking resolves only once the requests in flight have settled', async () => {
+  let sent!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    sent = resolve;
+  });
+  let notice!: () => void;
+  const noticed = new Promise<void>((resolve) => {
+    notice = resolve;
+  });
+  // The vendor connection gives up on the abort only when the test says so.
+  const { gateway } = rig({
+    fetch: ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        sent();
+        init?.signal?.addEventListener(
+          'abort',
+          () => void noticed.then(() => reject(new DOMException('aborted', 'AbortError'))),
+          { once: true },
+        );
+      })) as typeof fetch,
+  });
+  const ledger = recordingPort(1);
+  const client = gateway.inProcess({ vendor: 'anthropic', subject: 'run-d', budget: ledger.port });
+  const value = body();
+  const pending = post(client, value);
+  await arrived;
+  let drained = false;
+  const revoked = client.revoke().then(() => {
+    drained = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false, 'the request in flight has not settled yet');
+  assert.equal(ledger.settled.length, 0);
+  notice();
+  await revoked;
+  assert.equal(ledger.settled.length, 1, 'it settled before the revoke resolved');
+  assert.ok(Math.abs(client.spend().spentUsd - worst(value)) < 1e-12, 'billing unknown: reserved');
+  assert.equal((await pending).status, 503);
+  assert.equal(gateway.inFlight, 0);
+});
+
+test('a revoke settles a stream that nobody is reading', async () => {
+  const { gateway, upstream } = rig();
+  const grant = gateway.issue({ vendor: 'anthropic', subject: 't', budget: { limitUsd: 1 } });
+  const found = gateway.authenticate(grant.token);
+  assert.ok(found);
+  let open: ControlledBody | undefined;
+  upstream.next((request) => {
+    open = new ControlledBody(request.signal);
+    open.push(sse([anthropicStart({ input_tokens: 40, output_tokens: 1 })]));
+    return new Response(open.stream, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  // The response is handed back and never read: the client stalled.
+  await gateway.handle(
+    found.grant,
+    'messages',
+    new Headers(),
+    new TextEncoder().encode(JSON.stringify(body())),
+  );
+  await grant.revoke();
+  assert.equal(gateway.inFlight, 0);
+  assert.ok(grant.spend().spentUsd > 0, 'settled at the revoke');
+});
+
 test('a grant has a bounded number of requests in flight', async () => {
   const { gateway, upstream } = rig({
-    limits: { requestOverheadTokens: 0, imageTokens: 1, maxInflightPerGrant: 1 },
+    limits: { requestOverheadTokens: 0, imageBaseTokens: 1, maxInflightPerGrant: 1 },
   });
   const client = gateway.inProcess({ vendor: 'anthropic', subject: 'x', budget: { limitUsd: 10 } });
   let open: ControlledBody | undefined;

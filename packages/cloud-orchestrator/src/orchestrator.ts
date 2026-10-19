@@ -833,12 +833,16 @@ export class Orchestrator {
   private async pump(taskId: TaskId, handle: RunHandle): Promise<void> {
     try {
       for await (const event of handle.events) {
-        if (this.isStopping(taskId)) return;
-        if (event.type === 'progress') {
-          await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
-        } else if (event.type === 'usage') {
+        if (event.type === 'usage') {
           if (!Number.isFinite(event.costUsd) || event.costUsd < 0) continue;
           await this.recordSpend(taskId, event.costUsd);
+          continue;
+        }
+        // The outcome of a stopping task no longer counts, but its stream is read to the end:
+        // the run reports what settled while it stopped.
+        if (this.isStopping(taskId)) continue;
+        if (event.type === 'progress') {
+          await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
           await this.recordRunnerOutcome({ type: 'task_failed', taskId, reason: event.reason });
@@ -923,18 +927,18 @@ export class Orchestrator {
 
   /**
    * Records a runner's spend on the top-level task of its tree, and cancels the
-   * tree when that reaches its cap. Dropped once the reporting task is stopping
-   * or the top-level task has ended.
+   * tree when that reaches its cap. Spend is never dropped: what settles after
+   * a cancel or after the top-level task ended was still paid for.
    */
   private async recordSpend(taskId: TaskId, costUsd: number): Promise<void> {
     const root = this.treeRoot(taskId);
     if (!root) return;
-    const recorded = await this.record(
-      { type: 'task_cost', taskId: root.taskId, fromTaskId: taskId, costUsd },
-      () => {
-        if (this.isStopping(taskId) || this.isDone(root.taskId)) throw new Superseded();
-      },
-    );
+    const recorded = await this.record({
+      type: 'task_cost',
+      taskId: root.taskId,
+      fromTaskId: taskId,
+      costUsd,
+    });
     if (recorded && this.overBudget(root.taskId)) {
       this.track(this.cancelTree(root.taskId, 'system'));
     }
@@ -981,6 +985,11 @@ export class Orchestrator {
   }
 
   private afterApply(event: TaskEvent): void {
+    if (event.type === 'task_cost' && !this.tasks.has(event.taskId)) {
+      // Spend that settled after the end changed the ended record.
+      this.archive.delete(event.taskId);
+      return;
+    }
     if (event.type === 'task_stop_pending' || event.type === 'task_stopped') {
       // An ended task's record changed, so the cached copy is stale.
       this.archive.delete(event.taskId);
@@ -1160,7 +1169,7 @@ export class Orchestrator {
     const events = this.store.readTask(taskId);
     if (events.length === 0) return undefined;
     const record = reduce(events).get(taskId);
-    // Only an ended task is immutable, which is why caching it needs no invalidation.
+    // An ended task changes only by a stop obligation or late spend, which drop it from the cache.
     if (record && isTerminal(record.state)) this.archive.set(taskId, record);
     return record;
   }

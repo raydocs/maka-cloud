@@ -46,7 +46,8 @@ import { Prng } from './prng.js';
  * - quotas hold exactly at the moment a task is created;
  * - nothing is created or started in a tree whose recorded spend reached its
  *   cap, only a top-level task carries a cap, and spend is recorded only on a
- *   top-level task that has not ended, from a task of its tree not stopping;
+ *   top-level task, from a task of its tree (also once either is stopping or
+ *   ended: what settled late was still paid for);
  * - a keyed delegation creates its task once, and never after a cancel by
  *   that key found nothing (in the same process);
  * - a revoked or rotated token commits nothing new after the revoke or rotate;
@@ -70,7 +71,8 @@ import { Prng } from './prng.js';
  * ended, and their executor tokens no longer authenticate.
  * Checked at quiescence, after settled(): one terminal event per task, every
  * request returned, no task owes a stop, every run of every process ended on
- * its own or was cancelled or stopped, and every counter and map is back to zero.
+ * its own or was cancelled or stopped, every spend a run of the live process
+ * reported is recorded, and every counter and map is back to zero.
  */
 
 /**
@@ -226,6 +228,8 @@ class FuzzRun implements RunHandle {
   reported = false;
   /** Cumulative spend reported so far, in cents. */
   private cents = 0;
+  /** The last cumulative spend handed to the orchestrator, in dollars. */
+  reportedUsd = 0;
   private over = false;
   readonly events: AsyncIterable<RunnerEvent>;
 
@@ -295,6 +299,7 @@ class FuzzRun implements RunHandle {
         if (kind === 'progress') resolve({ done: false, value: { type: 'progress', note: 'p' } });
         else if (kind === 'usage') {
           this.cents += 5 + this.world.rng.int(60);
+          this.reportedUsd = this.cents / 100;
           resolve({ done: false, value: { type: 'usage', costUsd: this.cents / 100 } });
           return `usage ${this.cents / 100}`;
         } else if (kind === 'finished') {
@@ -776,12 +781,8 @@ export class FuzzWorld {
     }
     if (event.type === 'task_cost') {
       if (task.parentTaskId !== undefined) this.violation(`${what}: not a top-level task`);
-      if (task.terminals > 0) this.violation(`${what}: the top-level task ended`);
       const from = this.chain(event.fromTaskId);
       if (from.at(-1) !== task) this.violation(`${what}: the reporting task is in another tree`);
-      if (from[0] && (from[0].terminals > 0 || from[0].cancelRequested)) {
-        this.violation(`${what}: the reporting task is ${this.stopState(from[0])}`);
-      }
     }
     this.checkControl(event, task, request, what);
     if (event.type === 'task_cancel_requested' && event.by !== 'system') {
@@ -1059,6 +1060,15 @@ export class FuzzWorld {
     for (const run of this.runs) {
       if (!run.reported && !run.cancelled && !run.stopped) {
         this.violation(`the run of ${run.taskId} from epoch ${run.epoch} was never stopped`);
+      }
+      // A run of a process that died took its unrecorded reports with it.
+      if (run.epoch !== this.epoch || run.reportedUsd === 0) continue;
+      const root = this.chain(run.taskId).at(-1);
+      const recorded = root?.spend.get(run.taskId) ?? 0;
+      if (Math.round(recorded * 100) < Math.round(run.reportedUsd * 100)) {
+        this.violation(
+          `the run of ${run.taskId} reported $${run.reportedUsd}, but $${recorded} is recorded`,
+        );
       }
     }
     for (const lost of this.lostStarts) {

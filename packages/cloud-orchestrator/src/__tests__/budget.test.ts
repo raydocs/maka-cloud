@@ -111,3 +111,64 @@ test('a budget must be a positive number', async (t) => {
     );
   }
 });
+
+/** A run whose cancel reports what settled while it stopped, as a metered runner's does. */
+function settlesOnCancel(run: FakeRun, finalUsd: number): void {
+  const cancel = run.cancel.bind(run);
+  run.cancel = async () => {
+    run.usage(finalUsd);
+    await cancel();
+  };
+}
+
+test('spend a run reports while it is cancelled is recorded', async (t) => {
+  const h = await makeHarness(t, {
+    fake: { onStart: (run: FakeRun) => settlesOnCancel(run, 0.7) },
+  });
+  const conductor = h.session();
+  const task = await h.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'x',
+    budgetUsd: 5,
+  });
+  await eventually(() => h.fake.runs.length === 1, 'the run');
+  h.fake.runFor(task.taskId).usage(0.2);
+  await eventually(() => h.orchestrator.status(conductor, task.taskId).costUsd === 0.2, 'usage');
+  await h.orchestrator.cancel(conductor, task.taskId);
+  await eventually(
+    () => h.orchestrator.status(conductor, task.taskId).costUsd === 0.7,
+    'the spend that settled during the cancel',
+  );
+  assert.equal(h.orchestrator.status(conductor, task.taskId).state, 'cancelled');
+});
+
+test('spend a child reports after its top-level task ended is recorded on the ended task', async (t) => {
+  const h = await makeHarness(t, {
+    fake: { onStart: (run: FakeRun) => settlesOnCancel(run, 0.4) },
+  });
+  const conductor = h.session();
+  const top = await h.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'top',
+    budgetUsd: 5,
+  });
+  await eventually(() => h.fake.runs.length === 1, 'the top run');
+  const child = await h.orchestrator.delegate(h.executorSession(top.taskId), {
+    runner: 'fake',
+    brief: 'child',
+  });
+  await eventually(() => h.fake.runs.length === 2, 'the child run');
+  // Read once ended, so the ended record is cached before the late spend arrives.
+  await h.fake.runFor(top.taskId).complete();
+  await eventually(
+    () => h.orchestrator.status(conductor, top.taskId).state === 'succeeded',
+    'the top task ended',
+  );
+  await h.orchestrator.settled();
+  assert.equal(h.fake.runFor(child.taskId).cancelled, true, 'the end cancelled the child');
+  await eventually(
+    () => h.orchestrator.status(conductor, top.taskId).costUsd === 0.4,
+    'the child spend after the end',
+  );
+  assert.equal(h.orchestrator.status(conductor, top.taskId).state, 'succeeded');
+});

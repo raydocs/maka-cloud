@@ -35,9 +35,12 @@ conductor, supervisor ──in-process fetch──▶ gateway ──master key�
 - 32 random bytes, base64url, prefixed `mkg_`. The gateway keeps only their SHA-256, in memory.
   A request is authenticated by `x-api-key` or `Authorization: Bearer`, looked up by hash.
 - **Revocation.** `revoke()` marks the grant dead and aborts its in-flight requests at once: an
-  open stream ends mid-way. A runner revokes in its cleanup on every exit (end, cancel, failure,
-  throw, start that lost a race with a cancel); the orphan sweep calls `revokeForTask`. Grants are
-  never persisted, so a host restart revokes every token.
+  open stream ends mid-way. It resolves once every request of the grant has settled, so the spend
+  read after it is final. A runner revokes before it reports its end, and in its cleanup on every
+  exit (cancel, failure, throw, start that lost a race with a cancel), and reports the final spend
+  as its last `usage`; the orchestrator records that spend even after a cancel or the end of the
+  tree's top-level task. The orphan sweep calls `revokeForTask`. Grants are never persisted, so a
+  host restart revokes every token.
 - **Concurrency.** A grant has at most 8 requests in flight; more are refused with 429. A leaked
   token cannot exhaust the vendor rate limit for everyone.
 - **Scope.** A token is issued for one vendor. A Claude task's token is refused on the OpenAI route.
@@ -74,11 +77,14 @@ whose cost it cannot bound is refused (400), never sent.
 
 - **Input bound.** The UTF-8 byte length of the request body as tokens (no tokenizer emits more
   tokens than bytes of text), plus a fixed overhead per request (default 4,000 tokens, for the
-  vendor's hidden tool-use prompt), plus a fixed bound per image (default 10,000 tokens: a small,
-  very compressible image can cost more tokens than its bytes). Documents, and any image or file
-  given by URL or file id, cannot be bounded by bytes: an Anthropic request with one is counted with
-  the vendor's free token-count endpoint (plus 10% and the overhead); an OpenAI request with one is
-  refused.
+  vendor's hidden tool-use prompt), plus a bound per inline image from the pixel size its PNG,
+  JPEG, GIF or WebP header declares: 300 tokens plus 3 per 32×32 patch. The vendors bill an image
+  by its pixels and only ever scale it down, and 3 per patch is above every known rate at every
+  detail level (a 4096×4096 image at OpenAI's `original` detail is billed about 19,661 tokens; the
+  bound is 49,452). Images anywhere in the input count, tool outputs included. Documents, and any
+  image or file given by URL or file id or whose size cannot be read, cannot be bounded by bytes:
+  an Anthropic request with one is counted with the vendor's free token-count endpoint (plus 10%
+  and the overhead); an OpenAI request with one is refused.
 - **When the byte bound does not fit.** Agent contexts are large and bytes overstate tokens about
   fourfold. When the byte bound exceeds what is left, an Anthropic request is counted the same way
   and reserved at the counted bound. Only if that does not fit either is it refused.
@@ -95,7 +101,9 @@ whose cost it cannot bound is refused (400), never sent.
   show are refused: fast mode, inference geography, service tiers other than standard, server-side
   conversation state (`previous_response_id`, `conversation`, stored prompts), MCP servers,
   containers, compaction, and every hosted tool (web search, web fetch, code execution, file
-  search). Only the fields each route lists are accepted; an unknown field is refused, so a CLI
+  search, a shell in a vendor container). OpenAI tools the caller runs itself are accepted only in
+  their exact shape (`function`, `custom`, `local_shell`, `apply_patch`, and `shell` with
+  `environment: {"type": "local"}` and nothing else). Only the fields each route lists are accepted; an unknown field is refused, so a CLI
   update that starts sending a new priced field fails loudly instead of overspending.
 
 ## Settling and cutting
@@ -103,10 +111,11 @@ whose cost it cannot bound is refused (400), never sent.
 - The gateway reads the vendor's usage from the response as it passes through, without changing
   the bytes: Anthropic `message_start` (input and cache counts) and `message_delta` (output);
   OpenAI `response.completed`, `response.incomplete` or `response.failed`, or the JSON body.
-- **Settle** at the reported usage. An error status before any output (4xx, 5xx) settles at 0: the
-  vendors do not bill those. A stream that ends without usage settles at the full reservation,
-  since whether it was billed is unknown; after `message_start` it settles at the reported input
-  plus the full output bound.
+- **Settle** at the reported usage, only when its input and output counts are present and every
+  count is a non-negative number. An error status before any output (4xx, 5xx) settles at 0: the
+  vendors do not bill those. A response that ends without complete, valid usage settles at the full
+  reservation, since what was billed is unknown; a stream cut after a valid `message_start`
+  settles at the reported input plus the full output bound.
 - **Cut.** A stream is cut (the upstream request aborted, the client's stream ended with an error
   event) when the grant is revoked, when the gateway closes, and when the reported input already
   makes the request cost more than its reservation. The last case is a bound that turned out
