@@ -91,7 +91,12 @@ export class Orchestrator {
     return this.auth.resolve(token);
   }
 
-  async delegate(session: SessionInfo, input: DelegateInput): Promise<TaskView> {
+  async delegate(
+    session: SessionInfo,
+    input: DelegateInput,
+    signal?: AbortSignal,
+  ): Promise<TaskView> {
+    this.assertSessionActive(session);
     const runner = this.runners.get(input.runner);
     if (!runner) {
       throw new OrchestratorError(
@@ -124,8 +129,9 @@ export class Orchestrator {
       throw new OrchestratorError('invalid_request', errorMessage(error));
     }
     try {
-      // A cancel can finish while the brief is being written, so check again
-      // inside the write chain, where it cannot interleave with the append.
+      // The session can be revoked and a cancel or an end can land while the
+      // brief is being written, so check again inside the write chain, where
+      // nothing can interleave with the append.
       await this.record(
         {
           type: 'task_created',
@@ -136,7 +142,10 @@ export class Orchestrator {
           ...(input.title === undefined ? {} : { title: input.title }),
           mode,
         },
-        parent === undefined ? undefined : () => this.assertParentActive(parent),
+        () => {
+          this.assertSessionActive(session);
+          if (parent !== undefined) this.assertParentActive(parent);
+        },
       );
     } catch (error) {
       if (error instanceof OrchestratorError) await this.handoff.discard(taskId);
@@ -144,7 +153,7 @@ export class Orchestrator {
     }
     // launch records its own failures; a store failure has nowhere left to report.
     void this.launch(taskId, input.runner, paths).catch(() => undefined);
-    if (mode === 'wait') return this.waitView(taskId, input.timeoutMs);
+    if (mode === 'wait') return this.waitView(taskId, input.timeoutMs, signal);
     return this.view(taskId);
   }
 
@@ -152,15 +161,24 @@ export class Orchestrator {
     return toView(this.visible(session, taskId));
   }
 
-  async wait(session: SessionInfo, taskId: TaskId, timeoutMs?: number): Promise<TaskView> {
+  /** An aborted `signal` (the caller's connection dropped) stops the wait; the task is left alone. */
+  async wait(
+    session: SessionInfo,
+    taskId: TaskId,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<TaskView> {
     this.visible(session, taskId);
-    return this.waitView(taskId, timeoutMs);
+    return this.waitView(taskId, timeoutMs, signal);
   }
 
-  /** Cancels the task and every descendant, children first. Terminal tasks keep their state. */
+  /**
+   * Cancels the task and every descendant, children first. Terminal tasks keep
+   * their state, and a task that already ended does not shield its running
+   * descendants.
+   */
   async cancel(session: SessionInfo, taskId: TaskId): Promise<TaskView> {
-    const root = this.visible(session, taskId);
-    if (isTerminal(root.state)) return toView(root);
+    this.visible(session, taskId);
     for (;;) {
       const targets = this.subtree(taskId).filter((task) => !isTerminal(task.state));
       if (targets.length === 0) break;
@@ -215,7 +233,7 @@ export class Orchestrator {
           : { mcp: { url: this.endpoint, token: executor.token } }),
       });
     } catch (error) {
-      await this.record({
+      await this.recordRunnerOutcome({
         type: 'task_failed',
         taskId,
         reason: `runner failed to start: ${errorMessage(error)}`,
@@ -236,14 +254,13 @@ export class Orchestrator {
       for await (const event of handle.events) {
         if (this.isStopping(taskId)) return;
         if (event.type === 'progress') {
-          await this.record({ type: 'task_progress', taskId, note: event.note });
+          await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
         } else if (event.type === 'failed') {
-          await this.record({ type: 'task_failed', taskId, reason: event.reason });
+          await this.recordRunnerOutcome({ type: 'task_failed', taskId, reason: event.reason });
           return;
         } else {
           const result = await this.handoff.readManifest(taskId);
-          if (this.isStopping(taskId)) return;
-          await this.record(
+          await this.recordRunnerOutcome(
             result.ok
               ? { type: 'task_succeeded', taskId, manifest: result.manifest }
               : { type: 'task_failed', taskId, reason: result.reason },
@@ -252,22 +269,18 @@ export class Orchestrator {
         }
       }
     } catch (error) {
-      if (!this.isStopping(taskId)) {
-        await this.record({
-          type: 'task_failed',
-          taskId,
-          reason: `runner error: ${errorMessage(error)}`,
-        });
-      }
-      return;
-    }
-    if (!this.isStopping(taskId)) {
-      await this.record({
+      await this.recordRunnerOutcome({
         type: 'task_failed',
         taskId,
-        reason: 'runner exited without reporting a result',
+        reason: `runner error: ${errorMessage(error)}`,
       });
+      return;
     }
+    await this.recordRunnerOutcome({
+      type: 'task_failed',
+      taskId,
+      reason: 'runner exited without reporting a result',
+    });
   }
 
   private async cancelOne(taskId: TaskId): Promise<void> {
@@ -285,6 +298,21 @@ export class Orchestrator {
       }
     }
     await this.record({ type: 'task_cancelled', taskId });
+  }
+
+  /**
+   * Records what a runner reported. Once a cancel is requested or the task has
+   * ended the report is dropped, checked inside the write chain so a cancel
+   * that commits in between cannot be followed by a result.
+   */
+  private async recordRunnerOutcome(event: TaskEvent & { taskId: TaskId }): Promise<void> {
+    try {
+      await this.record(event, () => {
+        if (this.isStopping(event.taskId)) throw new Superseded();
+      });
+    } catch (error) {
+      if (!(error instanceof Superseded)) throw error;
+    }
   }
 
   /** `guard` runs in the write chain right before the append and aborts it by throwing. */
@@ -317,14 +345,23 @@ export class Orchestrator {
     }
   }
 
-  private async waitView(taskId: TaskId, timeoutMs: number | undefined): Promise<TaskView> {
+  private async waitView(
+    taskId: TaskId,
+    timeoutMs: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<TaskView> {
     const limit = Math.min(Math.max(timeoutMs ?? DEFAULT_WAIT_MS, 0), MAX_WAIT_MS);
-    const finished = await this.untilTerminal(taskId, limit);
+    const finished = await this.untilTerminal(taskId, limit, signal);
     return { ...this.view(taskId), ...(finished ? {} : { waitTimedOut: true }) };
   }
 
-  private untilTerminal(taskId: TaskId, timeoutMs: number): Promise<boolean> {
+  private untilTerminal(
+    taskId: TaskId,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
     if (this.isDone(taskId)) return Promise.resolve(true);
+    if (signal?.aborted) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
       let set = this.waiters.get(taskId);
       if (!set) {
@@ -332,14 +369,17 @@ export class Orchestrator {
         this.waiters.set(taskId, set);
       }
       const waiting = set;
-      const wake = () => {
+      const stop = (finished: boolean) => {
         clearTimeout(timer);
-        resolve(true);
-      };
-      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
         waiting.delete(wake);
-        resolve(false);
-      }, timeoutMs);
+        if (waiting.size === 0 && this.waiters.get(taskId) === waiting) this.waiters.delete(taskId);
+        resolve(finished);
+      };
+      const wake = () => stop(true);
+      const onAbort = () => stop(false);
+      const timer = setTimeout(() => stop(false), timeoutMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
       waiting.add(wake);
     });
   }
@@ -350,9 +390,25 @@ export class Orchestrator {
     return toView(task);
   }
 
+  /**
+   * Throws when the session's token was revoked. The server calls it when a tool
+   * runs, since the token was only checked when the request arrived; `delegate`
+   * calls it again right before it records a task.
+   */
+  assertSessionActive(session: SessionInfo): void {
+    if (!this.auth.isActive(session.sessionId)) {
+      throw new OrchestratorError('unauthorized', 'The session token is no longer valid');
+    }
+  }
+
+  /** No task above the caller may be cancelling or ended: its children would outlive it. */
   private assertParentActive(parent: TaskId): void {
-    if (this.ancestry(parent).some((task) => task.cancelRequestedBy !== undefined)) {
+    const chain = this.ancestry(parent);
+    if (chain.some((task) => task.cancelRequestedBy !== undefined)) {
       throw new OrchestratorError('invalid_request', 'The calling task is being cancelled');
+    }
+    if (chain.some((task) => isTerminal(task.state))) {
+      throw new OrchestratorError('invalid_request', 'The calling task has ended');
     }
   }
 
@@ -399,6 +455,9 @@ export class Orchestrator {
     );
   }
 }
+
+/** Thrown by a write guard to drop an event that no longer applies. */
+class Superseded extends Error {}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

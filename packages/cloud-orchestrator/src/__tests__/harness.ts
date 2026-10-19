@@ -7,7 +7,7 @@ import { FakeRunner, type FakeRunnerOptions } from '../fake-runner.js';
 import { Orchestrator, type OrchestratorOptions } from '../orchestrator.js';
 import { RunnerRegistry } from '../runner.js';
 import { MemoryTaskStore, type TaskStore } from '../store.js';
-import type { TaskId } from '../types.js';
+import type { StoredEvent, TaskEvent, TaskId } from '../types.js';
 
 export interface Harness {
   dir: string;
@@ -66,4 +66,47 @@ export async function eventually(
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/** A store that can hold one kind of append until the test lets it through. */
+export class GatedStore extends MemoryTaskStore {
+  private gate: { type: TaskEvent['type']; open: Promise<void> } | undefined;
+  private waitingAtGate = false;
+
+  /** The next append of `type` blocks until the returned function is called. */
+  holdNext(type: TaskEvent['type']): () => void {
+    let release: () => void = () => {};
+    this.gate = {
+      type,
+      open: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
+    return release;
+  }
+
+  get held(): boolean {
+    return this.waitingAtGate;
+  }
+
+  override async append(event: TaskEvent, at: number): Promise<StoredEvent> {
+    const gate = this.gate;
+    if (gate && gate.type === event.type) {
+      this.gate = undefined;
+      this.waitingAtGate = true;
+      await gate.open;
+      this.waitingAtGate = false;
+    }
+    return super.append(event, at);
+  }
+}
+
+/** Waits registered by `task_wait` and `delegate` in wait mode that are still pending. */
+export function pendingWaits(h: Harness): number {
+  const waiters = (h.orchestrator as unknown as { waiters: Map<TaskId, Set<unknown>> }).waiters;
+  return waiters.size;
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
