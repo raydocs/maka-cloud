@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
+import { VerificationRecordSchema, renderFromRecord } from '../record.js';
+import { ReportSchema } from '../report-schema.js';
 import { MAX_SOURCE_BYTES, runCiteCheck } from '../run.js';
 import { parseCiteCheckLine } from '../summary-line.js';
 import { PAGE_BRIDGE_HTML, PAGE_TUNNEL_TXT, sampleReport } from './fixtures.js';
@@ -109,6 +111,41 @@ describe('cite-check', () => {
       lastLine(outcome.stdout),
       'cite-check v1: claims=3 verified=1 quote_verified=1 failed=1 removed=1 judged=2',
     );
+  });
+
+  test('the exported record lets a renderer make the delivered report again, byte for byte', async () => {
+    // The supervisor does not trust the renderings an agent delivers: it makes them again from the report and this record.
+    const again = async (label: string) => {
+      const record = VerificationRecordSchema.parse(
+        JSON.parse(await readFile(path('out/verification.json'), 'utf8')),
+      );
+      const report = ReportSchema.parse(JSON.parse(await readFile(path('report.json'), 'utf8')));
+      const rendered = renderFromRecord(report, record);
+      assert.equal(rendered.markdown, await readFile(path('out/report.md'), 'utf8'), label);
+      assert.equal(rendered.html, await readFile(path('out/report.html'), 'utf8'), label);
+    };
+    await run();
+    await again('clean');
+    await reportWith((report) => {
+      report.sections[0]?.claims.push({
+        id: 'bad',
+        text: 'The bridge was closed for forty years.',
+        citations: [{ sourceId: 'bridge', quote: 'The bridge was closed for forty years' }],
+      });
+    });
+    await run();
+    await again('a failed claim kept, with its note');
+    await run('--drop-unsupported');
+    await again('a failed claim dropped and listed');
+    await writeFile(
+      path('judgments.json'),
+      JSON.stringify([
+        { claimId: 'c1', entailed: true, reason: 'gives the date' },
+        { claimId: 'c2', entailed: false, reason: 'it is a design figure' },
+      ]),
+    );
+    await run('--judgments', path('judgments.json'), '--drop-unsupported');
+    await again('judged claims, one of them unsupported and dropped');
   });
 
   test('a source with no fetched text makes its claims fail', async () => {

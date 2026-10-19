@@ -2,7 +2,7 @@ import type { SignalManifest } from '../events.js';
 import { clip } from '../text.js';
 import { raceAbort } from './abort.js';
 import { type Prepared, prepareCoding, prepareResearch } from './checks.js';
-import { refFor, type VerificationKind } from './kind.js';
+import { refsFor, type VerificationKind } from './kind.js';
 import { buildRequest, chooseVerifier, collectVerdicts, costUsd, upperBoundUsd } from './model.js';
 import type { Mismatch, Outcome, VerificationOptions } from './ports.js';
 
@@ -54,8 +54,11 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
   const { task, manifest, options, signal } = input;
 
   const read: Parameters<typeof prepareCoding>[0]['read'] = async (name) => {
-    const ref = refFor(manifest, name);
+    const refs = refsFor(manifest, name);
+    const ref = refs[0];
     if (ref === undefined) return { ok: false, reason: 'not_listed' };
+    // Two artifacts of one name: which one the human is shown cannot be told.
+    if (refs.length > 1) return { ok: false, reason: 'ambiguous' };
     if (signal.aborted) return { ok: false, reason: 'unavailable' };
     try {
       return await raceAbort(options.evidence.readArtifact(task, ref, signal), signal);
@@ -83,6 +86,16 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
   // Cheap and certain first: this runs whatever is left of the budget.
   if (prepared.failures.length > 0) {
     return { state: 'failed', mismatches: prepared.failures.slice(0, MAX_MISMATCHES) };
+  }
+  if (prepared.unverified.length > 0) {
+    return cannot(
+      'unverified',
+      clip(
+        `checks reported by agent (unverified): ${prepared.unverified.slice(0, 3).join('; ')}`,
+        300,
+      ),
+      false,
+    );
   }
   if (prepared.unavailable.length > 0) {
     return cannot(
