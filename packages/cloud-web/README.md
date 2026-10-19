@@ -107,5 +107,7 @@ the server and the runner sent, and nothing it infers.
   stored per owner; the app does not call them.
 - Conversations created before the owner column exist stay hidden until
   `cloud-server conversation adopt` runs.
-- Root CI does not install or test this package (its dependency versions differ
-  from the root workspaces), so the commands above are the check.
+- Root `ci.yml` does not install or test this package (its dependency versions
+  differ from the root workspaces). `.github/workflows/fork-cloud-web.yml`
+  builds the server, then runs this package's build, vitest and Playwright
+  suites on every pull request and on main.
