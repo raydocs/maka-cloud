@@ -8,6 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "allowJs": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     "types": ["vite/client", "node"],
     "paths": {
@@ -17,5 +18,5 @@
       "@astryxdesign/core": ["./node_modules/@astryxdesign/core"]
     }
   },
-  "include": ["src", "tests", "mock", "*.ts"]
+  "include": ["src", "tests", "*.ts"]
 }

@@ -1,12 +1,8 @@
 import { expect, test } from '@playwright/test';
-
-test.beforeEach(async ({ request }) => {
-  await request.post('/__mock/reset');
-});
+import { control, signIn } from './support';
 
 async function stubPush(page: import('@playwright/test').Page) {
-  // Stub only the browser push transport. Registration, UI and HTTP use real code.
-  // No push provider is contacted and no real key is used.
+  // Stub only the browser push transport. No push service is contacted.
   await page.addInitScript(() => {
     Object.defineProperty(Notification, 'requestPermission', { value: async () => 'granted' });
     Object.defineProperty(PushManager.prototype, 'getSubscription', { value: async () => null });
@@ -23,27 +19,40 @@ async function stubPush(page: import('@playwright/test').Page) {
   });
 }
 
-test('registers push, then service worker handles a completion with no page open', async ({
+// Web Push is T4 PR E (#44), which is not on main: the real server answers 404 for its
+// routes, so the app must say so and never claim notifications are on.
+test('a server without push says so and never claims notifications are enabled', async ({
   page,
-  context,
   request,
 }) => {
   await stubPush(page);
-  await page.goto('/');
+  await signIn(page, request);
+  await page.getByLabel('What would you like to get done?').fill('Hello');
+  await page.getByRole('button', { name: 'Start' }).click();
   await page.getByRole('button', { name: 'Enable notifications' }).click();
-  await expect(page.getByText('Background notifications enabled')).toBeVisible();
-  const state = await (await request.get('/__mock/state')).json();
-  expect(state.subscriptions).toEqual([
-    {
-      endpoint: 'https://push.example.invalid/local-test',
-      expirationTime: null,
-      keys: { auth: 'fake', p256dh: 'fake' },
-    },
-  ]);
-  const worker = context.serviceWorkers()[0];
-  expect(worker.url()).toContain('/sw.js');
+  await expect(page.getByRole('alert')).toContainText('No change was made');
+  await expect(page.getByText('Background notifications enabled')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Enable notifications' })).toHaveCount(0);
+  await expect(
+    page.getByText('Background notifications are unavailable on this server.'),
+  ).toBeVisible();
+  void control;
+});
+
+test('the service worker shows one generic notification and ignores whatever the push carries', async ({
+  page,
+  context,
+}) => {
+  await page.goto('/');
+  const worker = await page.evaluate(async () => {
+    await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    return true;
+  });
+  expect(worker).toBe(true);
+  const registered = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
   await page.close();
-  const notification = await worker.evaluate(async () => {
+  const notification = await registered.evaluate(async () => {
     const scope = self as unknown as {
       registration: {
         showNotification: (title: string, options: NotificationOptions) => Promise<void>;
@@ -54,8 +63,7 @@ test('registers push, then service worker handles a completion with no page open
     scope.registration.showNotification = async (title, options) => {
       shown = { title, options };
     };
-    // Synthetic delivery at the real worker boundary, not a foreground callback.
-    // Deliberately hostile payload: the worker must ignore content and URLs.
+    // Synthetic delivery at the real worker boundary. Deliberately hostile payload.
     const event = new Event('push');
     const promises: Promise<unknown>[] = [];
     Object.assign(event, {
@@ -71,19 +79,3 @@ test('registers push, then service worker handles a completion with no page open
     options: { body: 'Open Maka to review the result.', data: { path: '/' } },
   });
 });
-
-for (const status of [404, 405, 500]) {
-  test(`push registration ${status} never claims enabled`, async ({ page, request }) => {
-    await stubPush(page);
-    await request.post('/__mock/overrides', { data: { 'POST /v1/push/subscriptions': status } });
-    await page.goto('/');
-    await page.getByRole('button', { name: 'Enable notifications' }).click();
-    await expect(page.getByRole('alert')).toBeVisible();
-    await expect(page.getByText('Background notifications enabled')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Enable notifications' })).toHaveCount(
-      status === 500 ? 1 : 0,
-    );
-    const state = await (await request.get('/__mock/state')).json();
-    expect(state.subscriptions).toEqual([]);
-  });
-}

@@ -522,3 +522,6 @@ textarea {
     transition-duration: 0s !important;
   }
 }
+.held-action code {
+  overflow-wrap: anywhere;
+}

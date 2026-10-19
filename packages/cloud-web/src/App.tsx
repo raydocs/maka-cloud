@@ -2,32 +2,57 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
 import { ChoicePanel } from '@maka/ui';
 import { ApiError, CloudClient, Unsupported } from './client';
-import type { Artifact, Conversation, OutboxQuestion, TaskView } from './contract';
+import {
+  type ArtifactContent,
+  type ArtifactListing,
+  type Conversation,
+  type Question,
+  TERMINAL,
+  type TaskView,
+} from './contract';
 import { displayText, dollars, publicLink } from './presentation';
 import { enablePush } from './push';
-import { applyEvent, emptyState, type ConversationState } from './state';
+import { applyEvent, type ConversationState, emptyState, mergeViews, totalCost } from './state';
+
+const ERROR_TEXT: Record<string, string> = {
+  pause_unsupported: 'This task cannot be paused.',
+  invalid_state: 'The task is not in a state where that can be done.',
+  not_open: 'This question is no longer open.',
+  closed: 'This question is no longer open.',
+  conflict: 'A different answer was already recorded for this question.',
+  unknown_option: 'That answer is not one of the options.',
+  text_too_long: 'The additional context is too long.',
+  artifact_too_large: 'This result is too large to show here.',
+};
 
 function errorText(error: unknown): string {
   if (error instanceof Unsupported)
     return 'This action is unavailable on this server. No change was made.';
-  if (error instanceof ApiError)
-    return error.status === 401
-      ? 'Your invite is no longer valid. Please reconnect.'
-      : `Could not complete the request (${error.status}). Try again.`;
+  if (error instanceof ApiError) {
+    if (error.status === 401) return 'Your invite is no longer valid. Please reconnect.';
+    if (error.status === 429) return 'Too many requests. Try again in a moment.';
+    if (error.status === 404) return 'That is no longer available.';
+    const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
+    return known ?? `Could not complete the request (${error.status}). Try again.`;
+  }
   return 'Could not complete the request. Check your connection and try again.';
 }
+
+const REASON_HEADING = {
+  taste: 'Needs your decision',
+  budget_overrun: 'Needs your decision on the budget',
+  irreversible: 'Needs your approval',
+} as const;
 
 export function QuestionCard({
   question,
   answered,
   disabled,
-  available,
   onAnswer,
 }: {
-  question: OutboxQuestion;
+  question: Question;
   answered?: string;
   disabled: boolean;
-  available: boolean;
   onAnswer: (option: string, text?: string) => void;
 }) {
   const options = [...question.options].sort(
@@ -39,15 +64,22 @@ export function QuestionCard({
     <section className="question" aria-label="Your decision">
       <div className="section-heading">
         <span className={`status-mark ${answered ? 'succeeded' : 'attention'}`} />
-        {answered ? 'Decision recorded' : 'Needs your decision'}
+        {answered ? 'Decision recorded' : (REASON_HEADING[question.reason] ?? REASON_HEADING.taste)}
       </div>
       <h3>{displayText(question.question)}</h3>
+      {question.note && <p className="muted">{displayText(question.note)}</p>}
+      {question.action && !answered && (
+        <p className="muted held-action">
+          Held until you answer: {displayText(question.action.tool)}{' '}
+          <code>{displayText(JSON.stringify(question.action.args) ?? '')}</code>
+        </p>
+      )}
       {answered ? (
         <p className="acknowledged">
           Answer recorded:{' '}
           {displayText(question.options.find((o) => o.id === answered)?.label ?? 'Selected option')}
         </p>
-      ) : available ? (
+      ) : (
         <>
           <ChoicePanel
             label="Choose an answer"
@@ -81,48 +113,46 @@ export function QuestionCard({
             onClick={() => onAnswer(selected, note || undefined)}
           />
         </>
-      ) : (
-        <p className="muted">Answers are not supported by this server yet.</p>
       )}
     </section>
   );
 }
 
+function taskLabel(task: TaskView): string {
+  if (task.cancelRequested && !TERMINAL.has(task.state)) return 'Cancelling…';
+  if (task.state === 'running' && task.pauseRequested) return 'Pausing…';
+  return {
+    queued: 'Queued',
+    running: 'In progress',
+    paused: 'Paused',
+    succeeded: 'Finished',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+  }[task.state];
+}
+
 function TaskBranch({
   task,
   tasks,
-  state,
-  client,
-  conversationId,
+  noPause,
   busy,
   act,
+  control,
   ancestors = [],
 }: {
   task: TaskView;
   tasks: TaskView[];
-  state: ConversationState;
-  client: CloudClient;
-  conversationId: string;
+  noPause: ReadonlySet<string>;
   busy: boolean;
   act: (key: string, work: () => Promise<unknown>) => Promise<void>;
+  control: (task: string, action: 'cancel' | 'pause' | 'resume') => Promise<void>;
   ancestors?: string[];
 }) {
   // A bad parent reference cannot make rendering loop forever.
   if (ancestors.includes(task.taskId)) return null;
-  const running = task.state === 'running';
-  const paused = state.paused[task.taskId];
-  const label =
-    paused && running
-      ? 'Paused'
-      : task.cancelRequested && running
-        ? 'Cancelling…'
-        : {
-            queued: 'Queued',
-            running: 'In progress',
-            succeeded: 'Finished',
-            failed: 'Failed',
-            cancelled: 'Cancelled',
-          }[task.state];
+  const children = tasks.filter((child) => child.parentTaskId === task.taskId);
+  const live = !TERMINAL.has(task.state) && !task.cancelRequested;
+  const stopping = task.stopPending || task.treeStopPending;
   return (
     <li>
       <article className="task" aria-label={displayText(task.title ?? 'Task')}>
@@ -131,9 +161,20 @@ function TaskBranch({
           <h3>{displayText(task.title ?? 'Task')}</h3>
         </div>
         <div className="task-meta">
-          <span>{label}</span>
-          <span>Cost so far: {dollars(state.costs[task.taskId])}</span>
+          <span>{taskLabel(task)}</span>
+          {task.parentTaskId === undefined && (
+            <span>
+              Cost so far: {dollars(task.costUsd)}
+              {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+            </span>
+          )}
         </div>
+        {task.budgetExceeded && (
+          <p className="failure">The budget was reached, so the work was stopped.</p>
+        )}
+        {stopping && (
+          <p className="muted">Still stopping. The cost may change until it has stopped.</p>
+        )}
         {task.progress.length > 0 && (
           <p className="current-step">
             <span>Current step</span>
@@ -142,51 +183,144 @@ function TaskBranch({
         )}
         {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
         {task.manifest && <p>{displayText(task.manifest.summary)}</p>}
-        {running && !task.cancelRequested && (
+        {live && (
           <div className="task-actions">
-            {client.capabilities.taskPause !== false && (
+            {task.state === 'running' && !task.pauseRequested && !noPause.has(task.taskId) && (
               <Button
-                label={paused ? 'Resume task' : 'Pause task'}
+                label="Pause task"
                 variant="secondary"
                 isDisabled={busy}
                 onClick={() =>
-                  void act(`pause-${task.taskId}`, () =>
-                    client.pause(conversationId, task.taskId, !paused),
-                  )
+                  void act(`pause-${task.taskId}`, () => control(task.taskId, 'pause'))
                 }
               />
             )}
-            {client.capabilities.taskCancel !== false && (
+            {task.state === 'paused' && (
               <Button
-                label="Cancel task"
+                label="Resume task"
                 variant="secondary"
                 isDisabled={busy}
                 onClick={() =>
-                  void act(`cancel-${task.taskId}`, () =>
-                    client.cancel(conversationId, task.taskId),
-                  )
+                  void act(`resume-${task.taskId}`, () => control(task.taskId, 'resume'))
                 }
               />
             )}
+            <Button
+              label="Cancel task"
+              variant="secondary"
+              isDisabled={busy}
+              onClick={() =>
+                void act(`cancel-${task.taskId}`, () => control(task.taskId, 'cancel'))
+              }
+            />
           </div>
         )}
       </article>
-      {tasks.some((child) => child.parentTaskId === task.taskId) && (
+      {children.length > 0 && (
         <ul className="task-children">
-          {tasks
-            .filter((child) => child.parentTaskId === task.taskId)
-            .map((child) => (
-              <TaskBranch
-                key={child.taskId}
-                {...{ task: child, tasks, state, client, conversationId, busy, act }}
-                ancestors={[...ancestors, task.taskId]}
-              />
-            ))}
+          {children.map((child) => (
+            <TaskBranch
+              key={child.taskId}
+              {...{ task: child, tasks, noPause, busy, act, control }}
+              ancestors={[...ancestors, task.taskId]}
+            />
+          ))}
         </ul>
       )}
     </li>
   );
 }
+
+/** Where a result link points, said in the user's words; nothing here claims the result was checked. */
+function artifactKind(listing: ArtifactListing, url: string | undefined): string {
+  if (url && /\/pull\/\d+/u.test(url)) return 'Pull request';
+  if (/\.(diff|patch)$/iu.test(listing.name)) return 'Changes';
+  if (listing.kind === 'link') return 'Link';
+  return 'Result';
+}
+
+interface TaskArtifacts {
+  listings: ArtifactListing[];
+  failed?: boolean;
+}
+
+function ArtifactList({
+  client,
+  taskId,
+  title,
+  entry,
+  busy,
+  act,
+}: {
+  client: CloudClient;
+  taskId: string;
+  title: string;
+  entry: TaskArtifacts;
+  busy: boolean;
+  act: (key: string, work: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [content, setContent] = useState<Record<number, ArtifactContent>>({});
+  return (
+    <>
+      {entry.listings.map((listing) => {
+        const loaded = content[listing.index];
+        const link = publicLink(loaded?.kind === 'link' ? loaded.url : listing.url);
+        const kind = artifactKind(listing, link);
+        return (
+          <article className="artifact" key={`${taskId}-${listing.index}`}>
+            <div className="artifact-heading">
+              <span className="file-symbol" aria-hidden="true">
+                ▤
+              </span>
+              <h3>{displayText(listing.name)}</h3>
+            </div>
+            <span className="artifact-kind">
+              {kind} · {displayText(title)}
+            </span>
+            {link && (
+              <a href={link} target="_blank" rel="noreferrer noopener">
+                {kind === 'Pull request' ? 'Open pull request' : 'Open link'} ↗
+              </a>
+            )}
+            {listing.kind === 'file' && !loaded && (
+              <Button
+                label={`Review ${displayText(listing.name)}`}
+                variant="secondary"
+                isDisabled={busy}
+                onClick={() =>
+                  void act('artifact', async () => {
+                    const result = await client.readArtifact(taskId, listing.index);
+                    setContent((previous) => ({ ...previous, [listing.index]: result }));
+                  })
+                }
+              />
+            )}
+            {loaded?.kind === 'text' && (
+              <pre className={kind === 'Changes' ? 'diff-content' : 'report-content'}>
+                {displayText(loaded.text)}
+              </pre>
+            )}
+            {listing.kind === 'link' && !link && (
+              <p className="muted">This link cannot be shown safely.</p>
+            )}
+          </article>
+        );
+      })}
+      {entry.failed && (
+        <p className="muted">The results of “{displayText(title)}” could not be listed.</p>
+      )}
+    </>
+  );
+}
+
+const REFRESH_AFTER = new Set([
+  'task_succeeded',
+  'task_failed',
+  'task_cancelled',
+  'task_cancel_requested',
+  'task_stop_pending',
+  'task_stopped',
+]);
 
 export function ConversationView({
   client,
@@ -204,38 +338,73 @@ export function ConversationView({
   const pending = useRef(false);
   const [draft, setDraft] = useState('');
   const messageId = useRef<string | null>(null);
-  const [artifacts, setArtifacts] = useState<Record<string, Artifact>>({});
+  const [artifacts, setArtifacts] = useState<Record<string, TaskArtifacts>>({});
+  const [noPause, setNoPause] = useState<ReadonlySet<string>>(new Set());
   const [notifications, setNotifications] = useState(false);
   const [notificationHint, setNotificationHint] = useState('');
   useEffect(() => {
     const controller = new AbortController();
-    async function load() {
-      try {
-        const tasks = await client.listTasks(conversation.conversationId);
-        if (controller.signal.aborted) return;
-        setState({
-          ...emptyState(),
-          tasks: Object.fromEntries(tasks.map((task) => [task.taskId, task])),
-        });
-        await client.subscribe(
-          conversation.conversationId,
-          (event) => {
-            if (event.data.conversationId !== conversation.conversationId) return;
-            setState((previous) => applyEvent(previous, event));
-          },
-          setStatus,
-          controller.signal,
-        );
-      } catch (e) {
+    let refresh: ReturnType<typeof setTimeout> | undefined;
+    // The stream replays the conversation from the start; the task list adds
+    // what only the server works out (cost, budget, stops still owed).
+    const reconcile = () => {
+      clearTimeout(refresh);
+      refresh = setTimeout(() => {
+        client
+          .listTasks(conversation.conversationId)
+          .then((views) => {
+            if (!controller.signal.aborted) setState((previous) => mergeViews(previous, views));
+          })
+          .catch(() => {});
+      }, 250);
+    };
+    client
+      .subscribe(
+        conversation.conversationId,
+        (event) => {
+          if (event.data.conversationId !== conversation.conversationId) return;
+          setState((previous) => applyEvent(previous, event));
+          if (event.kind === 'task.event' && REFRESH_AFTER.has(event.data.event.type)) reconcile();
+        },
+        setStatus,
+        controller.signal,
+      )
+      .catch(() => {
         if (!controller.signal.aborted) {
-          setError(errorText(e));
+          setError(errorText(undefined));
           setStatus('Disconnected');
         }
-      }
-    }
-    void load();
-    return () => controller.abort();
+      });
+    return () => {
+      controller.abort();
+      clearTimeout(refresh);
+    };
   }, [client, conversation.conversationId]);
+
+  // A finished task with results: ask the server what they are, once.
+  const listed = useRef(new Set<string>());
+  useEffect(() => {
+    for (const task of Object.values(state.tasks)) {
+      if (
+        task.state !== 'succeeded' ||
+        !task.manifest?.artifacts?.length ||
+        listed.current.has(task.taskId)
+      )
+        continue;
+      listed.current.add(task.taskId);
+      client
+        .listArtifacts(task.taskId)
+        .then(({ artifacts: listings }) =>
+          setArtifacts((previous) => ({ ...previous, [task.taskId]: { listings } })),
+        )
+        .catch(() => {
+          setArtifacts((previous) => ({
+            ...previous,
+            [task.taskId]: { listings: [], failed: true },
+          }));
+        });
+    }
+  }, [client, state.tasks]);
 
   async function act(key: string, work: () => Promise<unknown>) {
     if (pending.current) return;
@@ -252,16 +421,21 @@ export function ConversationView({
     }
   }
 
+  async function control(taskId: string, action: 'cancel' | 'pause' | 'resume') {
+    try {
+      await client.control(taskId, action);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'pause_unsupported')
+        setNoPause((previous) => new Set(previous).add(taskId));
+      throw e;
+    }
+  }
+
   const tasks = Object.values(state.tasks);
-  const refs = [...new Set(tasks.flatMap((task) => task.manifest?.artifacts ?? []))];
-  const running = tasks.filter(
-    (task) => task.state === 'running' && !state.paused[task.taskId],
-  ).length;
-  const costValues = tasks.map((task) => state.costs[task.taskId]);
-  const total =
-    costValues.length && costValues.every((n) => n !== undefined)
-      ? costValues.reduce((sum, n) => sum + n, 0)
-      : undefined;
+  const running = tasks.filter((task) => task.state === 'running').length;
+  const total = totalCost(tasks);
+  const withResults = tasks.filter((task) => artifacts[task.taskId]);
+  const questions = Object.values(state.questions);
 
   return (
     <div className="app-shell">
@@ -300,21 +474,20 @@ export function ConversationView({
               </article>
             ))}
           </div>
-          {Object.values(state.questions).map((question) => (
+          {questions.map((question) => (
             <QuestionCard
               key={question.questionId}
               question={question}
               answered={state.answers[question.questionId]}
-              available={client.capabilities.answers !== false}
               disabled={Boolean(busy)}
               onAnswer={(optionId, text) =>
                 void act('answer', async () => {
-                  const result = await client.answer(conversation.conversationId, {
+                  // 200 means the server recorded it (a repeat of the same answer is a duplicate).
+                  await client.answer(conversation.conversationId, {
                     questionId: question.questionId,
                     optionId,
                     ...(text ? { text } : {}),
                   });
-                  if (!result.accepted) throw new Error('Answer was not accepted');
                   setState((previous) => ({
                     ...previous,
                     answers: { ...previous.answers, [question.questionId]: optionId },
@@ -376,7 +549,10 @@ export function ConversationView({
             </div>
             <div className="spend">
               <span>Total cost so far</span>
-              <strong>{dollars(total)}</strong>
+              <strong>
+                {dollars(total.usd)}
+                {total.usd !== undefined && !total.complete && ' (not all reported)'}
+              </strong>
             </div>
           </section>
           <section aria-label="Task tree">
@@ -388,8 +564,8 @@ export function ConversationView({
                   .map((task) => (
                     <TaskBranch
                       key={task.taskId}
-                      conversationId={conversation.conversationId}
-                      {...{ task, tasks, state, client, busy: Boolean(busy), act }}
+                      {...{ task, tasks, noPause, act, control }}
+                      busy={Boolean(busy)}
                     />
                   ))}
               </ul>
@@ -399,65 +575,27 @@ export function ConversationView({
           </section>
           <section className="artifacts" aria-label="Artifacts">
             <h2 className="panel-heading">Ready to review</h2>
-            {!refs.length && (
+            {!withResults.some((task) => artifacts[task.taskId]?.listings.length) && (
               <p className="muted">Reports, changes, and pull requests will collect here.</p>
             )}
-            {refs.map((ref, index) => {
-              const artifact = artifacts[ref];
-              const link = publicLink(artifact?.url ?? ref);
-              return (
-                <article className="artifact" key={ref}>
-                  <div className="artifact-heading">
-                    <span className="file-symbol" aria-hidden="true">
-                      ▤
-                    </span>
-                    <h3>{artifact ? displayText(artifact.title) : `Result ${index + 1}`}</h3>
-                  </div>
-                  {artifact && (
-                    <span className="artifact-kind">
-                      {artifact.kind === 'pr'
-                        ? 'Pull request'
-                        : artifact.kind === 'diff'
-                          ? 'Changes'
-                          : 'Report'}
-                    </span>
-                  )}
-                  {link && (
-                    <a href={link} target="_blank" rel="noreferrer noopener">
-                      {artifact?.kind === 'pr' ? 'Open pull request' : 'Open result'} ↗
-                    </a>
-                  )}
-                  {!artifact && client.capabilities.artifacts !== false && (
-                    <Button
-                      label={`Review result ${index + 1}`}
-                      variant="secondary"
-                      isDisabled={Boolean(busy)}
-                      onClick={() =>
-                        void act('artifact', async () => {
-                          const result = await client.artifact(conversation.conversationId, ref);
-                          setArtifacts((previous) => ({ ...previous, [ref]: result }));
-                        })
-                      }
-                    />
-                  )}
-                  {artifact?.content && (
-                    <pre className={artifact.kind === 'diff' ? 'diff-content' : 'report-content'}>
-                      {displayText(artifact.content)}
-                    </pre>
-                  )}
-                  {!artifact && !link && client.capabilities.artifacts === false && (
-                    <p className="muted">Preview is unavailable on this server.</p>
-                  )}
-                </article>
-              );
-            })}
+            {withResults.map((task) => (
+              <ArtifactList
+                key={task.taskId}
+                client={client}
+                taskId={task.taskId}
+                title={task.title ?? 'Task'}
+                entry={artifacts[task.taskId] as TaskArtifacts}
+                busy={Boolean(busy)}
+                act={act}
+              />
+            ))}
           </section>
           <section className="notifications">
             <h2>Step away. Stay in the loop.</h2>
             <p className="muted">
               Get a notification when background work finishes, even after you close this page.
             </p>
-            {client.capabilities.push !== false && !notifications && (
+            {!client.unsupported.has('push') && !notifications && (
               <Button
                 label="Enable notifications"
                 variant="secondary"
@@ -482,7 +620,7 @@ export function ConversationView({
               />
             )}
             {notifications && <p role="status">Background notifications enabled</p>}
-            {client.capabilities.push === false && (
+            {client.unsupported.has('push') && (
               <p className="muted">Background notifications are unavailable on this server.</p>
             )}
             {notificationHint && <p role="status">{notificationHint}</p>}
@@ -491,6 +629,73 @@ export function ConversationView({
       </main>
       <footer className="page-footer">A little less to manage. A little more done.</footer>
     </div>
+  );
+}
+
+/** The first message of a new conversation: creates the conversation, then posts into it. */
+function StartForm({
+  client,
+  onStarted,
+}: {
+  client: CloudClient;
+  onStarted: (conversation: Conversation) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  // A retry after a failed post reuses the conversation and the message id.
+  const attempt = useRef<{ conversationId: string; clientMessageId: string } | null>(null);
+  return (
+    <main className="welcome">
+      <h1>Make room for your next idea.</h1>
+      <p>Tell us what you’d like done, in a sentence. We’ll take it from there.</p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!draft.trim() || busy) return;
+          setBusy(true);
+          setError('');
+          void (async () => {
+            try {
+              attempt.current ??= {
+                conversationId: (await client.createConversation()).conversationId,
+                clientMessageId: crypto.randomUUID(),
+              };
+              const { conversationId, clientMessageId } = attempt.current;
+              await client.postMessage(conversationId, draft.trim(), clientMessageId);
+              attempt.current = null;
+              onStarted({ conversationId, title: null, createdAt: Date.now() });
+            } catch (failure) {
+              setError(errorText(failure));
+              setBusy(false);
+            }
+          })();
+        }}
+      >
+        <label htmlFor="first-message">What would you like to get done?</label>
+        <textarea
+          id="first-message"
+          rows={3}
+          maxLength={16000}
+          value={draft}
+          onChange={(e) => {
+            setDraft(displayText(e.target.value));
+            if (attempt.current) attempt.current.clientMessageId = crypto.randomUUID();
+          }}
+        />
+        <Button
+          label={busy ? 'Starting…' : 'Start'}
+          type="submit"
+          variant="primary"
+          isDisabled={busy || !draft.trim()}
+        />
+      </form>
+      {error && (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+    </main>
   );
 }
 
@@ -507,8 +712,16 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     setBusy(true);
     setError('');
     try {
-      const client = new CloudClient(token);
-      const [result] = await Promise.all([client.listConversations(), client.discover()]);
+      const client = new CloudClient(token, {
+        onRevoked: () => {
+          // The invite is gone: leave the workspace and keep nothing of it.
+          setSession(null);
+          setInvite('');
+          setChosen('');
+          setError('Your invite is no longer valid. Please reconnect.');
+        },
+      });
+      const result = await client.listConversations();
       setSession({ client, conversations: result.conversations });
       setChosen(result.conversations.at(-1)?.conversationId ?? '');
     } catch (e) {
@@ -545,20 +758,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           label="New conversation"
           isDisabled={busy}
           variant="secondary"
-          onClick={async () => {
-            setBusy(true);
-            setError('');
-            try {
-              const created = await session.client.createConversation();
-              const conversation = { ...created, title: null, createdAt: Date.now() };
-              setSession({ ...session, conversations: [...session.conversations, conversation] });
-              setChosen(created.conversationId);
-            } catch (e) {
-              setError(errorText(e));
-            } finally {
-              setBusy(false);
-            }
-          }}
+          onClick={() => setChosen('')}
         />
       </nav>
       {error && (
@@ -577,10 +777,14 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           }}
         />
       ) : (
-        <main className="welcome">
-          <h1>Make room for your next idea.</h1>
-          <p>Create a conversation to get started.</p>
-        </main>
+        <StartForm
+          key={session.conversations.length}
+          client={session.client}
+          onStarted={(conversation) => {
+            setSession({ ...session, conversations: [...session.conversations, conversation] });
+            setChosen(conversation.conversationId);
+          }}
+        />
       )}
     </>
   ) : (
