@@ -32,6 +32,11 @@ export interface MakaHostOptions {
   toolsFor(kind: SessionKind): MakaTool[];
   /** Every physical model call, as soon as it completes: the conductor meters spend from it. */
   onModelCall(makaSessionId: string, attempt: ModelCallAttempt): void;
+  /**
+   * Called before every HTTP request to the model provider, retries included.
+   * Throwing refuses the request: nothing is sent and nothing is charged.
+   */
+  beforeModelRequest(makaSessionId: string): void;
   now?: () => number;
 }
 
@@ -135,7 +140,16 @@ export class MakaHost {
       providerStateIdentity: this.identity,
       apiKey: access.apiKey,
       modelId: MODEL_ID,
-      modelFactory: (modelInput) => getAIModel(modelInput),
+      modelFactory: (modelInput) => {
+        const send = modelInput.fetch ?? globalThis.fetch;
+        return getAIModel({
+          ...modelInput,
+          fetch: (input, init) => {
+            this.options.beforeModelRequest(ctx.sessionId);
+            return send(input, init);
+          },
+        });
+      },
       tools: this.options.toolsFor(session.kind),
       providerOptions,
       supportsVision: false,

@@ -30,11 +30,12 @@ import { Prng } from './prng.js';
  * a run's event stream (progress, finished, failed, clean end, throw) and its
  * close, brief writes, manifest reads, and wait timers through a fake clock.
  * Between gates the PRNG issues requests the way the MCP endpoint makes them:
- * delegate (async and wait, nested through executor tokens), cancel, wait and
- * status on any task, dropped connections, revoke, rotate, new conductors and
- * restarts over the same store. The public API's operator (it acts for a
- * conversation without a session token) pauses, resumes and cancels, and its
- * credential can be revoked.
+ * delegate (async and wait, nested through executor tokens, with or without a
+ * budget and an idempotency key), cancel by id or key, wait and status on any
+ * task, dropped connections, revoke, rotate, new conductors and restarts over
+ * the same store. Runs report cumulative spend as well as progress. The public
+ * API's operator (it acts for a conversation without a session token) pauses,
+ * resumes and cancels, and its credential can be revoked.
  *
  * Checked as each append is decided (right after its guard):
  * - nothing is created or started under an ancestor that ended or is being
@@ -42,6 +43,11 @@ import { Prng } from './prng.js';
  * - at most one terminal event per task, and a task whose cancel was requested
  *   ends cancelled;
  * - quotas hold exactly at the moment a task is created;
+ * - nothing is created or started in a tree whose recorded spend reached its
+ *   cap, only a top-level task carries a cap, and spend is recorded only on a
+ *   top-level task that has not ended, from a task of its tree not stopping;
+ * - a keyed delegation creates its task once, and never after a cancel by
+ *   that key found nothing (in the same process);
  * - a revoked or rotated token commits nothing new after the revoke or rotate;
  *   a revoked operator credential commits nothing either;
  * - a pause is requested once, only for a started task nothing is stopping, and
@@ -82,6 +88,10 @@ const MAX_DEPTH = 2;
 const MAX_RESTARTS = 2;
 const MAX_CONDUCTORS = 4;
 const WAIT_TIMEOUTS = [0, 5, 100, 1_000, 30_000, undefined] as const;
+/** Caps a top-level delegation may ask for; runs report spend in cents. */
+const BUDGETS = [undefined, undefined, 0.5, 1, 2] as const;
+/** Few keys, so repeats and cancels by key meet the same delegation. */
+const KEYS = ['k1', 'k2', 'k3'] as const;
 const MANIFEST: ResultManifest = {
   summary: 'fuzz run complete',
   done: ['all'],
@@ -149,6 +159,9 @@ interface ModelTask {
   resumeRequested: boolean;
   terminals: number;
   createdAt: number;
+  budgetUsd?: number;
+  /** Cumulative spend per reporting task, recorded on a top-level task. */
+  spend: Map<TaskId, number>;
 }
 
 interface Internals {
@@ -197,6 +210,8 @@ class FuzzRun implements RunHandle {
   readonly resume?: () => Promise<void>;
   /** The stream handed the orchestrator `finished` or `failed`: the run ended on its own. */
   reported = false;
+  /** Cumulative spend reported so far, in cents. */
+  private cents = 0;
   private over = false;
   readonly events: AsyncIterable<RunnerEvent>;
 
@@ -254,15 +269,20 @@ class FuzzRun implements RunHandle {
     return new Promise((resolve, reject) =>
       this.world.gate(this.epoch, 'next', this.taskId, (draining) => {
         const kind = this.world.rng.weighted([
-          ['progress', draining ? 0 : 70],
+          ['progress', draining ? 0 : 55],
+          ['usage', draining ? 0 : 15],
           ['finished', 8],
           ['failed', 8],
           ['eof', 6],
           ['throw', 8],
         ] as const);
-        if (kind !== 'progress') this.over = true;
+        if (kind !== 'progress' && kind !== 'usage') this.over = true;
         if (kind === 'progress') resolve({ done: false, value: { type: 'progress', note: 'p' } });
-        else if (kind === 'finished') {
+        else if (kind === 'usage') {
+          this.cents += 5 + this.world.rng.int(60);
+          resolve({ done: false, value: { type: 'usage', costUsd: this.cents / 100 } });
+          return `usage ${this.cents / 100}`;
+        } else if (kind === 'finished') {
           this.reported = true;
           this.world.writeManifest(this.taskId);
           resolve({ done: false, value: { type: 'finished' } });
@@ -328,6 +348,8 @@ export class FuzzWorld {
   private readonly operatorRevoked = new Set<SessionId>();
   private readonly rotatedTokens = new Set<string>();
   private readonly manifests = new Set<TaskId>();
+  /** session + key of each cancel by key that found no task, in this process. */
+  private readonly tombstones = new Set<string>();
   private readonly requests: Request[] = [];
   private requestCount = 0;
   private taskCount = 0;
@@ -416,6 +438,8 @@ export class FuzzWorld {
     this.gates = [];
     this.clock.dropAll();
     this.orchestrator = undefined;
+    // Cancels by key are remembered in memory only.
+    this.tombstones.clear();
     const active = new Set(this.store.activeTaskIds());
     this.note(`restart -> epoch ${this.epoch}, active [${[...active].join(' ')}]`);
     this.boot(active);
@@ -545,12 +569,19 @@ export class FuzzWorld {
         resumeRequested: false,
         terminals: 0,
         createdAt: at,
+        ...(event.budgetUsd === undefined ? {} : { budgetUsd: event.budgetUsd }),
+        spend: new Map(),
       });
       return;
     }
     const task = this.tasks.get(event.taskId);
     if (!task) return;
-    if (event.type === 'task_started') task.started = true;
+    if (event.type === 'task_cost') {
+      task.spend.set(
+        event.fromTaskId,
+        Math.max(task.spend.get(event.fromTaskId) ?? 0, event.costUsd),
+      );
+    } else if (event.type === 'task_started') task.started = true;
     else if (event.type === 'task_cancel_requested') task.cancelRequested = true;
     else if (event.type === 'task_pause_requested') task.pauseRequested = true;
     else if (event.type === 'task_paused') task.paused = true;
@@ -580,6 +611,14 @@ export class FuzzWorld {
     return chain;
   }
 
+  /** The top-level task of a tree whose recorded spend reached its cap, if `chain` is in one. */
+  private overCap(chain: ModelTask[]): ModelTask | undefined {
+    const root = chain.at(-1);
+    if (root?.budgetUsd === undefined) return undefined;
+    const cost = [...root.spend.values()].reduce((sum, usd) => sum + usd, 0);
+    return Math.round((root.budgetUsd - cost) * 1e9) <= 0 ? root : undefined;
+  }
+
   private stoppedIn(chain: ModelTask[]): ModelTask | undefined {
     return chain.find((task) => task.terminals > 0 || task.cancelRequested);
   }
@@ -604,6 +643,9 @@ export class FuzzWorld {
     ) {
       return `${event.type} ${event.taskId} by ${this.label(event.by)}`;
     }
+    if (event.type === 'task_cost') {
+      return `${event.type} ${event.taskId} from ${event.fromTaskId} ${event.costUsd}`;
+    }
     return `${event.type} ${event.taskId}`;
   }
 
@@ -620,6 +662,18 @@ export class FuzzWorld {
       const stopped = this.stoppedIn(this.chain(event.parentTaskId));
       if (stopped)
         this.violation(`${what}: ancestor ${stopped.taskId} is ${this.stopState(stopped)}`);
+      const capped = this.overCap(this.chain(event.parentTaskId));
+      if (capped) this.violation(`${what}: tree ${capped.taskId} spent its budget`);
+      if (event.parentTaskId !== undefined && event.budgetUsd !== undefined) {
+        this.violation(`${what}: a child task carries its own budget`);
+      }
+      if (this.tasks.has(event.taskId)) this.violation(`${what}: the task was created before`);
+      if (
+        event.idempotencyKey !== undefined &&
+        this.tombstones.has(`${event.sessionId}\0${event.idempotencyKey}`)
+      ) {
+        this.violation(`${what}: a cancel by key ${event.idempotencyKey} found nothing before`);
+      }
       this.checkQuota(event.rootSessionId ?? event.sessionId, at, what);
       return;
     }
@@ -640,6 +694,17 @@ export class FuzzWorld {
       const stopped = this.stoppedIn(this.chain(task.parentTaskId));
       if (stopped)
         this.violation(`${what}: ancestor ${stopped.taskId} is ${this.stopState(stopped)}`);
+      const capped = this.overCap(this.chain(event.taskId));
+      if (capped) this.violation(`${what}: tree ${capped.taskId} spent its budget`);
+    }
+    if (event.type === 'task_cost') {
+      if (task.parentTaskId !== undefined) this.violation(`${what}: not a top-level task`);
+      if (task.terminals > 0) this.violation(`${what}: the top-level task ended`);
+      const from = this.chain(event.fromTaskId);
+      if (from.at(-1) !== task) this.violation(`${what}: the reporting task is in another tree`);
+      if (from[0] && (from[0].terminals > 0 || from[0].cancelRequested)) {
+        this.violation(`${what}: the reporting task is ${this.stopState(from[0])}`);
+      }
     }
     this.checkControl(event, task, request, what);
     if (event.type === 'task_cancel_requested' && event.by !== 'system') {
@@ -977,7 +1042,8 @@ export class FuzzWorld {
     );
     const choice = this.rng.weighted([
       ['delegate', 30],
-      ['cancel', 14],
+      ['cancel', 12],
+      ['cancelKey', 4],
       ['wait', 12],
       ['status', 4],
       ['abort', open.length > 0 ? 6 : 0],
@@ -994,7 +1060,10 @@ export class FuzzWorld {
       case 'delegate': {
         const mode = this.rng.chance(0.35) ? 'wait' : 'async';
         const timeoutMs = this.rng.pick(WAIT_TIMEOUTS);
-        this.request(`delegate ${mode}`, mode === 'wait', (session, signal) =>
+        const budgetUsd = this.rng.pick(BUDGETS);
+        const key = this.rng.chance(0.3) ? this.rng.pick(KEYS) : undefined;
+        const what = `delegate ${mode}${budgetUsd === undefined ? '' : ` $${budgetUsd}`}${key === undefined ? '' : ` key ${key}`}`;
+        this.request(what, mode === 'wait', (session, signal) =>
           orchestrator.delegate(
             session,
             {
@@ -1002,9 +1071,24 @@ export class FuzzWorld {
               brief: 'do it',
               mode,
               ...(timeoutMs === undefined ? {} : { timeoutMs }),
+              ...(budgetUsd === undefined ? {} : { budgetUsd }),
+              ...(key === undefined ? {} : { idempotencyKey: key }),
             },
             signal,
           ),
+        );
+        return;
+      }
+      case 'cancelKey': {
+        const key = this.rng.pick(KEYS);
+        const epoch = this.epoch;
+        this.request(`cancel key ${key}`, false, (session) =>
+          orchestrator.cancelByKey(session, key).then((view) => {
+            if (view === undefined && epoch === this.epoch) {
+              this.tombstones.add(`${session.sessionId}\0${key}`);
+            }
+            return view;
+          }),
         );
         return;
       }

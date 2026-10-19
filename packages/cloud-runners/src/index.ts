@@ -27,7 +27,13 @@ export type {
   SandboxLease,
   SandboxProvider,
 } from './types.js';
-export { claudeAdapter, codexAdapter, type VendorAdapter } from './vendors.js';
+export {
+  claudeAdapter,
+  codexAdapter,
+  DEFAULT_PRICES,
+  type TokenPrices,
+  type VendorAdapter,
+} from './vendors.js';
 
 export interface CloudRunners {
   /** `claude-agent-sdk` and `codex`, ready for a `RunnerRegistry`. */

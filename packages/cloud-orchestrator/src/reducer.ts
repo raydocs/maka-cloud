@@ -22,6 +22,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       runner: event.runner,
       ...(event.title === undefined ? {} : { title: event.title }),
       mode: event.mode,
+      ...(event.budgetUsd === undefined ? {} : { budgetUsd: event.budgetUsd }),
       state: 'queued',
       createdAt: at,
       progress: [],
@@ -35,6 +36,13 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       task.state = 'running';
       task.startedAt = at;
       return;
+    case 'task_cost': {
+      const spend = (task.spendByTask ??= {});
+      spend[event.fromTaskId] = Math.max(spend[event.fromTaskId] ?? 0, event.costUsd);
+      const total = Object.values(spend).reduce((sum, usd) => sum + usd, 0);
+      task.costUsd = Math.round(total * 1e9) / 1e9;
+      return;
+    }
     case 'task_progress':
       task.progress.push(event.note);
       if (task.progress.length > MAX_PROGRESS_NOTES) task.progress.shift();
@@ -102,5 +110,12 @@ export function toView(task: TaskRecord): TaskView {
     ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
     cancelRequested: task.cancelRequestedBy !== undefined,
     pauseRequested: task.pauseRequested === true,
+    ...(task.costUsd === undefined ? {} : { costUsd: task.costUsd }),
+    ...(task.budgetUsd === undefined
+      ? {}
+      : {
+          budgetUsd: task.budgetUsd,
+          ...((task.costUsd ?? 0) >= task.budgetUsd ? { budgetExceeded: true } : {}),
+        }),
   };
 }

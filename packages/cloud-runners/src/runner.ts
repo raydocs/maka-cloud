@@ -16,7 +16,13 @@ import { LineSplitter } from './lines.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage } from './shell.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
-import { preambleFor, type VendorAdapter } from './vendors.js';
+import {
+  DEFAULT_PRICES,
+  preambleFor,
+  type TokenPrices,
+  tokenCostUsd,
+  type VendorAdapter,
+} from './vendors.js';
 
 const DEFAULT_MAX_NOTES = 300;
 const CLEANUP_STEP_MS = 20_000;
@@ -115,6 +121,14 @@ class Run implements RunHandle {
   private ended = false;
   private notes = 0;
   private lastNote = '';
+  /** Dollars spent by the CLI invocations of this run that have ended. */
+  private spentBefore = 0;
+  /** The current invocation: an estimate per model call, until the CLI reports its own total. */
+  private callCosts = new Map<string, number>();
+  private reportedTotal: number | undefined;
+  private lastReportedUsd = -1;
+  /** Set once the run has spent its budget: the reason it stops. */
+  private budgetStop: string | undefined;
   private readonly secrets = new Set<string>();
   private machine: RemoteMachine | undefined;
   private record: RunnerSessionRecord | undefined;
@@ -393,6 +407,8 @@ class Run implements RunHandle {
     if (launched === 'cancelled') return { ok: false, reason: 'the start was cancelled' };
 
     const parser = vendor.parser((text) => this.scrub(text));
+    this.callCosts = new Map();
+    this.reportedTotal = undefined;
     const rawTail: string[] = [];
     let guardReason: string | undefined;
     let verdict: { ok: boolean; text?: string } | undefined;
@@ -412,7 +428,13 @@ class Run implements RunHandle {
       for (const event of events) {
         if (event.kind === 'session') void this.rememberSession(event.id).catch(() => undefined);
         else if (event.kind === 'progress') this.progress(event.note);
-        else
+        else if (event.kind === 'usage') {
+          this.callCosts.set(event.id, tokenCostUsd(event.tokens, this.prices()));
+          this.meter();
+        } else if (event.kind === 'cost') {
+          this.reportedTotal = event.totalUsd;
+          this.meter();
+        } else
           verdict =
             event.text === undefined ? { ok: event.ok } : { ok: event.ok, text: event.text };
       }
@@ -430,6 +452,8 @@ class Run implements RunHandle {
         this.checkCancelled();
         lines.push(decoder.write(update.data));
         consumed += update.data.length;
+        // Over budget: stop here; the cleanup that follows stops the CLI.
+        if (this.budgetStop) return { ok: false, reason: this.budgetStop };
 
         const state = update.state;
         if (state === 'starting' || state === 'none') {
@@ -470,6 +494,9 @@ class Run implements RunHandle {
     } finally {
       watch.stop();
       this.stopWatch = undefined;
+      this.spentBefore += this.invocationCost();
+      this.callCosts = new Map();
+      this.reportedTotal = undefined;
     }
 
     // The turn is over: nothing it started may outlive it, and its raw output goes before the
@@ -480,6 +507,31 @@ class Run implements RunHandle {
     this.checkCancelled();
     await this.snapshot(machine);
     return { ok: true };
+  }
+
+  // -- spend ------------------------------------------------------------------------------------
+
+  private prices(): TokenPrices {
+    return this.fleet.options.prices?.[this.vendor.name] ?? DEFAULT_PRICES[this.vendor.name];
+  }
+
+  private invocationCost(): number {
+    if (this.reportedTotal !== undefined) return this.reportedTotal;
+    let sum = 0;
+    for (const usd of this.callCosts.values()) sum += usd;
+    return sum;
+  }
+
+  /** Reports what the run has spent so far, and stops it once that reaches its budget. */
+  private meter(): void {
+    const spent = Math.round((this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
+    if (spent === this.lastReportedUsd) return;
+    this.lastReportedUsd = spent;
+    if (!this.ended) this.events.push({ type: 'usage', costUsd: spent });
+    const budget = this.spec.budgetUsd;
+    if (budget !== undefined && spent >= budget && !this.budgetStop) {
+      this.budgetStop = `budget of ${usd(budget)} reached (${usd(spent)} spent)`;
+    }
   }
 
   private async rememberSession(id: string): Promise<void> {
@@ -703,6 +755,10 @@ class Run implements RunHandle {
       if (secret.length >= 6) out = out.split(secret).join('[redacted]');
     return out;
   }
+}
+
+function usd(value: number): string {
+  return `$${value.toFixed(2)}`;
 }
 
 function clipQuote(text: string): string {
