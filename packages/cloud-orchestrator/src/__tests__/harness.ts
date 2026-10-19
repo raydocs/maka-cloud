@@ -107,6 +107,24 @@ export function pendingWaits(h: Harness): number {
   return waiters.size;
 }
 
+/**
+ * Resolves when the orchestrator has queued an event of `type` behind its write
+ * chain. Queued, not yet guarded or written, so a test can tell that a report is
+ * waiting behind a held append.
+ */
+export function eventQueued(h: Harness, type: TaskEvent['type']): Promise<void> {
+  const target = h.orchestrator as unknown as {
+    record: (event: TaskEvent, guard?: () => void) => Promise<unknown>;
+  };
+  const original = target.record.bind(target);
+  return new Promise<void>((resolve) => {
+    target.record = (event, guard) => {
+      if (event.type === type) resolve();
+      return original(event, guard);
+    };
+  });
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

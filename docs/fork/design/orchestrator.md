@@ -27,6 +27,9 @@ Errors are tool results with `isError` and a code: `not_found`,
 `read(afterSeq?)` returns entries in order. `reduce(events)` is the only code
 that computes task state, for live updates and for replay. The first terminal
 event for a task wins, so a runner that finishes after a cancel cannot undo it.
+The write chain enforces the same rule on the way in: a terminal event for a
+task that already ended is dropped before it is appended, so the log holds
+exactly one terminal event per task.
 
 `Orchestrator.create` restores from the log. Nothing is running after a
 restart, so every task still `queued` or `running` gets an event appended:
@@ -54,12 +57,25 @@ knownIssues[], artifacts?}`, validated with zod. A missing, oversized or
 invalid manifest fails the task with the reason. No transcript crosses a task
 boundary.
 
+The orchestrator creates each task dir itself, mode 0700, and refuses a path
+that already exists, so it never writes through a symlink someone left there.
+`O_NOFOLLOW` only covers the last component of `result.json`, so before reading
+it the orchestrator also `lstat`s the task dir (it must be a real directory)
+and checks that its `realpath` is `<realpath(root)>/<taskId>`. A check followed
+by an open leaves a race. It is acceptable because runners never get write
+access to the handoff root (T6 rule), so nothing running inside a task can swap
+the directory; the checks are a second layer, not the access control. A runner
+that runs as another user needs a task dir it can write `result.json` into,
+which is T6's to arrange without giving it the root.
+
 ## Runners
 
 `Runner.start(spec)` returns a `RunHandle` with an `events` stream (`progress`,
 `finished`, `failed`) and `cancel()`. A stream that ends without `finished` or
 `failed` fails the task. Once a cancel is requested, whatever the runner does
-next is ignored. `FakeRunner` is scriptable for tests. `claudeAgentSdkRunner`
+next is ignored. A handle that is still registered when its task ends (the
+stream broke, or the runner came up late) is cancelled, best effort; a runner
+that reported its own end is not cancelled. `FakeRunner` is scriptable for tests. `claudeAgentSdkRunner`
 and `codexRunner` are stubs that fail the task with "not implemented yet"; T6
 replaces them.
 
@@ -70,6 +86,30 @@ which stops any of them from delegating further, then cancels runners deepest
 first and records `task_cancelled`. It repeats until nothing in the subtree is
 live. A runner whose `cancel()` throws is still recorded as cancelled, with the
 error kept as a progress note.
+
+- **Session.** The caller's session is checked where the first cancel request
+  is accepted in the write chain, so a token revoked while the call was queued
+  changes nothing. Once accepted, the cleanup runs to the end on its own.
+- **Concurrent cancels.** Cancels of one task share a single in-flight cancel,
+  and a request for a task that is already stopping is not logged again.
+- **Start in flight.** While `Runner.start` is pending there is no handle to
+  stop. When it returns, a task that is stopping (cancel requested, ended, or an
+  ancestor stopping) gets the new handle cancelled and is never recorded as
+  started. `task_started` goes through the same check in the write chain.
+
+## Ending a task ends what is below it
+
+When any task ends, whether `succeeded`, `failed` or `cancelled`, the
+orchestrator cancels its non-terminal descendants the same way `task_cancel`
+does (requests recorded as `by: "system"`, deepest first). A parent that
+reports `finished` while a child is still running does not leave the child
+behind. Delegation is refused under an ended or cancelling ancestor, and the
+ancestors are checked again where a started runner is handed off, so a child
+whose start was pending when its ancestor ended never runs. A restart appends
+outcomes for everything still live and does not cascade.
+
+`Orchestrator.settled()` resolves once the runner starts and cascades under way
+have been handed off. It does not wait for running tasks.
 
 ## Transport
 
