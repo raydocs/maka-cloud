@@ -28,6 +28,7 @@ function assertReleased(conductor: Conductor): void {
     openClients: 0,
     outboxSending: 0,
     outboxRetrying: 0,
+    stopChecks: 0,
   });
 }
 

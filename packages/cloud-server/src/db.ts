@@ -100,7 +100,94 @@ CREATE TRIGGER task_cost_log_no_delete BEFORE DELETE ON task_cost_log
 BEGIN SELECT RAISE(ABORT, 'task_cost_log is append-only'); END;
 `;
 
+/**
+ * Step `i` takes the schema from version `i` to `i + 1`. Steps are only ever
+ * appended: one that has shipped is never edited.
+ */
+/**
+ * v3: what the conductor publishes into a conversation (notices, questions,
+ * answers), one row per event, keyed by the event's stable id so a retried
+ * publish is a no-op. Assistant messages also record their event id here and
+ * live in `messages` with role 'assistant'.
+ */
 const SCHEMA_V3 = `
+CREATE TABLE conductor_events (
+  event_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER conductor_events_no_update BEFORE UPDATE ON conductor_events
+BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
+CREATE TRIGGER conductor_events_no_delete BEFORE DELETE ON conductor_events
+BEGIN SELECT RAISE(ABORT, 'conductor_events is append-only'); END;
+`;
+
+/**
+ * v4: what components that share the server process (the supervisor's inbox) put
+ * into the feed, one row per event. The feed kind says whose event it is, so
+ * nothing about a component is baked into the feed schema.
+ */
+const SCHEMA_V4 = `
+CREATE TABLE extension_events (
+  event_id INTEGER PRIMARY KEY,
+  conversation_id TEXT,
+  kind TEXT NOT NULL,
+  data TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER extension_events_no_update BEFORE UPDATE ON extension_events
+BEGIN SELECT RAISE(ABORT, 'extension_events is append-only'); END;
+CREATE TRIGGER extension_events_no_delete BEFORE DELETE ON extension_events
+BEGIN SELECT RAISE(ABORT, 'extension_events is append-only'); END;
+`;
+
+/**
+ * v5: per-invite isolation and durable message delivery.
+ *
+ * `owner` is the invite that created the conversation; tasks, artifacts, inbox
+ * items and feed rows belong to whoever owns their conversation. Conversations
+ * from before v5 keep a NULL owner: no invite sees them until
+ * `cloud-server conversation adopt` gives them to one.
+ *
+ * `message_deliveries` holds one row per user message, written in the
+ * message's own transaction, until the handler acknowledges it. Messages from
+ * before v5 get no row: they were handed over at the time, or not at all, and
+ * replaying them after an upgrade would start runs nobody just asked for.
+ */
+const SCHEMA_V5 = `
+ALTER TABLE conversations ADD COLUMN owner TEXT;
+CREATE INDEX conversations_owner ON conversations (owner, n);
+
+CREATE TABLE message_deliveries (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL,
+  delivered_at INTEGER
+);
+CREATE INDEX message_deliveries_pending ON message_deliveries (next_attempt_at)
+  WHERE delivered_at IS NULL;
+`;
+
+/**
+ * v6: which tasks owe a stop (`task_stop_pending` with no `task_stopped` after
+ * it), ended or not, so a restart finds the stops it must retry.
+ */
+const SCHEMA_V6 = `
+ALTER TABLE task_index ADD COLUMN stop_pending INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX task_index_stop_pending ON task_index (n) WHERE stop_pending = 1;
+`;
+
+/**
+ * v7: Web Push. A subscription belongs to the invite that registered it;
+ * `since_feed_id` is where the feed stood when the device subscribed, so only
+ * tasks that end after that are sent. `push_deliveries` records each message
+ * once, so a restart neither loses nor repeats one.
+ */
+const SCHEMA_V7 = `
 CREATE TABLE push_subscriptions (
   endpoint TEXT PRIMARY KEY,
   invite_id TEXT NOT NULL,
@@ -119,11 +206,15 @@ CREATE TABLE push_deliveries (
 );
 `;
 
-/**
- * Step `i` takes the schema from version `i` to `i + 1`. Steps are only ever
- * appended: one that has shipped is never edited.
- */
-const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+export const MIGRATIONS: readonly string[] = [
+  SCHEMA_V1,
+  SCHEMA_V2,
+  SCHEMA_V3,
+  SCHEMA_V4,
+  SCHEMA_V5,
+  SCHEMA_V6,
+  SCHEMA_V7,
+];
 
 /**
  * Opens the database for this process alone. `locking_mode=EXCLUSIVE` plus an

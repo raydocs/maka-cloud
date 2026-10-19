@@ -1,16 +1,46 @@
 import type { TaskId } from '@maka-cloud/orchestrator';
 
+/** Spend the model gateway settled for one access, request by request. */
+export interface AccessMeter {
+  spentUsd(): number;
+  /**
+   * Called after each settled request, and when a request was refused because the budget could
+   * not cover it (`exhausted`). Returns the unsubscribe.
+   */
+  subscribe(listener: (state: { spentUsd: number; exhausted: boolean }) => void): () => void;
+}
+
 /** Credentials for one task's model calls. API keys only; there is no subscription login. */
 export interface ModelAccess {
   /** Gateway base URL. Unset: the vendor's own API endpoint. */
   baseUrl?: string;
   apiKey: string;
-  /** Called when the task ends or is cancelled. */
+  /**
+   * The gateway's web search, called with `apiKey`. When set, the run gets it as
+   * `MAKA_SEARCH_URL` and `MAKA_SEARCH_TOKEN`, for the `web-search` sandbox tool.
+   */
+  searchUrl?: string;
+  /**
+   * Called when the task ends or is cancelled. With a `meter`, it resolves once every request of
+   * the access has settled, so the meter's spend after it is final.
+   */
   revoke?(): Promise<void> | void;
+  /**
+   * The gateway's own metering of this access. When set, the run's spend and its budget stop
+   * come from it, request by request, instead of from what the CLI prints.
+   */
+  meter?: AccessMeter;
 }
 
 export interface ModelAccessProvider {
-  issue(input: { taskId: TaskId; runner: string }): Promise<ModelAccess>;
+  issue(input: {
+    taskId: TaskId;
+    runner: string;
+    /** What the run may spend (`RunSpec.budgetUsd`). */
+    budgetUsd?: number;
+    /** The top-level task of the run's tree (`RunSpec.budgetRootId`). */
+    budgetRootId?: TaskId;
+  }): Promise<ModelAccess>;
   /**
    * Revokes whatever was issued for `taskId`, from a process that no longer holds the
    * `ModelAccess` (called when leftovers are stopped after a restart).

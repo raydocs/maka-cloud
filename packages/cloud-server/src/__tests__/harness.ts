@@ -11,6 +11,8 @@ export interface Harness {
   fake: FakeRunner;
   server: CloudServer;
   token: string;
+  /** The invite behind `token`: the owner of what the harness creates. */
+  inviteId: string;
   warnings: Array<{ message: string; detail?: unknown }>;
   /** Calls the public API with the harness invite unless `token` says otherwise. */
   api(path: string, init?: RequestInit & { token?: string | null }): Promise<Response>;
@@ -39,7 +41,9 @@ export async function startHarness(
   };
   const harness = { dir, options, fake, warnings } as Harness;
   harness.server = await startCloudServer(options);
-  harness.token = harness.server.invites.create('test').token;
+  const invite = harness.server.invites.create('test');
+  harness.token = invite.token;
+  harness.inviteId = invite.inviteId;
   t.after(async () => {
     await harness.server.close();
     if (ownsDir) await rm(dir, { recursive: true, force: true });

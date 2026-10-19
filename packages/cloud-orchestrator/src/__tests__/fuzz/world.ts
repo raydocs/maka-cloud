@@ -28,7 +28,8 @@ import { Prng } from './prng.js';
  * The schedule fuzzer. Every await the orchestrator crosses is a gate the
  * scheduler releases: store appends, runner starts, handle cancels, each pull on
  * a run's event stream (progress, finished, failed, clean end, throw) and its
- * close, brief writes, manifest reads, and wait timers through a fake clock.
+ * close, brief writes, manifest reads, stops of leftover runs by task id, and
+ * wait, stop-timeout and stop-retry timers through a fake clock.
  * Between gates the PRNG issues requests the way the MCP endpoint makes them:
  * delegate (async and wait, nested through executor tokens, with or without a
  * budget and an idempotency key), cancel by id or key, wait and status on any
@@ -45,14 +46,19 @@ import { Prng } from './prng.js';
  * - quotas hold exactly at the moment a task is created;
  * - nothing is created or started in a tree whose recorded spend reached its
  *   cap, only a top-level task carries a cap, and spend is recorded only on a
- *   top-level task that has not ended, from a task of its tree not stopping;
+ *   top-level task, from a task of its tree (also once either is stopping or
+ *   ended: what settled late was still paid for);
  * - a keyed delegation creates its task once, and never after a cancel by
  *   that key found nothing (in the same process);
  * - a revoked or rotated token commits nothing new after the revoke or rotate;
  *   a revoked operator credential commits nothing either;
  * - a pause is requested once, only for a started task nothing is stopping, and
  *   pause and resume results are only recorded for an open request on a task
- *   that is not being cancelled.
+ *   that is not being cancelled;
+ * - a task never ends while a run of it may still be live (not reported, not
+ *   cancelled, not stopped by id, or still starting) unless it already owes a
+ *   stop; a stop is owed once at a time, and cleared only when no run of the
+ *   task may still be live.
  * Checked after every step:
  * - the in-memory tasks and per-tree counts match the log's unfinished tasks,
  *   and their states (queued, running, paused) match the log;
@@ -64,7 +70,9 @@ import { Prng } from './prng.js';
  * Checked after each restore: exactly the unfinished tasks were loaded and
  * ended, and their executor tokens no longer authenticate.
  * Checked at quiescence, after settled(): one terminal event per task, every
- * request returned, and every counter and map is back to zero.
+ * request returned, no task owes a stop, every run of every process ended on
+ * its own or was cancelled or stopped, every spend a run of the live process
+ * reported is recorded, and every counter and map is back to zero.
  */
 
 /**
@@ -109,7 +117,8 @@ type GateKind =
   | 'pause'
   | 'resume'
   | 'next'
-  | 'return';
+  | 'return'
+  | 'stop';
 
 /** One await point the orchestrator is parked on. `open` lets it continue and says how. */
 interface Gate {
@@ -158,6 +167,8 @@ interface ModelTask {
   paused: boolean;
   resumeRequested: boolean;
   terminals: number;
+  /** A `task_stop_pending` with no `task_stopped` after it. */
+  stopPending: boolean;
   createdAt: number;
   budgetUsd?: number;
   /** Cumulative spend per reporting task, recorded on a top-level task. */
@@ -170,6 +181,7 @@ interface Internals {
   waiters: Map<TaskId, Set<unknown>>;
   executorSessions: Map<TaskId, SessionId>;
   cancelling: Map<TaskId, unknown>;
+  starting: Set<TaskId>;
   background: Set<unknown>;
   openConnections: number;
   activeByRoot: { counts: Map<SessionId, number> };
@@ -206,12 +218,18 @@ function errorMessage(error: unknown): string {
 /** A run handed back by the fake runner. Every pull on its event stream is a gate. */
 class FuzzRun implements RunHandle {
   cancelCalls = 0;
+  /** A cancel of this run succeeded. */
+  cancelled = false;
+  /** A stop by task id succeeded after this run existed. */
+  stopped = false;
   readonly pause?: () => Promise<void>;
   readonly resume?: () => Promise<void>;
   /** The stream handed the orchestrator `finished` or `failed`: the run ended on its own. */
   reported = false;
   /** Cumulative spend reported so far, in cents. */
   private cents = 0;
+  /** The last cumulative spend handed to the orchestrator, in dollars. */
+  reportedUsd = 0;
   private over = false;
   readonly events: AsyncIterable<RunnerEvent>;
 
@@ -258,6 +276,7 @@ class FuzzRun implements RunHandle {
           reject(new Error('cancel failed'));
           return 'rejected';
         }
+        this.cancelled = true;
         resolve();
         return 'done';
       }),
@@ -280,6 +299,7 @@ class FuzzRun implements RunHandle {
         if (kind === 'progress') resolve({ done: false, value: { type: 'progress', note: 'p' } });
         else if (kind === 'usage') {
           this.cents += 5 + this.world.rng.int(60);
+          this.reportedUsd = this.cents / 100;
           resolve({ done: false, value: { type: 'usage', costUsd: this.cents / 100 } });
           return `usage ${this.cents / 100}`;
         } else if (kind === 'finished') {
@@ -339,6 +359,13 @@ export class FuzzWorld {
   private restarts = 0;
   private readonly tasks = new Map<TaskId, ModelTask>();
   private readonly runs: FuzzRun[] = [];
+  /** Runner starts of this process not answered yet, per task. */
+  private readonly startsOut = new Map<TaskId, number>();
+  /**
+   * Starts a dead process never heard back from: each may have left work running
+   * that only a stop by task id can end.
+   */
+  private readonly lostStarts: Array<{ taskId: TaskId; epoch: number; stopped: boolean }> = [];
   private readonly credentials: Credential[] = [];
   private readonly labels = new Map<SessionId, string>();
   private readonly executorOf = new Map<SessionId, TaskId>();
@@ -440,6 +467,12 @@ export class FuzzWorld {
     this.orchestrator = undefined;
     // Cancels by key are remembered in memory only.
     this.tombstones.clear();
+    for (const [taskId, out] of this.startsOut) {
+      for (let i = 0; i < out; i += 1) {
+        this.lostStarts.push({ taskId, epoch: this.epoch - 1, stopped: false });
+      }
+    }
+    this.startsOut.clear();
     const active = new Set(this.store.activeTaskIds());
     this.note(`restart -> epoch ${this.epoch}, active [${[...active].join(' ')}]`);
     this.boot(active);
@@ -464,6 +497,7 @@ export class FuzzWorld {
       childrenOf: (taskId) => inner.childrenOf(taskId),
       activeTaskIds: () => inner.activeTaskIds(),
       taskIds: () => inner.taskIds(),
+      stopPendingTaskIds: () => inner.stopPendingTaskIds(),
       countCreatedSince: (root, since) => inner.countCreatedSince(root, since),
     };
   }
@@ -512,8 +546,10 @@ export class FuzzWorld {
           this.note(`start ${spec.taskId} throws synchronously`);
           throw new Error('start threw');
         }
+        this.startsOut.set(spec.taskId, (this.startsOut.get(spec.taskId) ?? 0) + 1);
         return new Promise<RunHandle>((resolve, reject) =>
           this.gate(epoch, 'start', spec.taskId, () => {
+            this.startsOut.set(spec.taskId, (this.startsOut.get(spec.taskId) ?? 1) - 1);
             if (this.rng.chance(0.15)) {
               reject(new Error('start failed'));
               return 'rejected';
@@ -525,7 +561,38 @@ export class FuzzWorld {
           }),
         );
       },
+      // Finds a task's work by id, whichever process started it, as a remote sandbox would.
+      stopOrphaned: (taskId: TaskId) => {
+        if (this.rng.chance(0.05)) {
+          this.note(`stop ${taskId} throws synchronously`);
+          throw new Error('stop threw');
+        }
+        return new Promise<void>((resolve, reject) =>
+          this.gate(epoch, 'stop', taskId, (draining) => {
+            // A drained world answers every call, so what is owed is always settled.
+            if (!draining && this.rng.chance(0.3)) {
+              reject(new Error('sandbox unreachable'));
+              return 'rejected';
+            }
+            for (const run of this.runs) if (run.taskId === taskId) run.stopped = true;
+            for (const lost of this.lostStarts) if (lost.taskId === taskId) lost.stopped = true;
+            resolve();
+            return 'stopped';
+          }),
+        );
+      },
     };
+  }
+
+  /** A run of the task, from any process, that may still be going, or a start of it not answered yet. */
+  private liveRun(taskId: TaskId): string | undefined {
+    if ((this.startsOut.get(taskId) ?? 0) > 0) return 'a start is still out';
+    const run = this.runs.find(
+      (r) => r.taskId === taskId && !r.reported && !r.cancelled && !r.stopped,
+    );
+    if (run) return `its run from epoch ${run.epoch} may still be live`;
+    const lost = this.lostStarts.find((l) => l.taskId === taskId && !l.stopped);
+    return lost && `a start from epoch ${lost.epoch} may have left a run`;
   }
 
   /** The runner is handed the executor's token, so the fuzzer can act as that executor. */
@@ -568,6 +635,7 @@ export class FuzzWorld {
         paused: false,
         resumeRequested: false,
         terminals: 0,
+        stopPending: false,
         createdAt: at,
         ...(event.budgetUsd === undefined ? {} : { budgetUsd: event.budgetUsd }),
         spend: new Map(),
@@ -588,6 +656,8 @@ export class FuzzWorld {
     else if (event.type === 'task_pause_failed') task.pauseRequested = false;
     else if (event.type === 'task_resume_requested') task.resumeRequested = true;
     else if (event.type === 'task_resume_failed') task.resumeRequested = false;
+    else if (event.type === 'task_stop_pending') task.stopPending = true;
+    else if (event.type === 'task_stopped') task.stopPending = false;
     else if (event.type === 'task_resumed') {
       task.paused = false;
       task.pauseRequested = false;
@@ -688,6 +758,18 @@ export class FuzzWorld {
     if (TERMINAL.has(event.type) && task.cancelRequested && event.type !== 'task_cancelled') {
       this.violation(`${what} after its cancel was requested: it must end cancelled`);
     }
+    if (TERMINAL.has(event.type) && !task.stopPending) {
+      const live = this.liveRun(event.taskId);
+      if (live) this.violation(`${what} while ${live}, and no stop is owed`);
+    }
+    if (event.type === 'task_stop_pending' && task.stopPending) {
+      this.violation(`${what}: a stop is already owed`);
+    }
+    if (event.type === 'task_stopped') {
+      if (!task.stopPending) this.violation(`${what}: no stop was owed`);
+      const live = this.liveRun(event.taskId);
+      if (live) this.violation(`${what} while ${live}`);
+    }
     if (event.type === 'task_started') {
       if (task.terminals > 0) this.violation(`${what} after its terminal event`);
       if (task.cancelRequested) this.violation(`${what} after its cancel was requested`);
@@ -699,12 +781,8 @@ export class FuzzWorld {
     }
     if (event.type === 'task_cost') {
       if (task.parentTaskId !== undefined) this.violation(`${what}: not a top-level task`);
-      if (task.terminals > 0) this.violation(`${what}: the top-level task ended`);
       const from = this.chain(event.fromTaskId);
       if (from.at(-1) !== task) this.violation(`${what}: the reporting task is in another tree`);
-      if (from[0] && (from[0].terminals > 0 || from[0].cancelRequested)) {
-        this.violation(`${what}: the reporting task is ${this.stopState(from[0])}`);
-      }
     }
     this.checkControl(event, task, request, what);
     if (event.type === 'task_cancel_requested' && event.by !== 'system') {
@@ -977,6 +1055,26 @@ export class FuzzWorld {
     for (const task of this.tasks.values()) {
       if (task.terminals !== 1)
         this.violation(`${task.taskId} has ${task.terminals} terminal events`);
+      if (task.stopPending) this.violation(`${task.taskId} still owes a stop`);
+    }
+    for (const run of this.runs) {
+      if (!run.reported && !run.cancelled && !run.stopped) {
+        this.violation(`the run of ${run.taskId} from epoch ${run.epoch} was never stopped`);
+      }
+      // A run of a process that died took its unrecorded reports with it.
+      if (run.epoch !== this.epoch || run.reportedUsd === 0) continue;
+      const root = this.chain(run.taskId).at(-1);
+      const recorded = root?.spend.get(run.taskId) ?? 0;
+      if (Math.round(recorded * 100) < Math.round(run.reportedUsd * 100)) {
+        this.violation(
+          `the run of ${run.taskId} reported $${run.reportedUsd}, but $${recorded} is recorded`,
+        );
+      }
+    }
+    for (const lost of this.lostStarts) {
+      if (!lost.stopped) {
+        this.violation(`a start of ${lost.taskId} from epoch ${lost.epoch} was never stopped`);
+      }
     }
     for (const request of this.requests) {
       if (request.epoch === this.epoch && !request.settled) {
@@ -995,6 +1093,8 @@ export class FuzzWorld {
       ['handles', o.handles.size],
       ['executorSessions', o.executorSessions.size],
       ['cancelling', o.cancelling.size],
+      ['starting', o.starting.size],
+      ['stopRetries', stats.stopRetries],
       ['background', o.background.size],
     ];
     for (const [name, value] of leftovers) {

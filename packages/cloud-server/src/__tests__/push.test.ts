@@ -12,7 +12,7 @@ import { createHttpsTransport, isNonPublicAddress, type PushTransport } from '..
 import { SqliteTaskStore } from '../sqlite-task-store.js';
 import { type CloudServerOptions, startCloudServer } from '../cloud-server.js';
 import { conductorSession, recordingHandler } from './conductor.js';
-import { eventually, type Harness, newConversation, startHarness } from './harness.js';
+import { eventually, type Harness, newConversation, postJson, startHarness } from './harness.js';
 
 const vapid = webpush.generateVAPIDKeys();
 const config = { ...vapid, subject: 'mailto:ops@example.com' };
@@ -109,6 +109,7 @@ async function setup(t: TestContext, push: Partial<NonNullable<CloudServerOption
   return {
     h,
     fake,
+    seen,
     conversationId,
     finish,
     restart,
@@ -270,23 +271,51 @@ test('only top-level tasks push, and only tasks that end after the subscription'
   assert.ok(!taskIds.includes(early));
 });
 
-test('every device of every invite gets the message once, and a revoked invite gets none', async (t) => {
-  const { h, fake, finish } = await setup(t);
+test("a device is told only about its own invite's conversations, and a revoked invite gets nothing", async (t) => {
+  const { h, fake, seen, finish } = await setup(t);
   const a = device();
-  const b = device();
+  const a2 = device();
+  const other = device();
   const gone = device();
   const second = h.server.invites.create('second');
   await subscribe(h, a);
-  await subscribe(h, b, second.token);
+  await subscribe(h, a2);
+  await subscribe(h, other, second.token);
   await subscribe(h, gone, h.server.invites.create('gone').token);
   const goneId = h.server.invites.list().find((invite) => invite.label === 'gone')?.inviteId ?? '';
   h.server.invites.revoke(goneId);
-  await finish();
-  await eventually(() => fake.calls.length >= 2, 'two pushes');
-  await finish();
-  await eventually(() => fake.calls.length >= 4, 'four pushes');
-  const count = (d: Device) => fake.calls.filter((call) => call.endpoint === d.endpoint).length;
-  assert.deepEqual([count(a), count(b), count(gone)], [2, 2, 0]);
+  // The second invite has a conversation and a task of its own.
+  const res = await postJson(h, '/v1/conversations', {}, second.token);
+  const { conversationId: otherConversation } = (await res.json()) as { conversationId: string };
+  await postJson(
+    h,
+    `/v1/conversations/${otherConversation}/messages`,
+    { text: 'go' },
+    second.token,
+  );
+  await eventually(() => seen.has(otherConversation), 'second handler call');
+  const otherSession = h.server.orchestrator.authenticate(
+    seen.get(otherConversation)?.rotateToken() ?? '',
+  );
+  assert.ok(otherSession);
+  const own = async () => {
+    const before = h.fake.runs.length;
+    const task = await h.server.orchestrator.delegate(otherSession, { runner: 'fake', brief: 'b' });
+    await eventually(() => h.fake.runs.length > before, 'run');
+    await h.fake.runFor(task.taskId).complete();
+    await h.server.orchestrator.wait(otherSession, task.taskId, 2000);
+    return task.taskId;
+  };
+  const first = await finish();
+  const second1 = await own();
+  await eventually(() => fake.calls.length >= 3, 'three pushes');
+  const forDevice = (d: Device) => fake.calls.filter((call) => call.endpoint === d.endpoint);
+  assert.deepEqual(
+    [forDevice(a), forDevice(a2), forDevice(other), forDevice(gone)].map((calls) => calls.length),
+    [1, 1, 1, 0],
+  );
+  assert.equal(payloadOf(forDevice(a)[0] as Call, a).taskId, first);
+  assert.equal(payloadOf(forDevice(other)[0] as Call, other).taskId, second1);
 });
 
 test('what was sent is not sent again after a restart, and what was missed is sent once', async (t) => {
@@ -493,28 +522,51 @@ test('the real transport refuses to connect to a private address, before any req
 });
 
 // The service on its own, so a pass can be made to fail on purpose.
-async function serviceOnly(t: TestContext) {
+async function serviceOnly(t: TestContext, options: { maxAttempts?: number } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'push-service-'));
   const db = openDatabase(join(dir, 'server.sqlite'));
   const hub = new FeedHub();
   const store = new SqliteTaskStore(db, hub);
   const fake = fakeTransport();
   const warnings: string[] = [];
-  const control = { failIsActive: false };
+  const listeners = new Set<(inviteId: string) => void>();
+  const control = {
+    failIsActive: false,
+    revoked: new Set<string>(),
+    revoke(inviteId: string) {
+      control.revoked.add(inviteId);
+      for (const listener of [...listeners]) listener(inviteId);
+    },
+  };
+  // Three conversations: ses_1 is owned by inv_1, ses_2 by inv_2, ses_3 by nobody.
+  const conversations: Array<[string, string, string | null]> = [
+    ['ses_1', 'cnv_1', 'inv_1'],
+    ['ses_2', 'cnv_2', 'inv_2'],
+    ['ses_3', 'cnv_3', null],
+  ];
+  conversations.forEach(([session, conversation, owner], index) => {
+    db.prepare(
+      'INSERT INTO conversations (conversation_id, n, title, session_id, created_at, owner) VALUES (?, ?, NULL, ?, 0, ?)',
+    ).run(conversation, index + 1, session, owner);
+  });
   const service = new PushService(
     db,
     hub,
     {
-      isActive: () => {
+      active: (inviteId) => {
         if (control.failIsActive) throw new Error('invite store unavailable');
-        return true;
+        return !control.revoked.has(inviteId);
+      },
+      onRevoke: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
       },
     },
     {
       config,
       transport: fake.transport,
       retryDelayMs: 1,
-      maxAttempts: 2,
+      maxAttempts: options.maxAttempts ?? 2,
       onWarning: (message) => warnings.push(message),
     },
   );
@@ -524,11 +576,11 @@ async function serviceOnly(t: TestContext) {
     await rm(dir, { recursive: true, force: true });
   });
   let n = 0;
-  const finish = async () => {
+  const finish = async (sessionId = 'ses_1') => {
     n += 1;
     const taskId = `tsk_${n}`;
     await store.append(
-      { type: 'task_created', taskId, sessionId: 'ses_1', runner: 'fake', mode: 'async' },
+      { type: 'task_created', taskId, sessionId, runner: 'fake', mode: 'async' },
       n,
     );
     await store.append(
@@ -541,7 +593,7 @@ async function serviceOnly(t: TestContext) {
     );
     return taskId;
   };
-  return { service, hub, fake, warnings, control, finish };
+  return { service, db, hub, fake, warnings, control, finish };
 }
 
 test('a pass that fails is reported, does not stop the service, and is retried on the next commit', async (t) => {
@@ -574,4 +626,56 @@ test('a transport that throws at once counts as a failed attempt, and the messag
   await eventually(() => fake.calls.length === 3, 'the next task');
   assert.equal(payloadOf(fake.calls[2] as Call, d).taskId, next);
   assert.equal(fake.calls.filter((call) => payloadOf(call, d).taskId === 'tsk_1').length, 2);
+});
+
+test('a conversation another invite owns, or nobody owns, never reaches a device', async (t) => {
+  const { service, fake, finish } = await serviceOnly(t);
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  service.start();
+  await finish('ses_2');
+  await finish('ses_3');
+  // Feed order makes the last task the proof that the first two were looked at.
+  const own = await finish('ses_1');
+  await eventually(() => fake.calls.length >= 1, 'the own conversation');
+  assert.deepEqual(
+    fake.calls.map((call) => payloadOf(call, d).taskId),
+    [own],
+  );
+});
+
+test("a revoke forgets the invite's devices and cuts off a send in flight, and other invites are untouched", async (t) => {
+  const { service, db, fake, control, finish } = await serviceOnly(t, { maxAttempts: 1 });
+  const d = device();
+  const other = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  service.register('inv_2', { endpoint: other.endpoint, ...other.keys });
+  service.start();
+  let release: () => void = () => undefined;
+  fake.state.behave = (call) =>
+    call.endpoint === d.endpoint
+      ? new Promise((_resolve, reject) => {
+          call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+          release = () => reject(new Error('never'));
+        })
+      : Promise.resolve({ status: 201 });
+  await finish('ses_1');
+  await eventually(() => fake.calls.length === 1, 'the send under way');
+  control.revoke('inv_1');
+  const held = fake.calls[0] as Call;
+  await eventually(() => held.signal.aborted, 'the send is cut off');
+  release();
+  const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+  assert.equal(count('SELECT COUNT(*) AS n FROM push_subscriptions'), 1);
+  // The aborted send leaves nothing behind that could be sent or counted later.
+  await finish('ses_2');
+  await eventually(() => fake.calls.length === 2, "the other invite's push");
+  assert.equal((fake.calls[1] as Call).endpoint, other.endpoint);
+  const recorded = db
+    .prepare('SELECT COUNT(*) AS n FROM push_deliveries WHERE endpoint = ?')
+    .get(d.endpoint) as {
+    n: number;
+  };
+  assert.equal(recorded.n, 0);
+  assert.equal(fake.calls.filter((call) => call.endpoint === d.endpoint).length, 1);
 });

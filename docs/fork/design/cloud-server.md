@@ -15,19 +15,35 @@ process per storage root (`tryAcquireRuntimeHostLaunch`; a second owner gets
 starts that owner and talks to it over its authenticated transport. Embedding
 the runtime inside the HTTP process would need new hosting code for lifecycle,
 ownership and crash handling that runtime-host already has, and it would tie the
-server's restarts to the runtime's. So the conductor (T5) is a client of a
-runtime-host owner, and this package only exposes a port for it:
+server's restarts to the runtime's. So this package only exposes a port for the
+conductor (T5):
 
 ```ts
 interface ConversationHandler {
   onUserMessage(message: { conversationId; messageId; text }, conductor: ConductorAccess): void | Promise<void>;
+  onAnswer?(answer: { conversationId; questionId; optionId; text? }, conductor: ConductorAccess): Promise<AnswerOutcome>;
+  close?(): void | Promise<void>;
 }
 ```
 
+The conductor turned out not to be a runtime-host client: runtime-host adds a
+per-turn runtime context and reactive compaction, and T3 requires neither (the
+history must stay append-only). T5 runs Maka in-process (SessionManager and the
+AI SDK backend) inside the handler instead, and still has no import edge into
+this package.
+
 `ConductorAccess` gives T5 the orchestrator MCP URL and a conductor token for
 that conversation (rotated on request, never sent over the public API). With no
-handler the server stores the message and nothing replies. Wiring T5 is T5's
-job.
+handler the server stores the message and nothing replies. `createHandler`
+builds the handler after the database opens and hands it a
+`ConversationPublisher`. Through it, the conductor posts assistant messages
+(`message.posted`, role `assistant`), notices (`conductor.notice`), questions
+(`conductor.question`) and answers (`conductor.answered`) into the feed, each
+idempotent by the event's stable id. `POST /v1/conversations/:id/answers`
+(`{questionId, optionId, text?}`) exists only when the handler has `onAnswer`,
+and maps its outcome to 200 `{accepted, duplicate}`, 404, 409 or 400. On
+shutdown `close()` runs while the orchestrator endpoint is still up, so the
+conductor can cancel its tasks.
 
 ## Storage
 
@@ -40,7 +56,7 @@ One SQLite file (`node:sqlite`), opened by exactly one process.
 | `conversations`, `messages` | Append-only. `messages` has a unique `(conversation_id, client_message_id)` so a retried POST stores once. A conversation owns one orchestrator session id. |
 | `feed(id, kind, conversation_id, ref, at)` | The order of everything a client can stream. A conversation row, a message or a `task_log` row is inserted together with its `feed` row in one transaction. |
 | `sessions(session_id, token_sha256, parent_task_id, created_at)` | The orchestrator's `SessionStore`. Digests only. |
-| `push_subscriptions(endpoint, invite_id, p256dh, auth, since_feed_id, created_at)`, `push_deliveries(endpoint, task_id, state, at)` | Web Push. Mutable, unlike the log tables. `since_feed_id` is the feed position when the device subscribed. Schema step 3. |
+| `push_subscriptions(endpoint, invite_id, p256dh, auth, since_feed_id, created_at)`, `push_deliveries(endpoint, task_id, state, at)` | Web Push. Mutable, unlike the log tables. `since_feed_id` is the feed position when the device subscribed. Schema step 7. |
 
 Invite tokens (`invites`: id, SHA-256 digest, label, created and revoked times)
 live in a second SQLite file. The main database belongs to the one running
@@ -69,13 +85,26 @@ Invite tokens read `mki_<inviteId>.<secret>`; the id picks the row and digests
 are compared with `timingSafeEqual`. Missing, malformed, unknown and revoked
 tokens all get the same 401. There is no route that creates invites; the CLI
 (`cloud-server invite create|list|revoke`) does, and prints the token once.
-Single tenant: every invite sees every conversation. Accounts replace this in T17.
+
+Each invite is a principal and sees only what it owns. A conversation stores the
+invite that created it (`conversations.owner`, schema v5); its tasks, artifacts,
+inbox items and feed rows belong to that owner. Every list, read and stream is
+filtered by owner, and every write is checked against it. Another owner's object
+answers 404 exactly like a missing one, never 403. Writes check the invite again
+after the body is read and right before their effect; control operations check
+invite and owner once more inside the orchestrator's write chain; an approved
+irreversible call checks its approver once more right before it runs (the
+conductor's `approverAuthorized`, fed by `createHandler`'s `authorized`). Feed
+rows of no conversation (the supervisor's digest) belong to nobody and are not
+streamed. Conversations from before v5 have no owner and are invisible until
+`cloud-server conversation adopt --db <file> --invites <file> <inviteId>`, run
+with the server stopped, gives them to an invite. Accounts replace invites in T17.
 
 | Route | Behavior |
 |---|---|
 | `POST /v1/conversations` | `{title?}` -> `{conversationId}`. Creates the conversation and its orchestrator session. |
-| `GET /v1/conversations` | Conversations, oldest first. |
-| `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores, emits, then calls the handler. A repeated `clientMessageId` returns the first message's id and emits nothing. |
+| `GET /v1/conversations` | The caller's conversations, oldest first. |
+| `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores the message with a pending delivery, emits, then hands it to the handler. A repeated `clientMessageId` returns the first message's id, emits nothing, and retries a delivery still pending. |
 | `GET /v1/conversations/:id/tasks?after=&limit=` | Task views for the conversation's trees, in creation order, paged. |
 | `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
 | `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`. |
@@ -125,17 +154,22 @@ not contain them. Encryption (RFC 8291) and VAPID signing (RFC 8292) are the
 `web-push` package's; the server only builds the request with it and sends it
 itself.
 
-When a top-level task (no parent) ends, every registered device whose invite is
-still active gets one message: `{type: "task.finished", conversationId, taskId,
-state}`. Nothing a task or a model wrote goes in it, and there is no title.
+When a top-level task (no parent) ends, every device registered by the invite
+that owns its conversation gets one message, while that invite is active:
+`{type: "task.finished", conversationId, taskId, state}`. A conversation another
+invite owns, or one nobody owns yet (before `conversation adopt`), reaches no
+device. Nothing a task or a model wrote goes in it, and there is no title, model
+name or vendor name.
 
 What is left to send is computed from the database: a terminal event of a
 top-level task that came after the subscription (`since_feed_id`) and has no
 `push_deliveries` row. A restart therefore sends what it missed and never sends
 twice. A `404`/`410` deletes the subscription; `429`, `5xx`, a timeout and a network
 error are retried (3 attempts, 5 s times the attempt number apart); other `4xx`
-and an exhausted retry record the message as `dropped`. An invite revoked
-meanwhile records `revoked`.
+and an exhausted retry record the message as `dropped`. A revoke made through this
+server's invite store deletes the invite's devices and aborts sends to them that are
+under way; one made from the command line is seen at the next send, which records
+`revoked` instead of sending.
 
 The server fetches a URL a client chose, so: the endpoint must be `https`, on port
 443, without credentials, on a host in the allow-list (FCM, Mozilla autopush,
@@ -175,7 +209,24 @@ sent twice, whether it arrives during replay or after.
 
 Backpressure is the memory bound: the next page is not read until the socket
 drained. A client that does not drain within 30 s is closed and resumes later
-from its last id. A comment line goes out every 15 s.
+from its last id. A comment line goes out every 15 s, through the same drain
+wait, so a stalled idle client is dropped too.
+
+A stream belongs to its invite. Before each frame and each heartbeat the invite
+is read again; a revoke through the server's own store ends its streams at once,
+and one from the command line (another process) is seen within
+`revokeCheckMs` (1 s) through SQLite's `data_version`, so no frame goes out
+after the revoke is visible.
+
+### Message delivery
+
+The message and a `message_deliveries` row are committed in one transaction.
+The row is marked delivered only when the handler's promise resolves; a failure
+is retried with a doubling delay (1 s up to 60 s), and whatever is pending at
+start is tried again, so a crash between the commit and the handler loses
+nothing. One attempt per message runs at a time and the handler dedupes by
+`messageId` (the conductor admits a message id once). Messages from before v5
+have no row and are not replayed.
 
 ## Limits
 

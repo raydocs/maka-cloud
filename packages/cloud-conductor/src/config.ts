@@ -24,6 +24,24 @@ export interface ModelAccess {
   baseUrl?: string;
   /** Stable id of this connection; every Maka session is created with it (T3 path 6). */
   connectionId?: string;
+  /**
+   * The model gateway in this process. With it, every model request is reserved in the run ledger
+   * at its worst-case cost before it is sent and settled there at what it cost; the reported
+   * usage is not charged again. Without it, requests go to `baseUrl` and spend is metered from
+   * the reported usage after each call.
+   */
+  gateway?: ModelGateway;
+}
+
+/** Where the gateway charges one request. Both calls are synchronous: nothing spends between the check and the hold. */
+export interface ModelCharge {
+  reserve(key: string, usd: number): { ok: true } | { ok: false; reason: string; budget?: boolean };
+  settle(key: string, usd: number): void;
+}
+
+export interface ModelGateway {
+  /** A `fetch` whose requests are charged to `charge`. `close` cuts its requests in flight. */
+  open(charge: ModelCharge, subject: string): { fetch: typeof fetch; close(): void };
 }
 
 export interface ConductorLimits {
@@ -51,6 +69,11 @@ export interface ConductorLimits {
   outboxRetryMs: number;
   /** Longest wait between two sends of one outbox event. */
   outboxMaxRetryMs: number;
+  /**
+   * How long to wait before asking again about a task that ended while its run
+   * was not known to have stopped. Its reservation is held until it has.
+   */
+  stopCheckMs: number;
 }
 
 export const DEFAULT_LIMITS: ConductorLimits = {
@@ -66,6 +89,7 @@ export const DEFAULT_LIMITS: ConductorLimits = {
   maxNoticesPerRun: 20,
   outboxRetryMs: 1000,
   outboxMaxRetryMs: 60_000,
+  stopCheckMs: 60_000,
 };
 
 export const CONNECTION_SLUG = 'conductor-anthropic';

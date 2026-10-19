@@ -232,6 +232,103 @@ test('an irreversible tool is held until the user approves that exact call, and 
   assert.deepEqual(published, [{ title: 'Hello' }]);
 });
 
+test('an approval runs only while its approver may still act, checked right before the held call runs', async (t) => {
+  published.length = 0;
+  const allowed = new Set(['inv_a']);
+  const asked: Array<[string | null, string]> = [];
+  const h = await makeHarness(t, {
+    conductor: {
+      tools: [publish],
+      approverAuthorized: (approvedBy, conversationId) => {
+        asked.push([approvedBy, conversationId]);
+        return approvedBy !== null && allowed.has(approvedBy);
+      },
+    },
+  });
+  let actionRef = '';
+  h.model.script('conductor', calls(tool('publish_page', { title: 'Hello' })), (request) => {
+    actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1] ?? '';
+    return calls(
+      tool('ask_user', {
+        reason: 'irreversible',
+        question: 'Publish?',
+        actionRef,
+        recommended: 'approve',
+      }),
+    );
+  });
+  await h.send('cnv_1', 'Publish my page.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0]!;
+  h.model.script(
+    'conductor',
+    (request) => {
+      assert.match(lastUserText(request), new RegExp(`actionRef "${actionRef}"`));
+      // The approver's invite is revoked after the approval was recorded and before the call runs.
+      allowed.delete('inv_a');
+      return calls(tool('publish_page', { title: 'Hello', actionRef }));
+    },
+    (request) => {
+      assert.match(refusal(toolResults(request)[0]), /^not_approved:/);
+      allowed.add('inv_a');
+      // A refused approver's approval is gone, even once the check would pass again.
+      return calls(tool('publish_page', { title: 'Hello', actionRef }));
+    },
+    (request) => {
+      assert.match(refusal(toolResults(request)[0]), /^not_approved:/);
+      return text('Not published.');
+    },
+  );
+  assert.deepEqual(
+    await h.conductor.onAnswer(
+      {
+        conversationId: 'cnv_1',
+        questionId: question.questionId,
+        optionId: 'approve',
+        caller: 'inv_a',
+      },
+      h.access('cnv_1'),
+    ),
+    { accepted: true, duplicate: false },
+  );
+  await h.conductor.idle();
+  assert.deepEqual(published, []);
+  assert.deepEqual(asked, [['inv_a', 'cnv_1']]);
+  assert.equal(h.conductor.state.heldState(actionRef)?.state, 'expired');
+});
+
+test('an approval with no approver on record does not run when approvers are checked', async (t) => {
+  published.length = 0;
+  const h = await makeHarness(t, {
+    conductor: { tools: [publish], approverAuthorized: (approvedBy) => approvedBy !== null },
+  });
+  let actionRef = '';
+  h.model.script('conductor', calls(tool('publish_page', { title: 'Hello' })), (request) => {
+    actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1] ?? '';
+    return calls(
+      tool('ask_user', {
+        reason: 'irreversible',
+        question: 'Publish?',
+        actionRef,
+        recommended: 'approve',
+      }),
+    );
+  });
+  await h.send('cnv_1', 'Publish my page.');
+  await h.conductor.idle();
+  h.model.script(
+    'conductor',
+    () => calls(tool('publish_page', { title: 'Hello', actionRef })),
+    (request) => {
+      assert.match(refusal(toolResults(request)[0]), /^not_approved:/);
+      return text('Not published.');
+    },
+  );
+  await h.answer('cnv_1', h.outbox.questions[0]!.questionId, 'approve');
+  await h.conductor.idle();
+  assert.deepEqual(published, []);
+});
+
 test('a rejected irreversible action never runs', async (t) => {
   published.length = 0;
   const h = await makeHarness(t, { conductor: { tools: [publish] } });

@@ -49,9 +49,9 @@ interface SupervisorHost {
     subscribe(listener: () => void): () => void;       // FeedHub.subscribe
   };
   publish(entry: { kind: 'inbox.item' | 'inbox.digest'; conversationId: string | null; data: unknown }): void;
-  notice(conversationId: string, text: string): void;  // the conductor's notify path (conductor.notice)
-  answers: { deliver(a: QuestionAnswer): Promise<DeliveryOutcome> };   // T5's answers route
-  budget: {                                            // T5's run ledger, see "Verification spend"
+  notifier: { interrupt(i: Interrupt): void | Promise<void> };   // conversation notice now, web push later
+  answers: { deliver(a: QuestionDelivery, signal: AbortSignal): Promise<QuestionOutcome> };   // T5's answers route
+  budget: {                                            // PR 2, over T5's Conductor.reserveSpend / settleSpend
     reserve(r: { key: string; conversationId: string; taskId: string; maxUsd: number }): { ok: true } | { ok: false };
     settle(key: string, actualUsd: number): void;      // releases the unused part
   };
@@ -87,7 +87,7 @@ properties, checked against the merged code before any T20 package code:
 | `conductor.question {questionId, reason (taste \| budget_overrun \| irreversible), question, options[{id,label}], recommended, actionRef?}` | The three conductor-raised interrupt rules read `reason` as given by code. T20 never infers a reason from text. |
 | `conductor.answered {questionId, by}` when any route answers | Closes the inbox item when the human answered inline in the web app. Without it T20 would parse the "Answer to q_…" user message, which is brittle. |
 | The answers route is idempotent per `questionId` | Re-delivery of the same answer returns success with `applied:false`; a different answer to a closed question returns 409 `already_answered` with the stored one. T5 already checks "open question" in its write chain; this makes retries safe. |
-| An optional `text` on the answers route | The free-text reply. Option-only for `irreversible`. If T5 has no `text`, the T20 server PR adds it to the route and the handler (our files). |
+| Free text with an option on the answers route | **As merged:** the text accompanies a chosen option; there is no text-only answer. Option-only (no text) for `irreversible` and `budget_overrun`. |
 | A way for T20 to put a notice into a conversation | `host.notice`, wired to the same outbox as `notify`. |
 | A ledger entry other than model spend and child reservations: `reserve(key, conversationId, taskId, maxUsd)` and `settle(key, actualUsd)` | Verification spend counts against the budget of the run that delegated the task (win, 2026-10-19). The reservation is one synchronous check-and-reserve in T5's ledger, idempotent by `key`, and still allowed after that run's turn has ended (a task can finish after its turn). Refused when the run's remaining budget is below `maxUsd`. |
 
@@ -284,7 +284,7 @@ never receives interrupt flags and cannot change them.
 
 ## Answers
 
-`POST /v1/inbox/items/:id/answer` with `{answerId, optionId | text, preconditionHash}`.
+`POST /v1/inbox/items/:id/answer` with `{answerId, optionId, text?, preconditionHash}`.
 
 1. **Claim, in one synchronous transaction:** the item is `open`, the hash
    matches, no answer exists. Insert the answer, set the item `answering`. A repeat
@@ -303,7 +303,7 @@ never receives interrupt flags and cannot change them.
    with `clientMessageId = answerId`, which T4 already makes idempotent. The
    message is built by code: a fixed template, the task id and a capped, quoted
    title, and the human's text after a delimiter. A `local` route (accept,
-   acknowledge, snooze) records the decision and sends nothing.
+   acknowledge, keep waiting) records the decision and sends nothing.
 5. **Retry with backoff** while the item is `answering`; on success close it
    (`answered`). 409 `already_answered` from the conductor with a different
    choice closes it `handled_elsewhere` and shows what was chosen. The same
@@ -334,6 +334,12 @@ check (T5, inside its write chain) is the final arbiter for question answers.
 | `GET` / `PUT /v1/inbox/settings` | Quiet hours, hourly cap, stall time, digest schedule, daily verifier cap. |
 | `POST /v1/inbox/digest` | Build and return a digest now. |
 | SSE `inbox.item` on `GET /v1/events` | Item snapshot with `version`. Clients list on connect, then apply events by `(id, version)`. |
+
+Since per-invite isolation, items are listed and answered within the caller's
+own conversations, and the answer stores its caller so delivery is refused once
+that invite is revoked. Mutes, settings and the digest are one set for the
+whole server, so the server answers 404 to them for every invite until they are
+kept per owner; digests stay off client streams.
 
 The item rows live in `supervisor.db`, the stream lives in the T4 feed. They are
 joined by `feed_outbox`: every item version is recorded with the item, and a
@@ -410,3 +416,227 @@ Per-user scoping (T17 adds accounts; items then carry a user), the gateway ledge
 that replaces the price table (T17), web push (T9), suggestion cards (T16 reuses the item
 store, delivery and limits), live model or network runs, and any new authority
 for the supervisor over tasks or sandboxes.
+
+## As built (PR 1, core inbox)
+
+Where the package differs from the sketches above, now that T5 has merged:
+
+- T5 already exposes `Conductor.reserveSpend`/`settleSpend` and a notice path, so
+  the budget port (PR 2) and the notifier are thin adapters. Text always
+  accompanies an option; a user message dismisses an open question and emits no
+  event, so the supervisor closes its question items on a user message and on
+  refused deliveries (`not_open`, `closed`), and never posts a message over an
+  open question (`question_open`).
+- The stall options are check, cancel and "keep waiting" (local, no message);
+  there is no snooze. A low-confidence manifest is a `decision` item.
+- `stop()` does not wait for a notifier or publisher that never returns: those
+  calls carry no signal, so the supervisor stops waiting for them on abort.
+- Task history from before the supervisor's first start updates the projection
+  but raises no items; a question that is still open does.
+- The digest's `open` count excludes `finished` items, which never ask anything of the human.
+
+## As built (PR 2a, source fetcher)
+
+`createSourceFetcher` (`src/verification/fetcher.ts`) is the only code that makes
+an outbound request. A host name is resolved once per hop; if any answer is not
+public the fetch is refused (a mixed answer is not trusted), and the connection
+goes to the first checked address with the certificate verified for the URL's
+host name (`nodeTransport`, no agent, so no cookie or credential is ever sent).
+Address literals and every spelling the URL parser normalizes (decimal, hex,
+short forms, IPv4-mapped IPv6) are judged by `isPublicAddress`. Only text types
+are read, identity encoding only, 2 MiB and 15 s by default. Nothing calls it
+until the verification engine (PR 2b) is wired.
+
+## As built (PR 2b, independent verification)
+
+Verification is off unless `Supervisor.start` gets a `verification` option
+(evidence source, source fetcher, budget port, verifier pool). Without it a
+finished task is shown as finished at once, as in PR 1.
+
+- **Claim and queue.** When a top-level task succeeds, the feed transaction
+  inserts its one `verifications` row (`UNIQUE(task_id)`). Coding is recognized
+  by `changes.json` or `change.patch` in the manifest's artifacts, research by
+  `report.json` (T7 exports it in #47). A task with neither is `skipped`: a
+  finished item marked "not independently checked", no reads, no spend. A
+  low-confidence result raises its decision at once and is checked alongside it.
+- **Deterministic first, and final.** Coding: the test record says `verified`,
+  every changed file's content matches its recorded git blob hash, the patch is
+  not empty. Research: the exported `report.json` parses, every cited page is
+  fetched once (4 at a time), and `@maka-cloud/playbooks/citations` checks that
+  each quote is in its page and each number in a claim is in its quote. Claims
+  the playbook already dropped (`removed` in the exported `verification.json`)
+  are skipped. A 4xx page or a refused address is a failure; a page that is down
+  is "could not check" and retried.
+- **Model second, only if nothing failed.** The pool model of a different vendor
+  than the runner (`claude-agent-sdk` is Anthropic, `codex` is OpenAI; an unknown
+  runner has no eligible verifier). The request carries claims and evidence as
+  JSON inside blocks closed by a random marker; the answer is validated with zod;
+  the worst of repeated verdicts wins; a missing verdict is "could not check".
+  A verdict can add a failure, never remove one.
+- **Spend.** Before the request the supervisor reserves the upper bound (input
+  at 2 characters per token, output at the cap): first against the day's cap in
+  `verifier_spend` (one synchronous transaction, the day in the configured time
+  zone), then in the conversation's budget (`BudgetPort`, over T5's
+  `reserveSpend`/`settleSpend`). A refusal by either ends the check
+  `could_not_check` with a budget message, and a refusal by the conversation
+  budget releases the daily reservation. After the call both settle to the
+  reported usage; a call that failed is charged at its reservation. A reservation
+  left by a stopped process is settled at its bound if it had been armed (a
+  request may have run) and released if not. `BudgetPort.settle` must treat an
+  unknown key as a no-op.
+- **Ends.** `passed` raises the finished item (independently checked); `failed`
+  and `could_not_check` raise a `verification_failed` item (options: ask the
+  agent to fix it, accept anyway, and for "could not check" also check again,
+  which queues a new epoch). A check that could not run for a passing reason
+  (source or evidence down, the model not answering, a deadline) is retried up to
+  3 times with doubling backoff; `budget` and `no_verifier` are not retried.
+- **Exits.** Slots (default 2), the per-attempt deadline timer and the abort
+  handle are released on done, deadline, stop and throw; a stopped attempt leaves
+  its row running and the next start queues it again.
+
+## As built (PR 3a, server side)
+
+Everything here is in `packages/cloud-server`; it imports nothing from the
+supervisor package, so the two build independently and the composition code (PR
+3b) joins them.
+
+- **`supervisor` option.** `startCloudServer({ supervisor })` calls the factory
+  with `SupervisorParts` after the handler exists and before the server listens,
+  and gets an `InboxService` back. On close the order is: streams end, the HTTP
+  server stops accepting, the supervisor stops, the handler closes, the
+  orchestrator endpoint closes, the database closes last. A failed start stops
+  the supervisor it already started. Without the option nothing changes and
+  `/v1/inbox/*` is 404.
+- **Parts.** `feed.read` is `readFeed` over all conversations with `internal`
+  set, which keeps a task's runner id (the public stream still strips it; the
+  supervisor needs it to pick a verifier of another vendor). `feed.subscribe` is
+  the hub. `publish` writes an extension event. `answers.deliver` goes to the
+  handler's `onAnswer` with the conversation's own access (`not_found` for an
+  unknown conversation or a handler that takes no answers). `messages.post` is the
+  messages route's own path: idempotent on `clientMessageId`, and a new message
+  reaches the handler once. `artifacts.read` reads through the artifact source
+  and checks that the task's root session is the named conversation's.
+  `answers.deliver` and `messages.post` refuse an already aborted signal before
+  they write anything.
+- **Extension feed kinds.** Schema v4 adds `extension_events` (append-only) and
+  the feed kinds `inbox.item` and `inbox.digest`. The event body is stored as
+  published and sent as the stream frame's data with `conversationId` added.
+  Events are refused for an unknown conversation or data over 256 KiB. A
+  conversation stream carries the inbox events of that conversation; digests
+  (no conversation) go to unscoped streams only.
+- **Routes** (`inbox.ts`), all behind the same invite as the rest of the API:
+  `GET /v1/inbox/items`, `POST /v1/inbox/items/:id/answer`,
+  `PUT`/`DELETE /v1/inbox/mutes/:kind`, `GET`/`PUT /v1/inbox/settings`,
+  `POST /v1/inbox/digest`. The answer is 200 when the item is closed and 202
+  while delivery is still being retried; refusals map `not_found` 404,
+  `invalid_*`/`text_*` 400, `stale`/`closed`/`already_answered`/`question_open`
+  409 (stale and already answered carry the refreshed item), `stopped` 503; a
+  reason the server does not know is a 500. Writes share the control rate limit
+  per invite; reads are not limited. The service decides what a settings patch
+  or a mute kind means (`ok: false` is 400 or 404), so the server holds no copy
+  of the supervisor's schemas.
+- **Not in this PR:** the `Supervisor` to `InboxService` adapter, the notifier,
+  the conversation budget and verifier model adapters, and the end-to-end test
+  (PR 3b, `packages/cloud-host`).
+
+## As built (PR 3b, host wiring)
+
+`packages/cloud-host` joins the server and the supervisor. The server and the
+supervisor still import nothing from each other.
+
+- **Start.** `startCloud({ supervisor })` calls the factory with the server's
+  parts and the conductor after the conductor exists and before the server
+  listens; the stack's factory is `startInbox` (`src/inbox/setup.ts`), with the
+  supervisor's database at `<data dir>/supervisor.db`. On close the supervisor
+  stops before the conductor and the database (PR 3a's order).
+- **Adapters** (`src/inbox/`):
+  - `budget.ts`: `BudgetPort` over `Conductor.reserveSpend/settleSpend`. A refusal
+    (budget, no run, conflict, bad amount) or an error reading the budget is a
+    refusal with a reason; settling an unknown key is silent.
+  - `evidence.ts`: artifacts through the server's artifact source (the host-side
+    handoff directory), decoded as UTF-8.
+  - `notifier.ts`: an interrupt becomes a conversation notice (`postNotice`), one
+    per conversation for a batch, the ask clipped to 300 characters. Web push is a
+    second notifier later.
+  - `models.ts`: verifier and summary models over the AI SDK's `generateText`:
+    one stateless request, `maxRetries: 0` (every retry is the supervisor's, and
+    reserved and charged), API key only. Missing usage is charged at the bound.
+    A reply that is not JSON is passed on as text and counts as no verdict.
+  - `service.ts`: the supervisor as the server's `InboxService`; settings and mute
+    kinds are validated by the supervisor's own schema.
+- **Configuration** (`MAKA_CLOUD_VERIFIER_MODELS`): a JSON array of
+  `{vendor, model, inputPerMTokUsd, outputPerMTokUsd, maxInputChars?,
+  maxOutputTokens?, baseUrl?}`. No model id or price is built in. An `openai` entry
+  needs `OPENAI_API_KEY`. `MAKA_CLOUD_VERIFIER_DAILY_CAP_USD` (default 5) is the
+  starting cap, changeable in the inbox settings; `MAKA_CLOUD_SUMMARY_MODEL`
+  defaults to `claude-haiku-5-5`. With no pool the checks that need no model still
+  run, and anything that needs one ends "could not check" instead of passing.
+- **Consequence to know about:** a `claude-agent-sdk` task can only be checked by a
+  non-Anthropic model, so without an `openai` pool entry those tasks are never
+  shown as independently verified.
+- Fork delta: the root `build` and `build:test` chains build the supervisor before
+  the host (the host now depends on it), and `packages/cloud-host` gains
+  `@maka-cloud/supervisor`, `ai`, `@ai-sdk/anthropic` and `@ai-sdk/openai` at the
+  versions `packages/runtime` already pins (one lockfile entry, no new package).
+
+## As built (post-merge review fixes, part C)
+
+Four findings from the post-merge review, each with a test that fails on the code
+before the fix.
+
+- **The bound is bytes, not characters.** `inputTokenBound(request)` in
+  `verification/model.ts` is the one place the input estimate lives: one token per
+  UTF-8 byte of instructions and prompt, plus a 1024-token wrapper allowance. The
+  old half-a-token-per-character guess undercounted dense text (CJK, emoji) by up
+  to three times, so the reservation, the conversation budget and the daily cap
+  could be overrun. `upperBoundUsd` adds the output cap in full and returns
+  `undefined` when a price or the output cap is not a finite, non-negative number;
+  the engine then ends `could_not_check` with code `budget` before reserving
+  anything or calling the model. The host's fallback for a provider that reports no
+  usage charges the same bound. A model gateway's reservation replaces
+  `inputTokenBound`; nothing else computes the estimate.
+- **An empty check is never a pass.** A research report with no claims, or whose
+  renderings show no claim, is a failure. The engine also refuses to pass with
+  zero claims left (`incomplete`): a guard for future preparers, not reachable by
+  the two built in.
+- **Text the agent wrote is never matched, it is reproduced.** `report.json` is the
+  source of truth and the checked set is exactly the claims in it. Claim ids must be
+  unique, else the report is rejected. `verification.json` and the renderings are
+  written by the agent, so they never take a claim out of the check: a claim the
+  record calls removed is still checked (a report that should not contain a failing
+  claim must not contain it in `report.json`). They are only tied to the report: the
+  record must list exactly the claims of `report.json`, its `removed` flags must be
+  what its own statuses give in `drop_unsupported` mode, and every delivered
+  `report.md` and `report.html` must equal, as raw bytes, what `renderFromRecord`
+  (exported from `@maka-cloud/playbooks/citations`, the renderer `cite-check` uses)
+  makes from them. Anything else ends `could_not_check` with code `unverified` and
+  the reason "checks reported by agent (unverified)": never "independently
+  checked", and no fetch or model call is spent past it. That covers a rendering
+  edited after it was made, a missing or unusable record, a listed rendering that
+  does not exist, an artifact name listed twice, and an artifact listed as a link
+  (a link cannot be read here and reproduced, so it is never skipped). A task that
+  lists a change beside any report file, and any task whose artifacts are not
+  exactly the files one check reads, is `unverified` too. That is decided by
+  allowlists, not by matching names: coding is accepted only if every artifact is
+  a plain local path whose file name is exactly `changes.json`, `change.patch` or
+  `verification.json` (a change among them); research only if every artifact is
+  exactly `report.json`, `report.md`, `report.html` or `verification.json`
+  (`report.json` among them). "Plain" means ASCII letters, digits, `.`, `_`, `-`
+  and `/` with no empty, `.` or `..` part, so a link, an encoding, a query or
+  fragment, a backslash, a look-alike letter or a different case is never
+  accepted. A manifest that resembles a change or a report by a loose reading
+  (links, percent-decoding, case-folding) but is not accepted gets the research
+  check, which ends unverified before anything is read; the loose reading only
+  ever widens suspicion. With no
+  rendering listed there is nothing to reproduce and every claim is checked. A contract test in the
+  playbooks (`run.test.ts`) keeps the record able to reproduce what `cite-check`
+  delivers. `ArtifactRead` carries the raw `bytes` next to the decoded `text` for
+  this comparison.
+- **Nothing waits on a hung resolver or fetcher.** The source fetcher races its
+  name resolution with the fetch's abort signal (the deadline or the caller's
+  stop), and `prepareResearch` races each `fetchText` with the check's signal, so a
+  fetcher that ignores the signal cannot hold a verification slot past the deadline
+  or keep `Supervisor.stop()` from returning.
+- **A 404 or 410 stays a 404 or 410.** `fetchText` keeps the status of an error
+  answer in its failure result, so the research check reports a gone page as a
+  failure instead of as a source that is merely down.

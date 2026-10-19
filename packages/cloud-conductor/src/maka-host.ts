@@ -19,6 +19,7 @@ import {
   connectionIdOf,
   MODEL_ID,
   type ModelAccess,
+  type ModelCharge,
   providerStateIdentity,
 } from './config.js';
 import type { ConductorState, SessionKind } from './state.js';
@@ -37,6 +38,8 @@ export interface MakaHostOptions {
    * Throwing refuses the request: nothing is sent and nothing is charged.
    */
   beforeModelRequest(makaSessionId: string): void;
+  /** Where the session's requests are charged when `access.gateway` is set. */
+  chargeFor(makaSessionId: string): ModelCharge;
   now?: () => number;
 }
 
@@ -58,6 +61,7 @@ export class MakaHost {
   private readonly connection;
   private readonly identity: `sha256:${string}`;
   private readonly now: () => number;
+  private readonly gatewayClients = new Map<string, { fetch: typeof fetch; close(): void }>();
 
   constructor(private readonly options: MakaHostOptions) {
     this.now = options.now ?? Date.now;
@@ -118,8 +122,34 @@ export class MakaHost {
     return this.manager.recoverInterruptedSessions();
   }
 
+  /** Whether model requests are charged by the gateway when they settle. */
+  get gatewayCharged(): boolean {
+    return this.options.access.gateway !== undefined;
+  }
+
+  /** Ends the session's gateway access, cutting its requests in flight. The next request opens it again. */
+  releaseModelAccess(makaSessionId: string): void {
+    const client = this.gatewayClients.get(makaSessionId);
+    if (!client) return;
+    this.gatewayClients.delete(makaSessionId);
+    client.close();
+  }
+
   async close(): Promise<void> {
+    for (const makaSessionId of [...this.gatewayClients.keys()]) {
+      this.releaseModelAccess(makaSessionId);
+    }
     await this.runStore.close?.();
+  }
+
+  private gatewayFetch(makaSessionId: string): typeof fetch {
+    const gateway = this.options.access.gateway as NonNullable<ModelAccess['gateway']>;
+    let client = this.gatewayClients.get(makaSessionId);
+    if (!client) {
+      client = gateway.open(this.options.chargeFor(makaSessionId), makaSessionId);
+      this.gatewayClients.set(makaSessionId, client);
+    }
+    return client.fetch;
   }
 
   private buildBackend(ctx: BackendFactoryContext): AiSdkBackend {
@@ -141,7 +171,9 @@ export class MakaHost {
       apiKey: access.apiKey,
       modelId: MODEL_ID,
       modelFactory: (modelInput) => {
-        const send = modelInput.fetch ?? globalThis.fetch;
+        const send: typeof fetch = access.gateway
+          ? (input, init) => this.gatewayFetch(ctx.sessionId)(input, init)
+          : (modelInput.fetch ?? globalThis.fetch);
         return getAIModel({
           ...modelInput,
           fetch: (input, init) => {

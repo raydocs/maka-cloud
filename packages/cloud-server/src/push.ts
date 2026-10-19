@@ -117,7 +117,8 @@ SELECT s.endpoint, s.p256dh, s.auth, t.task_id, f.conversation_id,
 FROM feed f
 JOIN task_log t ON t.seq = CAST(f.ref AS INTEGER)
 JOIN task_index i ON i.task_id = t.task_id AND i.parent_task_id IS NULL
-JOIN push_subscriptions s ON f.id > s.since_feed_id
+JOIN conversations c ON c.conversation_id = f.conversation_id
+JOIN push_subscriptions s ON f.id > s.since_feed_id AND s.invite_id = c.owner
 LEFT JOIN push_deliveries d ON d.endpoint = s.endpoint AND d.task_id = t.task_id
 WHERE f.kind = 'task.event' AND f.id > ?
   AND json_extract(t.event, '$.type') IN ('task_succeeded', 'task_failed', 'task_cancelled')
@@ -126,7 +127,8 @@ ORDER BY f.id, s.endpoint
 LIMIT ?`;
 
 /**
- * Tells registered devices when a top-level task of any conversation ends. What
+ * Tells a device when a top-level task of a conversation its invite owns ends; a
+ * conversation nobody owns, or another invite owns, never reaches it. What
  * still has to be sent is derived from the database: a terminal event of a
  * top-level task that came after the subscription and has no `push_deliveries` row. So
  * a restart sends what was missed, and nothing is sent twice. The payload names
@@ -148,13 +150,19 @@ export class PushService {
   private dirty = false;
   private running: Promise<void> | undefined;
   private unsubscribe: (() => void) | undefined;
+  private offRevoke: (() => void) | undefined;
+  /** Sends under way, so a revoke can cut them off. */
+  private readonly inflight = new Map<string, { inviteId: string; controller: AbortController }>();
   private timer: NodeJS.Timeout | undefined;
   private closed = false;
 
   constructor(
     private readonly db: DatabaseSync,
     private readonly hub: FeedHub,
-    private readonly invites: { isActive(inviteId: string): boolean },
+    private readonly invites: {
+      active(inviteId: string): boolean;
+      onRevoke?(listener: (inviteId: string) => void): () => void;
+    },
     private readonly options: PushOptions,
   ) {
     const { config } = options;
@@ -227,6 +235,7 @@ export class PushService {
   start(): void {
     if (this.closed || this.unsubscribe) return;
     this.unsubscribe = this.hub.subscribe(() => this.kick());
+    this.offRevoke = this.invites.onRevoke?.((inviteId) => this.revokeInvite(inviteId));
     this.kick();
   }
 
@@ -234,6 +243,7 @@ export class PushService {
   async close(): Promise<void> {
     this.closed = true;
     this.unsubscribe?.();
+    this.offRevoke?.();
     clearTimeout(this.timer);
     this.abort.abort();
     try {
@@ -320,7 +330,7 @@ export class PushService {
         .get(item.endpoint) as { invite_id: string } | undefined
     )?.invite_id;
     if (inviteId === undefined) return;
-    if (!this.invites.isActive(inviteId)) return this.finish(item, 'revoked');
+    if (!this.invites.active(inviteId)) return this.finish(item, 'revoked');
     let request: ReturnType<typeof webpush.generateRequestDetails>;
     try {
       request = webpush.generateRequestDetails(
@@ -341,8 +351,14 @@ export class PushService {
       Object.entries(request.headers).map(([name, value]) => [name, String(value)]),
     );
     let status: number | undefined;
+    const controller = new AbortController();
+    this.inflight.set(key, { inviteId, controller });
     try {
-      const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.timeoutMs)]);
+      const signal = AbortSignal.any([
+        this.abort.signal,
+        controller.signal,
+        AbortSignal.timeout(this.timeoutMs),
+      ]);
       status = (
         await this.transport(
           { endpoint: item.endpoint, headers, body: request.body ?? Buffer.alloc(0) },
@@ -351,7 +367,11 @@ export class PushService {
       ).status;
     } catch {
       if (this.closed) return;
+    } finally {
+      this.inflight.delete(key);
     }
+    // A revoke while the send was out removed the subscription: nothing more is recorded.
+    if (!this.subscribed(item.endpoint)) return;
     if (status !== undefined && status >= 200 && status < 300) return this.finish(item, 'sent');
     if (status === 404 || status === 410) return this.forget(item.endpoint);
     if (status !== undefined && status !== 429 && status < 500) return this.finish(item, 'dropped');
@@ -376,6 +396,26 @@ export class PushService {
         'INSERT OR IGNORE INTO push_deliveries (endpoint, task_id, state, at) VALUES (?, ?, ?, ?)',
       )
       .run(item.endpoint, item.taskId, state, this.now());
+  }
+
+  private subscribed(endpoint: string): boolean {
+    return (
+      this.db.prepare('SELECT 1 FROM push_subscriptions WHERE endpoint = ?').get(endpoint) !==
+      undefined
+    );
+  }
+
+  /** The invite is revoked: its devices are forgotten and sends to them are cut off. */
+  private revokeInvite(inviteId: string): void {
+    const endpoints = (
+      this.db
+        .prepare('SELECT endpoint FROM push_subscriptions WHERE invite_id = ?')
+        .all(inviteId) as unknown as Array<{ endpoint: string }>
+    ).map((row) => row.endpoint);
+    for (const endpoint of endpoints) this.forget(endpoint);
+    for (const entry of this.inflight.values()) {
+      if (entry.inviteId === inviteId) entry.controller.abort();
+    }
   }
 
   private forget(endpoint: string): void {

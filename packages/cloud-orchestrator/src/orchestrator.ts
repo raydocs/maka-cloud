@@ -16,6 +16,7 @@ import {
   isTerminal,
   OrchestratorError,
   type SessionId,
+  type StopPendingCause,
   type StoredEvent,
   type TaskEvent,
   type TaskId,
@@ -30,6 +31,8 @@ export const MAX_WAIT_MS = 10 * 60_000;
 export const DEFAULT_MAX_DEPTH = 5;
 export const DEFAULT_ORPHAN_STOP_TIMEOUT_MS = 10_000;
 export const DEFAULT_CONTROL_TIMEOUT_MS = 15_000;
+/** How often a stop a task is owed is tried again: doubling from `firstMs`, at most `maxMs` apart. */
+export const DEFAULT_STOP_RETRY = { firstMs: 5_000, maxMs: 5 * 60_000 } as const;
 const MAX_TITLE_LENGTH = 200;
 const MAX_KEY_LENGTH = 200;
 /** Keys cancelled before their task existed, remembered so a late delegation is refused. */
@@ -60,6 +63,8 @@ export interface OrchestratorOptions {
   orphanStopTimeoutMs?: number;
   /** How long a pause or resume waits for the runner to answer. Default 15 s. */
   controlTimeoutMs?: number;
+  /** Backoff for retrying a stop a task is owed. Default `DEFAULT_STOP_RETRY`. */
+  stopRetry?: { firstMs?: number; maxMs?: number };
 }
 
 /**
@@ -90,6 +95,8 @@ export interface OrchestratorStats {
   /** Trees counted against the active-task quota. */
   treesCounted: number;
   connectionSessions: number;
+  /** Tasks whose owed stop is being retried. */
+  stopRetries: number;
 }
 
 export interface DelegateInput {
@@ -119,6 +126,7 @@ export class Orchestrator {
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
   private readonly controlTimeoutMs: number;
+  private readonly stopRetry: { firstMs: number; maxMs: number };
   private readonly newTaskId: () => TaskId;
   private readonly auth: SessionAuth;
   private readonly quotas: QuotaLimits;
@@ -130,6 +138,11 @@ export class Orchestrator {
   private readonly connectionsBySession = new KeyedCounter<SessionId>();
   private openConnections = 0;
   private readonly handles = new Map<TaskId, RunHandle>();
+  /** Tasks whose runner start has not been handed off yet: a run may still appear for them. */
+  private readonly starting = new Set<TaskId>();
+  /** Retries of owed stops, one per task, until the runner confirms or `close`. */
+  private readonly stopRetries = new Map<TaskId, AbortController>();
+  private closed = false;
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
   private readonly background = new Set<Promise<void>>();
@@ -160,6 +173,7 @@ export class Orchestrator {
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
+    this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
       options.newTaskId ?? (() => `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`);
   }
@@ -194,6 +208,16 @@ export class Orchestrator {
     return this.orphans;
   }
 
+  /**
+   * Stops retrying the stops tasks are owed. The obligations stay in the log, so
+   * the next process over the same store retries them.
+   */
+  close(): void {
+    this.closed = true;
+    for (const retry of this.stopRetries.values()) retry.abort();
+    this.stopRetries.clear();
+  }
+
   stats(): OrchestratorStats {
     return {
       activeTasks: this.tasks.size,
@@ -204,6 +228,7 @@ export class Orchestrator {
       sessionsWaiting: this.waitsBySession.keys,
       treesCounted: this.activeByRoot.keys,
       connectionSessions: this.connectionsBySession.keys,
+      stopRetries: this.stopRetries.size,
     };
   }
 
@@ -377,7 +402,8 @@ export class Orchestrator {
   }
 
   status(session: SessionInfo, taskId: TaskId): TaskView {
-    return toView(this.visible(session, taskId));
+    this.visible(session, taskId);
+    return this.view(taskId);
   }
 
   /** An aborted `signal` (the caller's connection dropped) stops the wait; the task is left alone. */
@@ -610,13 +636,19 @@ export class Orchestrator {
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(orphans.map((task) => this.stopLeftover(task)));
     for (const [index, task] of orphans.entries()) {
-      const problem = stops[index];
-      if (problem !== undefined) {
+      const stop = stops[index] ?? 'none';
+      if (typeof stop === 'object') {
         await this.record({
           type: 'task_progress',
           taskId: task.taskId,
-          note: `could not stop the leftover runner: ${problem}`,
+          note: `could not stop the leftover runner: ${stop.problem}`,
         });
+        // Ending the task does not stop its run: the stop stays owed and is retried.
+        if (!task.stopPending) {
+          await this.record({ type: 'task_stop_pending', taskId: task.taskId, cause: 'restart' });
+        }
+      } else if (stop === 'stopped' && task.stopPending) {
+        await this.record({ type: 'task_stopped', taskId: task.taskId });
       }
       // Nothing is running after a restart. History is never edited, so the
       // outcome is appended.
@@ -635,12 +667,19 @@ export class Orchestrator {
       );
     }
     this.restoring = false;
+    // Ended tasks whose stop an earlier process could not confirm.
+    for (const taskId of this.store.stopPendingTaskIds()) this.retryStop(taskId);
   }
 
-  /** Resolves to a description of what went wrong, or undefined when the leftover is stopped (or none exists). */
-  private async stopLeftover(task: TaskRecord): Promise<string | undefined> {
+  /**
+   * Stops what a runner left of the task. Only `stopped` is a confirmation; `none`
+   * means its runner is registered and cannot leave work behind (it has no
+   * `stopOrphaned`). A runner that is not registered is unknown, never stopped.
+   */
+  private async stopLeftover(task: TaskRecord): Promise<LeftoverStop> {
     const runner = this.runners.get(task.runner);
-    if (!runner?.stopOrphaned) return undefined;
+    if (!runner) return { problem: 'its runner is not registered' };
+    if (!runner.stopOrphaned) return 'none';
     const timeoutMs = this.orphanStopTimeoutMs;
     const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
@@ -654,11 +693,80 @@ export class Orchestrator {
           }, timeoutMs);
         }),
       ]);
-      return undefined;
+      return 'stopped';
     } catch (error) {
-      return error instanceof Error ? error.message : String(error);
+      return { problem: error instanceof Error ? error.message : String(error) };
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /** True when the task's run is registered or starting and its runner could stop it later by id. */
+  private mayStillRun(taskId: TaskId): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || task.stopPending) return false;
+    if (!this.handles.has(taskId) && !this.starting.has(taskId)) return false;
+    return this.runners.get(task.runner)?.stopOrphaned !== undefined;
+  }
+
+  /** Records that the task owes a stop, when its runner can stop it by id and it does not owe one yet. */
+  private async recordStopPending(taskId: TaskId, cause: StopPendingCause): Promise<void> {
+    await this.record({ type: 'task_stop_pending', taskId, cause }, () => {
+      const task = this.lookup(taskId);
+      if (!task || task.stopPending || !this.runners.get(task.runner)?.stopOrphaned) {
+        throw new Superseded();
+      }
+    });
+  }
+
+  /** Clears an owed stop. Dropped unless one is owed and no start can still hand back a run. */
+  private recordStopped(taskId: TaskId): Promise<StoredEvent | undefined> {
+    return this.record({ type: 'task_stopped', taskId }, () => {
+      if (!this.lookup(taskId)?.stopPending || this.starting.has(taskId)) throw new Superseded();
+    });
+  }
+
+  /** Cancels the run of a task that ended. Until that succeeds, the task owes a stop. */
+  private async cancelLeftover(taskId: TaskId, handle: RunHandle): Promise<void> {
+    if (await cancelHandle(handle)) await this.recordStopped(taskId);
+    else await this.recordStopPending(taskId, 'cancel_failed');
+  }
+
+  /** Retries the stop a task is owed, backing off, until its runner confirms it or `close`. */
+  private retryStop(taskId: TaskId): void {
+    if (this.closed || this.stopRetries.has(taskId)) return;
+    const retry = new AbortController();
+    this.stopRetries.set(taskId, retry);
+    // Released in the same step as the decision to stop, so an obligation
+    // recorded right after starts a retry of its own.
+    const release = () => {
+      if (this.stopRetries.get(taskId) === retry) this.stopRetries.delete(taskId);
+    };
+    void this.stopUntilConfirmed(taskId, retry.signal, release).finally(release);
+  }
+
+  private async stopUntilConfirmed(
+    taskId: TaskId,
+    signal: AbortSignal,
+    release: () => void,
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      await sleep(Math.min(this.stopRetry.firstMs * 2 ** attempt, this.stopRetry.maxMs), signal);
+      if (signal.aborted) return release();
+      const task = this.lookup(taskId);
+      if (!task?.stopPending) return release();
+      // A start still under way may yet hand back a run: try again after it.
+      if (this.starting.has(taskId)) continue;
+      try {
+        // Only a confirmed stop clears the obligation: a runner that is gone or
+        // can no longer stop by id leaves it owed.
+        if ((await this.stopLeftover(task)) !== 'stopped' || signal.aborted) continue;
+        await this.recordStopped(taskId);
+      } catch {
+        // The store failed; the obligation is still in the log, so try again.
+        continue;
+      }
+      if (!this.lookup(taskId)?.stopPending) return release();
     }
   }
 
@@ -676,6 +784,8 @@ export class Orchestrator {
     const left = this.budgetLeft(taskId);
     const executor = this.auth.issue({ parentTaskId: taskId });
     this.executorSessions.set(taskId, executor.sessionId);
+    // Until the run is registered or stopped, a task that ends owes a stop.
+    this.starting.add(taskId);
     let handle: RunHandle;
     try {
       handle = await runner.start({
@@ -683,12 +793,15 @@ export class Orchestrator {
         runner: runnerName,
         briefPath: paths.briefPath,
         resultPath: paths.resultPath,
-        ...(left === undefined ? {} : { budgetUsd: left }),
+        ...(left === undefined
+          ? {}
+          : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),
         ...(this.endpoint === undefined
           ? {}
           : { mcp: { url: this.endpoint, token: executor.token } }),
       });
     } catch (error) {
+      this.starting.delete(taskId);
       await this.recordRunnerOutcome({
         type: 'task_failed',
         taskId,
@@ -696,34 +809,97 @@ export class Orchestrator {
       });
       return;
     }
-    // The hand-off. A cancel or an ended ancestor may have landed while the
-    // runner was starting, and the task need not be terminal yet: a cancel in
-    // progress has no handle to stop. Anything that is stopping gets the late
-    // handle cancelled here, because nothing else knows about it.
-    if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
-      await cancelQuietly(handle);
-      return;
+    // One reader per handle, started the moment the handle exists and living as long as its
+    // stream, whatever happens to this start: it records what the run spends until the stream ends,
+    // and what the run reports only once its start is recorded. pump records its own failures; a
+    // store failure has nowhere left to report.
+    let reports!: (recorded: boolean) => void;
+    const reading = this.pump(
+      taskId,
+      handle,
+      new Promise<boolean>((resolve) => {
+        reports = resolve;
+      }),
+    ).catch(() => undefined);
+    let recorded = false;
+    try {
+      // The hand-off. A cancel or an ended ancestor may have landed while the
+      // runner was starting, and the task need not be terminal yet: a cancel in
+      // progress has no handle to stop. Anything that is stopping gets the late
+      // handle cancelled here, because nothing else knows about it.
+      if (this.isStopping(taskId) || this.ancestorStopped(taskId)) {
+        // The reader records the spend that settles during the cancel too; the cancel ends the
+        // stream.
+        reports(false);
+        await this.cancelUnrecorded(taskId, handle, reading);
+        return;
+      }
+      this.handles.set(taskId, handle);
+      this.starting.delete(taskId);
+      try {
+        const started = await this.record({ type: 'task_started', taskId }, () => {
+          if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
+            throw new Superseded();
+        });
+        // Dropped: whatever is stopping the task also holds the handle now and ends its stream;
+        // the reader still records the spend the run reports until then.
+        recorded = started !== undefined;
+      } catch (error) {
+        // The start could not be written, so nothing the run reports can be. It is stopped, unless
+        // a stop already holds it, and the reader records its spend until the stream ends.
+        reports(false);
+        if (this.handles.get(taskId) !== handle) return;
+        this.handles.delete(taskId);
+        this.starting.add(taskId);
+        await this.cancelUnrecorded(taskId, handle, reading);
+        await this.recordRunnerOutcome({
+          type: 'task_failed',
+          taskId,
+          reason: `the run's start could not be recorded: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      reports(recorded);
     }
-    this.handles.set(taskId, handle);
-    const started = await this.record({ type: 'task_started', taskId }, () => {
-      if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
-        throw new Superseded();
-    });
-    // Dropped: whatever is stopping the task also holds the handle now.
-    if (!started) return;
-    // pump records its own failures; a store failure has nowhere left to report.
-    void this.pump(taskId, handle).catch(() => undefined);
   }
 
-  private async pump(taskId: TaskId, handle: RunHandle): Promise<void> {
+  /**
+   * Cancels a run whose start is not recorded. It counts as starting while the cancel is out, so a
+   * task that ends meanwhile owes a stop; one that failed is owed before that is cleared.
+   */
+  private async cancelUnrecorded(
+    taskId: TaskId,
+    handle: RunHandle,
+    reading: Promise<void>,
+  ): Promise<void> {
+    let cancelled = false;
+    try {
+      cancelled = await cancelHandle(handle);
+      if (!cancelled) await this.recordStopPending(taskId, 'cancel_failed');
+    } finally {
+      this.starting.delete(taskId);
+    }
+    if (cancelled) await Promise.all([reading, this.recordStopped(taskId)]);
+  }
+
+  /**
+   * Reads a run's stream to its end. Spend is recorded as it comes; everything else waits for
+   * `reports`, and counts only if the run's start was recorded.
+   */
+  private async pump(taskId: TaskId, handle: RunHandle, reports: Promise<boolean>): Promise<void> {
     try {
       for await (const event of handle.events) {
-        if (this.isStopping(taskId)) return;
-        if (event.type === 'progress') {
-          await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
-        } else if (event.type === 'usage') {
+        if (event.type === 'usage') {
           if (!Number.isFinite(event.costUsd) || event.costUsd < 0) continue;
           await this.recordSpend(taskId, event.costUsd);
+          continue;
+        }
+        if (!(await reports)) continue;
+        // The outcome of a stopping task no longer counts, but its stream is read to the end:
+        // the run reports what settled while it stopped.
+        if (this.isStopping(taskId)) continue;
+        if (event.type === 'progress') {
+          await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
           await this.recordRunnerOutcome({ type: 'task_failed', taskId, reason: event.reason });
@@ -740,6 +916,7 @@ export class Orchestrator {
         }
       }
     } catch (error) {
+      if (!(await reports)) return;
       // The stream broke; the remote run may still be alive, so the handle
       // stays registered and is cancelled when the task ends.
       await this.recordRunnerOutcome({
@@ -749,6 +926,7 @@ export class Orchestrator {
       });
       return;
     }
+    if (!(await reports)) return;
     // A clean end of the stream does not prove the remote run stopped, so the
     // handle stays registered and is cancelled when the task ends.
     await this.recordRunnerOutcome({
@@ -786,6 +964,8 @@ export class Orchestrator {
           taskId,
           note: `runner cancel failed: ${errorMessage(error)}`,
         });
+        // Owed before the task ends, so no restart in between can lose it.
+        await this.recordStopPending(taskId, 'cancel_failed');
       }
     }
     await this.record({ type: 'task_cancelled', taskId });
@@ -806,18 +986,18 @@ export class Orchestrator {
 
   /**
    * Records a runner's spend on the top-level task of its tree, and cancels the
-   * tree when that reaches its cap. Dropped once the reporting task is stopping
-   * or the top-level task has ended.
+   * tree when that reaches its cap. Spend is never dropped: what settles after
+   * a cancel or after the top-level task ended was still paid for.
    */
   private async recordSpend(taskId: TaskId, costUsd: number): Promise<void> {
     const root = this.treeRoot(taskId);
     if (!root) return;
-    const recorded = await this.record(
-      { type: 'task_cost', taskId: root.taskId, fromTaskId: taskId, costUsd },
-      () => {
-        if (this.isStopping(taskId) || this.isDone(root.taskId)) throw new Superseded();
-      },
-    );
+    const recorded = await this.record({
+      type: 'task_cost',
+      taskId: root.taskId,
+      fromTaskId: taskId,
+      costUsd,
+    });
     if (recorded && this.overBudget(root.taskId)) {
       this.track(this.cancelTree(root.taskId, 'system'));
     }
@@ -845,16 +1025,36 @@ export class Orchestrator {
         if (error instanceof Superseded) return undefined;
         throw error;
       }
-      const stored = await this.store.append(event, this.now());
-      applyEvent(this.tasks, stored);
-      this.afterApply(stored.event);
-      return stored;
+      // An end with a run still registered or starting does not stop that run.
+      if (isTerminalEvent(event) && this.mayStillRun(event.taskId)) {
+        await this.commit({ type: 'task_stop_pending', taskId: event.taskId, cause: 'run_live' });
+      }
+      return this.commit(event);
     });
     this.writeChain = written.catch(() => undefined);
     return written;
   }
 
+  /** Appends and applies one event. Only `record` calls it, inside the write chain. */
+  private async commit(event: TaskEvent): Promise<StoredEvent> {
+    const stored = await this.store.append(event, this.now());
+    applyEvent(this.tasks, stored);
+    this.afterApply(stored.event);
+    return stored;
+  }
+
   private afterApply(event: TaskEvent): void {
+    if (event.type === 'task_cost' && !this.tasks.has(event.taskId)) {
+      // Spend that settled after the end changed the ended record.
+      this.archive.delete(event.taskId);
+      return;
+    }
+    if (event.type === 'task_stop_pending' || event.type === 'task_stopped') {
+      // An ended task's record changed, so the cached copy is stale.
+      this.archive.delete(event.taskId);
+      if (event.type === 'task_stop_pending') this.retryStop(event.taskId);
+      return;
+    }
     const task = this.tasks.get(event.taskId);
     if (!task) return;
     if (event.type === 'task_created') {
@@ -863,11 +1063,12 @@ export class Orchestrator {
     }
     if (!isTerminal(task.state)) return;
     // A handle still registered when the task ends belongs to a run nobody
-    // stopped (its stream broke, say). Best effort, nothing is waiting on it.
+    // stopped (its stream broke, say). The task owes its stop until this cancel
+    // or a retry confirms it.
     const handle = this.handles.get(task.taskId);
     if (handle) {
       this.handles.delete(task.taskId);
-      void cancelQuietly(handle);
+      this.track(this.cancelLeftover(task.taskId, handle));
     }
     const executor = this.executorSessions.get(task.taskId);
     if (executor !== undefined) {
@@ -928,7 +1129,30 @@ export class Orchestrator {
   private view(taskId: TaskId): TaskView {
     const task = this.lookup(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
-    return toView(task);
+    const view = toView(task);
+    // A start still under way may yet hand back a run, whether or not its runner can stop it by id.
+    const mayRun = this.starting.has(taskId) || this.belowStillRuns(taskId);
+    return mayRun ? { ...view, treeStopPending: true } : view;
+  }
+
+  /** True when a task below `rootId` has not ended, is still starting, or owes a stop. */
+  private belowStillRuns(rootId: TaskId): boolean {
+    const seen = new Set<TaskId>([rootId]);
+    let level = this.store.childrenOf(rootId);
+    while (level.length > 0) {
+      const next: TaskId[] = [];
+      for (const id of level) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const task = this.lookup(id);
+        if (!task || !isTerminal(task.state) || task.stopPending || this.starting.has(id)) {
+          return true;
+        }
+        next.push(...this.store.childrenOf(id));
+      }
+      level = next;
+    }
+    return false;
   }
 
   // Budgets. A top-level task delegated with `budgetUsd` caps the spend its
@@ -1027,7 +1251,7 @@ export class Orchestrator {
     const events = this.store.readTask(taskId);
     if (events.length === 0) return undefined;
     const record = reduce(events).get(taskId);
-    // Only an ended task is immutable, which is why caching it needs no invalidation.
+    // An ended task changes only by a stop obligation or late spend, which drop it from the cache.
     if (record && isTerminal(record.state)) this.archive.set(taskId, record);
     return record;
   }
@@ -1166,11 +1390,35 @@ function isTerminalEvent(event: TaskEvent): boolean {
   );
 }
 
-/** A cancel that throws, synchronously or not, must not stop the cleanup around it. */
-function cancelQuietly(handle: RunHandle): Promise<void> {
+/** What stopping a task's leftover run came to; see `stopLeftover`. */
+type LeftoverStop = 'stopped' | 'none' | { problem: string };
+
+/** A cancel that throws, synchronously or not, must not stop the cleanup around it. True when it succeeded. */
+function cancelHandle(handle: RunHandle): Promise<boolean> {
   return Promise.resolve()
     .then(() => handle.cancel())
-    .catch(() => undefined);
+    .then(
+      () => true,
+      () => false,
+    );
+}
+
+/** Resolves after `ms`, or at once when `signal` aborts. The timer never holds the process open. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    if (typeof timer === 'object') timer.unref();
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 function errorMessage(error: unknown): string {

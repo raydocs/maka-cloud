@@ -45,10 +45,12 @@ class EventQueue implements AsyncIterable<RunnerEvent> {
   private wake: (() => void) | undefined;
   private closed = false;
 
-  push(event: RunnerEvent): void {
-    if (this.closed) return;
+  /** Queues `event`, unless the stream has closed; says whether it was queued. */
+  push(event: RunnerEvent): boolean {
+    if (this.closed) return false;
     this.items.push(event);
     this.wake?.();
+    return true;
   }
 
   close(): void {
@@ -121,6 +123,8 @@ class Run implements RunHandle {
   private readonly abort = new AbortController();
   private cancelled = false;
   private ended = false;
+  /** How the run ended, reported once its model access has settled. */
+  private terminal: RunnerEvent | undefined;
   private notes = 0;
   private lastNote = '';
   /** Dollars spent by the CLI invocations of this run that have ended. */
@@ -128,7 +132,8 @@ class Run implements RunHandle {
   /** The current invocation: an estimate per model call, until the CLI reports its own total. */
   private callCosts = new Map<string, number>();
   private reportedTotal: number | undefined;
-  private lastReportedUsd = -1;
+  /** The spend last queued as a `usage` event: only an event actually queued moves it. */
+  private publishedUsd = -1;
   /** Set once the run has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
   private readonly secrets = new Set<string>();
@@ -137,6 +142,15 @@ class Run implements RunHandle {
   private machine: RemoteMachine | undefined;
   private record: RunnerSessionRecord | undefined;
   private access: ModelAccess | undefined;
+  /** What the gateway settled for this run's access, when the access is metered. */
+  private meteredUsd: number | undefined;
+  private stopMetering: (() => void) | undefined;
+  /**
+   * The release of a metered access, shared by every caller until it has settled: the stream
+   * stays open for its final spend, past a step's time limit too. An unmetered access has no spend
+   * to wait for, so its release is only ever waited for within the time limit.
+   */
+  private releasing: Promise<void> | undefined;
   private lease: SandboxLease | undefined;
   private runName: string | undefined;
   /** Every CLI run this object started, which are the only ones its cleanup may stop. */
@@ -241,13 +255,19 @@ class Run implements RunHandle {
 
       await this.writeResult(result.bytes);
       this.checkCancelled();
-      this.ended = true;
-      this.events.push({ type: 'finished' });
+      this.terminal = { type: 'finished' };
     } catch (error) {
       if (this.cancelled || error instanceof CancelledError) return;
       this.fail(errorMessage(error));
     } finally {
+      // The last requests settle and their spend is reported before the end is.
+      if (this.terminal !== undefined && this.access?.meter) {
+        await this.step('revoke model access', () => this.releaseAccess());
+        // A revoke past its time limit is reported, and still waited for: its cost comes first.
+        await this.releasing;
+      }
       this.ended = true;
+      if (this.terminal !== undefined && !this.cancelled) this.events.push(this.terminal);
       await this.cleanup();
     }
   }
@@ -280,7 +300,12 @@ class Run implements RunHandle {
 
   private async issueAccess(): Promise<void> {
     const { fleet, spec, vendor } = this;
-    const access = await fleet.modelAccess.issue({ taskId: spec.taskId, runner: vendor.name });
+    const access = await fleet.modelAccess.issue({
+      taskId: spec.taskId,
+      runner: vendor.name,
+      ...(spec.budgetUsd === undefined ? {} : { budgetUsd: spec.budgetUsd }),
+      ...(spec.budgetRootId === undefined ? {} : { budgetRootId: spec.budgetRootId }),
+    });
     this.adoptAccess(access);
     this.checkCancelled();
   }
@@ -290,7 +315,25 @@ class Run implements RunHandle {
     this.access = access;
     this.secrets.add(access.apiKey);
     if (this.spec.mcp) this.secrets.add(this.spec.mcp.token);
-    if (this.cleanupPromise) void this.step('revoke model access', () => this.releaseAccess());
+    if (this.cleanupPromise) {
+      void this.step('revoke model access', () => this.releaseAccess());
+      return;
+    }
+    const meter = access.meter;
+    if (meter) {
+      // Every request is metered when it settles, so the budget acts inside a CLI turn too.
+      this.meteredUsd = meter.spentUsd();
+      this.stopMetering = meter.subscribe((state) => {
+        this.meteredUsd = state.spentUsd;
+        if (state.exhausted && !this.budgetStop) {
+          this.budgetStop =
+            this.spec.budgetUsd === undefined
+              ? 'the model budget is used up'
+              : `budget of ${usd(this.spec.budgetUsd)} reached (${usd(state.spentUsd)} spent)`;
+        }
+        this.meter();
+      });
+    }
   }
 
   private adoptLease(lease: SandboxLease): void {
@@ -305,16 +348,18 @@ class Run implements RunHandle {
     if (this.resumePrompt === undefined) {
       this.adoptLease(await fleet.sandboxes.acquire({ tenantId, taskId: spec.taskId }));
       this.checkCancelled();
-      const record: RunnerSessionRecord = {
+      const machineId = (this.lease as SandboxLease).machineId;
+      // A task handed to the other vendor starts afresh in the same directory: its runs keep
+      // counting from the earlier ones, so a run name (and its lock file) is never reused.
+      const record = await fleet.updateRecord(spec.taskId, (current) => ({
         taskId: spec.taskId,
         runner: vendor.name,
         tenantId,
-        machineId: (this.lease as SandboxLease).machineId,
-        turns: 0,
+        machineId,
+        turns: current?.machineId === machineId ? current.turns : 0,
         snapshotIds: [],
         updatedAt: fleet.now(),
-      };
-      await fleet.updateRecord(spec.taskId, () => record);
+      }));
       return { record };
     }
 
@@ -478,7 +523,12 @@ class Run implements RunHandle {
       dirName: spec.taskId,
       run,
       script: buildRunScript({ preamble: preambleFor(vendor), command }),
-      envs: vendor.env(access, spec.mcp?.token),
+      envs: {
+        ...vendor.env(access, spec.mcp?.token),
+        ...(access.searchUrl
+          ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
+          : {}),
+      },
       runToken,
       workdir: `${dir}/workspace`,
       signal: this.signal,
@@ -508,6 +558,9 @@ class Run implements RunHandle {
       for (const event of events) {
         if (event.kind === 'session') void this.rememberSession(event.id).catch(() => undefined);
         else if (event.kind === 'progress') this.progress(event.note);
+        // A metered access is the source of the run's spend; the CLI's own numbers are not.
+        else if ((event.kind === 'usage' || event.kind === 'cost') && this.meteredUsd !== undefined)
+          continue;
         else if (event.kind === 'usage') {
           this.callCosts.set(event.id, tokenCostUsd(event.tokens, this.prices()));
           this.meter();
@@ -596,18 +649,29 @@ class Run implements RunHandle {
   }
 
   private invocationCost(): number {
+    if (this.meteredUsd !== undefined) return 0;
     if (this.reportedTotal !== undefined) return this.reportedTotal;
     let sum = 0;
     for (const usd of this.callCosts.values()) sum += usd;
     return sum;
   }
 
-  /** Reports what the run has spent so far, and stops it once that reaches its budget. */
-  private meter(): void {
-    const spent = Math.round((this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
-    if (spent === this.lastReportedUsd) return;
-    this.lastReportedUsd = spent;
-    if (!this.ended) this.events.push({ type: 'usage', costUsd: spent });
+  /**
+   * Reports what the run has spent so far, and stops it once that reaches its budget. `final` is
+   * the spend once the access has settled: reported even after the run ended or was cancelled.
+   * What is observed and what is published are kept apart, so a spend seen after the end and not
+   * reported then is still reported by the final call.
+   */
+  private meter(final = false): void {
+    const spent =
+      Math.round(((this.meteredUsd ?? 0) + this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
+    if (
+      (!this.ended || final) &&
+      spent !== this.publishedUsd &&
+      this.events.push({ type: 'usage', costUsd: spent })
+    ) {
+      this.publishedUsd = spent;
+    }
     const budget = this.spec.budgetUsd;
     if (budget !== undefined && spent >= budget && !this.budgetStop) {
       this.budgetStop = `budget of ${usd(budget)} reached (${usd(spent)} spent)`;
@@ -752,6 +816,8 @@ class Run implements RunHandle {
         this.stopAndRelease(),
       ]);
     } finally {
+      // The final cost is queued before the stream closes, even after a step's time limit.
+      await this.releasing;
       this.fleet.openRuns--;
       this.events.close();
     }
@@ -791,10 +857,33 @@ class Run implements RunHandle {
     });
   }
 
-  private async releaseAccess(): Promise<void> {
+  /**
+   * Revokes the access. A metered revoke resolves once every request has settled, so the spend
+   * read after it is final; it is reported before the meter is let go. For a metered access every
+   * caller gets the same release, so none returns (and lets the stream close) before the final
+   * spend is queued.
+   */
+  private releaseAccess(): Promise<void> {
     const access = this.access;
+    if (access === undefined) return this.releasing ?? Promise.resolve();
     this.access = undefined;
-    await access?.revoke?.();
+    const previous = this.releasing ?? Promise.resolve();
+    const release = (async () => {
+      await previous;
+      try {
+        await access.revoke?.();
+        if (access.meter && this.meteredUsd !== undefined) {
+          this.meteredUsd = access.meter.spentUsd();
+          this.meter(true);
+        }
+      } finally {
+        this.stopMetering?.();
+        this.stopMetering = undefined;
+      }
+    })();
+    // The waiters only need it to have ended; a failed revoke is reported by its step.
+    if (access.meter) this.releasing = release.catch(() => undefined);
+    return release;
   }
 
   private async releaseLease(): Promise<void> {
@@ -835,8 +924,7 @@ class Run implements RunHandle {
   }
 
   private fail(reason: string): void {
-    this.ended = true;
-    this.events.push({ type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) });
+    this.terminal ??= { type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) };
   }
 
   private progress(note: string): void {

@@ -1,0 +1,289 @@
+import { join } from 'node:path';
+import { type ModelPrice, priceProblem } from '@maka-cloud/gateway';
+import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
+import { type InboxConfig, readInboxConfig } from './inbox/config.js';
+
+/**
+ * Everything the stack needs, read from the environment. Secret values are kept
+ * only where they are used; `describeConfig` never prints them.
+ */
+export interface StackConfig {
+  dataDir: string;
+  dbPath: string;
+  invitesPath: string;
+  handoffRoot: string;
+  conductorRoot: string;
+  runnerSessionsPath: string;
+  codingDeliveriesPath: string;
+  /** The supervisor's own database. */
+  supervisorDbPath: string;
+  host: string;
+  port: number;
+  mcp: {
+    host: string;
+    port: number;
+    /** The orchestrator's MCP URL as the sandbox reaches it. Without it, tasks get the local URL. */
+    publicUrl?: string;
+  };
+  conductor: {
+    apiKey: string;
+    baseUrl?: string;
+    connectionId?: string;
+  };
+  instabox: {
+    machineId: string;
+    apiUrl?: string;
+  };
+  /** The model gateway sandbox runs reach the vendors through. It reads the vendor keys itself. */
+  gateway: {
+    host: string;
+    port: number;
+    /** The gateway as sandboxes reach it. Without it, sandboxes get the local URL. */
+    publicUrl?: string;
+    /** Prices beyond the built-in Claude ones; Codex models need an entry here. */
+    models: ModelPrice[];
+    anthropicBaseUrl?: string;
+    openAiBaseUrl?: string;
+    /** The web search provider's API, when not its default. */
+    searchBaseUrl?: string;
+  };
+  inbox: InboxConfig;
+  /** The codex runner needs it when a task starts; the stack starts without it. */
+  openAiKeySet: boolean;
+  /** With it, research runs get a `web-search` command, paid per call from their budget. */
+  searchKeySet: boolean;
+  /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
+  githubTokenProblem?: string;
+}
+
+export class ConfigError extends Error {
+  constructor(readonly problems: readonly string[]) {
+    super(
+      `The environment does not configure the stack:\n${problems.map((p) => `- ${p}`).join('\n')}`,
+    );
+    this.name = 'ConfigError';
+  }
+}
+
+/** The variables `readStackConfig` reads, for the usage text. */
+export const ENV_VARIABLES = [
+  [
+    'MAKA_CLOUD_DATA_DIR',
+    'required: directory for the databases, handoff files and conductor storage',
+  ],
+  ['MAKA_CLOUD_HOST', 'public API host (default 127.0.0.1)'],
+  ['MAKA_CLOUD_PORT', 'public API port (default 8080)'],
+  ['MAKA_CLOUD_MCP_HOST', 'orchestrator MCP host (default 127.0.0.1)'],
+  ['MAKA_CLOUD_MCP_PORT', 'orchestrator MCP port (default 8081)'],
+  ['MAKA_CLOUD_MCP_PUBLIC_URL', 'the MCP URL as the sandbox reaches it (http or https)'],
+  ['ANTHROPIC_API_KEY', 'required: the conductor’s key, and the model gateway’s for Claude runs'],
+  ['ANTHROPIC_BASE_URL', 'Messages API base URL, for the conductor and the model gateway'],
+  ['MAKA_CLOUD_LLM_CONNECTION_ID', 'stable id of the conductor’s model connection'],
+  ['INSTABOX_API_KEY', 'required: sandbox API key'],
+  ['INSTABOX_MACHINE_ID', 'required: the sandbox machine tasks run in'],
+  ['INSTABOX_API_URL', 'sandbox API base URL'],
+  ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
+  ['OPENAI_BASE_URL', 'Responses API base URL for the model gateway'],
+  ['DEEPSEEK_API_KEY', 'the model gateway’s key for web search (DeepSeek Search API)'],
+  ['DEEPSEEK_BASE_URL', 'DeepSeek API base URL for web search'],
+  ['MAKA_CLOUD_GATEWAY_HOST', 'model gateway host (default 127.0.0.1)'],
+  ['MAKA_CLOUD_GATEWAY_PORT', 'model gateway port (default 8082)'],
+  [
+    'MAKA_CLOUD_GATEWAY_PUBLIC_URL',
+    'the model gateway as the sandbox reaches it (https, or http on a loopback host)',
+  ],
+  [
+    'MAKA_CLOUD_GATEWAY_MODELS',
+    'JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one',
+  ],
+  [
+    'MAKA_CLOUD_VERIFIER_MODELS',
+    'JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run',
+  ],
+  [
+    'MAKA_CLOUD_VERIFIER_DAILY_CAP_USD',
+    'daily cap on model checks, default 5; changeable in the inbox settings',
+  ],
+  ['MAKA_CLOUD_SUMMARY_MODEL', 'model that writes the digest summary (default claude-haiku-5-5)'],
+  [
+    'MAKA_GITHUB_TOKEN',
+    'fine-grained GitHub token for opening pull requests, read when one is opened',
+  ],
+] as const;
+
+export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
+  const problems: string[] = [];
+  const value = (name: string): string | undefined => {
+    const raw = env[name]?.trim();
+    return raw === undefined || raw === '' ? undefined : raw;
+  };
+  const required = (name: string): string => {
+    const found = value(name);
+    if (found === undefined) problems.push(`${name} is not set`);
+    return found ?? '';
+  };
+  const port = (name: string, fallback: number): number => {
+    const raw = value(name);
+    if (raw === undefined) return fallback;
+    const parsed = Number(raw);
+    if (!/^\d+$/u.test(raw) || parsed < 1 || parsed > 65535) {
+      problems.push(`${name} must be a port number from 1 to 65535`);
+      return fallback;
+    }
+    return parsed;
+  };
+  const url = (name: string): string | undefined => {
+    const raw = value(name);
+    if (raw === undefined) return undefined;
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      problems.push(`${name} is not a URL`);
+      return undefined;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      problems.push(`${name} must be an http or https URL`);
+      return undefined;
+    }
+    if (parsed.username !== '' || parsed.password !== '') {
+      problems.push(`${name} must not carry credentials`);
+      return undefined;
+    }
+    return raw;
+  };
+
+  const dataDir = required('MAKA_CLOUD_DATA_DIR');
+  const config: StackConfig = {
+    dataDir,
+    dbPath: join(dataDir, 'cloud.db'),
+    invitesPath: join(dataDir, 'invites.db'),
+    handoffRoot: join(dataDir, 'handoff'),
+    conductorRoot: join(dataDir, 'conductor'),
+    runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
+    codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
+    supervisorDbPath: join(dataDir, 'supervisor.db'),
+    host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
+    port: port('MAKA_CLOUD_PORT', 8080),
+    mcp: {
+      host: value('MAKA_CLOUD_MCP_HOST') ?? '127.0.0.1',
+      port: port('MAKA_CLOUD_MCP_PORT', 8081),
+    },
+    conductor: { apiKey: required('ANTHROPIC_API_KEY') },
+    instabox: { machineId: '' },
+    gateway: {
+      host: value('MAKA_CLOUD_GATEWAY_HOST') ?? '127.0.0.1',
+      port: port('MAKA_CLOUD_GATEWAY_PORT', 8082),
+      models: gatewayModels(value('MAKA_CLOUD_GATEWAY_MODELS'), problems),
+    },
+    inbox: readInboxConfig(value, problems),
+    openAiKeySet: value('OPENAI_API_KEY') !== undefined,
+    searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
+  };
+  const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
+  if (github !== undefined) config.githubTokenProblem = github;
+  const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
+  if (publicUrl !== undefined) config.mcp.publicUrl = publicUrl;
+  const baseUrl = url('ANTHROPIC_BASE_URL');
+  if (baseUrl !== undefined) {
+    config.conductor.baseUrl = baseUrl;
+    config.gateway.anthropicBaseUrl = baseUrl;
+  }
+  const openAiBaseUrl = url('OPENAI_BASE_URL');
+  if (openAiBaseUrl !== undefined) config.gateway.openAiBaseUrl = openAiBaseUrl;
+  const searchBaseUrl = url('DEEPSEEK_BASE_URL');
+  if (searchBaseUrl !== undefined) config.gateway.searchBaseUrl = searchBaseUrl;
+  const gatewayUrl = url('MAKA_CLOUD_GATEWAY_PUBLIC_URL');
+  if (gatewayUrl !== undefined) {
+    // The task token travels in every request: in the clear only on the host itself.
+    if (new URL(gatewayUrl).protocol === 'https:' || isLoopback(new URL(gatewayUrl).hostname)) {
+      config.gateway.publicUrl = gatewayUrl;
+    } else {
+      problems.push('MAKA_CLOUD_GATEWAY_PUBLIC_URL must be https, except on a loopback host');
+    }
+  }
+  const connectionId = value('MAKA_CLOUD_LLM_CONNECTION_ID');
+  if (connectionId !== undefined) config.conductor.connectionId = connectionId;
+  required('INSTABOX_API_KEY');
+  config.instabox.machineId = required('INSTABOX_MACHINE_ID');
+  const apiUrl = url('INSTABOX_API_URL');
+  if (apiUrl !== undefined) config.instabox.apiUrl = apiUrl;
+  if (config.port === config.mcp.port && config.host === config.mcp.host) {
+    problems.push('MAKA_CLOUD_PORT and MAKA_CLOUD_MCP_PORT must differ');
+  }
+  for (const [name, other] of [
+    ['MAKA_CLOUD_PORT', config],
+    ['MAKA_CLOUD_MCP_PORT', config.mcp],
+  ] as const) {
+    if (config.gateway.port === other.port && config.gateway.host === other.host) {
+      problems.push(`MAKA_CLOUD_GATEWAY_PORT and ${name} must differ`);
+    }
+  }
+  if (problems.length > 0) throw new ConfigError(problems);
+  return config;
+}
+
+function isLoopback(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/u.test(hostname);
+}
+
+function gatewayModels(raw: string | undefined, problems: string[]): ModelPrice[] {
+  if (raw === undefined) return [];
+  let list: unknown;
+  try {
+    list = JSON.parse(raw);
+  } catch {
+    problems.push('MAKA_CLOUD_GATEWAY_MODELS is not JSON');
+    return [];
+  }
+  if (!Array.isArray(list)) {
+    problems.push('MAKA_CLOUD_GATEWAY_MODELS must be a JSON array');
+    return [];
+  }
+  const models: ModelPrice[] = [];
+  list.forEach((entry: unknown, index) => {
+    const problem =
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+        ? priceProblem(entry as ModelPrice)
+        : 'must be an object';
+    if (problem === undefined) models.push(entry as ModelPrice);
+    else problems.push(`MAKA_CLOUD_GATEWAY_MODELS entry ${index + 1}: ${problem}`);
+  });
+  return models;
+}
+
+/** The resolved configuration without secret values, one setting per line. */
+export function describeConfig(config: StackConfig): string[] {
+  return [
+    `data directory:      ${config.dataDir}`,
+    `public API:          http://${config.host}:${config.port}`,
+    `orchestrator MCP:    http://${config.mcp.host}:${config.mcp.port}/mcp`,
+    `MCP URL for tasks:   ${config.mcp.publicUrl ?? '(not set: tasks get the local URL)'}`,
+    `model API base URL:  ${config.conductor.baseUrl ?? '(default)'}`,
+    `model connection id: ${config.conductor.connectionId ?? '(default)'}`,
+    `sandbox machine:     ${config.instabox.machineId}`,
+    `sandbox API URL:     ${config.instabox.apiUrl ?? '(default)'}`,
+    `Codex runner key:    ${config.openAiKeySet ? 'set' : 'not set (Codex tasks will fail)'}`,
+    `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
+    `gateway for tasks:   ${config.gateway.publicUrl ?? '(not set: tasks get the local URL)'}`,
+    `gateway models:      ${describeModels(config.gateway.models)}`,
+    `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
+    `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
+    `invites file:        ${config.invitesPath}`,
+    `work checks:        ${describeVerifiers(config.inbox)}`,
+    `digest summary:      ${config.inbox.summaryModel}`,
+  ];
+}
+
+function describeModels(models: readonly ModelPrice[]): string {
+  if (models.length === 0) return 'built-in Claude prices only (Codex tasks will be refused)';
+  return `built-in Claude prices and ${models.length} configured`;
+}
+
+function describeVerifiers(inbox: InboxConfig): string {
+  if (inbox.verifierModels.length === 0) {
+    return `no model configured (only the checks that need none run), daily cap $${inbox.dailyCapUsd}`;
+  }
+  const vendors = [...new Set(inbox.verifierModels.map((entry) => entry.vendor))].join(', ');
+  return `${inbox.verifierModels.length} model(s) from ${vendors}, daily cap $${inbox.dailyCapUsd}`;
+}

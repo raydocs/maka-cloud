@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { FakeRunner, RunnerRegistry } from '@maka-cloud/orchestrator';
 import type { ConversationHandler } from '../cloud-server.js';
 import { conductorSession, recordingHandler } from './conductor.js';
 import { eventually, newConversation, postJson, startHarness } from './harness.js';
@@ -99,6 +100,44 @@ test('sweepOrphans gets every task id in the log after the restart has ended the
   assert.deepEqual(h.warnings, []);
   // The restart ended the orphan before the server came up.
   assert.equal(h.server.orchestrator.status(session, running.taskId).state, 'failed');
+});
+
+test('a task whose stop could not be confirmed is swept again and its stop retried after the next start', async (t) => {
+  const { handler, seen } = recordingHandler();
+  const h = await startHarness(t, { handler });
+  const conversationId = await newConversation(h);
+  const { session } = await conductorSession(h, seen, conversationId);
+  const running = await h.server.orchestrator.delegate(session, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'run');
+
+  const calls: string[][] = [];
+  const sweepOrphans = async (ids: Iterable<string>) => {
+    calls.push([...ids]);
+    return { stopped: [], failed: [] };
+  };
+  const unreachable = new FakeRunner({
+    stopOrphaned: async () => {
+      throw new Error('sandbox unreachable');
+    },
+  });
+  await h.restart({ runners: new RunnerRegistry([unreachable]), sweepOrphans });
+  const ended = h.server.orchestrator.status(session, running.taskId);
+  assert.equal(ended.state, 'failed');
+  assert.equal(ended.stopPending, true);
+  assert.deepEqual(calls[0], [], 'the task owes a stop, so the sweep does not skip it');
+
+  const reachable = new FakeRunner({ stopOrphaned: async () => {} });
+  await h.restart({
+    runners: new RunnerRegistry([reachable]),
+    sweepOrphans,
+    orchestrator: { stopRetry: { firstMs: 1, maxMs: 1 } },
+  });
+  await eventually(
+    () => h.server.orchestrator.status(session, running.taskId).stopPending === undefined,
+    'the stop retried and confirmed',
+  );
+  assert.deepEqual(reachable.orphanStops, [running.taskId]);
+  assert.deepEqual(calls[1], [], 'still owed when this start swept');
 });
 
 test('a sweep that reports failures or throws is a warning, never a failed start', async (t) => {

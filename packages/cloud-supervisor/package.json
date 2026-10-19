@@ -1,0 +1,22 @@
+{
+  "name": "@maka-cloud/supervisor",
+  "version": "0.1.0",
+  "description": "Supervisor and needs-you inbox: watches every conversation, escalates under explicit rules, and routes the human's answers back exactly once.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@maka-cloud/playbooks": "0.1.0",
+    "zod": "^4.6.5"
+  }
+}
