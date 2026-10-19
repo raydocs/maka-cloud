@@ -1,0 +1,25 @@
+{
+  "name": "@maka-cloud/server",
+  "version": "0.1.0",
+  "description": "Cloud server: HTTP API, resumable event stream and the host for the orchestrator MCP server, over SQLite.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "cloud-server": "./dist/cli.js"
+  },
+  "scripts": {
+    "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:dist": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@maka-cloud/orchestrator": "0.1.0",
+    "zod": "^4.6.5"
+  }
+}
