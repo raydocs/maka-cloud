@@ -9,6 +9,13 @@ import { type CiteCheckSummary, parseCiteCheckLine } from './summary-line.js';
 
 export const REPORT_ARTIFACTS = ['report.md', 'report.html', 'verification.json'] as const;
 
+/**
+ * The line the runner adds to `done` for the artifacts it copied into the task's handoff directory
+ * (the runner drops any such line a model wrote). `@maka-cloud/runners` writes it; this package
+ * does not depend on it, so the prefix is spelled out here.
+ */
+export const RUNNER_EXPORT_PREFIX = 'runner-exported:';
+
 /** A verdict that says where it comes from, so the conductor cannot present it as an independent check. */
 export interface ResearchVerdict extends Verdict {
   /** The manifest is the runner's own word: the conductor did not re-run the citation check. */
@@ -35,6 +42,29 @@ export function verifyResearchManifest(manifest: Manifest): ResearchVerdict {
   const names = new Set((manifest.artifacts ?? []).map(artifactName));
   const absent = REPORT_ARTIFACTS.filter((name) => !names.has(name));
   if (absent.length > 0) problems.push(`artifacts do not list: ${absent.join(', ')}`);
+
+  const exports = manifest.done
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.startsWith(RUNNER_EXPORT_PREFIX));
+  if (exports.length === 0) {
+    problems.push(
+      "done has no runner-exported line: the report files were not copied to the task's handoff directory",
+    );
+  } else if (exports.length > 1) {
+    problems.push('done has more than one runner-exported line');
+  } else {
+    const exported = new Set(
+      (exports[0] as string)
+        .slice(RUNNER_EXPORT_PREFIX.length)
+        .trim()
+        .split(/\s+/)
+        .map(artifactName),
+    );
+    const notExported = REPORT_ARTIFACTS.filter((name) => !exported.has(name));
+    if (notExported.length > 0) {
+      problems.push(`the runner did not export: ${notExported.join(', ')}`);
+    }
+  }
 
   const lines = manifest.done
     .map((entry) => entry.trim())
@@ -90,9 +120,9 @@ export const researchPlaybook: Playbook = {
   planningInstructions:
     'Break the question into sub-questions, say which sources to search and fetch for each, and list the specific claims the report will make. Prefer primary sources. Every number, date and name in a claim needs a verbatim quote from the page that states it.',
   steps: [
-    `Delegate the searching, fetching and drafting to one runner. Put the plan in the brief, and this output contract: ${CONTRACT}`,
+    `Delegate the searching, fetching and drafting to one runner. Begin its brief with the line \`maka-artifacts: out/report.md out/report.html out/verification.json\` before anything else (the runner then fails the task unless those files exist and are listed in artifacts, and copies them to where the user can read them). Put the plan after it, and this output contract: ${CONTRACT}`,
     'Wait for the result and read its verification. It is runner-reported: the conductor did not re-run the check, so never call the report independently verified.',
-    "Optional, if the budget allows: delegate a review to the other runner than the one that drafted. Its brief must begin with the line `maka-inputs: <drafterTaskId> report.json sources` before anything else: the runner copies those files of the finished drafting task into the reviewer's workspace under inputs/<drafterTaskId>/, and a request anywhere else in a brief fails the task. The reviewer writes judgments.json, a list of {claimId, entailed, reason} saying whether each quote supports its claim, and lists it in artifacts. Then delegate the rerun to the drafting runner as a new task whose brief begins with `maka-inputs: <drafterTaskId> report.json sources` and `maka-inputs: <reviewerTaskId> judgments.json`, and tells it to run `cite-check --report inputs/<drafterTaskId>/report.json --sources inputs/<drafterTaskId>/sources --judgments inputs/<reviewerTaskId>/judgments.json --out out --drop-unsupported` and report as in the contract above.",
+    "Optional, if the budget allows: delegate a review to the other runner than the one that drafted. Its brief must begin with the line `maka-inputs: <drafterTaskId> report.json sources` before anything else: the runner copies those files of the finished drafting task into the reviewer's workspace under inputs/<drafterTaskId>/, and a request anywhere else in a brief fails the task. The reviewer writes judgments.json, a list of {claimId, entailed, reason} saying whether each quote supports its claim, and lists it in artifacts (begin its brief with `maka-artifacts: judgments.json` after the inputs line). Then delegate the rerun to the drafting runner as a new task whose brief begins with `maka-inputs: <drafterTaskId> report.json sources`, `maka-inputs: <reviewerTaskId> judgments.json` and `maka-artifacts: out/report.md out/report.html out/verification.json`, and tells it to run `cite-check --report inputs/<drafterTaskId>/report.json --sources inputs/<drafterTaskId>/sources --judgments inputs/<reviewerTaskId>/judgments.json --out out --drop-unsupported` and report as in the contract above.",
     'If the verification names problems, delegate the fixes with those problems in the brief, or deliver without the failing claims.',
     'Deliver the report with its sources, how many claims were verified and removed, and say plainly that the check was run by the research runner, and whether a reviewer judged that the quotes support the claims.',
   ],

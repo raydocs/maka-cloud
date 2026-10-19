@@ -7,10 +7,12 @@ import { claudeAdapter, codexAdapter } from './vendors.js';
 
 export { Fleet, type CloudRunnersOptions, type RunnerName, type SweepResult } from './fleet.js';
 export {
+  ARTIFACTS_PREFIX,
+  type BriefHeader,
   INPUTS_PREFIX,
   type InputPolicy,
   type InputRequest,
-  parseInputRequests,
+  parseBriefHeader,
   sameConversationInputPolicy,
   type TaskDirectory,
 } from './inputs.js';

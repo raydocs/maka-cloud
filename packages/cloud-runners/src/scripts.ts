@@ -374,6 +374,41 @@ mv -- "$tmp" "$parent/$MAKA_FROM"
 echo "OK $n $copied"
 `;
 
+/**
+ * Copies one file of a task's workspace into a private stage file next to the task directory, as the
+ * sandbox user (never `GET /files`): the workspace and every component of the path must be real, not
+ * symlinks; the file must be a regular file; it is opened with nofollow and cut at the cap, and a
+ * file that grew past it is refused. Prints `OK <bytes>` or `REFUSED <reason>`. Env: MAKA_DIR,
+ * MAKA_REL (relative path), MAKA_CAP, MAKA_STAGE (the stage file's name in the task directory).
+ */
+export const FILE_STAGE_SCRIPT = `set -u
+umask 077
+w="$MAKA_DIR/workspace"
+refuse() { rm -f -- "$MAKA_DIR/$MAKA_STAGE"; echo "REFUSED $1"; exit 0; }
+{ [ -d "$w" ] && [ ! -L "$w" ]; } || refuse "the workspace is missing"
+cur="$w"
+rest="$MAKA_REL"
+while [ -n "$rest" ]; do
+  comp="\${rest%%/*}"
+  if [ "$comp" = "$rest" ]; then rest=""; else rest="\${rest#*/}"; fi
+  cur="$cur/$comp"
+  [ ! -L "$cur" ] || refuse "it goes through a symbolic link"
+  [ -e "$cur" ] || refuse "it does not exist in the workspace"
+done
+[ -f "$cur" ] || refuse "it is not a regular file"
+stage="$MAKA_DIR/$MAKA_STAGE"
+rm -f -- "$stage"
+( set -C -o pipefail; dd if="$cur" iflag=nofollow,nonblock status=none 2>/dev/null | head -c $((MAKA_CAP + 1)) > "$stage" ) || refuse "it could not be read"
+size=$(stat -c %s -- "$stage")
+[ "$size" -le "$MAKA_CAP" ] || refuse "it is larger than $MAKA_CAP bytes"
+echo "OK $size"
+`;
+
+/** Prints `MAKA_OFF`..`MAKA_OFF + MAKA_LEN` of the stage file as base64. */
+export const FILE_CHUNK_SCRIPT = `cd "$MAKA_DIR" && tail -c +$((MAKA_OFF + 1)) "$MAKA_STAGE" | head -c "$MAKA_LEN" | base64 -w0`;
+
+export const FILE_CLEAN_SCRIPT = `rm -f -- "$MAKA_DIR/$MAKA_STAGE"`;
+
 /** True (exit 0) when the tool is installed with the content that has this hash. */
 export const TOOL_CHECK_SCRIPT = `[ "$(cat "$MAKA_TOOL_MARKER" 2>/dev/null)" = "$MAKA_TOOL_HASH" ] && [ -x "$HOME/.maka-cli/bin/$MAKA_TOOL_NAME" ]`;
 
