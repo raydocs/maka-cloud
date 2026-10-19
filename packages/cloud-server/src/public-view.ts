@@ -8,14 +8,37 @@ import type { TaskEvent, TaskView } from '@maka-cloud/orchestrator';
  */
 export type PublicTaskView = Omit<TaskView, 'runner'>;
 
-export function toPublicView(view: TaskView): PublicTaskView {
-  const { runner: _runner, ...rest } = view;
-  return rest;
+/** The names cloud-web hides (packages/cloud-web/src/presentation.ts); error text a runner wrote can carry them. */
+const HIDDEN_NAMES =
+  /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus/giu;
+
+/** Error text as clients see it: no model or vendor names, by the rule cloud-web applies. */
+export function scrubErrorText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/[\p{Cf}]/gu, '')
+    .replace(HIDDEN_NAMES, 'assistant');
 }
 
-/** A logged event as clients see it: without the runner id. */
+export function toPublicView(view: TaskView): PublicTaskView {
+  const { runner: _runner, ...rest } = view;
+  return rest.failureReason === undefined
+    ? rest
+    : { ...rest, failureReason: scrubErrorText(rest.failureReason) };
+}
+
+/** A logged event as clients see it: without the runner id, and with error text scrubbed. */
 export function toPublicEvent(event: TaskEvent): unknown {
-  if (event.type !== 'task_created') return event;
-  const { runner: _runner, ...rest } = event;
-  return rest;
+  switch (event.type) {
+    case 'task_created': {
+      const { runner: _runner, ...rest } = event;
+      return rest;
+    }
+    case 'task_failed':
+    case 'task_pause_failed':
+    case 'task_resume_failed':
+      return { ...event, reason: scrubErrorText(event.reason) };
+    default:
+      return event;
+  }
 }

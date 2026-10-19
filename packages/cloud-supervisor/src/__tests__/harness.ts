@@ -77,7 +77,14 @@ export class FakeHost implements SupervisorHost {
   readonly interrupts: Interrupt[] = [];
   readonly published: Array<{ kind: string; conversationId: string | null; data: any }> = [];
   readonly deliveries: QuestionDelivery[] = [];
-  readonly posted: Array<{ conversationId: string; text: string; clientMessageId: string }> = [];
+  readonly posted: Array<{
+    conversationId: string;
+    text: string;
+    clientMessageId: string;
+    caller?: string;
+  }> = [];
+  /** Callers the host no longer takes messages from, as the server does for a revoked invite. */
+  readonly refusedCallers = new Set<string>();
   readonly warnings: string[] = [];
   private readonly seenClientIds = new Set<string>();
   /** Deliveries the "conductor" accepted, by question: what it would have applied. */
@@ -100,10 +107,13 @@ export class FakeHost implements SupervisorHost {
 
   messages = {
     post: async (
-      message: { conversationId: string; text: string; clientMessageId: string },
+      message: { conversationId: string; text: string; clientMessageId: string; caller?: string },
       signal: AbortSignal,
-    ): Promise<{ messageId: string }> => {
+    ): Promise<{ messageId: string } | { refused: string }> => {
       await this.script.post?.(message, signal);
+      if (message.caller !== undefined && this.refusedCallers.has(message.caller)) {
+        return { refused: 'not_found' };
+      }
       if (!this.seenClientIds.has(message.clientMessageId)) {
         this.seenClientIds.add(message.clientMessageId);
         this.posted.push(message);

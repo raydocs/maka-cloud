@@ -18,6 +18,8 @@ export interface QuestionDelivery {
   questionId: string;
   optionId: string;
   text?: string;
+  /** Who answered (`AnswerRequest.caller`); the host checks it again before the answer takes effect. */
+  caller?: string;
 }
 
 /** The conductor's answers route: idempotent per question, the same option again is a duplicate. */
@@ -61,12 +63,16 @@ export interface SupervisorHost {
   answers: {
     deliver(answer: QuestionDelivery, signal: AbortSignal): Promise<QuestionOutcome>;
   };
-  /** The conversation's message route: idempotent on `clientMessageId`. */
+  /**
+   * The conversation's message route: idempotent on `clientMessageId`. `caller`
+   * is who answered; when the host no longer accepts them it answers `refused`
+   * and posts nothing.
+   */
   messages: {
     post(
-      message: { conversationId: string; text: string; clientMessageId: string },
+      message: { conversationId: string; text: string; clientMessageId: string; caller?: string },
       signal: AbortSignal,
-    ): Promise<{ messageId: string }>;
+    ): Promise<{ messageId: string } | { refused: string }>;
   };
   /** Reports things that must not stop the supervisor. */
   onWarning?(message: string, detail?: unknown): void;
