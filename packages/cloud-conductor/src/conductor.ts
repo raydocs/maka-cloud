@@ -1,0 +1,832 @@
+import { join } from 'node:path';
+import type { SessionEvent } from '@maka/core/events';
+import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
+import type { MakaToolContext } from '@maka/runtime/tool-runtime';
+import {
+  type ConductorLimits,
+  DEFAULT_LIMITS,
+  type ModelAccess,
+  type ModelPrices,
+  OPUS_5_5_PRICES,
+} from './config.js';
+import { MakaHost } from './maka-host.js';
+import { type ConductorAccess, OrchestratorLink } from './orchestrator-link.js';
+import type { ConductorOutbox, OutboxNotice } from './outbox.js';
+import { DEFAULT_PLAYBOOKS, type Playbook } from './playbooks.js';
+import { callCostUsd } from './pricing.js';
+import { conductorSystemPrompt, PLANNER_SYSTEM_PROMPT, plannerInput } from './prompts.js';
+import { ConductorState, OPEN_RUN_STATES, type QuestionRow, type RunRow } from './state.js';
+import {
+  type ActiveTurn,
+  type ConductorToolSpec,
+  conductorTools,
+  type ToolHost,
+  ToolRefusal,
+} from './tools.js';
+
+export interface ConductorOptions {
+  /** Directory for the conductor's database and Maka's storage. One process owns it. */
+  root: string;
+  access: ModelAccess;
+  outbox: ConductorOutbox;
+  playbooks?: readonly Playbook[];
+  /** Tools playbooks add; `irreversible` ones are held for approval. */
+  tools?: readonly ConductorToolSpec[];
+  limits?: Partial<ConductorLimits>;
+  prices?: ModelPrices;
+  now?: () => number;
+  /** Reports what must not stop the conductor: an outbox that threw, a cancel that failed. */
+  onWarning?: (message: string, detail?: unknown) => void;
+  /** Test seams. */
+  hooks?: {
+    /** After a turn is registered and before its message is sent. */
+    beforeSend?(turn: { runId: string; conversationId: string }): Promise<void>;
+  };
+}
+
+export interface UserMessage {
+  conversationId: string;
+  messageId: string;
+  text: string;
+}
+
+export interface UserAnswer {
+  conversationId: string;
+  questionId: string;
+  optionId: string;
+  /** Optional words the user added to the chosen option; passed to the model with it. */
+  text?: string;
+}
+
+export const MAX_ANSWER_TEXT_LENGTH = 4000;
+
+/**
+ * Answers are idempotent per question: the same option again is accepted as a
+ * duplicate and changes nothing; a different option is a conflict.
+ */
+export type AnswerOutcome =
+  | { accepted: true; duplicate: boolean }
+  | {
+      accepted: false;
+      reason: 'not_found' | 'not_open' | 'unknown_option' | 'conflict' | 'closed' | 'text_too_long';
+    };
+
+export interface ConductorStats {
+  /** Runs holding a slot. */
+  runningTurns: number;
+  /** Turns waiting for a slot. */
+  waitingForSlot: number;
+  /** Inputs queued behind a running turn. */
+  queued: number;
+  planners: number;
+  timers: number;
+  openClients: number;
+}
+
+type StopReason = 'user' | 'timeout' | 'shutdown' | 'refusals';
+
+interface Turn extends ActiveTurn {
+  readonly makaSessionId: string;
+  readonly controller: AbortController;
+  refusals: number;
+  stopReason?: StopReason;
+  /** Settles once Maka has been told to stop. */
+  stopping?: Promise<void>;
+  /** Planner sessions running for this turn. */
+  readonly planners: Set<string>;
+  /** Text since the last tool call: the delivery. */
+  finalText: string[];
+  errors: string[];
+  completeReason?: string;
+  /** Async work started from event handlers (question posts), awaited before settling. */
+  readonly pending: Set<Promise<void>>;
+}
+
+type Job = { kind: 'turn'; runId: string; text: string } | { kind: 'cancel_tasks'; runId: string };
+
+interface Lane {
+  readonly conversationId: string;
+  access?: ConductorAccess;
+  queue: Job[];
+  pump?: Promise<void>;
+  current?: Turn;
+}
+
+const money = (usd: number) => `$${usd.toFixed(2)}`;
+
+/**
+ * Turns one user message into a playbook run on a Maka session, delegating
+ * through the T2 orchestrator. Implements the cloud server's
+ * `ConversationHandler` (`onUserMessage`).
+ *
+ * Every run holds a slot, an abort controller, a timer and an orchestrator
+ * client; one `finally` gives all of them back, whichever way the turn ends.
+ */
+export class Conductor {
+  readonly state: ConductorState;
+  private readonly host: MakaHost;
+  private readonly outbox: ConductorOutbox;
+  private readonly playbooks: readonly Playbook[];
+  private readonly limits: ConductorLimits;
+  private readonly prices: ModelPrices;
+  private readonly now: () => number;
+  private readonly warn: (message: string, detail?: unknown) => void;
+  private readonly hooks: NonNullable<ConductorOptions['hooks']>;
+  private readonly lanes = new Map<string, Lane>();
+  private readonly turns = new Map<string, Turn>();
+  private readonly plannerTurns = new Map<string, Turn>();
+  private readonly tokens = new Map<string, string>();
+  private readonly counters = { openClients: 0, timers: 0, planners: 0 };
+  private readonly closing = new AbortController();
+  private slotsInUse = 0;
+  private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
+  private closed: Promise<void> | undefined;
+
+  private constructor(options: ConductorOptions) {
+    this.now = options.now ?? Date.now;
+    this.state = new ConductorState(join(options.root, 'conductor.db'), this.now);
+    this.outbox = options.outbox;
+    this.playbooks = options.playbooks ?? DEFAULT_PLAYBOOKS;
+    this.limits = { ...DEFAULT_LIMITS, ...options.limits };
+    this.prices = options.prices ?? OPUS_5_5_PRICES;
+    this.warn = options.onWarning ?? (() => undefined);
+    this.hooks = options.hooks ?? {};
+    const tools = conductorTools(this.toolHost(), options.tools);
+    this.host = new MakaHost({
+      root: join(options.root, 'maka'),
+      access: options.access,
+      state: this.state,
+      toolsFor: (kind) => (kind === 'conductor' ? tools : []),
+      onModelCall: (makaSessionId, attempt) => this.meter(makaSessionId, attempt),
+      now: this.now,
+    });
+  }
+
+  /**
+   * Opens the conductor over its root. Runs a previous process left active are
+   * ended as interrupted (their orchestrator tasks were already failed by the
+   * orchestrator's own restore) and their users are told; runs waiting for an
+   * answer keep waiting.
+   */
+  static async create(options: ConductorOptions): Promise<Conductor> {
+    const conductor = new Conductor(options);
+    try {
+      for (const run of conductor.state.runsInState('active')) {
+        if (conductor.state.endRun(run.runId, 'interrupted', 'restart')) {
+          await conductor.notice(
+            run,
+            'This run was interrupted by a restart. Send the request again to start over.',
+          );
+        }
+      }
+      await conductor.host.recoverInterrupted();
+    } catch (error) {
+      await conductor.host.close().catch(() => undefined);
+      conductor.state.close();
+      throw error;
+    }
+    return conductor;
+  }
+
+  /** Admits a user message once and queues its turn. Returns before the run finishes. */
+  async onUserMessage(message: UserMessage, access: ConductorAccess): Promise<void> {
+    if (this.closing.signal.aborted) throw new Error('The conductor is closed');
+    const lane = this.lane(message.conversationId, access);
+    if (lane.queue.length >= this.limits.maxQueuedPerConversation) {
+      this.safe(() =>
+        this.outbox.notice({
+          conversationId: message.conversationId,
+          text: 'Too many messages are waiting. Wait for the current run to answer, then send this again.',
+        }),
+      );
+      return;
+    }
+    const admitted = this.state.admitMessage(
+      message.conversationId,
+      message.messageId,
+      this.limits.defaultRunBudgetUsd,
+    );
+    if (admitted.duplicate) return;
+    this.enqueue(lane, { kind: 'turn', runId: admitted.run.runId, text: message.text });
+  }
+
+  /**
+   * Applies an answer to an open question once. A budget raise or an approval
+   * is applied by code before the answer reaches the model; "stop" ends the run.
+   */
+  async onAnswer(answer: UserAnswer, access: ConductorAccess): Promise<AnswerOutcome> {
+    if (this.closing.signal.aborted) throw new Error('The conductor is closed');
+    if (answer.text !== undefined && answer.text.length > MAX_ANSWER_TEXT_LENGTH) {
+      return { accepted: false, reason: 'text_too_long' };
+    }
+    const lane = this.lane(answer.conversationId, access);
+    const result = this.state.answer(answer.conversationId, answer.questionId, answer.optionId);
+    if (!result.accepted) return result;
+    if (result.duplicate) return { accepted: true, duplicate: true };
+    const { question, option, run } = result;
+    this.safe(() =>
+      this.outbox.answered?.({
+        conversationId: question.conversationId,
+        runId: question.runId,
+        questionId: question.questionId,
+        optionId: option.id,
+        ...(answer.text ? { text: answer.text } : {}),
+      }),
+    );
+    if (!OPEN_RUN_STATES.includes(run.state)) return { accepted: false, reason: 'closed' };
+    if (question.reason === 'budget_overrun' && option.id === 'stop') {
+      this.stopRun(lane, run.runId, 'user_stop');
+      return { accepted: true, duplicate: false };
+    }
+    const followUp =
+      question.reason === 'irreversible' && option.id === 'approve'
+        ? ` Call the tool again with the same arguments and actionRef "${question.actionRef}".`
+        : question.reason === 'irreversible'
+          ? ' Do not perform that action.'
+          : question.reason === 'budget_overrun'
+            ? ` The run budget is now ${money(this.state.budget(run.runId).budgetUsd)}.`
+            : '';
+    this.enqueue(lane, {
+      kind: 'turn',
+      runId: run.runId,
+      text: `Answer to question ${question.questionId} ("${question.question}"): ${option.label}.${followUp}${
+        answer.text ? `\n\nThe user added: ${JSON.stringify(answer.text)}` : ''
+      }`,
+    });
+    return { accepted: true, duplicate: false };
+  }
+
+  /** Stops the conversation's open run: its turn, queued inputs and tasks. */
+  async stop(conversationId: string): Promise<boolean> {
+    const run = this.state.openRun(conversationId);
+    if (!run) return false;
+    return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
+  }
+
+  /**
+   * Reserves spend against a conversation's run budget for a caller in the same
+   * process (the supervisor's verification). See ConductorState.reserveExternal.
+   */
+  reserveSpend(key: string, conversationId: string, taskId: string | undefined, maxUsd: number) {
+    return this.state.reserveExternal(key, conversationId, taskId, maxUsd);
+  }
+
+  /** Settles a reservation made with reserveSpend at what was actually spent. */
+  settleSpend(key: string, actualUsd: number) {
+    return this.state.settleExternal(key, actualUsd);
+  }
+
+  /** Posts a notice to the conversation's feed for a caller in the same process. */
+  async postNotice(notice: OutboxNotice): Promise<void> {
+    await this.safe(() => this.outbox.notice(notice));
+  }
+
+  stats(): ConductorStats {
+    let queued = 0;
+    for (const lane of this.lanes.values()) queued += lane.queue.length;
+    return {
+      runningTurns: this.slotsInUse,
+      waitingForSlot: this.slotWaiters.length,
+      queued,
+      planners: this.counters.planners,
+      timers: this.counters.timers,
+      openClients: this.counters.openClients,
+    };
+  }
+
+  /** Resolves once no conversation has work queued or running. */
+  async idle(): Promise<void> {
+    for (;;) {
+      const pumps = [...this.lanes.values()].flatMap((lane) => (lane.pump ? [lane.pump] : []));
+      if (pumps.length === 0) return;
+      await Promise.all(pumps);
+    }
+  }
+
+  /** Stops every turn, waits for each to give back what it holds, then closes the stores. */
+  close(): Promise<void> {
+    this.closed ??= (async () => {
+      this.closing.abort();
+      for (const waiter of this.slotWaiters.splice(0))
+        waiter.refuse(new Error('The conductor is closed'));
+      for (const lane of this.lanes.values()) {
+        lane.queue = [];
+        if (lane.current) this.requestStop(lane.current, 'shutdown');
+      }
+      await this.idle();
+      try {
+        await this.host.close();
+      } finally {
+        this.state.close();
+      }
+    })();
+    return this.closed;
+  }
+
+  // Lanes and slots
+
+  private lane(conversationId: string, access?: ConductorAccess): Lane {
+    let lane = this.lanes.get(conversationId);
+    if (!lane) {
+      lane = { conversationId, queue: [] };
+      this.lanes.set(conversationId, lane);
+    }
+    if (access) lane.access = access;
+    return lane;
+  }
+
+  private enqueue(lane: Lane, job: Job): void {
+    lane.queue.push(job);
+    this.startPump(lane);
+  }
+
+  private startPump(lane: Lane): void {
+    if (lane.pump) return;
+    lane.pump = this.pump(lane).finally(() => {
+      lane.pump = undefined;
+      // A job queued after the pump's last look still runs.
+      if (lane.queue.length > 0 && !this.closing.signal.aborted) this.startPump(lane);
+    });
+  }
+
+  private async pump(lane: Lane): Promise<void> {
+    for (let job = lane.queue.shift(); job; job = lane.queue.shift()) {
+      try {
+        if (job.kind === 'turn') await this.executeTurn(lane, job);
+        else await this.cancelTasks(lane, job.runId);
+      } catch (error) {
+        this.warn('A conductor job failed', error);
+      }
+    }
+  }
+
+  private acquireSlot(): Promise<void> {
+    if (this.closing.signal.aborted) return Promise.reject(new Error('The conductor is closed'));
+    if (this.slotsInUse < this.limits.maxConcurrentRuns) {
+      this.slotsInUse += 1;
+      return Promise.resolve();
+    }
+    return new Promise((grant, refuse) => this.slotWaiters.push({ grant, refuse }));
+  }
+
+  private releaseSlot(): void {
+    const next = this.slotWaiters.shift();
+    // The slot passes straight to the next waiter, so the count never dips below the limit.
+    if (next) next.grant();
+    else this.slotsInUse -= 1;
+  }
+
+  // Turns
+
+  private async executeTurn(lane: Lane, job: Extract<Job, { kind: 'turn' }>): Promise<void> {
+    const before = this.state.run(job.runId);
+    if (!before || !OPEN_RUN_STATES.includes(before.state)) return;
+    try {
+      await this.acquireSlot();
+    } catch {
+      return;
+    }
+    const link = new OrchestratorLink(
+      lane.conversationId,
+      lane.access as ConductorAccess,
+      this.tokens,
+      this.counters,
+    );
+    let turn: Turn | undefined;
+    let setupError: unknown;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const makaSessionId = await this.ensureSession(lane.conversationId);
+      const controller = new AbortController();
+      turn = {
+        runId: job.runId,
+        conversationId: lane.conversationId,
+        makaSessionId,
+        link,
+        controller,
+        signal: controller.signal,
+        refusals: 0,
+        planners: new Set(),
+        finalText: [],
+        errors: [],
+        pending: new Set(),
+      };
+      const active: Turn = turn;
+      lane.current = active;
+      this.turns.set(makaSessionId, active);
+      timer = setTimeout(() => this.requestStop(active, 'timeout'), this.limits.turnTimeoutMs);
+      this.counters.timers += 1;
+      await this.hooks.beforeSend?.({ runId: job.runId, conversationId: lane.conversationId });
+      // Checked after the turn is registered: a stop that ran before this saw
+      // no turn and ended the run, so this sees it; one that runs after sees the turn.
+      if (this.closing.signal.aborted) this.requestStop(active, 'shutdown');
+      const run = this.state.run(job.runId) as RunRow;
+      if (!OPEN_RUN_STATES.includes(run.state) && !active.stopReason)
+        this.requestStop(active, 'user');
+      if (!active.stopReason && this.state.budget(job.runId).remainingUsd <= 0) {
+        // Spent before this input arrived (a dismissed budget question): ask again, send nothing.
+        await this.askBudget(active, 0);
+      } else if (!active.stopReason) {
+        const text = this.turnText(job.runId, job.text);
+        for await (const event of this.host.send(
+          makaSessionId,
+          text,
+          this.limits.maxStepsPerTurn,
+        )) {
+          this.onEvent(active, event);
+        }
+      }
+    } catch (error) {
+      if (turn) turn.errors.push(errorMessage(error));
+      else setupError = error;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+        this.counters.timers -= 1;
+      }
+      if (turn) {
+        this.turns.delete(turn.makaSessionId);
+        if (lane.current === turn) lane.current = undefined;
+        await turn.stopping;
+        await Promise.allSettled(turn.pending);
+      }
+      try {
+        const queued = lane.queue.some((next) => next.kind === 'turn' && next.runId === job.runId);
+        await this.settle(job.runId, turn, setupError, link, queued);
+      } catch (error) {
+        this.warn('Settling a run failed', error);
+      }
+      await link
+        .close()
+        .catch((error: unknown) => this.warn('Closing the orchestrator client failed', error));
+      this.releaseSlot();
+    }
+  }
+
+  private async ensureSession(conversationId: string): Promise<string> {
+    const existing = this.state.conversationSession(conversationId);
+    if (existing) return existing;
+    const makaSessionId = await this.host.createSession({
+      kind: 'conductor',
+      systemPrompt: conductorSystemPrompt(this.playbooks),
+      thinkingLevel: 'medium',
+      runId: null,
+    });
+    this.state.bindConversation(conversationId, makaSessionId);
+    return makaSessionId;
+  }
+
+  private turnText(runId: string, text: string): string {
+    const budget = this.state.budget(runId);
+    return `[${new Date(this.now()).toISOString()}] Run budget: ${money(Math.max(0, budget.remainingUsd))} left of ${money(budget.budgetUsd)}.\n\n${text}`;
+  }
+
+  private onEvent(turn: Turn, event: SessionEvent): void {
+    switch (event.type) {
+      case 'tool_start':
+      case 'tool_result':
+        turn.finalText = [];
+        break;
+      case 'text_complete':
+        if (!event.interrupted && event.text.trim()) turn.finalText.push(event.text);
+        break;
+      case 'error':
+        if (!event.recoverable) turn.errors.push(event.message);
+        break;
+      case 'complete':
+        turn.completeReason = event.stopReason;
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Decides how the run continues once its turn is over. */
+  private async settle(
+    runId: string,
+    turn: Turn | undefined,
+    setupError: unknown,
+    link: OrchestratorLink,
+    queued: boolean,
+  ): Promise<void> {
+    const run = this.state.run(runId);
+    if (!run) return;
+    if (turn?.stopReason === 'shutdown') {
+      // The orchestrator's restore fails the run's tasks when the server comes back.
+      this.state.endRun(runId, 'interrupted', 'shutdown');
+      return;
+    }
+    if (!OPEN_RUN_STATES.includes(run.state)) {
+      // Ended while the turn ran (user stop): stop what it started.
+      await this.cancelRunTasks(runId, link);
+      return;
+    }
+    const failure = this.failureOf(turn, setupError);
+    if (failure) {
+      if (this.state.endRun(runId, 'failed', failure.reason)) await this.notice(run, failure.text);
+      await this.cancelRunTasks(runId, link);
+      return;
+    }
+    const text = turn?.finalText.join('\n\n').trim();
+    if (text)
+      this.safe(() => this.outbox.message({ conversationId: run.conversationId, runId, text }));
+    if (queued && (turn?.stopReason !== 'refusals' || this.state.openQuestion(runId))) {
+      // A message sent during this turn continues the run; it was written
+      // without seeing a question this turn asked, so it stands in for the answer.
+      this.state.dismissQuestion(runId);
+      this.state.setRunState(runId, 'active');
+      return;
+    }
+    if (this.state.openQuestion(runId)) {
+      this.state.setRunState(runId, 'waiting');
+      return;
+    }
+    if (turn?.stopReason === 'refusals') {
+      if (this.state.endRun(runId, 'failed', 'stopped')) {
+        await this.notice(
+          run,
+          'The run was stopped because it kept calling tools after it had to stop.',
+        );
+      }
+      await this.cancelRunTasks(runId, link);
+      return;
+    }
+    if (this.state.endRun(runId, 'done', 'delivered')) await this.cancelRunTasks(runId, link);
+  }
+
+  private failureOf(
+    turn: Turn | undefined,
+    setupError: unknown,
+  ): { reason: string; text: string } | undefined {
+    if (setupError !== undefined) {
+      return {
+        reason: 'setup_failed',
+        text: `The run could not start: ${errorMessage(setupError)}`,
+      };
+    }
+    if (!turn) return { reason: 'setup_failed', text: 'The run could not start.' };
+    if (turn.stopReason === 'timeout') {
+      return {
+        reason: 'timeout',
+        text: `The run took longer than ${Math.round(this.limits.turnTimeoutMs / 60_000)} minutes and was stopped.`,
+      };
+    }
+    if (turn.stopReason === 'refusals') return undefined;
+    const error = turn.errors.at(-1);
+    if (error !== undefined || turn.completeReason === 'error') {
+      const message = error ?? 'the model call failed';
+      return /context|too long|too many tokens/i.test(message)
+        ? {
+            reason: 'context_full',
+            text: 'This conversation is too long to continue. Start a new conversation for the next request.',
+          }
+        : { reason: 'model_error', text: `The run failed: ${message}` };
+    }
+    if (turn.completeReason === 'step_limit' || turn.completeReason === 'max_tokens') {
+      return {
+        reason: turn.completeReason,
+        text: `The run stopped early (${turn.completeReason}).`,
+      };
+    }
+    return undefined;
+  }
+
+  private requestStop(turn: Turn, reason: StopReason): void {
+    if (turn.stopReason) return;
+    turn.stopReason = reason;
+    turn.controller.abort();
+    const sessions = [turn.makaSessionId, ...turn.planners];
+    turn.stopping = Promise.all(
+      sessions.map((sessionId) =>
+        this.host
+          .stop(sessionId)
+          .catch((error: unknown) => this.warn('Stopping a Maka turn failed', error)),
+      ),
+    ).then(() => undefined);
+  }
+
+  private stopRun(lane: Lane, runId: string, reason: string): boolean {
+    if (!this.state.endRun(runId, 'cancelled', reason)) return false;
+    lane.queue = lane.queue.filter((job) => job.runId !== runId);
+    if (lane.current?.runId === runId) this.requestStop(lane.current, 'user');
+    else this.enqueue(lane, { kind: 'cancel_tasks', runId });
+    return true;
+  }
+
+  private async cancelTasks(lane: Lane, runId: string): Promise<void> {
+    if (!lane.access || this.state.tasksOf(runId).length === 0) return;
+    const link = new OrchestratorLink(lane.conversationId, lane.access, this.tokens, this.counters);
+    try {
+      await this.cancelRunTasks(runId, link);
+    } finally {
+      await link.close().catch(() => undefined);
+    }
+  }
+
+  private async cancelRunTasks(runId: string, link: OrchestratorLink): Promise<void> {
+    for (const taskId of this.state.tasksOf(runId)) {
+      try {
+        const result = await link.call('task_cancel', { taskId });
+        if (result.isError) this.warn(`Cancelling task ${taskId} failed`, result.text);
+      } catch (error) {
+        this.warn(`Cancelling task ${taskId} failed`, error);
+      }
+    }
+  }
+
+  // Budget
+
+  private meter(makaSessionId: string, attempt: ModelCallAttempt): void {
+    const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+    const runId = turn?.runId ?? this.state.session(makaSessionId)?.runId;
+    if (!runId) return;
+    const budget = this.state.addModelSpend(
+      runId,
+      callCostUsd(attempt, this.prices),
+      attempt.attemptId,
+    );
+    if (turn && budget.remainingUsd <= 0 && !this.state.openQuestion(runId)) {
+      const asked = this.askBudget(turn, 0).then(() => undefined);
+      turn.pending.add(asked);
+      void asked.finally(() => turn.pending.delete(asked));
+    }
+  }
+
+  /** Opens the code-built budget question. `needUsd` 0 means the model spend ran out. */
+  private async askBudget(turn: ActiveTurn, needUsd: number): Promise<QuestionRow | undefined> {
+    const budget = this.state.budget(turn.runId);
+    const target =
+      needUsd > 0
+        ? (budget.spentUsd + needUsd) * 1.2
+        : Math.max(budget.budgetUsd * 1.5, budget.budgetUsd + this.limits.defaultRunBudgetUsd);
+    const raiseToUsd = Math.ceil(target * 100) / 100;
+    const opened = this.state.openQuestionIf(
+      turn.runId,
+      {
+        reason: 'budget_overrun',
+        question:
+          needUsd > 0
+            ? `The next step needs ${money(needUsd)}, but this run has ${money(Math.max(0, budget.remainingUsd))} of its ${money(budget.budgetUsd)} budget left. Raise the budget?`
+            : `This run has used its ${money(budget.budgetUsd)} budget. Raise it to keep going?`,
+        options: [
+          { id: 'raise', label: `Raise the budget to ${money(raiseToUsd)}` },
+          { id: 'stop', label: 'Stop here' },
+        ],
+        recommended: 'raise',
+        raiseToUsd,
+        actionRef: null,
+      },
+      () => undefined,
+    );
+    if (!opened.ok) return undefined;
+    await this.postQuestion(opened.question);
+    return opened.question;
+  }
+
+  // Tool host
+
+  private toolHost(): ToolHost {
+    return {
+      state: this.state,
+      limits: this.limits,
+      playbooks: this.playbooks,
+      turnFor: (ctx: MakaToolContext) => {
+        const turn = this.turns.get(ctx.sessionId);
+        if (!turn) throw new ToolRefusal('no_run', 'This session has no running conductor turn.');
+        return turn;
+      },
+      mustStop: (active) => this.mustStop(active as Turn),
+      plan: (active, input, signal) => this.plan(active as Turn, input, signal),
+      askBudget: (active, needUsd) => this.askBudget(active, needUsd),
+      postQuestion: (question) => this.postQuestion(question),
+      postNotice: async (active, text) => {
+        const run = this.state.run(active.runId);
+        if (run) await this.notice(run, text);
+      },
+    };
+  }
+
+  private mustStop(turn: Turn): string | undefined {
+    let reason: string | undefined;
+    if (turn.stopReason) reason = 'The run is stopping.';
+    else {
+      const run = this.state.run(turn.runId);
+      if (!run || !OPEN_RUN_STATES.includes(run.state)) reason = 'The run has ended.';
+      else if (this.state.openQuestion(turn.runId)) reason = 'A question is waiting for the user.';
+      else if (this.state.budget(turn.runId).remainingUsd <= 0) reason = 'The run budget is spent.';
+    }
+    if (reason) {
+      turn.refusals += 1;
+      if (turn.refusals >= this.limits.maxRefusalsBeforeStop) this.requestStop(turn, 'refusals');
+    }
+    return reason;
+  }
+
+  /** One planning call on its own Maka session at high effort; the plan is the tool result. */
+  private async plan(
+    turn: Turn,
+    input: { playbook: Playbook; goal: string; context?: string },
+    signal: AbortSignal,
+  ): Promise<string> {
+    const makaSessionId = await this.host.createSession({
+      kind: 'planner',
+      systemPrompt: PLANNER_SYSTEM_PROMPT,
+      thinkingLevel: 'high',
+      runId: turn.runId,
+    });
+    this.counters.planners += 1;
+    turn.planners.add(makaSessionId);
+    this.plannerTurns.set(makaSessionId, turn);
+    let stopping: Promise<void> | undefined;
+    const stop = () => {
+      stopping ??= this.host
+        .stop(makaSessionId)
+        .catch((error: unknown) => this.warn('Stopping the planner failed', error));
+    };
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, this.limits.plannerTimeoutMs);
+    this.counters.timers += 1;
+    signal.addEventListener('abort', stop, { once: true });
+    const texts: string[] = [];
+    const errors: string[] = [];
+    let completeReason: string | undefined;
+    try {
+      if (signal.aborted) stop();
+      else {
+        const text = plannerInput({
+          ...input,
+          remainingUsd: Math.max(0, this.state.budget(turn.runId).remainingUsd),
+        });
+        for await (const event of this.host.send(makaSessionId, text, 1)) {
+          if (event.type === 'text_complete' && !event.interrupted) texts.push(event.text);
+          else if (event.type === 'error' && !event.recoverable) errors.push(event.message);
+          else if (event.type === 'complete') completeReason = event.stopReason;
+        }
+      }
+    } catch (error) {
+      errors.push(errorMessage(error));
+    } finally {
+      clearTimeout(timer);
+      this.counters.timers -= 1;
+      signal.removeEventListener('abort', stop);
+      await stopping;
+      turn.planners.delete(makaSessionId);
+      this.plannerTurns.delete(makaSessionId);
+      this.counters.planners -= 1;
+    }
+    if (signal.aborted)
+      throw new ToolRefusal('run_must_stop', 'The run is stopping. End your turn now.');
+    if (timedOut)
+      throw new ToolRefusal('planner_timeout', 'Planning took too long. Plan the steps yourself.');
+    if (errors.length > 0 || completeReason === 'error') {
+      throw new ToolRefusal(
+        'planner_failed',
+        `Planning failed (${errors.at(-1) ?? 'model error'}). Plan the steps yourself.`,
+      );
+    }
+    const plan = texts.join('\n\n').trim();
+    if (!plan)
+      throw new ToolRefusal(
+        'planner_failed',
+        'The planner returned no plan. Plan the steps yourself.',
+      );
+    return plan;
+  }
+
+  // Outbox
+
+  private async postQuestion(question: QuestionRow): Promise<void> {
+    await this.safe(() =>
+      this.outbox.question({
+        conversationId: question.conversationId,
+        runId: question.runId,
+        questionId: question.questionId,
+        reason: question.reason,
+        question: question.question,
+        options: question.options,
+        recommended: question.recommended,
+      }),
+    );
+  }
+
+  private async notice(run: RunRow, text: string): Promise<void> {
+    await this.safe(() =>
+      this.outbox.notice({ conversationId: run.conversationId, runId: run.runId, text }),
+    );
+  }
+
+  private async safe(fn: () => void | Promise<void>): Promise<void> {
+    try {
+      await fn();
+    } catch (error) {
+      this.warn('The outbox failed', error);
+    }
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
