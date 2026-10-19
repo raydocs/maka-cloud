@@ -8,6 +8,7 @@ import {
   children,
   collect,
   exists,
+  filesUnder,
   isRunning,
   reader,
   setup,
@@ -233,7 +234,7 @@ for (const row of ROWS) {
     if (row.orphan !== false) assert.ok(left.length >= 1, 'the CLI left a child behind');
     for (const pid of left) assert.equal(await isRunning(pid), false, `child ${pid} survived`);
     assert.equal(await h.cliCalls('claude'), row.cliRuns ?? (await h.cliCalls('claude')));
-    assert.deepEqual(await fs.readdir(h.logRoot).catch(() => []), [], 'raw output left behind');
+    assert.deepEqual(await filesUnder(h.logRoot), [], 'raw output left behind');
 
     // Every handle is back.
     const { fleet } = h.runners;

@@ -121,6 +121,8 @@ class Run implements RunHandle {
   private access: ModelAccess | undefined;
   private lease: SandboxLease | undefined;
   private runName: string | undefined;
+  /** Every CLI run this object started, which are the only ones its cleanup may stop. */
+  private readonly runNames: string[] = [];
   private stopWatch: (() => void) | undefined;
   private renewTimer: NodeJS.Timeout | undefined;
   private renewing: Promise<void> | undefined;
@@ -364,6 +366,7 @@ class Run implements RunHandle {
     const dir = machine.taskDir(spec.taskId);
     const run = `t${turns}`;
     this.runName = run;
+    this.runNames.push(run);
     const runToken = randomBytes(16).toString('hex');
     this.secrets.add(runToken);
     const mcpUrl = spec.mcp
@@ -389,7 +392,7 @@ class Run implements RunHandle {
     this.checkCancelled();
     if (launched === 'cancelled') return { ok: false, reason: 'the start was cancelled' };
 
-    const parser = vendor.parser();
+    const parser = vendor.parser((text) => this.scrub(text));
     const rawTail: string[] = [];
     let guardReason: string | undefined;
     let verdict: { ok: boolean; text?: string } | undefined;
@@ -398,12 +401,12 @@ class Run implements RunHandle {
 
     const handleLine = (line: string): void => {
       if (line.startsWith('MAKA_GUARD: ')) {
-        guardReason = clipQuote(line.slice('MAKA_GUARD: '.length));
+        guardReason = clipQuote(this.scrub(line.slice('MAKA_GUARD: '.length)));
         return;
       }
       const events = parser.feed(line);
       if (events.length === 0 && line.trim() !== '' && !line.trimStart().startsWith('{')) {
-        rawTail.push(clipQuote(line));
+        rawTail.push(clipQuote(this.scrub(line)));
         if (rawTail.length > RAW_TAIL_LINES) rawTail.shift();
       }
       for (const event of events) {
@@ -611,13 +614,16 @@ class Run implements RunHandle {
   }
 
   /**
-   * Stops every process of the task. With `startMayBeInFlight` it also marks the current run as
-   * cancelled, so a start whose answer has not come back yet cannot slip in after this.
+   * Stops the processes of this object's own runs, and nobody else's: the orchestrator is told a
+   * run is over before its cleanup has finished, and a resume of the task may already be running.
+   * With `startMayBeInFlight` it also marks the current run as cancelled, so a start whose answer
+   * has not come back yet cannot slip in after this.
    */
   private async stopProcesses(startMayBeInFlight: boolean): Promise<void> {
     const machine = this.machine;
-    if (!machine) return;
+    if (!machine || this.runNames.length === 0) return;
     await machine.kill(this.spec.taskId, {
+      runs: this.runNames,
       signal: AbortSignal.timeout(this.cleanupTimeoutMs()),
       graceTenths: Math.max(1, Math.ceil((this.fleet.options.stopGraceMs ?? 3_000) / 100)),
       ...(startMayBeInFlight && this.runName ? { cancelRuns: [this.runName] } : {}),
@@ -681,12 +687,21 @@ class Run implements RunHandle {
     this.events.push({ type: 'progress', note: text });
   }
 
-  /** Secrets out first, then the length cap, so a cut can never leave half a secret behind. */
+  /**
+   * Secrets out first, then the length cap, so a cut can never leave half a secret behind. Output
+   * of the CLI is scrubbed before anything shortens or reformats it, not after.
+   */
   private redact(text: string, max: number): string {
+    const out = this.scrub(text);
+    return out.length <= max ? out : `${out.slice(0, max - 1)}…`;
+  }
+
+  /** Replaces every secret of the run in `text`. Nothing is cut: call this before clipping. */
+  private scrub(text: string): string {
     let out = text;
     for (const secret of this.secrets)
       if (secret.length >= 6) out = out.split(secret).join('[redacted]');
-    return out.length <= max ? out : `${out.slice(0, max - 1)}…`;
+    return out;
   }
 }
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { RunnerSessionRecord } from '../types.js';
-import { collect, notes, setup, terminal } from './harness.js';
+import { collect, deferred, notes, setup, terminal } from './harness.js';
 
 function record(taskId: string, snapshotIds: string[], turns: number): RunnerSessionRecord {
   return {
@@ -145,4 +145,53 @@ test('a snapshot that fails to delete does not fail the turn', async (t) => {
   h.fake.snapshots.delete(first); // already gone: the delete answers 404
   a = (await fleet.snapshotTurn({ ...a, turns: 2 }, machine)).record;
   assert.equal(a.snapshotIds.length, 1);
+});
+
+test('snapshots are ordered by when they were captured, not by when their upload finished', async (t) => {
+  const h = await setup({ cloud: { keepSnapshots: 2 } });
+  t.after(() => h.cleanup());
+  const { fleet } = h.runners;
+  const machine = fleet.machine(h.fake.machineId);
+
+  // The fake keeps no files, so stand in for the machine's disk: each snapshot holds what was on
+  // it when the snapshot was requested.
+  const disk = new Set<string>();
+  const captured = new Map<string, Set<string>>();
+  const slowId = deferred<string>();
+  const slowUpload = deferred();
+  const create = h.client.createSnapshot.bind(h.client);
+  h.client.createSnapshot = async (...args) => {
+    const files = new Set(disk);
+    const snapshot = await create(...args);
+    captured.set(snapshot.id, files);
+    if (captured.size === 1) slowId.resolve(snapshot.id);
+    return snapshot;
+  };
+  const wait = h.client.waitForSnapshot.bind(h.client);
+  h.client.waitForSnapshot = async (id, ...rest) => {
+    if (id === (await slowId.promise)) await slowUpload.promise;
+    return await wait(id, ...rest);
+  };
+
+  // A is captured first and uploads slowly; B and C are captured and filed meanwhile.
+  for (const id of ['a', 'b', 'c']) await h.sessions.put(record(id, [], 1));
+  disk.add('a');
+  const slow = fleet.snapshotTurn((await h.sessions.get('a')) as RunnerSessionRecord, machine);
+  await slowId.promise;
+  disk.add('b');
+  await fleet.snapshotTurn((await h.sessions.get('b')) as RunnerSessionRecord, machine);
+  disk.add('c');
+  await fleet.snapshotTurn((await h.sessions.get('c')) as RunnerSessionRecord, machine);
+  slowUpload.resolve();
+  await slow;
+
+  for (const r of await h.sessions.list()) {
+    const restorePoint = r.snapshotIds.at(-1) as string;
+    assert.ok(h.fake.snapshots.has(restorePoint), `${r.taskId} points at a snapshot that exists`);
+    assert.ok(
+      captured.get(restorePoint)?.has(r.taskId),
+      `${r.taskId} restores from a snapshot that holds its files: ${[...(captured.get(restorePoint) ?? [])]}`,
+    );
+  }
+  assert.equal(h.fake.snapshots.size, 2, 'retention still holds');
 });
