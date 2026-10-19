@@ -36,6 +36,7 @@ test('the minimal environment gives the data layout and the defaults', () => {
   assert.deepEqual(config.conductor, { apiKey: 'sk-secret-anthropic' });
   assert.deepEqual(config.instabox, { machineId: 'mch_1' });
   assert.equal(config.openAiKeySet, false);
+  assert.equal(config.searchKeySet, false);
   assert.match(config.githubTokenProblem ?? '', /MAKA_GITHUB_TOKEN is not set/);
 });
 
@@ -66,7 +67,11 @@ test('optional settings are read', () => {
     MAKA_CLOUD_LLM_CONNECTION_ID: 'conn-prod',
     INSTABOX_API_URL: 'https://sandbox.example.test',
     OPENAI_API_KEY: 'sk-secret-openai',
+    DEEPSEEK_API_KEY: 'sk-secret-search',
+    DEEPSEEK_BASE_URL: 'https://search.example.test',
   });
+  assert.equal(config.searchKeySet, true);
+  assert.equal(config.gateway.searchBaseUrl, 'https://search.example.test');
   assert.equal(config.host, '0.0.0.0');
   assert.equal(config.port, 9000);
   assert.deepEqual(config.mcp, {
@@ -170,7 +175,11 @@ test('the model gateway listens on the host by default, and its settings are che
 
 test('the printed configuration carries no secret value', () => {
   const lines = describeConfig(
-    readStackConfig({ ...ENV, OPENAI_API_KEY: 'sk-secret-openai' }),
+    readStackConfig({
+      ...ENV,
+      OPENAI_API_KEY: 'sk-secret-openai',
+      DEEPSEEK_API_KEY: 'sk-secret-search',
+    }),
   ).join('\n');
   assert.doesNotMatch(lines, /secret/);
   assert.match(lines, /Codex runner key: +set/);

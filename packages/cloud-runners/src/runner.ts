@@ -520,7 +520,12 @@ class Run implements RunHandle {
       dirName: spec.taskId,
       run,
       script: buildRunScript({ preamble: preambleFor(vendor), command }),
-      envs: vendor.env(access, spec.mcp?.token),
+      envs: {
+        ...vendor.env(access, spec.mcp?.token),
+        ...(access.searchUrl
+          ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
+          : {}),
+      },
       runToken,
       workdir: `${dir}/workspace`,
       signal: this.signal,

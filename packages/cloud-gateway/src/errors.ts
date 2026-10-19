@@ -52,3 +52,21 @@ export function cutEvent(vendor: Vendor, message: string): Uint8Array {
       : `event: error\ndata: ${JSON.stringify({ type: 'error', code: 'server_error', message, param: null })}\n\n`;
   return new TextEncoder().encode(text);
 }
+
+const PLAIN_STATUS: Record<Refusal, number> = {
+  invalid_request: 400,
+  unauthenticated: 401,
+  budget: 402,
+  busy: 429,
+  not_found: 404,
+  too_large: 413,
+  unavailable: 503,
+};
+
+/** A refusal of a route that is no vendor's (web search). The text names no provider. */
+export function plainRefusal(refusal: Refusal, message: string): Response {
+  return new Response(JSON.stringify({ error: { type: refusal, message } }), {
+    status: PLAIN_STATUS[refusal],
+    headers: { 'content-type': 'application/json' },
+  });
+}

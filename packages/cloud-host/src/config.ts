@@ -44,10 +44,14 @@ export interface StackConfig {
     models: ModelPrice[];
     anthropicBaseUrl?: string;
     openAiBaseUrl?: string;
+    /** The web search provider's API, when not its default. */
+    searchBaseUrl?: string;
   };
   inbox: InboxConfig;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
+  /** With it, research runs get a `web-search` command, paid per call from their budget. */
+  searchKeySet: boolean;
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
@@ -80,6 +84,8 @@ export const ENV_VARIABLES = [
   ['INSTABOX_API_URL', 'sandbox API base URL'],
   ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
   ['OPENAI_BASE_URL', 'Responses API base URL for the model gateway'],
+  ['DEEPSEEK_API_KEY', 'the model gateway’s key for web search (DeepSeek Search API)'],
+  ['DEEPSEEK_BASE_URL', 'DeepSeek API base URL for web search'],
   ['MAKA_CLOUD_GATEWAY_HOST', 'model gateway host (default 127.0.0.1)'],
   ['MAKA_CLOUD_GATEWAY_PORT', 'model gateway port (default 8082)'],
   [
@@ -172,6 +178,7 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     },
     inbox: readInboxConfig(value, problems),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
+    searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
   };
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
@@ -184,6 +191,8 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
   }
   const openAiBaseUrl = url('OPENAI_BASE_URL');
   if (openAiBaseUrl !== undefined) config.gateway.openAiBaseUrl = openAiBaseUrl;
+  const searchBaseUrl = url('DEEPSEEK_BASE_URL');
+  if (searchBaseUrl !== undefined) config.gateway.searchBaseUrl = searchBaseUrl;
   const gatewayUrl = url('MAKA_CLOUD_GATEWAY_PUBLIC_URL');
   if (gatewayUrl !== undefined) {
     // The task token travels in every request: in the clear only on the host itself.
@@ -258,6 +267,7 @@ export function describeConfig(config: StackConfig): string[] {
     `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
     `gateway for tasks:   ${config.gateway.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `gateway models:      ${describeModels(config.gateway.models)}`,
+    `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,

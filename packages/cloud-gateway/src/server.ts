@@ -1,9 +1,10 @@
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { refusalResponse } from './errors.js';
+import { plainRefusal, refusalResponse } from './errors.js';
 import type { Gateway, Route } from './gateway.js';
 import type { Vendor } from './pricing.js';
+import { MAX_SEARCH_BODY_BYTES } from './search.js';
 
 /** The paths sandboxes call, under the gateway's base URL. */
 export const ROUTES: Readonly<Record<string, { vendor: Vendor; route: Route }>> = {
@@ -11,6 +12,14 @@ export const ROUTES: Readonly<Record<string, { vendor: Vendor; route: Route }>> 
   '/anthropic/v1/messages/count_tokens': { vendor: 'anthropic', route: 'count' },
   '/openai/v1/responses': { vendor: 'openai', route: 'responses' },
 };
+
+/** Web search, for a grant of either vendor. */
+export const SEARCH_PATH = '/search';
+
+/** The URL a sandbox's search tool calls. */
+export function searchUrl(gatewayUrl: string): string {
+  return `${gatewayUrl.replace(/\/+$/u, '')}${SEARCH_PATH}`;
+}
 
 /** The base URL a vendor's CLI is given, below the gateway's own URL. */
 export function vendorBaseUrl(gatewayUrl: string, vendor: Vendor): string {
@@ -95,6 +104,7 @@ export async function serveGateway(
   const server = createServer((request, out) => {
     void (async () => {
       const path = new URL(request.url ?? '/', 'http://gateway').pathname;
+      if (path === SEARCH_PATH) return search(request, out);
       const match = ROUTES[path];
       const vendor: Vendor =
         match?.vendor ?? (path.startsWith('/openai/') ? 'openai' : 'anthropic');
@@ -137,6 +147,27 @@ export async function serveGateway(
       } else out.destroy();
     });
   });
+  const search = async (request: IncomingMessage, out: ServerResponse): Promise<void> => {
+    if (request.method !== 'POST') {
+      request.resume();
+      return write(out, plainRefusal('not_found', 'the gateway does not serve this path'));
+    }
+    const found = gateway.authenticate(tokenOf(request));
+    if (!found) {
+      request.resume();
+      return write(out, plainRefusal('unauthenticated', 'the access key is not valid'));
+    }
+    const body = await readBody(request, MAX_SEARCH_BODY_BYTES);
+    if (body === undefined) {
+      request.resume();
+      return write(out, plainRefusal('too_large', 'the request body is too large'));
+    }
+    const aborted = new AbortController();
+    out.on('close', () => {
+      if (!out.writableFinished) aborted.abort();
+    });
+    await write(out, await gateway.search(found.grant, body, aborted.signal));
+  };
   server.listen(options.port, options.host);
   await once(server, 'listening');
   const address = server.address() as AddressInfo;

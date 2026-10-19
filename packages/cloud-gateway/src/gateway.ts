@@ -9,8 +9,16 @@ import {
   DEFAULT_BOUND_LIMITS,
 } from './bound.js';
 import { Allowance, type BudgetPort, LimitPort, type ReserveResult } from './budget.js';
-import { cutEvent, type Refusal, refusalResponse } from './errors.js';
+import { cutEvent, plainRefusal, type Refusal, refusalResponse } from './errors.js';
 import { costUsd, type ModelPrice, modelTable, type Vendor, worstCaseUsd } from './pricing.js';
+import {
+  DEFAULT_SEARCH_CALL_USD,
+  DEFAULT_SEARCH_TIMEOUT_MS,
+  MAX_SEARCH_BODY_BYTES,
+  parseSearchRequest,
+  type SearchOutcome,
+  type SearchProvider,
+} from './search.js';
 import { UsageTracker } from './usage.js';
 
 export type Route = 'messages' | 'count' | 'responses';
@@ -45,8 +53,18 @@ export interface GatewayOptions {
   limits?: Partial<GatewayLimits>;
   /** For the requests to the vendors. Default: global `fetch`. */
   fetch?: typeof fetch;
+  /** Web search for grants of either vendor. Unset: `search` refuses. */
+  search?: SearchOptions;
   /** A problem worth knowing. Never carries a body, a header value, a token or a key. */
   onWarning?: (message: string, detail?: Record<string, string | number>) => void;
+}
+
+export interface SearchOptions {
+  provider: SearchProvider;
+  /** What one call is reserved at, and settled at when the provider bills it. */
+  callUsd?: number;
+  /** A call still running after this is cut (and charged, since it may have been billed). */
+  timeoutMs?: number;
 }
 
 export interface IssueInput {
@@ -274,6 +292,11 @@ export class Gateway {
     return grant && !grant.revoked ? { vendor: grant.vendor, grant } : undefined;
   }
 
+  /** Whether `search` has a provider. */
+  get canSearch(): boolean {
+    return this.options.search !== undefined;
+  }
+
   /** Grants open, for tests and stats. */
   get openGrants(): number {
     return this.grants.size;
@@ -327,6 +350,78 @@ export class Gateway {
     } catch (error) {
       release();
       throw error;
+    }
+  }
+
+  /**
+   * One web search of `grant` (from `authenticate`), whatever its vendor. The call's price is
+   * reserved before it is sent, and settled at that price when the provider bills it (or may
+   * have), else at nothing. The answer is plain JSON, `{results: [{title, url, snippet,
+   * published?}]}`, and names no provider. The results are web text: data, never instructions.
+   */
+  async search(grantRef: unknown, raw: Uint8Array, signal?: AbortSignal): Promise<Response> {
+    const grant = grantRef as Grant;
+    if (grant.revoked) return plainRefusal('unauthenticated', 'the access was revoked');
+    const options = this.options.search;
+    if (!options) return plainRefusal('unavailable', 'web search is not available');
+    if (grant.flights.size >= this.limits.maxInflightPerGrant) {
+      return plainRefusal('busy', 'too many requests at once');
+    }
+    if (raw.byteLength > MAX_SEARCH_BODY_BYTES) {
+      return plainRefusal('too_large', 'the request body is too large');
+    }
+    let parsed: ReturnType<typeof parseSearchRequest>;
+    try {
+      parsed = parseSearchRequest(JSON.parse(new TextDecoder().decode(raw)));
+    } catch {
+      return plainRefusal('invalid_request', 'the request body is not JSON');
+    }
+    if (typeof parsed === 'string') return plainRefusal('invalid_request', parsed);
+
+    const flight: Flight = { controller: new AbortController() };
+    grant.flights.add(flight);
+    const onAbort = (): void => flight.controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) flight.controller.abort();
+    const timer = setTimeout(() => {
+      flight.cut ??= 'the search took too long';
+      flight.controller.abort();
+    }, options.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS);
+    const callUsd = options.callUsd ?? DEFAULT_SEARCH_CALL_USD;
+    const key = `${grant.id}:${randomBytes(8).toString('hex')}`;
+    try {
+      const reserved = this.reserve(grant, key, callUsd);
+      if (!reserved.ok) {
+        return plainRefusal(reserved.budget ? 'budget' : 'invalid_request', reserved.reason);
+      }
+      if (flight.controller.signal.aborted) {
+        this.settle(grant, key, 0);
+        return plainRefusal('unavailable', flight.cut ?? 'the search was cancelled');
+      }
+      let outcome: SearchOutcome;
+      try {
+        outcome = await options.provider.search(parsed, flight.controller.signal);
+      } catch {
+        outcome = { ok: false, billed: 'unknown', retryable: true };
+      }
+      const billed = outcome.ok ? outcome.billed : outcome.billed === 'unknown';
+      this.settle(grant, key, billed ? callUsd : 0);
+      if (outcome.ok) {
+        return new Response(JSON.stringify({ results: outcome.hits }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (flight.cut !== undefined) return plainRefusal('unavailable', flight.cut);
+      if (!outcome.retryable) {
+        return plainRefusal('invalid_request', 'the search service refused the query');
+      }
+      this.warn('A web search failed', { subject: grant.subject });
+      return plainRefusal('unavailable', 'the search service could not answer; try again');
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      grant.land(flight);
     }
   }
 
