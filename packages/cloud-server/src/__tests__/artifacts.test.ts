@@ -77,6 +77,32 @@ test('the manifest lists its references and each file comes back as an attachmen
   );
 });
 
+test("a research run's exported report is served as both files, never as a page", async (t) => {
+  const { h, finished } = await setup(t);
+  const { taskId } = await finished(['out/report.md', 'out/report.html', 'out/verification.json'], {
+    'out/report.md': '# Report\n',
+    'out/report.html': '<h1>Report</h1><script>alert(1)</script>',
+    'out/verification.json': '{"checked":3}',
+  });
+  assert.deepEqual(await (await get(h, taskId, '')).json(), {
+    artifacts: [
+      { index: 0, name: 'report.md', kind: 'file' },
+      { index: 1, name: 'report.html', kind: 'file' },
+      { index: 2, name: 'verification.json', kind: 'file' },
+    ],
+    total: 3,
+  });
+  const html = await get(h, taskId, '/1');
+  assert.equal(html.status, 200);
+  assert.equal(await html.text(), '<h1>Report</h1><script>alert(1)</script>');
+  assert.equal(html.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.equal(html.headers.get('content-disposition'), 'attachment; filename="report.html"');
+  assert.equal(html.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(html.headers.get('content-security-policy') ?? '', /sandbox/u);
+  assert.equal(await (await get(h, taskId, '/0')).text(), '# Report\n');
+  assert.equal(await (await get(h, taskId, '/2')).text(), '{"checked":3}');
+});
+
 test('every route needs the invite, and unknown tasks, missing manifests and bad indexes are 404', async (t) => {
   const { h, finished } = await setup(t);
   const { taskId } = await finished(['a.md'], { 'a.md': 'a' });
