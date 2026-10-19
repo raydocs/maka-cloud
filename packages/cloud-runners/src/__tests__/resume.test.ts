@@ -107,3 +107,18 @@ test('when the machine is gone and nothing can restore it, resume fails without 
   assert.match(last?.type === 'failed' ? last.reason : '', /cannot resume: the sandbox is gone/);
   assert.equal(h.runners.fleet.openRuns, 0);
 });
+
+test('a task handed to the other vendor starts a new run instead of reusing the first run name', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_handoff');
+  assert.equal(terminal(await collect(await h.runners.claude.start(spec)))?.type, 'finished');
+
+  const events = await collect(await h.runners.codex.start({ ...spec, runner: 'codex' }));
+  assert.equal(terminal(events)?.type, 'finished');
+  assert.equal(await h.cliCalls('codex'), 1, 'the codex CLI ran');
+  const record = await h.sessions.get('tsk_handoff');
+  assert.equal(record?.runner, 'codex');
+  assert.equal(record?.turns, 2);
+  assert.equal(record?.sessionId, 'thr-1');
+});

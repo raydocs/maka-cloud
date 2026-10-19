@@ -305,16 +305,18 @@ class Run implements RunHandle {
     if (this.resumePrompt === undefined) {
       this.adoptLease(await fleet.sandboxes.acquire({ tenantId, taskId: spec.taskId }));
       this.checkCancelled();
-      const record: RunnerSessionRecord = {
+      const machineId = (this.lease as SandboxLease).machineId;
+      // A task handed to the other vendor starts afresh in the same directory: its runs keep
+      // counting from the earlier ones, so a run name (and its lock file) is never reused.
+      const record = await fleet.updateRecord(spec.taskId, (current) => ({
         taskId: spec.taskId,
         runner: vendor.name,
         tenantId,
-        machineId: (this.lease as SandboxLease).machineId,
-        turns: 0,
+        machineId,
+        turns: current?.machineId === machineId ? current.turns : 0,
         snapshotIds: [],
         updatedAt: fleet.now(),
-      };
-      await fleet.updateRecord(spec.taskId, () => record);
+      }));
       return { record };
     }
 
