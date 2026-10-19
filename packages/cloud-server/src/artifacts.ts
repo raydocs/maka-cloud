@@ -74,8 +74,10 @@ const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants
  * Reads artifacts from a task's handoff directory and nothing else. Every path
  * component is `lstat`ed and may not be a symlink, the file must be a regular
  * file, the resolved path must stay inside the task's directory, and the size is
- * checked on the open descriptor. Runners never get write access to the handoff
- * root (T6 rule), so these checks guard against a runner that was handed too much.
+ * checked on the open descriptor. The host-side runner writes validated artifact
+ * bytes into the task's directory when the task ends; the sandbox never gets write
+ * access to the handoff root (T6 rule). These checks guard against a link or file
+ * that should not be there anyway.
  * Sources that live in a sandbox plug in through `ArtifactSource` instead.
  */
 export class FileArtifactSource implements ArtifactSource {
