@@ -559,3 +559,154 @@ test('a delegation keeps its reservation while a task below its task may still r
   assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
   assert.equal(h.conductor.state.budget(delegation.runId).reservedUsd, 0);
 });
+
+test('a task_status answer keeps the reservation while a task below the delegated one may still run', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    orchestrator: { stopRetry: { firstMs: 1, maxMs: 1 } },
+    conductor: { limits: { stopCheckMs: 5 } },
+  });
+  // The child's sandbox cannot be reached until `reachable`: its cancel fails, and so does a stop by id.
+  let childId = '';
+  let reachable = false;
+  const childStopTried = gate();
+  h.claude.stopOrphaned = async (taskId) => {
+    if (taskId !== childId || reachable) return;
+    childStopTried.open();
+    throw new Error('sandbox unreachable');
+  };
+  let starts = 0;
+  const childStarted = gate();
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    const run = (await realStart(spec)) as FakeRun;
+    starts += 1;
+    if (starts > 1) {
+      run.cancel = async () => {
+        throw new Error('sandbox unreachable');
+      };
+      childStarted.open();
+    }
+    return run;
+  };
+  let settles = 0;
+  const settled = gate();
+  const realSettle = h.conductor.state.settleDelegation.bind(h.conductor.state);
+  h.conductor.state.settleDelegation = (key, actualUsd) => {
+    const result = realSettle(key, actualUsd);
+    settles += 1;
+    settled.open();
+    return result;
+  };
+  let parentId = '';
+  // The run ends after the status call, and its task is cancelled; asked twice, it is still held.
+  let cancels = 0;
+  const askedAgain = gate();
+  const realCancel = h.orchestrator.cancel.bind(h.orchestrator);
+  h.orchestrator.cancel = async (session, taskId) => {
+    const view = await realCancel(session, taskId);
+    if (taskId === parentId && ++cancels === 2) askedAgain.open();
+    return view;
+  };
+  let settlesAfterStatus = -1;
+  let statusView: Record<string, unknown> | undefined;
+  h.model.script('planner', plan);
+  h.model.script(
+    'conductor',
+    startResearch,
+    calls(delegate(2)),
+    async () => {
+      // The delegated task starts a child, then finishes; ending it cancels the child, which fails.
+      const [delegation] = h.conductor.state.unsettledDelegations();
+      assert.ok(delegation?.taskId);
+      parentId = delegation.taskId;
+      const executor = h.orchestrator.authenticate(
+        h.orchestrator.issueSession({ parentTaskId: parentId }).token,
+      );
+      assert.ok(executor);
+      childId = (
+        await h.orchestrator.delegate(executor, { runner: 'claude-agent-sdk', brief: 'c' })
+      ).taskId;
+      await childStarted.promise;
+      await h.claude.runFor(parentId).complete();
+      await childStopTried.promise;
+      return calls(tool('task_status', { taskId: parentId }));
+    },
+    (request) => {
+      settlesAfterStatus = settles;
+      statusView = JSON.parse(toolResults(request)[0]?.text ?? '{}');
+      return text('Done.');
+    },
+  );
+  await h.send('cnv_1', 'Research.');
+  const first = await Promise.race([
+    askedAgain.promise.then(() => 'held'),
+    settled.promise.then(() => 'settled'),
+  ]);
+  assert.equal(first, 'held', 'not settled while the tree may still run');
+  assert.equal(statusView?.state, 'succeeded');
+  assert.equal(settlesAfterStatus, 0, 'task_status did not settle the delegation');
+  assert.equal(h.conductor.state.unsettledDelegations().length, 1);
+
+  reachable = true;
+  await settled.promise;
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+});
+
+test('a delegation cancelled while its runner is still starting keeps its reservation until the late run is cancelled', async (t) => {
+  // The runner cannot stop by id, so nothing is owed: only the start under way can hand back a run.
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { limits: { stopCheckMs: 5 } },
+  });
+  const held = gate();
+  const startCalled = gate();
+  const realStart = h.claude.start.bind(h.claude);
+  let lateRun: FakeRun | undefined;
+  h.claude.start = async (spec) => {
+    startCalled.open();
+    await held.promise;
+    lateRun = (await realStart(spec)) as FakeRun;
+    return lateRun;
+  };
+  // Asked again after the cancel, the task is still held.
+  const askedAgain = gate();
+  let cancelView: TaskView | undefined;
+  let cancels = 0;
+  const realCancel = h.orchestrator.cancel.bind(h.orchestrator);
+  h.orchestrator.cancel = async (session, taskId) => {
+    const view = await realCancel(session, taskId);
+    cancelView ??= view;
+    if (++cancels === 2) askedAgain.open();
+    return view;
+  };
+  const settled = gate();
+  const realSettle = h.conductor.state.settleDelegation.bind(h.conductor.state);
+  h.conductor.state.settleDelegation = (key, actualUsd) => {
+    const result = realSettle(key, actualUsd);
+    settled.open();
+    return result;
+  };
+  h.model.script('planner', plan);
+  h.model.script('conductor', startResearch, calls(delegate(2)), async () => {
+    await startCalled.promise;
+    return text('Done.');
+  });
+  await h.send('cnv_1', 'Research.');
+  // The run is over, so its task is cancelled while its runner is still starting.
+  const first = await Promise.race([
+    askedAgain.promise.then(() => 'held'),
+    settled.promise.then(() => 'settled'),
+  ]);
+  assert.equal(first, 'held', 'not settled while the start may still hand back a run');
+  assert.equal(cancelView?.state, 'cancelled');
+  assert.equal(cancelView?.stopPending, undefined, 'nothing is owed by id');
+  const [delegation] = h.conductor.state.unsettledDelegations();
+  assert.ok(delegation, 'the delegation is not settled');
+  assert.equal(h.conductor.state.budget(delegation.runId).reservedUsd, 2);
+
+  held.open();
+  await settled.promise;
+  assert.equal(lateRun?.cancelled, true, 'the late run is cancelled');
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+});

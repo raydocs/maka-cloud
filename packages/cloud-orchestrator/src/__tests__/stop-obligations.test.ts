@@ -299,8 +299,34 @@ test("a task's view says its tree may still run while a task below it owes a sto
   assert.equal(view.state, 'cancelled');
   assert.equal(view.stopPending, undefined, 'the parent itself stopped');
   assert.equal(view.treeStopPending, true, 'its child may still run');
+  assert.equal(
+    h.orchestrator.status(conductor, parentId).treeStopPending,
+    true,
+    'status says so too',
+  );
   assert.equal(h.orchestrator.status(conductor, child.taskId).stopPending, true);
 
   await eventually(() => store.stopPendingTaskIds().length === 0, 'the child stop confirmed');
   assert.equal(h.orchestrator.status(conductor, parentId).treeStopPending, undefined);
+});
+
+test('a task cancelled while its runner is still starting says it may still run, though its runner cannot stop by id', async (t) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const h = await makeHarness(t, { fake: { onStart: () => held } });
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'start called');
+  const view = await h.orchestrator.cancel(conductor, taskId);
+  assert.equal(view.state, 'cancelled');
+  assert.equal(view.stopPending, undefined, 'its runner cannot stop it by id');
+  assert.equal(view.treeStopPending, true, 'the start may still hand back a run');
+  assert.equal(h.orchestrator.status(conductor, taskId).treeStopPending, true);
+
+  release();
+  await h.orchestrator.settled();
+  assert.equal(h.fake.runFor(taskId).cancelled, true, 'the late run is cancelled');
+  assert.equal(h.orchestrator.status(conductor, taskId).treeStopPending, undefined);
 });
