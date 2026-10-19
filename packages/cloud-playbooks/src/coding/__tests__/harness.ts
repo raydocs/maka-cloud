@@ -75,6 +75,8 @@ export class FakeAgent implements AgentRunner {
 
   private async run(spec: RunSpec, kind: 'start' | 'resume', prompt?: string): Promise<RunHandle> {
     const h = this.harness;
+    // Like the real runners, every run reads its brief, a resume included.
+    await fs.readFile(spec.briefPath, 'utf8');
     await h.fleet.updateRecord(spec.taskId, (current) => ({
       taskId: spec.taskId,
       runner: this.vendor,
@@ -216,6 +218,7 @@ class RecordingSandbox implements CodingSandbox {
     const { h, samples } = this;
     return {
       dir: ws.dir,
+      controlDir: ws.controlDir,
       async exec(script, options = {}) {
         const call = { script, envs: options.envs ?? {} };
         h.calls.push(call);
@@ -226,6 +229,7 @@ class RecordingSandbox implements CodingSandbox {
         return result;
       },
       stopAll: (s) => ws.stopAll(s),
+      stopRuns: (names, s) => ws.stopRuns(names, s),
       agentOnSameMachine: () => ws.agentOnSameMachine(),
       async release() {
         h.leases.released++;

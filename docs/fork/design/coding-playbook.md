@@ -28,7 +28,9 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
 4. The runner checks the work itself, as the sandbox user, with detached processes it polls:
    the reproduction test passes; `testCommand` passes; the reproduction test **fails** with every change outside its
    files reverted to the base commit (then the change is put back). A test that passes without the change does not
-   reproduce anything and is rejected.
+   reproduce anything and is rejected, and so does one that times out, is killed by a signal, or cannot run its
+   command there (exit 125 or above): only the test's own failure, exit 1 to 124 within the time limit, shows the
+   problem.
 5. A failed check or a failed run resumes the same vendor session with the failure and the end of the output.
 6. After two failures, or an edit loop, the runner writes `failure_brief.json` (what was tried, how the checks failed)
    and `attempt-1.patch`, fetches the base commit again, and starts the other vendor once. It gets the same two
@@ -52,8 +54,16 @@ samples of one vendor's attempt, is a loop: the run is cancelled and the task ha
 run what is left of the task's `budgetUsd`. When the total reaches the budget, it stops the agent run and fails the
 task with the reason. A spent budget is not a vendor failure, so the task is not handed over.
 
-**Exits.** Every exit (end, cancel, throw, check timeout) cancels the agent run, stops running checks through the
-runners' task-wide stop (checks record their pid and run token the way runner scripts do), restores a reverted
+**Checks.** Each check launch gets an id and a nonce from the host, chosen after the agent's run has stopped. Its
+control files (nonce, output, exit record) go in a fresh directory under the task's memory-backed log directory,
+outside the task directory the agent works in, created exclusively: a launch that finds that directory, or pid or
+token files under its id, refuses, unless the nonce is its own (a retried launch, which starts nothing new). The exit
+record carries the nonce and whether the time limit stopped the check, and a status whose nonce does not match counts
+as a check that did not finish. When a check ends, its process group and session are stopped, so nothing it started
+runs into the next check.
+
+**Exits.** Every exit (end, cancel, throw, check timeout) cancels the agent run, stops every process of the task,
+finished checks included, through the runners' task-wide stop (checks record their pid and run token the way runner scripts do), restores a reverted
 workspace, and releases the sandbox lease. The terminal event is published only after that. After a restart,
 `stopOrphaned` stops a task's leftovers by id.
 
@@ -87,6 +97,10 @@ Decided by win (2026-10-19):
 
 ## Not covered yet
 
+- Checks run as the same sandbox user as the agent, because instabox `exec` has no other user. Unpredictable ids
+  and nonces stop results laid out in advance, but a process the agent left running that escaped the runners'
+  task-wide stop (one that cleared `MAKA_RUN_TOKEN` from its environment) could still interfere with a check while
+  it runs. Running checks as a separate user needs sandbox support.
 - Private repositories (they need a read credential in the sandbox; a separate decision).
 - A check longer than its timeout (default 15 min) fails; long suites need a higher limit per task.
 - Build outputs ignored by git stay in place during the base check, so a test that reads a stale build could pass on

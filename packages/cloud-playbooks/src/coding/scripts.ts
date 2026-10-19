@@ -39,49 +39,77 @@ echo "BASE $sha"
 `;
 
 /**
- * Starts one check (a test command) detached, at most once per check name. It runs as its own
- * session under \`timeout\`, records its pid and run token the way the runners' scripts do, so
- * the runners' task-wide stop also stops a check, and writes \`<check>.exit\` last.
- * Prints STARTED or ALREADY.
+ * Starts one check (a test command) detached. Each launch has its own id and nonce, chosen by the
+ * host after the agent's run has stopped, so nothing can be laid out for it in advance. Its
+ * control files (nonce, output, exit record) live in a fresh directory under \`$MAKA_CTL_ROOT\`,
+ * outside the task directory; the directory is created exclusively, and a launch that finds it,
+ * or finds pid or token files under its id, refuses (EXISTS) unless the nonce is its own
+ * (ALREADY: a retried launch starts nothing new). The check runs as its own session under
+ * \`timeout\` and records its pid and run token in the task directory the way the runners' scripts
+ * do, so the runners' stop finds it. The exit record (\`<nonce> <code> <timed out 0|1>\`) is
+ * written last. Prints STARTED, ALREADY, EXISTS or BADROOT.
  */
 export const CHECK_START_SCRIPT = `set -u
 umask 077
 cd "$MAKA_DIR" || exit 1
 n="$MAKA_CHECK"
-if ! ( set -C; : > "$n.started" ) 2>/dev/null; then echo ALREADY; exit 0; fi
-rm -f -- "$n.exit" "$n.pid" "$n.out"
+nonce="$MAKA_NONCE"
+unset MAKA_NONCE
+root="$MAKA_CTL_ROOT"
+c="$root/$n"
+mkdir -p "$root" 2>/dev/null
+if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ] || ! chmod 700 "$root"; then echo BADROOT; exit 0; fi
+if ! mkdir "$c" 2>/dev/null; then
+  if [ ! -L "$c" ] && [ "$(cat "$c/nonce" 2>/dev/null)" = "$nonce" ]; then echo ALREADY; else echo EXISTS; fi
+  exit 0
+fi
+for f in "$n.pid" "$n.token"; do
+  if [ -e "$f" ] || [ -L "$f" ]; then echo EXISTS; exit 0; fi
+done
+printf '%s' "$nonce" > "$c/nonce"
 printf '%s' "$MAKA_RUN_TOKEN" > "$n.token"
 setsid bash -c '
   echo $$ > "$1.pid"
-  cd "$2" || { echo 127 > "$1.exit"; exit 127; }
+  ctl="$5" nonce="$6"
+  record() { echo "$nonce $1 $2" > "$ctl/exit.tmp" && mv -f "$ctl/exit.tmp" "$ctl/exit"; }
+  cd "$2" || { record 127 0; exit 127; }
+  started=$SECONDS
   timeout -k 5 "$3" bash -c "$4" < /dev/null
   rc=$?
-  echo "$rc" > "$1.exit.tmp" && mv -f "$1.exit.tmp" "$1.exit"
-' maka-check "$MAKA_DIR/$n" "$MAKA_CWD" "$MAKA_TIMEOUT" "$MAKA_CMD" > "$n.out" 2>&1 < /dev/null &
+  timed=0
+  if { [ "$rc" = 124 ] || [ "$rc" = 137 ]; } && [ $((SECONDS - started)) -ge "$3" ]; then timed=1; fi
+  record "$rc" "$timed"
+' maka-check "$MAKA_DIR/$n" "$MAKA_CWD" "$MAKA_TIMEOUT" "$MAKA_CMD" "$c" "$nonce" > "$c/out" 2>&1 < /dev/null &
 echo STARTED
 `;
 
 /**
- * Where a check is: \`EXIT <code> <output bytes>\` followed by a line with the base64 of the
- * output's last \`$MAKA_TAIL\` bytes, RUNNING, STARTING (started, no pid yet) or DEAD.
+ * Where a check is: \`EXIT <code> <timed out 0|1> <output bytes>\` followed by a line with the
+ * base64 of the output's last \`$MAKA_TAIL\` bytes, RUNNING, STARTING (started, no pid yet), DEAD,
+ * or FOREIGN when its control files do not carry the launch's nonce.
  */
 export const CHECK_STATUS_SCRIPT = `set -u
-cd "$MAKA_DIR" 2>/dev/null || { echo DEAD; exit 0; }
-n="$MAKA_CHECK"
+n="$MAKA_DIR/$MAKA_CHECK"
+c="$MAKA_CTL_ROOT/$MAKA_CHECK"
+if [ -L "$c" ] || [ ! -d "$c" ] || [ "$(cat "$c/nonce" 2>/dev/null)" != "$MAKA_NONCE" ]; then echo FOREIGN; exit 0; fi
 report() {
-  echo "EXIT $(cat "$n.exit") $(stat -c %s "$n.out" 2>/dev/null || echo 0)"
-  tail -c "$MAKA_TAIL" "$n.out" 2>/dev/null | base64 -w0
+  local nonce rc timed
+  read -r nonce rc timed < "$c/exit" || true
+  case "$rc" in ''|*[!0-9]*) echo FOREIGN; exit 0 ;; esac
+  if [ "$nonce" != "$MAKA_NONCE" ] || { [ "$timed" != 0 ] && [ "$timed" != 1 ]; }; then echo FOREIGN; exit 0; fi
+  echo "EXIT $rc $timed $(stat -c %s "$c/out" 2>/dev/null || echo 0)"
+  tail -c "$MAKA_TAIL" "$c/out" 2>/dev/null | base64 -w0
   echo
 }
-if [ -f "$n.exit" ]; then report; exit 0; fi
+if [ -f "$c/exit" ]; then report; exit 0; fi
 if [ -f "$n.pid" ]; then
   pid=$(cat "$n.pid")
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo RUNNING; exit 0; fi
-  if [ -f "$n.exit" ]; then report; exit 0; fi
+  if [ -f "$c/exit" ]; then report; exit 0; fi
   echo DEAD
   exit 0
 fi
-if [ -f "$n.started" ]; then echo STARTING; else echo DEAD; fi
+echo STARTING
 `;
 
 /**

@@ -19,9 +19,16 @@ export interface ExecOptions {
 export interface SandboxWorkspace {
   /** The task directory; the repository is `${dir}/workspace`. */
   readonly dir: string;
+  /**
+   * Where the runner keeps its checks' control files: outside the task directory, which is the
+   * agent's working area.
+   */
+  readonly controlDir: string;
   exec(script: string, options?: ExecOptions): Promise<ExecResult>;
   /** Stops every process of the task: agent runs and checks. Idempotent. */
   stopAll(signal?: AbortSignal): Promise<void>;
+  /** Stops the processes of the named runs or checks only (their process groups and sessions). */
+  stopRuns(names: string[], signal?: AbortSignal): Promise<void>;
   /** Whether the agent's runs for this task ran on this workspace's machine. */
   agentOnSameMachine(): Promise<boolean>;
   /** Gives the sandbox lease back. Idempotent. */
@@ -52,6 +59,8 @@ export class FleetCodingSandbox implements CodingSandbox {
     let released = false;
     return {
       dir: machine.taskDir(taskId),
+      // The task's memory-backed log directory, which the runners keep for raw output.
+      controlDir: `${machine.logDir(taskId)}/checks`,
       exec: async (script, options = {}) => {
         const result = await machine.exec(script, options);
         return {
@@ -63,6 +72,9 @@ export class FleetCodingSandbox implements CodingSandbox {
       },
       stopAll: async (stopSignal) => {
         await machine.kill(taskId, stopSignal ? { signal: stopSignal } : {});
+      },
+      stopRuns: async (names, stopSignal) => {
+        await machine.kill(taskId, { runs: names, ...(stopSignal ? { signal: stopSignal } : {}) });
       },
       agentOnSameMachine: async () =>
         (await fleet.sessions.get(taskId))?.machineId === lease.machineId,
