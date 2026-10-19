@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createECDH, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -14,6 +14,7 @@ import {
   type CloudServer,
   type ConversationHandler,
   type ConversationPublisher,
+  type PushTransport,
   startCloudServer,
 } from '../../../cloud-server/dist/index.js';
 
@@ -39,6 +40,8 @@ export interface Stack {
   inviteId: string;
   server: CloudServer;
   fake: FakeRunner;
+  /** Every Web Push message the server tried to send, as the (fake) push service received it. */
+  pushed: Array<{ endpoint: string; headers: Record<string, string>; bytes: number }>;
   /** Another invite, which owns nothing yet. */
   newInvite(): { token: string; inviteId: string };
   /** The assistant says something in a conversation. */
@@ -77,8 +80,21 @@ async function eventually<T>(read: () => T | undefined, what: string): Promise<T
   }
 }
 
+/** Hosts the stack's push configuration accepts; no real push service is ever contacted. */
+export const PUSH_HOST = 'push.example.test';
+
+/** A throwaway P-256 signing pair for the test server only. */
+function vapidKeys() {
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  return {
+    publicKey: ecdh.getPublicKey().toString('base64url'),
+    privateKey: ecdh.getPrivateKey().toString('base64url'),
+  };
+}
+
 export async function startStack(
-  options: { pausable?: boolean; port?: number } = {},
+  options: { pausable?: boolean; port?: number; push?: boolean } = {},
 ): Promise<Stack> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
   const fake = new FakeRunner({ pausable: options.pausable ?? true });
@@ -130,6 +146,15 @@ export async function startStack(
     },
   });
   let access!: (conversationId: string) => { rotateToken(): string } | undefined;
+  const pushed: Stack['pushed'] = [];
+  const transport: PushTransport = async (request) => {
+    pushed.push({
+      endpoint: request.endpoint,
+      headers: request.headers,
+      bytes: request.body?.length ?? 0,
+    });
+    return { status: 201 };
+  };
   const server = await startCloudServer({
     dbPath: join(dir, 'server.sqlite'),
     invitesPath: join(dir, 'invites.sqlite'),
@@ -143,6 +168,17 @@ export async function startStack(
       return handlerFor();
     },
     http: { messagesPerMinute: 1_000_000, controlPerMinute: 1_000_000, heartbeatMs: 1000 },
+    ...(options.push === false
+      ? {}
+      : {
+          push: {
+            ...vapidKeys(),
+            subject: 'mailto:test@example.invalid',
+            allowedHosts: [PUSH_HOST],
+            transport,
+            retryDelayMs: 1,
+          },
+        }),
   });
   const invite = server.invites.create('test');
 
@@ -159,6 +195,7 @@ export async function startStack(
     server,
     fake,
     answers,
+    pushed,
     newInvite: () => {
       const created = server.invites.create('other');
       return { token: created.token, inviteId: created.inviteId };

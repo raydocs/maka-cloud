@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { ApiError, CloudClient, readEvents } from '../../src/client';
-import type { FeedEvent } from '../../src/contract';
+import { ApiError, CloudClient, readEvents, Unsupported } from '../../src/client';
+import { type FeedEvent, routes } from '../../src/contract';
 import { type ConversationState, applyEvent, emptyState, totalCost } from '../../src/state';
 import { MANIFEST, type Stack, startStack } from '../support/stack';
 
@@ -358,4 +358,22 @@ test('no runner, model or vendor name reaches the client, even in a failure a ru
     'assistant Code crashed while assistant assistant-5 answered',
   );
   await view.stop();
+});
+
+test('a server without Web Push says so with a 404, and the client hides the control instead of guessing', async () => {
+  const bare = await startStack({ push: false });
+  try {
+    const client = new CloudClient(bare.token, { baseUrl: bare.url });
+    await expect(client.request(routes.pushKey, {}, 'push')).rejects.toBeInstanceOf(Unsupported);
+    expect(client.unsupported.has('push')).toBe(true);
+  } finally {
+    await bare.close();
+  }
+  // With push configured, the same route answers with the public key, to an invite only.
+  const keyed = await fetch(`${stack.url}${routes.pushKey}`, {
+    headers: { authorization: `Bearer ${stack.token}` },
+  });
+  expect(keyed.status).toBe(200);
+  expect(Object.keys(await keyed.json())).toEqual(['publicKey']);
+  expect((await fetch(`${stack.url}${routes.pushKey}`)).status).toBe(401);
 });

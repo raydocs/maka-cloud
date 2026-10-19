@@ -122,10 +122,10 @@ export type ArtifactContent =
   | { kind: 'link'; url: string }
   | { kind: 'text'; name: string; text: string };
 
+/** The body of `POST /v1/push/subscriptions`; `DELETE` takes `{endpoint}` alone. */
 export interface PushRegistration {
   endpoint: string;
-  expirationTime?: number | null;
-  keys?: { p256dh: string; auth: string };
+  keys: { p256dh: string; auth: string };
 }
 
 export type TaskControl = 'cancel' | 'pause' | 'resume';
@@ -140,7 +140,7 @@ export const routes = {
   control: (task: string, action: TaskControl) => `/v1/tasks/${encodeURIComponent(task)}/${action}`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,
-  // Web Push is T4 PR E (#44, not merged): proposed routes, hidden on a 404.
-  pushConfig: '/v1/push/config',
+  // Web Push answers 404 until the server is configured with its signing key.
+  pushKey: '/v1/push/key',
   pushSubscriptions: '/v1/push/subscriptions',
 } as const;
