@@ -62,7 +62,10 @@ jobs:
       # belong to this fork.
       - name: Keep inherited upstream workflows disabled
         run: |
+          # Only files under .github/workflows; GitHub's dynamic workflows
+          # (dynamic/dependabot/...) cannot be disabled by name.
           gh workflow list --all --json path,state --jq '.[] | select(.state == "active") | .path' |
+            grep '^\.github/workflows/' |
             grep -v -e '^\.github/workflows/fork-' -e '^\.github/workflows/ci\.yml$' |
             while read -r path; do
               echo "disabling $path"

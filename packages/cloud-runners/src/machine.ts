@@ -17,6 +17,7 @@ import {
 import { assertSafeId } from './shell.js';
 
 export const MAX_RESULT_BYTES = 1024 * 1024;
+export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
 const RESULT_CHUNK_BYTES = 256 * 1024;
 
 export type ResultRead = { ok: true; bytes: Buffer } | { ok: false; reason: string };
@@ -35,7 +36,15 @@ export class RemoteMachine {
     readonly machineId: string,
     /** Directory in the sandbox that holds one folder per task. */
     readonly root: string,
+    /** Memory-backed directory in the sandbox that holds each task's raw CLI output. */
+    readonly logRoot: string = DEFAULT_LOG_ROOT,
   ) {}
+
+  /** Where the raw output of a task's runs lives while they run. */
+  logDir(dirName: string): string {
+    this.taskDir(dirName);
+    return `${this.logRoot}/${dirName}`;
+  }
 
   /**
    * A task's directory, or a hidden `.setup-<name>` directory for installs. The sweep for leftover
@@ -100,11 +109,14 @@ export class RemoteMachine {
     envs: Record<string, string>;
     runToken: string;
     workdir: string;
+    /** Keep the raw output in the memory-backed log directory (default), or next to the run. */
+    rawLogs?: boolean;
     signal?: AbortSignal;
-  }): Promise<'started' | 'already'> {
+  }): Promise<'started' | 'already' | 'cancelled'> {
     const envs = {
       ...input.envs,
       MAKA_DIR: this.taskDir(input.dirName),
+      ...(input.rawLogs === false ? {} : { MAKA_LOG_DIR: this.logDir(input.dirName) }),
       MAKA_RUN: assertSafeId('run', input.run),
       MAKA_RUN_TOKEN: input.runToken,
       MAKA_WORKDIR: input.workdir,
@@ -113,6 +125,7 @@ export class RemoteMachine {
     for (let attempt = 0; ; attempt++) {
       try {
         const out = await this.execOk(LAUNCH_SCRIPT, { ...options, stdin: input.script });
+        if (out.includes('CANCELLED')) return 'cancelled';
         return out.includes('ALREADY') ? 'already' : 'started';
       } catch (error) {
         input.signal?.throwIfAborted();
@@ -128,21 +141,52 @@ export class RemoteMachine {
     }
   }
 
-  /** Stops every live run of a task. Returns the runs that were stopped. */
+  /**
+   * Stops every live run of a task and whatever they started, and deletes their raw output. Returns
+   * the runs that had something to stop. Throws when a process survived KILL. `cancelRuns` names
+   * runs that may be about to start (a launch in flight); they will not. With `runs`, only those
+   * runs are touched (processes, lock, raw output): a run that is done uses this, because a later
+   * turn of the same task may already be running.
+   */
   async kill(
     dirName: string,
-    options: { signal?: AbortSignal; graceTenths?: number } = {},
+    options: {
+      signal?: AbortSignal;
+      graceTenths?: number;
+      cancelRuns?: string[];
+      runs?: string[];
+    } = {},
   ): Promise<string[]> {
-    const out = await this.execOk(KILL_SCRIPT, {
+    const result = await this.exec(KILL_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
+        MAKA_LOG_DIR: this.logDir(dirName),
         MAKA_GRACE_TENTHS: String(options.graceTenths ?? 30),
+        ...(options.runs
+          ? { MAKA_ONLY_RUNS: options.runs.map((run) => assertSafeId('run', run)).join(' ') }
+          : {}),
+        ...(options.cancelRuns?.length
+          ? {
+              MAKA_CANCEL_RUNS: options.cancelRuns.map((run) => assertSafeId('run', run)).join(' '),
+            }
+          : {}),
       },
       timeoutSeconds: 15,
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    return out
-      .split('\n')
+    const lines = result.stdout.split('\n');
+    const survivors = lines
+      .filter((line) => line.startsWith('SURVIVORS '))
+      .map((line) => line.slice('SURVIVORS '.length).trim());
+    if (survivors.length > 0) {
+      throw new Error(`processes of ${dirName} (${survivors.join(', ')}) survived SIGKILL`);
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `sandbox command failed (exit ${result.exitCode}): ${result.stderr.trim().slice(-300) || result.stdout.trim().slice(-300)}`,
+      );
+    }
+    return lines
       .filter((line) => line.startsWith('KILLED '))
       .map((line) => line.slice('KILLED '.length).trim());
   }
