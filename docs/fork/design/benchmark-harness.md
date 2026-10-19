@@ -66,6 +66,12 @@ stop that could not be confirmed, or a grader error is `infra_failed` (replaced 
   not above the approval (`assertLiveApproved`, before anything is built or contacted). **No thread runs `--live`
   without win's explicit OK.** The real wiring (`createLiveDeps`) needs `INSTABOX_API_KEY`, `INSTABOX_MACHINE_ID`, the
   model keys, `MAKA_EVALS_DATA_DIR` (a `swe-bench-verified.jsonl`) and `MAKA_EVALS_PYTHON`.
+- **Keys.** Model calls go through the model gateway (`design/model-gateway.md`), started inside the run with the
+  vendor keys from the environment. A sandbox gets a token for its own cell's budget and the gateway URL, never a vendor
+  key. `createLiveDeps` refuses, before it builds a fleet, when a subject's vendor has no key (`ANTHROPIC_API_KEY` for
+  Claude, both for the playbook, which hands over to the other vendor), when Codex has no price in
+  `MAKA_CLOUD_GATEWAY_MODELS`, or when the gateway settings are invalid. The gateway reserves the worst case of every
+  request inside the cell's cap and its spend journal is `gateway-spend.db` in the experiment directory.
 - `BudgetLedger` is synchronous. A cell reserves its whole cap before its first await, so cells that start together
   cannot overspend the total. A run that started and reported no cost is charged its cap. On a resumed run the ledger
   starts from what the earlier attempts already cost. Every exit (finish, abort, timeout, driver throw, grader throw)

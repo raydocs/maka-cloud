@@ -39,7 +39,7 @@ export interface CloudEvalsCliDependencies {
   stderr: (text: string) => void;
   signal?: AbortSignal;
   /** Replaces the real subjects, sandbox and grader of a live run (tests). */
-  liveDeps?: (spec: ExperimentSpec, workRoot: string) => Promise<EvalDeps>;
+  liveDeps?: (spec: ExperimentSpec, workRoot: string, stateDir: string) => Promise<EvalDeps>;
 }
 
 type Flags = Map<string, string[]>;
@@ -234,10 +234,14 @@ async function runCommand(argv: readonly string[], io: CloudEvalsCliDependencies
     approvedUsd: approvedRaw === undefined ? undefined : Number(approvedRaw),
   });
   const workRoot = await mkdtemp(join(tmpdir(), 'cloud-evals-'));
+  let deps: EvalDeps | undefined;
   try {
     const live = spec.executor.config.mode === 'live';
-    const deps = live
-      ? await (io.liveDeps ?? ((_, root) => createLiveDeps(root)))(spec, workRoot)
+    deps = live
+      ? await (
+          io.liveDeps ??
+          ((given, root, stateDir) => createLiveDeps(given, root, process.env, { stateDir }))
+        )(spec, workRoot, out)
       : dryRunDeps(spec);
     const budget = budgetOf(spec.budget);
     const ledger = new BudgetLedger(
@@ -263,6 +267,8 @@ async function runCommand(argv: readonly string[], io: CloudEvalsCliDependencies
     await writeReport(spec, new FileAttemptStore(join(out, 'attempts')), join(out, 'report'));
     return code;
   } finally {
+    // The gateway revokes every token it issued before the scratch directory goes.
+    await deps?.close?.().catch(() => undefined);
     await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
