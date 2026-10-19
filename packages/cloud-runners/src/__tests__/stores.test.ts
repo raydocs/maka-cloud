@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import * as runners from '../index.js';
 import {
-  envModelAccess,
   FixedMachineProvider,
   JsonFileSessionStore,
   MemorySessionStore,
@@ -13,6 +13,7 @@ import {
   TenantMachineProvider,
 } from '../index.js';
 import { collect, setup, terminal } from './harness.js';
+import { envModelAccess } from './live-access.js';
 
 const record = (taskId: string, snapshotIds: string[] = []): RunnerSessionRecord => ({
   taskId,
@@ -85,7 +86,20 @@ test('a task of another tenant fails instead of running on the shared machine', 
   assert.equal(await h.cliCalls('claude'), 0);
 });
 
-test('model keys come from the environment per vendor, and are required', async () => {
+test('the package offers no way to put a vendor key from the environment into a sandbox', async () => {
+  assert.equal('envModelAccess' in runners, false, 'the env-key provider is not exported');
+  // No production source reads a vendor key from an environment: a run's key comes only from
+  // the model access it is given (the gateway's per-run token).
+  const src = new URL('../../src/', import.meta.url);
+  const sources = (await readdir(src)).filter((name) => name.endsWith('.ts'));
+  assert.ok(sources.length > 0);
+  for (const name of sources) {
+    const text = await readFile(new URL(name, src), 'utf8');
+    assert.doesNotMatch(text, /\benv\.(ANTHROPIC|OPENAI)_(API_KEY|BASE_URL)\b/u, name);
+  }
+});
+
+test("the live smoke test's env-key provider takes keys per vendor, and requires them", async () => {
   const access = envModelAccess({
     ANTHROPIC_API_KEY: 'a',
     ANTHROPIC_BASE_URL: 'https://gw',

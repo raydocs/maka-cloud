@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createCloudRunnersFromEnv, envModelAccess } from '../index.js';
+import { createCloudRunnersFromEnv } from '../index.js';
+import { envModelAccess } from './live-access.js';
 
 /**
  * Real sandbox, real CLI, real model calls, real spend. It runs only when all three variables

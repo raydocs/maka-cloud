@@ -5,7 +5,11 @@ import {
   JsonFileCodingDeliveries,
   createCodingRunner,
 } from '@maka-cloud/playbooks/coding';
-import { createCloudRunnersFromEnv, envModelAccess } from '@maka-cloud/runners';
+import {
+  createCloudRunnersFromEnv,
+  type ModelAccess,
+  type ModelAccessProvider,
+} from '@maka-cloud/runners';
 import { PlaybookDriver, VendorAloneDriver } from './drivers.js';
 import { SweBenchDataset } from './suites.js';
 import { SweBenchGrader } from './swebench-grader.js';
@@ -70,7 +74,7 @@ export async function createLiveDeps(
   const datasetPath = join(dataDir, 'swe-bench-verified.jsonl');
   const dataset = await SweBenchDataset.read(datasetPath);
   // A live benchmark run hands the vendor keys to its sandbox; the product stack never does.
-  const cloud = createCloudRunnersFromEnv(env, { modelAccess: envModelAccess(env) });
+  const cloud = createCloudRunnersFromEnv(env, { modelAccess: benchmarkVendorKeys(env) });
   const sandbox = new FleetCodingSandbox(cloud.fleet);
   const deliveries = new JsonFileCodingDeliveries(join(workRoot, 'deliveries.json'));
   const coding = createCodingRunner(cloud, { deliveries });
@@ -82,5 +86,22 @@ export async function createLiveDeps(
     ]),
     grader: new SweBenchGrader({ python, datasetPath, workDir: workRoot }),
     hidden: dataset,
+  };
+}
+
+/**
+ * The vendor keys from the environment, for an approved live benchmark run only: the benchmark
+ * measures each vendor's runner alone, outside the product's gateway. Not exported, so nothing
+ * but `createLiveDeps` can build it.
+ */
+function benchmarkVendorKeys(env: NodeJS.ProcessEnv): ModelAccessProvider {
+  return {
+    async issue({ runner }): Promise<ModelAccess> {
+      const codex = runner === 'codex';
+      const apiKey = codex ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY;
+      if (!apiKey) throw new Error(`${codex ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'} is not set.`);
+      const baseUrl = codex ? env.OPENAI_BASE_URL : env.ANTHROPIC_BASE_URL;
+      return { apiKey, ...(baseUrl ? { baseUrl } : {}) };
+    },
   };
 }
