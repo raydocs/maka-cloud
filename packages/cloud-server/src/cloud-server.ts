@@ -8,12 +8,14 @@ import {
   type OrchestratorServerOptions,
   type RunnerRegistry,
 } from '@maka-cloud/orchestrator';
-import { type ArtifactSource, FileArtifactSource } from './artifacts.js';
+import { type ArtifactRead, type ArtifactSource, FileArtifactSource } from './artifacts.js';
 import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
 import { ConversationStore } from './conversations.js';
 import { openDatabase } from './db.js';
-import { FeedHub } from './feed.js';
+import { ExtensionFeed, type ExtensionEvent } from './extension-feed.js';
+import { type FeedEntry, FeedHub, readFeed } from './feed.js';
 import { type AnswerOutcome, DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
+import { type InboxService, InboxRoutes } from './inbox.js';
 import { InviteStore } from './invites.js';
 import { RateLimiter } from './rate-limit.js';
 import { SqliteSessionStore } from './sqlite-session-store.js';
@@ -47,6 +49,46 @@ export interface ConversationHandler {
   close?(): void | Promise<void>;
 }
 
+/**
+ * What the server hands a component that runs inside its process and watches
+ * every conversation (the supervisor). Everything here is in-process: the
+ * database is locked to this process, so the component cannot read it from
+ * outside, and nothing here adds authority over tasks or sandboxes.
+ */
+export interface SupervisorParts {
+  feed: {
+    /** Entries after `after` of all conversations, runner ids kept. Synchronous: a database read. */
+    read(after: number, limit: number): FeedEntry[];
+    /** Called after the feed moved. Returns the unsubscribe function. */
+    subscribe(listener: () => void): () => void;
+  };
+  /** Appends to the feed clients stream. Throws for an unknown conversation or unstorable data. */
+  publish(event: ExtensionEvent): void;
+  /** The handler's answers route. Without a handler that takes answers, every question is `not_found`. */
+  answers: {
+    deliver(
+      answer: { conversationId: string; questionId: string; optionId: string; text?: string },
+      signal: AbortSignal,
+    ): Promise<AnswerOutcome>;
+  };
+  /** Posts a user message into a conversation, like the messages route: idempotent on `clientMessageId`. */
+  messages: {
+    post(
+      message: { conversationId: string; text: string; clientMessageId: string },
+      signal: AbortSignal,
+    ): Promise<{ messageId: string }>;
+  };
+  /** Reads one artifact of a task of that conversation, with the checks of the artifact route. */
+  artifacts: {
+    read(
+      task: { taskId: string; conversationId: string },
+      ref: string,
+      signal: AbortSignal,
+    ): Promise<ArtifactRead>;
+  };
+  onWarning(message: string, detail?: unknown): void;
+}
+
 export interface CloudServerOptions {
   /** The SQLite file. Exactly one server may have it open. */
   dbPath: string;
@@ -78,6 +120,12 @@ export interface CloudServerOptions {
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
   sweepOrphans?: SweepOrphans;
+  /**
+   * Starts the supervisor once the handler exists and before the server listens, and
+   * stops it before the handler and the database close. Without it the `/v1/inbox`
+   * routes answer 404 and nothing else changes.
+   */
+  supervisor?: (parts: SupervisorParts) => InboxService | Promise<InboxService>;
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
 }
@@ -106,6 +154,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   let mcp: OrchestratorServer | undefined;
   let http: Server | undefined;
   let handler: ConversationHandler | undefined;
+  let inbox: InboxService | undefined;
   try {
     const hub = new FeedHub();
     const store = new SqliteTaskStore(db, hub);
@@ -155,6 +204,101 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       : options.handler;
     const ownHandler = handler;
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
+    const artifacts = options.artifacts ?? new FileArtifactSource(options.handoffRoot);
+    const deliverMessage = (message: {
+      conversationId: string;
+      messageId: string;
+      text: string;
+      sessionId: string;
+    }): void => {
+      if (!ownHandler) return;
+      const conductor = accessFor(message.sessionId);
+      void Promise.resolve()
+        .then(() =>
+          ownHandler.onUserMessage(
+            {
+              conversationId: message.conversationId,
+              messageId: message.messageId,
+              text: message.text,
+            },
+            conductor,
+          ),
+        )
+        .catch((error: unknown) => warn('The conversation handler failed', error));
+    };
+    const deliverAnswer = ownHandler?.onAnswer
+      ? (answer: {
+          conversationId: string;
+          questionId: string;
+          optionId: string;
+          text?: string;
+          sessionId: string;
+        }): Promise<AnswerOutcome> =>
+          (ownHandler.onAnswer as NonNullable<ConversationHandler['onAnswer']>)(
+            {
+              conversationId: answer.conversationId,
+              questionId: answer.questionId,
+              optionId: answer.optionId,
+              ...(answer.text === undefined ? {} : { text: answer.text }),
+            },
+            accessFor(answer.sessionId),
+          )
+      : undefined;
+    if (options.supervisor) {
+      const extensions = new ExtensionFeed(db, hub, options.orchestrator?.now);
+      inbox = await options.supervisor({
+        feed: {
+          read: (after, limit) => readFeed(db, after, limit, undefined, { internal: true }),
+          subscribe: (listener) => hub.subscribe(listener),
+        },
+        publish: (event) => void extensions.publish(event),
+        answers: {
+          deliver: async (answer, signal) => {
+            signal.throwIfAborted();
+            const sessionId = conversations.sessionOf(answer.conversationId);
+            if (sessionId === undefined || !deliverAnswer) {
+              return { accepted: false, reason: 'not_found' };
+            }
+            return deliverAnswer({ ...answer, sessionId });
+          },
+        },
+        messages: {
+          post: async (message, signal) => {
+            signal.throwIfAborted();
+            const result = conversations.post(
+              message.conversationId,
+              message.text,
+              message.clientMessageId,
+            );
+            if (!result.found) throw new Error('The conversation does not exist');
+            if (!result.duplicate) {
+              deliverMessage({
+                conversationId: message.conversationId,
+                messageId: result.messageId,
+                text: result.text,
+                sessionId: result.sessionId,
+              });
+            }
+            return { messageId: result.messageId };
+          },
+        },
+        artifacts: {
+          read: async (task, ref, signal) => {
+            signal.throwIfAborted();
+            // The task must belong to the conversation the caller names.
+            const session = orchestrator.rootSessionOfTask(task.taskId);
+            if (
+              session === undefined ||
+              conversations.conversationOf(session) !== task.conversationId
+            ) {
+              return { ok: false, reason: 'not_found' };
+            }
+            return artifacts.read(task.taskId, ref);
+          },
+        },
+        onWarning: warn,
+      });
+    }
     const api = new PublicApi({
       db,
       invites,
@@ -164,39 +308,12 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       messageLimiter: new RateLimiter(limits.messagesPerMinute),
       controlLimiter: new RateLimiter(limits.controlPerMinute),
       orchestrator,
-      artifacts: options.artifacts ?? new FileArtifactSource(options.handoffRoot),
+      artifacts,
       artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
       limits,
-      onMessage: (message) => {
-        if (!ownHandler) return;
-        const conductor = accessFor(message.sessionId);
-        void Promise.resolve()
-          .then(() =>
-            ownHandler.onUserMessage(
-              {
-                conversationId: message.conversationId,
-                messageId: message.messageId,
-                text: message.text,
-              },
-              conductor,
-            ),
-          )
-          .catch((error: unknown) => warn('The conversation handler failed', error));
-      },
-      ...(ownHandler?.onAnswer
-        ? {
-            onAnswer: (answer) =>
-              (ownHandler.onAnswer as NonNullable<ConversationHandler['onAnswer']>)(
-                {
-                  conversationId: answer.conversationId,
-                  questionId: answer.questionId,
-                  optionId: answer.optionId,
-                  ...(answer.text === undefined ? {} : { text: answer.text }),
-                },
-                accessFor(answer.sessionId),
-              ),
-          }
-        : {}),
+      onMessage: deliverMessage,
+      ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
+      ...(inbox ? { inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute)) } : {}),
     });
     const server = createServer((req, res) => {
       void api.handle(req, res);
@@ -208,12 +325,18 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     });
     const { port } = server.address() as AddressInfo;
     const ownInvites = invites;
+    const ownInbox = inbox;
     let closing: Promise<void> | undefined;
     const shutdown = async (): Promise<void> => {
       api.closeStreams();
       server.closeAllConnections();
       try {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        try {
+          await ownInbox?.stop();
+        } catch (error) {
+          warn('The supervisor failed to stop', error);
+        }
         try {
           await ownHandler?.close?.();
         } catch (error) {
@@ -241,6 +364,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   } catch (error) {
     http?.closeAllConnections();
     http?.close();
+    await Promise.resolve(inbox?.stop()).catch(() => undefined);
     await Promise.resolve(handler?.close?.()).catch(() => undefined);
     await mcp?.close().catch(() => undefined);
     try {

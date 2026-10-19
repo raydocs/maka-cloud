@@ -487,3 +487,48 @@ finished task is shown as finished at once, as in PR 1.
 - **Exits.** Slots (default 2), the per-attempt deadline timer and the abort
   handle are released on done, deadline, stop and throw; a stopped attempt leaves
   its row running and the next start queues it again.
+
+## As built (PR 3a, server side)
+
+Everything here is in `packages/cloud-server`; it imports nothing from the
+supervisor package, so the two build independently and the composition code (PR
+3b) joins them.
+
+- **`supervisor` option.** `startCloudServer({ supervisor })` calls the factory
+  with `SupervisorParts` after the handler exists and before the server listens,
+  and gets an `InboxService` back. On close the order is: streams end, the HTTP
+  server stops accepting, the supervisor stops, the handler closes, the
+  orchestrator endpoint closes, the database closes last. A failed start stops
+  the supervisor it already started. Without the option nothing changes and
+  `/v1/inbox/*` is 404.
+- **Parts.** `feed.read` is `readFeed` over all conversations with `internal`
+  set, which keeps a task's runner id (the public stream still strips it; the
+  supervisor needs it to pick a verifier of another vendor). `feed.subscribe` is
+  the hub. `publish` writes an extension event. `answers.deliver` goes to the
+  handler's `onAnswer` with the conversation's own access (`not_found` for an
+  unknown conversation or a handler that takes no answers). `messages.post` is the
+  messages route's own path: idempotent on `clientMessageId`, and a new message
+  reaches the handler once. `artifacts.read` reads through the artifact source
+  and checks that the task's root session is the named conversation's.
+  `answers.deliver` and `messages.post` refuse an already aborted signal before
+  they write anything.
+- **Extension feed kinds.** Schema v4 adds `extension_events` (append-only) and
+  the feed kinds `inbox.item` and `inbox.digest`. The event body is stored as
+  published and sent as the stream frame's data with `conversationId` added.
+  Events are refused for an unknown conversation or data over 256 KiB. A
+  conversation stream carries the inbox events of that conversation; digests
+  (no conversation) go to unscoped streams only.
+- **Routes** (`inbox.ts`), all behind the same invite as the rest of the API:
+  `GET /v1/inbox/items`, `POST /v1/inbox/items/:id/answer`,
+  `PUT`/`DELETE /v1/inbox/mutes/:kind`, `GET`/`PUT /v1/inbox/settings`,
+  `POST /v1/inbox/digest`. The answer is 200 when the item is closed and 202
+  while delivery is still being retried; refusals map `not_found` 404,
+  `invalid_*`/`text_*` 400, `stale`/`closed`/`already_answered`/`question_open`
+  409 (stale and already answered carry the refreshed item), `stopped` 503; a
+  reason the server does not know is a 500. Writes share the control rate limit
+  per invite; reads are not limited. The service decides what a settings patch
+  or a mute kind means (`ok: false` is 400 or 404), so the server holds no copy
+  of the supervisor's schemas.
+- **Not in this PR:** the `Supervisor` to `InboxService` adapter, the notifier,
+  the conversation budget and verifier model adapters, and the end-to-end test
+  (PR 3b, `packages/cloud-host`).

@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
 import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
 import { type FeedEntry, type FeedHub, readFeed } from './feed.js';
+import type { InboxRoutes } from './inbox.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import { toPublicView } from './public-view.js';
 import type { RateLimiter } from './rate-limit.js';
@@ -106,6 +107,8 @@ export interface PublicApiDeps {
   onMessage: (message: PostedMessage) => void;
   /** Absent when no handler takes answers; the route then answers 404. */
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
+  /** Absent when no supervisor runs; the `/v1/inbox` routes then answer 404. */
+  inbox?: InboxRoutes;
 }
 
 const createConversation = z
@@ -125,7 +128,7 @@ const postAnswer = z
   })
   .strict();
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
@@ -220,6 +223,9 @@ export class PublicApi {
       const taskId = decodeURIComponent(artifacts[1] ?? '');
       if (artifacts[2] === undefined) return this.listArtifacts(res, taskId);
       return this.readArtifact(res, invite, taskId, decodeURIComponent(artifacts[2]));
+    }
+    if (this.deps.inbox && path.startsWith('/v1/inbox/')) {
+      if (await this.deps.inbox.handle(req, res, url, invite)) return;
     }
     if (path === '/v1/events') {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
@@ -584,13 +590,13 @@ function frame(entry: FeedEntry): string {
   return `id: ${entry.id}\nevent: ${entry.kind}\ndata: ${data}\n\n`;
 }
 
-function parseCount(value: string | null | undefined, fallback: number): number {
+export function parseCount(value: string | null | undefined, fallback: number): number {
   if (value === null || value === undefined || value === '') return fallback;
   if (!/^\d{1,15}$/u.test(value)) throw new HttpError(400, 'invalid_request');
   return Number(value);
 }
 
-function respond(
+export function respond(
   res: ServerResponse,
   status: number,
   body: unknown,
@@ -601,7 +607,7 @@ function respond(
     .end(JSON.stringify(body));
 }
 
-async function readJson(req: IncomingMessage, allowEmpty: boolean): Promise<unknown> {
+export async function readJson(req: IncomingMessage, allowEmpty: boolean): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
