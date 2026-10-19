@@ -1,0 +1,3 @@
+# Visual review captures are repository evidence, not source-release inputs.
+# Keep the application, mock, tests and configuration in the source archive.
+/evidence export-ignore

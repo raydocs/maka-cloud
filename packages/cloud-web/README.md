@@ -158,6 +158,9 @@ registration unsubscribes a newly-created browser subscription.
 - [`evidence/`](evidence/) retains inspected desktop/phone, answered/paused,
   artifact and degraded states plus a real-pointer interaction clip for GitHub
   handoff. Phone rendering is Chromium emulation, not a physical device.
+  Package-local `.gitattributes` excludes only this review evidence from source
+  release archives, matching the repository's visual-evidence convention; all
+  application, mock and test source remains included.
 - Root CI does not install/test this standalone package; green root CI alone
   is not T9 acceptance. Package-local commands and evidence are required.
 
