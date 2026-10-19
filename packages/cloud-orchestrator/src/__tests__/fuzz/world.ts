@@ -58,7 +58,11 @@ import { Prng } from './prng.js';
  * - a task never ends while a run of it may still be live (not reported, not
  *   cancelled, not stopped by id, or still starting) unless it already owes a
  *   stop; a stop is owed once at a time, and cleared only when no run of the
- *   task may still be live.
+ *   task may still be live. One seed in four runs a runner that cannot stop by
+ *   id: nothing can be owed for it, so these checks give way to the next one.
+ * Checked as each request returns: a view of an ended task that marks nothing
+ * in its tree as still running (no owed stop, no `treeStopPending`) has no run
+ * in that tree that may still be live, so its budget can be settled.
  * Checked after every step:
  * - the in-memory tasks and per-tree counts match the log's unfinished tasks,
  *   and their states (queued, running, paused) match the log;
@@ -71,7 +75,8 @@ import { Prng } from './prng.js';
  * ended, and their executor tokens no longer authenticate.
  * Checked at quiescence, after settled(): one terminal event per task, every
  * request returned, no task owes a stop, every run of every process ended on
- * its own or was cancelled or stopped, every spend a run of the live process
+ * its own or was cancelled or stopped (of the live process only, for a runner
+ * that cannot stop by id), every spend a run of the live process
  * reported is recorded, and every counter and map is back to zero.
  */
 
@@ -348,6 +353,8 @@ export interface FuzzResult {
  */
 export class FuzzWorld {
   readonly rng: Prng;
+  /** Whether the runner can stop a task's work by id. Taken from the seed, so the PRNG stream is unchanged. */
+  private readonly stopsById: boolean;
   readonly clock = new FakeClock();
   readonly trace: string[] = [];
   readonly violations: string[] = [];
@@ -388,6 +395,7 @@ export class FuzzWorld {
     readonly catalog: Catalog,
   ) {
     this.rng = new Prng(seed);
+    this.stopsById = seed % 4 !== 0;
   }
 
   async run(): Promise<FuzzResult> {
@@ -561,36 +569,45 @@ export class FuzzWorld {
           }),
         );
       },
-      // Finds a task's work by id, whichever process started it, as a remote sandbox would.
-      stopOrphaned: (taskId: TaskId) => {
-        if (this.rng.chance(0.05)) {
-          this.note(`stop ${taskId} throws synchronously`);
-          throw new Error('stop threw');
-        }
-        return new Promise<void>((resolve, reject) =>
-          this.gate(epoch, 'stop', taskId, (draining) => {
-            // A drained world answers every call, so what is owed is always settled.
-            if (!draining && this.rng.chance(0.3)) {
-              reject(new Error('sandbox unreachable'));
-              return 'rejected';
-            }
-            for (const run of this.runs) if (run.taskId === taskId) run.stopped = true;
-            for (const lost of this.lostStarts) if (lost.taskId === taskId) lost.stopped = true;
-            resolve();
-            return 'stopped';
-          }),
-        );
-      },
+      ...(this.stopsById ? { stopOrphaned: (taskId: TaskId) => this.stopById(epoch, taskId) } : {}),
     };
+  }
+
+  /** Finds a task's work by id, whichever process started it, as a remote sandbox would. */
+  private stopById(epoch: number, taskId: TaskId): Promise<void> {
+    if (this.rng.chance(0.05)) {
+      this.note(`stop ${taskId} throws synchronously`);
+      throw new Error('stop threw');
+    }
+    return new Promise<void>((resolve, reject) =>
+      this.gate(epoch, 'stop', taskId, (draining) => {
+        // A drained world answers every call, so what is owed is always settled.
+        if (!draining && this.rng.chance(0.3)) {
+          reject(new Error('sandbox unreachable'));
+          return 'rejected';
+        }
+        for (const run of this.runs) if (run.taskId === taskId) run.stopped = true;
+        for (const lost of this.lostStarts) if (lost.taskId === taskId) lost.stopped = true;
+        resolve();
+        return 'stopped';
+      }),
+    );
   }
 
   /** A run of the task, from any process, that may still be going, or a start of it not answered yet. */
   private liveRun(taskId: TaskId): string | undefined {
     if ((this.startsOut.get(taskId) ?? 0) > 0) return 'a start is still out';
+    // Without a stop by id, nothing can reach what a dead process left: only this process's runs count.
     const run = this.runs.find(
-      (r) => r.taskId === taskId && !r.reported && !r.cancelled && !r.stopped,
+      (r) =>
+        r.taskId === taskId &&
+        !r.reported &&
+        !r.cancelled &&
+        !r.stopped &&
+        (this.stopsById || r.epoch === this.epoch),
     );
     if (run) return `its run from epoch ${run.epoch} may still be live`;
+    if (!this.stopsById) return undefined;
     const lost = this.lostStarts.find((l) => l.taskId === taskId && !l.stopped);
     return lost && `a start from epoch ${lost.epoch} may have left a run`;
   }
@@ -758,7 +775,8 @@ export class FuzzWorld {
     if (TERMINAL.has(event.type) && task.cancelRequested && event.type !== 'task_cancelled') {
       this.violation(`${what} after its cancel was requested: it must end cancelled`);
     }
-    if (TERMINAL.has(event.type) && !task.stopPending) {
+    // A runner that cannot stop by id can be owed nothing: the view check covers it instead.
+    if (TERMINAL.has(event.type) && !task.stopPending && this.stopsById) {
       const live = this.liveRun(event.taskId);
       if (live) this.violation(`${what} while ${live}, and no stop is owed`);
     }
@@ -1058,7 +1076,8 @@ export class FuzzWorld {
       if (task.stopPending) this.violation(`${task.taskId} still owes a stop`);
     }
     for (const run of this.runs) {
-      if (!run.reported && !run.cancelled && !run.stopped) {
+      const reachable = this.stopsById || run.epoch === this.epoch;
+      if (reachable && !run.reported && !run.cancelled && !run.stopped) {
         this.violation(`the run of ${run.taskId} from epoch ${run.epoch} was never stopped`);
       }
       // A run of a process that died took its unrecorded reports with it.
@@ -1072,7 +1091,7 @@ export class FuzzWorld {
       }
     }
     for (const lost of this.lostStarts) {
-      if (!lost.stopped) {
+      if (this.stopsById && !lost.stopped) {
         this.violation(`a start of ${lost.taskId} from epoch ${lost.epoch} was never stopped`);
       }
     }
@@ -1357,7 +1376,10 @@ export class FuzzWorld {
       }
     });
     result.then(
-      (value) => this.settle(request, `ok ${describeView(value)}`),
+      (value) => {
+        this.checkSettleView(request, value);
+        this.settle(request, `ok ${describeView(value)}`);
+      },
       (error: unknown) => {
         if (!(error instanceof OrchestratorError)) {
           this.violation(
@@ -1427,7 +1449,10 @@ export class FuzzWorld {
       }
     });
     result.then(
-      (value) => this.settle(request, `ok ${describeView(value)}`),
+      (value) => {
+        this.checkSettleView(request, value);
+        this.settle(request, `ok ${describeView(value)}`);
+      },
       (error: unknown) => {
         if (!(error instanceof OrchestratorError)) {
           this.violation(
@@ -1439,6 +1464,37 @@ export class FuzzWorld {
         this.settle(request, `${error.code}: ${error.message}`);
       },
     );
+  }
+
+  /**
+   * A view of an ended task that marks nothing in its tree as still running is
+   * what lets a caller settle the tree's budget: nothing in that tree may still run.
+   */
+  private checkSettleView(request: Request, value: unknown): void {
+    if (request.epoch !== this.epoch || typeof value !== 'object' || value === null) return;
+    const view = value as Partial<TaskView>;
+    if (typeof view.taskId !== 'string') return;
+    if (!['succeeded', 'failed', 'cancelled'].includes(String(view.state))) return;
+    if (view.stopPending || view.treeStopPending) return;
+    for (const taskId of this.treeOf(view.taskId)) {
+      const live = this.liveRun(taskId);
+      if (live) {
+        this.violation(
+          `${request.label}: ${view.taskId} reads ${view.state} with nothing still running, but ${taskId}: ${live}`,
+        );
+      }
+    }
+  }
+
+  /** The task and everything below it. */
+  private treeOf(rootId: TaskId): TaskId[] {
+    const tree = [rootId];
+    for (let i = 0; i < tree.length; i += 1) {
+      for (const task of this.tasks.values()) {
+        if (task.parentTaskId === tree[i]) tree.push(task.taskId);
+      }
+    }
+    return tree;
   }
 
   /** The server aborts the request's signal and gives the connection slot back when the socket closes. */

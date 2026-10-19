@@ -330,3 +330,104 @@ test('a task cancelled while its runner is still starting says it may still run,
   assert.equal(h.fake.runFor(taskId).cancelled, true, 'the late run is cancelled');
   assert.equal(h.orchestrator.status(conductor, taskId).treeStopPending, undefined);
 });
+
+/** A runner that cannot stop by id, whose runs' cancel fails until `works` is set. */
+function cancelFailsUntil(h: { works: boolean; tries: number }) {
+  return (run: FakeRun) => {
+    const cancel = run.cancel.bind(run);
+    run.cancel = async () => {
+      h.tries += 1;
+      if (!h.works) throw new Error('sandbox unreachable');
+      await cancel();
+    };
+  };
+}
+
+test('a late run whose cancel fails, on a runner that cannot stop by id, reads as still running until a retried cancel succeeds', async (t) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const cancels = { works: false, tries: 0 };
+  const failing = cancelFailsUntil(cancels);
+  const h = await makeHarness(t, {
+    orchestrator: FAST,
+    fake: {
+      onStart: async (run: FakeRun) => {
+        await held;
+        failing(run);
+      },
+    },
+  });
+  t.after(() => h.orchestrator.close());
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.fake.runs.length === 1, 'start called');
+  const view = await h.orchestrator.cancel(conductor, taskId);
+  assert.equal(view.state, 'cancelled');
+  release();
+  await eventually(() => cancels.tries >= 3, 'the cancel retried');
+  // The run keeps going, and spending.
+  h.fake.runFor(taskId).usage(1.4);
+  await eventually(
+    () => h.orchestrator.status(conductor, taskId).costUsd === 1.4,
+    'spend recorded',
+  );
+  const running = h.orchestrator.status(conductor, taskId);
+  assert.equal(running.stopPending, undefined, 'nothing can be owed by id');
+  assert.equal(running.treeStopPending, true, 'its run is still going');
+
+  cancels.works = true;
+  await eventually(
+    () => h.orchestrator.status(conductor, taskId).treeStopPending === undefined,
+    'the cancel succeeded',
+  );
+  assert.equal(h.orchestrator.stats().stopRetries, 0);
+});
+
+test('a running task whose cancel fails, on a runner that cannot stop by id, ends cancelled but reads as still running until a retry succeeds', async (t) => {
+  const cancels = { works: false, tries: 0 };
+  const h = await makeHarness(t, {
+    orchestrator: FAST,
+    fake: { onStart: cancelFailsUntil(cancels) },
+  });
+  t.after(() => h.orchestrator.close());
+  const conductor = h.session();
+  const parent = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(
+    () => h.orchestrator.status(conductor, parent.taskId).state === 'running',
+    'started',
+  );
+  const view = await h.orchestrator.cancel(conductor, parent.taskId);
+  assert.equal(view.state, 'cancelled');
+  assert.equal(view.treeStopPending, true);
+  cancels.works = true;
+  await eventually(
+    () => h.orchestrator.status(conductor, parent.taskId).treeStopPending === undefined,
+    'the cancel succeeded',
+  );
+  assert.ok(cancels.tries >= 2);
+});
+
+test('a leftover run whose cancel fails, on a runner that cannot stop by id, keeps its task reading as running until a retry succeeds', async (t) => {
+  const cancels = { works: false, tries: 0 };
+  const h = await makeHarness(t, {
+    orchestrator: FAST,
+    fake: { onStart: cancelFailsUntil(cancels) },
+  });
+  t.after(() => h.orchestrator.close());
+  const conductor = h.session();
+  const { taskId } = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  await eventually(() => h.orchestrator.status(conductor, taskId).state === 'running', 'started');
+  h.fake.runFor(taskId).crash(new Error('connection lost'));
+  const ended = await h.orchestrator.wait(conductor, taskId, 2000);
+  assert.equal(ended.state, 'failed');
+  assert.equal(ended.treeStopPending, true, 'the leftover run is being cancelled');
+  await eventually(() => cancels.tries >= 2, 'the cancel retried');
+  assert.equal(h.orchestrator.status(conductor, taskId).treeStopPending, true);
+  cancels.works = true;
+  await eventually(
+    () => h.orchestrator.status(conductor, taskId).treeStopPending === undefined,
+    'the cancel succeeded',
+  );
+});

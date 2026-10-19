@@ -166,9 +166,9 @@ export interface TaskView {
    */
   stopPending?: boolean;
   /**
-   * This task's runner is still starting, or a task below it has not ended, is
-   * still starting, or owes a stop: the tree may still be running (and spending)
-   * though this task ended.
+   * This task's runner is still starting or its cancel is being retried, or a
+   * task below it has not ended, is still starting, owes a stop or has its cancel
+   * retried: the tree may still be running (and spending) though this task ended.
    */
   treeStopPending?: boolean;
 }
