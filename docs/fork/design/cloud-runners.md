@@ -71,8 +71,38 @@ session id is known, the session is resumed once with "write it again" before th
 The start script deletes the previous turn's `result.json` once it holds the run's lock (a retried
 start does not reach that line), and a resumed turn is told to write it, so a turn that does no
 work cannot pass for one that did.
-Runner code on the host writes only `resultPath`; the runner never gets write access to the
+Runner code on the host writes `resultPath` and the exported artifacts (below) into the task's
+handoff directory, and nothing else; the sandbox, and so the agent, never gets write access to the
 orchestrator's handoff root.
+
+## Artifacts
+
+A research report is only useful if the user can open it, and the server's artifact route reads files
+under `handoffRoot/<taskId>/`, not from a sandbox. So when a task finishes, the runner copies the files
+its manifest lists in `artifacts` into its handoff directory, under the same relative path the manifest
+names (`out/report.md` becomes `<handoffRoot>/<taskId>/out/report.md`), and the server needs no change.
+
+- **Reading.** Over `exec` as the sandbox user, never `GET /files` (`FILE_STAGE_SCRIPT`): the workspace and
+  every component of the path must be real, not symlinks; a regular file; opened with nofollow and cut at
+  the cap. Only plain relative paths are read; links (`https:`) are left alone for the server to list.
+- **Writing.** Host code, validated bytes. The task directory must be a real directory (the orchestrator made
+  it, mode 0700); every directory below it on the way is created 0700 or must already be a real directory,
+  not a symlink; the file is written 0600 to a temporary name and renamed over nothing or a regular file;
+  `brief.md` and `result.json` are never replaced. The sandbox still has no write access to the handoff
+  root, so the argument in `handoff.ts` (nothing that runs inside a task can swap its directory) holds: the
+  only writer besides the orchestrator is this process. Caps: 20 files, 2 MiB each (the server's read cap),
+  8 MiB in all.
+- **Required artifacts.** A brief can start with `maka-artifacts: <path> ...` (same leading-block rule as
+  `maka-inputs:`). Those must be listed in the manifest and be exported, or the result is rejected like a bad
+  `result.json`: the agent gets one repair turn in the same session, then the task fails. A finished run with
+  no report is a false success. Other listed artifacts that cannot be exported are progress notes. Required
+  files are exported first, so the file cap cannot leave one out.
+- **The runner vouches for what it exported.** A manifest checker sees only the manifest, so the runner adds
+  one `done` line, `runner-exported: <paths>`, and drops any `done` entry a model wrote with that prefix.
+  A playbook that must know a file is really in the handoff directory (the research playbook's `verify`)
+  reads that line, which does not depend on the brief having asked for it. A manifest that needs no change
+  is passed on byte for byte.
+- A resumed turn exports again, with the brief's requirements.
 
 ## Snapshots and resume
 
@@ -109,6 +139,37 @@ copied first and the copy is checked, so changing the caller's object afterwards
 read each other's environment (`/proc/<pid>/environ`) and signal each other. That is
 acceptable for a single tenant running its own tasks; a deployment that does not trust its tasks to
 each other needs a sandbox per task.
+
+## Tools and inputs (research playbook support)
+
+**Sandbox tools.** `sandboxTools` installs single-file programs (the research playbook's
+`cite-check` bundle) into `$HOME/.maka-cli/bin`, which the run script already puts first on PATH. The
+install is a few `exec` calls with base64 chunks on stdin, assembled under a temporary name, checked
+against the sha256 and renamed, with a marker `<root>/.setup/tool-<name>.sha256` holding the hash.
+It is not a detached job: it takes a second and cannot outlive its caller in a way that matters, since
+every step is idempotent and a failed one removes its temporary file. Runs that start together share
+one install, a cancelled run stops waiting for it and the install finishes on its own. Names are
+checked when the runners are built, and cannot be a vendor CLI's name.
+
+**Inputs.** The reviewer of a research report is a separate task with its own directory, and
+`delegate_task` carries only a brief. So a brief can begin with `maka-inputs: <taskId> <path>...` lines.
+Why a brief line and not a new field: it changes no orchestrator, MCP or conductor contract. Why only
+at the start: the brief is written by the delegating parent and can quote hostile page text; a request
+line elsewhere (quoted, indented, in a list) fails the task rather than being obeyed or ignored.
+
+Checks, in order. On the host: the line is well formed; `inputs` is configured; the source is not the
+task itself; same tenant; the runner has a record for the source, on this sandbox (copying between
+sandboxes is not built, and fails closed); the policy allows it (`sameConversationInputPolicy`: same
+root session, source ended; ending is final, so no later event undoes the check). In the sandbox, as
+the sandbox user: no live process of the source; every requested path inside its workspace, no
+symlink on the way or below it, only regular files and directories; at most 200 files, 5 MiB per file
+and 32 MiB in all. Files are copied with nofollow opens into a temporary directory that replaces
+`inputs/<taskId>` in one rename, so a repeated start gives the same result. This adds no privilege:
+tasks of one tenant share the sandbox user (see "Sandboxes and tenants"), and the copy runs as that
+user, never through `GET /files`. A refusal fails the task with its reason before the CLI starts: an
+agent missing its inputs would otherwise review files it never saw. A resumed turn does not copy again.
+Not covered: a source process that starts a write after the live-process check passes (same user, same
+tenant, and the sources of a finished task are not written by anyone but the agent that left them).
 
 ## Cancel and cleanup
 

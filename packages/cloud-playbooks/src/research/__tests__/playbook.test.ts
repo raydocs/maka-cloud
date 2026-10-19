@@ -13,10 +13,12 @@ const summary: CiteCheckSummary = {
   judged: 6,
 };
 
+const EXPORTED = 'runner-exported: out/report.md out/report.html out/verification.json';
+
 function manifest(overrides: Partial<Manifest> = {}): Manifest {
   return {
     summary: 'Report written',
-    done: ['wrote the report', formatCiteCheckLine(summary)],
+    done: ['wrote the report', formatCiteCheckLine(summary), EXPORTED],
     notDone: [],
     confidence: 'high',
     knownIssues: [],
@@ -37,7 +39,10 @@ describe('verifyResearchManifest', () => {
 
   test('the label is there on a failure too, and says when nobody judged the quotes', () => {
     const verdict = verifyResearchManifest(
-      manifest({ done: [formatCiteCheckLine({ ...summary, judged: 0 })], notDone: ['x'] }),
+      manifest({
+        done: [formatCiteCheckLine({ ...summary, judged: 0 }), EXPORTED],
+        notDone: ['x'],
+      }),
     );
     assert.equal(verdict.ok, false);
     assert.equal(verdict.basis, 'runner_reported');
@@ -54,7 +59,7 @@ describe('verifyResearchManifest', () => {
   });
 
   test('no cite-check line fails', () => {
-    const verdict = verifyResearchManifest(manifest({ done: ['wrote the report'] }));
+    const verdict = verifyResearchManifest(manifest({ done: ['wrote the report', EXPORTED] }));
     assert.deepEqual(verdict.problems, ['done has no cite-check line']);
     assert.equal(verdict.checked, undefined);
   });
@@ -67,7 +72,7 @@ describe('verifyResearchManifest', () => {
       'cite-check v1: claims=10 verified=4 quote_verified=4 failed=2 removed=2 judged=6\nsecond line',
       'cite-check: all good',
     ]) {
-      const verdict = verifyResearchManifest(manifest({ done: [line] }));
+      const verdict = verifyResearchManifest(manifest({ done: [line, EXPORTED] }));
       assert.equal(verdict.ok, false, line);
       assert.match(verdict.problems.join(), /cite-check/);
     }
@@ -81,16 +86,45 @@ describe('verifyResearchManifest', () => {
     assert.equal(parseCiteCheckLine(huge).ok, false);
   });
 
+  test('the runner must vouch that the report files reached the handoff directory', () => {
+    const cite = formatCiteCheckLine(summary);
+    const problems = (done: string[]) => verifyResearchManifest(manifest({ done })).problems;
+
+    assert.deepEqual(problems([cite]), [
+      "done has no runner-exported line: the report files were not copied to the task's handoff directory",
+    ]);
+    assert.deepEqual(problems([cite, EXPORTED, EXPORTED]), [
+      'done has more than one runner-exported line',
+    ]);
+    // A file the runner did not export is named, wherever the others live.
+    assert.deepEqual(problems([cite, 'runner-exported: out/report.md out/report.html']), [
+      'the runner did not export: verification.json',
+    ]);
+    assert.deepEqual(problems([cite, 'runner-exported: out/verification.json']), [
+      'the runner did not export: report.md, report.html',
+    ]);
+    assert.deepEqual(problems([cite, 'runner-exported:']), [
+      'the runner did not export: report.md, report.html, verification.json',
+    ]);
+    // Listing a file in artifacts is not the same as having it exported.
+    assert.deepEqual(problems([cite, 'runner-exported: notes.md']).length, 1);
+    assert.deepEqual(problems([cite, 'x/report.md x/report.html x/verification.json']).length, 1);
+    assert.deepEqual(
+      problems([cite, 'runner-exported: a/report.md b/report.html c/verification.json']),
+      [],
+    );
+  });
+
   test('two cite-check lines fail', () => {
     const line = formatCiteCheckLine(summary);
-    assert.deepEqual(verifyResearchManifest(manifest({ done: [line, line] })).problems, [
+    assert.deepEqual(verifyResearchManifest(manifest({ done: [line, line, EXPORTED] })).problems, [
       'done has more than one cite-check line',
     ]);
   });
 
   test('a failed claim left in the report fails', () => {
     const verdict = verifyResearchManifest(
-      manifest({ done: [formatCiteCheckLine({ ...summary, removed: 1 })] }),
+      manifest({ done: [formatCiteCheckLine({ ...summary, removed: 1 }), EXPORTED] }),
     );
     assert.equal(verdict.ok, false);
     assert.match(
@@ -109,7 +143,7 @@ describe('verifyResearchManifest', () => {
       judged: 0,
     });
     assert.match(
-      verifyResearchManifest(manifest({ done: [empty] })).problems.join(),
+      verifyResearchManifest(manifest({ done: [empty, EXPORTED] })).problems.join(),
       /no checked claim is left/,
     );
   });
@@ -135,6 +169,9 @@ test('the research playbook has the conductor Playbook shape and tells the condu
     '--drop-unsupported',
     'runner-reported',
     'judgments.json',
+    'maka-inputs: <drafterTaskId> report.json sources',
+    'maka-inputs: <reviewerTaskId> judgments.json',
+    '--judgments inputs/<reviewerTaskId>/judgments.json',
   ]) {
     assert.ok(steps.includes(needle), needle);
   }

@@ -12,7 +12,6 @@ import {
 import { z } from 'zod';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
 import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
-import type { CostSource } from './cost.js';
 import { type FeedEntry, type FeedHub, readFeed } from './feed.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import { toPublicView } from './public-view.js';
@@ -101,7 +100,6 @@ export interface PublicApiDeps {
   messageLimiter: RateLimiter;
   controlLimiter: RateLimiter;
   orchestrator: Pick<Orchestrator, 'cancelAs' | 'pauseAs' | 'resumeAs' | 'rootSessionOfTask'>;
-  costs: CostSource;
   artifacts: ArtifactSource;
   artifactLimiter: RateLimiter;
   limits: HttpLimits;
@@ -309,7 +307,7 @@ export class PublicApi {
     const page = this.deps.tasks.tasksOfRoot(sessionId, after, limit);
     const tasks = page.flatMap(({ taskId }) => {
       const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-      return record ? [toPublicView(toView(record), this.deps.costs.taskCostUsd(taskId))] : [];
+      return record ? [toPublicView(toView(record))] : [];
     });
     const last = page.at(-1);
     respond(res, 200, {
@@ -435,7 +433,7 @@ export class PublicApi {
           : action === 'pause'
             ? await orchestrator.pauseAs(access, taskId)
             : await orchestrator.resumeAs(access, taskId);
-      respond(res, 200, { task: toPublicView(view, this.deps.costs.taskCostUsd(taskId)) });
+      respond(res, 200, { task: toPublicView(view) });
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
     }

@@ -6,7 +6,22 @@ import { SandboxCliRunner } from './runner.js';
 import { claudeAdapter, codexAdapter } from './vendors.js';
 
 export { Fleet, type CloudRunnersOptions, type RunnerName, type SweepResult } from './fleet.js';
-export { MAX_RESULT_BYTES, RemoteMachine } from './machine.js';
+export {
+  ARTIFACTS_PREFIX,
+  type BriefHeader,
+  INPUTS_PREFIX,
+  type InputPolicy,
+  type InputRequest,
+  parseBriefHeader,
+  sameConversationInputPolicy,
+  type TaskDirectory,
+} from './inputs.js';
+export {
+  DEFAULT_STAGE_LIMITS,
+  MAX_RESULT_BYTES,
+  RemoteMachine,
+  type StageLimits,
+} from './machine.js';
 export {
   DEFAULT_TENANT,
   envModelAccess,
@@ -26,6 +41,7 @@ export type {
   RunnerSessionStore,
   SandboxLease,
   SandboxProvider,
+  SandboxTool,
 } from './types.js';
 export {
   claudeAdapter,

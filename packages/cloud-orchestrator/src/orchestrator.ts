@@ -21,6 +21,7 @@ import {
   type TaskId,
   type TaskMode,
   type TaskRecord,
+  type TaskState,
   type TaskView,
 } from './types.js';
 
@@ -1080,6 +1081,11 @@ export class Orchestrator {
   /** The conversation session whose tree holds the task, if the task exists. */
   rootSessionOfTask(taskId: TaskId): SessionId | undefined {
     return this.lookup(taskId)?.rootSessionId;
+  }
+
+  /** Where a task stands, for callers that act on it outside a session (an unknown task: undefined). */
+  taskStateOf(taskId: TaskId): TaskState | undefined {
+    return this.lookup(taskId)?.state;
   }
 
   /** A session sees tasks it created and everything beneath them, nothing else. */

@@ -16,6 +16,7 @@
  *   longfail      print a 100 kB line, then exit 1
  *   spend         report token usage for each model call and, for claude, the total cost; then ok
  *   spendhang     report the same usage, then run until killed
+ *   custom        write `$HOME/fake-cli/manifest.json` as result.json (`manifest2.json` when resumed, if there is one)
  *   wait          like ok, but first run until `$HOME/fake-cli/go` exists (`waiting` says it is running)
  *   leakedge-plain  print the API key right where a 300-character quote would cut it, then exit 1
  *   leakedge-guard  the same, after a MAKA_GUARD: prefix
@@ -63,6 +64,7 @@ write_result() {
   case "$mode" in
     ok|leakout|flood|spend|wait) printf '%s' "$good" > "$result" ;;
     badthengood) if [ "$resumed" = 1 ]; then printf '%s' "$good" > "$result"; else printf '%s' '{"summary":""}' > "$result"; fi ;;
+    custom) if [ "$resumed" = 1 ] && [ -e "$ctl/manifest2.json" ]; then cp "$ctl/manifest2.json" "$result"; else cp "$ctl/manifest.json" "$result"; fi ;;
     symlink) rm -f "$result"; ln -s "$ctl/secret.txt" "$result" ;;
     big) head -c 1100000 /dev/zero | tr '\0' 'a' > "$result" ;;
   esac

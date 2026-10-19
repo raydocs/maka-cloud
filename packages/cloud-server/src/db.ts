@@ -85,6 +85,7 @@ BEGIN SELECT RAISE(ABORT, '${table} is append-only'); END;`,
   .join('\n')}
 `;
 
+// Unused since task cost comes from the orchestrator's `task_cost` events; a shipped step is never edited.
 const SCHEMA_V2 = `
 CREATE TABLE task_cost_log (
   id INTEGER PRIMARY KEY,

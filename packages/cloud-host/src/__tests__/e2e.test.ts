@@ -13,7 +13,7 @@ import {
   toolResults,
 } from '@maka-cloud/conductor/testing/fake-model';
 import { FakeRun, FakeRunner, RunnerRegistry } from '@maka-cloud/orchestrator';
-import { formatCiteCheckLine } from '@maka-cloud/playbooks';
+import { formatCiteCheckLine, REPORT_ARTIFACTS, RUNNER_EXPORT_PREFIX } from '@maka-cloud/playbooks';
 import { type Cloud, type CloudOptions, startCloud } from '../host.js';
 
 interface SseEvent {
@@ -45,6 +45,8 @@ const RESEARCH_MANIFEST = {
       removed: 0,
       judged: 0,
     }),
+    // The line a real research runner adds once it has copied the report to the handoff directory.
+    `${RUNNER_EXPORT_PREFIX} ${REPORT_ARTIFACTS.join(' ')}`,
   ],
   notDone: [],
   confidence: 'high' as const,
