@@ -1,0 +1,32 @@
+{
+  "name": "@maka-cloud/playbooks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Playbooks for the conductor: the research playbook and its citation checker.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "cite-check": "./dist/research/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./citations": {
+      "types": "./dist/citations.d.ts",
+      "default": "./dist/citations.js"
+    }
+  },
+  "scripts": {
+    "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@maka-cloud/conductor": "0.1.0",
+    "zod": "^4.6.5"
+  }
+}
