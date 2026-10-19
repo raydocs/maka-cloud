@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { ConfigError, describeConfig, readStackConfig } from '../config.js';
+import { ConfigError, describeConfig, ENV_VARIABLES, readStackConfig } from '../config.js';
 
 const ENV = {
   MAKA_CLOUD_DATA_DIR: '/srv/maka',
@@ -223,4 +223,32 @@ test('a missing variable or an unknown command exits with 2 and says why', async
     assert.match(failed.stderr, /Usage:/);
     return true;
   });
+});
+
+const PUSH_ENV = {
+  CLOUD_PUSH_VAPID_PUBLIC: 'public-key-value',
+  CLOUD_PUSH_VAPID_PRIVATE: 'sk-secret-vapid-private',
+  CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+};
+
+test('Web Push is off unless all three VAPID settings are set', () => {
+  assert.equal(readStackConfig(ENV).pushSet, false);
+  assert.equal(readStackConfig({ ...ENV, ...PUSH_ENV }).pushSet, true);
+});
+
+test('a partial Web Push setting is refused, naming the missing variable and no secret', () => {
+  const problems = problemsOf({ ...ENV, CLOUD_PUSH_VAPID_PRIVATE: 'sk-secret-vapid-private' });
+  const problem = problems.find((p) => p.includes('CLOUD_PUSH_'));
+  assert.ok(problem, problems.join('; '));
+  assert.match(problem, /CLOUD_PUSH_VAPID_PUBLIC/);
+  assert.match(problem, /CLOUD_PUSH_SUBJECT/);
+  assert.ok(!problems.join('\n').includes('sk-secret-vapid-private'));
+});
+
+test('the usage text lists the Web Push variables, and the summary never prints the key', () => {
+  assert.ok(ENV_VARIABLES.some(([name]) => name === 'CLOUD_PUSH_VAPID_PRIVATE'));
+  const lines = describeConfig(readStackConfig({ ...ENV, ...PUSH_ENV })).join('\n');
+  assert.match(lines, /Web Push:\s+on/);
+  assert.ok(!lines.includes('sk-secret-vapid-private'));
+  assert.ok(!lines.includes('public-key-value'));
 });
