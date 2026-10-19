@@ -2,19 +2,24 @@ import {
   routes,
   type AnswerRequest,
   type AnswerResult,
-  type Artifact,
-  type Capabilities,
-  type Capability,
+  type ArtifactContent,
+  type ArtifactListing,
   type Conversation,
   type FeedEvent,
+  type TaskControl,
   type TaskView,
 } from './contract';
 
+/** A refused request. `code` is the server's error code, when it sent one. */
 export class ApiError extends Error {
-  constructor(readonly status: number) {
+  constructor(
+    readonly status: number,
+    readonly code?: string,
+  ) {
     super(`Request failed (${status}).`);
   }
 }
+/** The server has no such feature: its route answered 404 or 405. */
 export class Unsupported extends Error {}
 
 /** Authenticated fetch SSE: native EventSource cannot carry the invite header. */
@@ -32,7 +37,15 @@ export async function readEvents(
   const line = (text: string) => {
     if (text === '') {
       if (data.length && /^\d{1,15}$/.test(id)) {
-        receive({ id: Number(id), kind, data: JSON.parse(data.join('\n')) } as FeedEvent);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data.join('\n'));
+        } catch {
+          // A frame that is not JSON is skipped; the ones after it still count.
+        }
+        if (typeof parsed === 'object' && parsed !== null) {
+          receive({ id: Number(id), kind, data: parsed } as FeedEvent);
+        }
       }
       kind = '';
       id = '';
@@ -65,40 +78,54 @@ export async function readEvents(
   }
 }
 
+export interface ClientOptions {
+  fetcher?: typeof fetch;
+  /** Prefix for every path. Empty: same origin, as the built app is served. */
+  baseUrl?: string;
+  /** Called when the server says the invite is no longer valid (401). */
+  onRevoked?: () => void;
+}
+
 export class CloudClient {
-  capabilities: Capabilities = {};
+  /** Features whose routes answered 404/405 on this connection; their controls stay hidden. */
+  readonly unsupported = new Set<string>();
+  private readonly fetcher: typeof fetch;
+  private readonly baseUrl: string;
+  private readonly onRevoked: (() => void) | undefined;
   constructor(
     private readonly token: string,
-    private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
-  ) {}
+    options: ClientOptions | typeof fetch = {},
+  ) {
+    const resolved = typeof options === 'function' ? { fetcher: options } : options;
+    this.fetcher = resolved.fetcher ?? globalThis.fetch.bind(globalThis);
+    this.baseUrl = resolved.baseUrl ?? '';
+    this.onRevoked = resolved.onRevoked;
+  }
 
-  async request<T>(path: string, init: RequestInit = {}, feature?: Capability): Promise<T> {
-    const response = await this.fetcher(path, {
+  private async send(path: string, init: RequestInit = {}, feature?: string): Promise<Response> {
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
-        'Content-Type': 'application/json',
+        ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...init.headers,
         Authorization: `Bearer ${this.token}`,
       },
     });
+    if (response.ok) return response;
+    if (response.status === 401) this.onRevoked?.();
     if (feature && (response.status === 404 || response.status === 405)) {
-      this.capabilities[feature] = false;
+      this.unsupported.add(feature);
       throw new Unsupported('This action is not available on this server.');
     }
-    if (!response.ok) throw new ApiError(response.status);
-    if (response.status === 204) return undefined as T;
-    return response.json() as Promise<T>;
+    const body = (await response.json().catch(() => undefined)) as { error?: unknown } | undefined;
+    throw new ApiError(response.status, typeof body?.error === 'string' ? body.error : undefined);
   }
 
-  async discover(): Promise<void> {
-    try {
-      this.capabilities = await this.request<Capabilities>(routes.capabilities);
-    } catch (error) {
-      // Old T4 servers have no discovery route. Unknown is not supported or absent:
-      // try an action once; a 404/405 hides only that feature for this connection.
-      if (!(error instanceof ApiError) || ![404, 405].includes(error.status)) throw error;
-    }
+  async request<T>(path: string, init: RequestInit = {}, feature?: string): Promise<T> {
+    const response = await this.send(path, init, feature);
+    return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
   }
+
   listConversations() {
     return this.request<{ conversations: Conversation[] }>(routes.conversations);
   }
@@ -127,29 +154,31 @@ export class CloudClient {
       after = page.next;
     }
   }
-  cancel(conversation: string, task: string) {
-    return this.request<void>(
-      routes.cancel(conversation, task),
-      { method: 'POST', body: '{}' },
-      'taskCancel',
-    );
+  /** The server answers with the task's view; the event stream carries the same change. */
+  async control(task: string, action: TaskControl): Promise<void> {
+    await this.request<unknown>(routes.control(task, action), { method: 'POST', body: '{}' });
   }
-  pause(conversation: string, task: string, paused: boolean) {
-    return this.request<void>(
-      routes.pause(conversation, task),
-      { method: 'POST', body: JSON.stringify({ paused }) },
-      'taskPause',
-    );
-  }
+  /** A 404 is a question that is gone or not yours: the route is absent only where no conductor runs, and then there is no question. */
   answer(id: string, answer: AnswerRequest) {
-    return this.request<AnswerResult>(
-      routes.answers(id),
-      { method: 'POST', body: JSON.stringify(answer) },
-      'answers',
-    );
+    return this.request<AnswerResult>(routes.answers(id), {
+      method: 'POST',
+      body: JSON.stringify(answer),
+    });
   }
-  artifact(id: string, ref: string) {
-    return this.request<Artifact>(routes.artifact(id, ref), {}, 'artifacts');
+  listArtifacts(task: string) {
+    return this.request<{ artifacts: ArtifactListing[]; total: number }>(routes.artifacts(task));
+  }
+  /** A link is handed back as is; a file arrives as an attachment and is read as inert text. */
+  async readArtifact(task: string, index: number): Promise<ArtifactContent> {
+    const response = await this.send(routes.artifact(task, index));
+    const disposition = response.headers.get('content-disposition');
+    if (disposition === null) {
+      const link = (await response.json()) as { url?: unknown };
+      if (typeof link.url !== 'string') throw new Error('Unexpected artifact response');
+      return { kind: 'link', url: link.url };
+    }
+    const name = /filename="([^"]*)"/u.exec(disposition)?.[1] ?? 'result';
+    return { kind: 'text', name, text: await response.text() };
   }
 
   async subscribe(
@@ -162,7 +191,7 @@ export class CloudClient {
     let delay = 500;
     while (!signal.aborted) {
       try {
-        const response = await this.fetcher(routes.events(id), {
+        const response = await this.fetcher(`${this.baseUrl}${routes.events(id)}`, {
           headers: {
             Authorization: `Bearer ${this.token}`,
             Accept: 'text/event-stream',
@@ -171,7 +200,12 @@ export class CloudClient {
           signal,
         });
         if (response.status === 401) {
+          this.onRevoked?.();
           status('Invite expired. Reconnect with a valid invite.');
+          return;
+        }
+        if (response.status === 404) {
+          status('This conversation is not available.');
           return;
         }
         if (!response.ok) {

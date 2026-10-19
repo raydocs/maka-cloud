@@ -252,7 +252,11 @@ export const exclusionRules = [
     justification:
       'Files added by the private maka-cloud fork. They are not contributions to the ASF, so an ASF header would assert provenance the ASF does not have.',
     matches: (path) =>
-      isOneOf('AGENTS.md', '.github/workflows/fork-upstream-sync.yml')(path) ||
+      isOneOf(
+        'AGENTS.md',
+        '.github/workflows/fork-upstream-sync.yml',
+        '.github/workflows/fork-cloud-web.yml',
+      )(path) ||
       startsWith('docs/fork')(path) ||
       path.startsWith('packages/cloud-'),
   },

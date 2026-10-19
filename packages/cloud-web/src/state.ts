@@ -1,17 +1,21 @@
-import type { FeedEvent, OutboxQuestion, TaskView } from './contract';
+import { type FeedEvent, type Question, TERMINAL, type TaskView } from './contract';
 
 export interface ConversationState {
   messages: { id: string; role: 'user' | 'assistant' | 'notice'; text: string }[];
   tasks: Record<string, TaskView>;
-  questions: Record<string, OutboxQuestion>;
+  questions: Record<string, Question>;
   answers: Record<string, string>;
-  costs: Record<string, number>;
-  paused: Record<string, boolean>;
 }
 export function emptyState(): ConversationState {
-  return { messages: [], tasks: {}, questions: {}, answers: {}, costs: {}, paused: {} };
+  return { messages: [], tasks: {}, questions: {}, answers: {} };
 }
 
+const MAX_PROGRESS_NOTES = 20;
+
+/**
+ * The same rules as the orchestrator's reducer, applied to the events the feed
+ * carries. A task keeps what it already knows when `task_created` is replayed.
+ */
 export function applyEvent(state: ConversationState, frame: FeedEvent): ConversationState {
   const next = { ...state };
   switch (frame.kind) {
@@ -19,18 +23,17 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
       if (state.messages.some((m) => m.id === frame.data.messageId)) return state;
       next.messages = [
         ...state.messages,
-        { id: frame.data.messageId, role: 'user', text: frame.data.text },
+        {
+          id: frame.data.messageId,
+          role: frame.data.role === 'assistant' ? 'assistant' : 'user',
+          text: frame.data.text,
+        },
       ];
       break;
-    case 'conductor.message':
     case 'conductor.notice':
       next.messages = [
         ...state.messages,
-        {
-          id: String(frame.id),
-          role: frame.kind === 'conductor.message' ? 'assistant' : 'notice',
-          text: frame.data.text,
-        },
+        { id: frame.data.noticeId ?? String(frame.id), role: 'notice', text: frame.data.text },
       ];
       break;
     case 'conductor.question':
@@ -39,55 +42,57 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
     case 'conductor.answered':
       next.answers = { ...state.answers, [frame.data.questionId]: frame.data.optionId };
       break;
-    case 'task.cost':
-      if (Number.isFinite(frame.data.costUsd) && frame.data.costUsd >= 0)
-        next.costs = { ...state.costs, [frame.data.taskId]: frame.data.costUsd };
-      break;
-    case 'task.paused':
-      next.paused = { ...state.paused, [frame.data.taskId]: frame.data.paused };
-      break;
     case 'task.event': {
       const { event, at } = frame.data;
       let task = state.tasks[event.taskId];
       if (event.type === 'task_created') {
+        if (task) return state;
         task = {
           taskId: event.taskId,
-          parentTaskId: event.parentTaskId,
-          title: event.title,
-          runner: event.runner,
+          ...(event.parentTaskId === undefined ? {} : { parentTaskId: event.parentTaskId }),
+          ...(event.title === undefined ? {} : { title: event.title }),
+          ...(event.budgetUsd === undefined ? {} : { budgetUsd: event.budgetUsd }),
           state: 'queued',
           createdAt: at,
           progress: [],
           cancelRequested: false,
+          pauseRequested: false,
         };
       } else if (!task) return state;
       else {
         task = { ...task };
+        const ended = TERMINAL.has(task.state);
         switch (event.type) {
-          case 'task_started':
-            task.state = 'running';
-            task.startedAt = at;
+          // Spend and stops are recorded after a task ended too.
+          case 'task_cost':
+            if (
+              typeof frame.data.totalCostUsd === 'number' &&
+              Number.isFinite(frame.data.totalCostUsd) &&
+              frame.data.totalCostUsd >= 0
+            )
+              task.costUsd = frame.data.totalCostUsd;
             break;
-          case 'task_progress':
-            task.progress = [...task.progress, event.note];
+          case 'task_stop_pending':
+            task.stopPending = true;
             break;
-          case 'task_succeeded':
-            task.state = 'succeeded';
-            task.manifest = event.manifest;
-            task.finishedAt = at;
+          case 'task_stopped':
+            delete task.stopPending;
             break;
-          case 'task_failed':
-            task.state = 'failed';
-            task.failureReason = event.reason;
-            task.finishedAt = at;
-            break;
-          case 'task_cancel_requested':
-            task.cancelRequested = true;
-            break;
-          case 'task_cancelled':
-            task.state = 'cancelled';
-            task.finishedAt = at;
-            break;
+          default:
+            if (ended) return state;
+            applyLive(task, event, at);
+            if (event.type === 'task_pause_failed' || event.type === 'task_resume_failed')
+              next.messages = [
+                ...state.messages,
+                {
+                  id: `${frame.id}`,
+                  role: 'notice',
+                  text:
+                    event.type === 'task_pause_failed'
+                      ? `Could not pause “${task.title ?? 'a task'}”. It keeps running. ${event.reason}`
+                      : `Could not resume “${task.title ?? 'a task'}”. It stays paused. ${event.reason}`,
+                },
+              ];
         }
       }
       next.tasks = { ...state.tasks, [event.taskId]: task };
@@ -95,4 +100,89 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
     }
   }
   return next;
+}
+
+function applyLive(
+  task: TaskView,
+  event: Extract<FeedEvent, { kind: 'task.event' }>['data']['event'],
+  at: number,
+) {
+  switch (event.type) {
+    case 'task_started':
+      task.state = 'running';
+      task.startedAt = at;
+      break;
+    case 'task_progress':
+      task.progress = [...task.progress, event.note].slice(-MAX_PROGRESS_NOTES);
+      break;
+    case 'task_succeeded':
+      task.state = 'succeeded';
+      task.manifest = event.manifest;
+      task.finishedAt = at;
+      break;
+    case 'task_failed':
+      task.state = 'failed';
+      task.failureReason = event.reason;
+      task.finishedAt = at;
+      break;
+    case 'task_cancel_requested':
+      task.cancelRequested = true;
+      break;
+    case 'task_cancelled':
+      task.state = 'cancelled';
+      task.finishedAt = at;
+      break;
+    case 'task_pause_requested':
+      if (task.state === 'running') task.pauseRequested = true;
+      break;
+    case 'task_paused':
+      if (task.state === 'running' && task.pauseRequested) task.state = 'paused';
+      break;
+    case 'task_pause_failed':
+      if (task.state === 'running') task.pauseRequested = false;
+      break;
+    case 'task_resumed':
+      if (task.state === 'paused') {
+        task.state = 'running';
+        task.pauseRequested = false;
+      }
+      break;
+  }
+}
+
+/**
+ * Takes what only the server's view knows from a fresh task list: the flags
+ * that say a stopped-looking tree may still run, and the cost and budget it
+ * worked out. Task state and progress stay as the event stream built them.
+ */
+export function mergeViews(state: ConversationState, views: TaskView[]): ConversationState {
+  const tasks = { ...state.tasks };
+  for (const view of views) {
+    const task = tasks[view.taskId];
+    if (!task) continue;
+    const merged: TaskView = { ...task };
+    for (const key of [
+      'costUsd',
+      'budgetUsd',
+      'budgetExceeded',
+      'stopPending',
+      'treeStopPending',
+    ] as const) {
+      if (view[key] === undefined) delete merged[key];
+      else (merged as unknown as Record<string, unknown>)[key] = view[key];
+    }
+    tasks[view.taskId] = merged;
+  }
+  return { ...state, tasks };
+}
+
+/** What the tree of top-level tasks reported spending. `complete` is false while some task has not reported. */
+export function totalCost(tasks: TaskView[]): { usd: number | undefined; complete: boolean } {
+  const roots = tasks.filter((task) => task.parentTaskId === undefined);
+  const reported = roots.filter((task) => task.costUsd !== undefined);
+  if (reported.length === 0) return { usd: undefined, complete: roots.length === 0 };
+  return {
+    usd: reported.reduce((sum, task) => sum + (task.costUsd ?? 0), 0),
+    complete: reported.length === roots.length,
+  };
 }

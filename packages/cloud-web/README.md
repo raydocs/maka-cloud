@@ -1,170 +1,113 @@
-# T9 — conversation workspace
+# T9: conversation workspace
 
-React web app, entirely inside `packages/cloud-web`. One conversation brings
-together messages, a live nested task tree/current step, per-task cost so far,
-recommended-first decision cards, pause/resume/cancel, reports/diffs/PR links,
-and opt-in background Web Push. It reuses `packages/ui`'s public `ChoicePanel`
-implementation and the existing Astryx design system without changing either.
+React web app, entirely inside `packages/cloud-web`. The first screen is one
+sentence: the user types what they want done, and the conversation starts. From
+there one view holds the messages, the live task tree with its current step,
+the cost so far, recommended-first decision cards, pause/resume/cancel, and the
+results of finished tasks (reports, changes, pull-request links). It reuses
+`packages/ui`'s public `ChoicePanel` and the Astryx design system without
+changing either.
 
-**The complete UI runs against a local mock. The merged server only implements
-the base API below. Extensions are explicit integration contracts, not claims
-that the server already supports these capabilities.** No provider, paid run,
-real API key, real push service, or unrelated task is needed to run the demo/tests.
+The app speaks to the real `packages/cloud-server` API and nothing else. There
+is no mock server: tests start the real server (SQLite in a temporary
+directory, the real orchestrator and event stream) with a fake runner as the
+only "model", so no key, provider, paid run or network is involved.
 
 ## Run and verify
 
-This is deliberately a standalone package: root workspaces, lockfiles, CI and
-other packages are out of scope. From the repository root, with Node 22+:
+Needs Node 22+. The tests start the built server and orchestrator, so build
+those once from the repository root after `npm ci`:
 
 ```sh
+npm --workspace @maka-cloud/orchestrator run build
+npm --workspace @maka-cloud/server run build
 npm --prefix packages/cloud-web ci --workspaces=false
-npm --prefix packages/cloud-web run demo
-# Local mock/demo uses port 4173 and the non-secret demo-invite fixture.
-npm --prefix packages/cloud-web run build
-npm --prefix packages/cloud-web test
-npm --prefix packages/cloud-web exec -- playwright install chromium
-npm --prefix packages/cloud-web run test:e2e
+npm --prefix packages/cloud-web run check      # build, vitest, Playwright
 ```
 
-Alternatively set `CHROME_PATH` to an installed Chromium executable; Playwright
-does not download a browser in that case. `npm run check` inside this package
-runs build, components/client tests and Playwright. Mock Playwright starts its
-own dev server if needed; do not run another mock browser concurrently, since
-the deterministic fixture is shared/reset between tests.
+- `npm test` runs the component tests and `tests/integration/real-api.test.ts`,
+  which drives the client and the event reducer against the real server.
+- `npm run test:e2e` runs Playwright (desktop and a 390px touch-emulated phone)
+  against the real server and the dev server. Install a browser with
+  `npm --prefix packages/cloud-web exec -- playwright install chromium`, or set
+  `CHROME_PATH` to an installed Chromium.
+- `npm run stack` starts only the test stack (real server on port 4174, a
+  control API on 4175 that plays the conductor and the runners). With it
+  running, `CLOUD_WEB_API=http://127.0.0.1:4174 npm run dev` serves the app on
+  port 4173 and proxies `/v1` to the server, so the page and the API share an
+  origin. The control API prints nothing secret; it exists only in the test
+  stack.
 
-`npm run dev` is the non-mock entry: enter an invite token (memory only).
-Serve `dist/` and the authenticated API on the same origin, with HTTPS for Web
-Push. This package does not configure or start the real cloud server. Mock
-middleware and its `/__mock/*` controls exist only with `CLOUD_WEB_MOCK=1` in the
-development server; they are not part of the built client or production API.
-Vite/TypeScript resolve `@maka/ui` to the existing public ChoicePanel source so
-this scoped package does not need the desktop package graph built first.
+Against a deployed server: serve `dist/` and the API on one origin (HTTPS, for
+Web Push later) and enter an invite token. The token lives in memory only.
 
-## Verified merged base contract: T4 #21
+## The API the app uses
 
-[PR #21](https://github.com/raydocs/maka-cloud/pull/21) merged on 2026-10-19 as
-[`8ea4b8f`](https://github.com/raydocs/maka-cloud/commit/8ea4b8f1f9fd26b73e83c76d1df7a63756d0e19c).
-The actual merged `packages/cloud-server/src/http.ts`, `feed.ts`,
-`conversations.ts`, and `packages/cloud-orchestrator/src/types.ts` were read and
-aligned after merge. [`src/contract.ts`](src/contract.ts) separates these base
-types from proposed extension types. Every route, including SSE, uses
-`Authorization: Bearer <invite>`; never put credentials in URLs or local storage.
+Every route needs `Authorization: Bearer <invite>`, including the event stream
+(fetch-based SSE, since `EventSource` cannot send the header). An object another
+invite owns answers 404, the same as one that does not exist.
 
-| Route | Request → response |
+| What | Route |
 | --- | --- |
-| `POST /v1/conversations` | Optional `{title}` → 201 `{conversationId}`. |
-| `GET /v1/conversations` | 200 `{conversations:[{conversationId,title,createdAt}]}`, oldest first. |
-| `POST /v1/conversations/:id/messages` | `{text,clientMessageId?}` → 202 `{messageId}`; client ID makes retry idempotent. |
-| `GET /v1/conversations/:id/tasks?after=&limit=` | 200 `{tasks:TaskView[],next?:number}`. Global task-creation cursor, default limit 50, capped at 200. |
-| `GET /v1/events?conversation=&after=` | Authenticated fetch SSE, filtered by conversation. |
+| Conversations | `GET`/`POST /v1/conversations` |
+| Say something | `POST /v1/conversations/:id/messages` `{text, clientMessageId}`: a retry with the same id is one message |
+| Task list | `GET /v1/conversations/:id/tasks?after=&limit=` |
+| Pause, resume, cancel | `POST /v1/tasks/:id/(pause\|resume\|cancel)` |
+| Results | `GET /v1/tasks/:id/artifacts` (names and kinds), `GET /v1/tasks/:id/artifacts/:index` (a link as JSON, a file as an attachment) |
+| Answer a question | `POST /v1/conversations/:id/answers` `{questionId, optionId, text?}` |
+| Live updates | `GET /v1/events?conversation=` with `Last-Event-ID` |
 
-The mock uses these same paths/statuses/payloads, distinct task-log sequences
-and feed positions, message idempotency, task pagination, SSE replay/header
-precedence and comment heartbeats. It is not a replacement for server tests:
-SQLite persistence, quotas, stream backpressure and invite administration are
-server responsibilities, not simulated infrastructure guarantees.
+Event frames the view uses: `message.posted` (role `user` or `assistant`),
+`task.event`, `conductor.notice`, `conductor.question`, `conductor.answered`.
+The view is built from the replayed stream (a fresh view replays from the
+start; there is no "list messages" route) and reconnects with the last event id.
+After a task ends or a stop is owed, it reads the task list once more for the
+flags only the server works out (`costUsd`, `budgetExceeded`,
+`treeStopPending`).
 
-```text
-id: <feed position, not task seq>
-event: <kind>
-data: <JSON below>
+What the UI does with the answers:
 
-conversation.created  {conversationId,title,at}
-message.posted        {conversationId,messageId,role:"user",text,at}
-task.event            {conversationId,seq,at,event:TaskEvent}
-```
+- **Cost.** Spend is recorded on the top-level task and covers its subtasks
+  (`costUsd` on the view, `totalCostUsd` on `task_cost` frames). Subtasks show no
+  cost of their own. A task that has not reported shows "Not reported", never
+  zero, and a total over only some tasks says "not all reported".
+- **Stops.** A task whose run is not known to have stopped (`stopPending`,
+  `treeStopPending`) says it is still stopping and that the cost may change.
+  `budgetExceeded` says the budget was reached.
+- **Control errors.** `409 pause_unsupported` hides Pause for that task;
+  `409 invalid_state`, `404`, `429` and the answer codes (`conflict`, `not_open`,
+  `closed`, `unknown_option`) each get a plain sentence. Nothing is shown as
+  done until the stream says so, except an answer the server accepted.
+- **Revoke.** A 401 on any request or on the stream returns to the invite screen
+  and drops everything held for the conversation.
 
-`Last-Event-ID` wins over `?after=`; replay returns strictly later positions.
-The client preserves the last applied feed ID across reconnects and ignores
-duplicate positions. A fresh view replays from zero (there is no GET messages
-route). `TaskView.progress`'s last note is the current step. Base task states
-remain queued/running/succeeded/failed/cancelled; pause and cost do **not** get
-silently added to base TaskView. A missing cost is “Not reported”, never zero.
+## Presentation safety
 
-## Extension integration / upstream blocker table
+Every untrusted string (messages, titles, task text, decision labels, artifact
+names and contents, drafts, accessible names) passes one filter
+(`src/presentation.ts`) that suppresses known model and vendor names after
+Unicode normalization. The server scrubs error text the same way, and never
+sends the runner id. Artifact content is inert text, never HTML. Links need
+HTTPS, no credentials, and no forbidden name once decoded. This is a
+presentation policy, not a secret-redaction system.
 
-These are **documented proposals** implemented by the mock and typed client.
-T5 PR A [#27](https://github.com/raydocs/maka-cloud/pull/27) is merged: its
-`cloud-conductor/src/outbox.ts` supplies the exact message/question/answered/
-notice fields below, and `conductor.ts` defines the UserAnswer body/result.
-No identifiable T5 PR B was available in the inspected open/all T5 PR list at
-implementation time. **Its HTTP response and SSE envelope names still need
-confirmation**; do not mistake the proposed names for an existing transport.
-The answer URL is the requester-specified T5 PR B integration URL.
+A result is never described as checked or verified by this app: it shows what
+the server and the runner sent, and nothing it infers.
 
-All extension routes use the same invite authentication. IDs/references are
-URL-encoded. Pending owners must confirm authorization, persistence, replay
-and mutation semantics server-side before production rollout.
+## Not done yet
 
-| Extension | Proposed wire contract used here | Responsible upstream work / status |
-| --- | --- | --- |
-| Discovery | `GET /v1/capabilities` → 200 optional booleans `taskCancel,taskPause,answers,artifacts,taskCost,push` | Server integration; concrete follow-up task ID **pending upstream confirmation**. |
-| Assistant message | SSE `conductor.message` → `{conversationId,runId,text}` | T5 PR B server implementation of the conductor outbox; payload verified in merged PR A, event name proposed. |
-| Decision | SSE `conductor.question` → `{conversationId,runId,questionId,reason,question,options:[{id,label}],recommended}`; reason is `taste\|budget_overrun\|irreversible` | T5 PR B; payload verified, envelope proposed. UI independently moves recommendation first. |
-| Answer | `POST /v1/conversations/:id/answers` `{questionId,optionId,text?}` → 200 `{accepted:true,duplicate:boolean}` or `{accepted:false,reason}`. Conflicts may return 409. SSE `conductor.answered` → `{conversationId,runId,questionId,optionId,text?}` | T5 PR B. Request/outbox fields and onAnswer result verified in PR A; HTTP mapping/event name proposed, to confirm against B. |
-| Notice | SSE `conductor.notice` → `{conversationId,runId?,text}` | T5 PR B; payload verified, envelope proposed. |
-| Cancel | `POST /v1/conversations/:id/tasks/:task/cancel` `{}` → 204; then base task cancellation events | Server/orchestrator integration, concrete follow-up task ID **pending upstream confirmation**. Server owns descendant semantics. |
-| Pause/resume | `POST /v1/conversations/:id/tasks/:task/pause` `{paused:boolean}` → 204; SSE `task.paused` `{conversationId,taskId,paused}` | Server/orchestrator integration, concrete task ID **pending upstream confirmation**. No invented base “paused” state. |
-| Spend | SSE `task.cost` `{conversationId,taskId,costUsd}`; cumulative **direct** task cost, excludes descendants to avoid double counting | Server/conductor accounting, concrete task ID **pending upstream confirmation**. Must replay latest cumulative values. |
-| Artifact retrieval | `GET /v1/conversations/:id/artifacts?ref=<manifest reference>` → 200 `{kind:"report"\|"diff"\|"pr",title,content?,url?}` | Server artifact store/access control, concrete task ID **pending upstream confirmation**. No browser access to internal filesystem/session credentials. |
-| Web Push | `GET /v1/push/config` → 200 `{applicationServerKey:<base64url public key>}`; `POST /v1/push/subscriptions` with browser `PushSubscription.toJSON()` → 204 | Server registration, tenant binding and background completion delivery; concrete task ID **pending upstream confirmation**. Worker expects pushes only for completed tasks. |
-
-### Clean degradation, no fake success
-
-Discovery `false` hides that feature immediately. Older servers return 404/405
-for discovery; capabilities remain unknown and an action may be tried once.
-Any feature endpoint returning **404 or 405** hides its controls for the current
-connection and reports “No change was made”. Neither response marks a task
-paused/cancelled, records an answer, loads an artifact, or enables notifications.
-Other failures remain retryable errors. Pause/cancel state changes come from
-events; answers are acknowledged only after an accepted response or answered
-event. Server-side semantic rejection never becomes a local answer.
-
-The current merged T4 server lacks every extension in this table. That is a
-production integration blocker owned outside this PR, **not** a blocker on
-delivering the complete mock-driven UI under the updated T9 scope. No other
-package was edited to simulate server support.
-
-## Presentation and notification safety
-
-Every displayed untrusted string passes the same presentation filter, including
-messages, titles, task progress/errors, decision labels, artifacts, user drafts
-and accessible names. Known model/vendor names (including the five explicitly
-forbidden by T9) are suppressed after Unicode normalization. Artifact content
-is inert text, not injected HTML. Links require HTTPS, no embedded credentials,
-and no forbidden names in the decoded URL; internal references stay invisible.
-This is a presentation policy, not a general-purpose secret-redaction system.
-
-Push is an actual service-worker registration/subscription flow, not an
-SSE-triggered foreground notification. The worker ignores all server-derived
-notification text/URLs and shows a generic completion notification; clicking it
-focuses a same-origin window or opens `/`. Browser permission/subscription and
-server registration must all succeed before “enabled” appears. A failed
-registration unsubscribes a newly-created browser subscription.
-
-## Verification evidence
-
-- Build/typecheck: `npm --prefix packages/cloud-web run build`.
-- Components/client: `npm --prefix packages/cloud-web test` — 8 tests.
-- Mocked Playwright: `npm --prefix packages/cloud-web run test:e2e` — 20 tests
-  across desktop and 390px touch-emulated Chromium. Checks decisions, task
-  controls, live completion, artifacts, cost, SSE Last-Event-ID/replay,
-  conversation isolation, failed-send draft preservation, name suppression in
-  text/a11y/URLs, and **404 and 405** control degradation/no false success.
-- Push tests stub only browser push transport and notification presentation:
-  real worker registration/HTTP registration, page closed, synthetic hostile
-  completion delivery at the real worker boundary. This proves local worker
-  behavior, **not external Web Push delivery**.
-- [`evidence/`](evidence/) retains inspected desktop/phone, answered/paused,
-  artifact and degraded states plus a real-pointer interaction clip for GitHub
-  handoff. Phone rendering is Chromium emulation, not a physical device.
-  Package-local `.gitattributes` excludes only this review evidence from source
-  release archives, matching the repository's visual-evidence convention; all
-  application, mock and test source remains included.
-- Root CI does not install/test this standalone package; green root CI alone
-  is not T9 acceptance. Package-local commands and evidence are required.
-
-This replaces the original documentation-only blocker on the same branch and
-[PR #28](https://github.com/raydocs/maka-cloud/pull/28). Actual merged #21 was
-checked; no polling, schedule, external review, provider run or deployment was
-used. Previously stopped unrelated tasks remain stopped.
+- **Inbox ("needs you") view and the supervisor's own check label** for a
+  finished task: the routes exist (`/v1/inbox/*`), the view is the next PR.
+- **Web Push.** The service worker and the registration flow are in, but the
+  server side is T4 PR E (#44), which is not on main. Its routes answer 404
+  today, so the button says notifications are unavailable and nothing claims
+  they are on. The registration paths here are the proposal that predates #44
+  and will be aligned to the merged routes.
+- **Inbox settings, mutes and digest** answer 404 on the server until they are
+  stored per owner; the app does not call them.
+- Conversations created before the owner column exist stay hidden until
+  `cloud-server conversation adopt` runs.
+- Root `ci.yml` does not install or test this package (its dependency versions
+  differ from the root workspaces). `.github/workflows/fork-cloud-web.yml`
+  builds the server, then runs this package's build, vitest and Playwright
+  suites on every pull request and on main.

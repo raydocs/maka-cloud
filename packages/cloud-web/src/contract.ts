@@ -1,4 +1,8 @@
-/** T4 #21 wire contract. Extensions below are proposals, not claims about T4. */
+/**
+ * The public API of packages/cloud-server as it is on main. Every route needs
+ * `Authorization: Bearer <invite>`; an object another invite owns answers 404.
+ * Test against the real server: tests/integration/real-api.test.ts.
+ */
 export interface Conversation {
   conversationId: string;
   title: string | null;
@@ -14,11 +18,13 @@ export interface Manifest {
   artifacts?: string[];
 }
 
-export type TaskState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type TaskState = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
+export const TERMINAL: ReadonlySet<TaskState> = new Set(['succeeded', 'failed', 'cancelled']);
+
+/** A task as the public API shows it: the runner id never leaves the server. */
 export interface TaskView {
   taskId: string;
   parentTaskId?: string;
-  runner: string;
   title?: string;
   state: TaskState;
   createdAt: number;
@@ -28,7 +34,15 @@ export interface TaskView {
   manifest?: Manifest;
   failureReason?: string;
   cancelRequested: boolean;
-  waitTimedOut?: boolean;
+  /** On a top-level task: what its whole tree reported spending. Absent until a run reports. */
+  costUsd?: number;
+  budgetUsd?: number;
+  budgetExceeded?: boolean;
+  pauseRequested: boolean;
+  /** The run is not known to have stopped, whatever `state` says. */
+  stopPending?: boolean;
+  /** This task or one below it may still be running, or owes a stop. */
+  treeStopPending?: boolean;
 }
 
 export type TaskEvent =
@@ -36,122 +50,97 @@ export type TaskEvent =
       type: 'task_created';
       taskId: string;
       sessionId: string;
-      rootSessionId?: string;
       parentTaskId?: string;
-      runner: string;
       title?: string;
       mode: 'async' | 'wait';
+      budgetUsd?: number;
     }
   | { type: 'task_started'; taskId: string }
+  | { type: 'task_cost'; taskId: string; fromTaskId: string; costUsd: number }
   | { type: 'task_progress'; taskId: string; note: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }
   | { type: 'task_failed'; taskId: string; reason: string }
   | { type: 'task_cancel_requested'; taskId: string; by: string }
-  | { type: 'task_cancelled'; taskId: string };
+  | { type: 'task_cancelled'; taskId: string }
+  | { type: 'task_pause_requested'; taskId: string; by: string }
+  | { type: 'task_paused'; taskId: string }
+  | { type: 'task_pause_failed'; taskId: string; reason: string }
+  | { type: 'task_resume_requested'; taskId: string; by: string }
+  | { type: 'task_resumed'; taskId: string }
+  | { type: 'task_resume_failed'; taskId: string; reason: string }
+  | { type: 'task_stop_pending'; taskId: string; cause: string }
+  | { type: 'task_stopped'; taskId: string };
 
-export type BaseEvents = {
-  'conversation.created': { conversationId: string; title: string | null; at: number };
-  'message.posted': {
-    conversationId: string;
-    messageId: string;
-    role: 'user';
-    text: string;
-    at: number;
-  };
-  'task.event': { conversationId: string | null; seq: number; at: number; event: TaskEvent };
-};
-
-/** Exact T5 PR A outbox fields (outbox.ts / state.ts on main). */
-export interface OutboxMessage {
-  conversationId: string;
-  runId: string;
-  text: string;
-}
-export interface OutboxQuestion {
-  conversationId: string;
-  runId: string;
+export interface Question {
   questionId: string;
   reason: 'taste' | 'budget_overrun' | 'irreversible';
   question: string;
   options: { id: string; label: string }[];
   recommended: string;
+  /** The model's own words, shown under the code-built question. */
+  note?: string;
+  /** For an irreversible action: the held call the user approves or rejects. */
+  action?: { tool: string; args: unknown };
 }
-export interface OutboxAnswered {
-  conversationId: string;
-  runId: string;
-  questionId: string;
-  optionId: string;
-  text?: string;
-}
-export interface OutboxNotice {
-  conversationId: string;
-  runId?: string;
-  text: string;
-}
+
+/** The payloads of `GET /v1/events`. The server adds `conversationId` to every one. */
+export type Events = {
+  'conversation.created': { title: string | null; at: number };
+  'message.posted': { messageId: string; role: 'user' | 'assistant'; text: string; at: number };
+  'task.event': {
+    seq: number;
+    at: number;
+    event: TaskEvent;
+    /** On `task_cost`: the task's total over its runs. */
+    totalCostUsd?: number;
+  };
+  'conductor.notice': { noticeId: string; text: string; at: number };
+  'conductor.question': Question & { at: number };
+  'conductor.answered': { questionId: string; optionId: string; text?: string; at: number };
+};
+export type FeedEvent = {
+  [K in keyof Events]: { id: number; kind: K; data: Events[K] & { conversationId: string } };
+}[keyof Events];
+
 export interface AnswerRequest {
   questionId: string;
   optionId: string;
   text?: string;
 }
-export type AnswerResult =
-  | { accepted: true; duplicate: boolean }
-  | { accepted: false; reason: string };
-
-/**
- * Proposed wire envelopes. T5 PR B owns answers/outbox transport; no public
- * implementation was available at inspection. Retain exact outbox fields.
- * Other route/event ownership and outstanding confirmation: README table.
- */
-export type ExtensionEvents = {
-  'conductor.message': OutboxMessage;
-  'conductor.question': OutboxQuestion;
-  'conductor.answered': OutboxAnswered;
-  'conductor.notice': OutboxNotice;
-  'task.paused': { conversationId: string; taskId: string; paused: boolean };
-  'task.cost': { conversationId: string; taskId: string; costUsd: number };
-};
-export type Events = BaseEvents & ExtensionEvents;
-export type FeedEvent = {
-  [K in keyof Events]: { id: number; kind: K; data: Events[K] };
-}[keyof Events];
-
-export interface Capabilities {
-  taskCancel?: boolean;
-  taskPause?: boolean;
-  answers?: boolean;
-  artifacts?: boolean;
-  taskCost?: boolean;
-  push?: boolean;
+export interface AnswerResult {
+  accepted: true;
+  duplicate: boolean;
 }
-export type Capability = keyof Capabilities;
-export interface Artifact {
-  kind: 'report' | 'diff' | 'pr';
-  title: string;
-  content?: string;
+
+export interface ArtifactListing {
+  index: number;
+  name: string;
+  kind: 'file' | 'link';
   url?: string;
 }
+export type ArtifactContent =
+  | { kind: 'link'; url: string }
+  | { kind: 'text'; name: string; text: string };
+
 export interface PushRegistration {
   endpoint: string;
   expirationTime?: number | null;
   keys?: { p256dh: string; auth: string };
 }
 
-/** All paths are same-origin; encode opaque IDs, never expose session tokens. */
+export type TaskControl = 'cancel' | 'pause' | 'resume';
+
+/** All paths are same-origin; opaque ids are URL-encoded. */
 export const routes = {
   conversations: '/v1/conversations',
   messages: (id: string) => `/v1/conversations/${encodeURIComponent(id)}/messages`,
   tasks: (id: string) => `/v1/conversations/${encodeURIComponent(id)}/tasks`,
-  events: (id: string) => `/v1/events?conversation=${encodeURIComponent(id)}`,
-  // Extensions: T5 PR B (answer path specified by the task; body from UserAnswer).
   answers: (id: string) => `/v1/conversations/${encodeURIComponent(id)}/answers`,
-  // Extensions: server/orchestrator owners; concrete follow-up IDs unconfirmed.
-  cancel: (conversation: string, task: string) =>
-    `${routes.tasks(conversation)}/${encodeURIComponent(task)}/cancel`,
-  pause: (conversation: string, task: string) =>
-    `${routes.tasks(conversation)}/${encodeURIComponent(task)}/pause`,
-  artifact: (conversation: string, ref: string) =>
-    `/v1/conversations/${encodeURIComponent(conversation)}/artifacts?ref=${encodeURIComponent(ref)}`,
-  capabilities: '/v1/capabilities',
+  events: (id: string) => `/v1/events?conversation=${encodeURIComponent(id)}`,
+  control: (task: string, action: TaskControl) => `/v1/tasks/${encodeURIComponent(task)}/${action}`,
+  artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
+  artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,
+  // Web Push is T4 PR E (#44, not merged): proposed routes, hidden on a 404.
   pushConfig: '/v1/push/config',
   pushSubscriptions: '/v1/push/subscriptions',
 } as const;
