@@ -121,6 +121,8 @@ class Run implements RunHandle {
   private readonly abort = new AbortController();
   private cancelled = false;
   private ended = false;
+  /** How the run ended, reported once its model access has settled. */
+  private terminal: RunnerEvent | undefined;
   private notes = 0;
   private lastNote = '';
   /** Dollars spent by the CLI invocations of this run that have ended. */
@@ -244,13 +246,17 @@ class Run implements RunHandle {
 
       await this.writeResult(result.bytes);
       this.checkCancelled();
-      this.ended = true;
-      this.events.push({ type: 'finished' });
+      this.terminal = { type: 'finished' };
     } catch (error) {
       if (this.cancelled || error instanceof CancelledError) return;
       this.fail(errorMessage(error));
     } finally {
+      // The last requests settle and their spend is reported before the end is.
+      if (this.terminal !== undefined && this.access?.meter) {
+        await this.step('revoke model access', () => this.releaseAccess());
+      }
       this.ended = true;
+      if (this.terminal !== undefined && !this.cancelled) this.events.push(this.terminal);
       await this.cleanup();
     }
   }
@@ -634,13 +640,16 @@ class Run implements RunHandle {
     return sum;
   }
 
-  /** Reports what the run has spent so far, and stops it once that reaches its budget. */
-  private meter(): void {
+  /**
+   * Reports what the run has spent so far, and stops it once that reaches its budget. `final` is
+   * the spend once the access has settled: reported even after the run ended or was cancelled.
+   */
+  private meter(final = false): void {
     const spent =
       Math.round(((this.meteredUsd ?? 0) + this.spentBefore + this.invocationCost()) * 1e6) / 1e6;
     if (spent === this.lastReportedUsd) return;
     this.lastReportedUsd = spent;
-    if (!this.ended) this.events.push({ type: 'usage', costUsd: spent });
+    if (!this.ended || final) this.events.push({ type: 'usage', costUsd: spent });
     const budget = this.spec.budgetUsd;
     if (budget !== undefined && spent >= budget && !this.budgetStop) {
       this.budgetStop = `budget of ${usd(budget)} reached (${usd(spent)} spent)`;
@@ -824,12 +833,23 @@ class Run implements RunHandle {
     });
   }
 
+  /**
+   * Revokes the access. A metered revoke resolves once every request has settled, so the spend
+   * read after it is final; it is reported before the meter is let go.
+   */
   private async releaseAccess(): Promise<void> {
     const access = this.access;
     this.access = undefined;
-    this.stopMetering?.();
-    this.stopMetering = undefined;
-    await access?.revoke?.();
+    try {
+      await access?.revoke?.();
+      if (access?.meter && this.meteredUsd !== undefined) {
+        this.meteredUsd = access.meter.spentUsd();
+        this.meter(true);
+      }
+    } finally {
+      this.stopMetering?.();
+      this.stopMetering = undefined;
+    }
   }
 
   private async releaseLease(): Promise<void> {
@@ -870,8 +890,7 @@ class Run implements RunHandle {
   }
 
   private fail(reason: string): void {
-    this.ended = true;
-    this.events.push({ type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) });
+    this.terminal ??= { type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) };
   }
 
   private progress(note: string): void {

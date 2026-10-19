@@ -15,7 +15,10 @@ export interface ModelAccess {
   /** Gateway base URL. Unset: the vendor's own API endpoint. */
   baseUrl?: string;
   apiKey: string;
-  /** Called when the task ends or is cancelled. */
+  /**
+   * Called when the task ends or is cancelled. With a `meter`, it resolves once every request of
+   * the access has settled, so the meter's spend after it is final.
+   */
   revoke?(): Promise<void> | void;
   /**
    * The gateway's own metering of this access. When set, the run's spend and its budget stop

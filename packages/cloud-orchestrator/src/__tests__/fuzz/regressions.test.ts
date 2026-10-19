@@ -9,6 +9,11 @@ const PINNED: Array<{ seed: number; catalog: Catalog; bug: string }> = [
     catalog: 'memory',
     bug: 'a delegate already under way when its token was rotated still recorded its task',
   },
+  {
+    seed: 7,
+    catalog: 'memory',
+    bug: 'spend a run reported after its cancel was requested was never recorded',
+  },
 ];
 
 for (const { seed, catalog, bug } of PINNED) {

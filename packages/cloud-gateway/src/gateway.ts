@@ -73,8 +73,11 @@ export interface SpendState {
 export interface GrantHandle {
   /** What the caller sends as its API key. */
   readonly token: string;
-  /** Ends the grant: new requests are refused and requests in flight are cut. Idempotent. */
-  revoke(): void;
+  /**
+   * Ends the grant: new requests are refused and requests in flight are cut. Resolves once every
+   * request of the grant has settled, so `spend()` after it is final. Idempotent.
+   */
+  revoke(): Promise<void>;
   spend(): SpendState;
   /** Called after each settled request and on a refusal for budget. Returns the unsubscribe. */
   onSpend(listener: (state: SpendState) => void): () => void;
@@ -83,7 +86,8 @@ export interface GrantHandle {
 export interface InProcessClient {
   /** A `fetch` for a vendor SDK's `fetch` option: its requests go through the gateway. */
   fetch: typeof fetch;
-  revoke(): void;
+  /** As `GrantHandle.revoke`: resolves once every request of the grant has settled. */
+  revoke(): Promise<void>;
   spend(): SpendState;
 }
 
@@ -139,6 +143,8 @@ class Grant {
   readonly flights = new Set<Flight>();
   readonly listeners = new Set<(state: SpendState) => void>();
   onRevoke: (() => void) | undefined;
+  /** Called once no request is in flight. */
+  private idle: Array<() => void> = [];
 
   constructor(
     readonly vendor: Vendor,
@@ -162,14 +168,31 @@ class Grant {
     }
   }
 
-  revoke(): void {
-    if (this.revoked) return;
-    this.revoked = true;
-    for (const flight of this.flights) {
-      flight.cut ??= 'the access was revoked';
-      flight.controller.abort();
+  /** A request left the grant; it settled first, whatever it was charged. */
+  land(flight: Flight): void {
+    this.flights.delete(flight);
+    if (this.flights.size > 0) return;
+    const idle = this.idle;
+    this.idle = [];
+    for (const resolve of idle) resolve();
+  }
+
+  /** Resolves once no request of the grant is in flight. */
+  drained(): Promise<void> {
+    if (this.flights.size === 0) return Promise.resolve();
+    return new Promise((resolve) => this.idle.push(resolve));
+  }
+
+  revoke(): Promise<void> {
+    if (!this.revoked) {
+      this.revoked = true;
+      for (const flight of this.flights) {
+        flight.cut ??= 'the access was revoked';
+        flight.controller.abort();
+      }
+      this.onRevoke?.();
     }
-    this.onRevoke?.();
+    return this.drained();
   }
 }
 
@@ -237,9 +260,11 @@ export class Gateway {
     };
   }
 
-  /** Revokes every grant issued for the task. */
-  revokeForTask(taskId: string): void {
-    for (const grant of [...this.grants]) if (grant.taskId === taskId) grant.revoke();
+  /** Revokes every grant issued for the task; resolves once their requests have settled. */
+  async revokeForTask(taskId: string): Promise<void> {
+    const revoked: Promise<void>[] = [];
+    for (const grant of [...this.grants]) if (grant.taskId === taskId) revoked.push(grant.revoke());
+    await Promise.all(revoked);
   }
 
   /** The grant a token belongs to, for the HTTP route. */
@@ -293,8 +318,8 @@ export class Gateway {
     const release = (): void => {
       if (released) return;
       released = true;
-      grant.flights.delete(flight);
       signal?.removeEventListener('abort', onAbort);
+      grant.land(flight);
     };
     try {
       const response = await this.process(grant, route, headers, raw, flight, release);
@@ -447,12 +472,22 @@ export class Gateway {
       const usage = tracker.usage;
       let usd: number;
       if (tracker.complete) usd = costUsd(price, usage);
-      else if (tracker.inputKnown) {
+      // A response that ended without its full usage settles at the reservation.
+      else if (tracker.inputKnown && !tracker.ended) {
         usd = costUsd(price, { ...usage, output: Math.max(usage.output, bounded.outputTokens) });
       } else usd = reservedUsd;
       this.settle(grant, key, usd);
       release();
     };
+    // A cut settles whether or not anyone reads the body: after the chunk being read, if any.
+    const onCut = (): void => {
+      queueMicrotask(() => {
+        void reader.cancel().catch(() => undefined);
+        finish();
+      });
+    };
+    if (flight.controller.signal.aborted) onCut();
+    else flight.controller.signal.addEventListener('abort', onCut, { once: true });
     const body = new ReadableStream<Uint8Array>({
       pull: async (controller) => {
         try {

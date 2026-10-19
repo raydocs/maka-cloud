@@ -1,3 +1,4 @@
+import { dataUrlBytes, imageSize } from './image.js';
 import type { ModelPrice, Vendor } from './pricing.js';
 import { CACHE_WRITE_1H, CACHE_WRITE_5M } from './pricing.js';
 
@@ -5,15 +6,22 @@ import { CACHE_WRITE_1H, CACHE_WRITE_5M } from './pricing.js';
 export interface BoundLimits {
   /** Tokens added to every request for what the vendor adds and the body does not show. */
   requestOverheadTokens: number;
-  /** Tokens assumed for each image, whatever its size in bytes. */
-  imageTokens: number;
+  /** Tokens added to each image whatever its size. */
+  imageBaseTokens: number;
+  /**
+   * Tokens per 32×32 patch of an image at the size its file declares. With `imageBaseTokens` it
+   * covers what every model charges for an image at any detail level, since the vendors bill an
+   * image by its pixels and only ever scale it down.
+   */
+  imagePatchTokens: number;
   /** Added to a vendor's token count, as a fraction of it: the count is an estimate. */
   countMargin: number;
 }
 
 export const DEFAULT_BOUND_LIMITS: BoundLimits = {
   requestOverheadTokens: 4_000,
-  imageTokens: 10_000,
+  imageBaseTokens: 300,
+  imagePatchTokens: 3,
   countMargin: 0.1,
 };
 
@@ -91,8 +99,40 @@ const OPENAI_FIELDS = new Set([
   'safety_identifier',
 ]);
 
-/** OpenAI tools the caller runs itself. Hosted tools bill work the body does not show. */
-const OPENAI_TOOL_TYPES = new Set(['function', 'custom', 'local_shell', 'shell', 'apply_patch']);
+/**
+ * OpenAI tools the caller runs itself, with every key each may carry. Hosted tools bill work the
+ * body does not show, and a shell with an environment other than `local` runs in a vendor container.
+ */
+const OPENAI_TOOL_KEYS = new Map<string, ReadonlySet<string>>([
+  ['function', new Set(['type', 'name', 'description', 'parameters', 'strict'])],
+  ['custom', new Set(['type', 'name', 'description', 'format'])],
+  ['local_shell', new Set(['type'])],
+  ['shell', new Set(['type', 'environment'])],
+  ['apply_patch', new Set(['type'])],
+]);
+
+function localOpenAITool(tool: unknown): boolean {
+  if (!isObject(tool) || typeof tool.type !== 'string') return false;
+  const keys = OPENAI_TOOL_KEYS.get(tool.type);
+  if (keys === undefined || unknownField(tool, keys) !== undefined) return false;
+  if (tool.type !== 'shell') return true;
+  const environment = tool.environment;
+  return (
+    isObject(environment) && environment.type === 'local' && Object.keys(environment).length === 1
+  );
+}
+
+/** The input bound of an image of this size. */
+function imageTokens(width: number, height: number, limits: BoundLimits): number {
+  const patches = Math.ceil(width / 32) * Math.ceil(height / 32);
+  return limits.imageBaseTokens + patches * limits.imagePatchTokens;
+}
+
+/** The input bound of an image file, or undefined when its size cannot be read. */
+function imageFileTokens(bytes: Uint8Array | undefined, limits: BoundLimits): number | undefined {
+  const size = bytes === undefined ? undefined : imageSize(bytes);
+  return size === undefined ? undefined : imageTokens(size.width, size.height, limits);
+}
 
 function unknownField(body: Json, allowed: ReadonlySet<string>): string | undefined {
   return Object.keys(body).find((key) => !allowed.has(key));
@@ -121,8 +161,9 @@ function outputCap(value: unknown, price: ModelPrice): number | string {
 }
 
 /**
- * The worst case of a Messages API request, or why it has none. Bytes bound text; images get a
- * fixed bound each; a document or a reference to remote content needs the vendor's count.
+ * The worst case of a Messages API request, or why it has none. Bytes bound text; an inline image
+ * gets a bound from its pixel size; a document, a remote image or one whose size cannot be read
+ * needs the vendor's count.
  */
 export function boundAnthropic(
   raw: Uint8Array,
@@ -150,7 +191,7 @@ export function boundAnthropic(
     if (!ok) return { ok: false, reason: 'only context edits that clear content are allowed' };
   }
 
-  let images = 0;
+  let imageBound = 0;
   let mustCount = false;
   let oneHour = false;
   let refusal: string | undefined;
@@ -164,10 +205,16 @@ export function boundAnthropic(
     cached(block);
     const source = isObject(block.source) ? block.source : undefined;
     switch (block.type) {
-      case 'image':
-        if (source?.type === 'base64') images++;
-        else mustCount = true;
+      case 'image': {
+        const tokens =
+          source?.type === 'base64' && typeof source.data === 'string'
+            ? imageFileTokens(Buffer.from(source.data, 'base64'), limits)
+            : undefined;
+        // A remote image, or one whose size the header does not give: the count covers it.
+        if (tokens === undefined) mustCount = true;
+        else imageBound += tokens;
         break;
+      }
       case 'document':
         if (source?.type === 'text') break;
         if (source?.type === 'content') {
@@ -207,7 +254,7 @@ export function boundAnthropic(
     ok: true,
     price,
     body: raw,
-    inputTokens: raw.byteLength + limits.requestOverheadTokens + images * limits.imageTokens,
+    inputTokens: raw.byteLength + limits.requestOverheadTokens + imageBound,
     outputTokens: output,
     inputMultiplier: oneHour ? CACHE_WRITE_1H : CACHE_WRITE_5M,
     mustCount,
@@ -235,22 +282,11 @@ export function boundOpenAI(
     return { ok: false, reason: 'only the default service tier is allowed' };
   }
   for (const tool of list(body.tools)) {
-    if (!isObject(tool) || typeof tool.type !== 'string' || !OPENAI_TOOL_TYPES.has(tool.type)) {
-      return { ok: false, reason: 'hosted tools are not allowed' };
-    }
+    if (!localOpenAITool(tool)) return { ok: false, reason: 'hosted tools are not allowed' };
   }
 
-  let images = 0;
-  for (const item of typeof body.input === 'string' ? [] : list(body.input)) {
-    if (!isObject(item)) continue;
-    if (item.type === 'item_reference')
-      return { ok: false, reason: 'stored items are not allowed' };
-    for (const part of list(item.content)) {
-      if (!isObject(part)) continue;
-      if (part.type === 'input_image') images++;
-      if (part.type === 'input_file') return { ok: false, reason: 'input files are not allowed' };
-    }
-  }
+  const images = openAIImages(body.input, limits);
+  if (typeof images === 'string') return { ok: false, reason: images };
 
   let sent = raw;
   let output: number | string;
@@ -266,13 +302,58 @@ export function boundOpenAI(
     ok: true,
     price,
     body: sent,
-    inputTokens: sent.byteLength + limits.requestOverheadTokens + images * limits.imageTokens,
+    inputTokens: sent.byteLength + limits.requestOverheadTokens + images,
     outputTokens: output,
     inputMultiplier: 1,
     mustCount: false,
     oneHourCache: false,
     stream: body.stream === true,
   };
+}
+
+/**
+ * The input bound of the images anywhere in a Responses input (message content, tool outputs),
+ * or why the input has none. Only inline images whose header gives their size are taken: a URL
+ * or a file reference is content the body does not show.
+ */
+function openAIImages(input: unknown, limits: BoundLimits): number | string {
+  let tokens = 0;
+  const stack: unknown[] = [input];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      for (const value of node) stack.push(value);
+      continue;
+    }
+    if (!isObject(node)) continue;
+    switch (node.type) {
+      case 'item_reference':
+        return 'stored items are not allowed';
+      case 'input_file':
+        return 'input files are not allowed';
+      case 'input_image':
+      case 'computer_screenshot': {
+        if (node.file_id !== undefined && node.file_id !== null) {
+          return 'images must be sent inline, not as a file reference';
+        }
+        const url = typeof node.image_url === 'string' ? node.image_url : '';
+        const bound = imageFileTokens(dataUrlBytes(url), limits);
+        if (bound === undefined) {
+          return url.startsWith('data:')
+            ? 'an image is not a PNG, JPEG, GIF or WebP file whose size can be read'
+            : 'images must be sent inline, not as a URL';
+        }
+        tokens += bound;
+        continue;
+      }
+      default:
+        break;
+    }
+    for (const value of Object.values(node)) {
+      if (typeof value === 'object' && value !== null) stack.push(value);
+    }
+  }
+  return tokens;
 }
 
 /** The input bound from a vendor's count of the request. */
