@@ -77,7 +77,11 @@ async function startStack(
     runners: new RunnerRegistry([claude, codex]),
     conductorRoot: join(dir, 'conductor'),
     conductor: {
-      access: access?.(model.url) ?? { apiKey: 'sk-test-not-a-key', baseUrl: model.url },
+      access: access?.(model.url) ?? {
+        apiKey: 'sk-test-not-a-key',
+        baseUrl: model.url,
+        unmeteredTestAccess: true,
+      },
     },
     onWarning: (message, detail) => warnings.push({ message, detail }),
   };

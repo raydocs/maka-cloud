@@ -88,7 +88,7 @@ export async function makeHarness(t: TestContext, options: HarnessOptions = {}):
   };
   const conductorOptions = (overrides: Partial<ConductorOptions> = {}): ConductorOptions => ({
     root: join(dir, 'conductor'),
-    access: { apiKey: 'sk-test-not-a-key', baseUrl: model.url },
+    access: { apiKey: 'sk-test-not-a-key', baseUrl: model.url, unmeteredTestAccess: true },
     outbox,
     onWarning: (message, detail) => warnings.push({ message, detail }),
     ...options.conductor,
