@@ -112,3 +112,61 @@ test('a runner without stopOrphaned is fine', async (t) => {
   const second = await makeHarness(t, { store, dir });
   assert.equal(second.orchestrator.status(conductor, ids[0] as string).state, 'failed');
 });
+
+test('restore records what runs spent in the crashed process before it ends their tasks', async (t) => {
+  const store = new MemoryTaskStore();
+  const first = await makeHarness(t, { store });
+  const conductor = first.session();
+  const top = await first.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'top',
+    budgetUsd: 5,
+  });
+  await eventually(() => first.fake.runs.length === 1, 'top run');
+  const child = await first.orchestrator.delegate(first.executorSession(top.taskId), {
+    runner: 'fake',
+    brief: 'child',
+  });
+  await eventually(() => first.fake.runs.length === 2, 'child run');
+  // Recorded before the crash: 0.2 of the child's spend. The journal holds 0.2 settled plus an
+  // open 0.5 reservation, and the top run's 0.1 that never reached the log.
+  first.fake.runFor(child.taskId).usage(0.2);
+  await eventually(
+    () => first.orchestrator.status(conductor, top.taskId).costUsd === 0.2,
+    'the child spend recorded',
+  );
+  const journal = [
+    { taskId: child.taskId, usd: 0.7 },
+    { taskId: top.taskId, usd: 0.1 },
+    { taskId: 'tsk_unknown', usd: 3 },
+  ];
+  let recordedCalls = 0;
+  await makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: { stopOrphaned: async () => {} },
+    orchestrator: {
+      recoveredSpend: {
+        unrecorded: () => journal,
+        recorded: () => {
+          recordedCalls++;
+        },
+      },
+    },
+  });
+  assert.equal(recordedCalls, 1);
+  const log = await store.read();
+  // task_cost keeps the highest total per run: the child's 0.7 replaces its recorded 0.2.
+  const spend = new Map<string, number>();
+  for (const { event } of log) {
+    if (event.type !== 'task_cost') continue;
+    assert.equal(event.taskId, top.taskId, 'charged to the tree');
+    spend.set(event.fromTaskId, Math.max(spend.get(event.fromTaskId) ?? 0, event.costUsd));
+  }
+  assert.deepEqual(Object.fromEntries(spend), { [child.taskId]: 0.7, [top.taskId]: 0.1 });
+  const firstEnd = log.findIndex(
+    ({ event }) => event.type === 'task_failed' || event.type === 'task_cancelled',
+  );
+  const lastCost = log.map(({ event }) => event.type).lastIndexOf('task_cost');
+  assert.ok(firstEnd >= 0 && lastCost < firstEnd, 'the spend is in the log before any task ends');
+});
