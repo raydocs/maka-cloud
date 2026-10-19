@@ -9,6 +9,7 @@ import {
   type RunnerRegistry,
 } from '@maka-cloud/orchestrator';
 import { ConversationStore } from './conversations.js';
+import { CostLedger } from './cost.js';
 import { openDatabase } from './db.js';
 import { FeedHub } from './feed.js';
 import { DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
@@ -63,6 +64,11 @@ export interface CloudServer {
   mcpUrl: string;
   orchestrator: Orchestrator;
   invites: InviteStore;
+  /**
+   * Records the cost of a task so far, in US dollars. A figure that is not above the
+   * last one, or for an unknown task, is ignored; the result says whether it was kept.
+   */
+  reportCost(taskId: string, usd: number): boolean;
   /** Event streams currently open. */
   openStreams(): number;
   close(): Promise<void>;
@@ -106,6 +112,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       () => orchestrator.issueSession(),
       options.orchestrator?.now,
     );
+    const costs = new CostLedger(db, hub, options.orchestrator?.now);
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
     const api = new PublicApi({
       db,
@@ -114,6 +121,9 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       tasks: store,
       hub,
       messageLimiter: new RateLimiter(limits.messagesPerMinute),
+      controlLimiter: new RateLimiter(limits.controlPerMinute),
+      orchestrator,
+      costs,
       limits,
       onMessage: (message) => {
         const handler = options.handler;
@@ -168,6 +178,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       mcpUrl,
       orchestrator,
       invites: ownInvites,
+      reportCost: (taskId, usd) => costs.report(taskId, usd),
       openStreams: () => api.openStreams,
       close: () => {
         closing ??= shutdown();

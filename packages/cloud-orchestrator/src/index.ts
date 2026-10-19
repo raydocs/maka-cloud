@@ -9,6 +9,7 @@ export {
 export { BoundedCache, type CacheLimits } from './cache.js';
 export {
   DEFAULT_FAKE_MANIFEST,
+  type FakeHold,
   FakeRun,
   FakeRunner,
   type FakeRunnerOptions,
@@ -16,12 +17,14 @@ export {
 export { Handoff, type HandoffPaths, MAX_BRIEF_BYTES, MAX_MANIFEST_BYTES } from './handoff.js';
 export {
   DEFAULT_ARCHIVE_CACHE,
+  DEFAULT_CONTROL_TIMEOUT_MS,
   DEFAULT_MAX_DEPTH,
   DEFAULT_ORPHAN_STOP_TIMEOUT_MS,
   DEFAULT_WAIT_MS,
   type DelegateInput,
   MAX_WAIT_MS,
   Orchestrator,
+  type OperatorAccess,
   type OrchestratorOptions,
   type OrchestratorStats,
 } from './orchestrator.js';

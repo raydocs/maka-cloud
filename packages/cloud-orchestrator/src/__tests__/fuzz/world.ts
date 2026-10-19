@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { MemorySessionStore, type SessionInfo } from '../../auth.js';
 import type { CacheLimits } from '../../cache.js';
 import type { HandoffPaths } from '../../handoff.js';
-import { DEFAULT_ARCHIVE_CACHE, Orchestrator } from '../../orchestrator.js';
+import { DEFAULT_ARCHIVE_CACHE, type OperatorAccess, Orchestrator } from '../../orchestrator.js';
 import type { QuotaLimits } from '../../quota.js';
 import {
   type RunHandle,
@@ -32,7 +32,9 @@ import { Prng } from './prng.js';
  * Between gates the PRNG issues requests the way the MCP endpoint makes them:
  * delegate (async and wait, nested through executor tokens), cancel, wait and
  * status on any task, dropped connections, revoke, rotate, new conductors and
- * restarts over the same store.
+ * restarts over the same store. The public API's operator (it acts for a
+ * conversation without a session token) pauses, resumes and cancels, and its
+ * credential can be revoked.
  *
  * Checked as each append is decided (right after its guard):
  * - nothing is created or started under an ancestor that ended or is being
@@ -40,9 +42,14 @@ import { Prng } from './prng.js';
  * - at most one terminal event per task, and a task whose cancel was requested
  *   ends cancelled;
  * - quotas hold exactly at the moment a task is created;
- * - a revoked or rotated token commits nothing new after the revoke or rotate.
+ * - a revoked or rotated token commits nothing new after the revoke or rotate;
+ *   a revoked operator credential commits nothing either;
+ * - a pause is requested once, only for a started task nothing is stopping, and
+ *   pause and resume results are only recorded for an open request on a task
+ *   that is not being cancelled.
  * Checked after every step:
- * - the in-memory tasks and per-tree counts match the log's unfinished tasks;
+ * - the in-memory tasks and per-tree counts match the log's unfinished tasks,
+ *   and their states (queued, running, paused) match the log;
  * - handle, waiter and executor-session maps hold no ended task;
  * - connection counts match open requests, wait slots and registered waiters
  *   never exceed waiting requests;
@@ -83,7 +90,16 @@ const MANIFEST: ResultManifest = {
   knownIssues: [],
 };
 
-type GateKind = 'append' | 'brief' | 'manifest' | 'start' | 'cancel' | 'next' | 'return';
+type GateKind =
+  | 'append'
+  | 'brief'
+  | 'manifest'
+  | 'start'
+  | 'cancel'
+  | 'pause'
+  | 'resume'
+  | 'next'
+  | 'return';
 
 /** One await point the orchestrator is parked on. `open` lets it continue and says how. */
 interface Gate {
@@ -116,6 +132,8 @@ interface Request {
   abort: AbortController;
   /** For a cancel: its first request was written, so it was accepted. */
   accepted: boolean;
+  /** Made through the public API's operator, which holds no session token. */
+  operator?: boolean;
 }
 
 /** What the log says about one task. Built only from appends the store performed. */
@@ -126,6 +144,9 @@ interface ModelTask {
   rootSessionId: SessionId;
   started: boolean;
   cancelRequested: boolean;
+  pauseRequested: boolean;
+  paused: boolean;
+  resumeRequested: boolean;
   terminals: number;
   createdAt: number;
 }
@@ -172,6 +193,8 @@ function errorMessage(error: unknown): string {
 /** A run handed back by the fake runner. Every pull on its event stream is a gate. */
 class FuzzRun implements RunHandle {
   cancelCalls = 0;
+  readonly pause?: () => Promise<void>;
+  readonly resume?: () => Promise<void>;
   /** The stream handed the orchestrator `finished` or `failed`: the run ended on its own. */
   reported = false;
   private over = false;
@@ -182,12 +205,30 @@ class FuzzRun implements RunHandle {
     readonly epoch: number,
     readonly taskId: TaskId,
   ) {
+    if (world.rng.chance(0.9)) {
+      this.pause = () => this.control('pause');
+      this.resume = () => this.control('resume');
+    }
     this.events = {
       [Symbol.asyncIterator]: () => ({
         next: () => this.next(),
         return: () => this.close(),
       }),
     };
+  }
+
+  private control(kind: 'pause' | 'resume'): Promise<void> {
+    return new Promise<void>((resolve, reject) =>
+      this.world.gate(this.epoch, kind, this.taskId, (draining) => {
+        // A drained world answers every call, so what the runner owes is always settled.
+        if (!draining && this.world.rng.chance(0.2)) {
+          reject(new Error(`${kind} failed`));
+          return 'rejected';
+        }
+        resolve();
+        return 'done';
+      }),
+    );
   }
 
   cancel(): Promise<void> {
@@ -213,11 +254,11 @@ class FuzzRun implements RunHandle {
     return new Promise((resolve, reject) =>
       this.world.gate(this.epoch, 'next', this.taskId, (draining) => {
         const kind = this.world.rng.weighted([
-          ['progress', draining ? 0 : 35],
-          ['finished', 15],
-          ['failed', 15],
-          ['eof', 15],
-          ['throw', 20],
+          ['progress', draining ? 0 : 70],
+          ['finished', 8],
+          ['failed', 8],
+          ['eof', 6],
+          ['throw', 8],
         ] as const);
         if (kind !== 'progress') this.over = true;
         if (kind === 'progress') resolve({ done: false, value: { type: 'progress', note: 'p' } });
@@ -283,6 +324,8 @@ export class FuzzWorld {
   private readonly executorOf = new Map<SessionId, TaskId>();
   private readonly executorTokens = new Map<TaskId, string[]>();
   private readonly revoked = new Set<SessionId>();
+  /** Conductor sessions whose public-API credential was revoked. */
+  private readonly operatorRevoked = new Set<SessionId>();
   private readonly rotatedTokens = new Set<string>();
   private readonly manifests = new Set<TaskId>();
   private readonly requests: Request[] = [];
@@ -347,6 +390,7 @@ export class FuzzWorld {
       handoffRoot: '/fuzz',
       now: () => this.clock.now,
       maxDepth: MAX_DEPTH,
+      controlTimeoutMs: 1_500,
       newTaskId: () => `t${++this.taskCount}`,
       sessions: this.sessions,
       quotas: QUOTAS,
@@ -496,6 +540,9 @@ export class FuzzWorld {
         rootSessionId: event.rootSessionId ?? event.sessionId,
         started: false,
         cancelRequested: false,
+        pauseRequested: false,
+        paused: false,
+        resumeRequested: false,
         terminals: 0,
         createdAt: at,
       });
@@ -505,7 +552,16 @@ export class FuzzWorld {
     if (!task) return;
     if (event.type === 'task_started') task.started = true;
     else if (event.type === 'task_cancel_requested') task.cancelRequested = true;
-    else if (TERMINAL.has(event.type)) task.terminals += 1;
+    else if (event.type === 'task_pause_requested') task.pauseRequested = true;
+    else if (event.type === 'task_paused') task.paused = true;
+    else if (event.type === 'task_pause_failed') task.pauseRequested = false;
+    else if (event.type === 'task_resume_requested') task.resumeRequested = true;
+    else if (event.type === 'task_resume_failed') task.resumeRequested = false;
+    else if (event.type === 'task_resumed') {
+      task.paused = false;
+      task.pauseRequested = false;
+      task.resumeRequested = false;
+    } else if (TERMINAL.has(event.type)) task.terminals += 1;
   }
 
   private ended(taskId: TaskId): boolean {
@@ -541,7 +597,11 @@ export class FuzzWorld {
     if (event.type === 'task_created') {
       return `${event.type} ${event.taskId} by ${this.label(event.sessionId)}${event.parentTaskId === undefined ? '' : ` under ${event.parentTaskId}`}`;
     }
-    if (event.type === 'task_cancel_requested') {
+    if (
+      event.type === 'task_cancel_requested' ||
+      event.type === 'task_pause_requested' ||
+      event.type === 'task_resume_requested'
+    ) {
       return `${event.type} ${event.taskId} by ${this.label(event.by)}`;
     }
     return `${event.type} ${event.taskId}`;
@@ -581,6 +641,7 @@ export class FuzzWorld {
       if (stopped)
         this.violation(`${what}: ancestor ${stopped.taskId} is ${this.stopState(stopped)}`);
     }
+    this.checkControl(event, task, request, what);
     if (event.type === 'task_cancel_requested' && event.by !== 'system') {
       if (!request || request.sessionId !== event.by) {
         this.violation(`${what} was not written by a request of that session`);
@@ -594,6 +655,55 @@ export class FuzzWorld {
         request.accepted = true;
         if (!this.stoppedIn(this.chain(task.parentTaskId))) this.checkAuthority(request, what);
       }
+    }
+  }
+
+  /** Pause and resume are recorded only for the operator, only when nothing is stopping the task. */
+  private checkControl(
+    event: TaskEvent,
+    task: ModelTask,
+    request: Request | undefined,
+    what: string,
+  ): void {
+    const stopping = task.terminals > 0 || task.cancelRequested;
+    if (event.type === 'task_pause_requested' || event.type === 'task_resume_requested') {
+      if (!request?.operator || request.sessionId !== event.by) {
+        this.violation(`${what} was not written by an operator request of that session`);
+      } else {
+        this.checkAuthority(request, what);
+      }
+      if (stopping) this.violation(`${what} on a task that is ended or being cancelled`);
+      const stoppedAbove = this.stoppedIn(this.chain(task.parentTaskId));
+      if (stoppedAbove) {
+        this.violation(
+          `${what}: ancestor ${stoppedAbove.taskId} is ${this.stopState(stoppedAbove)}`,
+        );
+      }
+    }
+    switch (event.type) {
+      case 'task_pause_requested':
+        if (!task.started) this.violation(`${what} before the task started`);
+        if (task.pauseRequested) this.violation(`${what}: a pause is already requested`);
+        if (task.resumeRequested) this.violation(`${what} while a resume is under way`);
+        return;
+      case 'task_paused':
+      case 'task_pause_failed':
+        if (!task.pauseRequested || task.paused) {
+          this.violation(`${what} without an open pause request`);
+        }
+        if (stopping) this.violation(`${what} on a task that is ended or being cancelled`);
+        return;
+      case 'task_resume_requested':
+        if (!task.paused) this.violation(`${what} on a task that is not paused`);
+        if (task.resumeRequested) this.violation(`${what}: a resume is already requested`);
+        return;
+      case 'task_resumed':
+      case 'task_resume_failed':
+        if (!task.paused || !task.resumeRequested) {
+          this.violation(`${what} without an open resume request`);
+        }
+        if (stopping) this.violation(`${what} on a task that is ended or being cancelled`);
+        return;
     }
   }
 
@@ -611,6 +721,14 @@ export class FuzzWorld {
   }
 
   private checkAuthority(request: Request, what: string): void {
+    if (request.operator) {
+      if (this.operatorRevoked.has(request.sessionId)) {
+        this.violation(
+          `${what}: ${request.label} committed after its operator credential was revoked`,
+        );
+      }
+      return;
+    }
     if (this.isRevoked(request.sessionId)) {
       this.violation(
         `${what}: ${request.label} committed after ${request.credential.label} was revoked`,
@@ -639,6 +757,20 @@ export class FuzzWorld {
       this.violation(
         `tasks in memory [${inMemory.join(' ')}] != unfinished in the log [${expected.join(' ')}]`,
       );
+    }
+    for (const [taskId, record] of o.tasks as Map<
+      TaskId,
+      { state: string; pauseRequested?: boolean }
+    >) {
+      const model = this.tasks.get(taskId);
+      if (!model) continue;
+      const state = model.paused ? 'paused' : model.started ? 'running' : 'queued';
+      if (record.state !== state) {
+        this.violation(`${taskId} is ${record.state} in memory but ${state} in the log`);
+      }
+      if ((record.pauseRequested === true) !== model.pauseRequested) {
+        this.violation(`${taskId} pauseRequested differs between memory and the log`);
+      }
     }
     this.checkCounts(
       'active tasks per tree',
@@ -849,6 +981,10 @@ export class FuzzWorld {
       ['wait', 12],
       ['status', 4],
       ['abort', open.length > 0 ? 6 : 0],
+      ['pause', 12],
+      ['resume', 12],
+      ['operatorCancel', 4],
+      ['revokeOperator', 0.5],
       ['revoke', 3],
       ['rotate', 3],
       ['conductor', this.conductors < MAX_CONDUCTORS ? (this.anyConductorUsable() ? 2 : 20) : 0],
@@ -889,6 +1025,33 @@ export class FuzzWorld {
         this.request('status', false, (session, _signal, credential) =>
           orchestrator.status(session, this.pickTask(credential)),
         );
+        return;
+      }
+      case 'pause':
+        this.operatorRequest(
+          'pause',
+          (task) => task.started && task.terminals === 0 && !task.pauseRequested,
+          (access, taskId) => orchestrator.pauseAs(access, taskId),
+        );
+        return;
+      case 'resume':
+        this.operatorRequest(
+          'resume',
+          (task) => task.paused && task.terminals === 0 && !task.resumeRequested,
+          (access, taskId) => orchestrator.resumeAs(access, taskId),
+        );
+        return;
+      case 'operatorCancel':
+        this.operatorRequest('operator cancel', undefined, (access, taskId) =>
+          orchestrator.cancelAs(access, taskId),
+        );
+        return;
+      case 'revokeOperator': {
+        const conductors = this.credentials.filter((credential) => credential.taskId === undefined);
+        if (conductors.length === 0) return;
+        const credential = this.rng.pick(conductors);
+        this.operatorRevoked.add(credential.sessionId);
+        this.note(`revoke operator credential of ${credential.label}`);
         return;
       }
       case 'abort': {
@@ -1019,7 +1182,77 @@ export class FuzzWorld {
           this.settle(request, `threw ${errorMessage(error)}`);
           return;
         }
-        this.settle(request, `${error.code}`);
+        this.settle(request, `${error.code}: ${error.message}`);
+      },
+    );
+  }
+
+  /**
+   * A call through the public API: the user's own credential was checked by the
+   * server, and the orchestrator acts for the conversation's session. No session
+   * token and no connection slot are involved.
+   */
+  private operatorRequest(
+    what: string,
+    wanted: ((task: ModelTask) => boolean) | undefined,
+    call: (access: OperatorAccess, taskId: TaskId) => unknown,
+  ): void {
+    const conductors = this.credentials.filter((credential) => credential.taskId === undefined);
+    if (conductors.length === 0) return;
+    // Mostly a task that fits the request, asked through the conductor whose tree holds it.
+    const fits = wanted ? [...this.tasks.values()].filter(wanted) : [...this.tasks.values()];
+    const target = fits.length > 0 && this.rng.chance(0.85) ? this.rng.pick(fits) : undefined;
+    const owner = conductors.find((candidate) => candidate.sessionId === target?.rootSessionId);
+    const trusted = conductors.filter(
+      (candidate) => !this.operatorRevoked.has(candidate.sessionId),
+    );
+    const credential =
+      owner ?? this.rng.pick(trusted.length > 0 && this.rng.chance(0.9) ? trusted : conductors);
+    const taskId = target?.taskId ?? this.pickTask(credential);
+    this.requestCount += 1;
+    const request: Request = {
+      label: `r${this.requestCount} ${what}`,
+      credential,
+      token: '',
+      sessionId: credential.sessionId,
+      epoch: this.epoch,
+      waits: false,
+      settled: false,
+      connection: undefined,
+      abort: new AbortController(),
+      accepted: false,
+      operator: true,
+    };
+    this.requests.push(request);
+    this.note(`${request.label} by operator of ${credential.label}`);
+    const access: OperatorAccess = {
+      sessionId: credential.sessionId,
+      authorize: () => {
+        if (this.operatorRevoked.has(credential.sessionId)) {
+          throw new OrchestratorError('unauthorized', 'The operator credential was revoked');
+        }
+      },
+    };
+    const result = requestContext.run(request, () => {
+      try {
+        // The server checks the credential when the request arrives.
+        access.authorize();
+        return Promise.resolve(call(access, taskId));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    });
+    result.then(
+      (value) => this.settle(request, `ok ${describeView(value)}`),
+      (error: unknown) => {
+        if (!(error instanceof OrchestratorError)) {
+          this.violation(
+            `${request.label} failed with a non-orchestrator error: ${errorMessage(error)}`,
+          );
+          this.settle(request, `threw ${errorMessage(error)}`);
+          return;
+        }
+        this.settle(request, `${error.code}: ${error.message}`);
       },
     );
   }
