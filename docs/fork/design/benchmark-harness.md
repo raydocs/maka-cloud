@@ -116,4 +116,9 @@ cells is biased); the left-out ones are listed in the report.
   it is refused. A live path waits on running task images in instabox.
 - Cost is what the CLIs report, priced with the runners' table; it is not an invoice, and grading is not included.
 - The agents can reach the public internet, where upstream fixes exist; only the base commit is fetched, with no history.
-- The 50-task subset is produced by `select` from the real dataset; the instance ids are not checked in.
+- The 50-task subset is `suites/swe-bench-verified-50.json`: `select --size 50 --seed 1` over the 500 instances of
+  `princeton-nlp/SWE-bench_Verified` (downloaded from Hugging Face on 2026-10-19; the file records the parquet's sha256
+  and the URL). The parquet becomes the jsonl the harness reads with `scripts/parquet-to-jsonl.py`, which is
+  deterministic: the `version` in the list is the sha256 prefix of that jsonl. The ids are public; the dataset itself
+  (with the hidden tests) is not checked in. A different dataset file gives a different `version`, so a spec made from
+  it no longer matches the list.
