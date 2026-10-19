@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MemorySessionStore, SessionAuth, type SessionStore } from '../auth.js';
 import { MemoryTaskStore } from '../store.js';
+import { OrchestratorError } from '../types.js';
 import { eventually, makeHarness } from './harness.js';
 
 test('digests, not tokens, are what a session store receives', () => {
@@ -65,6 +66,29 @@ test('rotating keeps the session and its tasks, and the old token stops working 
   const again = h.orchestrator.authenticate(rotated.token);
   assert.equal(h.orchestrator.status(again ?? conductor, taskId).taskId, taskId);
   assert.equal(h.orchestrator.rotateSession('ses_unknown'), undefined);
+});
+
+test('a delegate already under way when its token is rotated records nothing', async (t) => {
+  const h = await makeHarness(t);
+  const issued = h.orchestrator.issueSession();
+  const conductor = h.orchestrator.authenticate(issued.token);
+  assert.ok(conductor);
+  // The request was authenticated with the old token and is writing its brief
+  // when the rotate lands; the task must not be recorded after it.
+  const delegating = h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'x' });
+  const rotated = h.orchestrator.rotateSession(issued.sessionId);
+  assert.ok(rotated);
+  await assert.rejects(
+    delegating,
+    (error) => error instanceof OrchestratorError && error.code === 'unauthorized',
+  );
+  assert.deepEqual(await h.store.read(), []);
+  assert.throws(() => h.orchestrator.assertSessionActive(conductor), OrchestratorError);
+
+  const again = h.orchestrator.authenticate(rotated.token);
+  assert.ok(again);
+  const view = await h.orchestrator.delegate(again, { runner: 'fake', brief: 'y' });
+  assert.equal(view.state, 'queued');
 });
 
 test('a cached session cannot outlive a revoke, a rotate or the end of its task', async (t) => {

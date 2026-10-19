@@ -668,7 +668,7 @@ export class Orchestrator {
    * calls it again right before it records a task.
    */
   assertSessionActive(session: SessionInfo): void {
-    if (!this.auth.isActive(session.sessionId)) {
+    if (!this.auth.isActive(session)) {
       throw new OrchestratorError('unauthorized', 'The session token is no longer valid');
     }
   }
