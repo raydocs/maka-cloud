@@ -70,3 +70,14 @@ export interface RunnerSessionStore {
   delete(taskId: TaskId): Promise<void>;
   list(): Promise<RunnerSessionRecord[]>;
 }
+
+/**
+ * A program installed into the sandbox for the agent to run: one self-contained file (a script with
+ * a shebang) put on the PATH of every run as `name`. Installed once per sandbox, again when
+ * `content` changes.
+ */
+export interface SandboxTool {
+  /** Lowercase letters, digits and dashes; not a vendor CLI's name. */
+  name: string;
+  content: Uint8Array | string;
+}
