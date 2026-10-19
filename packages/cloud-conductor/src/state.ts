@@ -171,20 +171,21 @@ export type OpenQuestionResult =
   | { ok: true; question: QuestionRow }
   | { ok: false; code: string; message: string };
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS conversations (
+/** The schema #27 shipped. A shipped step is never edited; a change is a new step. */
+const SCHEMA_V1 = `
+CREATE TABLE conversations (
   conversation_id TEXT PRIMARY KEY,
   maka_session_id TEXT NOT NULL UNIQUE,
   created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS maka_sessions (
+CREATE TABLE maka_sessions (
   maka_session_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
   system_prompt TEXT NOT NULL,
   run_id TEXT,
   created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS runs (
+CREATE TABLE runs (
   run_id TEXT PRIMARY KEY,
   n INTEGER NOT NULL UNIQUE,
   conversation_id TEXT NOT NULL,
@@ -192,20 +193,19 @@ CREATE TABLE IF NOT EXISTS runs (
   playbook TEXT,
   budget_usd REAL NOT NULL,
   notices INTEGER NOT NULL DEFAULT 0,
-  blocked_reason TEXT,
   created_at INTEGER NOT NULL,
   ended_at INTEGER,
   end_reason TEXT
 );
-CREATE INDEX IF NOT EXISTS runs_by_conversation ON runs (conversation_id, n);
-CREATE TABLE IF NOT EXISTS inputs (
+CREATE INDEX runs_by_conversation ON runs (conversation_id, n);
+CREATE TABLE inputs (
   input_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
   kind TEXT NOT NULL,
   at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS ledger (
+CREATE TABLE ledger (
   n INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -213,13 +213,13 @@ CREATE TABLE IF NOT EXISTS ledger (
   ref TEXT,
   at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ledger_by_run ON ledger (run_id);
-CREATE UNIQUE INDEX IF NOT EXISTS ledger_model_once ON ledger (ref) WHERE kind = 'model';
-CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
+CREATE INDEX ledger_by_run ON ledger (run_id);
+CREATE UNIQUE INDEX ledger_model_once ON ledger (ref) WHERE kind = 'model';
+CREATE TRIGGER ledger_no_update BEFORE UPDATE ON ledger
   BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
+CREATE TRIGGER ledger_no_delete BEFORE DELETE ON ledger
   BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
-CREATE TABLE IF NOT EXISTS external_charges (
+CREATE TABLE external_charges (
   key TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   conversation_id TEXT NOT NULL,
@@ -228,6 +228,46 @@ CREATE TABLE IF NOT EXISTS external_charges (
   reservation INTEGER NOT NULL,
   actual_usd REAL
 );
+CREATE TABLE run_tasks (
+  task_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  reservation INTEGER NOT NULL
+);
+CREATE TABLE questions (
+  question_id TEXT PRIMARY KEY,
+  n INTEGER NOT NULL UNIQUE,
+  run_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  question TEXT NOT NULL,
+  options TEXT NOT NULL,
+  recommended TEXT NOT NULL,
+  raise_to_usd REAL,
+  action_ref TEXT,
+  state TEXT NOT NULL,
+  answer TEXT,
+  created_at INTEGER NOT NULL,
+  closed_at INTEGER
+);
+CREATE TABLE held_actions (
+  action_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  args TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+`;
+
+/**
+ * #36: blocked runs, keyed delegations (which replace `run_tasks`), the durable
+ * outbox and approval notes. Written to also complete a database that #36's
+ * code opened before migrations existed: it created the new tables but could
+ * not add columns.
+ */
+function schemaV2(db: DatabaseSync): void {
+  addColumn(db, 'runs', 'blocked_reason', 'TEXT');
+  db.exec(`
 CREATE TABLE IF NOT EXISTS delegations (
   key TEXT PRIMARY KEY,
   task_id TEXT UNIQUE,
@@ -251,33 +291,72 @@ CREATE TABLE IF NOT EXISTS outbox (
   acked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (conversation_id, n) WHERE acked_at IS NULL;
-CREATE TABLE IF NOT EXISTS questions (
-  question_id TEXT PRIMARY KEY,
-  n INTEGER NOT NULL UNIQUE,
-  run_id TEXT NOT NULL,
-  conversation_id TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  question TEXT NOT NULL,
-  options TEXT NOT NULL,
-  recommended TEXT NOT NULL,
-  raise_to_usd REAL,
-  action_ref TEXT,
-  action TEXT,
-  note TEXT,
-  state TEXT NOT NULL,
-  answer TEXT,
-  created_at INTEGER NOT NULL,
-  closed_at INTEGER
-);
-CREATE TABLE IF NOT EXISTS held_actions (
-  action_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  tool TEXT NOT NULL,
-  args TEXT NOT NULL,
-  state TEXT NOT NULL,
-  created_at INTEGER NOT NULL
-);
-`;
+`);
+  addColumn(db, 'questions', 'action', 'TEXT');
+  addColumn(db, 'questions', 'note', 'TEXT');
+  if (hasTable(db, 'run_tasks')) {
+    // A task of #27 is a bound delegation with no key of its own; its whole
+    // reservation stays held until the task's end is seen. A row whose run is
+    // gone fails the step (conversation_id is NOT NULL) rather than being dropped,
+    // so this is a plain INSERT: OR IGNORE would skip such a row silently.
+    db.exec(`
+INSERT INTO delegations (key, task_id, run_id, conversation_id, reservation, state, created_at)
+  SELECT 'legacy_' || t.task_id, t.task_id, t.run_id, r.conversation_id, t.reservation, 'bound',
+    COALESCE((SELECT l.at FROM ledger l WHERE l.n = t.reservation), r.created_at)
+  FROM run_tasks t LEFT JOIN runs r ON r.run_id = t.run_id
+  WHERE NOT EXISTS (SELECT 1 FROM delegations d WHERE d.task_id = t.task_id)
+  ORDER BY t.rowid;
+DROP TABLE run_tasks;
+`);
+  }
+}
+
+type Migration = string | ((db: DatabaseSync) => void);
+
+/** Step `i` takes the database from `user_version` i to i + 1. */
+export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, schemaV2];
+
+function hasTable(db: DatabaseSync, table: string): boolean {
+  return (
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
+    undefined
+  );
+}
+
+function addColumn(db: DatabaseSync, table: string, column: string, type: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((info) => info.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+}
+
+/**
+ * Brings the database to the newest schema in one transaction: a step that
+ * fails leaves it as it was. A database written before versions existed (#27,
+ * or #27 opened by #36) has `user_version` 0 but already holds the #27 tables.
+ */
+export function migrateConductorDb(db: DatabaseSync): void {
+  const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
+  let version = row.user_version;
+  if (version > CONDUCTOR_MIGRATIONS.length) {
+    throw new Error(`Unsupported conductor database schema version ${version}`);
+  }
+  if (version === CONDUCTOR_MIGRATIONS.length) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (version === 0 && hasTable(db, 'runs')) version = 1;
+    for (let step = version; step < CONDUCTOR_MIGRATIONS.length; step += 1) {
+      const migration = CONDUCTOR_MIGRATIONS[step];
+      if (typeof migration === 'string') db.exec(migration);
+      else migration?.(db);
+    }
+    db.exec(`PRAGMA user_version = ${CONDUCTOR_MIGRATIONS.length}`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
 
 type Row = Record<string, unknown>;
 
@@ -292,7 +371,7 @@ export class ConductorState {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-    this.db.exec(SCHEMA);
+    migrateConductorDb(this.db);
   }
 
   close(): void {
