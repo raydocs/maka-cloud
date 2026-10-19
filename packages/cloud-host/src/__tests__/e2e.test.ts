@@ -53,7 +53,7 @@ const RESEARCH_MANIFEST = {
   notDone: [],
   confidence: 'high' as const,
   knownIssues: [],
-  artifacts: ['report.md', 'report.html', 'verification.json'],
+  artifacts: [...REPORT_ARTIFACTS],
 };
 
 type ConductorAccess = NonNullable<CloudOptions['conductor']>['access'];
@@ -77,7 +77,11 @@ async function startStack(
     runners: new RunnerRegistry([claude, codex]),
     conductorRoot: join(dir, 'conductor'),
     conductor: {
-      access: access?.(model.url) ?? { apiKey: 'sk-test-not-a-key', baseUrl: model.url },
+      access: access?.(model.url) ?? {
+        apiKey: 'sk-test-not-a-key',
+        baseUrl: model.url,
+        unmeteredTestAccess: true,
+      },
     },
     onWarning: (message, detail) => warnings.push({ message, detail }),
   };

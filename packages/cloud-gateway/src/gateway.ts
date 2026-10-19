@@ -10,6 +10,7 @@ import {
 } from './bound.js';
 import { Allowance, type BudgetPort, LimitPort, type ReserveResult } from './budget.js';
 import { cutEvent, plainRefusal, type Refusal, refusalResponse } from './errors.js';
+import { journaledPort, type SpendJournal } from './journal.js';
 import { costUsd, type ModelPrice, modelTable, type Vendor, worstCaseUsd } from './pricing.js';
 import {
   DEFAULT_SEARCH_CALL_USD,
@@ -55,6 +56,11 @@ export interface GatewayOptions {
   fetch?: typeof fetch;
   /** Web search for grants of either vendor. Unset: `search` refuses. */
   search?: SearchOptions;
+  /**
+   * Where the spend of every grant issued for a task is also written, durably, before each
+   * request is sent and when it settles, so a restart can charge what was in flight.
+   */
+  journal?: SpendJournal;
   /** A problem worth knowing. Never carries a body, a header value, a token or a key. */
   onWarning?: (message: string, detail?: Record<string, string | number>) => void;
 }
@@ -212,6 +218,12 @@ class Grant {
     }
     return this.drained();
   }
+}
+
+/** The refusal for a reservation that was not made. */
+function refusalOf(reserved: { budget?: boolean; unavailable?: boolean }): Refusal {
+  if (reserved.budget) return 'budget';
+  return reserved.unavailable ? 'unavailable' : 'invalid_request';
 }
 
 /**
@@ -392,7 +404,7 @@ export class Gateway {
     try {
       const reserved = this.reserve(grant, key, callUsd);
       if (!reserved.ok) {
-        return plainRefusal(reserved.budget ? 'budget' : 'invalid_request', reserved.reason);
+        return plainRefusal(refusalOf(reserved), reserved.reason);
       }
       if (flight.controller.signal.aborted) {
         this.settle(grant, key, 0);
@@ -465,7 +477,7 @@ export class Gateway {
     const reserved = this.reserve(grant, key, usd);
     if (reserved.ok) reservedUsd = usd;
     else if (reserved.budget && vendor === 'anthropic') budgetRefusal = reserved.reason;
-    else return refuse(reserved.budget ? 'budget' : 'invalid_request', reserved.reason);
+    else return refuse(refusalOf(reserved), reserved.reason);
     if (reservedUsd === undefined) {
       // The byte bound does not fit: count the request, and reserve the count.
       const counted = await this.count(upstream, json, headers, flight.controller.signal);
@@ -483,7 +495,7 @@ export class Gateway {
       });
       const reserved = this.reserve(grant, key, usd);
       if (!reserved.ok) {
-        return refuse(reserved.budget ? 'budget' : 'invalid_request', reserved.reason);
+        return refuse(refusalOf(reserved), reserved.reason);
       }
       reservedUsd = usd;
     }
@@ -681,6 +693,9 @@ export class Gateway {
       const own = new Allowance(budget.limitUsd);
       if (budget.poolId !== undefined) pool = this.pool(budget.poolId, budget.limitUsd);
       port = new LimitPort(pool ? [own, pool.allowance] : [own]);
+    }
+    if (this.options.journal && input.taskId !== undefined) {
+      port = journaledPort(port, this.options.journal, input.taskId);
     }
     const grant = new Grant(input.vendor, input.subject, input.taskId, port);
     if (pool) pool.open++;

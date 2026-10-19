@@ -11,6 +11,7 @@ import {
   type GenerateText,
   parseReply,
 } from '../inbox/models.js';
+import * as models from '../inbox/models.js';
 import { conductorNotifier } from '../inbox/notifier.js';
 
 function config(env: Record<string, string>) {
@@ -98,11 +99,10 @@ test('a verifier model makes one request with no retries of its own and reports 
     usage: { inputTokens: 10, outputTokens: 3 },
   });
   const sdkModel = { tag: 'sdk-model' } as never;
-  const model = createVerifierModel(
-    POOL_ENTRY,
-    {},
-    { generateText: generate, languageModel: () => sdkModel },
-  );
+  const model = createVerifierModel(POOL_ENTRY, {
+    generateText: generate,
+    languageModel: () => sdkModel,
+  });
   assert.equal(model.vendor, 'openai');
   assert.deepEqual(model.price, { inputPerMTokUsd: 2, outputPerMTokUsd: 8 });
   const signal = new AbortController().signal;
@@ -124,11 +124,10 @@ test('a verifier model makes one request with no retries of its own and reports 
 
 test('usage the provider does not report is charged at the bound, never at zero', async () => {
   const { generate } = fakeGenerate({ text: 'not json' });
-  const model = createVerifierModel(
-    POOL_ENTRY,
-    {},
-    { generateText: generate, languageModel: () => ({}) as never },
-  );
+  const model = createVerifierModel(POOL_ENTRY, {
+    generateText: generate,
+    languageModel: () => ({}) as never,
+  });
   const request = { instructions: 'abcd', prompt: 'efghij', maxOutputTokens: 40 };
   const out = await model.verify(request, new AbortController().signal);
   assert.equal(
@@ -145,16 +144,12 @@ test('usage the provider does not report is charged at the bound, never at zero'
 });
 
 test('a provider error reaches the supervisor, which charges the reservation', async () => {
-  const model = createVerifierModel(
-    POOL_ENTRY,
-    {},
-    {
-      generateText: async () => {
-        throw new Error('rate limited');
-      },
-      languageModel: () => ({}) as never,
+  const model = createVerifierModel(POOL_ENTRY, {
+    generateText: async () => {
+      throw new Error('rate limited');
     },
-  );
+    languageModel: () => ({}) as never,
+  });
   await assert.rejects(
     model.verify(
       { instructions: 'a', prompt: 'b', maxOutputTokens: 1 },
@@ -164,13 +159,19 @@ test('a provider error reaches the supervisor, which charges the reservation', a
   );
 });
 
-test('the real provider objects are built from the key in the environment without any network call', () => {
-  const anthropic = createVerifierModel(
-    { ...POOL_ENTRY, vendor: 'anthropic', model: 'claude-x' },
-    { ANTHROPIC_API_KEY: 'k' },
+test('no inbox model is built from a vendor key in the environment', () => {
+  const env = { ANTHROPIC_API_KEY: 'sk-ant-real-looking', OPENAI_API_KEY: 'sk-real-looking' };
+  // Handed an environment where a model is expected, each refuses instead of reading a key.
+  assert.throws(
+    () => createVerifierModel(POOL_ENTRY, env as never),
+    /production uses the gateway/u,
   );
-  const openai = createVerifierModel(POOL_ENTRY, { OPENAI_API_KEY: 'k' });
-  assert.deepEqual([anthropic.id, openai.id], ['anthropic:claude-x', 'openai:gpt-x']);
+  assert.throws(
+    () => createVerifierModel({ ...POOL_ENTRY, vendor: 'anthropic' }, env as never),
+    /production uses the gateway/u,
+  );
+  assert.throws(() => createSummaryModel('m', env as never), /production uses the gateway/u);
+  assert.ok(!('languageModelFromEnv' in models), 'no export builds a model from the environment');
 });
 
 test('parseReply strips a code fence and keeps text that is not JSON as text', () => {
@@ -180,7 +181,7 @@ test('parseReply strips a code fence and keeps text that is not JSON as text', (
 });
 
 test('the summary model returns an order and a summary, and anything else is an error', async () => {
-  const good = createSummaryModel('m', {}, undefined, {
+  const good = createSummaryModel('m', {
     generateText: fakeGenerate({ text: '{"order":["b","a"],"summary":"Two things need you."}' })
       .generate,
     languageModel: () => ({}) as never,
@@ -196,18 +197,12 @@ test('the summary model returns an order and a summary, and anything else is an 
     '{"order":[1],"summary":"s"}',
     '{"order":[]}',
   ]) {
-    const bad = createSummaryModel('m', {}, undefined, {
+    const bad = createSummaryModel('m', {
       generateText: fakeGenerate({ text }).generate,
       languageModel: () => ({}) as never,
     });
     await assert.rejects(bad.summarize(input, new AbortController().signal), /order and a summary/);
   }
-  const seen: unknown[] = [];
-  createSummaryModel('m', {}, 'https://gw.example/v1', {
-    generateText: fakeGenerate({ text: '{}' }).generate,
-    languageModel: (entry) => (seen.push(entry), {} as never),
-  });
-  assert.deepEqual(seen, [{ vendor: 'anthropic', model: 'm', baseUrl: 'https://gw.example/v1' }]);
 });
 
 // ------------------------------------------------------------------ budget

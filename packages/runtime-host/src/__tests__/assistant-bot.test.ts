@@ -153,9 +153,15 @@ async function fixture(readAvatarImage?: AssistantDependencies['readAvatarImage'
           await runner(input);
           assert.equal((await input.finish()).allow, true, 'runtime accepts the final Sleep');
         })
-        .finally(() => {
-          worker.status = 'idle';
-        });
+        .then(
+          () => {
+            worker.status = 'idle';
+          },
+          (error) => {
+            worker.status = 'blocked';
+            throw error;
+          },
+        );
       void worker.task.catch(() => {});
       if (loseSubmitResponse) {
         loseSubmitResponse = false;
@@ -165,7 +171,10 @@ async function fixture(readAvatarImage?: AssistantDependencies['readAvatarImage'
     },
     steer: async () => {},
     inject: async () => {},
-    snapshot: async (id) => ({ agent: { status: sessions.get(id)?.status ?? 'idle' } }),
+    snapshot: async (id) => ({
+      agent: { status: sessions.get(id)?.status ?? 'idle' },
+      pendingInteractions: sessions.get(id)?.pendingInteractions ?? 0,
+    }),
     transcript: async (id) => sessions.get(id)?.messages ?? [],
     whenIdle: async (id, signal) => {
       if (signal?.aborted) throw signal.reason;
@@ -593,6 +602,70 @@ test('interrupted worker replays input on retry instead of losing a returned bat
   await until(() => done);
 });
 
+test('mail arriving during a failed call resumes the blocked worker without another user nudge', async (t) => {
+  const f = await fixture();
+  t.after(f.close);
+  let fail!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    fail = resolve;
+  });
+  let entered = false;
+  let recovered = false;
+  f.runner(async ({ invoke }) => {
+    await invoke('InboxCheck');
+    entered = true;
+    await gate;
+    throw Error('ERR_HTTP2_STREAM_ERROR');
+  });
+  await f.send('first', '原消息');
+  await until(() => entered);
+  await f.send('during-failure', '新消息');
+  f.runner(async ({ invoke }) => {
+    assert.deepEqual(
+      (await invoke('InboxCheck')).items.map((x: any) => x.id),
+      ['first', 'during-failure'],
+    );
+    await invoke('SendUser', { messageId: 'recovered', messages: [{ text: '已恢复处理' }] });
+    await invoke('Sleep');
+    recovered = true;
+  });
+  fail();
+  await until(() => recovered);
+  await until(async () => ((await f.service.call('assistant.binding', {})) as any).bot.sleeping);
+  assert.equal(f.starts(), 2);
+  assert.equal(f.visible.filter((m) => m.text === '已恢复处理').length, 1);
+});
+
+test('persistent model failures report error without a polling retry storm; fresh mail can retry', async (t) => {
+  const f = await fixture();
+  t.after(f.close);
+  f.runner(async () => {
+    throw Error('model unavailable');
+  });
+  await f.send('first-failure', '你好');
+  await until(async () => ((await f.service.call('assistant.binding', {})) as any).bot.error);
+  await new Promise((resolve) => setTimeout(resolve, 2200));
+  assert.equal(f.starts(), 1);
+  await f.send('second-attempt', '再试一次');
+  await until(() => f.starts() === 2);
+  await until(async () => ((await f.service.call('assistant.binding', {})) as any).bot.error);
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(f.starts(), 2);
+});
+
+test('blocked worker with a genuine pending interaction is not restarted by new mail', async (t) => {
+  const f = await fixture();
+  t.after(f.close);
+  await f.send('initial', '你好');
+  await until(async () => ((await f.service.call('assistant.binding', {})) as any).bot.sleeping);
+  const worker = f.sessions.get(f.invocation.id);
+  worker.status = 'blocked';
+  worker.pendingInteractions = 1;
+  await f.send('approval-pending', '还有一件事');
+  await until(async () => ((await f.service.call('assistant.binding', {})) as any).bot.error);
+  assert.equal(f.starts(), 1, 'must not bypass pending authorization');
+});
+
 test('existing processed-column databases retain messages; large bodies have explicit continuation', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'bot-old-store-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -1007,7 +1080,7 @@ test('a completed Sleep clears an ambiguous wake error without submitting again'
   assert.equal(f.starts(), 1);
 });
 
-for (const interruptedStatus of ['idle', 'active', 'aborted']) {
+for (const interruptedStatus of ['idle', 'active', 'aborted', 'blocked']) {
   test(`restart resumes an owned wake with ${interruptedStatus} worker without losing mail`, async (t) => {
     const dir = await mkdtemp(join(tmpdir(), 'bot-owned-recovery-'));
     let store = new BotStore(dir);
@@ -1018,9 +1091,11 @@ for (const interruptedStatus of ['idle', 'active', 'aborted']) {
     store = new BotStore(dir);
     let submissions = 0;
     let status = interruptedStatus;
+    if (status === 'blocked')
+      store.set('error', 'Error: Bot requires attention in its worker Session');
     let controller: BotController;
     const agent = {
-      snapshot: async () => ({ agent: { status } }),
+      snapshot: async () => ({ agent: { status }, pendingInteractions: 0 }),
       messageExecution: async (id: string) => ({
         state: id === 'old-wake' ? 'owned' : 'not_admitted',
       }),

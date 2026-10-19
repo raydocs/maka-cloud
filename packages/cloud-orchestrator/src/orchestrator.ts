@@ -65,6 +65,18 @@ export interface OrchestratorOptions {
   controlTimeoutMs?: number;
   /** Backoff for retrying a stop a task is owed. Default `DEFAULT_STOP_RETRY`. */
   stopRetry?: { firstMs?: number; maxMs?: number };
+  /**
+   * Spend an earlier process wrote down but may not have recorded (the model gateway's journal).
+   * Restore records it on each task's tree before anything else, then calls `recorded`.
+   */
+  recoveredSpend?: RecoveredSpend;
+}
+
+export interface RecoveredSpend {
+  /** Per task, everything its runs spent in earlier processes, open reservations in full. */
+  unrecorded(): ReadonlyArray<{ taskId: TaskId; usd: number }>;
+  /** Called once all of it is in the task log. */
+  recorded(): void;
 }
 
 /**
@@ -95,7 +107,7 @@ export interface OrchestratorStats {
   /** Trees counted against the active-task quota. */
   treesCounted: number;
   connectionSessions: number;
-  /** Tasks whose owed stop is being retried. */
+  /** Tasks whose owed stop, or the cancel of a run that cannot be stopped by id, is being retried. */
   stopRetries: number;
 }
 
@@ -125,6 +137,7 @@ export class Orchestrator {
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
+  private readonly recoveredSpend: RecoveredSpend | undefined;
   private readonly controlTimeoutMs: number;
   private readonly stopRetry: { firstMs: number; maxMs: number };
   private readonly newTaskId: () => TaskId;
@@ -142,6 +155,12 @@ export class Orchestrator {
   private readonly starting = new Set<TaskId>();
   /** Retries of owed stops, one per task, until the runner confirms or `close`. */
   private readonly stopRetries = new Map<TaskId, AbortController>();
+  /**
+   * Runs whose cancel failed on a runner that cannot stop by id: nothing durable
+   * can be owed for them, so their handle's cancel is retried here, and the task
+   * reads as still running until it succeeds.
+   */
+  private readonly cancelRetries = new Map<TaskId, AbortController>();
   private closed = false;
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
@@ -172,6 +191,7 @@ export class Orchestrator {
     );
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
+    this.recoveredSpend = options.recoveredSpend;
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
@@ -216,6 +236,8 @@ export class Orchestrator {
     this.closed = true;
     for (const retry of this.stopRetries.values()) retry.abort();
     this.stopRetries.clear();
+    for (const retry of this.cancelRetries.values()) retry.abort();
+    this.cancelRetries.clear();
   }
 
   stats(): OrchestratorStats {
@@ -228,7 +250,7 @@ export class Orchestrator {
       sessionsWaiting: this.waitsBySession.keys,
       treesCounted: this.activeByRoot.keys,
       connectionSessions: this.connectionsBySession.keys,
-      stopRetries: this.stopRetries.size,
+      stopRetries: this.stopRetries.size + this.cancelRetries.size,
     };
   }
 
@@ -631,6 +653,7 @@ export class Orchestrator {
       this.tasks.set(taskId, task);
       this.activeByRoot.add(task.rootSessionId);
     }
+    await this.recordRecoveredSpend();
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
@@ -669,6 +692,28 @@ export class Orchestrator {
     this.restoring = false;
     // Ended tasks whose stop an earlier process could not confirm.
     for (const taskId of this.store.stopPendingTaskIds()) this.retryStop(taskId);
+  }
+
+  /**
+   * Records what runs of an earlier process spent, before any task here ends or settles. A run's
+   * spend is recorded as its total (`task_cost` keeps the highest per task), so recording again
+   * after a crash in between changes nothing. Its tree is not cancelled for it here: every task
+   * still running is ended just below.
+   */
+  private async recordRecoveredSpend(): Promise<void> {
+    const recovered = this.recoveredSpend?.unrecorded() ?? [];
+    for (const { taskId, usd } of recovered) {
+      if (!Number.isFinite(usd) || usd <= 0) continue;
+      const root = this.treeRoot(taskId);
+      if (!root) continue;
+      await this.record({
+        type: 'task_cost',
+        taskId: root.taskId,
+        fromTaskId: taskId,
+        costUsd: usd,
+      });
+    }
+    if (recovered.length > 0) this.recoveredSpend?.recorded();
   }
 
   /**
@@ -728,8 +773,56 @@ export class Orchestrator {
 
   /** Cancels the run of a task that ended. Until that succeeds, the task owes a stop. */
   private async cancelLeftover(taskId: TaskId, handle: RunHandle): Promise<void> {
+    // Nothing durable can be owed for a run that cannot be stopped by id: the
+    // task reads as still running from before the first try until one succeeds.
+    if (!this.stopsById(taskId)) return this.retryCancel(taskId, handle, true);
     if (await cancelHandle(handle)) await this.recordStopped(taskId);
     else await this.recordStopPending(taskId, 'cancel_failed');
+  }
+
+  private stopsById(taskId: TaskId): boolean {
+    const task = this.lookup(taskId);
+    return task !== undefined && this.runners.get(task.runner)?.stopOrphaned !== undefined;
+  }
+
+  /**
+   * A cancel of the task's run failed. A runner that can stop by id is owed a stop,
+   * in the log; any other keeps the handle, and its cancel is retried until it succeeds.
+   */
+  private async cancelFailed(taskId: TaskId, handle: RunHandle): Promise<void> {
+    if (this.stopsById(taskId)) await this.recordStopPending(taskId, 'cancel_failed');
+    else void this.retryCancel(taskId, handle, false);
+  }
+
+  /**
+   * Cancels a run that cannot be stopped by id, at once when `tryNow`, then
+   * backing off until a try succeeds or `close`; the task reads as still running
+   * meanwhile. Resolves after the first try: later ones run on their own.
+   */
+  private async retryCancel(taskId: TaskId, handle: RunHandle, tryNow: boolean): Promise<void> {
+    if (this.cancelRetries.has(taskId)) return;
+    if (this.closed) {
+      if (tryNow) await cancelHandle(handle);
+      return;
+    }
+    const retry = new AbortController();
+    this.cancelRetries.set(taskId, retry);
+    const first = tryNow ? cancelHandle(handle) : Promise.resolve(false);
+    void first
+      .then(async (cancelled) => {
+        for (let attempt = 0; !cancelled; attempt += 1) {
+          await sleep(
+            Math.min(this.stopRetry.firstMs * 2 ** attempt, this.stopRetry.maxMs),
+            retry.signal,
+          );
+          if (retry.signal.aborted) return;
+          cancelled = await cancelHandle(handle);
+        }
+      })
+      .finally(() => {
+        if (this.cancelRetries.get(taskId) === retry) this.cancelRetries.delete(taskId);
+      });
+    await first;
   }
 
   /** Retries the stop a task is owed, backing off, until its runner confirms it or `close`. */
@@ -865,7 +958,8 @@ export class Orchestrator {
 
   /**
    * Cancels a run whose start is not recorded. It counts as starting while the cancel is out, so a
-   * task that ends meanwhile owes a stop; one that failed is owed before that is cleared.
+   * task that ends meanwhile owes a stop; one that failed is owed (or, without a stop by id,
+   * retried) before that is cleared.
    */
   private async cancelUnrecorded(
     taskId: TaskId,
@@ -875,7 +969,7 @@ export class Orchestrator {
     let cancelled = false;
     try {
       cancelled = await cancelHandle(handle);
-      if (!cancelled) await this.recordStopPending(taskId, 'cancel_failed');
+      if (!cancelled) await this.cancelFailed(taskId, handle);
     } finally {
       this.starting.delete(taskId);
     }
@@ -965,7 +1059,7 @@ export class Orchestrator {
           note: `runner cancel failed: ${errorMessage(error)}`,
         });
         // Owed before the task ends, so no restart in between can lose it.
-        await this.recordStopPending(taskId, 'cancel_failed');
+        await this.cancelFailed(taskId, handle);
       }
     }
     await this.record({ type: 'task_cancelled', taskId });
@@ -1130,12 +1224,14 @@ export class Orchestrator {
     const task = this.lookup(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
     const view = toView(task);
-    // A start still under way may yet hand back a run, whether or not its runner can stop it by id.
-    const mayRun = this.starting.has(taskId) || this.belowStillRuns(taskId);
+    // A start still under way may yet hand back a run, whether or not its runner can stop it by
+    // id, and a run whose cancel is being retried is still going.
+    const mayRun =
+      this.starting.has(taskId) || this.cancelRetries.has(taskId) || this.belowStillRuns(taskId);
     return mayRun ? { ...view, treeStopPending: true } : view;
   }
 
-  /** True when a task below `rootId` has not ended, is still starting, or owes a stop. */
+  /** True when a task below `rootId` has not ended, is still starting, owes a stop, or has its cancel retried. */
   private belowStillRuns(rootId: TaskId): boolean {
     const seen = new Set<TaskId>([rootId]);
     let level = this.store.childrenOf(rootId);
@@ -1145,7 +1241,13 @@ export class Orchestrator {
         if (seen.has(id)) continue;
         seen.add(id);
         const task = this.lookup(id);
-        if (!task || !isTerminal(task.state) || task.stopPending || this.starting.has(id)) {
+        if (
+          !task ||
+          !isTerminal(task.state) ||
+          task.stopPending ||
+          this.starting.has(id) ||
+          this.cancelRetries.has(id)
+        ) {
           return true;
         }
         next.push(...this.store.childrenOf(id));

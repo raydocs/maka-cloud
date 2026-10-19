@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
+import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
@@ -21,6 +22,7 @@ interface Started {
   /** Resolves at the first Messages request the model server gets. */
   firstMessage: Promise<void>;
   sweeps: string[][];
+  dataDir: string;
 }
 
 async function start(
@@ -105,6 +107,7 @@ async function start(
     modelKeys,
     firstMessage,
     sweeps,
+    dataDir: dir,
   };
 }
 
@@ -195,6 +198,38 @@ test('sandbox runs get a gateway token bound to their budget, never the vendor k
   const revoked = await ask(100);
   assert.equal(revoked.status, 401);
   await revoked.arrayBuffer();
+});
+
+test("a task's model requests are written to the spend journal a restart reads back", async (t) => {
+  const { options, dataDir } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const access = options.modelAccess;
+  assert.ok(access);
+  const grant = await access.issue({
+    taskId: 'tsk_spend',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_spend',
+  });
+  const sent = await fetch(`${grant.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': grant.apiKey },
+    body: JSON.stringify({
+      model: 'claude-haiku-5-5',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  await sent.arrayBuffer();
+  // A second journal on the same file stands in for the next process.
+  const next = new SqliteSpendJournal(join(dataDir, 'gateway-spend.db'));
+  t.after(() => next.close());
+  assert.deepEqual(
+    next.unrecorded().map((spend) => spend.taskId),
+    ['tsk_spend'],
+    'the request was journaled under its task in the data directory',
+  );
 });
 
 test('with a search key, runs get the web-search tool and a search paid from their token', async (t) => {

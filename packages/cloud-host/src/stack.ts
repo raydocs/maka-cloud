@@ -1,5 +1,7 @@
 import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
+import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { type Orchestrator, RunnerRegistry, type TaskId } from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
 import {
@@ -28,6 +30,7 @@ import {
   startGateway,
 } from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
+import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 
 /** The playbooks the stack runs: T7's research playbook, T8's coding playbook and the free one. */
@@ -73,12 +76,23 @@ export async function startStack(
     taskStateOf: (taskId: TaskId) => orchestrator?.taskStateOf(taskId),
   };
   const warn = dependencies.onWarning ?? (() => undefined);
-  const gateway = await startGateway(
-    config.gateway,
-    env,
-    warn,
-    gatewayPrices(config.gateway.models, config.inbox.verifierModels),
-  );
+  // Every request of a task's run is written down before it is sent, so a crash cannot lose what
+  // it cost: the orchestrator records it on restore.
+  await mkdir(dirname(config.gatewaySpendPath), { recursive: true });
+  const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  let gateway: StackGateway;
+  try {
+    gateway = await startGateway(
+      config.gateway,
+      env,
+      warn,
+      gatewayPrices(config.gateway.models, config.inbox.verifierModels),
+      journal,
+    );
+  } catch (error) {
+    journal.close();
+    throw error;
+  }
   // Every exit from here on closes the gateway: a failed start, or the stack's close.
   let runners: CloudRunners;
   let coding: CodingRunner;
@@ -120,6 +134,7 @@ export async function startStack(
       port: config.port,
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
+      orchestrator: { recoveredSpend: journal },
       conductorRoot: config.conductorRoot,
       conductor: {
         // The vendor key stays in the gateway: the conductor's requests go through it in process.
@@ -139,6 +154,7 @@ export async function startStack(
             dbPath: config.supervisorDbPath,
             config: config.inbox,
             gateway: gateway.gateway,
+            summaryBudget: journal.dailyLimit('digest summary', SUMMARY_DAILY_CAP_USD),
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
           context,
@@ -151,6 +167,7 @@ export async function startStack(
     });
   } catch (error) {
     await gateway.close();
+    journal.close();
     throw error;
   }
   return {
@@ -164,6 +181,7 @@ export async function startStack(
         await cloud.close();
       } finally {
         await gateway.close();
+        journal.close();
       }
     },
   };
