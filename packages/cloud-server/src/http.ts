@@ -15,6 +15,7 @@ import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifa
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { InboxRoutes } from './inbox.js';
 import type { InviteInfo, InviteStore } from './invites.js';
+import type { PushApi } from './push.js';
 import { toPublicView } from './public-view.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
@@ -110,6 +111,8 @@ export interface PublicApiDeps {
   messageLimiter: RateLimiter;
   controlLimiter: RateLimiter;
   orchestrator: Pick<Orchestrator, 'cancelAs' | 'pauseAs' | 'resumeAs' | 'rootSessionOfTask'>;
+  /** Absent when Web Push is not configured; its routes are then 404. */
+  push?: PushApi;
   artifacts: ArtifactSource;
   artifactLimiter: RateLimiter;
   limits: HttpLimits;
@@ -127,6 +130,16 @@ export interface PublicApiDeps {
 const createConversation = z
   .object({ title: z.string().max(MAX_TITLE_LENGTH).optional() })
   .strict();
+const pushSubscription = z
+  .object({
+    endpoint: z.string().min(1).max(2048),
+    keys: z
+      .object({ p256dh: z.string().min(1).max(256), auth: z.string().min(1).max(64) })
+      .strict(),
+    expirationTime: z.number().nullable().optional(),
+  })
+  .strict();
+const pushRemoval = z.object({ endpoint: z.string().min(1).max(2048) }).strict();
 const postMessage = z
   .object({
     text: z.string().min(1),
@@ -322,6 +335,17 @@ export class PublicApi {
       if (artifacts[2] === undefined) return this.listArtifacts(res, invite, taskId);
       return this.readArtifact(res, invite, taskId, decodeURIComponent(artifacts[2]));
     }
+    if (path === '/v1/push/key' || path === '/v1/push/subscriptions') {
+      const { push } = this.deps;
+      if (!push) throw new HttpError(404, 'not_found');
+      if (path === '/v1/push/key') {
+        if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+        return respond(res, 200, { publicKey: push.publicKey });
+      }
+      if (method === 'POST') return this.subscribePush(req, res, invite, push);
+      if (method === 'DELETE') return this.unsubscribePush(req, res, invite, push);
+      throw new HttpError(405, 'method_not_allowed', { allow: 'POST, DELETE' });
+    }
     if (this.deps.inbox && path.startsWith('/v1/inbox/')) {
       if (await this.deps.inbox.handle(req, res, url, invite)) return;
     }
@@ -420,6 +444,48 @@ export class PublicApi {
       tasks,
       ...(last !== undefined && page.length === limit ? { next: last.position } : {}),
     });
+  }
+
+  private takeControlToken(invite: InviteInfo): void {
+    const allowed = this.deps.controlLimiter.take(invite.inviteId);
+    if (allowed.ok) return;
+    throw new HttpError(429, 'quota_exceeded', {
+      'retry-after': String(Math.max(1, Math.ceil(allowed.retryAfterMs / 1000))),
+    });
+  }
+
+  private async subscribePush(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    push: PushApi,
+  ): Promise<void> {
+    const body = pushSubscription.safeParse(await readJson(req, false));
+    if (!body.success) throw new HttpError(400, 'invalid_request');
+    this.takeControlToken(invite);
+    const result = push.register(invite.inviteId, {
+      endpoint: body.data.endpoint,
+      p256dh: body.data.keys.p256dh,
+      auth: body.data.keys.auth,
+    });
+    if (result === 'limit') throw new HttpError(429, 'too_many_subscriptions');
+    if (result === 'invalid_endpoint' || result === 'invalid_keys') {
+      throw new HttpError(400, result);
+    }
+    respond(res, result === 'created' ? 201 : 200, {});
+  }
+
+  private async unsubscribePush(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    push: PushApi,
+  ): Promise<void> {
+    const body = pushRemoval.safeParse(await readJson(req, false));
+    if (!body.success) throw new HttpError(400, 'invalid_request');
+    this.takeControlToken(invite);
+    if (!push.remove(invite.inviteId, body.data.endpoint)) throw new HttpError(404, 'not_found');
+    res.writeHead(204).end();
   }
 
   /** The artifact references of a task's manifest; 404 for a task of a conversation the invite does not own. */

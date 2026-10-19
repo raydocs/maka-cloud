@@ -38,78 +38,88 @@ mv "$tmp" "$ws"
 echo "BASE $sha"
 `;
 
+/** How every process of a task's checks is marked: the tag of each check starts with this. */
+export function checkTagPrefix(taskId: string): string {
+  return `maka-check:${taskId}:`;
+}
+
 /**
- * Starts one check (a test command) detached. Each launch has its own id and nonce, chosen by the
- * host after the agent's run has stopped, so nothing can be laid out for it in advance. Its
- * control files (nonce, output, exit record) live in a fresh directory under \`$MAKA_CTL_ROOT\`,
- * outside the task directory; the directory is created exclusively, and a launch that finds it,
- * or finds pid or token files under its id, refuses (EXISTS) unless the nonce is its own
- * (ALREADY: a retried launch starts nothing new). The check runs as its own session under
- * \`timeout\` and records its pid and run token in the task directory the way the runners' scripts
- * do, so the runners' stop finds it. The exit record (\`<nonce> <code> <timed out 0|1>\`) is
- * written last. Prints STARTED, ALREADY, EXISTS or BADROOT.
+ * Runs one check (a test command) to its end, inside one exec, so its exit status is the exec's
+ * own, which the sandbox API reports to the host; nothing the check writes is read as its result.
+ * The command runs in a new user and PID namespace whose first process is ours: when it ends, the
+ * kernel kills every process left in the namespace, and nothing inside can leave it (\`setsid\`,
+ * \`env -u\` and double forks included) or signal or trace the processes outside. The namespace's
+ * first process marks a fresh directory once it runs; without the mark the check was not
+ * isolated, and the script exits 125 with a \`maka-check:\` line on stderr (which the check cannot
+ * write to). \`timeout\` ends the command after \`$MAKA_TIMEOUT\` seconds (TERM, then KILL 5 s
+ * later); an outer one ends the namespace 10 s after that. Prints the last \`$MAKA_TAIL\` bytes of
+ * the output on stdout and \`BYTES <output bytes>\` on stderr. \`$MAKA_CHECK_TAG\` is an argument
+ * of the processes outside the namespace and of its first process, so CHECK_STOP_SCRIPT finds them.
  */
-export const CHECK_START_SCRIPT = `set -u
+export const CHECK_SCRIPT = `set -u
 umask 077
-cd "$MAKA_DIR" || exit 1
-n="$MAKA_CHECK"
-nonce="$MAKA_NONCE"
-unset MAKA_NONCE
-root="$MAKA_CTL_ROOT"
-c="$root/$n"
-mkdir -p "$root" 2>/dev/null
-if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ] || ! chmod 700 "$root"; then echo BADROOT; exit 0; fi
-if ! mkdir "$c" 2>/dev/null; then
-  if [ ! -L "$c" ] && [ "$(cat "$c/nonce" 2>/dev/null)" = "$nonce" ]; then echo ALREADY; else echo EXISTS; fi
-  exit 0
+cd "$MAKA_DIR/workspace" 2>/dev/null || { echo 'maka-check: the workspace is missing' >&2; exit 125; }
+mark=$(mktemp -d) || { echo 'maka-check: no temporary directory' >&2; exit 125; }
+timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
+  unshare --user --map-current-user --pid --fork --kill-child -- \\
+  bash -c ': > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
+  "$MAKA_CHECK_TAG" "$mark" "$MAKA_CMD" "$MAKA_TIMEOUT" < /dev/null 2>&1 |
+  { tee >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
+rc=\${PIPESTATUS[0]}
+isolated=0
+[ -e "$mark/started" ] && isolated=1
+rm -rf -- "$mark"
+if [ "$isolated" = 0 ]; then
+  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare)' >&2
+  exit 125
 fi
-for f in "$n.pid" "$n.token"; do
-  if [ -e "$f" ] || [ -L "$f" ]; then echo EXISTS; exit 0; fi
-done
-printf '%s' "$nonce" > "$c/nonce"
-printf '%s' "$MAKA_RUN_TOKEN" > "$n.token"
-setsid bash -c '
-  echo $$ > "$1.pid"
-  ctl="$5" nonce="$6"
-  record() { echo "$nonce $1 $2" > "$ctl/exit.tmp" && mv -f "$ctl/exit.tmp" "$ctl/exit"; }
-  cd "$2" || { record 127 0; exit 127; }
-  started=$SECONDS
-  timeout -k 5 "$3" bash -c "$4" < /dev/null
-  rc=$?
-  timed=0
-  if { [ "$rc" = 124 ] || [ "$rc" = 137 ]; } && [ $((SECONDS - started)) -ge "$3" ]; then timed=1; fi
-  record "$rc" "$timed"
-' maka-check "$MAKA_DIR/$n" "$MAKA_CWD" "$MAKA_TIMEOUT" "$MAKA_CMD" "$c" "$nonce" > "$c/out" 2>&1 < /dev/null &
-echo STARTED
+exit "$rc"
 `;
 
 /**
- * Where a check is: \`EXIT <code> <timed out 0|1> <output bytes>\` followed by a line with the
- * base64 of the output's last \`$MAKA_TAIL\` bytes, RUNNING, STARTING (started, no pid yet), DEAD,
- * or FOREIGN when its control files do not carry the launch's nonce.
+ * Stops the checks whose tag starts with \`$MAKA_CHECK_TAG\` (one check, or with
+ * checkTagPrefix every check of a task): kills the processes that carry the tag, which ends their
+ * namespaces, then waits until no process of those namespaces is left. Prints STOPPED, NONE or
+ * SURVIVORS.
  */
-export const CHECK_STATUS_SCRIPT = `set -u
-n="$MAKA_DIR/$MAKA_CHECK"
-c="$MAKA_CTL_ROOT/$MAKA_CHECK"
-if [ -L "$c" ] || [ ! -d "$c" ] || [ "$(cat "$c/nonce" 2>/dev/null)" != "$MAKA_NONCE" ]; then echo FOREIGN; exit 0; fi
-report() {
-  local nonce rc timed
-  read -r nonce rc timed < "$c/exit" || true
-  case "$rc" in ''|*[!0-9]*) echo FOREIGN; exit 0 ;; esac
-  if [ "$nonce" != "$MAKA_NONCE" ] || { [ "$timed" != 0 ] && [ "$timed" != 1 ]; }; then echo FOREIGN; exit 0; fi
-  echo "EXIT $rc $timed $(stat -c %s "$c/out" 2>/dev/null || echo 0)"
-  tail -c "$MAKA_TAIL" "$c/out" 2>/dev/null | base64 -w0
-  echo
+export const CHECK_STOP_SCRIPT = `set -u
+self=$(readlink /proc/self/ns/pid)
+tagged() {
+  local arg
+  while IFS= read -r -d '' arg; do
+    case "$arg" in "$MAKA_CHECK_TAG"*) return 0 ;; esac
+  done < "$1/cmdline" 2>/dev/null
+  return 1
 }
-if [ -f "$c/exit" ]; then report; exit 0; fi
-if [ -f "$n.pid" ]; then
-  pid=$(cat "$n.pid")
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo RUNNING; exit 0; fi
-  if [ -f "$c/exit" ]; then report; exit 0; fi
-  echo DEAD
-  exit 0
-fi
-echo STARTING
+nss=""
+found=0
+for p in /proc/[0-9]*; do
+  [ "\${p#/proc/}" = "$$" ] && continue
+  tagged "$p" || continue
+  found=1
+  ns=$(readlink "$p/ns/pid" 2>/dev/null) || ns=""
+  [ -n "$ns" ] && [ "$ns" != "$self" ] && nss="$nss $ns"
+  kill -KILL "\${p#/proc/}" 2>/dev/null
+done
+[ "$found" = 1 ] || { echo NONE; exit 0; }
+left() {
+  local p ns stat
+  for p in /proc/[0-9]*; do
+    ns=$(readlink "$p/ns/pid" 2>/dev/null) || continue
+    case " $nss " in *" $ns "*) ;; *) continue ;; esac
+    stat=$(cat "$p/stat" 2>/dev/null) || continue
+    stat=\${stat##*) }
+    [ "\${stat%% *}" = Z ] || return 0
+  done
+  return 1
+}
+waited=0
+while [ -n "$nss" ] && left; do
+  [ "$waited" -ge 50 ] && { echo SURVIVORS; exit 0; }
+  sleep 0.1
+  waited=$((waited + 1))
+done
+echo STOPPED
 `;
 
 /**

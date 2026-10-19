@@ -13,6 +13,7 @@ import {
   type CloudRunnersOptions,
   createCloudRunnersFromEnv,
 } from '@maka-cloud/runners';
+import type { RecoveredSpend } from './recovery.js';
 import { PlaybookDriver, VendorAloneDriver } from './drivers.js';
 import { SweBenchDataset } from './suites.js';
 import { SweBenchGrader } from './swebench-grader.js';
@@ -22,6 +23,8 @@ export interface EvalDeps {
   drivers: ReadonlyMap<string, SubjectDriver>;
   grader: Grader;
   hidden: HiddenTestSource;
+  /** What earlier processes of this run spent through the gateway (live only). */
+  recovered?: RecoveredSpend;
   /** Closes what the deps opened (the model gateway); called once the run is over. */
   close?(): Promise<void>;
 }
@@ -159,6 +162,7 @@ export async function createLiveDeps(
       ]),
       grader: new SweBenchGrader({ python, datasetPath, workDir: workRoot }),
       hidden: dataset,
+      recovered: journal,
       close: () => {
         closing ??= (async () => {
           await gateway.close();

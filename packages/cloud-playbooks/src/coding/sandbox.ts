@@ -1,4 +1,5 @@
 import type { Fleet, RemoteMachine } from '@maka-cloud/runners';
+import { CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
 
 export interface ExecResult {
   stdout: string;
@@ -6,6 +7,8 @@ export interface ExecResult {
   exitCode: number;
   /** The sandbox cut the output short. */
   truncated?: boolean;
+  /** The sandbox ended the command at the exec's time limit. */
+  timedOut?: boolean;
 }
 
 export interface ExecOptions {
@@ -19,16 +22,9 @@ export interface ExecOptions {
 export interface SandboxWorkspace {
   /** The task directory; the repository is `${dir}/workspace`. */
   readonly dir: string;
-  /**
-   * Where the runner keeps its checks' control files: outside the task directory, which is the
-   * agent's working area.
-   */
-  readonly controlDir: string;
   exec(script: string, options?: ExecOptions): Promise<ExecResult>;
   /** Stops every process of the task: agent runs and checks. Idempotent. */
   stopAll(signal?: AbortSignal): Promise<void>;
-  /** Stops the processes of the named runs or checks only (their process groups and sessions). */
-  stopRuns(names: string[], signal?: AbortSignal): Promise<void>;
   /** Whether the agent's runs for this task ran on this workspace's machine. */
   agentOnSameMachine(): Promise<boolean>;
   /** Gives the sandbox lease back. Idempotent. */
@@ -59,8 +55,6 @@ export class FleetCodingSandbox implements CodingSandbox {
     let released = false;
     return {
       dir: machine.taskDir(taskId),
-      // The task's memory-backed log directory, which the runners keep for raw output.
-      controlDir: `${machine.logDir(taskId)}/checks`,
       exec: async (script, options = {}) => {
         const result = await machine.exec(script, options);
         return {
@@ -68,13 +62,12 @@ export class FleetCodingSandbox implements CodingSandbox {
           stderr: result.stderr,
           exitCode: result.exitCode,
           truncated: result.truncated,
+          timedOut: result.timedOut,
         };
       },
       stopAll: async (stopSignal) => {
         await machine.kill(taskId, stopSignal ? { signal: stopSignal } : {});
-      },
-      stopRuns: async (names, stopSignal) => {
-        await machine.kill(taskId, { runs: names, ...(stopSignal ? { signal: stopSignal } : {}) });
+        await stopChecks(machine, taskId, stopSignal);
       },
       agentOnSameMachine: async () =>
         (await fleet.sessions.get(taskId))?.machineId === lease.machineId,
@@ -87,6 +80,39 @@ export class FleetCodingSandbox implements CodingSandbox {
   }
 
   async stopTask(taskId: string, signal?: AbortSignal): Promise<void> {
-    await this.fleet.stopTask(taskId, signal);
+    const { fleet } = this;
+    let failure: unknown;
+    await fleet.stopTask(taskId, signal).catch((error: unknown) => {
+      failure = error;
+    });
+    // The checks ran on the machine the task's lease gives, as in open().
+    try {
+      const lease = await fleet.sandboxes.acquire({ tenantId: fleet.tenantOf(taskId), taskId });
+      try {
+        await stopChecks(fleet.machine(lease.machineId), taskId, signal);
+      } finally {
+        await lease.release();
+      }
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure !== undefined) throw failure;
+  }
+}
+
+/** Stops every check of a task on one machine: their PID namespaces, whole. */
+async function stopChecks(
+  machine: RemoteMachine,
+  taskId: string,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const out = await machine.exec(CHECK_STOP_SCRIPT, {
+    envs: { MAKA_CHECK_TAG: checkTagPrefix(taskId) },
+    timeoutSeconds: 30,
+    ...(signal ? { signal } : {}),
+  });
+  const status = out.stdout.trim();
+  if (status !== 'NONE' && status !== 'STOPPED') {
+    throw new Error(`the checks of ${taskId} could not be stopped (${status.slice(0, 200)})`);
   }
 }

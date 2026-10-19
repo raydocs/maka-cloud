@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createECDH } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -63,6 +64,7 @@ async function start(
       INSTABOX_API_KEY: 'ibx-test-not-a-key',
       INSTABOX_MACHINE_ID: 'mch_test',
       ...(publicUrl === undefined ? {} : { MAKA_CLOUD_MCP_PUBLIC_URL: publicUrl }),
+      ...Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith('CLOUD_PUSH_'))),
     }),
     port: 0,
   };
@@ -374,4 +376,69 @@ test('coding tasks go to the coding runner, and the stack runs the coding playbo
     ['research', 'coding', 'free'],
   );
   assert.equal(STACK_PLAYBOOKS[1], codingPlaybook);
+});
+
+/** A VAPID key pair the way a deployment would generate one: a P-256 key, base64url. */
+function vapidKeys(): { publicKey: string; privateKey: string } {
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  return {
+    publicKey: ecdh.getPublicKey().toString('base64url'),
+    privateKey: ecdh.getPrivateKey().toString('base64url'),
+  };
+}
+
+test('the Web Push routes answer 404 without CLOUD_PUSH_* and serve the public key with it', async (t) => {
+  const key = (started: Started, token: string) =>
+    fetch(`${started.stack.cloud.server.url}/v1/push/key`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  const off = await start(t);
+  assert.equal(
+    (await key(off, off.stack.cloud.server.invites.create('off').token)).status,
+    404,
+    'push is off without its settings',
+  );
+
+  const vapid = vapidKeys();
+  const on = await start(t, undefined, {
+    CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+    CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+    CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+  });
+  const answer = await key(on, on.stack.cloud.server.invites.create('on').token);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(await answer.json(), { publicKey: vapid.publicKey });
+});
+
+test('Web Push settings that cannot sign stop the start, without the key in the message', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const vapid = vapidKeys();
+  const env = {
+    ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+    CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+    CLOUD_PUSH_VAPID_PRIVATE: 'not-a-private-key-secret',
+    CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+  };
+  const config = readStackConfig({
+    MAKA_CLOUD_DATA_DIR: dir,
+    INSTABOX_API_KEY: 'ibx-test-not-a-key',
+    INSTABOX_MACHINE_ID: 'mch_test',
+    ...env,
+  });
+  config.port = 0;
+  config.mcp.port = 0;
+  config.gateway.port = 0;
+  await assert.rejects(
+    startStack(config, env, {
+      createRunners: () =>
+        ({ runners: [], sweepOrphans: async () => ({}) }) as unknown as CloudRunners,
+    }).then((stack) => stack.close()),
+    (error: Error) => {
+      assert.match(error.message, /Web Push/u);
+      assert.ok(!error.message.includes('not-a-private-key-secret'));
+      return true;
+    },
+  );
 });

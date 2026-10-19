@@ -12,6 +12,7 @@ import { budgetOf, createCloudEvals } from './cloud.js';
 import { FAKE_PROFILES, FakeDriver, FakeGrader, FakeHiddenTests } from './fake.js';
 import { BudgetLedger } from './ledger.js';
 import { type EvalDeps, assertLiveApproved, createLiveDeps } from './live.js';
+import { carrySpend, priorSpentUsd } from './recovery.js';
 import { writeReport } from './report.js';
 import { SweBenchDataset, selectStratified, terminalBenchTasks } from './suites.js';
 import { makeSpec } from './spec-gen.js';
@@ -197,20 +198,6 @@ async function makeSpecCommand(
   return 0;
 }
 
-async function priorSpentUsd(spec: ExperimentSpec, attemptsDir: string): Promise<number> {
-  const store = new FileAttemptStore(attemptsDir);
-  const cap = budgetOf(spec.budget).taskBudgetUsd;
-  let spent = 0;
-  for (const cell of expandExperiment(spec)) {
-    for (const attempt of await store.list(cell.id)) {
-      const { costUsd, status } = attempt.result;
-      // An attempt that reported no cost but did real work is charged its cap.
-      spent += costUsd ?? (status === 'infra_failed' ? 0 : cap);
-    }
-  }
-  return spent;
-}
-
 function dryRunDeps(spec: ExperimentSpec): EvalDeps {
   const drivers = new Map<string, SubjectDriver>(
     spec.subjects.map((subject) => [
@@ -244,9 +231,12 @@ async function runCommand(argv: readonly string[], io: CloudEvalsCliDependencies
         )(spec, workRoot, out)
       : dryRunDeps(spec);
     const budget = budgetOf(spec.budget);
+    // Spend an earlier crashed process left in the journal is kept in the experiment directory
+    // before the ledger starts, so no restart can forget it.
+    const carried = await carrySpend(out, deps.recovered);
     const ledger = new BudgetLedger(
       budget.totalBudgetUsd,
-      await priorSpentUsd(spec, join(out, 'attempts')),
+      await priorSpentUsd(spec, join(out, 'attempts'), carried),
     );
     const { executor, subject } = createCloudEvals({
       mode: live ? 'live' : 'dry-run',

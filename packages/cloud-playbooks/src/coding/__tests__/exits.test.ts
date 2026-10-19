@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CHECK_START_SCRIPT, CLONE_SCRIPT, CHECK_STATUS_SCRIPT } from '../scripts.js';
+import { CLONE_SCRIPT } from '../scripts.js';
 import {
   type AgentTurn,
   collect,
@@ -11,50 +11,35 @@ import {
   gate,
   type Harness,
   isAlive,
+  isCheck,
   readJson,
+  recordedPids,
+  recordPid,
   setup,
   terminal,
   writeRepro,
   zeroStats,
 } from './harness.js';
 
-/** A reproduction test that records its pid and runs until killed; with `onlyOnBase`, it passes when add() is fixed. */
+/**
+ * A reproduction test that records its pid under `hang` and runs until killed; with `onlyOnBase`,
+ * it passes when add() is fixed, so it hangs only in the base check.
+ */
 async function hangingRepro(turn: AgentTurn, onlyOnBase = false): Promise<void> {
   const body = [
-    'echo $$ > "$MAKA_TEST_PIDS/$(basename "$PWD")-$RANDOM"',
     'source lib/add.sh',
     onlyOnBase ? '[ "$(add 2 3)" = 5 ] && exit 0' : '',
+    recordPid('hang'),
     'while :; do sleep 0.05; done',
   ].join('\n');
   await writeRepro(turn, `${body}\n`);
   await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), FIXED_ADD);
 }
 
-/** Holds the runner right after the named check started, and returns the pid it records. */
-function holdAfterCheckStart(h: Harness, check: string) {
-  const started = gate();
-  const release = gate();
-  h.hook = async (call, phase) => {
-    if (
-      phase === 'after' &&
-      call.script === CHECK_START_SCRIPT &&
-      call.envs.MAKA_CHECK?.endsWith(check)
-    ) {
-      started.open();
-      await release.promise;
-    }
-  };
-  return { started: started.promise, release: () => release.open() };
-}
-
-async function checkPid(h: Harness, taskId: string, check: string): Promise<number> {
-  const dir = join(h.root, taskId);
-  for (;;) {
-    const name = (await fs.readdir(dir)).find((file) => file.endsWith(`${check}.pid`));
-    const text = name ? (await fs.readFile(join(dir, name), 'utf8')).trim() : '';
-    if (text) return Number(text);
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+/** The pid of the hanging reproduction test, once it runs. */
+async function hangingPid(h: Harness, until?: Promise<unknown>): Promise<number> {
+  const [pid] = await recordedPids(h, 'hang', 1, until);
+  return pid as number;
 }
 
 test('cancel while the repository is being fetched: nothing starts and the sandbox is released', async (t) => {
@@ -137,15 +122,11 @@ test('cancel during a check stops the check process', async (t) => {
     await hangingRepro(turn);
     return 'ok';
   };
-  const hold = holdAfterCheckStart(h, 'repro');
   const handle = await h.runner.start(await h.spec('tsk_ccheck'));
   const events = collect(handle);
-  await hold.started;
-  const pid = await checkPid(h, 'tsk_ccheck', 'repro');
+  const pid = await hangingPid(h, events);
   assert.equal(isAlive(pid), true);
-  const cancelled = handle.cancel();
-  hold.release();
-  await cancelled;
+  await handle.cancel();
   assert.equal(terminal(await events), undefined);
   assert.equal(isAlive(pid), false, 'the check was stopped');
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
@@ -162,20 +143,16 @@ test('cancel during the base check stops it and puts the change back', async (t)
   h.runner = h.makeRunner({
     onCleanupError: (f) => cleanupErrors.push(`${f.step}: ${String(f.error)}`),
   });
-  const hold = holdAfterCheckStart(h, 'repro-base');
   const handle = await h.runner.start(await h.spec('tsk_cbase'));
   const events = collect(handle);
-  await hold.started;
+  const pid = await hangingPid(h, events);
   const workspace = join(h.root, 'tsk_cbase', 'workspace');
   assert.notEqual(
     await fs.readFile(join(workspace, 'lib', 'add.sh'), 'utf8'),
     FIXED_ADD,
     'reverted for the check',
   );
-  const pid = await checkPid(h, 'tsk_cbase', 'repro-base');
-  const cancelled = handle.cancel();
-  hold.release();
-  await cancelled;
+  await handle.cancel();
   assert.equal(terminal(await events), undefined);
   assert.equal(isAlive(pid), false);
   assert.equal(
@@ -194,20 +171,19 @@ test('a sandbox error during a check fails the task and still stops the check', 
     await hangingRepro(turn);
     return 'ok';
   };
-  const hold = holdAfterCheckStart(h, 'repro');
-  const handle = await h.runner.start(await h.spec('tsk_cthrow'));
-  const events = collect(handle);
-  await hold.started;
-  const pid = await checkPid(h, 'tsk_cthrow', 'repro');
-  h.fake.onExec = (request) =>
-    request.body?.cmd === CHECK_STATUS_SCRIPT
-      ? { status: 400, error: { code: 'bad_request', message: 'broken', retryable: false } }
-      : undefined;
-  hold.release();
-  const last = terminal(await events);
-  assert.equal(last?.type, 'failed');
-  h.fake.onExec = undefined;
-  assert.equal(isAlive(pid), false, 'the check was stopped by the cleanup');
+  // The check's exec loses its connection while the check runs in the sandbox.
+  let running: Promise<unknown> | undefined;
+  h.replace = (call, run) => {
+    if (!isCheck(call)) return undefined;
+    running = run().catch(() => undefined);
+    return hangingPid(h, running).then(() => {
+      throw new Error('socket hang up');
+    });
+  };
+  const last = terminal(await collect(await h.runner.start(await h.spec('tsk_cthrow'))));
+  assert.deepEqual(last, { type: 'failed', reason: 'socket hang up' });
+  assert.equal(isAlive(await hangingPid(h)), false, 'the check was stopped');
+  await running;
   zeroStats(h.runner);
 });
 
@@ -241,19 +217,15 @@ test('after a restart, stopOrphaned stops a check the old process left running',
     await hangingRepro(turn);
     return 'ok';
   };
-  const hold = holdAfterCheckStart(h, 'repro');
   const old = await h.runner.start(await h.spec('tsk_orphan'));
   const events = collect(old);
-  await hold.started;
-  const pid = await checkPid(h, 'tsk_orphan', 'repro');
+  const pid = await hangingPid(h, events);
 
   // A new process knows the task only by id.
   await h.makeRunner().stopOrphaned('tsk_orphan');
   assert.equal(isAlive(pid), false);
 
-  const cancelled = old.cancel();
-  hold.release();
-  await cancelled;
+  await old.cancel();
   await events;
 });
 

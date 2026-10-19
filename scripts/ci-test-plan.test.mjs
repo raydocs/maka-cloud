@@ -215,6 +215,13 @@ test('runtime changes retain the dedicated Runtime Host lane', () => {
   assert.deepEqual(plan.standardWorkspaces, ['packages/runtime', 'packages/cli', 'apps/desktop']);
 });
 
+test('coding playbook changes enable user namespaces for its check isolation', () => {
+  const plan = planTests(['packages/cloud-playbooks/src/coding/runner.ts']);
+
+  assert.ok(plan.workspaces.includes('packages/cloud-playbooks'));
+  assert.equal(plan.runtimeSandbox, true);
+});
+
 test('CLI release inputs select installed-package validation', () => {
   const plan = planTests(['packages/runtime/src/runtime.ts'], { graph });
 

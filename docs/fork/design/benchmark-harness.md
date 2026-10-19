@@ -76,6 +76,12 @@ stop that could not be confirmed, or a grader error is `infra_failed` (replaced 
   cannot overspend the total. A run that started and reported no cost is charged its cap. On a resumed run the ledger
   starts from what the earlier attempts already cost. Every exit (finish, abort, timeout, driver throw, grader throw)
   settles the reservation, stops the run, returns the lease and removes the attempt directory; each has a test.
+- **Restart.** The gateway's spend journal (`gateway-spend.db`) is in the experiment directory. At the start of a live
+  run, what earlier processes spent through it (their settles, and every open hold at its reserved amount) is moved into
+  `carried-spend.json` in the same directory, synced to disk before the journal is told to forget it, and starts the
+  ledger. An attempt record names its gateway task id; for an attempt the journal also holds, the larger of the two
+  amounts counts, once. A cell that died before it was recorded therefore still counts. An unreadable
+  `carried-spend.json` stops the run.
 
 ## Commands
 
@@ -110,4 +116,9 @@ cells is biased); the left-out ones are listed in the report.
   it is refused. A live path waits on running task images in instabox.
 - Cost is what the CLIs report, priced with the runners' table; it is not an invoice, and grading is not included.
 - The agents can reach the public internet, where upstream fixes exist; only the base commit is fetched, with no history.
-- The 50-task subset is produced by `select` from the real dataset; the instance ids are not checked in.
+- The 50-task subset is `suites/swe-bench-verified-50.json`: `select --size 50 --seed 1` over the 500 instances of
+  `princeton-nlp/SWE-bench_Verified` (downloaded from Hugging Face on 2026-10-19; the file records the parquet's sha256
+  and the URL). The parquet becomes the jsonl the harness reads with `scripts/parquet-to-jsonl.py`, which is
+  deterministic: the `version` in the list is the sha256 prefix of that jsonl. The ids are public; the dataset itself
+  (with the hidden tests) is not checked in. A different dataset file gives a different `version`, so a spec made from
+  it no longer matches the list.
