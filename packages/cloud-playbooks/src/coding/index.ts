@@ -6,5 +6,6 @@ export * from './playbook.js';
 export * from './pull-request.js';
 export * from './runner.js';
 export * from './sandbox.js';
+export * from './scripts.js';
 export * from './task.js';
 export * from './wiring.js';
