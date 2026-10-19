@@ -21,6 +21,7 @@ import {
   sameConversationInputPolicy,
   type TaskDirectory,
 } from '@maka-cloud/runners';
+import { pushConfigFromEnv } from '@maka-cloud/server';
 import type { StackConfig } from './config.js';
 import {
   conductorGateway,
@@ -125,7 +126,11 @@ export async function startStack(
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
     });
 
+    // Web Push is on when all three VAPID settings are set. The private key is read here from the
+    // environment and goes to the server only; it is not part of the config the stack describes.
+    const push = config.pushSet ? pushConfigFromEnv(env) : undefined;
     cloud = await startCloud({
+      ...(push === undefined ? {} : { push }),
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
       handoffRoot: config.handoffRoot,

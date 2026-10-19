@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { type ModelPrice, priceProblem } from '@maka-cloud/gateway';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
+import { pushConfigFromEnv } from '@maka-cloud/server';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
 /**
@@ -53,6 +54,8 @@ export interface StackConfig {
   openAiKeySet: boolean;
   /** With it, research runs get a `web-search` command, paid per call from their budget. */
   searchKeySet: boolean;
+  /** All three VAPID settings are set: the Web Push routes are on. The key itself is read from the environment by the stack. */
+  pushSet: boolean;
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
@@ -109,6 +112,13 @@ export const ENV_VARIABLES = [
     'daily cap on model checks, default 5; changeable in the inbox settings',
   ],
   ['MAKA_CLOUD_SUMMARY_MODEL', 'model that writes the digest summary (default claude-haiku-5-5)'],
+  ['CLOUD_PUSH_VAPID_PUBLIC', 'Web Push: the VAPID public key (with the next two, turns push on)'],
+  ['CLOUD_PUSH_VAPID_PRIVATE', 'Web Push: the VAPID private key, kept in memory only'],
+  ['CLOUD_PUSH_SUBJECT', 'Web Push: the VAPID contact, a mailto: or https: URL'],
+  [
+    'CLOUD_PUSH_ALLOWED_HOSTS',
+    'Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows',
+  ],
   [
     'MAKA_GITHUB_TOKEN',
     'fine-grained GitHub token for opening pull requests, read when one is opened',
@@ -184,7 +194,14 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     inbox: readInboxConfig(value, problems),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
+    pushSet: false,
   };
+  try {
+    config.pushSet = pushConfigFromEnv(env) !== undefined;
+  } catch (error) {
+    // The message names the missing variables and never a value.
+    problems.push(error instanceof Error ? error.message : 'the Web Push settings are not valid');
+  }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
   const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
@@ -272,6 +289,7 @@ export function describeConfig(config: StackConfig): string[] {
     `gateway for tasks:   ${config.gateway.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `gateway models:      ${describeModels(config.gateway.models)}`,
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
+    `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,

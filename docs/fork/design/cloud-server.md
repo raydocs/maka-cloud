@@ -148,7 +148,9 @@ sandboxing CSP, so a browser never renders them. At most 8 reads run at once
 
 Off unless `CloudServerOptions.push` is set; `pushConfigFromEnv()` builds it from
 `CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` and
-optionally `CLOUD_PUSH_ALLOWED_HOSTS`. The private key lives in memory only: it is
+optionally `CLOUD_PUSH_ALLOWED_HOSTS`. In the host stack, `readStackConfig` checks
+them at start (a partial set is a configuration error) and `startStack` passes the
+result on. The private key lives in memory only: it is
 not logged, not stored, and bad settings fail startup with a message that does
 not contain them. Encryption (RFC 8291) and VAPID signing (RFC 8292) are the
 `web-push` package's; the server only builds the request with it and sends it
