@@ -554,7 +554,10 @@ export function planTests(changedFiles, options = {}) {
     // shell tools, so the bubblewrap + user-namespace setup is required whenever
     // the cli workspace runs in the dependency closure, not only for direct
     // cli/runtime edits (e.g. a storage-only change still selects cli via runtime).
-    runtimeSandbox: workspaces.includes('packages/cli'),
+    // maka-cloud fork: the coding playbook runs each check in its own user and PID
+    // namespace (unshare), so its tests need the same user-namespace step.
+    runtimeSandbox:
+      workspaces.includes('packages/cli') || workspaces.includes('packages/cloud-playbooks'),
     // The released forward roll: a build under test reads durable state a
     // published predecessor wrote. Selected by the decoders and the operation
     // vocabulary they decode against, plus the SQLite schemas.
