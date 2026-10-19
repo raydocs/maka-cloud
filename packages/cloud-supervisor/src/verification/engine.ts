@@ -97,7 +97,10 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
       prepared.unavailable.some((entry) => entry.transient),
     );
   }
-  if (prepared.claims.length === 0) return { state: 'passed' };
+  // A pass needs something that was judged: an empty set of claims proves nothing.
+  if (prepared.claims.length === 0) {
+    return cannot('incomplete', 'there were no claims left to check', false);
+  }
 
   const model = chooseVerifier(options.models, task.runner);
   if (!model) {
@@ -108,12 +111,15 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
     );
   }
   const request = buildRequest(model, prepared.claims, prepared.evidence);
-  const reserved = input.spend.reserve(
-    input.attemptKey,
-    upperBoundUsd(model, request),
-    task.conversationId,
-    task.taskId,
-  );
+  const bound = upperBoundUsd(model, request);
+  if (bound === undefined) {
+    return cannot(
+      'budget',
+      'the cost of the check could not be bounded safely, so the model check did not run',
+      false,
+    );
+  }
+  const reserved = input.spend.reserve(input.attemptKey, bound, task.conversationId, task.taskId);
   if (reserved !== undefined) {
     return cannot(
       'budget',
@@ -129,7 +135,7 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
     reply = await raceAbort(model.verify(request, signal), signal);
   } catch {
     // Whether tokens were billed is unknown: the reservation stands as the charge.
-    input.spend.settle(input.attemptKey, upperBoundUsd(model, request));
+    input.spend.settle(input.attemptKey, bound);
     return signal.aborted
       ? cannot('aborted', 'the check was stopped', true)
       : cannot('model_error', 'the checking model did not answer', true);

@@ -107,8 +107,24 @@ export function buildRequest(
   };
 }
 
-/** Characters per token the bound assumes: below real text, so the bound is above the real cost. */
-const CHARS_PER_TOKEN = 2;
+/**
+ * Room for what a provider adds around the text it is sent: message framing,
+ * role markers and the like. Counted in tokens, on top of the bytes.
+ */
+const WRAPPER_TOKENS = 1024;
+
+/**
+ * The most input tokens a request can use: one token per UTF-8 byte of the
+ * text, plus the wrapper. No tokenizer spends more than a token per byte, and
+ * dense text (CJK, emoji, base64) comes close to it, so this holds where a
+ * characters-per-token guess does not. The one place the estimate lives: a
+ * provider's own reservation replaces it here.
+ */
+export function inputTokenBound(request: Pick<VerifierRequest, 'instructions' | 'prompt'>): number {
+  return (
+    Buffer.byteLength(request.instructions) + Buffer.byteLength(request.prompt) + WRAPPER_TOKENS
+  );
+}
 
 export function costUsd(
   model: VerifierModel,
@@ -121,11 +137,18 @@ export function costUsd(
   );
 }
 
-/** The most a request can cost: every input character as half a token, and the output cap in full. */
-export function upperBoundUsd(model: VerifierModel, request: VerifierRequest): number {
-  const inputChars = request.instructions.length + request.prompt.length;
-  return costUsd(model, {
-    inputTokens: Math.ceil(inputChars / CHARS_PER_TOKEN),
+/**
+ * The most a request can cost: the input bound and the output cap in full. Or
+ * undefined when no safe bound can be computed (a price or an output cap that
+ * is not a finite, non-negative number): such a request is not made.
+ */
+export function upperBoundUsd(model: VerifierModel, request: VerifierRequest): number | undefined {
+  const { inputPerMTokUsd, outputPerMTokUsd } = model.price;
+  const safe = (value: number) => Number.isFinite(value) && value >= 0;
+  if (![inputPerMTokUsd, outputPerMTokUsd, request.maxOutputTokens].every(safe)) return undefined;
+  const bound = costUsd(model, {
+    inputTokens: inputTokenBound(request),
     outputTokens: request.maxOutputTokens,
   });
+  return Number.isFinite(bound) ? bound : undefined;
 }

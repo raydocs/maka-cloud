@@ -427,3 +427,50 @@ test('the spend ledger is append-only', async () => {
     db.close();
   }
 });
+
+test('dense text is bounded by its UTF-8 bytes, so the reservation covers a tokenizer that spends a token per byte', async () => {
+  const w = world();
+  // 20000 CJK characters are 60000 bytes; half a token per character would be 10000 tokens.
+  codingFiles(w, 't1', { patch: `+${'漢'.repeat(20_000)}\n` });
+  const r = await verifyRig(w);
+  await finishTask(r, 't1');
+  const request = w.openai.requests[0];
+  assert.ok(request);
+  const bytes = Buffer.byteLength(request.instructions) + Buffer.byteLength(request.prompt);
+  assert.ok(bytes > 60_000, `the request is dense: ${bytes} bytes`);
+  const [bound] = [...w.budget.reserved.values()];
+  const floor = (bytes * 1 + request.maxOutputTokens * 5) / 1_000_000;
+  assert.ok((bound ?? 0) >= floor, `reserved ${bound}, a token per byte is ${floor}`);
+  await r.stop();
+});
+
+test('a price or limit that gives no safe bound refuses the model check: no call, nothing reserved, nothing charged', async () => {
+  for (const price of [
+    { inputPerMTokUsd: Number.NaN, outputPerMTokUsd: 5 },
+    { inputPerMTokUsd: 1, outputPerMTokUsd: Number.POSITIVE_INFINITY },
+    { inputPerMTokUsd: -1, outputPerMTokUsd: 5 },
+  ]) {
+    const w = world();
+    codingFiles(w, 't1');
+    (w.openai as { price: typeof price }).price = price;
+    const r = await verifyRig(w);
+    await finishTask(r, 't1');
+    const label = JSON.stringify(price);
+    assert.equal(w.openai.requests.length, 0, label);
+    assert.equal(w.budget.reserveCalls, 0, label);
+    assert.equal(r.supervisor.verifierSpentToday(), 0, label);
+    assert.equal(itemsOf(r, 'finished').length, 0, label);
+    assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /could not be bounded/, label);
+    await r.stop();
+  }
+
+  const w = world();
+  codingFiles(w, 't1');
+  (w.openai as { maxOutputTokens: number }).maxOutputTokens = Number.NaN;
+  const r = await verifyRig(w);
+  await finishTask(r, 't1');
+  assert.equal(w.openai.requests.length, 0);
+  assert.equal(w.budget.reserveCalls, 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /could not be bounded/);
+  await r.stop();
+});

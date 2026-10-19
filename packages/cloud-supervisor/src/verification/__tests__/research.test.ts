@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createSourceFetcher } from '../fetcher.js';
 import {
   FakeFetcher,
   TUNNEL_QUOTE,
@@ -305,6 +306,87 @@ test('report data that is listed but missing or unreadable fails; one that is no
   assert.match(itemsOf(c, 'finished')[0]?.ask ?? '', /not independently checked/);
   assert.equal(unlisted.fetcher.fetched.length, 0);
   await c.stop();
+});
+
+async function checkedResearch(setup: (w: ReturnType<typeof world>) => void) {
+  const w = world();
+  setup(w);
+  const r = await verifyRig(w);
+  await finishTask(r, 't1', researchManifest(), { runner: 'codex' });
+  return { w, r };
+}
+
+test('a report with no claims is a failure, not a pass: nothing was checked', async () => {
+  const { w, r } = await checkedResearch((w) => researchFiles(w, 't1', { claims: [] }));
+  assert.equal(itemsOf(r, 'finished').length, 0, 'never "independently checked"');
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /no claims/);
+  assert.equal(w.fetcher.fetched.length, 0);
+  assert.equal(w.anthropic.requests.length, 0);
+  await r.stop();
+});
+
+test('a record that removes every claim leaves nothing to check and is a failure', async () => {
+  const { w, r } = await checkedResearch((w) => researchFiles(w, 't1', { removed: ['c1', 'c2'] }));
+  assert.equal(itemsOf(r, 'finished').length, 0);
+  assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /no claim is left/);
+  assert.equal(w.fetcher.fetched.length, 0);
+  assert.equal(w.anthropic.requests.length, 0);
+  await r.stop();
+});
+
+test('a removal the record does not back with a failing status, or of a claim the report does not have, fails', async () => {
+  // c2 is removed from the check while the record itself calls it verified.
+  const forged = await checkedResearch((w) =>
+    researchFiles(w, 't1', { removed: ['c2'], statuses: { c2: 'quote_verified' } }),
+  );
+  assert.equal(itemsOf(forged.r, 'finished').length, 0);
+  assert.match(itemsOf(forged.r, 'verification_failed')[0]?.ask ?? '', /Traffic is mostly freight/);
+  assert.equal(forged.w.anthropic.requests.length, 0);
+  await forged.r.stop();
+
+  // A removal naming an id that is not in the delivered report.
+  const unknown = await checkedResearch((w) => {
+    researchFiles(w, 't1');
+    w.evidence.set(
+      't1',
+      'verification.json',
+      JSON.stringify({
+        version: 1,
+        claims: [
+          { id: 'c1', status: 'quote_verified', removed: false },
+          { id: 'c2', status: 'quote_verified', removed: false },
+          { id: 'ghost', status: 'quote_not_found', removed: true },
+        ],
+      }),
+    );
+  });
+  assert.equal(itemsOf(unknown.r, 'finished').length, 0);
+  assert.match(itemsOf(unknown.r, 'verification_failed')[0]?.ask ?? '', /not in the report/);
+  await unknown.r.stop();
+});
+
+test('a real 404 or 410 from the fetcher is a deterministic failure, not a source that is merely down', async () => {
+  for (const status of [404, 410]) {
+    const w = world({
+      fetcher: createSourceFetcher({
+        resolve: async () => ['93.184.216.34'],
+        transport: {
+          get: async () => ({
+            status,
+            headers: { 'content-type': 'text/html' },
+            body: (async function* () {})(),
+            close() {},
+          }),
+        },
+      }),
+    });
+    researchFiles(w, 't1');
+    const r = await verifyRig(w);
+    await finishTask(r, 't1', researchManifest(), { runner: 'codex' });
+    assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', new RegExp(`answered ${status}`));
+    assert.equal(w.anthropic.requests.length, 0);
+    await r.stop();
+  }
 });
 
 void FakeFetcher;

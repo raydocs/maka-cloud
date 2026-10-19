@@ -32,6 +32,7 @@ export {
   type FetcherOptions,
   type SourceFetcher,
 } from './verification/fetcher.js';
+export { inputTokenBound } from './verification/model.js';
 export { nodeTransport, type Transport } from './verification/transport.js';
 export {
   type ArtifactRead,
