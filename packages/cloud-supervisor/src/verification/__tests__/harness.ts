@@ -318,7 +318,13 @@ export function defaultClaims(): ReportClaim[] {
 export function researchFiles(
   w: World,
   taskId: string,
-  options: { claims?: ReportClaim[]; removed?: string[]; pages?: Record<string, string> } = {},
+  options: {
+    claims?: ReportClaim[];
+    removed?: string[];
+    /** The status the exported record gives a claim; a removed claim defaults to a failing one. */
+    statuses?: Record<string, string>;
+    pages?: Record<string, string>;
+  } = {},
 ): ReportClaim[] {
   const claims = options.claims ?? defaultClaims();
   const sourceIds = [...new Set(claims.flatMap((claim) => claim.citations.map((c) => c.sourceId)))];
@@ -336,11 +342,14 @@ export function researchFiles(
     'verification.json',
     JSON.stringify({
       version: 1,
-      claims: claims.map((claim) => ({
-        id: claim.id,
-        status: 'quote_verified',
-        removed: options.removed?.includes(claim.id) ?? false,
-      })),
+      claims: claims.map((claim) => {
+        const removed = options.removed?.includes(claim.id) ?? false;
+        return {
+          id: claim.id,
+          status: options.statuses?.[claim.id] ?? (removed ? 'quote_not_found' : 'quote_verified'),
+          removed,
+        };
+      }),
     }),
   );
   const pages = options.pages ?? {
