@@ -26,6 +26,10 @@ export type ConductorFeedEvent =
       /** The recommended option comes first. */
       options: QuestionOptionPayload[];
       recommended: string;
+      /** The model's own words, shown under the code-built question. */
+      note?: string;
+      /** For an irreversible action: the exact held call the user approves or rejects. */
+      action?: { tool: string; args: unknown };
     }
   | {
       kind: 'answered';
@@ -129,6 +133,10 @@ function payloadOf(event: ConductorFeedEvent): Record<string, unknown> {
         question: event.question,
         options: event.options.map((option) => ({ id: option.id, label: option.label })),
         recommended: event.recommended,
+        ...(event.note === undefined ? {} : { note: event.note }),
+        ...(event.action === undefined
+          ? {}
+          : { action: { tool: event.action.tool, args: event.action.args } }),
       };
     case 'answered':
       return {

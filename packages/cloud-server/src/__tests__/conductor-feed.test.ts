@@ -276,3 +276,25 @@ test('a version 1 database is migrated in place and keeps its rows', async (t) =
   assert.throws(() => db.exec("UPDATE conductor_events SET data = 'x'"), /append-only/u);
   assert.throws(() => db.exec('DELETE FROM conductor_events'), /append-only/u);
 });
+
+test('an approval question carries the held call and the model note as separate fields', async (t) => {
+  const h = await startHarness(t);
+  const conversationId = await newConversation(h);
+  h.server.publisher.publish({
+    ...question(conversationId, 'evt_irr'),
+    reason: 'irreversible',
+    question: 'Run delete_account?',
+    options: [
+      { id: 'reject', label: 'Reject' },
+      { id: 'approve', label: 'Approve' },
+    ],
+    recommended: 'reject',
+    note: 'Generate a read-only preview?',
+    action: { tool: 'delete_account', args: { accountId: 'a_1' } },
+  });
+  const stream = await openStream(t, h, `?conversation=${conversationId}`);
+  const [, asked] = await stream.until(2);
+  assert.equal(asked?.data.question, 'Run delete_account?');
+  assert.equal(asked?.data.note, 'Generate a read-only preview?');
+  assert.deepEqual(asked?.data.action, { tool: 'delete_account', args: { accountId: 'a_1' } });
+});
