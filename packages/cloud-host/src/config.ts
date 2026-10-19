@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
+import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
 /**
  * Everything the stack needs, read from the environment. Secret values are kept
@@ -13,6 +14,8 @@ export interface StackConfig {
   conductorRoot: string;
   runnerSessionsPath: string;
   codingDeliveriesPath: string;
+  /** The supervisor's own database. */
+  supervisorDbPath: string;
   host: string;
   port: number;
   mcp: {
@@ -30,6 +33,7 @@ export interface StackConfig {
     machineId: string;
     apiUrl?: string;
   };
+  inbox: InboxConfig;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
@@ -63,6 +67,15 @@ export const ENV_VARIABLES = [
   ['INSTABOX_MACHINE_ID', 'required: the sandbox machine tasks run in'],
   ['INSTABOX_API_URL', 'sandbox API base URL'],
   ['OPENAI_API_KEY', 'the Codex runner’s API key, read when a task starts'],
+  [
+    'MAKA_CLOUD_VERIFIER_MODELS',
+    'JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run',
+  ],
+  [
+    'MAKA_CLOUD_VERIFIER_DAILY_CAP_USD',
+    'daily cap on model checks, default 5; changeable in the inbox settings',
+  ],
+  ['MAKA_CLOUD_SUMMARY_MODEL', 'model that writes the digest summary (default claude-haiku-5-5)'],
   [
     'MAKA_GITHUB_TOKEN',
     'fine-grained GitHub token for opening pull requests, read when one is opened',
@@ -120,6 +133,7 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     conductorRoot: join(dataDir, 'conductor'),
     runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
     codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
+    supervisorDbPath: join(dataDir, 'supervisor.db'),
     host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
     port: port('MAKA_CLOUD_PORT', 8080),
     mcp: {
@@ -128,6 +142,7 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
     },
     conductor: { apiKey: required('ANTHROPIC_API_KEY') },
     instabox: { machineId: '' },
+    inbox: readInboxConfig(value, problems),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
   };
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
@@ -163,5 +178,15 @@ export function describeConfig(config: StackConfig): string[] {
     `Codex runner key:    ${config.openAiKeySet ? 'set' : 'not set (Codex tasks will fail)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
+    `work checks:        ${describeVerifiers(config.inbox)}`,
+    `digest summary:      ${config.inbox.summaryModel}`,
   ];
+}
+
+function describeVerifiers(inbox: InboxConfig): string {
+  if (inbox.verifierModels.length === 0) {
+    return `no model configured (only the checks that need none run), daily cap $${inbox.dailyCapUsd}`;
+  }
+  const vendors = [...new Set(inbox.verifierModels.map((entry) => entry.vendor))].join(', ');
+  return `${inbox.verifierModels.length} model(s) from ${vendors}, daily cap $${inbox.dailyCapUsd}`;
 }

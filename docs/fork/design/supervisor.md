@@ -532,3 +532,43 @@ supervisor package, so the two build independently and the composition code (PR
 - **Not in this PR:** the `Supervisor` to `InboxService` adapter, the notifier,
   the conversation budget and verifier model adapters, and the end-to-end test
   (PR 3b, `packages/cloud-host`).
+
+## As built (PR 3b, host wiring)
+
+`packages/cloud-host` joins the server and the supervisor. The server and the
+supervisor still import nothing from each other.
+
+- **Start.** `startCloud({ supervisor })` calls the factory with the server's
+  parts and the conductor after the conductor exists and before the server
+  listens; the stack's factory is `startInbox` (`src/inbox/setup.ts`), with the
+  supervisor's database at `<data dir>/supervisor.db`. On close the supervisor
+  stops before the conductor and the database (PR 3a's order).
+- **Adapters** (`src/inbox/`):
+  - `budget.ts`: `BudgetPort` over `Conductor.reserveSpend/settleSpend`. A refusal
+    (budget, no run, conflict, bad amount) or an error reading the budget is a
+    refusal with a reason; settling an unknown key is silent.
+  - `evidence.ts`: artifacts through the server's artifact source (the host-side
+    handoff directory), decoded as UTF-8.
+  - `notifier.ts`: an interrupt becomes a conversation notice (`postNotice`), one
+    per conversation for a batch, the ask clipped to 300 characters. Web push is a
+    second notifier later.
+  - `models.ts`: verifier and summary models over the AI SDK's `generateText`:
+    one stateless request, `maxRetries: 0` (every retry is the supervisor's, and
+    reserved and charged), API key only. Missing usage is charged at the bound.
+    A reply that is not JSON is passed on as text and counts as no verdict.
+  - `service.ts`: the supervisor as the server's `InboxService`; settings and mute
+    kinds are validated by the supervisor's own schema.
+- **Configuration** (`MAKA_CLOUD_VERIFIER_MODELS`): a JSON array of
+  `{vendor, model, inputPerMTokUsd, outputPerMTokUsd, maxInputChars?,
+  maxOutputTokens?, baseUrl?}`. No model id or price is built in. An `openai` entry
+  needs `OPENAI_API_KEY`. `MAKA_CLOUD_VERIFIER_DAILY_CAP_USD` (default 5) is the
+  starting cap, changeable in the inbox settings; `MAKA_CLOUD_SUMMARY_MODEL`
+  defaults to `claude-haiku-5-5`. With no pool the checks that need no model still
+  run, and anything that needs one ends "could not check" instead of passing.
+- **Consequence to know about:** a `claude-agent-sdk` task can only be checked by a
+  non-Anthropic model, so without an `openai` pool entry those tasks are never
+  shown as independently verified.
+- Fork delta: the root `build` and `build:test` chains build the supervisor before
+  the host (the host now depends on it), and `packages/cloud-host` gains
+  `@maka-cloud/supervisor`, `ai`, `@ai-sdk/anthropic` and `@ai-sdk/openai` at the
+  versions `packages/runtime` already pins (one lockfile entry, no new package).

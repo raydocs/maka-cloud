@@ -21,6 +21,7 @@ import {
 } from '@maka-cloud/runners';
 import type { StackConfig } from './config.js';
 import { type Cloud, startCloud } from './host.js';
+import { type InboxSetup, startInbox } from './inbox/setup.js';
 
 /** The playbooks the stack runs: T7's research playbook, T8's coding playbook and the free one. */
 export const STACK_PLAYBOOKS = [researchPlaybook, codingPlaybook, FREE_PLAYBOOK] as const;
@@ -28,6 +29,8 @@ export const STACK_PLAYBOOKS = [researchPlaybook, codingPlaybook, FREE_PLAYBOOK]
 export interface StackDependencies {
   /** Builds the runner fleet from the options the stack sets. Default: `createCloudRunnersFromEnv`. */
   createRunners?: (options: Partial<CloudRunnersOptions>) => CloudRunners;
+  /** Replaces the inbox's models, fetcher and timers, for tests. */
+  inbox?: InboxSetup['override'];
   onWarning?: (message: string, detail?: unknown) => void;
 }
 
@@ -40,7 +43,7 @@ export interface Stack {
 
 /**
  * Starts the whole stack: the runner fleet, the cloud server with its orchestrator, the conductor
- * and the product playbooks. Starting it runs nothing: tasks start only when a user's message
+ * the product playbooks and the supervisor with its inbox. Starting it runs nothing: tasks start only when a user's message
  * reaches the conductor. At start the server stops leftover sandbox runs whose task it does not
  * know, and the conductor retries cancels that a shutdown left undone.
  */
@@ -95,6 +98,19 @@ export async function startStack(
     sweepOrphans: (known) => runners.sweepOrphans(known),
     conductorRoot: config.conductorRoot,
     conductor: { access: config.conductor, playbooks: STACK_PLAYBOOKS, tools: [pullRequests] },
+    supervisor: (context) =>
+      startInbox(
+        {
+          dbPath: config.supervisorDbPath,
+          config: config.inbox,
+          env,
+          ...(config.conductor.baseUrl === undefined
+            ? {}
+            : { anthropicBaseUrl: config.conductor.baseUrl }),
+          ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
+        },
+        context,
+      ),
     onReady: (parts) => {
       orchestrator = parts.orchestrator;
       conductor = parts.conductor;
