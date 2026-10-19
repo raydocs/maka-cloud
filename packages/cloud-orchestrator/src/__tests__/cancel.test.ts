@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readdir } from 'node:fs/promises';
 import { test } from 'node:test';
 import { OrchestratorError, type TaskId } from '../types.js';
 import { eventually, type Harness, makeHarness } from './harness.js';
@@ -135,6 +136,43 @@ test('a task whose ancestor is being cancelled cannot delegate', async (t) => {
     h.orchestrator.delegate(parentSession, { runner: 'fake', brief: 'late child' }),
     (error: unknown) => error instanceof OrchestratorError && error.code === 'invalid_request',
   );
+});
+
+test('a cancel that finishes while a delegate is writing its brief leaves no child behind', async (t) => {
+  let cancelling: Promise<unknown> = Promise.resolve();
+  let onNewTask: () => void = () => {};
+  const h = await makeHarness(t, {
+    orchestrator: {
+      // Runs after delegate's first check and before its brief is written. The
+      // cancel needs no real I/O, so it finishes before the brief write does.
+      newTaskId: () => {
+        onNewTask();
+        return `tsk_${globalThis.crypto.randomUUID().replaceAll('-', '')}`;
+      },
+    },
+  });
+  const conductor = h.session();
+  const parent = await h.orchestrator.delegate(conductor, { runner: 'fake', brief: 'p' });
+  const parentSession = h.executorSession(parent.taskId);
+  await eventually(() => h.fake.runs.length === 1, 'run');
+  const eventsBefore = (await h.store.read()).length;
+
+  onNewTask = () => {
+    onNewTask = () => {};
+    cancelling = h.orchestrator.cancel(conductor, parent.taskId);
+  };
+  await assert.rejects(
+    h.orchestrator.delegate(parentSession, { runner: 'fake', brief: 'late child' }),
+    (error: unknown) => error instanceof OrchestratorError && error.code === 'invalid_request',
+  );
+  await cancelling;
+
+  const created = (await h.store.read(eventsBefore)).filter(
+    ({ event }) => event.type === 'task_created',
+  );
+  assert.deepEqual(created, []);
+  assert.equal(h.fake.runs.length, 1);
+  assert.deepEqual(await readdir(h.dir), [parent.taskId]);
 });
 
 test('a runner whose cancel throws is still recorded as cancelled', async (t) => {

@@ -26,7 +26,10 @@ export interface OrchestratorOptions {
   /** Directory that holds one `<taskId>/` folder of handoff files per task. */
   handoffRoot: string;
   now?: () => number;
-  /** How many levels of delegation a task tree may reach. */
+  /**
+   * How many levels of tasks may sit below a task the caller delegated
+   * directly. With 1, that task can delegate, but its children cannot.
+   */
   maxDepth?: number;
   newTaskId?: () => TaskId;
 }
@@ -104,13 +107,11 @@ export class Orchestrator {
     }
     const parent = session.parentTaskId;
     if (parent !== undefined) {
-      if (this.ancestry(parent).some((task) => task.cancelRequestedBy !== undefined)) {
-        throw new OrchestratorError('invalid_request', 'The calling task is being cancelled');
-      }
+      this.assertParentActive(parent);
       if (this.ancestry(parent).length > this.maxDepth) {
         throw new OrchestratorError(
           'depth_exceeded',
-          `Delegation is limited to ${this.maxDepth} levels`,
+          `Delegation is limited to ${this.maxDepth} levels below a top-level task`,
         );
       }
     }
@@ -122,15 +123,25 @@ export class Orchestrator {
     } catch (error) {
       throw new OrchestratorError('invalid_request', errorMessage(error));
     }
-    await this.record({
-      type: 'task_created',
-      taskId,
-      sessionId: session.sessionId,
-      ...(parent === undefined ? {} : { parentTaskId: parent }),
-      runner: input.runner,
-      ...(input.title === undefined ? {} : { title: input.title }),
-      mode,
-    });
+    try {
+      // A cancel can finish while the brief is being written, so check again
+      // inside the write chain, where it cannot interleave with the append.
+      await this.record(
+        {
+          type: 'task_created',
+          taskId,
+          sessionId: session.sessionId,
+          ...(parent === undefined ? {} : { parentTaskId: parent }),
+          runner: input.runner,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          mode,
+        },
+        parent === undefined ? undefined : () => this.assertParentActive(parent),
+      );
+    } catch (error) {
+      if (error instanceof OrchestratorError) await this.handoff.discard(taskId);
+      throw error;
+    }
     // launch records its own failures; a store failure has nowhere left to report.
     void this.launch(taskId, input.runner, paths).catch(() => undefined);
     if (mode === 'wait') return this.waitView(taskId, input.timeoutMs);
@@ -276,8 +287,10 @@ export class Orchestrator {
     await this.record({ type: 'task_cancelled', taskId });
   }
 
-  private record(event: TaskEvent): Promise<StoredEvent> {
+  /** `guard` runs in the write chain right before the append and aborts it by throwing. */
+  private record(event: TaskEvent, guard?: () => void): Promise<StoredEvent> {
     const written = this.writeChain.then(async () => {
+      guard?.();
       const stored = await this.store.append(event, this.now());
       applyEvent(this.tasks, stored);
       this.afterApply(stored.event);
@@ -335,6 +348,12 @@ export class Orchestrator {
     const task = this.tasks.get(taskId);
     if (!task) throw new OrchestratorError('not_found', `Task not found: ${taskId}`);
     return toView(task);
+  }
+
+  private assertParentActive(parent: TaskId): void {
+    if (this.ancestry(parent).some((task) => task.cancelRequestedBy !== undefined)) {
+      throw new OrchestratorError('invalid_request', 'The calling task is being cancelled');
+    }
   }
 
   /** Ended, or a cancel is under way: the runner's own outcome no longer counts. */
