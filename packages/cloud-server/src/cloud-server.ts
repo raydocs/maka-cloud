@@ -68,6 +68,11 @@ export interface CloudServerOptions {
    */
   createHandler?: (context: {
     publisher: ConversationPublisher;
+    /**
+     * The orchestrator access of a conversation, for work the handler resumes
+     * at start before any message arrives (retrying cancels a crash left undone).
+     */
+    conductorAccess(conversationId: string): ConductorAccess | undefined;
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
@@ -134,8 +139,6 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       options.orchestrator?.now,
     );
     const publisher = new ConductorFeed(db, hub, options.orchestrator?.now);
-    handler = options.createHandler ? await options.createHandler({ publisher }) : options.handler;
-    const ownHandler = handler;
     const accessFor = (sessionId: string): ConductorAccess => ({
       mcpUrl,
       rotateToken: () => {
@@ -144,6 +147,16 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         return rotated.token;
       },
     });
+    handler = options.createHandler
+      ? await options.createHandler({
+          publisher,
+          conductorAccess: (conversationId) => {
+            const sessionId = conversations.sessionOf(conversationId);
+            return sessionId === undefined ? undefined : accessFor(sessionId);
+          },
+        })
+      : options.handler;
+    const ownHandler = handler;
     const costs = new CostLedger(db, hub, options.orchestrator?.now);
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
     const api = new PublicApi({

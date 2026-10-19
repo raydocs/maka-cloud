@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import type { ConversationHandler } from '../cloud-server.js';
+import type { CloudServerOptions, ConversationHandler } from '../cloud-server.js';
 import type { ConductorFeedEvent } from '../conductor-feed.js';
 import { MIGRATIONS, openDatabase } from '../db.js';
 import type { AnswerOutcome } from '../http.js';
@@ -297,4 +297,24 @@ test('an approval question carries the held call and the model note as separate 
   assert.equal(asked?.data.question, 'Run delete_account?');
   assert.equal(asked?.data.note, 'Generate a read-only preview?');
   assert.deepEqual(asked?.data.action, { tool: 'delete_account', args: { accountId: 'a_1' } });
+});
+
+test("createHandler can reach a conversation's orchestrator session before any message arrives", async (t) => {
+  const h = await startHarness(t);
+  const conversationId = await newConversation(h);
+  let access: ReturnType<
+    Parameters<NonNullable<CloudServerOptions['createHandler']>>[0]['conductorAccess']
+  >;
+  let missing: unknown = 'unset';
+  await h.restart({
+    createHandler: ({ conductorAccess }) => {
+      access = conductorAccess(conversationId);
+      missing = conductorAccess('cnv_none');
+      return { onUserMessage: () => undefined };
+    },
+  });
+  assert.equal(missing, undefined);
+  assert.equal(access?.mcpUrl, h.server.mcpUrl);
+  const session = h.server.orchestrator.authenticate(access?.rotateToken() ?? '');
+  assert.ok(session, 'the token acts as the conversation');
 });
