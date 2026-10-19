@@ -7,12 +7,15 @@ import { applySignal, type Reassessment, reassess, stallPass } from './rules.js'
 import {
   dueDigestSlot,
   inQuietHours,
+  localParts,
   type Settings,
   type SettingsPatch,
   SettingsPatchSchema,
   SettingsSchema,
 } from './settings.js';
 import { type AnswerRecord, type ItemRecord, Store } from './store.js';
+import type { VerificationOptions } from './verification/ports.js';
+import { VerificationRunner } from './verification/runner.js';
 import { buildMessage } from './text.js';
 import { type ItemKind, type ItemOption, type ItemView, ITEM_KINDS } from './types.js';
 import { toView } from './view.js';
@@ -34,6 +37,11 @@ export interface SupervisorOptions {
   tickMs?: number;
   feedPage?: number;
   summaryTimeoutMs?: number;
+  /**
+   * Turns on independent verification of finished tasks. Without it a finished
+   * task is shown as finished at once, marked as not independently checked.
+   */
+  verification?: VerificationOptions;
   /** Replaces setInterval, so a test can see the timer is released. */
   schedule?: (fn: () => void, ms: number) => () => void;
 }
@@ -71,6 +79,8 @@ export interface SupervisorStats {
   inflight: number;
   feedSubscriptions: number;
   timers: number;
+  /** Independent verifications running now. */
+  verifications: number;
 }
 
 const ANSWER_ID = /^[A-Za-z0-9_-]{1,64}$/u;
@@ -96,6 +106,7 @@ export class Supervisor {
   private readonly abort = new AbortController();
   private readonly inflight = new Set<Promise<unknown>>();
   private readonly historyBefore: number;
+  private readonly verifier: VerificationRunner | undefined;
   private unsubscribe: (() => void) | undefined;
   private cancelTimer: (() => void) | undefined;
   private stopped = false;
@@ -109,8 +120,22 @@ export class Supervisor {
     this.store = new Store(openDatabase(options.dbPath));
     try {
       this.store.resetInFlight();
+      this.store.tx(() => this.store.requeueRunning());
       const first = this.store.tx(() => this.store.firstStart(this.now()));
       this.historyBefore = first;
+      this.verifier = options.verification
+        ? new VerificationRunner({
+            store: this.store,
+            options: options.verification,
+            now: this.now,
+            settings: () => this.settings(),
+            signal: this.abort.signal,
+            isStopped: () => this.stopped,
+            afterSettled: () => this.afterFeed(),
+            track: (work) => this.track(work),
+            warn: (message, detail) => this.warn(message, detail),
+          })
+        : undefined;
     } catch (error) {
       this.store.db.close();
       throw error;
@@ -142,6 +167,7 @@ export class Supervisor {
       inflight: this.inflight.size,
       feedSubscriptions: this.unsubscribe ? 1 : 0,
       timers: this.cancelTimer ? 1 : 0,
+      verifications: this.verifier?.running ?? 0,
     };
   }
 
@@ -249,7 +275,11 @@ export class Supervisor {
         const signal = signalOf(entry);
         if (signal) {
           const result = this.store.scope(() =>
-            applySignal(this.store, signal, { settings, historyBefore: this.historyBefore }),
+            applySignal(this.store, signal, {
+              settings,
+              historyBefore: this.historyBefore,
+              verification: this.options.verification !== undefined,
+            }),
           );
           if (!result.ok) this.warn(`The supervisor skipped feed entry ${entry.id}`, result.error);
         }
@@ -267,6 +297,7 @@ export class Supervisor {
   }
 
   private async afterFeed(): Promise<void> {
+    this.verifier?.pass();
     await this.flushPushes();
     await this.publishDirty();
   }
@@ -284,6 +315,7 @@ export class Supervisor {
       this.catchUp();
       const at = this.now();
       this.store.tx(() => stallPass(this.store, this.store.settings(this.options.settings), at));
+      this.verifier?.pass();
       await this.flushPushes();
       if (this.stopped) return;
       await this.flushHeld();
@@ -488,6 +520,12 @@ export class Supervisor {
     return item ? toView(item, this.store.answerOfItem(itemId)) : undefined;
   }
 
+  /** What the model checks have charged today (in the configured time zone), reservations included. */
+  verifierSpentToday(): number {
+    const day = localParts(this.settings().timeZone, this.now()).date;
+    return this.store.spentOn(day);
+  }
+
   // ----------------------------------------------------------- settings
 
   getSettings(): Settings {
@@ -523,7 +561,10 @@ export class Supervisor {
     if (!ANSWER_ID.test(request.answerId)) return { ok: false, reason: 'invalid_request' };
     const claim = this.claim(request);
     if (!claim.ok) return claim.result;
-    if (claim.duplicate || claim.local) return this.reply(claim.item.itemId, claim.duplicate);
+    if (claim.duplicate || claim.local) {
+      if (!claim.duplicate) this.verifier?.pass();
+      return this.reply(claim.item.itemId, claim.duplicate);
+    }
     const answer = claim.answer as AnswerRecord;
     await this.track(this.attemptDelivery(answer.answerId));
     return this.reply(claim.item.itemId, false);
@@ -593,6 +634,7 @@ export class Supervisor {
         at,
       });
       if (option.effect === 'local') {
+        if (option.localAction === 'recheck') this.store.requeueVerification(item.taskId ?? '', at);
         this.store.closeItem(item.itemId, option.closeReason ?? 'acknowledged', at);
         return {
           ok: true,

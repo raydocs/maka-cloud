@@ -8,9 +8,9 @@ export class SupervisorDatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
-const APPEND_ONLY = ['item_events', 'answer_log'];
+const APPEND_ONLY = ['item_events', 'answer_log', 'verifier_spend'];
 
 const SCHEMA = `
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -123,13 +123,50 @@ CREATE TABLE digests (
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
-${APPEND_ONLY.map(
-  (table) => `
+${APPEND_ONLY.filter((table) => table !== 'verifier_spend')
+  .map(
+    (table) => `
 CREATE TRIGGER ${table}_no_update BEFORE UPDATE ON ${table}
 BEGIN SELECT RAISE(ABORT, '${table} is append-only'); END;
 CREATE TRIGGER ${table}_no_delete BEFORE DELETE ON ${table}
 BEGIN SELECT RAISE(ABORT, '${table} is append-only'); END;`,
-).join('\n')}
+  )
+  .join('\n')}
+`;
+
+/** Added in schema 2: independent verification and its spend ledger. */
+const SCHEMA_V2 = `
+CREATE TABLE verifications (
+  verification_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL UNIQUE,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  epoch INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  result TEXT,
+  next_attempt_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX verifications_due ON verifications (state, next_attempt_at);
+
+CREATE TABLE verifier_spend (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL,
+  day TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  usd REAL NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX verifier_spend_key ON verifier_spend (key, id);
+CREATE INDEX verifier_spend_day ON verifier_spend (day);
+
+CREATE TRIGGER verifier_spend_no_update BEFORE UPDATE ON verifier_spend
+BEGIN SELECT RAISE(ABORT, 'verifier_spend is append-only'); END;
+CREATE TRIGGER verifier_spend_no_delete BEFORE DELETE ON verifier_spend
+BEGIN SELECT RAISE(ABORT, 'verifier_spend is append-only'); END;
 `;
 
 /**
@@ -167,12 +204,13 @@ function isBusy(error: unknown): boolean {
 function migrate(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
   if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version !== 0) {
+  if (row.user_version !== 0 && row.user_version !== 1) {
     throw new Error(`Unsupported supervisor database schema version ${row.user_version}`);
   }
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.exec(SCHEMA);
+    if (row.user_version === 0) db.exec(SCHEMA);
+    db.exec(SCHEMA_V2);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {

@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import type { Signal, SignalManifest, SignalTaskEvent } from './events.js';
 import { stableHash } from './hash.js';
 import type { Settings } from './settings.js';
-import type { ItemRecord, ItemSpec, Store, TaskRecord } from './store.js';
+import type { ItemRecord, ItemSpec, Store, TaskRecord, VerificationRecord } from './store.js';
 import { clip, quoted } from './text.js';
 import type { CloseReason, EvidenceLink, ItemContext, ItemOption } from './types.js';
+import { verificationKindOf } from './verification/kind.js';
 
 /**
  * The escalation rules. Everything here is deterministic code over the
@@ -15,7 +16,7 @@ import type { CloseReason, EvidenceLink, ItemContext, ItemOption } from './types
  * | Rule | Source |
  * | R1 conductor asked        | `conductor.question`, kind from its code-set reason |
  * | R2 same step failed twice | second `task_failed` with the same step key         |
- * | R3 failed verification    | PR 2                                                |
+ * | R3 failed verification    | `settleVerification`, from the verification runner   |
  * | R4 no progress            | `stallPass`, driven by the tick                      |
  * | R5 low confidence         | `task_succeeded` with `confidence: low`              |
  */
@@ -24,6 +25,8 @@ export interface RuleContext {
   settings: Settings;
   /** Signals older than this are history from before the supervisor first started: they update the projection but raise no items. */
   historyBefore: number;
+  /** Finished top-level tasks are checked independently before they are shown as finished. */
+  verification: boolean;
 }
 
 const MAX_ASK = 600;
@@ -121,6 +124,15 @@ export function fingerprint(store: Store, context: ItemContext): unknown {
         taskId: context.taskId,
         manifestDigest: context.manifestDigest ?? null,
       };
+    case 'verification': {
+      const verification = store.verification(context.taskId ?? '');
+      return {
+        subject: 'verification',
+        verificationId: context.verificationId,
+        epoch: verification?.epoch ?? -1,
+        state: verification?.state ?? 'missing',
+      };
+    }
   }
 }
 
@@ -277,14 +289,22 @@ export function finishedSpec(
   outcome: 'succeeded' | 'failed',
   detail: string,
   manifest?: SignalManifest,
+  checked?: 'passed' | 'not_checked',
 ): ItemSpec {
   const context: ItemContext = {
     subject: 'result',
     taskId: task.taskId,
     outcome,
     manifestDigest: manifest ? digestOf(manifest) : stableHash(detail),
+    ...(checked === undefined ? {} : { checked }),
     ...(task.title === null ? {} : { taskTitle: task.title }),
   };
+  const note =
+    checked === 'passed'
+      ? ' (independently checked)'
+      : checked === 'not_checked'
+        ? ' (not independently checked)'
+        : '';
   return {
     kind: 'finished',
     conversationId: task.conversationId,
@@ -292,7 +312,7 @@ export function finishedSpec(
     dedupeKey: `finished:${task.taskId}`,
     ask: clip(
       outcome === 'succeeded'
-        ? `${quoted(task.title)} finished: ${quoted(detail, 240)}`
+        ? `${quoted(task.title)} finished${note}: ${quoted(detail, 240)}`
         : `${quoted(task.title)} failed: ${quoted(detail, 240)}`,
       MAX_ASK,
     ),
@@ -375,7 +395,7 @@ export function applySignal(store: Store, signal: Signal, rule: RuleContext): vo
   const history = signal.at < rule.historyBefore;
   switch (signal.type) {
     case 'task':
-      applyTask(store, signal.conversationId, signal.at, signal.event, history);
+      applyTask(store, signal.conversationId, signal.at, signal.event, history, rule.verification);
       return;
     case 'user_message':
       // A message sent instead of an answer dismisses the conductor's open question.
@@ -409,6 +429,7 @@ function applyTask(
   at: number,
   event: SignalTaskEvent,
   history: boolean,
+  checking: boolean,
 ): void {
   const settle = (taskId: string) => {
     for (const cleared of store.bumpActivity(taskId, at)) {
@@ -461,7 +482,7 @@ function applyTask(
       if (store.task(event.taskId)) settle(event.taskId);
       return;
     case 'task_succeeded':
-      return endSucceeded(store, event.taskId, event.manifest, at, history);
+      return endSucceeded(store, event.taskId, event.manifest, at, history, checking);
     case 'task_failed':
       return endFailed(store, event.taskId, event.reason, at, history);
     case 'task_cancelled': {
@@ -479,6 +500,7 @@ function endSucceeded(
   manifest: SignalManifest,
   at: number,
   history: boolean,
+  checking: boolean,
 ): void {
   const task = store.task(taskId);
   if (!task || task.state === 'succeeded') return;
@@ -489,13 +511,26 @@ function endSucceeded(
   closeItems(store, `failed2:${task.stepKey}`, 'condition_cleared', at);
   if (history || task.parentTaskId !== null) return;
   const done = store.task(taskId) as TaskRecord;
-  openItem(
-    store,
-    manifest.confidence === 'low'
-      ? lowConfidenceSpec(store, done, manifest)
-      : finishedSpec(store, done, 'succeeded', manifest.summary, manifest),
-    at,
-  );
+  if (manifest.confidence === 'low') {
+    // The decision already stands in for the finished item; the check runs alongside it.
+    openItem(store, lowConfidenceSpec(store, done, manifest), at);
+  }
+  if (!checking) {
+    if (manifest.confidence !== 'low') {
+      openItem(store, finishedSpec(store, done, 'succeeded', manifest.summary, manifest), at);
+    }
+    return;
+  }
+  // One verification per task: a repeated event or a restart finds it claimed.
+  const kind = verificationKindOf(manifest);
+  store.enqueueVerification(done, kind ?? 'none', at);
+  if (kind === undefined && manifest.confidence !== 'low') {
+    openItem(
+      store,
+      finishedSpec(store, done, 'succeeded', manifest.summary, manifest, 'not_checked'),
+      at,
+    );
+  }
 }
 
 function endFailed(
@@ -582,5 +617,135 @@ export function reassess(store: Store, item: ItemRecord, at: number): Reassessme
     }
     case 'result':
       return { action: 'keep' };
+    case 'verification':
+      // Checked again, or settled differently, since the human looked.
+      return { action: 'close', reason: 'condition_cleared' };
   }
+}
+
+// --------------------------------------------------------- verification
+
+type VerifyFailure =
+  | { state: 'failed'; mismatches: Array<{ claim: string; found: string }> }
+  | { state: 'could_not_check'; code: string; reason: string };
+
+function verificationFailedOptions(couldNotCheck: boolean): ItemOption[] {
+  const fix: ItemOption = {
+    id: 'fix',
+    label: 'Ask the agent to fix it',
+    recommended: !couldNotCheck,
+    effect: 'message',
+    messageKey: 'fix_verification',
+  };
+  const accept: ItemOption = {
+    id: 'accept',
+    label: 'Accept it anyway',
+    recommended: false,
+    effect: 'local',
+    closeReason: 'accepted',
+  };
+  if (!couldNotCheck) return [fix, accept];
+  return [
+    {
+      id: 'again',
+      label: 'Check again',
+      recommended: true,
+      effect: 'local',
+      closeReason: 'acknowledged',
+      localAction: 'recheck',
+    },
+    fix,
+    accept,
+  ];
+}
+
+export function verificationFailedSpec(
+  store: Store,
+  task: TaskRecord,
+  verification: VerificationRecord,
+  outcome: VerifyFailure,
+): ItemSpec {
+  const failed = outcome.state === 'failed';
+  const detail = failed
+    ? outcome.mismatches
+        .slice(0, 3)
+        .map((mismatch) => `${quoted(mismatch.claim, 100)}: ${quoted(mismatch.found, 120)}`)
+        .join('; ')
+    : outcome.reason;
+  const more =
+    failed && outcome.mismatches.length > 3 ? ` (and ${outcome.mismatches.length - 3} more)` : '';
+  const context: ItemContext = {
+    subject: 'verification',
+    taskId: task.taskId,
+    verificationId: verification.verificationId,
+    verificationEpoch: verification.epoch,
+    verificationState: outcome.state,
+    detail: clip(detail, 300),
+    ...(failed ? { count: outcome.mismatches.length } : {}),
+    ...(task.title === null ? {} : { taskTitle: task.title }),
+  };
+  return {
+    kind: 'verification_failed',
+    conversationId: task.conversationId,
+    taskId: task.taskId,
+    dedupeKey: `verify:${task.taskId}`,
+    ask: clip(
+      failed
+        ? `The independent check of ${quoted(task.title)} found ${outcome.mismatches.length} ${outcome.mismatches.length === 1 ? 'problem' : 'problems'}: ${detail}${more}`
+        : `The independent check of ${quoted(task.title)} could not be completed, so the result is not verified: ${detail}`,
+      MAX_ASK,
+    ),
+    options: verificationFailedOptions(!failed),
+    allowText: true,
+    evidence: evidenceOf(task.taskId, task.manifest),
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
+
+/**
+ * Records how a verification ended and raises what the human should see, in
+ * the caller's transaction. A check that could not run for a passing reason
+ * goes back in the queue until `maxAttempts`; every other end is final.
+ */
+export function settleVerification(
+  store: Store,
+  verification: VerificationRecord,
+  outcome:
+    | { state: 'passed' }
+    | VerifyFailure
+    | { state: 'retry'; reason: string; nextAttemptAt: number },
+  at: number,
+): void {
+  const task = store.task(verification.taskId);
+  if (!task) return;
+  if (outcome.state === 'retry') {
+    store.retryVerificationLater(
+      verification.verificationId,
+      outcome.reason,
+      outcome.nextAttemptAt,
+      at,
+    );
+    return;
+  }
+  if (outcome.state === 'passed') {
+    store.finishVerification(verification.verificationId, 'passed', null, null, at);
+    if (task.manifest && task.manifest.confidence !== 'low') {
+      openItem(
+        store,
+        finishedSpec(store, task, 'succeeded', task.manifest.summary, task.manifest, 'passed'),
+        at,
+      );
+    }
+    return;
+  }
+  store.finishVerification(
+    verification.verificationId,
+    outcome.state,
+    outcome.state === 'failed' ? 'mismatches' : outcome.reason,
+    outcome.state === 'failed' ? { mismatches: outcome.mismatches } : { code: outcome.code },
+    at,
+  );
+  const current = store.verification(task.taskId) as VerificationRecord;
+  openItem(store, verificationFailedSpec(store, task, current, outcome), at);
 }

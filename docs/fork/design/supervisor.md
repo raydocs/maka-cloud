@@ -440,3 +440,50 @@ Address literals and every spelling the URL parser normalizes (decimal, hex,
 short forms, IPv4-mapped IPv6) are judged by `isPublicAddress`. Only text types
 are read, identity encoding only, 2 MiB and 15 s by default. Nothing calls it
 until the verification engine (PR 2b) is wired.
+
+## As built (PR 2b, independent verification)
+
+Verification is off unless `Supervisor.start` gets a `verification` option
+(evidence source, source fetcher, budget port, verifier pool). Without it a
+finished task is shown as finished at once, as in PR 1.
+
+- **Claim and queue.** When a top-level task succeeds, the feed transaction
+  inserts its one `verifications` row (`UNIQUE(task_id)`). Coding is recognized
+  by `changes.json` or `change.patch` in the manifest's artifacts, research by
+  `report.json` (T7 exports it in #47). A task with neither is `skipped`: a
+  finished item marked "not independently checked", no reads, no spend. A
+  low-confidence result raises its decision at once and is checked alongside it.
+- **Deterministic first, and final.** Coding: the test record says `verified`,
+  every changed file's content matches its recorded git blob hash, the patch is
+  not empty. Research: the exported `report.json` parses, every cited page is
+  fetched once (4 at a time), and `@maka-cloud/playbooks/citations` checks that
+  each quote is in its page and each number in a claim is in its quote. Claims
+  the playbook already dropped (`removed` in the exported `verification.json`)
+  are skipped. A 4xx page or a refused address is a failure; a page that is down
+  is "could not check" and retried.
+- **Model second, only if nothing failed.** The pool model of a different vendor
+  than the runner (`claude-agent-sdk` is Anthropic, `codex` is OpenAI; an unknown
+  runner has no eligible verifier). The request carries claims and evidence as
+  JSON inside blocks closed by a random marker; the answer is validated with zod;
+  the worst of repeated verdicts wins; a missing verdict is "could not check".
+  A verdict can add a failure, never remove one.
+- **Spend.** Before the request the supervisor reserves the upper bound (input
+  at 2 characters per token, output at the cap): first against the day's cap in
+  `verifier_spend` (one synchronous transaction, the day in the configured time
+  zone), then in the conversation's budget (`BudgetPort`, over T5's
+  `reserveSpend`/`settleSpend`). A refusal by either ends the check
+  `could_not_check` with a budget message, and a refusal by the conversation
+  budget releases the daily reservation. After the call both settle to the
+  reported usage; a call that failed is charged at its reservation. A reservation
+  left by a stopped process is settled at its bound if it had been armed (a
+  request may have run) and released if not. `BudgetPort.settle` must treat an
+  unknown key as a no-op.
+- **Ends.** `passed` raises the finished item (independently checked); `failed`
+  and `could_not_check` raise a `verification_failed` item (options: ask the
+  agent to fix it, accept anyway, and for "could not check" also check again,
+  which queues a new epoch). A check that could not run for a passing reason
+  (source or evidence down, the model not answering, a deadline) is retried up to
+  3 times with doubling backoff; `budget` and `no_verifier` are not retried.
+- **Exits.** Slots (default 2), the per-attempt deadline timer and the abort
+  handle are released on done, deadline, stop and throw; a stopped attempt leaves
+  its row running and the next start queues it again.

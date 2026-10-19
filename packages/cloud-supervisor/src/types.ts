@@ -41,6 +41,8 @@ export interface ItemOption {
   messageKey?: string;
   /** For `local` options: why the item closes. */
   closeReason?: 'acknowledged' | 'accepted';
+  /** For `local` options: a side effect inside the answer's transaction. `recheck` queues the verification again. */
+  localAction?: 'recheck';
 }
 
 export type EvidenceLink =
@@ -62,7 +64,7 @@ export type PushState = 'none' | 'pending' | 'sent' | 'held' | 'muted';
 /** What item text and the precondition hash are built from. Agent-written parts are always quoted. */
 export interface ItemContext {
   /** Which state the item depends on; picks the precondition and the reassessment. */
-  subject: 'question' | 'stall' | 'failed_twice' | 'result';
+  subject: 'question' | 'stall' | 'failed_twice' | 'result' | 'verification';
   taskTitle?: string;
   taskId?: string;
   questionId?: string;
@@ -73,6 +75,12 @@ export interface ItemContext {
   outcome?: 'succeeded' | 'failed';
   /** Digest of the manifest the item is about. */
   manifestDigest?: string;
+  /** For `verification` items: which verification, how often it was queued again, and how it ended. */
+  verificationId?: string;
+  verificationEpoch?: number;
+  verificationState?: string;
+  /** For `finished` items: whether an independent check ran. */
+  checked?: 'passed' | 'not_checked';
 }
 
 /** What clients see. No runner, model or vendor name is ever in here. */
