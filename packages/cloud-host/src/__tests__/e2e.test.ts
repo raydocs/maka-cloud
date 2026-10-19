@@ -247,7 +247,10 @@ test('the conductor reaches the model only through the gateway: the key stays th
 
   assert.ok(stack.model.requests.length >= 1);
   assert.equal(keys.length, stack.model.requests.length, 'every model request went through it');
-  assert.ok(keys.every((key) => key === MASTER), 'the vendor got the host’s key');
+  assert.ok(
+    keys.every((key) => key === MASTER),
+    'the vendor got the host’s key',
+  );
   assert.ok(stack.model.requests.every((request) => !request.raw.includes(MASTER)));
   const [run] = stack.cloud.conductor.state.runsInState('done');
   assert.ok(run);
