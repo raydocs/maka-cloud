@@ -55,9 +55,13 @@ export class Handoff {
    * it should under the handoff root.
    *
    * This leaves a window between the check and the open. It is acceptable
-   * because runners never get write access to the handoff root (T6 rule), so
-   * nothing that runs inside a task can swap the directory; the check guards
-   * against a runner that was handed too much, it is not the access control.
+   * because nothing that runs inside a task gets write access to the handoff
+   * root (T6 rule), so nothing in a task can swap the directory; the check
+   * guards against a runner that was handed too much, it is not the access
+   * control. The runner's own host process does write there: `result.json`
+   * and, before it reports a task finished, the files its manifest lists as artifacts, as
+   * validated bytes into directories it checks are real (`@maka-cloud/runners`,
+   * design doc "Artifacts"). That is still not the sandbox.
    */
   private async checkTaskDir(taskId: TaskId, dir: string): Promise<string | undefined> {
     try {

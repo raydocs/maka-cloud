@@ -70,6 +70,15 @@ files fails. The policy decides who may read whom; `sameConversationInputPolicy(
 tasks of the same conversation that have ended. The runner itself also requires the same tenant and
 the same sandbox. Any refusal fails the task before the CLI starts. Design: `docs/fork/design/cloud-runners.md`.
 
+## Artifacts
+
+When a task finishes, the files its manifest lists in `artifacts` (plain paths relative to its workspace)
+are copied into its handoff directory under the same path, so the server can serve them. A brief can start
+with `maka-artifacts: <path> ...` to name files that must exist and be listed: if one is missing, the agent
+gets one repair turn, then the task fails. The runner adds a `runner-exported: <paths>` line to the
+manifest's `done` (and drops any such line a model wrote), so a playbook's `verify` can tell what really
+arrived. Caps: `exportLimits`, default 20 files, 2 MiB each, 8 MiB in all.
+
 ## Tests
 
 `npm run build && npm run test:dist -w @maka-cloud/runners` runs against the in-process fake instabox with a fake `claude`

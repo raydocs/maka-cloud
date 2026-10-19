@@ -1,9 +1,13 @@
+import { randomBytes } from 'node:crypto';
 import {
   InstaboxApiError,
   type InstaboxClient,
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
 import {
+  FILE_CHUNK_SCRIPT,
+  FILE_CLEAN_SCRIPT,
+  FILE_STAGE_SCRIPT,
   INSPECT_SCRIPT,
   KILL_SCRIPT,
   LAUNCH_SCRIPT,
@@ -349,6 +353,52 @@ export class RemoteMachine {
         () => undefined,
       );
       throw error;
+    }
+  }
+
+  /**
+   * Reads one file of a task's workspace as the sandbox user, never through `GET /files` (which
+   * reads as root and would follow a symlink to files the task must not see). The path must be
+   * plain and relative; symlinks anywhere on it and anything but a regular file are refused; at
+   * most `maxBytes` are read, in chunks that fit an exec reply.
+   */
+  async readWorkspaceFile(
+    dirName: string,
+    relPath: string,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<ResultRead> {
+    const stage = `export-${randomBytes(8).toString('hex')}.read`;
+    const callOptions = (extra: Record<string, string>): ExecOptions => ({
+      envs: { MAKA_DIR: this.taskDir(dirName), MAKA_STAGE: stage, ...extra },
+      ...(signal ? { signal } : {}),
+    });
+    try {
+      const staged = (
+        await this.execOk(
+          FILE_STAGE_SCRIPT,
+          callOptions({ MAKA_REL: relPath, MAKA_CAP: String(maxBytes) }),
+        )
+      ).trim();
+      const refused = /^REFUSED (.*)$/u.exec(staged);
+      if (refused) return { ok: false, reason: refused[1] as string };
+      const match = /^OK (\d+)$/u.exec(staged);
+      if (!match) return { ok: false, reason: 'it could not be read' };
+      const size = Number(match[1]);
+      const parts: Buffer[] = [];
+      for (let offset = 0; offset < size; offset += RESULT_CHUNK_BYTES) {
+        const out = await this.execOk(
+          FILE_CHUNK_SCRIPT,
+          callOptions({ MAKA_OFF: String(offset), MAKA_LEN: String(RESULT_CHUNK_BYTES) }),
+        );
+        parts.push(Buffer.from(out.trim(), 'base64'));
+      }
+      const bytes = Buffer.concat(parts);
+      if (bytes.length !== size)
+        return { ok: false, reason: 'it changed while it was being copied' };
+      return { ok: true, bytes };
+    } finally {
+      await this.exec(FILE_CLEAN_SCRIPT, callOptions({})).catch(() => undefined);
     }
   }
 }

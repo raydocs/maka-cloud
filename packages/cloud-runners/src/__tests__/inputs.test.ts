@@ -1,47 +1,112 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  MAX_ARTIFACT_LINES,
+  MAX_ARTIFACT_PATHS,
   MAX_INPUT_LINES,
   MAX_INPUT_PATHS,
-  parseInputRequests,
+  parseBriefHeader,
   sameConversationInputPolicy,
 } from '../inputs.js';
 
 const refusal = (brief: string): string => {
-  const parsed = parseInputRequests(brief);
+  const parsed = parseBriefHeader(brief);
   assert.equal(parsed.ok, false, `expected a refusal for ${JSON.stringify(brief)}`);
   return parsed.ok ? '' : parsed.reason;
 };
 
 test('a brief with no request has none', () => {
-  assert.deepEqual(parseInputRequests('# Review\n\nDo the thing.\n'), { ok: true, requests: [] });
-  assert.deepEqual(parseInputRequests(''), { ok: true, requests: [] });
-  // Prose that mentions the word is not a request.
-  assert.deepEqual(parseInputRequests('Do it.\nsee maka-inputs: tsk_a report.json for how'), {
+  assert.deepEqual(parseBriefHeader('# Review\n\nDo the thing.\n'), {
     ok: true,
     requests: [],
+    artifacts: [],
+  });
+  assert.deepEqual(parseBriefHeader(''), { ok: true, requests: [], artifacts: [] });
+  // Prose that mentions the word is not a request.
+  assert.deepEqual(parseBriefHeader('Do it.\nsee maka-inputs: tsk_a report.json for how'), {
+    ok: true,
+    requests: [],
+    artifacts: [],
   });
 });
 
 test('requests at the start are read, with blank lines before them and CRLF line ends', () => {
   const brief =
     '\n\nmaka-inputs: tsk_a report.json sources/pages\r\nmaka-inputs: tsk_b judgments.json\r\n\r\n# Review\n';
-  assert.deepEqual(parseInputRequests(brief), {
+  assert.deepEqual(parseBriefHeader(brief), {
     ok: true,
     requests: [
       { source: 'tsk_a', paths: ['report.json', 'sources/pages'] },
       { source: 'tsk_b', paths: ['judgments.json'] },
     ],
+    artifacts: [],
   });
 });
 
 test('lines for one task are merged and a path is listed once', () => {
   const brief =
     'maka-inputs: tsk_a report.json sources\nmaka-inputs: tsk_a sources out/report.md\n';
-  assert.deepEqual(parseInputRequests(brief), {
+  assert.deepEqual(parseBriefHeader(brief), {
     ok: true,
     requests: [{ source: 'tsk_a', paths: ['report.json', 'sources', 'out/report.md'] }],
+    artifacts: [],
   });
+});
+
+test('artifact lines are read with input lines, in any order, and merged', () => {
+  const brief =
+    'maka-artifacts: out/report.md out/verification.json\nmaka-inputs: tsk_a report.json\nmaka-artifacts: out/report.md out/report.html\n\n# Draft\n';
+  assert.deepEqual(parseBriefHeader(brief), {
+    ok: true,
+    requests: [{ source: 'tsk_a', paths: ['report.json'] }],
+    artifacts: ['out/report.md', 'out/verification.json', 'out/report.html'],
+  });
+});
+
+test('a malformed or misplaced artifact line is refused, not skipped', () => {
+  for (const line of [
+    'maka-artifacts:',
+    'maka-artifacts: ',
+    'maka-artifacts:  out/a',
+    'maka-artifacts: out/a  out/b',
+    'maka-artifacts: out/a ',
+    'maka-artifacts:out/a',
+    'maka-artifacts:\tout/a',
+  ]) {
+    assert.match(refusal(`${line}\n`), /not "maka-artifacts: <path> ..."/, JSON.stringify(line));
+  }
+  for (const path of [
+    '..',
+    '../x',
+    '/abs',
+    'a//b',
+    '.hidden',
+    'a/.b',
+    'https://x.test/a',
+    'a b'.replace(' ', ';'),
+  ]) {
+    assert.match(refusal(`maka-artifacts: ${path}\n`), /not a plain relative path/, path);
+  }
+  for (const extra of [
+    'maka-artifacts: out/a',
+    '> maka-artifacts: out/a',
+    '  MAKA-ARTIFACTS : out/a',
+    '- maka-artifacts: out/a',
+  ]) {
+    assert.match(
+      refusal(`maka-inputs: tsk_a report.json\n\n# Draft\n${extra}\n`),
+      /maka-artifacts: lines are only read at the very start/,
+      extra,
+    );
+  }
+  assert.match(refusal('# Draft\nmaka-artifacts: out/a'), /only read at the very start/);
+});
+
+test('the number of artifact lines and paths is capped', () => {
+  const lines = Array.from({ length: MAX_ARTIFACT_LINES + 1 }, (_, i) => `maka-artifacts: a${i}`);
+  assert.match(refusal(`${lines.join('\n')}\n`), /more than \d+ maka-artifacts: lines/);
+  const many = Array.from({ length: MAX_ARTIFACT_PATHS + 1 }, (_, i) => `p${i}`);
+  assert.match(refusal(`maka-artifacts: ${many.join(' ')}\n`), /more than \d+ artifact paths/);
 });
 
 test('a request line after the start is refused, however it is dressed up', () => {
@@ -121,7 +186,7 @@ test('the number of lines and paths is capped', () => {
   const paths = Array.from({ length: MAX_INPUT_PATHS + 1 }, (_, i) => `p${i}`);
   assert.match(refusal(`maka-inputs: tsk_a ${paths.join(' ')}\n`), /more than \d+ input paths/);
   const ok = Array.from({ length: MAX_INPUT_PATHS }, (_, i) => `p${i}`);
-  assert.equal(parseInputRequests(`maka-inputs: tsk_a ${ok.join(' ')}\n`).ok, true);
+  assert.equal(parseBriefHeader(`maka-inputs: tsk_a ${ok.join(' ')}\n`).ok, true);
 });
 
 test('the conversation policy: same conversation and finished only', () => {

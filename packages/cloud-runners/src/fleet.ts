@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { InstaboxClient } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
+import { DEFAULT_EXPORT_LIMITS, type ExportLimits } from './export.js';
 import type { InputPolicy } from './inputs.js';
 import {
   DEFAULT_LOG_ROOT,
@@ -61,6 +62,11 @@ export interface CloudRunnersOptions {
   inputs?: InputPolicy;
   /** Caps on the files one task may take from others. Defaults: 200 files, 5 MiB each, 32 MiB in all. */
   inputLimits?: Partial<StageLimits>;
+  /**
+   * Caps on the artifacts a task's result exports to its handoff directory. Defaults: 20 files,
+   * 2 MiB each, 8 MiB in all.
+   */
+  exportLimits?: Partial<ExportLimits>;
   /**
    * Token prices for metering each run's spend against its budget, per runner. Defaults:
    * `DEFAULT_PRICES`. Claude's CLI also reports its own total at the end of each invocation.
@@ -230,6 +236,10 @@ mkdir -p "$(dirname ${shq(marker)})"
   /** Installs the sandbox tools the machine does not have yet. Concurrent callers share each install. */
   async ensureTools(machine: RemoteMachine): Promise<void> {
     for (const tool of this.tools) await this.ensureTool(machine, tool);
+  }
+
+  get exportLimits(): ExportLimits {
+    return { ...DEFAULT_EXPORT_LIMITS, ...this.options.exportLimits };
   }
 
   get stageLimits(): StageLimits {

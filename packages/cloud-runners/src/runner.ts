@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 import {
   type RunHandle,
   type Runner,
@@ -10,9 +10,10 @@ import {
   type RunSpec,
   type TaskId,
 } from '@maka-cloud/orchestrator';
+import { attestExports, exportArtifacts } from './export.js';
 import type { Fleet } from './fleet.js';
 import type { RemoteMachine } from './machine.js';
-import { type InputRequest, parseInputRequests } from './inputs.js';
+import { type InputRequest, parseBriefHeader } from './inputs.js';
 import { LineSplitter } from './lines.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage } from './shell.js';
@@ -131,6 +132,8 @@ class Run implements RunHandle {
   /** Set once the run has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
   private readonly secrets = new Set<string>();
+  /** Paths the brief says the task must hand back. */
+  private requiredArtifacts: string[] = [];
   private machine: RemoteMachine | undefined;
   private record: RunnerSessionRecord | undefined;
   private access: ModelAccess | undefined;
@@ -194,15 +197,16 @@ class Run implements RunHandle {
       const dir = machine.taskDir(spec.taskId);
       const resumed = this.resumePrompt !== undefined;
       let staged = '';
+      const brief = await this.guard(readFile(spec.briefPath, 'utf8'));
+      const header = parseBriefHeader(brief);
+      if (!header.ok) return this.fail(header.reason);
+      this.requiredArtifacts = header.artifacts;
       if (resumed) {
         await machine.prepare(spec.taskId, undefined, this.signal);
       } else {
-        const brief = await this.guard(readFile(spec.briefPath, 'utf8'));
-        const inputs = parseInputRequests(brief);
-        if (!inputs.ok) return this.fail(inputs.reason);
         await machine.prepare(spec.taskId, brief, this.signal);
-        if (inputs.requests.length > 0) {
-          const copied = await this.guard(this.stageInputs(machine, inputs.requests));
+        if (header.requests.length > 0) {
+          const copied = await this.guard(this.stageInputs(machine, header.requests));
           if (!copied.ok) return this.fail(copied.reason);
           staged = copied.note;
         }
@@ -217,17 +221,21 @@ class Run implements RunHandle {
       record = this.record ?? record;
       if (!outcome.ok) return this.fail(outcome.reason);
 
-      let result = await this.collectResult(machine);
+      let result = await this.acceptResult(machine);
       if (!result.ok && record.sessionId) {
         this.progress(
-          `the result file was rejected (${result.reason}); asking the agent to rewrite it`,
+          result.artifacts
+            ? `the result's artifacts were not accepted (${result.reason}); asking the agent to fix it`
+            : `the result file was rejected (${result.reason}); asking the agent to rewrite it`,
         );
         outcome = await this.turn(
-          `The result file at ${dir}/result.json was rejected: ${result.reason}. Write it again as ${manifestShape()}. Then stop.`,
+          result.artifacts
+            ? `The result at ${dir}/result.json was read, but its artifacts were not accepted: ${result.reason}. Fix that (write the missing file under ${dir}/workspace, or list it in artifacts) and write ${dir}/result.json again as ${manifestShape()}. Then stop.`
+            : `The result file at ${dir}/result.json was rejected: ${result.reason}. Write it again as ${manifestShape()}. Then stop.`,
           record.sessionId,
         );
         if (!outcome.ok) return this.fail(outcome.reason);
-        result = await this.collectResult(machine);
+        result = await this.acceptResult(machine);
       }
       if (!result.ok) return this.fail(`invalid result: ${result.reason}`);
 
@@ -636,6 +644,35 @@ class Run implements RunHandle {
   }
 
   // -- result hand-back --------------------------------------------------------------------------
+
+  /**
+   * The task's result as the orchestrator will get it: the manifest read from the sandbox and
+   * checked, then its artifacts exported to the handoff directory. A required artifact that is
+   * missing is a rejection like a bad manifest, so the agent gets the one repair turn.
+   */
+  private async acceptResult(
+    machine: RemoteMachine,
+  ): Promise<{ ok: true; bytes: Buffer } | { ok: false; reason: string; artifacts?: true }> {
+    const result = await this.collectResult(machine);
+    if (!result.ok) return result;
+    const { spec } = this;
+    const manifest = JSON.parse(result.bytes.toString('utf8')) as { artifacts?: string[] };
+    const handoffDir = dirname(spec.resultPath);
+    const outcome = await exportArtifacts({
+      machine,
+      taskId: spec.taskId,
+      handoffDir,
+      reserved: [basename(spec.resultPath), basename(spec.briefPath)],
+      listed: manifest.artifacts ?? [],
+      required: this.requiredArtifacts,
+      limits: this.fleet.exportLimits,
+      signal: this.signal,
+      note: (text) => this.progress(text),
+    });
+    this.checkCancelled();
+    if (!outcome.ok) return { ok: false, reason: outcome.reason, artifacts: true };
+    return { ok: true, bytes: attestExports(result.bytes, outcome.exported) };
+  }
 
   private async collectResult(
     machine: RemoteMachine,
