@@ -74,6 +74,14 @@ export class SqliteSpendJournal implements SpendJournal {
         usd REAL NOT NULL,
         PRIMARY KEY (epoch, task_id)
       );
+      CREATE TABLE IF NOT EXISTS daily (
+        key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        day TEXT NOT NULL,
+        usd REAL NOT NULL,
+        settled INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS daily_day ON daily (name, day);
     `);
   }
 
@@ -133,6 +141,54 @@ export class SqliteSpendJournal implements SpendJournal {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * A dollar limit per UTC day, kept in the journal, for spend that belongs to no task (the
+   * digest summary). A request settles on the day it was reserved. A reservation an earlier
+   * process never settled counts at its reserved amount, so a restart cannot spend the day twice.
+   */
+  dailyLimit(name: string, capUsd: number, now: () => number = Date.now): BudgetPort {
+    return {
+      reserve: (key, usd) => {
+        if (!Number.isFinite(usd) || usd < 0) {
+          return { ok: false, reason: 'the request has no valid cost' };
+        }
+        const day = new Date(now()).toISOString().slice(0, 10);
+        try {
+          this.db.exec('BEGIN IMMEDIATE');
+        } catch {
+          return { ok: false, unavailable: true, reason: 'the spend could not be recorded' };
+        }
+        try {
+          const row = this.db
+            .prepare('SELECT COALESCE(SUM(usd), 0) AS usd FROM daily WHERE name = ? AND day = ?')
+            .get(name, day) as { usd: number };
+          if (row.usd + usd > capUsd + 1e-9) {
+            this.db.exec('ROLLBACK');
+            return {
+              ok: false,
+              budget: true,
+              reason: `the day's limit of $${capUsd} for the ${name} cannot cover this request`,
+            };
+          }
+          this.db
+            .prepare('INSERT INTO daily (key, name, day, usd) VALUES (?, ?, ?, ?)')
+            .run(key, name, day, usd);
+          this.db.exec('COMMIT');
+          return { ok: true };
+        } catch {
+          this.db.exec('ROLLBACK');
+          return { ok: false, unavailable: true, reason: 'the spend could not be recorded' };
+        }
+      },
+      settle: (key, usd) => {
+        // If this throws, the reservation stays and counts in full.
+        this.db
+          .prepare('UPDATE daily SET usd = ?, settled = 1 WHERE key = ? AND settled = 0')
+          .run(usd, key);
+      },
+    };
   }
 
   close(): void {

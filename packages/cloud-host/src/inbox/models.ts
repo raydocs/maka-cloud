@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import { Allowance, type BudgetPort, type Gateway, LimitPort } from '@maka-cloud/gateway';
+import type { BudgetPort, Gateway } from '@maka-cloud/gateway';
 import {
   type CheckCharge,
   inputTokenBound,
@@ -210,35 +210,6 @@ export function createGatewayVerifierModel(
 
 /** The digest summary's daily limit. */
 export const SUMMARY_DAILY_CAP_USD = 0.5;
-
-/**
- * A dollar limit per UTC day, in memory, for the digest summary. A request settles on the day
- * it was reserved. A restart starts the day afresh, so a day with a restart can spend the cap
- * twice; at the summary's size that is cents.
- */
-export function dailyLimit(capUsd: number, now: () => number = Date.now): BudgetPort {
-  let day = '';
-  let port = new LimitPort([new Allowance(capUsd)]);
-  const held = new Map<string, LimitPort>();
-  return {
-    reserve(key, usd) {
-      const today = new Date(now()).toISOString().slice(0, 10);
-      if (today !== day) {
-        day = today;
-        port = new LimitPort([new Allowance(capUsd)]);
-      }
-      const reserved = port.reserve(key, usd);
-      if (reserved.ok) held.set(key, port);
-      return reserved;
-    },
-    settle(key, usd) {
-      const owner = held.get(key);
-      if (!owner) return;
-      held.delete(key);
-      owner.settle(key, usd);
-    },
-  };
-}
 
 /** The digest summary through the model gateway, charged to `budget`. */
 export function createGatewaySummaryModel(
