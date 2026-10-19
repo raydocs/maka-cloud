@@ -1,14 +1,17 @@
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ExperimentSpec } from '@maka/eval';
+import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { gatewayModelAccess, gatewayPrices, readStackConfig, startGateway } from '@maka-cloud/host';
 import {
   FleetCodingSandbox,
   JsonFileCodingDeliveries,
   createCodingRunner,
 } from '@maka-cloud/playbooks/coding';
 import {
+  type CloudRunners,
+  type CloudRunnersOptions,
   createCloudRunnersFromEnv,
-  type ModelAccess,
-  type ModelAccessProvider,
 } from '@maka-cloud/runners';
 import { PlaybookDriver, VendorAloneDriver } from './drivers.js';
 import { SweBenchDataset } from './suites.js';
@@ -19,7 +22,34 @@ export interface EvalDeps {
   drivers: ReadonlyMap<string, SubjectDriver>;
   grader: Grader;
   hidden: HiddenTestSource;
+  /** Closes what the deps opened (the model gateway); called once the run is over. */
+  close?(): Promise<void>;
 }
+
+export interface LiveOptions {
+  /**
+   * Where the model gateway's spend journal lives. It must outlive the run, so it is the
+   * experiment directory, not the scratch directory that is removed at the end.
+   */
+  stateDir: string;
+  /** Builds the runner fleet from the options set here. Default: `createCloudRunnersFromEnv`. */
+  createRunners?: (options: Partial<CloudRunnersOptions>) => CloudRunners;
+  onWarning?: (message: string, detail?: unknown) => void;
+}
+
+type Vendor = 'anthropic' | 'openai';
+
+/** The vendors each subject calls: the playbook hands over to the other vendor once. */
+const SUBJECT_VENDORS: Readonly<Record<string, readonly Vendor[]>> = {
+  'claude-agent-sdk': ['anthropic'],
+  codex: ['openai'],
+  'coding-playbook': ['anthropic', 'openai'],
+};
+
+const VENDOR_KEYS: Readonly<Record<Vendor, string>> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+};
 
 export interface LiveApproval {
   /** `--live` was given. */
@@ -61,47 +91,85 @@ export function assertLiveApproved(spec: ExperimentSpec, approval: LiveApproval)
 
 /**
  * Builds the real subjects, sandbox fleet and grader from the environment. Called only after
- * `assertLiveApproved`; nothing here is exercised by a test.
+ * `assertLiveApproved`; nothing here is exercised against a real vendor by a test.
+ *
+ * Model calls go through the model gateway, started here: the vendor keys stay in this process,
+ * and each run's sandbox gets a token for its own budget. It refuses to build, before anything
+ * is contacted, when a subject's vendor has no key or no price.
  */
 export async function createLiveDeps(
+  spec: ExperimentSpec,
   workRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
+  options: LiveOptions,
 ): Promise<EvalDeps> {
   const dataDir = env.MAKA_EVALS_DATA_DIR;
   const python = env.MAKA_EVALS_PYTHON;
   if (!dataDir) throw new Error('MAKA_EVALS_DATA_DIR is not set.');
   if (!python) throw new Error('MAKA_EVALS_PYTHON is not set.');
+  const vendors = new Set<Vendor>();
+  for (const subject of spec.subjects) {
+    const needs = SUBJECT_VENDORS[subject.id];
+    if (!needs) throw new Error(`unknown subject: ${subject.id}`);
+    for (const vendor of needs) vendors.add(vendor);
+  }
+  // The stack's own reader checks the gateway's settings (ports, URL scheme, prices). Its data
+  // directory is this run's, so no product database or journal is touched.
+  const config = readStackConfig({ ...env, MAKA_CLOUD_DATA_DIR: options.stateDir });
+  for (const vendor of vendors) {
+    if (!env[VENDOR_KEYS[vendor]]?.trim()) {
+      throw new Error(`${VENDOR_KEYS[vendor]} is not set, and a subject of this spec needs it.`);
+    }
+  }
+  if (vendors.has('openai') && !config.gateway.models.some((m) => m.vendor === 'openai')) {
+    throw new Error('MAKA_CLOUD_GATEWAY_MODELS has no OpenAI model, so Codex has no price.');
+  }
   const datasetPath = join(dataDir, 'swe-bench-verified.jsonl');
   const dataset = await SweBenchDataset.read(datasetPath);
-  // A live benchmark run hands the vendor keys to its sandbox; the product stack never does.
-  const cloud = createCloudRunnersFromEnv(env, { modelAccess: benchmarkVendorKeys(env) });
-  const sandbox = new FleetCodingSandbox(cloud.fleet);
-  const deliveries = new JsonFileCodingDeliveries(join(workRoot, 'deliveries.json'));
-  const coding = createCodingRunner(cloud, { deliveries });
-  return {
-    drivers: new Map<string, SubjectDriver>([
-      ['claude-agent-sdk', new VendorAloneDriver({ runner: cloud.claude, sandbox })],
-      ['codex', new VendorAloneDriver({ runner: cloud.codex, sandbox })],
-      ['coding-playbook', new PlaybookDriver({ runner: coding, deliveries, sandbox })],
-    ]),
-    grader: new SweBenchGrader({ python, datasetPath, workDir: workRoot }),
-    hidden: dataset,
-  };
-}
 
-/**
- * The vendor keys from the environment, for an approved live benchmark run only: the benchmark
- * measures each vendor's runner alone, outside the product's gateway. Not exported, so nothing
- * but `createLiveDeps` can build it.
- */
-function benchmarkVendorKeys(env: NodeJS.ProcessEnv): ModelAccessProvider {
-  return {
-    async issue({ runner }): Promise<ModelAccess> {
-      const codex = runner === 'codex';
-      const apiKey = codex ? env.OPENAI_API_KEY : env.ANTHROPIC_API_KEY;
-      if (!apiKey) throw new Error(`${codex ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'} is not set.`);
-      const baseUrl = codex ? env.OPENAI_BASE_URL : env.ANTHROPIC_BASE_URL;
-      return { apiKey, ...(baseUrl ? { baseUrl } : {}) };
-    },
-  };
+  await mkdir(options.stateDir, { recursive: true });
+  const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  let gateway: Awaited<ReturnType<typeof startGateway>>;
+  try {
+    gateway = await startGateway(
+      config.gateway,
+      env,
+      options.onWarning ?? (() => undefined),
+      gatewayPrices(config.gateway.models, []),
+      journal,
+    );
+  } catch (error) {
+    journal.close();
+    throw error;
+  }
+  let closing: Promise<void> | undefined;
+  try {
+    const modelAccess = gatewayModelAccess(gateway.gateway, gateway.sandboxUrl);
+    const cloud = (options.createRunners ?? ((o) => createCloudRunnersFromEnv(env, o)))({
+      modelAccess,
+    });
+    const sandbox = new FleetCodingSandbox(cloud.fleet);
+    const deliveries = new JsonFileCodingDeliveries(join(workRoot, 'deliveries.json'));
+    const coding = createCodingRunner(cloud, { deliveries });
+    return {
+      drivers: new Map<string, SubjectDriver>([
+        ['claude-agent-sdk', new VendorAloneDriver({ runner: cloud.claude, sandbox })],
+        ['codex', new VendorAloneDriver({ runner: cloud.codex, sandbox })],
+        ['coding-playbook', new PlaybookDriver({ runner: coding, deliveries, sandbox })],
+      ]),
+      grader: new SweBenchGrader({ python, datasetPath, workDir: workRoot }),
+      hidden: dataset,
+      close: () => {
+        closing ??= (async () => {
+          await gateway.close();
+          journal.close();
+        })();
+        return closing;
+      },
+    };
+  } catch (error) {
+    await gateway.close();
+    journal.close();
+    throw error;
+  }
 }

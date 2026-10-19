@@ -19,8 +19,10 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { join } from 'node:path';
+import { createAssistantWebBackend } from './assistant-web-backend.js';
+import { createAssistantImBridge } from './assistant-im-bridge.js';
 import { createWorkHubRemoteBridge } from './workhub-remote-bridge.js';
-import type { BotMessageHandling } from '@maka/core/bot-chat-settings';
+import { BOT_PROVIDERS, resolveBotMessageHandling, type BotChatSettings, type BotMessageHandling } from '@maka/core/bot-chat-settings';
 import { acquireOperationalStateDatabase } from '@maka/storage/operational-state-store';
 import type { IpcMain } from "electron";
 import type { ActiveInteractionRequestEvent } from '@maka/core/events';
@@ -155,6 +157,8 @@ export interface DesktopRuntimeHostCandidateDeps {
   };
   readonly nativeCapabilities: DesktopNativeCapabilityProviderInput;
   readonly botRegistry: BotRegistry;
+  readonly readBotChatSettings?: () => Promise<BotChatSettings>;
+  readonly botAssistantStateDirectory?: string;
   readonly readBotMessageHandling?: () => Promise<BotMessageHandling>;
   readonly botWorkHubStateDirectory?: string;
   readonly resolveBotCreateTarget: (
@@ -1026,9 +1030,26 @@ export async function createDesktopRuntimeHostCandidate(
     const botIncoming = target.access === 'owner'
       ? createBotIncomingMainService({
           botRegistry: deps.botRegistry,
+          readMode: async (platform) => deps.readBotChatSettings
+            ? resolveBotMessageHandling(await deps.readBotChatSettings(), platform)
+            : await deps.readBotMessageHandling?.() ?? 'task',
+          ...(deps.readBotChatSettings && deps.botAssistantStateDirectory ? {
+            assistants: Object.fromEntries(BOT_PROVIDERS.map((platform) => [platform, createAssistantImBridge({
+              platform, backend: createAssistantWebBackend(() => client), registry: deps.botRegistry,
+              readChannel: async () => {
+                const settings = await deps.readBotChatSettings!();
+                return { ...settings.channels[platform], messageHandling: resolveBotMessageHandling(settings, platform) };
+              },
+              // Keep existing WeChat/Feishu receipts across the generalized routing change.
+              statePath: join(deps.botAssistantStateDirectory!, `${platform === 'wechat' ? '' : platform + '-'}${createHash('sha256').update(client.rootId).digest('hex')}.json`),
+              isActive: () => deps.isTargetActive?.() !== false, onError: reportError,
+            })])),
+          } : {}),
           ...(deps.readBotMessageHandling && deps.botWorkHubStateDirectory ? {
             workHub: createWorkHubRemoteBridge({
-              client, botRegistry: deps.botRegistry, readMode: deps.readBotMessageHandling,
+              client, botRegistry: deps.botRegistry, readMode: async (platform) => platform && deps.readBotChatSettings
+                ? resolveBotMessageHandling(await deps.readBotChatSettings(), platform)
+                : await deps.readBotMessageHandling!(),
               statePath: join(deps.botWorkHubStateDirectory, `${createHash('sha256').update(client.hostId).digest('hex')}.json`),
               onError: reportError,
               isActive: deps.isTargetActive,

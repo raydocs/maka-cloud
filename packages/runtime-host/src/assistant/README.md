@@ -27,7 +27,7 @@ The feature defaults **off**, including installations with existing assistant da
 
 ## Master switch
 
-`personal-assistant/enablement.json` stores the Host-owned opt-in. With it absent or disabled, the Host does not import the modules, open their databases, adopt old plugin data, register assistant tools/prompts/finish checks, or run any assistant schedulers. The two allowlisted desktop operations `assistant.enablement` and `assistant.set-enabled` remain available; feature operations reject while disabled.
+`personal-assistant/enablement.json` stores the Host-owned feature switch. When absent, the personal assistant is enabled by default. An explicit `enabled: false` is preserved across restarts; while disabled, the Host does not import the modules, open their databases, adopt old plugin data, register assistant tools/prompts/finish checks, or run any assistant schedulers. Initialization failures leave the assistant unavailable with an error exposed in Settings, preserve stored preferences/data, and do not fail Host recovery. After fixing the configuration, enabling in Settings retries initialization. The two allowlisted desktop operations `assistant.enablement` and `assistant.set-enabled` remain available; feature operations reject while disabled.
 
 Disabling fences new calls, aborts in-flight tools, stops assistant/worker Sessions and all three schedulers, then closes their stores. Captured tools from a retired runtime reject further calls. Transitions serialize so re-enabling cannot overlap the previous generation. Session admission also checks the switch so old queued messages cannot restart disabled assistant workers. Ordinary conversations and WorkHub are unaffected.
 
@@ -100,7 +100,7 @@ assistant-wide discovery schedule.
 - `InitiativeConfigure({intervalMinutes})` explicitly changes that schedule and
   preserves its enabled/paused state. `InitiativeControl` pauses/resumes it or requests
   one general exploration. These operations create no goal-specific task.
-- `MemoryIndexControl` configures a particular index's maintenance;
+- `MemoryIndexControl configure` configures one persisted maintenance clock (12 hours by default); per-index pause/resume only controls participation. At each deadline the scheduler gives all eligible indexes of the same owner to one organizing Agent, retaining independent ranges/checkpoints. It decides what needs changing and which reads/updates to share. Ownership boundaries remain isolated. Creating or manually maintaining an index does not reset the clock; interrupted shared rounds retain their exact ranges and completed members across restarts;
   `MemoryIndexMaintain` runs one organizing round. Shared-job stop semantics remain
   unchanged.
 - `MatterDelegate` creates concrete work; `MatterTasks` reads progress;
