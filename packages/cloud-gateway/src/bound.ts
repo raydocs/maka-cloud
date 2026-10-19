@@ -109,13 +109,6 @@ function localOpenAITool(tool: unknown): boolean {
   );
 }
 
-/**
- * Images and files are refused: what a model bills for one depends on the model and the detail
- * level (tile-based models bill far more than their pixels suggest), and no rule is verified for
- * every model. Coding and research send text only.
- */
-const NO_IMAGES = 'images and files are not allowed';
-
 function unknownField(body: Json, allowed: ReadonlySet<string>): string | undefined {
   return Object.keys(body).find((key) => !allowed.has(key));
 }
@@ -142,9 +135,103 @@ function outputCap(value: unknown, price: ModelPrice): number | string {
   return value as number;
 }
 
+/** A cache hint: ephemeral, with the default or a listed lifetime. */
+function cacheControl(value: unknown): value is Json {
+  return (
+    isObject(value) &&
+    value.type === 'ephemeral' &&
+    unknownField(value, CACHE_FIELDS) === undefined &&
+    (value.ttl === undefined || value.ttl === '5m' || value.ttl === '1h')
+  );
+}
+
+const CACHE_FIELDS = new Set(['type', 'ttl']);
+const BAD_CACHE = 'a cache hint is not valid';
+
 /**
- * The worst case of a Messages API request, or why it has none. Bytes bound text, including a
- * document whose source is text; an image or any other document is refused.
+ * Every content block type a Messages request may carry, with every key each may have. Anything
+ * else is refused wherever it sits: an image, a document, a file, a search result, server-tool
+ * history (fetched pages, search results, code output) or a type added later. Each of those can
+ * bill more than its bytes, and coding and research need only text, thinking and local tools.
+ */
+const ANTHROPIC_BLOCK_KEYS = new Map<string, ReadonlySet<string>>([
+  ['text', new Set(['type', 'text', 'cache_control', 'citations'])],
+  ['thinking', new Set(['type', 'thinking', 'signature'])],
+  ['redacted_thinking', new Set(['type', 'data'])],
+  ['tool_use', new Set(['type', 'id', 'name', 'input', 'cache_control'])],
+  ['tool_result', new Set(['type', 'tool_use_id', 'content', 'is_error', 'cache_control'])],
+]);
+
+const NOT_TEXT = 'only text, thinking, tool calls and text tool results are allowed in a request';
+
+/** Why a block is refused, if it is: an unlisted type or key, or content that is not text. */
+function anthropicBlock(
+  block: unknown,
+  allowed: ReadonlySet<string>,
+  cached: (value: Json) => boolean,
+): string | undefined {
+  if (!isObject(block) || typeof block.type !== 'string' || !allowed.has(block.type)) {
+    return NOT_TEXT;
+  }
+  const keys = ANTHROPIC_BLOCK_KEYS.get(block.type);
+  if (keys === undefined || unknownField(block, keys) !== undefined) return NOT_TEXT;
+  if (!cached(block)) return BAD_CACHE;
+  switch (block.type) {
+    case 'text':
+      // Citations point into documents or search results, which are refused.
+      if (typeof block.text !== 'string' || (block.citations ?? null) !== null) return NOT_TEXT;
+      return undefined;
+    case 'tool_result':
+      if (block.content === undefined || typeof block.content === 'string') return undefined;
+      if (!Array.isArray(block.content)) return NOT_TEXT;
+      for (const inner of block.content) {
+        const refused = anthropicBlock(inner, TEXT_ONLY, cached);
+        if (refused !== undefined) return refused;
+      }
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+const TEXT_ONLY: ReadonlySet<string> = new Set(['text']);
+const MESSAGE_BLOCKS: ReadonlySet<string> = new Set(ANTHROPIC_BLOCK_KEYS.keys());
+
+/** Why the system prompt or the messages are refused, if they are. */
+function anthropicContent(body: Json, cached: (value: Json) => boolean): string | undefined {
+  const blocks = (content: unknown, allowed: ReadonlySet<string>): string | undefined => {
+    if (typeof content === 'string') return undefined;
+    if (!Array.isArray(content)) return NOT_TEXT;
+    for (const block of content) {
+      const refused = anthropicBlock(block, allowed, cached);
+      if (refused !== undefined) return refused;
+    }
+    return undefined;
+  };
+  if (body.system !== undefined) {
+    const refused = blocks(body.system, TEXT_ONLY);
+    if (refused !== undefined) return refused;
+  }
+  if (!Array.isArray(body.messages)) return 'the request has no messages';
+  for (const message of body.messages) {
+    if (
+      !isObject(message) ||
+      unknownField(message, MESSAGE_FIELDS) !== undefined ||
+      (message.role !== 'user' && message.role !== 'assistant')
+    ) {
+      return 'a message is not valid';
+    }
+    const refused = blocks(message.content, MESSAGE_BLOCKS);
+    if (refused !== undefined) return refused;
+  }
+  return undefined;
+}
+
+const MESSAGE_FIELDS = new Set(['role', 'content']);
+
+/**
+ * The worst case of a Messages API request, or why it has none. Bytes bound the text it may
+ * carry; every other content type is refused.
  */
 export function boundAnthropic(
   raw: Uint8Array,
@@ -173,54 +260,22 @@ export function boundAnthropic(
   }
 
   let oneHour = false;
-  let refusal: string | undefined;
-  const cached = (value: unknown): void => {
-    if (isObject(value) && isObject(value.cache_control) && value.cache_control.ttl === '1h') {
-      oneHour = true;
-    }
+  const cached = (value: Json): boolean => {
+    if (value.cache_control === undefined) return true;
+    if (!cacheControl(value.cache_control)) return false;
+    if (value.cache_control.ttl === '1h') oneHour = true;
+    return true;
   };
-  const visit = (block: unknown): void => {
-    if (!isObject(block)) return;
-    cached(block);
-    const source = isObject(block.source) ? block.source : undefined;
-    switch (block.type) {
-      case 'image':
-        refusal = NO_IMAGES;
-        break;
-      case 'document':
-        if (source?.type === 'text') break;
-        if (source?.type === 'content') {
-          for (const inner of list(source.content)) visit(inner);
-          break;
-        }
-        refusal = NO_IMAGES;
-        break;
-      case 'tool_result':
-      case 'search_result':
-        for (const inner of list(block.content)) visit(inner);
-        break;
-      case 'container_upload':
-        refusal = 'files uploaded to a container are not allowed';
-        break;
-      default:
-        break;
-    }
-  };
-
-  cached(body);
-  for (const block of list(body.system)) visit(block);
-  for (const message of list(body.messages)) {
-    if (!isObject(message)) continue;
-    for (const block of list(message.content)) visit(block);
-  }
+  if (!cached(body)) return { ok: false, reason: BAD_CACHE };
+  const content = anthropicContent(body, cached);
+  if (content !== undefined) return { ok: false, reason: content };
   for (const tool of list(body.tools)) {
     if (!isObject(tool)) return { ok: false, reason: 'a tool definition is not an object' };
     if (tool.type !== undefined && tool.type !== 'custom') {
       return { ok: false, reason: 'hosted tools are not allowed' };
     }
-    cached(tool);
+    if (!cached(tool)) return { ok: false, reason: BAD_CACHE };
   }
-  if (refusal !== undefined) return { ok: false, reason: refusal };
 
   return {
     ok: true,
@@ -256,6 +311,9 @@ export function boundOpenAI(
     if (!localOpenAITool(tool)) return { ok: false, reason: 'hosted tools are not allowed' };
   }
 
+  if (body.instructions !== undefined && typeof body.instructions !== 'string') {
+    return { ok: false, reason: 'the instructions must be text' };
+  }
   const content = refusedContent(body.input);
   if (content !== undefined) return { ok: false, reason: content };
 
@@ -282,9 +340,39 @@ export function boundOpenAI(
 }
 
 /**
- * Why a Responses input cannot be bounded by its bytes, if it cannot: an image or a file anywhere
- * (message content, tool outputs), or a stored item.
+ * Every typed object a Responses input may carry, at any depth: messages and their text, the
+ * caller's own tool calls and their text outputs, reasoning, and the small typed values inside
+ * local tool calls (a shell action or outcome, a patch operation). Anything else is refused
+ * wherever it sits: an image, a file, a screenshot, a stored item, hosted-tool history or a type
+ * added later. Each of those can bill more than its bytes.
  */
+const OPENAI_INPUT_TYPES: ReadonlySet<string> = new Set([
+  'message',
+  'input_text',
+  'output_text',
+  'refusal',
+  'reasoning',
+  'summary_text',
+  'reasoning_text',
+  'function_call',
+  'function_call_output',
+  'custom_tool_call',
+  'custom_tool_call_output',
+  'local_shell_call',
+  'local_shell_call_output',
+  'shell_call',
+  'shell_call_output',
+  'apply_patch_call',
+  'apply_patch_call_output',
+  'exec',
+  'exit',
+  'timeout',
+  'create_file',
+  'update_file',
+  'delete_file',
+]);
+
+/** Why a Responses input cannot be bounded by its bytes, if it cannot. */
 function refusedContent(input: unknown): string | undefined {
   const stack: unknown[] = [input];
   while (stack.length > 0) {
@@ -294,15 +382,11 @@ function refusedContent(input: unknown): string | undefined {
       continue;
     }
     if (!isObject(node)) continue;
-    switch (node.type) {
-      case 'item_reference':
-        return 'stored items are not allowed';
-      case 'input_file':
-      case 'input_image':
-      case 'computer_screenshot':
-        return NO_IMAGES;
-      default:
-        break;
+    if (node.type !== undefined) {
+      if (node.type === 'item_reference') return 'stored items are not allowed';
+      if (typeof node.type !== 'string' || !OPENAI_INPUT_TYPES.has(node.type)) {
+        return 'only text, reasoning and local tool calls are allowed in the input';
+      }
     }
     for (const value of Object.values(node)) {
       if (typeof value === 'object' && value !== null) stack.push(value);
