@@ -41,12 +41,17 @@ test('each agent run gets what is left of the budget, and the task stops when it
     await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
     return 'ok';
   };
-  const spec = { ...(await h.spec('tsk_budget')), budgetUsd: 1 };
+  const spec = { ...(await h.spec('tsk_budget')), budgetUsd: 1, budgetRootId: 'tsk_root' };
   const events = await collect(await h.runner.start(spec));
   await spent.promise;
   assert.deepEqual(
     h.claude.turns.map((turn) => turn.spec.budgetUsd),
     [1, 0.4],
+  );
+  assert.deepEqual(
+    h.claude.turns.map((turn) => turn.spec.budgetRootId),
+    ['tsk_root', 'tsk_root'],
+    'every agent run draws on the same tree',
   );
   const end = terminal(events);
   assert.equal(end?.type, 'failed');

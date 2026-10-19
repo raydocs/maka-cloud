@@ -26,6 +26,7 @@ export {
   DEFAULT_TENANT,
   envModelAccess,
   FixedMachineProvider,
+  noModelAccess,
   TenantMachineProvider,
 } from './providers.js';
 export { type ResumeInput, SandboxCliRunner } from './runner.js';
@@ -35,6 +36,7 @@ export {
   referencedSnapshotIds,
 } from './session-store.js';
 export type {
+  AccessMeter,
   ModelAccess,
   ModelAccessProvider,
   RunnerSessionRecord,
@@ -81,8 +83,8 @@ export function createCloudRunners(options: CloudRunnersOptions): CloudRunners {
 }
 
 /**
- * Reads `INSTABOX_API_KEY` and `INSTABOX_MACHINE_ID` (optionally `INSTABOX_API_URL`). Model keys
- * come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` when a task starts, not here.
+ * Reads `INSTABOX_API_KEY` and `INSTABOX_MACHINE_ID` (optionally `INSTABOX_API_URL`). Model access
+ * is `overrides.modelAccess`: without it every run fails to start.
  */
 export function createCloudRunnersFromEnv(
   env: NodeJS.ProcessEnv = process.env,

@@ -14,6 +14,11 @@ export interface RunSpec {
    * reported spend reaches the cap. Absent: the tree has no cap.
    */
   budgetUsd?: number;
+  /**
+   * The top-level task of the tree, set with `budgetUsd`: runs of one tree share its cap, so a
+   * model gateway can hold them to it together.
+   */
+  budgetRootId?: TaskId;
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
 }

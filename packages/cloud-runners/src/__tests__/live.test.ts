@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createCloudRunnersFromEnv } from '../index.js';
+import { createCloudRunnersFromEnv, envModelAccess } from '../index.js';
 
 /**
  * Real sandbox, real CLI, real model calls, real spend. It runs only when all three variables
@@ -29,7 +29,7 @@ test('live smoke: the Claude runner completes a trivial brief in a real sandbox'
     'Create a file hello.txt containing the word hello, then report what you did.',
   );
 
-  const { claude } = createCloudRunnersFromEnv();
+  const { claude } = createCloudRunnersFromEnv(process.env, { modelAccess: envModelAccess() });
   const handle = await claude.start({ taskId, runner: 'claude-agent-sdk', briefPath, resultPath });
   let outcome = '';
   for await (const event of handle.events) if (event.type !== 'progress') outcome = event.type;

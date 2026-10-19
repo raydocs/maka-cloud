@@ -15,6 +15,7 @@ test('a task tree shares its budget: the runner gets it, crossing it cancels the
   await eventually(() => h.fake.runs.length === 1, 'the top run');
   const topRun = h.fake.runFor(top.taskId);
   assert.equal(topRun.spec.budgetUsd, 2);
+  assert.equal(topRun.spec.budgetRootId, top.taskId);
   topRun.usage(0.5);
 
   // A child shares the tree's cap whatever it asks for: its runner gets what is left.
@@ -28,6 +29,11 @@ test('a task tree shares its budget: the runner gets it, crossing it cancels the
   await eventually(() => h.fake.runs.length === 2, 'the child run');
   const childRun = h.fake.runFor(child.taskId);
   assert.equal(childRun.spec.budgetUsd, 1.5);
+  assert.equal(
+    childRun.spec.budgetRootId,
+    top.taskId,
+    'the child draws on its tree, not its own cap',
+  );
 
   childRun.usage(1);
   await eventually(() => h.orchestrator.status(conductor, top.taskId).costUsd === 1.5, 'tree cost');
@@ -87,6 +93,7 @@ test('a tree without a budget is not capped, and its spend stays readable after 
   await eventually(() => h.orchestrator.status(conductor, task.taskId).costUsd === 30, 'usage');
   assert.equal(h.orchestrator.status(conductor, task.taskId).state, 'running');
   assert.equal(h.orchestrator.status(conductor, task.taskId).budgetUsd, undefined);
+  assert.equal(h.fake.runFor(task.taskId).spec.budgetRootId, undefined);
   await h.fake.runFor(task.taskId).complete();
   await eventually(
     () => h.orchestrator.status(conductor, task.taskId).state === 'succeeded',

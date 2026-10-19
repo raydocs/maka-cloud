@@ -495,6 +495,7 @@ class CodingRun implements RunHandle {
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
       // Each agent run may spend what is left of the task's budget.
       ...(budget === undefined ? {} : { budgetUsd: roundUsd(budget - this.spentBefore) }),
+      ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
     };
     // Every run reads its brief, a resume included.

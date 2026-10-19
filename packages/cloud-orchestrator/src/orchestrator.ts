@@ -785,7 +785,9 @@ export class Orchestrator {
         runner: runnerName,
         briefPath: paths.briefPath,
         resultPath: paths.resultPath,
-        ...(left === undefined ? {} : { budgetUsd: left }),
+        ...(left === undefined
+          ? {}
+          : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),
         ...(this.endpoint === undefined
           ? {}
           : { mcp: { url: this.endpoint, token: executor.token } }),
