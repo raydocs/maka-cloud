@@ -11,7 +11,14 @@ export type Authority = z.infer<typeof AuthoritySchema>;
 export const MAX_RUN_BUDGET_USD = 20;
 export const MAX_DAILY_CAP_USD = 100;
 export const MAX_INSTRUCTION_CHARS = 4000;
-export const MIN_SCHEDULE_MINUTES = 60;
+/** A schedule runs at most this often. */
+export const MIN_SCHEDULE_MINUTES = 15;
+/** An invite may have at most this many enabled duties, across its projects. */
+export const MAX_ENABLED_DUTIES = 20;
+/** A duty that fails this many times in a row turns itself off and tells its owner. */
+export const MAX_CONSECUTIVE_FAILURES = 10;
+/** One duty's output (a branch of its own) may wake a duty at most this many times in a row before a person is needed. */
+export const MAX_CHAIN_DEPTH = 3;
 export const MAX_SCHEDULE_MINUTES = 10_080;
 
 /** The branch prefix `open_pull_request` gives the employee's own pull requests. */
@@ -60,6 +67,10 @@ export interface Duty extends DutySpec {
   state: DutyState;
   /** When the user approved it; null until then. Schedules count from here. */
   activatedAt: number | null;
+  /** Why the duty is off when the engine turned it off itself. */
+  offReason: 'failures' | null;
+  /** Runs that failed since the last one that completed. */
+  consecutiveFailures: number;
 }
 
 export interface Project {

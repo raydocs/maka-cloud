@@ -9,7 +9,11 @@ import {
   type Authority,
   type Duty,
   dayOf,
+  DutySpecSchema,
   fromMicro,
+  MAX_CHAIN_DEPTH,
+  MAX_CONSECUTIVE_FAILURES,
+  MAX_ENABLED_DUTIES,
   type Project,
   type Proposal,
   type ProposalSet,
@@ -62,7 +66,10 @@ export type AddProjectResult =
 
 export type DecideResult =
   | { ok: true; duplicate: boolean; proposal: Proposal }
-  | { ok: false; reason: 'not_found' | 'forbidden' | 'unknown_set' | 'conflict' };
+  | {
+      ok: false;
+      reason: 'not_found' | 'forbidden' | 'unknown_set' | 'conflict' | 'duty_limit';
+    };
 
 export type ProposeResult =
   | { ok: true; proposal: Proposal; created: boolean }
@@ -96,6 +103,8 @@ interface DutyRow {
   state: 'proposed' | 'active' | 'off';
   activated_at: number | null;
   last_slot: number | null;
+  consecutive_failures: number;
+  off_reason: 'failures' | null;
 }
 
 interface RequestRow {
@@ -130,6 +139,8 @@ const dutyOf = (row: DutyRow): Duty => ({
   dailyCapUsd: fromMicro(row.daily_cap_micro),
   state: row.state,
   activatedAt: row.activated_at,
+  offReason: row.off_reason,
+  consecutiveFailures: row.consecutive_failures,
 });
 
 /**
@@ -238,6 +249,8 @@ export class DutyEngine {
              ON CONFLICT (scope) DO UPDATE SET last_success_seq = MAX(last_success_seq, excluded.last_success_seq)`,
           )
           .run(event.scope, event.seq);
+        // The branch passes again: its chain of runs is over.
+        this.db.prepare('DELETE FROM chains WHERE chain_key = ?').run(event.scope);
         // A failure that has not started yet is stale once a later run of the same workflow passed.
         const cancelled = this.cancelWhere(
           "state = 'pending' AND supersede_scope = ? AND supersede_seq < ?",
@@ -256,11 +269,35 @@ export class DutyEngine {
             return { status: 200, body: { ok: true, ignored: 'stale' } };
           }
         }
+        // A person acted on the project (a review or a comment on a pull request of ours): runs
+        // that woke each other may go on.
+        if (event.trigger === 'review_comment_own_pr') {
+          this.db.prepare('DELETE FROM chains WHERE project_id = ?').run(project.project_id);
+        }
+        const matching = this.activeDuties(project.project_id).filter(
+          (duty) => (JSON.parse(duty.trigger) as Trigger).kind === event.trigger,
+        );
+        if (event.chain && matching.length > 0) {
+          const chain = this.db
+            .prepare('SELECT depth, started_at FROM chains WHERE chain_key = ?')
+            .get(event.chain.key) as { depth: number; started_at: number } | undefined;
+          if (chain && chain.depth >= MAX_CHAIN_DEPTH) {
+            // Needs a person: nothing starts, and the owner is told once for this chain.
+            for (const duty of matching) {
+              this.notice(
+                project,
+                duty,
+                `chain:${event.chain.key}:${chain.started_at}:${duty.duty_id}`,
+                `“${duty.name}” has been woken ${MAX_CHAIN_DEPTH} times in a row by the checks of its own work on ${project.repo}, and stopped. It needs you: look at the branch, or comment on the pull request to let it go on.`,
+                at,
+              );
+            }
+            return { status: 200, body: { ok: true, started: 0, ignored: 'chain_limit' } };
+          }
+        }
         let started = 0;
         let capped = 0;
-        for (const duty of this.activeDuties(project.project_id)) {
-          const trigger = JSON.parse(duty.trigger) as Trigger;
-          if (trigger.kind !== event.trigger) continue;
+        for (const duty of matching) {
           const result = this.claim(
             project,
             duty,
@@ -272,6 +309,14 @@ export class DutyEngine {
           );
           if (result === 'created') started += 1;
           else if (result === 'daily_cap') capped += 1;
+        }
+        if (event.chain && started > 0) {
+          this.db
+            .prepare(
+              `INSERT INTO chains (chain_key, project_id, depth, started_at) VALUES (?, ?, 1, ?)
+               ON CONFLICT (chain_key) DO UPDATE SET depth = depth + 1`,
+            )
+            .run(event.chain.key, project.project_id, at);
         }
         return { status: 200, body: { ok: true, started, capped } };
       }
@@ -484,7 +529,7 @@ export class DutyEngine {
     owner: string,
     dutyId: string,
     state: 'active' | 'off',
-  ): 'ok' | 'not_found' | 'not_approved' {
+  ): 'ok' | 'not_found' | 'not_approved' | 'duty_limit' {
     return transaction(this.db, () => {
       const duty = this.db.prepare('SELECT * FROM duties WHERE duty_id = ?').get(dutyId) as
         | DutyRow
@@ -493,10 +538,14 @@ export class DutyEngine {
       if (!duty || !project || project.owner !== owner || project.removed === 1) return 'not_found';
       if (state === 'active' && duty.activated_at === null) return 'not_approved';
       if (state === 'active') {
-        // Slots while it was off are not owed: a schedule counts from now.
+        if (duty.state !== 'active' && this.enabledCount(owner) + 1 > MAX_ENABLED_DUTIES) {
+          return 'duty_limit';
+        }
+        // Slots while it was off are not owed: a schedule counts from now. A duty the engine
+        // turned off for failing starts counting again.
         this.db
           .prepare(
-            "UPDATE duties SET state = 'active', last_slot = NULL, activated_at = ? WHERE duty_id = ?",
+            "UPDATE duties SET state = 'active', last_slot = NULL, activated_at = ?, consecutive_failures = 0, off_reason = NULL WHERE duty_id = ?",
           )
           .run(this.now(), dutyId);
       } else {
@@ -540,6 +589,13 @@ export class DutyEngine {
       const open = this.openProposal(projectId);
       if (open) return { ok: true, proposal: open, created: false };
       const proposal = (this.options.proposer ?? proposeDuties)(facts);
+      // Whatever proposes duties, the limits of a duty (a schedule no faster than every 15
+      // minutes, the budget ceilings) hold for every one of them.
+      const invalid = proposal.duties.find((spec) => !DutySpecSchema.safeParse(spec).success);
+      if (invalid) {
+        this.options.onWarning?.('A proposal carried a duty outside the limits', invalid.name);
+        return { ok: false, reason: 'inspect_failed' };
+      }
       const proposalId = `prp_${randomUUID().replaceAll('-', '')}`;
       const at = this.now();
       const ids = proposal.duties.map(() => `dty_${randomUUID().replaceAll('-', '')}`);
@@ -607,6 +663,12 @@ export class DutyEngine {
           : { ok: false, reason: 'conflict' };
       }
       const at = this.now();
+      // The proposal's own duties are replaced by the chosen set; the rest of the invite's
+      // enabled duties stay, so the chosen set must fit beside them.
+      const others = this.enabledCount(project.owner, input.proposalId);
+      if (others + chosen.dutyIds.length > MAX_ENABLED_DUTIES) {
+        return { ok: false, reason: 'duty_limit' };
+      }
       this.db
         .prepare("UPDATE duties SET state = 'off' WHERE proposal_id = ?")
         .run(input.proposalId);
@@ -690,6 +752,8 @@ export class DutyEngine {
       if (!row) return 'gone';
       if (failure.permanent || row.attempts >= MAX_LAUNCH_ATTEMPTS) {
         this.end(requestId, failure.permanent ? 'launch_refused' : 'launch_failed', 0);
+        // A refusal is not the duty's fault (the owner is gone); running out of attempts is.
+        if (!failure.permanent) this.countOutcome(requestId, 'failed');
         return 'cancelled';
       }
       this.db
@@ -730,6 +794,7 @@ export class DutyEngine {
           "UPDATE run_requests SET state = 'done', reason = ?, spent_micro = ?, finished_at = ? WHERE request_id = ? AND state = 'started'",
         )
         .run(outcome, spent, this.now(), requestId);
+      this.countOutcome(requestId, outcome);
       return true;
     });
   }
@@ -791,6 +856,105 @@ export class DutyEngine {
   // ---------------------------------------------------------------- internals
 
   /** Ends an unfinished request without a run: its reservation becomes `spentMicro`. */
+  /** The invite's enabled duties, not counting those of `exceptProposal`. */
+  private enabledCount(owner: string, exceptProposal?: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM duties d JOIN projects p ON p.project_id = d.project_id
+         WHERE p.owner = ? AND p.removed = 0 AND d.state = 'active'
+           AND (? IS NULL OR d.proposal_id IS NOT ?)`,
+      )
+      .get(owner, exceptProposal ?? null, exceptProposal ?? null) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Counts how a request ended against its duty: a completed run clears the count, a failed or
+   * abandoned one adds to it, a stopped one changes nothing. At the limit the duty turns itself
+   * off, its waiting requests are cancelled and the owner is told. Inside the caller's transaction.
+   */
+  private countOutcome(requestId: string, outcome: EndOutcome): void {
+    const row = this.db
+      .prepare('SELECT duty_id FROM run_requests WHERE request_id = ?')
+      .get(requestId) as { duty_id: string } | undefined;
+    const duty = row
+      ? (this.db.prepare('SELECT * FROM duties WHERE duty_id = ?').get(row.duty_id) as
+          | DutyRow
+          | undefined)
+      : undefined;
+    if (!duty) return;
+    if (outcome === 'completed') {
+      if (duty.consecutive_failures > 0) {
+        this.db
+          .prepare('UPDATE duties SET consecutive_failures = 0 WHERE duty_id = ?')
+          .run(duty.duty_id);
+      }
+      return;
+    }
+    if (outcome === 'stopped') return;
+    const failures = duty.consecutive_failures + 1;
+    this.db
+      .prepare('UPDATE duties SET consecutive_failures = ? WHERE duty_id = ?')
+      .run(failures, duty.duty_id);
+    if (failures < MAX_CONSECUTIVE_FAILURES || duty.state !== 'active') return;
+    const at = this.now();
+    this.db
+      .prepare("UPDATE duties SET state = 'off', off_reason = 'failures' WHERE duty_id = ?")
+      .run(duty.duty_id);
+    this.cancelWhere("state = 'pending' AND duty_id = ?", [duty.duty_id], 'duty_off', at);
+    const project = this.projectById(duty.project_id);
+    if (project) {
+      this.notice(
+        project,
+        duty,
+        `off:${duty.duty_id}:${duty.activated_at ?? 0}`,
+        `“${duty.name}” on ${project.repo} failed ${MAX_CONSECUTIVE_FAILURES} times in a row and has turned itself off. Look at its last runs, then switch it on again when it is fixed.`,
+        at,
+      );
+    }
+  }
+
+  /** Writes a notice for the owner once per key. Inside the caller's transaction. */
+  private notice(project: ProjectRow, duty: DutyRow, key: string, text: string, at: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO notices (notice_key, owner, project_id, duty_id, text, created_at)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+      )
+      .run(key, project.owner, project.project_id, duty.duty_id, text, at);
+  }
+
+  /** Notices not yet delivered, oldest first. The host delivers them at least once. */
+  pendingNotices(
+    limit = 20,
+  ): Array<{ noticeKey: string; owner: string; projectId: string; dutyId: string; text: string }> {
+    const rows = this.db
+      .prepare(
+        'SELECT notice_key, owner, project_id, duty_id, text FROM notices WHERE delivered_at IS NULL ORDER BY created_at, notice_key LIMIT ?',
+      )
+      .all(limit) as unknown as Array<{
+      notice_key: string;
+      owner: string;
+      project_id: string;
+      duty_id: string;
+      text: string;
+    }>;
+    return rows.map((row) => ({
+      noticeKey: row.notice_key,
+      owner: row.owner,
+      projectId: row.project_id,
+      dutyId: row.duty_id,
+      text: row.text,
+    }));
+  }
+
+  /** The host told the owner. Marking twice changes nothing. */
+  noticeDelivered(noticeKey: string): void {
+    this.db
+      .prepare('UPDATE notices SET delivered_at = ? WHERE notice_key = ? AND delivered_at IS NULL')
+      .run(this.now(), noticeKey);
+  }
+
   private end(requestId: string, reason: string, spentMicro: number): boolean {
     const changed = this.db
       .prepare(

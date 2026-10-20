@@ -35,6 +35,8 @@ export type Classified =
       supersede?: { scope: string; seq: number };
       /** CI failure only: ignored when a later success of the same scope is already recorded. */
       staleIf?: { scope: string; seq: number };
+      /** CI failure of a branch of our own: part of a chain of runs that wake each other. */
+      chain?: { key: string };
     };
 
 const Account = z.object({ login: z.string().min(1), type: z.string() });
@@ -224,6 +226,7 @@ function classifyWorkflowRun(data: z.infer<typeof WorkflowRun>, project: Project
     },
     staleIf: { scope, seq: run.run_number },
     supersede: { scope, seq: run.run_number },
+    ...(own ? { chain: { key: scope } } : {}),
   };
 }
 

@@ -42,6 +42,8 @@ CREATE TABLE duties (
   state TEXT NOT NULL CHECK (state IN ('proposed', 'active', 'off')),
   activated_at INTEGER,
   last_slot INTEGER,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  off_reason TEXT CHECK (off_reason IS NULL OR off_reason IN ('failures')),
   created_at INTEGER NOT NULL
 );
 CREATE INDEX duties_by_project ON duties (project_id, state);
@@ -69,6 +71,27 @@ CREATE INDEX deliveries_by_time ON deliveries (received_at);
 CREATE TABLE ci_state (
   scope TEXT PRIMARY KEY,
   last_success_seq INTEGER NOT NULL
+);
+
+-- How many runs in a row an own branch's CI failures have woken, so a duty's own output cannot wake
+-- duties forever. The row goes when the branch's workflow passes or a person acts on the project.
+CREATE TABLE chains (
+  chain_key TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  depth INTEGER NOT NULL,
+  started_at INTEGER NOT NULL
+);
+CREATE INDEX chains_by_project ON chains (project_id);
+
+-- Things the owner must be told that no run says: delivered at least once by the host.
+CREATE TABLE notices (
+  notice_key TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  duty_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER
 );
 
 CREATE TABLE run_requests (
