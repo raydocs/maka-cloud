@@ -221,6 +221,8 @@ test('the tool is irreversible and its approval card names the repository, branc
     ownsTask: () => true,
   });
   assert.equal(tool.irreversible, true);
+  // A standing duty needs at least open-pr authority to call it (T23); read-only duties cannot.
+  assert.equal(tool.requiresAuthority, 'open-pr');
   assert.equal(
     await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' }),
     'Repository: acme/calc\nBranch: maka/tsk_1\nTitle: Fix add',

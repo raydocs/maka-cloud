@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { MakaTool, MakaToolContext } from '@maka/runtime/tool-runtime';
 import { z } from 'zod';
 import type { ConductorLimits } from './config.js';
-import { BUILTIN_TOOL_POLICY, playbookToolPolicy, type ToolEffect } from './guard.js';
+import {
+  authorityReaches,
+  BUILTIN_TOOL_POLICY,
+  playbookToolPolicy,
+  type RunAuthority,
+  type ToolPolicy,
+  type ToolEffect,
+} from './guard.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook } from './playbooks.js';
 import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
@@ -70,6 +77,11 @@ export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
    * conversation before it runs. Defaults to true; set false only for a result built by code.
    */
   externalResult?: boolean;
+  /**
+   * The lowest standing-duty authority that may call the tool (T23). A run started by a duty may
+   * not call a tool that has effects and declares none. A run a user starts is not limited by it.
+   */
+  requiresAuthority?: RunAuthority;
   /**
    * For an irreversible tool: what the approval card must also show about a held call (what it
    * will act on), built by code from the held arguments and shown under the call itself.
@@ -380,6 +392,13 @@ export function conductorTools(
           if (estimate === undefined) {
             throw new ToolRefusal('invalid_request', 'budget_overrun needs estimateUsd.');
           }
+          // A standing duty's budget is a hard limit: there is no card to raise it.
+          if (state.run(turn.runId)?.hardBudget) {
+            throw new ToolRefusal(
+              'budget_fixed',
+              'The budget of this standing duty cannot be raised. Finish within it, or report what you could not do and end your turn.',
+            );
+          }
           const now = state.budget(turn.runId);
           raiseToUsd = Math.ceil((now.spentUsd + estimate * 1.2) * 100) / 100;
           options = [
@@ -527,6 +546,7 @@ function withBuiltinPolicy(host: ToolHost, tool: MakaTool): MakaTool {
       let args = raw;
       if (guarded) {
         gate(host, turn);
+        requireAuthority(host, turn, tool.name, policy, true);
         const { actionRef, ...rest } = raw as Record<string, unknown> & { actionRef?: string };
         holdUnlessApproved(host, turn, tool.name, rest, actionRef, false);
         args = rest;
@@ -537,6 +557,30 @@ function withBuiltinPolicy(host: ToolHost, tool: MakaTool): MakaTool {
       return tool.impl(args, ctx);
     },
   };
+}
+
+/**
+ * A standing duty's authority is checked first and is final: a refused call is not held, no
+ * approval can be given for it, and the answer to the model names no way around it. A tool with
+ * effects that declared no `requiresAuthority` is out of reach of every duty.
+ */
+function requireAuthority(
+  host: ToolHost,
+  turn: ActiveTurn,
+  tool: string,
+  policy: ToolPolicy,
+  guarded: boolean,
+): void {
+  const authority = host.state.run(turn.runId)?.authority ?? null;
+  if (authority === null) return;
+  const needed = policy.requiresAuthority;
+  const allowed = needed === undefined ? !guarded : authorityReaches(authority, needed);
+  if (!allowed) {
+    throw new ToolRefusal(
+      'not_authorized',
+      `This standing duty has ${authority} authority, which does not allow ${tool}.`,
+    );
+  }
 }
 
 const ACTION_REF = z
@@ -645,6 +689,7 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
     impl: async (raw: Record<string, unknown>, ctx: MakaToolContext) => {
       const turn = host.turnFor(ctx);
       gate(host, turn);
+      requireAuthority(host, turn, spec.name, policy, guarded);
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
       if (guarded) holdUnlessApproved(host, turn, spec.name, args, actionRef, always);
       if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
