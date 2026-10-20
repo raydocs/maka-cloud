@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createECDH, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -7,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { InviteStore } from '@maka-cloud/server';
 import { FakeRunner } from '@maka-cloud/orchestrator';
@@ -14,6 +16,7 @@ import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
 import { listBackups, restoreBackup, verifyBackup } from '../backup.js';
 import { backupLayoutOf, readStackConfig } from '../config.js';
+import { openServerLedger } from '../spend.js';
 import {
   PAUSED_NOTICE,
   STACK_PLAYBOOKS,
@@ -95,7 +98,10 @@ async function start(
             name === 'MAKA_CLOUD_SANDBOXES' ||
             name === 'MAKA_CLOUD_BACKUP_DIR' ||
             name === 'MAKA_CLOUD_SPEND_ALERT_USD' ||
-            name === 'MAKA_CLOUD_OWNER_INVITE',
+            name === 'MAKA_CLOUD_OWNER_INVITE' ||
+            name === 'MAKA_CLOUD_SERVER_DAILY_USD' ||
+            name === 'MAKA_CLOUD_INVITE_DAILY_USD' ||
+            name === 'MAKA_CLOUD_INVITE_MONTHLY_USD',
         ),
       ),
     }),
@@ -874,4 +880,126 @@ test('the owner’s devices are told once when the day’s spend reaches the ale
 test('without a spend alert set the check does nothing', async (t) => {
   const started = await start(t);
   await started.stack.checkSpendAlert();
+});
+
+/** A process of its own, like the evals next to a running server: its environment is its own. */
+function evalProcess(
+  script: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; out: string; err: string }> {
+  const index = fileURLToPath(new URL('../index.js', import.meta.url));
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ['--no-warnings', '--input-type=module', '-e', script, index],
+      { env: { PATH: process.env.PATH ?? '', ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      err += chunk.toString();
+    });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, out, err }));
+  });
+}
+
+/** What the evals do: open the server's ledger from the data directory and reserve $0.25 until refused. */
+const BOOK_UNTIL_REFUSED = `
+const index = process.argv.at(-1);
+const { readStackConfig, openServerLedger, explicitSpendCaps } = await import(index);
+const env = process.env;
+const config = readStackConfig({ ...env }, { sandboxes: 'single-machine' });
+const ledger = openServerLedger(config, explicitSpendCaps ? { expected: explicitSpendCaps(env) } : undefined);
+let granted = 0;
+for (let i = 0; i < 100; i += 1) {
+  const result = ledger.accounts.reserve({ inviteId: env.MAKA_EVALS_INVITE_ID }, 'eval-' + i, 0.25);
+  if (!result.ok) break;
+  granted += 1;
+}
+console.log(granted);
+ledger.close();
+`;
+
+function evalEnv(started: Started, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    MAKA_CLOUD_DATA_DIR: started.dataDir,
+    MAKA_EVALS_INVITE_ID: started.inviteId,
+    ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+    INSTABOX_API_KEY: 'ibx-test-not-a-key',
+    INSTABOX_MACHINE_ID: 'mch_eval',
+    ...extra,
+  };
+}
+
+test('another process booking spend on the server runs under the server’s caps, not its own settings', async (t) => {
+  // The server's daily cap is $1; the evals' environment says nothing, so its own default is $25.
+  const started = await start(t, undefined, { MAKA_CLOUD_SERVER_DAILY_USD: '1' });
+  const run = await evalProcess(BOOK_UNTIL_REFUSED, evalEnv(started));
+  assert.equal(run.code, 0, run.err);
+  assert.equal(
+    Number(run.out.trim()) * 0.25,
+    1,
+    `the evals booked $${Number(run.out.trim()) * 0.25} against a server that allows $1 a day`,
+  );
+});
+
+test('an evals process whose own cap differs from the running server’s refuses to start', async (t) => {
+  const started = await start(t, undefined, { MAKA_CLOUD_SERVER_DAILY_USD: '1' });
+  const run = await evalProcess(
+    BOOK_UNTIL_REFUSED,
+    evalEnv(started, { MAKA_CLOUD_SERVER_DAILY_USD: '25' }),
+  );
+  assert.notEqual(run.code, 0, 'it did not start');
+  assert.match(run.err, /MAKA_CLOUD_SERVER_DAILY_USD/u);
+  assert.equal(run.out.trim(), '', 'and booked nothing');
+  const same = await evalProcess(
+    BOOK_UNTIL_REFUSED,
+    evalEnv(started, { MAKA_CLOUD_SERVER_DAILY_USD: '1' }),
+  );
+  assert.equal(same.code, 0, same.err);
+});
+
+test('the server’s caps are read at each booking: a restart with other caps applies to a ledger already open', async (t) => {
+  const started = await start(t, undefined, { MAKA_CLOUD_SERVER_DAILY_USD: '1' });
+  const config = readStackConfig(
+    {
+      MAKA_CLOUD_DATA_DIR: started.dataDir,
+      ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+      INSTABOX_API_KEY: 'ibx-test-not-a-key',
+      INSTABOX_MACHINE_ID: 'mch_eval',
+    },
+    { sandboxes: 'single-machine' },
+  );
+  const ledger = openServerLedger(config);
+  t.after(() => ledger.close());
+  const account = { inviteId: started.inviteId };
+  let granted = 0;
+  while (ledger.accounts.reserve(account, `a-${granted}`, 0.25).ok) granted += 1;
+  assert.equal(granted, 4);
+  // The server restarts with a daily cap of $2: it writes its caps down again.
+  const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  t.after(() => journal.close());
+  journal.setSpendPolicy({ ...config.spend, serverDailyUsd: 2 });
+  assert.equal(ledger.accounts.reserve(account, 'after-restart', 0.25).ok, true);
+});
+
+test('a data directory whose server never wrote its caps down is not booked to', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cloud-host-nopolicy-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const config = readStackConfig(
+    {
+      MAKA_CLOUD_DATA_DIR: dir,
+      ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+      INSTABOX_API_KEY: 'ibx-test-not-a-key',
+      INSTABOX_MACHINE_ID: 'mch_eval',
+    },
+    { sandboxes: 'single-machine' },
+  );
+  new InviteStore(config.invitesPath).close();
+  new SqliteSpendJournal(config.gatewaySpendPath).close();
+  assert.throws(() => openServerLedger(config), /caps|limits/u);
 });

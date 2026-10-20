@@ -36,6 +36,7 @@ export {
   journaledPort,
   readJournalTotals,
   type SpendJournal,
+  type SpendPolicy,
   SqliteSpendJournal,
   type UnrecordedSpend,
 } from './journal.js';
