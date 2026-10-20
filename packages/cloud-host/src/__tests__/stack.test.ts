@@ -31,6 +31,8 @@ interface Started {
   inviteId: string;
   /** Which invite owns a task, for the tasks the tests issue model access to directly. */
   owners: Map<string, string>;
+  /** What the stack warned about. */
+  warnings: string[];
 }
 
 async function start(
@@ -96,8 +98,10 @@ async function start(
   let options: Partial<CloudRunnersOptions> = {};
   let inviteId = '';
   const owners = new Map<string, string>();
+  const warnings: string[] = [];
   const stack = await startStack(config, env, {
     pausePollMs: 10,
+    onWarning: (message) => warnings.push(message),
     ...(ownerSeam
       ? { ownerOfTask: (taskId) => owners.get(taskId) ?? (inviteId === '' ? undefined : inviteId) }
       : {}),
@@ -132,6 +136,7 @@ async function start(
     dataDir: dir,
     inviteId,
     owners,
+    warnings,
   };
 }
 
@@ -537,6 +542,43 @@ test('model access is charged to the invite that owns the task, and a task nobod
   invites.revoke(shut);
   assert.equal(await ask(await grant('tsk_shut')), 402, 'a revoked invite may not spend');
   assert.equal(sentToVendor(), 2);
+});
+
+test('a spending limit that stops a task nobody can be told about is warned, and still refuses', async (t) => {
+  const { stack, options, modelKeys, owners, warnings } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const shut = stack.cloud.server.invites.create('shut').inviteId;
+  stack.cloud.server.invites.setLimits(shut, { dailyUsd: 0 });
+  owners.set('tsk_shut', shut);
+  const access = options.modelAccess;
+  assert.ok(access);
+  const given = await access.issue({
+    taskId: 'tsk_shut',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_shut',
+  });
+  const response = await fetch(`${given.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': given.apiKey },
+    body: JSON.stringify({
+      model: 'claude-haiku-5-5',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  await response.arrayBuffer();
+  assert.equal(response.status, 402);
+  assert.deepEqual(
+    modelKeys.filter((line) => line.startsWith('/v1/messages ')),
+    [],
+  );
+  assert.equal(
+    warnings.filter((message) => /no conversation could be told/u.test(message)).length,
+    1,
+    'a limit with nobody to tell is never silent',
+  );
 });
 
 test('a task that no conversation owns gets no model access, and nothing reaches the vendor', async (t) => {

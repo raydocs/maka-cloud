@@ -355,7 +355,10 @@ test("the conductor's requests count against the invite that owns the session's 
     ['ses_open', 'inv_open'],
     ['ses_shut', 'inv_shut'],
   ]);
-  const gate = conductorGateway(gateway, (sessionId) => owners.get(sessionId));
+  const gate = conductorGateway(gateway, (sessionId) => {
+    const inviteId = owners.get(sessionId);
+    return inviteId === undefined ? undefined : { inviteId };
+  });
   const held: string[] = [];
   const charge = {
     reserve: (key: string) => {

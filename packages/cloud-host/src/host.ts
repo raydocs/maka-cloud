@@ -40,6 +40,8 @@ export interface CloudOptions
     ownerOfTask(taskId: string): string | undefined;
     /** The invite that owns a conversation; undefined for an unknown or unowned one. */
     ownerOfConversation(conversationId: string): string | undefined;
+    /** The conversation a task belongs to; undefined for an unknown task. */
+    conversationOfTask(taskId: string): string | undefined;
   }): void;
   /**
    * Starts the supervisor with the server's in-process parts and the conductor, after the
@@ -90,6 +92,7 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
       authorized,
       ownerOfTask,
       ownerOfConversation,
+      conversationOfTask,
     }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
@@ -103,7 +106,13 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
         onWarning: warn,
       });
       conductor = created;
-      onReady?.({ orchestrator, conductor: created, ownerOfTask, ownerOfConversation });
+      onReady?.({
+        orchestrator,
+        conductor: created,
+        ownerOfTask,
+        ownerOfConversation,
+        conversationOfTask,
+      });
       return {
         onUserMessage: (message, access) => created.onUserMessage(message, access),
         onAnswer: (answer, access) => created.onAnswer(answer, access),

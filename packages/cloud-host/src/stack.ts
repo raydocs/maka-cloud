@@ -28,13 +28,15 @@ import {
   conductorGateway,
   gatewayModelAccess,
   gatewayPrices,
+  type Owner,
   type StackGateway,
   startGateway,
 } from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
-import { PauseSwitch, PauseWatcher } from './pause.js';
+import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
+import { PauseSwitch, PauseWatcher } from './pause.js';
 
 /** What a user is told when the operator's pause switch stopped their work. */
 export const PAUSED_NOTICE =
@@ -97,15 +99,24 @@ export async function startStack(
   // fails to start instead of landing on a machine another invite uses.
   let ownerOfTask: ((taskId: string) => string | undefined) | undefined;
   let ownerOfConversation: ((conversationId: string) => string | undefined) | undefined;
+  let conversationOfTask: ((taskId: string) => string | undefined) | undefined;
+  // Set when the supervisor starts: a spending limit that stops work raises an item in its inbox.
+  let raiseCapHit:
+    | ((input: { conversationId: string; taskId?: string; key: string; ask: string }) => void)
+    | undefined;
   const tenantOf = (taskId: TaskId): string => {
     const owner = ownerOfTask?.(taskId);
     if (owner === undefined) throw new Error(`Task ${taskId} has no owning invite, so no sandbox`);
     return owner;
   };
   // Whose model spend a conductor session or a check is: the invite that owns its conversation.
-  const ownerOfSession = (makaSessionId: string): string | undefined => {
+  const ownerOfSession = (makaSessionId: string): Owner | undefined => {
     const conversationId = conductor?.conversationOfSession(makaSessionId);
-    return conversationId === undefined ? undefined : ownerOfConversation?.(conversationId);
+    const inviteId =
+      conversationId === undefined ? undefined : ownerOfConversation?.(conversationId);
+    return inviteId === undefined || conversationId === undefined
+      ? undefined
+      : { inviteId, conversationId };
   };
   const warn = dependencies.onWarning ?? (() => undefined);
   // Every request of a task's run is written down before it is sent, so a crash cannot lose what
@@ -140,6 +151,18 @@ export async function startStack(
         // While paused every reservation is refused, whoever asks.
         paused: () => pause.isPaused(),
       }),
+      // A cap that ends spending is told to the conversation and raised as a budget item.
+      capReporter({
+        raise: (input) => {
+          if (raiseCapHit === undefined) throw new Error('The inbox is not running');
+          raiseCapHit(input);
+        },
+        notice: async (conversationId, text) => {
+          if (conductor === undefined) throw new Error('The conductor is not running');
+          await conductor.postNotice({ conversationId, text });
+        },
+        warn,
+      }),
     );
   } catch (error) {
     invites?.close();
@@ -153,9 +176,14 @@ export async function startStack(
   try {
     const publicUrl = config.mcp.publicUrl;
     const runnerOptions: Partial<CloudRunnersOptions> = {
-      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) =>
-        dependencies.ownerOfTask ? dependencies.ownerOfTask(taskId) : ownerOfTask?.(taskId),
-      ),
+      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) => {
+        const inviteId = dependencies.ownerOfTask
+          ? dependencies.ownerOfTask(taskId)
+          : ownerOfTask?.(taskId);
+        if (inviteId === undefined) return undefined;
+        const conversationId = conversationOfTask?.(taskId);
+        return conversationId === undefined ? { inviteId } : { inviteId, conversationId };
+      }),
       sessions: new JsonFileSessionStore(config.runnerSessionsPath),
       sandboxTools: [
         await citeCheckSandboxTool(),
@@ -220,6 +248,9 @@ export async function startStack(
               const inviteId = ownerOfConversation?.(conversationId);
               return inviteId === undefined ? undefined : { inviteId };
             },
+            onStarted: (supervisor) => {
+              raiseCapHit = (input) => supervisor.raiseCapHit(input);
+            },
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
           context,
@@ -229,6 +260,7 @@ export async function startStack(
         conductor = parts.conductor;
         ownerOfTask = parts.ownerOfTask;
         ownerOfConversation = parts.ownerOfConversation;
+        conversationOfTask = parts.conversationOfTask;
       },
       onWarning: warn,
     });

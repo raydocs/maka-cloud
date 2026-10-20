@@ -1,5 +1,6 @@
 import type { ModelGateway } from '@maka-cloud/conductor';
 import {
+  type CapEvent,
   deepSeekSearch,
   Gateway,
   type GatewayServer,
@@ -14,6 +15,12 @@ import {
 } from '@maka-cloud/gateway';
 import type { ModelAccessProvider } from '@maka-cloud/runners';
 import type { StackConfig } from './config.js';
+
+/** Whose spend a request is, and where to tell them if a limit stops it. */
+export interface Owner {
+  inviteId: string;
+  conversationId?: string;
+}
 
 function vendorOfRunner(runner: string): Vendor {
   if (runner === 'claude-agent-sdk') return 'anthropic';
@@ -30,15 +37,15 @@ function vendorOfRunner(runner: string): Vendor {
 export function gatewayModelAccess(
   gateway: Gateway,
   sandboxUrl: string,
-  ownerOfTask: (taskId: string) => string | undefined,
+  ownerOfTask: (taskId: string) => Owner | undefined,
 ): ModelAccessProvider {
   return {
     async issue({ taskId, runner, budgetUsd, budgetRootId }) {
       if (budgetUsd === undefined) {
         throw new Error('The task has no budget, so it gets no model access.');
       }
-      const inviteId = ownerOfTask(taskId);
-      if (inviteId === undefined) {
+      const owner = ownerOfTask(taskId);
+      if (owner === undefined) {
         throw new Error('The task has no owning invite, so it gets no model access.');
       }
       const vendor = vendorOfRunner(runner);
@@ -46,7 +53,8 @@ export function gatewayModelAccess(
         vendor,
         subject: taskId,
         taskId,
-        account: { inviteId },
+        account: { inviteId: owner.inviteId },
+        ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
         budget: {
           limitUsd: budgetUsd,
           ...(budgetRootId === undefined ? {} : { poolId: budgetRootId }),
@@ -74,12 +82,12 @@ export function gatewayModelAccess(
  */
 export function conductorGateway(
   gateway: Gateway,
-  ownerOfSession: (makaSessionId: string) => string | undefined,
+  ownerOfSession: (makaSessionId: string) => Owner | undefined,
 ): ModelGateway {
   return {
     open(charge, subject) {
-      const inviteId = ownerOfSession(subject);
-      if (inviteId === undefined) {
+      const owner = ownerOfSession(subject);
+      if (owner === undefined) {
         return {
           fetch: () => Promise.reject(new Error('The conversation has no owning invite')),
           close: () => undefined,
@@ -89,7 +97,8 @@ export function conductorGateway(
         vendor: 'anthropic',
         subject,
         budget: charge,
-        account: { inviteId },
+        account: { inviteId: owner.inviteId },
+        ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
       });
       return { fetch: client.fetch, close: () => client.revoke() };
     },
@@ -143,6 +152,7 @@ export async function startGateway(
   models: readonly ModelPrice[] = config.models,
   journal?: SpendJournal,
   accounts?: SpendAccounts,
+  onCap?: (event: CapEvent) => void,
 ): Promise<StackGateway> {
   const key = (name: string): string | undefined => {
     const value = env[name]?.trim();
@@ -185,6 +195,7 @@ export async function startGateway(
         }),
     ...(journal === undefined ? {} : { journal }),
     ...(accounts === undefined ? {} : { accounts }),
+    ...(onCap === undefined ? {} : { onCap }),
     onWarning: (message, detail) => onWarning(`model gateway: ${message}`, detail),
   });
   const server = await serveGateway(gateway, { host: config.host, port: config.port });

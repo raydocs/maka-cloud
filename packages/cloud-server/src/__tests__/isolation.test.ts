@@ -570,14 +570,17 @@ test('the server hands the conductor a check of the caller it can run where an a
 
 test('the server names the invite that owns a task, from the task alone, and never guesses', async (t) => {
   let ownerOfTask: ((taskId: string) => string | undefined) | undefined;
+  let conversationOfTask: ((taskId: string) => string | undefined) | undefined;
   const { handler, seen } = recordingHandler();
   const h = await startHarness(t, {
     createHandler: (context) => {
       ownerOfTask = context.ownerOfTask;
+      conversationOfTask = context.conversationOfTask;
       return handler;
     },
   });
   const owner = ownerOfTask as (taskId: string) => string | undefined;
+  const conversationOf = conversationOfTask as (taskId: string) => string | undefined;
   const b = h.server.invites.create('b');
   const mine = await newConversation(h);
   const theirs = (await (await postJson(h, '/v1/conversations', {}, b.token)).json()) as {
@@ -603,9 +606,14 @@ test('the server names the invite that owns a task, from the task alone, and nev
   assert.equal(owner(first.taskId), h.inviteId);
   assert.equal(owner(second.taskId), b.inviteId);
   assert.equal(owner('tsk_missing'), undefined);
+  // The conversation a spending-limit notice goes to is the task's own, never another's.
+  assert.equal(conversationOf(first.taskId), mine);
+  assert.equal(conversationOf(second.taskId), theirs.conversationId);
+  assert.equal(conversationOf('tsk_missing'), undefined);
   // A session that belongs to no conversation owns nothing.
   const loose = h.server.orchestrator.authenticate(h.server.orchestrator.issueSession().token);
   assert.ok(loose);
   const orphan = await h.server.orchestrator.delegate(loose, { runner: 'fake', brief: 'c' });
   assert.equal(owner(orphan.taskId), undefined);
+  assert.equal(conversationOf(orphan.taskId), undefined);
 });

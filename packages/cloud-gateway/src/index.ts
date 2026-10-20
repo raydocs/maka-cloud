@@ -15,6 +15,7 @@ export {
   type ReserveResult,
 } from './budget.js';
 export {
+  type CapEvent,
   DEFAULT_GATEWAY_LIMITS,
   Gateway,
   type GatewayLimits,

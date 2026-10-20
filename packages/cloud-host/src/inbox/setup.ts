@@ -46,6 +46,8 @@ export interface InboxSetup {
    * conversation. Without it the inbox builds no check model.
    */
   accountOf?: AccountOf;
+  /** Called with the running supervisor, so the host can raise items of its own. */
+  onStarted?: (supervisor: Supervisor) => void;
   /** Replaces what is built from the config, for tests. */
   override?: {
     models?: readonly VerifierModel[];
@@ -124,5 +126,6 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
       ...(override.backoffMs === undefined ? {} : { backoffMs: override.backoffMs }),
     },
   });
+  setup.onStarted?.(supervisor);
   return inboxService(supervisor);
 }

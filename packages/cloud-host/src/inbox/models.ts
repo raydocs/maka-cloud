@@ -177,21 +177,22 @@ export function createGatewayVerifierModel(
     async verify(request: VerifierRequest, signal: AbortSignal, charge?: CheckCharge) {
       // The check's spend counts against the invite that owns the checked task's conversation.
       const account = charge === undefined ? undefined : accountOf(charge.conversationId);
-      if (account === undefined)
+      if (charge === undefined || account === undefined) {
         throw new Error('The check has no owning invite, so no model access');
+      }
       const client = gateway.inProcess({
         vendor: entry.vendor,
         subject: 'verification',
         account,
+        conversationId: charge.conversationId,
         budget: {
           reserve: (_key, usd) => {
-            if (!charge) return { ok: false, reason: 'the check has no budget' };
             const refused = charge.reserve(usd);
             return refused === undefined
               ? { ok: true }
               : { ok: false, budget: true, reason: 'the check budget cannot cover this request' };
           },
-          settle: (_key, usd) => charge?.settle(usd),
+          settle: (_key, usd) => charge.settle(usd),
         },
       });
       try {

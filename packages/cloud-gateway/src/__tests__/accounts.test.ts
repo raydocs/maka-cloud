@@ -6,7 +6,9 @@ import { type TestContext, test } from 'node:test';
 import {
   type AccountLimits,
   type BudgetPort,
+  type CapEvent,
   Gateway,
+  type GatewayOptions,
   type SpendAccounts,
   SqliteSpendJournal,
 } from '../index.js';
@@ -68,9 +70,15 @@ function ledgerOn(journal: SqliteSpendJournal, caps: Caps = {}): SpendAccounts {
   });
 }
 
-function rig(t: TestContext, accounts: SpendAccounts | undefined, journal?: SqliteSpendJournal) {
+function rig(
+  t: TestContext,
+  accounts: SpendAccounts | undefined,
+  journal?: SqliteSpendJournal,
+  extra: Partial<GatewayOptions> = {},
+) {
   const upstream = new FakeUpstream();
   const gateway = new Gateway({
+    ...extra,
     upstreams: { anthropic: { apiKey: 'sk-master-0123456789' } },
     limits: { requestOverheadTokens: 0 },
     fetch: upstream.fetch,
@@ -406,4 +414,67 @@ test("a ledger that throws refuses the request and releases the grant's hold", a
   assert.equal(response.status, 503);
   assert.deepEqual(calls, ['reserve', 'settle 0']);
   assert.equal(upstream.requests.length, 0);
+});
+
+test('the first cap that stops a grant is reported once, with where to tell the user, and a throwing report breaks nothing', async (t) => {
+  const journal = new SqliteSpendJournal(await journalPath(t));
+  t.after(() => journal.close());
+  const reported: CapEvent[] = [];
+  const warnings: string[] = [];
+  let throwing = false;
+  const caps = { fallback: { dailyUsd: reservation * 1.5, monthlyUsd: 1_000 } };
+  const { gateway, upstream } = rig(t, ledgerOn(journal, caps), undefined, {
+    onCap: (event) => {
+      reported.push(event);
+      if (throwing) throw new Error('inbox is down');
+    },
+    onWarning: (message) => warnings.push(message),
+  });
+  const holder = grantFor(gateway, 'tsk_holder', 'inv_a');
+  const open = await hold(gateway, upstream, holder.ref);
+  const grant = gateway.issue({
+    vendor: 'anthropic',
+    subject: 'tsk_capped',
+    taskId: 'tsk_capped',
+    budget: { limitUsd: 1_000 },
+    account: { inviteId: 'inv_a' },
+    conversationId: 'cnv_a',
+  });
+  const found = gateway.authenticate(grant.token);
+  assert.ok(found);
+  assert.equal((await refused(gateway, upstream, found.grant)).status, 402);
+  assert.equal((await refused(gateway, upstream, found.grant)).status, 402);
+  assert.deepEqual(reported, [
+    {
+      cap: { scope: 'invite_daily', inviteId: 'inv_a', limitUsd: reservation * 1.5 },
+      subject: 'tsk_capped',
+      taskId: 'tsk_capped',
+      conversationId: 'cnv_a',
+      account: { inviteId: 'inv_a' },
+    },
+  ]);
+
+  // A report that throws is a warning; the request is refused all the same.
+  throwing = true;
+  const other = grantFor(gateway, 'tsk_other', 'inv_a');
+  assert.equal((await refused(gateway, upstream, other.ref)).status, 402);
+  assert.equal(reported.length, 2, 'each grant reports its own');
+  assert.deepEqual(warnings, ['A spending cap could not be reported']);
+  await open.end();
+});
+
+test("a pause or a grant's own budget is not reported as a cap", async (t) => {
+  const journal = new SqliteSpendJournal(await journalPath(t));
+  t.after(() => journal.close());
+  const reported: CapEvent[] = [];
+  const paused = { on: false };
+  const { gateway, upstream } = rig(t, ledgerOn(journal, { fallback: BIG, paused }), undefined, {
+    onCap: (event) => reported.push(event),
+  });
+  const tight = grantFor(gateway, 'tsk_tight', 'inv_a', reservation / 2);
+  assert.equal((await refused(gateway, upstream, tight.ref)).status, 402, 'its own budget');
+  paused.on = true;
+  const free = grantFor(gateway, 'tsk_free', 'inv_a');
+  assert.equal((await send(gateway, free.ref)).status, 503, 'the pause');
+  assert.deepEqual(reported, []);
 });
