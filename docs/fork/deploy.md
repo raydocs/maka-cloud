@@ -550,7 +550,8 @@ action except the pull request on the scratch repository.
 
 Preparation:
 
-1. A scratch repository the `MAKA_GITHUB_TOKEN` may open pull requests on.
+1. A **public** scratch repository the `MAKA_GITHUB_TOKEN` may open pull requests
+   on (the sandbox clones it without a token), with at least one commit.
 2. An invite for the smoke test alone, with its own sandbox machine, **and a
    daily limit of its own that is at most `MAKA_CLOUD_SMOKE_MAX_USD`**
    (`invite limits ... --daily`). That limit is the hard cap: the gateway refuses
