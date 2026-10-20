@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import type { RunAuthority } from './guard.js';
 import type { OutboxKind } from './outbox.js';
 
 /**
@@ -33,6 +34,17 @@ export interface RunRow {
   createdAt: number;
   endedAt: number | null;
   endReason: string | null;
+  /** T23: the standing duty that started the run, its authority and whether its budget is a hard limit. Fixed for the run's life. */
+  dutyId: string | null;
+  authority: RunAuthority | null;
+  hardBudget: boolean;
+}
+
+/** What a duty fixes about the run it starts. */
+export interface RunLimits {
+  dutyId: string;
+  authority: RunAuthority;
+  budgetUsd: number;
 }
 
 export type SessionKind = 'conductor' | 'planner';
@@ -333,10 +345,28 @@ INSERT INTO taints (conversation_id, source, at)
   SELECT conversation_id, 'migration', created_at FROM conversations;
 `;
 
+/**
+ * T23: a run started by a standing duty carries the duty, an authority and a hard budget, set when
+ * the run is created and never changed: a trigger refuses any update of them, so nothing (not the
+ * model, a message or an answer) can raise a run's authority or let it ask for more money.
+ */
+const SCHEMA_V4 = `
+ALTER TABLE runs ADD COLUMN duty_id TEXT;
+ALTER TABLE runs ADD COLUMN authority TEXT CHECK (authority IN ('read-only', 'open-pr', 'merge-when-green'));
+ALTER TABLE runs ADD COLUMN hard_budget INTEGER NOT NULL DEFAULT 0;
+CREATE TRIGGER runs_limits_fixed BEFORE UPDATE OF duty_id, authority, hard_budget ON runs
+  BEGIN SELECT RAISE(ABORT, 'a run''s authority and budget limits are fixed'); END;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
-export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, schemaV2, SCHEMA_V3];
+export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
+  SCHEMA_V1,
+  schemaV2,
+  SCHEMA_V3,
+  SCHEMA_V4,
+];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
   return (
@@ -505,7 +535,12 @@ export class ConductorState {
    * message sent instead of answering dismisses the open question) or starts
    * a new run with the default budget.
    */
-  admitMessage(conversationId: string, messageId: string, budgetUsd: number): AdmitResult {
+  admitMessage(
+    conversationId: string,
+    messageId: string,
+    budgetUsd: number,
+    limits?: RunLimits,
+  ): AdmitResult {
     return this.transaction((): AdmitResult => {
       if (this.db.prepare('SELECT 1 FROM inputs WHERE input_id = ?').get(messageId)) {
         return { duplicate: true };
@@ -518,7 +553,7 @@ export class ConductorState {
         this.setRunState(run.runId, 'active');
         run = { ...run, state: 'active' };
       } else {
-        run = this.createRun(conversationId, budgetUsd);
+        run = this.createRun(conversationId, limits?.budgetUsd ?? budgetUsd, limits);
         newRun = true;
       }
       this.db
@@ -530,15 +565,24 @@ export class ConductorState {
     });
   }
 
-  private createRun(conversationId: string, budgetUsd: number): RunRow {
+  private createRun(conversationId: string, budgetUsd: number, limits?: RunLimits): RunRow {
     const runId = `run_${randomUUID().replaceAll('-', '')}`;
     const n = (this.db.prepare('SELECT COALESCE(MAX(n), 0) + 1 AS n FROM runs').get() as Row).n;
     const createdAt = this.now();
     this.db
       .prepare(
-        "INSERT INTO runs (run_id, n, conversation_id, state, budget_usd, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+        "INSERT INTO runs (run_id, n, conversation_id, state, budget_usd, created_at, duty_id, authority, hard_budget) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)",
       )
-      .run(runId, n as number, conversationId, budgetUsd, createdAt);
+      .run(
+        runId,
+        n as number,
+        conversationId,
+        budgetUsd,
+        createdAt,
+        limits?.dutyId ?? null,
+        limits?.authority ?? null,
+        limits ? 1 : 0,
+      );
     return {
       runId,
       conversationId,
@@ -548,6 +592,9 @@ export class ConductorState {
       createdAt,
       endedAt: null,
       endReason: null,
+      dutyId: limits?.dutyId ?? null,
+      authority: limits?.authority ?? null,
+      hardBudget: limits !== undefined,
     };
   }
 
@@ -1416,6 +1463,9 @@ function toRun(row: Row): RunRow {
     createdAt: Number(row.created_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
     endReason: row.end_reason === null ? null : String(row.end_reason),
+    dutyId: row.duty_id === null ? null : String(row.duty_id),
+    authority: row.authority === null ? null : (String(row.authority) as RunAuthority),
+    hardBudget: Number(row.hard_budget) === 1,
   };
 }
 

@@ -10,7 +10,7 @@ import {
   type ModelPrices,
   OPUS_5_5_PRICES,
 } from './config.js';
-import { playbookToolPolicy } from './guard.js';
+import { isRunAuthority, playbookToolPolicy, type RunAuthority } from './guard.js';
 import { MakaHost } from './maka-host.js';
 import { type ConductorAccess, OrchestratorLink } from './orchestrator-link.js';
 import type {
@@ -86,6 +86,12 @@ export interface UserMessage {
    * conversation is tainted before the message is admitted, and stays tainted (T15).
    */
   external?: boolean;
+  /**
+   * Set only by a standing duty (T23): the run this message starts has this authority and this
+   * hard budget, which it cannot raise or ask to raise. It applies when the message starts a run;
+   * a message that joins a run already open changes nothing about it.
+   */
+  run?: { dutyId: string; authority: RunAuthority; budgetUsd: number };
 }
 
 export interface UserAnswer {
@@ -289,11 +295,36 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
+    const limits = message.run;
+    if (
+      limits !== undefined &&
+      !(
+        typeof limits.dutyId === 'string' &&
+        limits.dutyId !== '' &&
+        isRunAuthority(limits.authority) &&
+        Number.isFinite(limits.budgetUsd) &&
+        limits.budgetUsd > 0
+      )
+    ) {
+      // Fail closed: limits that cannot be read start no run, instead of a run with the defaults.
+      this.warn('A message carried run limits that are not valid; it was not run', {
+        messageId: message.messageId,
+      });
+      this.state.enqueueNotice(
+        { conversationId: message.conversationId },
+        'This request could not be started because its limits were not valid.',
+      );
+      this.sendOutbox(message.conversationId);
+      return;
+    }
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
       message.messageId,
       this.limits.defaultRunBudgetUsd,
+      limits === undefined
+        ? undefined
+        : { dutyId: limits.dutyId, authority: limits.authority, budgetUsd: limits.budgetUsd },
     );
     if (admitted.duplicate) return;
     this.enqueue(lane, { kind: 'turn', runId: admitted.run.runId, text: message.text });
@@ -1045,6 +1076,17 @@ export class Conductor {
    */
   private askBudget(turn: ActiveTurn, needUsd: number): QuestionRow | undefined {
     const budget = this.state.budget(turn.runId);
+    // A standing duty's budget is a hard limit: there is no card to raise it, the run ends.
+    if (this.state.run(turn.runId)?.hardBudget) {
+      this.stopRun(
+        this.lane(turn.conversationId),
+        turn.runId,
+        'budget_limit',
+        `This run reached its budget of ${money(budget.budgetUsd)} and was stopped. A standing duty cannot raise its own budget.`,
+      );
+      this.sendOutbox(turn.conversationId);
+      return undefined;
+    }
     const target =
       needUsd > 0
         ? (budget.spentUsd + needUsd) * 1.2

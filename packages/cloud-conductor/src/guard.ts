@@ -17,6 +17,20 @@ export const TOOL_EFFECTS = ['writes_outside_sandbox', 'sends', 'spends', 'irrev
 
 export type ToolEffect = (typeof TOOL_EFFECTS)[number];
 
+/**
+ * T23: what a standing-duty run may do, lowest first. A run started by a duty carries one for its
+ * whole life; a run a user starts has none and is limited by the rest of the gate only.
+ */
+export const RUN_AUTHORITIES = ['read-only', 'open-pr', 'merge-when-green'] as const;
+
+export type RunAuthority = (typeof RUN_AUTHORITIES)[number];
+
+export const isRunAuthority = (value: unknown): value is RunAuthority =>
+  (RUN_AUTHORITIES as readonly unknown[]).includes(value);
+
+export const authorityReaches = (have: RunAuthority, need: RunAuthority): boolean =>
+  RUN_AUTHORITIES.indexOf(have) >= RUN_AUTHORITIES.indexOf(need);
+
 export interface ToolPolicy {
   /** Empty only for a tool that does none of the effects. */
   readonly effects: readonly ToolEffect[];
@@ -27,6 +41,8 @@ export interface ToolPolicy {
    * instead of when the call starts: a call refused before that step returns only code-built text.
    */
   readonly ownTaint?: true;
+  /** The lowest duty authority that may call the tool. A duty run may not call a tool with effects and none. */
+  readonly requiresAuthority: RunAuthority | undefined;
 }
 
 /**
@@ -41,13 +57,18 @@ export interface ToolPolicy {
  * it calls the orchestrator, so a delegation refused for its budget does not.
  */
 export const BUILTIN_TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
-  start_playbook: { effects: [], externalResult: false },
-  delegate_task: { effects: ['sends'], externalResult: true, ownTaint: true },
-  task_status: { effects: [], externalResult: true },
-  task_wait: { effects: [], externalResult: true },
-  task_cancel: { effects: [], externalResult: true },
-  ask_user: { effects: [], externalResult: false },
-  notify: { effects: [], externalResult: false },
+  start_playbook: { effects: [], externalResult: false, requiresAuthority: undefined },
+  delegate_task: {
+    effects: ['sends'],
+    externalResult: true,
+    ownTaint: true,
+    requiresAuthority: undefined,
+  },
+  task_status: { effects: [], externalResult: true, requiresAuthority: undefined },
+  task_wait: { effects: [], externalResult: true, requiresAuthority: undefined },
+  task_cancel: { effects: [], externalResult: true, requiresAuthority: undefined },
+  ask_user: { effects: [], externalResult: false, requiresAuthority: undefined },
+  notify: { effects: [], externalResult: false, requiresAuthority: undefined },
 };
 
 /**
@@ -60,6 +81,7 @@ export function playbookToolPolicy(spec: {
   name: string;
   effects?: unknown;
   externalResult?: unknown;
+  requiresAuthority?: unknown;
 }): ToolPolicy {
   const { effects } = spec;
   if (
@@ -73,8 +95,14 @@ export function playbookToolPolicy(spec: {
   if (spec.externalResult !== undefined && typeof spec.externalResult !== 'boolean') {
     throw new Error(`Conductor tool ${spec.name}: externalResult must be a boolean.`);
   }
+  if (spec.requiresAuthority !== undefined && !isRunAuthority(spec.requiresAuthority)) {
+    throw new Error(
+      `Conductor tool ${spec.name}: requiresAuthority must be one of: ${RUN_AUTHORITIES.join(', ')}.`,
+    );
+  }
   return {
     effects: [...new Set(effects as ToolEffect[])],
     externalResult: spec.externalResult !== false,
+    requiresAuthority: spec.requiresAuthority,
   };
 }

@@ -73,6 +73,8 @@ export function openPullRequestTool(
     parameters,
     irreversible: true,
     effects: ['writes_outside_sandbox', 'irreversible'],
+    // A standing duty may open pull requests from `open-pr` upwards, never at `read-only`.
+    requiresAuthority: 'open-pr',
     // The pull request GitHub opened and the repository, built by code.
     externalResult: false,
     async approvalDetails(args: Args) {
