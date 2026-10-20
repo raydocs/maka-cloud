@@ -472,11 +472,14 @@ Preparation:
 
 1. A scratch repository the `MAKA_GITHUB_TOKEN` may open pull requests on.
 2. An invite for the smoke test alone, with its own sandbox machine, **and a
-   daily limit of its own** (`invite limits ... --daily`). The budget-stop step
-   lowers that limit for a few minutes and puts it back; an invite with no limit
-   of its own is refused because the old value could not be restored. If the run
-   is killed in that window, set the limit back by hand: the line printed at the
-   start of the step says what it was.
+   daily limit of its own that is at most `MAKA_CLOUD_SMOKE_MAX_USD`**
+   (`invite limits ... --daily`). That limit is the hard cap: the gateway refuses
+   every model request past it, whereas the budget alone only keeps another
+   scenario from starting once the server has spent it. The command refuses
+   (exit 2, before any request) when the invite has no limit of its own or one
+   above the budget. The budget-stop step lowers that limit for a few minutes and
+   puts it back. If the run is killed in that window, set the limit back by
+   hand: the line printed at the start of the step says what it was.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 
