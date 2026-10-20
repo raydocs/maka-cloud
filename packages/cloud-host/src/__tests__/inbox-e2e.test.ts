@@ -46,6 +46,7 @@ const REPORT = {
 };
 const CITE_RECORD = {
   version: 1,
+  mode: 'drop_unsupported',
   claims: [{ id: 'c1', status: 'quote_verified', removed: false }],
 };
 
