@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { backup as sqliteBackup, type DatabaseSync } from 'node:sqlite';
+import { MemoryStore } from '@maka-cloud/memory';
 import {
   Orchestrator,
   type OrchestratorOptions,
@@ -156,6 +157,11 @@ export interface CloudServerOptions {
      * with nothing in between.
      */
     authorized(caller: string, conversationId: string): boolean;
+    /** Invite-scoped memory; unknown, unowned or revoked conversations have no access. */
+    memory: {
+      context(conversationId: string): string;
+      remember(message: { eventId: string; conversationId: string; text: string }): void;
+    };
     /**
      * The invite that owns the conversation a task belongs to, or undefined when the task is
      * unknown or its conversation has no owner (a pre-v5 one nobody adopted). Never a guess.
@@ -287,6 +293,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const ownInviteStore = invites;
     const authorized = (caller: string, conversationId: string): boolean =>
       ownInviteStore.active(caller) && conversations.owns(caller, conversationId);
+    const memory = new MemoryStore(db);
+    const memoryOwner = (conversationId: string): string | undefined => {
+      const owner = conversations.ownerOf(conversationId);
+      return owner !== undefined && ownInviteStore.active(owner) ? owner : undefined;
+    };
     handler = options.createHandler
       ? await options.createHandler({
           publisher,
@@ -296,6 +307,22 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             return sessionId === undefined ? undefined : accessFor(sessionId);
           },
           authorized,
+          memory: {
+            context: (conversationId) => {
+              const owner = memoryOwner(conversationId);
+              return owner === undefined ? '' : memory.context(owner);
+            },
+            remember: (message) => {
+              const owner = memoryOwner(message.conversationId);
+              if (owner !== undefined) {
+                memory.remember(owner, {
+                  id: message.eventId,
+                  conversationId: message.conversationId,
+                  text: message.text,
+                });
+              }
+            },
+          },
           ownerOfTask: (taskId) => {
             const conversationId = conversationOfTask(taskId);
             return conversationId === undefined ? undefined : conversations.ownerOf(conversationId);
@@ -412,6 +439,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     }
     const api = new PublicApi({
       db,
+      memory,
       invites,
       conversations,
       tasks: store,

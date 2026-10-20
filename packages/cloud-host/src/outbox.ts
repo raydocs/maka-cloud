@@ -19,9 +19,11 @@ export class ServerOutbox implements ConductorOutbox {
   constructor(
     private readonly publisher: ConversationPublisher,
     private readonly warn: (message: string, detail?: unknown) => void = () => undefined,
+    private readonly remember?: (message: OutboxMessage) => void,
   ) {}
 
   message(message: OutboxMessage): void {
+    this.remember?.(message);
     this.publish({
       kind: 'message',
       eventId: message.eventId,

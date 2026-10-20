@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, type TestContext, test } from 'node:test';
+import { MemoryStore } from '@maka-cloud/memory';
 import { ConversationStore } from '../conversations.js';
 import { openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
@@ -31,6 +32,7 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
   }));
   const api = new PublicApi({
     db,
+    memory: new MemoryStore(db),
     invites,
     conversations,
     tasks: new SqliteTaskStore(db, hub),

@@ -19,6 +19,7 @@
     "test:dist": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
+    "@maka-cloud/memory": "0.1.0",
     "@maka-cloud/orchestrator": "0.1.0",
     "web-push": "3.6.7",
     "zod": "^4.6.5"

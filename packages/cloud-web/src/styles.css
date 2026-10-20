@@ -538,6 +538,31 @@ textarea {
 .inbox li {
   overflow-wrap: anywhere;
 }
+.memory-panel {
+  padding: 12px max(16px, calc((100vw - 1136px) / 2));
+  border-bottom: 1px solid var(--line);
+  background: white;
+}
+.memory-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.memory-content {
+  display: grid;
+  gap: 12px;
+  max-width: 620px;
+  padding: 16px 0;
+  overflow-wrap: anywhere;
+}
+.memory-content form {
+  display: grid;
+  gap: 10px;
+}
+.memory-facts {
+  display: grid;
+  gap: 16px;
+  padding-left: 20px;
+}
 .computer {
   margin: 12px 0 0 15px;
 }

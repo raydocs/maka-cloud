@@ -109,6 +109,7 @@ export async function startStack(
   >();
   const answers: Stack['answers'] = [];
   let publisher!: ConversationPublisher;
+  let remember!: (message: { eventId: string; conversationId: string; text: string }) => void;
   const handlerFor = (): ConversationHandler => ({
     onUserMessage(message) {
       publisher.publish({
@@ -170,6 +171,7 @@ export async function startStack(
     host: '127.0.0.1',
     createHandler: (context) => {
       publisher = context.publisher;
+      remember = context.memory.remember;
       access = context.conductorAccess;
       return handlerFor();
     },
@@ -247,7 +249,14 @@ export async function startStack(
       return { token: created.token, inviteId: created.inviteId };
     },
     say: (conversationId, text) => {
-      publisher.publish({ kind: 'message', eventId: `evt_${randomUUID()}`, conversationId, text });
+      const message = {
+        kind: 'message' as const,
+        eventId: `evt_${randomUUID()}`,
+        conversationId,
+        text,
+      };
+      remember(message);
+      publisher.publish(message);
     },
     notice: (conversationId, text) => {
       publisher.publish({ kind: 'notice', eventId: `evt_${randomUUID()}`, conversationId, text });
