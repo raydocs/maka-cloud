@@ -38,7 +38,7 @@ not code. We combine the two:
   detail (plan, steps, diff, tests, review, cost); minimal and phone first.
 
 Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
-T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
+T28, T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
 T23 and T24.
 
 Rules for all tasks:
@@ -448,9 +448,76 @@ Depends on: T5, T8, the model gateway.
 - Tests: the mode-to-role mapping, the reviewer's vendor always differs, the
   per-mode budget holds, and the fix loop runs at most once.
 
+## T28: durable tasks (design borrowed from Vercel's durable-harness)
+
+Depends on: T6, T8, T21. Comes before T26 and T27, which need it.
+
+Today a server restart fails every running task ("orphaned") and a box that
+dies loses the agent's session, because the transcript lives only on the box.
+Borrow the design of github.com/vercel-labs/durable-harness (Apache-2.0; read
+its `packages/harness-world`, `harness-claude-code`, `harness-codex` and
+`harness-process`), not its code or its dependencies: no Workflow SDK, no
+Vercel Sandbox. Keep our SQLite stores, our gateway and instabox.
+
+- Step log per task, in the orchestrator's existing event store: before any
+  model call, tool call with a side effect, push, PR, message or box action,
+  record its intent with a memo key and a replay class; after it, record the
+  outcome. First writer wins per memo key, and an outcome applies only to a
+  step still running. A completed step is never run again: its recorded
+  output is reused.
+- Replay classes: `safe` (reading, tests, building, a model call) reruns
+  after a crash; `never` (push, open or merge a PR, send, pay) is not rerun.
+  An interrupted `never` step is recorded as "may or may not have taken
+  effect", and the agent is told so and checks before trying again. Before a
+  `never` step runs, its intent must be durably written (a barrier).
+- Fencing: each attempt to drive a task gets an epoch. Every write carries the
+  epoch and the log sequence it read; a stale writer (an old process, a late
+  handle, an old box) is refused at its first write, starts nothing, and
+  stops. This replaces the case-by-case late-handle and stop-pending fixes.
+- Transcript mirroring: copy every line the CLI appends to its session file
+  into the server as it is written (Claude Code: the session JSONL under
+  `CLAUDE_CONFIG_DIR/projects/`; Codex: the rollout JSONL under
+  `CODEX_HOME`), tracking file size and inode, deduplicated by entry id, with
+  paths rewritten to the server's. A line that cannot be mapped stops the turn
+  with an error and keeps the task (fail closed). The server's copy is the
+  source of truth.
+- Resume instead of fail: after a restart, a lost box, or a box that slept
+  (T26) or moved (T27), start a fresh box, wipe the CLI's config directory,
+  upload only the mirrored session files, and resume the same session by id
+  (`claude --resume`; Codex `thread/resume`). Never reuse an old CLI home. If
+  the last turn never ended, first send a recovery note listing the steps that
+  completed, the `never` steps that were interrupted, and the `safe` steps
+  that will rerun. Give up after 3 resumes in a row and mark the task for the
+  user. Workspace files come from the box's disk or its snapshot; they are
+  not transactional, so the recovery note says what to re-check.
+- Spend: a model call the transcript shows as completed is not repeated, so
+  it is not billed twice; a call a crash cut off is billed once more and that
+  is recorded. Reservations follow the step log (intent reserves, outcome
+  settles), and a fenced writer can never settle.
+- Steering: a message the user sends while a task runs goes into the running
+  session at the next safe point instead of waiting or restarting (Claude
+  Code stream-json input; Codex app-server, which T27 moves to). A withdrawn
+  message that was not yet delivered is dropped.
+- Catch-up: the task stream has a cursor; a page that reconnects (or a phone
+  that wakes) resumes from its last cursor and sees what it missed, which T24
+  needs for "close it and come back, the work kept going".
+- Hardening from the same design: the CLI's environment is an explicit
+  allowlist; Codex's `shell_environment_policy` excludes our token variables
+  so tools the agent runs cannot read them; the model token in a box only
+  works from the CLI's own process tree where the box can enforce it.
+- Tests with fakes: a crash after a `never` step is never rerun and the
+  recovery note lists it; a crash mid-`safe` step reruns it once; two
+  processes driving one task, the stale one refused at its first write and the
+  side effect happens once; a restart resumes a running task with its session
+  instead of failing it; a lost box resumes on a fresh box from the mirrored
+  transcript; an unmappable transcript line stops the turn and keeps the task;
+  a resent user message is applied once; a reconnecting viewer gets every
+  event after its cursor exactly once; no completed model call is billed
+  twice.
+
 ## T26: sandbox sleep and wake, and Ship
 
-Depends on: T6, T8, T23.
+Depends on: T6, T8, T23, T28.
 
 - An invite's sandbox machine pauses after a configurable idle time (no task
   running, no live terminal or desktop view) and resumes on the next task or
