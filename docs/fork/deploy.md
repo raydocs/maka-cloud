@@ -396,7 +396,11 @@ delete the entry from `MAKA_CLOUD_SANDBOXES` and remove the machine.
 
 - Per-invite and whole-server caps (`MAKA_CLOUD_INVITE_DAILY_USD`,
   `MAKA_CLOUD_INVITE_MONTHLY_USD`, `MAKA_CLOUD_SERVER_DAILY_USD`) are enforced at
-  the model gateway, so a task cannot spend past them.
+  the model gateway, so a task cannot spend past them. The server writes the caps
+  it runs under into `gateway-spend.db` at each start; the evals (a second process
+  booking spend on this server) read them from there instead of their own
+  environment, and refuse to start if their environment sets one of the three to a
+  different value.
 - `maka-cloud pause` stops all spending within seconds, while the server runs;
   `maka-cloud resume` allows it again (work that was stopped is not restarted).
   Both need `MAKA_CLOUD_DATA_DIR`.

@@ -115,6 +115,37 @@ list. The server publishes item changes on its maintenance tick (15 s by
 default), so the app applies the answer's response at once and the stream
 confirms later.
 
+## Cloud computer handoff (T14, integration blocked)
+
+Each active task has a collapsed **Open computer** view. The viewer receives
+desktop images and inert terminal output over authenticated fetch SSE, never
+a shareable sandbox link. **Take control** waits for a confirmed task pause;
+only then can terminal text, desktop clicks and keys be sent. **Hand back
+control** disables input while resuming. Closing the view or losing its stream
+does not resume the task; reopen to hand back. The conversation records the
+handoffs. The compact viewer supports light and dark, without blur over code.
+
+Server integration: supply `CloudServerOptions.computer`, a trusted
+`ComputerSource` mapping **task ids** to desktop/terminal sessions. Routes:
+`GET /v1/tasks/:id/computer`, `GET .../computer/stream`, and
+`POST .../computer/(takeover|handback|input)`. The source sends PNG/JPEG
+base64 images and terminal text; pointer coordinates are normalized to 0–1.
+It must close upstream sessions and abort pending input on its `AbortSignal`,
+never buffer input for replay, and keep credentials/URLs server-side. Streams
+share the existing feed quotas and drain deadline. Every route checks task
+ownership, writes recheck after awaits, every frame checks the invite, and
+revocation aborts streams and held input. Revoke/cancel/shutdown do not
+automatically resume work.
+
+**Not production-ready:** this PR supplies the web/server contract and a fake
+source only. There is no instabox VNC/PTY-to-image/text adapter or host task-to-
+machine wiring yet. More importantly, `SandboxCliRunner` has no run-handle
+pause/resume support: real takeover is refused, rather than relying on the
+desktop service's advisory input lock (which does not pause CLI processes).
+Those integrations need runner/host work outside T14's current web/server
+scope. No fake is enabled in production; routes return 404 without a source.
+The fake stack never opens a sandbox or executes terminal input.
+
 ## Not done yet
 
 - **Web Push is wired to the server's routes** and tested end to end against the

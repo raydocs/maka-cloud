@@ -103,6 +103,12 @@ function openJournal(path: string): DatabaseSync {
       );
       CREATE INDEX IF NOT EXISTS account_spend_day ON account_spend (day, account);
       CREATE INDEX IF NOT EXISTS account_spend_month ON account_spend (account, month);
+      CREATE TABLE IF NOT EXISTS spend_policy (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        invite_daily_usd REAL NOT NULL,
+        invite_monthly_usd REAL NOT NULL,
+        server_daily_usd REAL NOT NULL
+      );
       `);
       return db;
     } catch (error) {
@@ -120,6 +126,13 @@ function openJournal(path: string): DatabaseSync {
   }
 }
 
+/** What an invite may spend per UTC day and month unless it has caps of its own, and what the whole server may spend per day. */
+export interface SpendPolicy {
+  inviteDailyUsd: number;
+  inviteMonthlyUsd: number;
+  serverDailyUsd: number;
+}
+
 /**
  * The journal in SQLite. Each process writes under its own epoch; at start, what earlier epochs
  * wrote is handed to the task log once (`unrecorded`) and then forgotten (`recorded`).
@@ -130,6 +143,46 @@ export class SqliteSpendJournal implements SpendJournal {
 
   constructor(path: string) {
     this.db = openJournal(path);
+  }
+
+  /**
+   * Writes down the caps this ledger runs under, where every process that books spend against it
+   * reads them: the server writes at each start, another process (the evals) reads them instead of
+   * its own settings. Replaces the earlier policy.
+   */
+  setSpendPolicy(policy: SpendPolicy): void {
+    for (const usd of [policy.inviteDailyUsd, policy.inviteMonthlyUsd, policy.serverDailyUsd]) {
+      if (!Number.isFinite(usd) || usd < 0) {
+        throw new RangeError('A spend cap is a number of dollars, 0 or more');
+      }
+    }
+    this.db
+      .prepare(
+        `INSERT INTO spend_policy (id, invite_daily_usd, invite_monthly_usd, server_daily_usd)
+         VALUES (1, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET invite_daily_usd = excluded.invite_daily_usd,
+           invite_monthly_usd = excluded.invite_monthly_usd,
+           server_daily_usd = excluded.server_daily_usd`,
+      )
+      .run(policy.inviteDailyUsd, policy.inviteMonthlyUsd, policy.serverDailyUsd);
+  }
+
+  /** The caps the server last wrote down, read from the file each time; nothing if it never has. */
+  spendPolicy(): SpendPolicy | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT invite_daily_usd, invite_monthly_usd, server_daily_usd FROM spend_policy WHERE id = 1',
+      )
+      .get() as
+      | { invite_daily_usd: number; invite_monthly_usd: number; server_daily_usd: number }
+      | undefined;
+    return (
+      row && {
+        inviteDailyUsd: row.invite_daily_usd,
+        inviteMonthlyUsd: row.invite_monthly_usd,
+        serverDailyUsd: row.server_daily_usd,
+      }
+    );
   }
 
   hold(taskId: string, key: string, usd: number): void {

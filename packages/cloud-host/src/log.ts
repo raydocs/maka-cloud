@@ -1,7 +1,8 @@
 import { scrubErrorText } from '@maka-cloud/server';
 
 export type LogLevel = 'info' | 'warn' | 'error';
-export type LogFields = Record<string, string | number | boolean | null | undefined>;
+/** Scalars are the norm; anything else (an object, a list) is scrubbed value by value before it prints. */
+export type LogFields = Record<string, unknown>;
 
 export interface Logger {
   info(event: string, fields?: LogFields): void;
@@ -66,16 +67,29 @@ export function createScrubber(env: NodeJS.ProcessEnv = process.env): (text: str
   };
 }
 
-function describe(detail: unknown): string | undefined {
-  if (detail === undefined || detail === null) return undefined;
-  // Name and message only: a stack or a cause chain can carry request bodies and headers.
-  if (detail instanceof Error) return `${detail.name}: ${detail.message}`;
-  if (typeof detail === 'string') return detail;
-  try {
-    return JSON.stringify(detail) ?? String(detail);
-  } catch {
-    return 'unprintable';
-  }
+/** The only keys of an error or a detail object that print, and only as scalars. Never a message body, header or endpoint. */
+const DETAIL_KEYS = [
+  'name',
+  'code',
+  'status',
+  'statusCode',
+  'errcode',
+  'errstr',
+  'errno',
+  'syscall',
+  'type',
+  'kind',
+] as const;
+const MAX_DEPTH = 4;
+const MAX_ITEMS = 20;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+/** An error's message prints only when we wrote it (`safeToLog`) or the operating system did (it names a `syscall`). */
+function messageIsSafe(error: Error): boolean {
+  const flags = error as Error & { safeToLog?: unknown; syscall?: unknown };
+  return flags.safeToLog === true || typeof flags.syscall === 'string';
 }
 
 export interface LoggerOptions {
@@ -84,7 +98,7 @@ export interface LoggerOptions {
   now?: () => number;
 }
 
-/** One JSON object per line, with every string scrubbed before it is written. */
+/** One JSON object per line, with every value scrubbed before it is written. */
 export function createLogger(options: LoggerOptions): Logger {
   const scrub = createScrubber(options.env ?? process.env);
   const now = options.now ?? Date.now;
@@ -92,6 +106,71 @@ export function createLogger(options: LoggerOptions): Logger {
     const clean = scrub(text);
     return clean.length > MAX_FIELD_LENGTH ? `${clean.slice(0, MAX_FIELD_LENGTH)}…` : clean;
   };
+
+  /** A value as it may print: scalars scrubbed, containers walked, a secret-named key dropped whatever it holds. */
+  const safe = (value: unknown, depth: number, seen: Set<object>): unknown => {
+    if (value === null || typeof value === 'boolean') return value;
+    if (typeof value === 'string') return clip(value);
+    if (typeof value === 'number' || typeof value === 'bigint') {
+      // A number can be a secret too (a PIN, a numeric token): compare it as text.
+      const text = String(value);
+      return scrub(text) === text ? (typeof value === 'bigint' ? text : value) : '[secret]';
+    }
+    if (!isRecord(value)) return undefined;
+    if (seen.has(value) || depth >= MAX_DEPTH) return '[cut]';
+    seen.add(value);
+    try {
+      if (Array.isArray(value)) {
+        const items = value.slice(0, MAX_ITEMS).map((item) => safe(item, depth + 1, seen));
+        return value.length > MAX_ITEMS ? [...items, `[${value.length - MAX_ITEMS} more]`] : items;
+      }
+      if (value instanceof Error) return clip(describeError(value));
+      const out: Record<string, unknown> = {};
+      for (const [key, inner] of Object.entries(value).slice(0, MAX_ITEMS)) {
+        const name = clip(key);
+        out[name] = SECRET_NAME.test(key) ? '[secret]' : safe(inner, depth + 1, seen);
+      }
+      return out;
+    } catch {
+      return '[unprintable]';
+    } finally {
+      seen.delete(value);
+    }
+  };
+
+  /** An error as text: its name and the few scalars that identify it. Its message only when it is safe to print. */
+  const describeError = (error: Error): string => {
+    const parts: string[] = [error.name];
+    const flags = error as unknown as Record<string, unknown>;
+    for (const key of DETAIL_KEYS) {
+      const inner = flags[key];
+      if (key !== 'name' && (typeof inner === 'string' || typeof inner === 'number')) {
+        parts.push(`${key}=${String(inner)}`);
+      }
+    }
+    return messageIsSafe(error) ? `${parts.join(' ')}: ${error.message}` : parts.join(' ');
+  };
+
+  /** Detail for a warning: an error by `describeError`, an object by the allowlist, text as text. */
+  const describe = (detail: unknown): string | undefined => {
+    if (detail === undefined || detail === null) return undefined;
+    if (detail instanceof Error) return clip(describeError(detail));
+    if (typeof detail === 'string') return clip(detail);
+    if (typeof detail === 'number' || typeof detail === 'boolean') return clip(String(detail));
+    if (!isRecord(detail)) return undefined;
+    const kept: string[] = [];
+    try {
+      for (const key of DETAIL_KEYS) {
+        const inner = (detail as Record<string, unknown>)[key];
+        if (typeof inner === 'string' || typeof inner === 'number')
+          kept.push(`${key}=${String(inner)}`);
+      }
+    } catch {
+      return 'unprintable';
+    }
+    return clip(kept.length > 0 ? kept.join(' ') : 'details omitted');
+  };
+
   const emit = (level: LogLevel, event: string, fields: LogFields = {}): void => {
     const line: Record<string, unknown> = {
       ts: new Date(now()).toISOString(),
@@ -101,15 +180,19 @@ export function createLogger(options: LoggerOptions): Logger {
     for (const [name, value] of Object.entries(fields)) {
       if (value === undefined) continue;
       const key = NAME.test(name) ? name : 'invalid_field';
-      const safe = RESERVED.has(key) ? `field_${key}` : key;
-      if (typeof value === 'string') {
-        // A field whose name says it holds a secret never prints, whatever it holds.
-        line[safe] = SECRET_NAME.test(safe) ? '[secret]' : clip(value);
-      } else {
-        line[safe] = value;
-      }
+      const field = RESERVED.has(key) ? `field_${key}` : key;
+      // A field whose name says it holds a secret never prints, whatever it holds and whatever its type.
+      const printable =
+        SECRET_NAME.test(name) || SECRET_NAME.test(field) ? '[secret]' : safe(value, 0, new Set());
+      if (printable !== undefined) line[field] = printable;
     }
-    options.write(JSON.stringify(line));
+    let out: string;
+    try {
+      out = JSON.stringify(line);
+    } catch {
+      out = JSON.stringify({ ts: line.ts, level, event: line.event, note: 'fields unprintable' });
+    }
+    options.write(out);
   };
   return {
     info: (event, fields) => emit('info', event, fields),

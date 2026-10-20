@@ -61,6 +61,7 @@ Upstream files this fork changes, so a sync knows what to re-check.
 
 | File | Change | Drop when |
 |---|---|---|
+| `package.json`, `package-lock.json` | T11: `packages/cloud-memory` joins workspaces and both build chains before its server consumer; npm regenerates the workspace/server dependency entries and normalizes existing Web Push transitive dev flags and entry order (no version changes) | never; on a sync, keep the entry and build order |
 | `scripts/asf-license-headers.mjs` | `maka-cloud-fork` exclusion rule for our files | never |
 | `.github/dependabot.yml` | deleted: dependency bumps come through upstream syncs, not separate Dependabot PRs | never; on a sync, keep it deleted |
 | `package.json`, `packages/runtime/package.json`, `package-lock.json`, `apps/desktop/artifact-budget.json`, `patches/@ai-sdk+*`, `scripts/generate-third-party-notices.mjs`, `LICENSE`, `*THIRD_PARTY_NOTICES.txt` | ai-sdk family upgrade for Claude Haiku 5.5 (branch `chore/ai-sdk-upgrade`) | upstream ships the same or newer ai-sdk versions |
@@ -81,4 +82,5 @@ Upstream files this fork changes, so a sync knows what to re-check.
 | `package.json`, `package-lock.json` | `packages/cloud-duties` added to `workspaces` and to the `build` and `build:test` chains before `packages/cloud-host`, so CI builds and tests it (T23; the lockfile change is the new workspace entry only) | never; on a sync, keep the entries and the order |
 | `scripts/ci-workflow-policy.test.mjs`, `scripts/asf-license-headers.mjs` | T9: the new `fork-cloud-web.yml` lane joins the pull-request allowlist and the `maka-cloud-fork` header exclusion, so CI builds and tests `packages/cloud-web` (it is not a root workspace) | never; on a sync, keep the entries |
 | `scripts/ci-test-plan.mjs`, `scripts/ci-test-plan.test.mjs` | T8 D1/D3: `runtimeSandbox` (the user-namespace CI step) is also selected when `packages/cloud-playbooks` is tested, because each coding check runs in its own user and PID namespace | never; on a sync, keep the `packages/cloud-playbooks` clause and its test |
+| `docs/code-origin-audit.md` | T14: exact-path non-text inventory entry for the synthetic cloud-web desktop test fixture | the fixture is removed or upstream records the same path |
 | `scripts/run-workspace-tests-parallel.mjs`, `scripts/run-workspace-tests-parallel.test.mjs` | A workspace whose `test:dist` exits 0 but reports no `# tests N` line, or a total of zero, fails the run (an unbuilt package no longer passes empty); its output is read through a pipe and passed on | upstream does the same |

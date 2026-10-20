@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { MemoryStore } from '@maka-cloud/memory';
 import { OrchestratorError, type OperatorAccess } from '@maka-cloud/orchestrator';
 import { ConversationStore } from '../conversations.js';
 import { openDatabase } from '../db.js';
@@ -313,6 +314,7 @@ for (const change of [
     });
     const api = new PublicApi({
       db,
+      memory: new MemoryStore(db),
       invites,
       conversations,
       tasks: new SqliteTaskStore(db, hub),

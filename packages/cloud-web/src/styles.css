@@ -538,3 +538,122 @@ textarea {
 .inbox li {
   overflow-wrap: anywhere;
 }
+.memory-panel {
+  padding: 12px max(16px, calc((100vw - 1136px) / 2));
+  border-bottom: 1px solid var(--line);
+  background: white;
+}
+.memory-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.memory-content {
+  display: grid;
+  gap: 12px;
+  max-width: 620px;
+  padding: 16px 0;
+  overflow-wrap: anywhere;
+}
+.memory-content form {
+  display: grid;
+  gap: 10px;
+}
+.memory-facts {
+  display: grid;
+  gap: 16px;
+  padding-left: 20px;
+}
+.computer {
+  margin: 12px 0 0 15px;
+}
+.computer summary {
+  cursor: pointer;
+  color: var(--accent);
+  padding: 6px 0;
+}
+.computer-viewer {
+  --computer-line: #39465b;
+  --computer-muted: #b2bed0;
+  color-scheme: dark;
+  color: #edf1f7;
+  background: #192436;
+  border: 1px solid var(--computer-line);
+  border-radius: 12px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  font-family: system-ui, sans-serif;
+  font-size: 12px;
+}
+.computer-viewer button {
+  border: 1px solid var(--computer-line);
+  border-radius: 999px;
+  padding: 7px 12px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  min-height: 36px;
+}
+.computer-viewer button:hover:not(:disabled) {
+  background: #3265b0;
+  color: white;
+}
+.computer-viewer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.computer-hint {
+  color: var(--computer-muted);
+  font-size: 11px;
+}
+.computer-screen {
+  line-height: 0;
+  overflow: hidden;
+}
+.computer-screen img {
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+.computer-viewer pre {
+  font:
+    11px / 1.5 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--computer-line);
+}
+.computer-viewer h4 {
+  margin: 0;
+}
+.computer-viewer form {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.computer-viewer label {
+  display: grid;
+  gap: 4px;
+}
+.computer-viewer input {
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  border-color: var(--computer-line);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  .computer-viewer {
+    --computer-line: #d2dae5;
+    --computer-muted: #5c6879;
+    color-scheme: light;
+    color: #252932;
+    background: #f4f6fa;
+  }
+}

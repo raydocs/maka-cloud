@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
+import { checkHistory } from '@maka-cloud/conductor-checks';
 import {
   calls,
   type FakeModel,
@@ -171,6 +172,104 @@ const assistantTexts = (events: SseEvent[]) =>
 
 /** Names the product must never show in what the conductor publishes. */
 const VENDOR_NAMES = /claude|anthropic|opus|codex|openai|gpt/iu;
+
+test('memory changes reach only the next appended turn, survive restart, and never cross invites', async (t) => {
+  const stack = await startStack(t);
+  const other = stack.cloud.server.invites.create('other');
+  const memoryApi = (token: string, path = '', method = 'GET', body?: unknown) =>
+    fetch(`${stack.cloud.server.url}/v1/memory${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const added = await memoryApi(stack.token, '/facts', 'POST', { text: 'Use SQLite.' });
+  assert.equal(added.status, 201);
+  const fact = (await added.json()) as { id: string; text: string };
+  await memoryApi(other.token, '/facts', 'POST', { text: 'Private other-invite preference.' });
+  for (const method of ['GET', 'PATCH', 'DELETE']) {
+    assert.equal(
+      (
+        await memoryApi(
+          other.token,
+          `/facts/${fact.id}`,
+          method,
+          method === 'PATCH' ? { text: 'stolen' } : undefined,
+        )
+      ).status,
+      404,
+    );
+  }
+  assert.equal(
+    (
+      await memoryApi(stack.token, '/facts', 'POST', {
+        text: 'injected owner',
+        inviteId: other.inviteId,
+      })
+    ).status,
+    400,
+  );
+  assert.ok(!(await (await memoryApi(other.token)).text()).includes('SQLite'));
+  const conversationId = await newConversation(stack);
+  const expected = ['Use SQLite.', 'Use Postgres.', undefined, undefined];
+  for (let n = 0; n < expected.length; n += 1) {
+    if (n === 1)
+      assert.equal(
+        (await memoryApi(stack.token, `/facts/${fact.id}`, 'PATCH', { text: expected[n] })).status,
+        200,
+      );
+    if (n === 2) {
+      assert.equal((await memoryApi(stack.token, `/facts/${fact.id}`, 'DELETE')).status, 204);
+      await stack.restart();
+    }
+    stack.model.script('conductor', (request) => {
+      const input = lastUserText(request);
+      const snapshot = JSON.parse(input.split('\n').at(-1) ?? '') as { facts: { text: string }[] };
+      assert.deepEqual(
+        snapshot.facts.map((row) => row.text),
+        expected[n] ? [expected[n]] : [],
+      );
+      assert.ok(input.indexOf('Memory snapshot') > input.indexOf(`Question ${n}`));
+      assert.ok(!input.includes('Private other-invite preference.'));
+      return {
+        ...text(n === 2 ? 'Old result mentioned Use Postgres.' : `Result ${n}`),
+        thinking: n % 2 ? 'redacted' : 'signed',
+      };
+    });
+    await stack.api(`/v1/conversations/${conversationId}/messages`, { text: `Question ${n}` });
+    await readFeed(stack, conversationId, (events) => assistantTexts(events).length === n + 1);
+    await stack.cloud.conductor.idle();
+  }
+  assert.equal(
+    (await memoryApi(stack.token, '/facts', 'POST', { text: 'use postgres.' })).status,
+    409,
+  );
+  const profile = (await (await memoryApi(stack.token)).json()) as {
+    summaries: { text: string }[];
+  };
+  assert.ok(profile.summaries.some((row) => row.text === 'Result 3'));
+  assert.ok(profile.summaries.every((row) => !row.text.includes('Postgres')));
+  const history = checkHistory(stack.model.requests, stack.model.emittedThinking, {
+    isRequestOnlyBlock: () => false,
+  });
+  assert.deepEqual(history.strictPrefix.breaks, []);
+  assert.deepEqual(history.thinking.failures, []);
+  assert.deepEqual(history.systemChanges, []);
+  assert.deepEqual(history.toolsChanges, []);
+  // The second invite's new conversation receives only its own facts and summaries.
+  const firstToken = stack.token;
+  stack.token = other.token;
+  const otherConversation = await newConversation(stack);
+  stack.model.script('conductor', (request) => {
+    assert.ok(lastUserText(request).includes('Private other-invite preference.'));
+    assert.ok(!lastUserText(request).includes('Result 3'));
+    return text('Other result');
+  });
+  await stack.api(`/v1/conversations/${otherConversation}/messages`, { text: 'Other question' });
+  await readFeed(stack, otherConversation, (events) => assistantTexts(events).length === 1);
+  stack.cloud.server.invites.revoke(other.inviteId);
+  assert.equal((await memoryApi(other.token)).status, 401);
+  stack.token = firstToken;
+});
 
 test('one sentence in: the research playbook runs through the server, the task and the checked report come out in the feed', async (t) => {
   const stack = await startStack(t);

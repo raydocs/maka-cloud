@@ -19,6 +19,7 @@ import {
   type PushTransport,
   startCloudServer,
 } from '../../../cloud-server/dist/index.js';
+import { fakeComputer } from './computer.ts';
 
 export interface AskedQuestion {
   questionId: string;
@@ -42,6 +43,7 @@ export interface Stack {
   inviteId: string;
   server: CloudServer;
   fake: FakeRunner;
+  computer: Awaited<ReturnType<typeof fakeComputer>>;
   /** Every Web Push message the server tried to send, as the (fake) push service received it. */
   pushed: Array<{ endpoint: string; headers: Record<string, string>; bytes: number }>;
   /** Another invite, which owns nothing yet. */
@@ -100,12 +102,14 @@ export async function startStack(
 ): Promise<Stack> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
   const fake = new FakeRunner({ pausable: options.pausable ?? true });
+  const computer = await fakeComputer();
   const questions = new Map<
     string,
     { options: Set<string>; answered?: { optionId: string; text?: string } }
   >();
   const answers: Stack['answers'] = [];
   let publisher!: ConversationPublisher;
+  let remember!: (message: { eventId: string; conversationId: string; text: string }) => void;
   const handlerFor = (): ConversationHandler => ({
     onUserMessage(message) {
       publisher.publish({
@@ -162,10 +166,12 @@ export async function startStack(
     invitesPath: join(dir, 'invites.sqlite'),
     handoffRoot: join(dir, 'handoff'),
     runners: new RunnerRegistry([fake]),
+    computer: computer.source,
     ...(options.port === undefined ? {} : { port: options.port }),
     host: '127.0.0.1',
     createHandler: (context) => {
       publisher = context.publisher;
+      remember = context.memory.remember;
       access = context.conductorAccess;
       return handlerFor();
     },
@@ -235,6 +241,7 @@ export async function startStack(
     inviteId: invite.inviteId,
     server,
     fake,
+    computer,
     answers,
     pushed,
     newInvite: () => {
@@ -242,7 +249,14 @@ export async function startStack(
       return { token: created.token, inviteId: created.inviteId };
     },
     say: (conversationId, text) => {
-      publisher.publish({ kind: 'message', eventId: `evt_${randomUUID()}`, conversationId, text });
+      const message = {
+        kind: 'message' as const,
+        eventId: `evt_${randomUUID()}`,
+        conversationId,
+        text,
+      };
+      remember(message);
+      publisher.publish(message);
     },
     notice: (conversationId, text) => {
       publisher.publish({ kind: 'notice', eventId: `evt_${randomUUID()}`, conversationId, text });

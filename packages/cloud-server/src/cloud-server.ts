@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { backup as sqliteBackup, type DatabaseSync } from 'node:sqlite';
+import { MemoryStore } from '@maka-cloud/memory';
 import {
   Orchestrator,
   type OrchestratorOptions,
@@ -10,6 +11,7 @@ import {
 } from '@maka-cloud/orchestrator';
 import { type ArtifactRead, type ArtifactSource, FileArtifactSource } from './artifacts.js';
 import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
+import type { ComputerSource } from './computer.js';
 import { ConversationStore } from './conversations.js';
 import { openDatabase } from './db.js';
 import { type DeliveryOptions, type DeliveryStats, MessageDeliveries } from './deliveries.js';
@@ -155,6 +157,11 @@ export interface CloudServerOptions {
      * with nothing in between.
      */
     authorized(caller: string, conversationId: string): boolean;
+    /** Invite-scoped memory; unknown, unowned or revoked conversations have no access. */
+    memory: {
+      context(conversationId: string): string;
+      remember(message: { eventId: string; conversationId: string; text: string }): void;
+    };
     /**
      * The invite that owns the conversation a task belongs to, or undefined when the task is
      * unknown or its conversation has no owner (a pre-v5 one nobody adopted). Never a guess.
@@ -167,6 +174,8 @@ export interface CloudServerOptions {
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
+  /** Computer routes are absent without a trusted desktop/terminal adapter. */
+  computer?: ComputerSource;
   sweepOrphans?: SweepOrphans;
   /** Web Push settings (see `pushConfigFromEnv`). Without them the push routes answer 404. */
   push?: PushConfig & Pick<PushOptions, 'transport' | 'retryDelayMs' | 'maxAttempts' | 'timeoutMs'>;
@@ -201,9 +210,10 @@ export interface CloudServer {
   backupDatabase(destination: string): Promise<void>;
   /**
    * Sends the operator's alert `key` to the devices of `inviteId`, each at most once per key.
-   * Resolves when they were told or given up on; without Web Push it resolves at once.
+   * Resolves `true` when every device was told or cannot be, `false` when some are still owed
+   * because the push service kept failing (ask again later); without Web Push it resolves `true`.
    */
-  pushAlert(inviteId: string, key: string): Promise<void>;
+  pushAlert(inviteId: string, key: string): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -283,6 +293,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const ownInviteStore = invites;
     const authorized = (caller: string, conversationId: string): boolean =>
       ownInviteStore.active(caller) && conversations.owns(caller, conversationId);
+    const memory = new MemoryStore(db);
+    const memoryOwner = (conversationId: string): string | undefined => {
+      const owner = conversations.ownerOf(conversationId);
+      return owner !== undefined && ownInviteStore.active(owner) ? owner : undefined;
+    };
     handler = options.createHandler
       ? await options.createHandler({
           publisher,
@@ -292,6 +307,22 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             return sessionId === undefined ? undefined : accessFor(sessionId);
           },
           authorized,
+          memory: {
+            context: (conversationId) => {
+              const owner = memoryOwner(conversationId);
+              return owner === undefined ? '' : memory.context(owner);
+            },
+            remember: (message) => {
+              const owner = memoryOwner(message.conversationId);
+              if (owner !== undefined) {
+                memory.remember(owner, {
+                  id: message.eventId,
+                  conversationId: message.conversationId,
+                  text: message.text,
+                });
+              }
+            },
+          },
           ownerOfTask: (taskId) => {
             const conversationId = conversationOfTask(taskId);
             return conversationId === undefined ? undefined : conversations.ownerOf(conversationId);
@@ -408,6 +439,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     }
     const api = new PublicApi({
       db,
+      memory,
       invites,
       conversations,
       tasks: store,
@@ -417,6 +449,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       orchestrator,
       ...(push ? { push } : {}),
       artifacts,
+      computer: options.computer,
+      publisher,
       artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
       limits,
       onMessage: deliverMessage,
@@ -480,7 +514,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       publisher,
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
-      pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(),
+      pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(true),
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       close: () => {
         closing ??= shutdown();

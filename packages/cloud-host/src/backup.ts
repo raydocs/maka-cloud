@@ -30,6 +30,8 @@ export interface BackupLayout {
 
 export class BackupError extends Error {
   override name = 'BackupError';
+  /** Its message is ours (paths and reasons), so the log may print it. */
+  readonly safeToLog = true;
 }
 
 const STAMP = /^\d{8}T\d{6}Z(?:-\d+)?$/u;

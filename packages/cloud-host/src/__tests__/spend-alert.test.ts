@@ -20,6 +20,7 @@ function watcher(
     spentToday: () => spent.usd,
     alert: async (inviteId, key) => {
       asked.push([inviteId, key]);
+      return true;
     },
     now: () => clock,
     onAlert: (day) => days.push(day),
@@ -73,6 +74,7 @@ test('a spend that cannot be read does not alert, and a failing alert is reporte
   const w = watcher(spent, {
     alert: async () => {
       if (fail) throw new Error('push is down');
+      return true;
     },
   });
   await w.made.tick();
@@ -107,8 +109,8 @@ test('a tick during a tick joins it, and close stops the timer for good', async 
       alert: () => {
         calls += 1;
         begun();
-        return new Promise<void>((resolve) => {
-          release = resolve;
+        return new Promise<boolean>((resolve) => {
+          release = () => resolve(true);
         });
       },
     },
@@ -139,10 +141,10 @@ test('close waits for the alert being sent and gives up on one that hangs', asyn
     {
       alert: () => {
         begun();
-        return new Promise<void>((resolve) => {
+        return new Promise<boolean>((resolve) => {
           release = () => {
             finished = true;
-            resolve();
+            resolve(true);
           };
         });
       },
@@ -171,7 +173,7 @@ test('close waits for the alert being sent and gives up on one that hangs', asyn
       closeWaitMs: 20,
       alert: () => {
         hungBegun();
-        return new Promise<void>(() => undefined);
+        return new Promise<boolean>(() => undefined);
       },
     },
   );
@@ -179,4 +181,60 @@ test('close waits for the alert being sent and gives up on one that hangs', asyn
   await hungStarted;
   await hung.made.close();
   assert.deepEqual(hung.warnings, ['A spend alert was still being sent when the stack closed']);
+});
+
+test('an alert that did not reach every device is reported, not counted as sent, and asked again later with growing waits', async () => {
+  const spent = { usd: 20 };
+  let complete = false;
+  const w = watcher(spent, {
+    alert: async (inviteId, key) => {
+      w.asked.push([inviteId, key]);
+      return complete;
+    },
+    pollMs: 60_000,
+  });
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 1);
+  assert.deepEqual(w.warnings, ['The spend alert did not reach every device; trying again later']);
+  assert.deepEqual(w.days, [], 'not reported as sent');
+  // The timer's own ticks wait out the backoff...
+  w.advance(60_000);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 1, 'one poll later is still inside the wait');
+  w.advance(60_000);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 2, 'two polls later it asks again');
+  assert.equal(w.warnings.length, 2);
+  // ...and the second wait is longer than the first.
+  w.advance(120_000);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 2, 'the wait grew');
+  w.advance(120_000);
+  complete = true;
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 3);
+  assert.deepEqual(w.days, ['2026-10-20'], 'reported once every device was told');
+  // Done for the day: later ticks ask again as before (a device that subscribed since is told).
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 4);
+  assert.deepEqual(w.days, ['2026-10-20']);
+});
+
+test('the wait between attempts is capped, and a check made by hand does not wait', async () => {
+  const spent = { usd: 20 };
+  const w = watcher(spent, {
+    alert: async (inviteId, key) => {
+      w.asked.push([inviteId, key]);
+      return false;
+    },
+    pollMs: 60_000,
+  });
+  for (let i = 0; i < 12; i += 1) {
+    await w.made.tick(true);
+    w.advance(15 * 60_000);
+  }
+  assert.equal(w.asked.length, 12, 'every 15 minutes is always past the wait');
+  await w.made.tick();
+  await w.made.tick();
+  assert.equal(w.asked.length, 14, 'a hand-made check asks at once');
 });

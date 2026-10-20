@@ -1,6 +1,6 @@
 // One presentation boundary for every untrusted string, including URLs and a11y.
 const hiddenNames =
-  /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus/giu;
+  /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus|instabox/giu;
 
 export function displayText(value: string): string {
   return value

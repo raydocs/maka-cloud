@@ -12,6 +12,8 @@ import {
   type TaskView,
 } from './contract';
 import { InboxPanel } from './Inbox';
+import { Computer } from './Computer';
+import { MemoryPanel } from './Memory';
 import { displayText, dollars, publicLink } from './presentation';
 import { disablePush, enablePush } from './push';
 import {
@@ -25,6 +27,7 @@ import {
 
 const ERROR_TEXT: Record<string, string> = {
   pause_unsupported: 'This task cannot be paused.',
+  computer_in_control: 'Hand back computer control before resuming this task.',
   invalid_state: 'The task is not in a state where that can be done.',
   not_open: 'This question is no longer open.',
   closed: 'This question is no longer open.',
@@ -32,6 +35,9 @@ const ERROR_TEXT: Record<string, string> = {
   unknown_option: 'That answer is not one of the options.',
   text_too_long: 'The additional context is too long.',
   artifact_too_large: 'This result is too large to show here.',
+  forgotten_fact: 'That fact was forgotten and cannot be saved again.',
+  invalid_fact: 'Enter a fact between 1 and 500 characters.',
+  fact_limit: 'You can save up to 50 facts. Delete one before adding another.',
   stale: 'This changed while you were looking. It has been refreshed; check it before you answer.',
   already_answered: 'This was already answered.',
   question_open:
@@ -153,6 +159,7 @@ function taskLabel(task: TaskView): string {
 
 function TaskBranch({
   task,
+  client,
   tasks,
   noPause,
   busy,
@@ -161,6 +168,7 @@ function TaskBranch({
   ancestors = [],
 }: {
   task: TaskView;
+  client: CloudClient;
   tasks: TaskView[];
   noPause: ReadonlySet<string>;
   busy: boolean;
@@ -203,6 +211,7 @@ function TaskBranch({
         )}
         {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
         {task.manifest && <p>{displayText(task.manifest.summary)}</p>}
+        {live && <Computer client={client} task={task} />}
         {live && (
           <div className="task-actions">
             {task.state === 'running' && !task.pauseRequested && !noPause.has(task.taskId) && (
@@ -241,7 +250,7 @@ function TaskBranch({
           {children.map((child) => (
             <TaskBranch
               key={child.taskId}
-              {...{ task: child, tasks, noPause, busy, act, control }}
+              {...{ task: child, client, tasks, noPause, busy, act, control }}
               ancestors={[...ancestors, task.taskId]}
             />
           ))}
@@ -624,7 +633,7 @@ export function ConversationView({
                   .map((task) => (
                     <TaskBranch
                       key={task.taskId}
-                      {...{ task, tasks, noPause, act, control }}
+                      {...{ task, client, tasks, noPause, act, control }}
                       busy={Boolean(busy)}
                     />
                   ))}
@@ -837,6 +846,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           onClick={() => setChosen('')}
         />
       </nav>
+      <MemoryPanel client={session.client} errorText={errorText} />
       {error && (
         <p className="error" role="alert">
           {error}

@@ -352,6 +352,11 @@ Depends on: T5, T15, T20, T21. Replaces T12.
   never merge). Results go to the Home brief (T24); escalations go through
   T20.
 - Schedules: missed runs after downtime run once, never once per missed slot.
+- Limits borrowed from OpenBot's routines and Reason Network's loop guard:
+  a schedule runs at most every 15 minutes, an invite has at most 20 enabled
+  duties, a duty that fails 10 times in a row turns itself off and tells the
+  user, and one duty's output can trigger another at most 3 times in a row
+  before it needs the user.
 - Tests: bad signatures rejected, duplicate deliveries ignored, authority
   enforced, budget and daily cap stop a run, schedule catch-up, a proposal
   runs nothing until approved, injected instructions in an issue cannot
@@ -372,23 +377,53 @@ proposals and T20 items).
   kept on Home; it replaces the T20 digest delivery.
 - Chat: one conversation with the employee. The conductor decides whether to
   answer directly or start a task. A running task shows one updating line
-  that expands to its steps; screenshots and terminal output are collapsed by
-  default.
+  that expands to its steps; terminal output is collapsed by default.
+- Delivery, the part users notice most in Hark: a finished task arrives as one
+  result card in Chat, not a wall of text. The card has a one-sentence outcome
+  in plain words ("The login page no longer loops; tests pass"), one visual
+  proof (a screenshot of the running app, the PR page or the test summary,
+  taken in the box), a short caption, and at most two one-tap actions ("Merge
+  PR #12", "Open preview"). Tapping the visual opens it large over a blurred,
+  dimmed Chat: close at top left, collapse at bottom right, a small status
+  pill with the result beside it, and a swipe or Escape to go back. A diff
+  opens the same way. Running tasks show a live thumbnail of the box's screen
+  when it has one (T14b) and fall back to the step line.
+- Sources and links, as Hark shows a search answer: a short answer first
+  (the pick, then one alternative per need, ending in one plain-text offer
+  such as "Want me to set one up?"), then the sources as a small fanned stack
+  of up to three cards below it, slightly rotated and overlapping (about -5,
+  0 and +4 degrees), the middle one on top with the deepest shadow. Each card
+  is about 215 by 190 px with a 12 px radius: a preview image on the top 60
+  percent, then a title (14 px, medium, two lines at most) and a grey meta
+  line (12 px: site, a dot, and a short label saying why it is there, such as
+  "the docs" or "an alternative"). On a phone the stack becomes a horizontal
+  swipe. A coding task uses the same stack for its PR, its preview and its
+  test report. Preview images are fetched by the server through a proxy that
+  refuses private and local addresses, caps size and time, and caches; the
+  browser never loads them from the source site, and a page without one gets
+  a plain card with the site's initial.
+- Briefs end with one offer ("Want me to update the two failing
+  dependencies?") and say the offer is also saved on Home.
 - Projects: the list, and per project its duties (on or off, authority,
   budget) and tasks. A task page shows the plan, steps, diff, test evidence,
   review verdict, cost and the PR link.
-- Look: flat and minimal like Hark, not Apple Liquid Glass. A calm
-  background (dark: a soft navy-to-slate gradient; light: off-white), opaque
-  or slightly translucent surfaces with no shadows, pill-shaped controls,
-  round icon buttons, thin line icons, a sans-serif system font with
-  hierarchy by weight, and one restrained accent colour. Generous whitespace,
-  phone first. Never show model or vendor names.
+- Look, as Hark actually renders it: Home and Chat sit on a soft full-bleed
+  background (light: a sky-blue gradient or photo; dark: navy to slate), with
+  frosted translucent cards on it (white at about 45 percent with a backdrop
+  blur, 14 to 20 px radius, no tails on chat bubbles, user messages as small
+  right-aligned pills). Verb-first cards put the verb in a small chip. Stat
+  panels use a three-tile grid (small grey label, large bold value). Controls
+  are pills and 44 px round icon buttons; the top navigation is a segmented
+  pill with the active item solid; the composer is a floating pill with a
+  round send button. Thin line icons, a sans-serif system font with hierarchy
+  by weight, one restrained accent colour, generous whitespace, phone first.
+  Never show model or vendor names.
 - Density by page: Home and Chat are airy; a task page (diff, test output,
-  terminal) is dense and uses a monospace font for code, because that is
-  where a programmer reads.
-- Only floating chrome (the top navigation and the composer) may use a light
-  backdrop blur; no refraction or glass effects over code. Native Liquid
-  Glass waits for the iOS app (T18), which gets it from the system.
+  terminal) is dense, on an opaque surface, and uses a monospace font for
+  code, because that is where a programmer reads. Never blur or tint behind
+  code or diffs.
+- Native Liquid Glass waits for the iOS app (T18), which gets it from the
+  system; the web uses plain CSS backdrop blur only.
 - Light and dark themes both, dark by default; check contrast on both.
 - Tests: Playwright at desktop and phone width for Home, a project and a task
   page; a stale card refreshes instead of acting; one tap answers exactly

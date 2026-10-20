@@ -50,6 +50,8 @@ export interface ConductorOptions {
    */
   orchestratorAccess?: (conversationId: string) => ConductorAccess | undefined;
   playbooks?: readonly Playbook[];
+  /** Appended once to each new durable user turn, never to the system prompt or old history. */
+  turnContext?: (conversationId: string) => string;
   /** Tools playbooks add; `irreversible` ones are held for approval. */
   tools?: readonly ConductorToolSpec[];
   limits?: Partial<ConductorLimits>;
@@ -146,6 +148,11 @@ interface Turn extends ActiveTurn {
   finalText: string[];
   errors: string[];
   completeReason?: string;
+  /**
+   * Whether the conversation was tainted when this turn's last conductor model request was sent:
+   * the context the model decided its tool calls on (T15). Unset before the first request.
+   */
+  contextTainted?: boolean;
 }
 
 type Job =
@@ -182,6 +189,7 @@ export class Conductor {
   private readonly now: () => number;
   private readonly warn: (message: string, detail?: unknown) => void;
   private readonly hooks: NonNullable<ConductorOptions['hooks']>;
+  private readonly turnContext: ConductorOptions['turnContext'];
   private readonly lanes = new Map<string, Lane>();
   private readonly turns = new Map<string, Turn>();
   private readonly plannerTurns = new Map<string, Turn>();
@@ -210,6 +218,7 @@ export class Conductor {
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
     this.hooks = options.hooks ?? {};
+    this.turnContext = options.turnContext;
     this.orchestratorAccess = options.orchestratorAccess;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
@@ -592,7 +601,8 @@ export class Conductor {
         // Spent or blocked before this input arrived (a dismissed budget question): ask again, send nothing.
         this.askBudget(active, 0);
       } else if (!active.stopReason) {
-        const text = this.turnText(job.runId, job.text);
+        const context = this.turnContext?.(lane.conversationId);
+        const text = this.turnText(job.runId, job.text) + (context ? `\n\n${context}` : '');
         for await (const event of this.host.send(
           makaSessionId,
           text,
@@ -966,7 +976,13 @@ export class Conductor {
         this.askBudget(turn, 0);
       }
     }
-    if (!refusal) return;
+    if (!refusal) {
+      // Read as the request goes out, after every result in it was stored with its taint.
+      if (this.turns.get(makaSessionId) === turn) {
+        turn.contextTainted = this.state.taintOf(turn.conversationId) !== undefined;
+      }
+      return;
+    }
     this.requestStop(turn, 'gated');
     throw new Error(`Model request not sent: ${refusal}.`);
   }
@@ -1089,6 +1105,8 @@ export class Conductor {
         const delegation = this.state.delegationOfTask(taskId);
         if (delegation && delegation.state !== 'settled') this.settleView(delegation, view);
       },
+      // Fail closed: a call with no request on record counts as decided on tainted context.
+      decidedOnTaint: (active) => (active as Turn).contextTainted ?? true,
       approverAuthorized: (approvedBy, conversationId) =>
         this.approverAuthorized ? this.approverAuthorized(approvedBy, conversationId) : true,
     };

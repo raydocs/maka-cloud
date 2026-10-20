@@ -22,20 +22,27 @@ export interface ToolPolicy {
   readonly effects: readonly ToolEffect[];
   /** Whether the result can carry content from outside the user. */
   readonly externalResult: boolean;
+  /**
+   * The tool stores the taint itself, right before the step that can return outside content,
+   * instead of when the call starts: a call refused before that step returns only code-built text.
+   */
+  readonly ownTaint?: true;
 }
 
 /**
- * The built-in tools. Spending inside the run budget (`delegate_task`, the
- * planner behind `start_playbook`) is not `spends`: the run budget, the
- * invite caps and the pause switch already stop it in code, and going past the
- * run budget is a budget question the user answers. `ask_user` and `notify`
- * reach only the user. Every tool that returns a task view taints: a task view
- * carries what a runner read and wrote (web pages, repository files, other
- * people's text).
+ * The built-in tools. `delegate_task` `sends`: its brief goes to a runner with
+ * full permissions and network access, which can send anything anywhere, so a
+ * delegation from a tainted conversation is held for the user's approval (the
+ * run budget limits spending, not sending). The planner behind
+ * `start_playbook` spends inside the run budget, which is not `spends`.
+ * `ask_user` and `notify` reach only the user. Every tool that returns a task
+ * view taints: a task view carries what a runner read and wrote (web pages,
+ * repository files, other people's text). `delegate_task` taints right before
+ * it calls the orchestrator, so a delegation refused for its budget does not.
  */
 export const BUILTIN_TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   start_playbook: { effects: [], externalResult: false },
-  delegate_task: { effects: [], externalResult: true },
+  delegate_task: { effects: ['sends'], externalResult: true, ownTaint: true },
   task_status: { effects: [], externalResult: true },
   task_wait: { effects: [], externalResult: true },
   task_cancel: { effects: [], externalResult: true },

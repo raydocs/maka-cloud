@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
-import { InviteStore } from '@maka-cloud/host';
+import { explicitSpendCaps, InviteStore } from '@maka-cloud/host';
 import type { CloudRunners, CloudRunnersOptions } from '@maka-cloud/runners';
 import { createLiveDeps, type EvalDeps } from '../live.js';
 import { makeSpec } from '../spec-gen.js';
@@ -94,7 +94,15 @@ async function setup(
   const invites = new InviteStore(join(serverDir, 'invites.db'));
   t.after(() => invites.close());
   const inviteId = invites.create('evals').inviteId;
-  new SqliteSpendJournal(join(serverDir, 'gateway-spend.db')).close();
+  // ...and has written down the caps it runs under, as the stack does at each start.
+  const serverJournal = new SqliteSpendJournal(join(serverDir, 'gateway-spend.db'));
+  serverJournal.setSpendPolicy({
+    inviteDailyUsd: 5,
+    inviteMonthlyUsd: 50,
+    serverDailyUsd: 25,
+    ...explicitSpendCaps(over),
+  });
+  serverJournal.close();
   const env: NodeJS.ProcessEnv = {
     MAKA_CLOUD_DATA_DIR: serverDir,
     MAKA_EVALS_INVITE_ID: inviteId,
@@ -276,6 +284,25 @@ test('with the server’s daily cap at zero a live run sends nothing', async (t)
   const deps = await s.load();
   assert.equal(await ask(s, deps), 402);
   assert.deepEqual(vendor.seen, []);
+});
+
+test('a live run whose environment sets a cap the server does not run under is refused before anything is built', async (t) => {
+  const vendor = await fakeVendor(t);
+  const s = await setup(t, {}, vendor.url);
+  // The server runs under $25 a day; this environment says $100.
+  s.env.MAKA_CLOUD_SERVER_DAILY_USD = '100';
+  await assert.rejects(s.load(), /MAKA_CLOUD_SERVER_DAILY_USD/u);
+  assert.equal(s.built.length, 0, 'no runner was built');
+  assert.deepEqual(vendor.seen, []);
+});
+
+test('a live run is refused when the server never wrote its caps down, and does not use its own', async (t) => {
+  const s = await setup(t);
+  const db = new DatabaseSync(join(s.serverDir, 'gateway-spend.db'));
+  db.exec('DELETE FROM spend_policy');
+  db.close();
+  await assert.rejects(s.load(), /not written its spending limits/u);
+  assert.equal(s.built.length, 0);
 });
 
 test('while the server is paused a live run sends nothing, and resuming lets it through', async (t) => {
