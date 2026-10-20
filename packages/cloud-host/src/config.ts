@@ -172,6 +172,9 @@ export class ConfigError extends Error {
     );
     this.name = 'ConfigError';
   }
+
+  /** Its message is ours (setting names and what is wrong), so the log may print it. */
+  readonly safeToLog = true;
 }
 
 /** The variables `readStackConfig` reads, for the usage text. */

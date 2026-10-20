@@ -98,7 +98,7 @@ test('look-alike spellings do not get a vendor name past the scrubber', () => {
   assert.doesNotMatch(scrub('ＣＬＡＵＤＥ and An​thropic'), /claude|anthropic/iu);
 });
 
-test('an error prints its name and message only, scrubbed, with no stack or cause', () => {
+test('an error prints its name and a code, never its message, stack or cause, unless the message is ours', () => {
   const { log, lines } = logger();
   const error = new Error(`fetch failed for key ${ENV.ANTHROPIC_API_KEY}`, {
     cause: new Error(ENV.INSTABOX_API_KEY),
@@ -111,19 +111,146 @@ test('an error prints its name and message only, scrubbed, with no stack or caus
   const record = parsed(lines)[0];
   assert.equal(record?.event, 'warning');
   assert.equal(record?.level, 'warn');
-  assert.match(String(record?.detail), /^Error: fetch failed for key \[secret\]$/u);
+  assert.match(String(record?.detail), /^Error\b/u);
+  assert.ok(!String(record?.detail).includes('fetch failed'), 'the message is not printed');
 });
 
-test('a detail object is printed as scrubbed JSON, and one that cannot be printed does not throw', () => {
+test('private text in an error message does not print, and a message we wrote or the system wrote does', () => {
   const { log, lines } = logger();
-  log.warning('detail', { token: ENV.MAKA_GITHUB_TOKEN, nested: { key: ENV.ANTHROPIC_API_KEY } });
-  const circular: Record<string, unknown> = {};
+  const PRIVATE = 'Dana asked me to send the quarterly numbers to her accountant';
+  log.warning('model call failed', new Error(`upstream rejected: ${PRIVATE}`));
+  log.warning('model call failed', new TypeError(PRIVATE));
+  const withCode = Object.assign(new Error(PRIVATE), { code: 'ERR_SOMETHING', status: 503 });
+  log.warning('with code', withCode);
+  const sqlite = Object.assign(new Error(`near "${PRIVATE}": syntax error`), {
+    errcode: 1,
+    errstr: 'SQL logic error',
+  });
+  log.warning('db', sqlite);
+  const system = Object.assign(new Error("ENOENT: no such file or directory, open '/var/x'"), {
+    code: 'ENOENT',
+    syscall: 'open',
+    errno: -2,
+  });
+  log.warning('fs', system);
+  class OurError extends Error {
+    readonly safeToLog = true;
+  }
+  log.warning('ours', new OurError('The backup directory must not be inside the data directory'));
+  const text = lines.join('\n');
+  assert.ok(!text.includes(PRIVATE), 'no private text anywhere');
+  const records = parsed(lines);
+  assert.match(String(records[2]?.detail), /ERR_SOMETHING/u);
+  assert.match(String(records[2]?.detail), /503/u);
+  assert.match(String(records[3]?.detail), /SQL logic error/u);
+  assert.match(String(records[4]?.detail), /ENOENT/u);
+  assert.match(String(records[4]?.detail), /no such file/u);
+  assert.match(String(records[5]?.detail), /must not be inside the data directory/u);
+});
+
+test('a detail object keeps only an allowlist of scalar fields: no endpoint, header, key or text', () => {
+  const { log, lines } = logger();
+  const ENDPOINT = 'https://fcm.googleapis.com/fcm/send/dQw4w9WgXcQ:APA91bHunCapabilityUrl';
+  log.warning('push failed', {
+    status: 503,
+    code: 'EAI_AGAIN',
+    endpoint: ENDPOINT,
+    keys: { p256dh: 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA', auth: 'tBHItJI5svbpez7KI4CCXg' },
+    headers: { authorization: 'Bearer abc.def.ghi', 'x-api-key': ENV.ANTHROPIC_API_KEY },
+    body: 'Dana asked me to send the quarterly numbers to her accountant',
+    token: 123456789012,
+  });
+  log.warning('nested', { response: { status: 400, error: { message: 'private text' } } });
+  const text = lines.join('\n');
+  for (const leaked of [
+    ENDPOINT,
+    'fcm.googleapis.com',
+    'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA',
+    'tBHItJI5svbpez7KI4CCXg',
+    'Bearer abc',
+    ENV.ANTHROPIC_API_KEY,
+    'quarterly numbers',
+    '123456789012',
+    'private text',
+  ]) {
+    assert.ok(!text.includes(leaked), `${leaked} leaked`);
+  }
+  assert.match(String(parsed(lines)[0]?.detail), /503/u);
+  assert.match(String(parsed(lines)[0]?.detail), /EAI_AGAIN/u);
+  const circular: Record<string, unknown> = { status: 500 };
   circular.self = circular;
   log.warning('circular', circular);
+  assert.equal(parsed(lines).length, 3);
+});
+
+test('fields of any type are scrubbed: a number or object under a secret name, nested strings, arrays', () => {
+  const { log, lines } = logger();
+  const fields = {
+    token: 123456789012,
+    apiKey: { value: 'plain-looking' },
+    password: true,
+    session_secret: ['one', 'two'],
+    request: {
+      headers: { authorization: 'Bearer abcdefghijklmnop', accept: 'application/json' },
+      note: `key ${ENV.ANTHROPIC_API_KEY} was used`,
+      deeper: { deeper: { deeper: { deeper: { leaf: ENV.MAKA_GITHUB_TOKEN } } } },
+    },
+    list: [`a ${ENV.INSTABOX_API_KEY}`, { x: ENV.CUSTOM_PASSWORD }],
+    count: 3,
+    ok: true,
+    nothing: null,
+  } as unknown as Parameters<typeof log.info>[1];
+  log.info('shapes', fields);
   const text = lines.join('\n');
-  assert.ok(!text.includes(ENV.MAKA_GITHUB_TOKEN));
-  assert.ok(!text.includes(ENV.ANTHROPIC_API_KEY));
-  assert.equal(parsed(lines).length, 2);
+  for (const leaked of [
+    '123456789012',
+    'plain-looking',
+    'abcdefghijklmnop',
+    ENV.ANTHROPIC_API_KEY,
+    ENV.MAKA_GITHUB_TOKEN,
+    ENV.INSTABOX_API_KEY,
+    ENV.CUSTOM_PASSWORD,
+    '"one"',
+  ]) {
+    assert.ok(!text.includes(leaked), `${leaked} leaked`);
+  }
+  const [record] = parsed(lines);
+  assert.equal(record?.token, '[secret]');
+  assert.equal(
+    record?.invalid_field,
+    '[secret]',
+    'apiKey is not a plain field name, and is still hidden',
+  );
+  assert.equal(record?.password, '[secret]');
+  assert.equal(record?.session_secret, '[secret]');
+  assert.equal(record?.count, 3);
+  assert.equal(record?.ok, true);
+  assert.equal(record?.nothing, null);
+  const request = record?.request as { headers: Record<string, unknown> };
+  assert.equal(request.headers.authorization, '[secret]');
+  assert.equal(request.headers.accept, 'application/json');
+});
+
+test('a number that is a secret value does not print, and values that cannot be printed do not throw', () => {
+  const { log, lines } = logger({ DB_PASSWORD: '48151623420000' });
+  const hostile = {
+    toJSON() {
+      throw new Error('no');
+    },
+  };
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  log.info('odd', {
+    pin: 48151623420000,
+    big: 10n,
+    fn: () => 1,
+    hostile,
+    circular,
+    many: Array.from({ length: 500 }, (_, i) => i),
+  } as unknown as Parameters<typeof log.info>[1]);
+  assert.equal(lines.length, 1);
+  assert.ok(!lines[0]?.includes('48151623420000'));
+  assert.ok((lines[0]?.length ?? 0) < 5_000, 'a long list is cut');
 });
 
 test('a field named like a secret never prints its value, and names cannot forge the line', () => {
