@@ -10,6 +10,9 @@ import {
   toView,
 } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
+import type { ConversationPublisher } from './conductor-feed.js';
+import type { ComputerSource } from './computer.js';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
 import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
@@ -114,6 +117,8 @@ export interface PublicApiDeps {
   /** Absent when Web Push is not configured; its routes are then 404. */
   push?: PushApi;
   artifacts: ArtifactSource;
+  computer?: ComputerSource;
+  publisher?: ConversationPublisher;
   artifactLimiter: RateLimiter;
   limits: HttpLimits;
   /**
@@ -154,6 +159,19 @@ const postAnswer = z
   })
   .strict();
 
+const computerInput = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('terminal'), text: z.string().min(1).max(4000) }).strict(),
+  z.object({ type: z.literal('key'), key: z.string().min(1).max(64) }).strict(),
+  z
+    .object({
+      type: z.literal('pointer'),
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+      button: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    })
+    .strict(),
+]);
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -180,6 +198,8 @@ export class PublicApi {
   private readonly streamEnds = new Map<string, Set<() => void>>();
   private stopWatching: (() => void) | undefined;
   private artifactReads = 0;
+  private readonly humanComputers = new Map<string, { inviteId: string; abort: AbortController }>();
+  private readonly busyComputers = new Set<string>();
 
   constructor(private readonly deps: PublicApiDeps) {}
 
@@ -195,6 +215,7 @@ export class PublicApi {
   /** Ends every open event stream; clients reconnect with their last id. */
   closeStreams(): void {
     for (const res of [...this.open]) res.end();
+    for (const taskId of [...this.humanComputers.keys()]) this.releaseComputer(taskId);
   }
 
   /** Ends the streams of invites that are no longer active. */
@@ -203,6 +224,10 @@ export class PublicApi {
       if (only !== undefined && inviteId !== only) continue;
       if (this.deps.invites.active(inviteId)) continue;
       for (const end of [...ends]) end();
+    }
+    for (const [taskId, lease] of this.humanComputers) {
+      if (only !== undefined && lease.inviteId !== only) continue;
+      if (!this.deps.invites.active(lease.inviteId)) this.releaseComputer(taskId);
     }
   }
 
@@ -214,7 +239,13 @@ export class PublicApi {
     invites.changedElsewhere();
     const timer = setInterval(() => {
       try {
-        if (invites.changedElsewhere()) this.endRevokedStreams();
+        invites.changedElsewhere();
+        this.endRevokedStreams();
+        for (const taskId of this.humanComputers.keys()) {
+          if (!this.busyComputers.has(taskId) && this.computerTask(taskId)?.state !== 'paused') {
+            this.releaseComputer(taskId);
+          }
+        }
       } catch {
         // The invites file is closing with the server; the streams end with it.
       }
@@ -227,7 +258,7 @@ export class PublicApi {
   }
 
   private unwatch(): void {
-    if (this.streams > 0) return;
+    if (this.streams > 0 || this.humanComputers.size > 0) return;
     this.stopWatching?.();
     this.stopWatching = undefined;
   }
@@ -327,6 +358,17 @@ export class PublicApi {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
       const action = control[2] as ControlAction;
       return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
+    }
+    const computer =
+      /^\/v1\/tasks\/([^/]+)\/computer(?:\/(stream|takeover|handback|input))?$/u.exec(path);
+    if (computer && this.deps.computer) {
+      return this.computerRoute(
+        req,
+        res,
+        invite,
+        decodeURIComponent(computer[1] ?? ''),
+        computer[2],
+      );
     }
     const artifacts = /^\/v1\/tasks\/([^/]+)\/artifacts(?:\/([^/]+))?$/u.exec(path);
     if (artifacts) {
@@ -568,6 +610,12 @@ export class PublicApi {
     await discard(req);
     this.reauthenticate(invite);
     const sessionId = this.ownTaskSession(invite, taskId);
+    if (
+      action === 'resume' &&
+      (this.humanComputers.has(taskId) || this.busyComputers.has(taskId))
+    ) {
+      throw new HttpError(409, 'computer_in_control');
+    }
     const token = bearerToken(req);
     const access: OperatorAccess = {
       sessionId,
@@ -576,6 +624,12 @@ export class PublicApi {
         if (!current || current.inviteId !== invite.inviteId) {
           throw new OrchestratorError('unauthorized', 'The invite is no longer valid');
         }
+        if (
+          action === 'resume' &&
+          (this.humanComputers.has(taskId) || this.busyComputers.has(taskId))
+        ) {
+          throw new OrchestratorError('invalid_state', 'Return computer control first');
+        }
         const conversationId = conversations.conversationOf(sessionId);
         if (conversationId === undefined || !conversations.owns(invite.inviteId, conversationId)) {
           throw new OrchestratorError('not_found', 'The conversation no longer exists');
@@ -583,6 +637,7 @@ export class PublicApi {
       },
     };
     try {
+      if (action === 'cancel') this.releaseComputer(taskId);
       const view =
         action === 'cancel'
           ? await orchestrator.cancelAs(access, taskId)
@@ -592,6 +647,208 @@ export class PublicApi {
       respond(res, 200, { task: toPublicView(view) });
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
+    }
+  }
+
+  private computerTask(taskId: string) {
+    const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
+    return record ? toView(record) : undefined;
+  }
+
+  private logComputer(taskId: string, text: string): void {
+    const session = this.deps.orchestrator.rootSessionOfTask(taskId);
+    const conversationId =
+      session === undefined ? undefined : this.deps.conversations.conversationOf(session);
+    if (conversationId)
+      this.deps.publisher?.publish({
+        kind: 'notice',
+        eventId: `computer_${randomUUID()}`,
+        conversationId,
+        text: `${text} (${taskId}).`,
+      });
+  }
+
+  private releaseComputer(taskId: string): void {
+    const lease = this.humanComputers.get(taskId);
+    if (!lease) return;
+    lease.abort.abort();
+    this.humanComputers.delete(taskId);
+    this.logComputer(taskId, 'Computer control ended; no automatic resume');
+    this.unwatch();
+  }
+
+  private async computerRoute(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+    action?: string,
+  ): Promise<void> {
+    const sessionId = this.ownTaskSession(invite, taskId);
+    const source = this.deps.computer!;
+    const expected = action === undefined || action === 'stream' ? 'GET' : 'POST';
+    if (req.method !== expected)
+      throw new HttpError(405, 'method_not_allowed', { allow: expected });
+    if (action === 'stream') {
+      if (!(await source.available(taskId))) throw new HttpError(404, 'not_found');
+      this.reauthenticate(invite);
+      this.ownTaskSession(invite, taskId);
+      return this.computerStream(res, invite, taskId);
+    }
+    if (!action) {
+      if (!(await source.available(taskId))) throw new HttpError(404, 'not_found');
+      this.reauthenticate(invite);
+      this.ownTaskSession(invite, taskId);
+      return respond(res, 200, { controller: this.humanComputers.has(taskId) ? 'human' : 'agent' });
+    }
+    take(this.deps.controlLimiter, invite);
+    const body = await readJson(req, true);
+    const authorize = () => {
+      this.reauthenticate(invite);
+      this.ownTaskSession(invite, taskId);
+    };
+    authorize();
+    if (this.busyComputers.has(taskId)) throw new HttpError(409, 'computer_busy');
+    this.busyComputers.add(taskId);
+    try {
+      const lease = this.humanComputers.get(taskId);
+      if (action === 'input') {
+        const input = computerInput.safeParse(body);
+        if (!input.success) throw new HttpError(400, 'invalid_request');
+        if (
+          !lease ||
+          lease.inviteId !== invite.inviteId ||
+          lease.abort.signal.aborted ||
+          this.computerTask(taskId)?.state !== 'paused'
+        )
+          throw new HttpError(409, 'computer_not_in_control');
+        await source.input(taskId, input.data, lease.abort.signal);
+        authorize();
+        return respond(res, 200, { accepted: true });
+      }
+      if (!(await source.available(taskId))) throw new HttpError(404, 'not_found');
+      authorize();
+      const access: OperatorAccess = { sessionId, authorize };
+      if (action === 'takeover') {
+        if (lease) return respond(res, 200, { controller: 'human' });
+        const task = this.computerTask(taskId);
+        if (task?.state !== 'running') throw new HttpError(409, 'invalid_state');
+        const paused = await this.deps.orchestrator.pauseAs(access, taskId);
+        authorize();
+        if (paused.state !== 'paused' || paused.cancelRequested || paused.stopPending)
+          throw new HttpError(409, 'invalid_state');
+        this.humanComputers.set(taskId, {
+          inviteId: invite.inviteId,
+          abort: new AbortController(),
+        });
+        this.watch();
+        this.logComputer(taskId, 'Computer control taken; task paused');
+      } else {
+        if (!lease) throw new HttpError(409, 'computer_not_in_control');
+        // Disable all input before resuming. On failure the task stays paused and
+        // the lease remains, so the owner can retry Hand back rather than lose it.
+        await this.deps.orchestrator.resumeAs(access, taskId);
+        lease.abort.abort();
+        this.humanComputers.delete(taskId);
+        this.unwatch();
+        this.logComputer(taskId, 'Computer control returned; task resumed');
+        authorize();
+      }
+      respond(res, 200, { controller: action === 'takeover' ? 'human' : 'agent' });
+    } catch (error) {
+      authorize();
+      throw error instanceof OrchestratorError ? controlError(error) : error;
+    } finally {
+      this.busyComputers.delete(taskId);
+    }
+  }
+
+  private async computerStream(
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+  ): Promise<void> {
+    const { limits, computer } = this.deps;
+    if (
+      this.streams >= limits.streamsTotal ||
+      !this.streamsByInvite.tryAcquire(invite.inviteId, limits.streamsPerInvite)
+    )
+      throw new HttpError(429, 'quota_exceeded', { 'retry-after': '1' });
+    this.streams++;
+    this.open.add(res);
+    const abort = new AbortController();
+    let ends = this.streamEnds.get(invite.inviteId);
+    if (!ends) {
+      ends = new Set();
+      this.streamEnds.set(invite.inviteId, ends);
+    }
+    const ownEnds = ends;
+    let heartbeat: NodeJS.Timeout | undefined;
+    let unsubscribe = () => {};
+    const end = () => {
+      if (abort.signal.aborted) return;
+      abort.abort();
+      clearInterval(heartbeat);
+      unsubscribe();
+      ownEnds.delete(end);
+      if (!ownEnds.size) this.streamEnds.delete(invite.inviteId);
+      this.open.delete(res);
+      this.streams--;
+      this.streamsByInvite.release(invite.inviteId);
+      this.unwatch();
+      // A stalled reader must lose its socket, not retain queued desktop data
+      // after its stream slot or invite has been released.
+      if (res.writableNeedDrain) res.destroy();
+      else res.end();
+    };
+    const valid = () => {
+      try {
+        this.reauthenticate(invite);
+        this.ownTaskSession(invite, taskId);
+        const task = this.computerTask(taskId);
+        if (!task || !['running', 'paused'].includes(task.state) || task.cancelRequested) {
+          end();
+          return false;
+        }
+        return !abort.signal.aborted;
+      } catch {
+        end();
+        return false;
+      }
+    };
+    ownEnds.add(end);
+    res.once('close', end);
+    this.watch();
+    unsubscribe = this.deps.hub.subscribe(() => {
+      valid();
+    });
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'private, no-store',
+      'x-accel-buffering': 'no',
+    });
+    res.flushHeaders();
+    heartbeat = setInterval(() => {
+      if (valid() && !res.writableNeedDrain) res.write(': keep-alive\n\n');
+    }, limits.heartbeatMs);
+    heartbeat.unref();
+    try {
+      if (!valid()) return;
+      for await (const frame of computer!.watch(taskId, abort.signal)) {
+        if (!valid()) break;
+        const data = JSON.stringify({
+          ...frame,
+          controller: this.humanComputers.has(taskId) ? 'human' : 'agent',
+        });
+        if (Buffer.byteLength(data) > 2 * 1024 * 1024) break;
+        if (!res.write(`id: 1\nevent: computer\ndata: ${data}\n\n`)) {
+          await once(res, 'drain', {
+            signal: AbortSignal.any([abort.signal, AbortSignal.timeout(limits.drainTimeoutMs)]),
+          });
+        }
+      }
+    } finally {
+      end();
     }
   }
 

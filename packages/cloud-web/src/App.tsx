@@ -12,6 +12,7 @@ import {
   type TaskView,
 } from './contract';
 import { InboxPanel } from './Inbox';
+import { Computer } from './Computer';
 import { displayText, dollars, publicLink } from './presentation';
 import { disablePush, enablePush } from './push';
 import {
@@ -25,6 +26,7 @@ import {
 
 const ERROR_TEXT: Record<string, string> = {
   pause_unsupported: 'This task cannot be paused.',
+  computer_in_control: 'Hand back computer control before resuming this task.',
   invalid_state: 'The task is not in a state where that can be done.',
   not_open: 'This question is no longer open.',
   closed: 'This question is no longer open.',
@@ -153,6 +155,7 @@ function taskLabel(task: TaskView): string {
 
 function TaskBranch({
   task,
+  client,
   tasks,
   noPause,
   busy,
@@ -161,6 +164,7 @@ function TaskBranch({
   ancestors = [],
 }: {
   task: TaskView;
+  client: CloudClient;
   tasks: TaskView[];
   noPause: ReadonlySet<string>;
   busy: boolean;
@@ -203,6 +207,7 @@ function TaskBranch({
         )}
         {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
         {task.manifest && <p>{displayText(task.manifest.summary)}</p>}
+        {live && <Computer client={client} task={task} />}
         {live && (
           <div className="task-actions">
             {task.state === 'running' && !task.pauseRequested && !noPause.has(task.taskId) && (
@@ -241,7 +246,7 @@ function TaskBranch({
           {children.map((child) => (
             <TaskBranch
               key={child.taskId}
-              {...{ task: child, tasks, noPause, busy, act, control }}
+              {...{ task: child, client, tasks, noPause, busy, act, control }}
               ancestors={[...ancestors, task.taskId]}
             />
           ))}
@@ -624,7 +629,7 @@ export function ConversationView({
                   .map((task) => (
                     <TaskBranch
                       key={task.taskId}
-                      {...{ task, tasks, noPause, act, control }}
+                      {...{ task, client, tasks, noPause, act, control }}
                       busy={Boolean(busy)}
                     />
                   ))}

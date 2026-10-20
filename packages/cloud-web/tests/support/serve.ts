@@ -29,6 +29,10 @@ async function run(body: Body): Promise<unknown> {
       return stack.answers;
     case 'pushed':
       return stack.pushed;
+    case 'computer-inputs':
+      return stack.computer.inputs.filter((entry) => entry.taskId === text('taskId'));
+    case 'computer-disconnect':
+      return stack.computer.disconnected.add(text('taskId'));
     case 'delegate':
       return {
         taskId: await stack.delegate(text('conversationId'), {

@@ -14,6 +14,7 @@ export {
   type QuestionOptionPayload,
 } from './conductor-feed.js';
 export { DatabaseInUseError, openDatabase } from './db.js';
+export type { ComputerSource, ComputerFrame, ComputerInput } from './computer.js';
 export { type DeliveryOptions, type DeliveryStats } from './deliveries.js';
 export { type ExtensionEvent, type ExtensionKind } from './extension-feed.js';
 export {

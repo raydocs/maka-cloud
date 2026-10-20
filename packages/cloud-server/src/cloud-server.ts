@@ -10,6 +10,7 @@ import {
 } from '@maka-cloud/orchestrator';
 import { type ArtifactRead, type ArtifactSource, FileArtifactSource } from './artifacts.js';
 import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
+import type { ComputerSource } from './computer.js';
 import { ConversationStore } from './conversations.js';
 import { openDatabase } from './db.js';
 import { type DeliveryOptions, type DeliveryStats, MessageDeliveries } from './deliveries.js';
@@ -163,6 +164,8 @@ export interface CloudServerOptions {
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
+  /** Computer routes are absent without a trusted desktop/terminal adapter. */
+  computer?: ComputerSource;
   sweepOrphans?: SweepOrphans;
   /** Web Push settings (see `pushConfigFromEnv`). Without them the push routes answer 404. */
   push?: PushConfig & Pick<PushOptions, 'transport' | 'retryDelayMs' | 'maxAttempts' | 'timeoutMs'>;
@@ -399,6 +402,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       orchestrator,
       ...(push ? { push } : {}),
       artifacts,
+      computer: options.computer,
+      publisher,
       artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
       limits,
       onMessage: deliverMessage,
