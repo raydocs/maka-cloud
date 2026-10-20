@@ -116,7 +116,15 @@ const ROWS: Row[] = [
       const handle = await h.runners.claude.start(await h.spec(name));
       const events = reader(handle);
       await events.until(WORKING);
-      assert.notEqual(await settles(handle.cancel()), 'stuck');
+      // The revoke never answers: the cancel is not held up, and it does not say the run is stopped.
+      const cancelled = await settles(
+        handle.cancel().then(
+          () => 'stopped',
+          (error: unknown) => String(error),
+        ),
+      );
+      assert.notEqual(cancelled, 'stuck');
+      assert.match(cancelled, /revoke model access failed/);
       return (await settles(events.rest())) as RunnerEvent[];
     },
   },

@@ -114,7 +114,7 @@ test('cancel while a snapshot is pending releases everything and deletes the unf
   assert.deepEqual((await h.sessions.get('tsk_c_snap'))?.snapshotIds ?? [], []);
 });
 
-test('repeated cancels share one cleanup, and a revoke that never answers does not hold it up', async (t) => {
+test('repeated cancels share one cleanup, and a revoke that never answers does not hold it up but is refused', async (t) => {
   const tr = new Tracking();
   tr.revokeMode = 'hang';
   const errors: { step: string; message: string }[] = [];
@@ -134,8 +134,14 @@ test('repeated cancels share one cleanup, and a revoke that never answers does n
   await events.until(WORKING);
   const pid = await h.runPid('tsk_c_twice');
 
-  const both = Promise.all([handle.cancel(), handle.cancel(), handle.cancel()]);
-  assert.notEqual(await settles(both), 'stuck');
+  const both = Promise.allSettled([handle.cancel(), handle.cancel(), handle.cancel()]);
+  const results = await settles(both);
+  assert.notEqual(results, 'stuck');
+  // The key may still be live: no cancel says the run is stopped.
+  for (const result of results === 'stuck' ? [] : results) {
+    assert.equal(result.status, 'rejected');
+    assert.match(String((result as PromiseRejectedResult).reason), /revoke model access failed/);
+  }
   assert.equal(tr.revoked, 1, 'one cleanup, one revoke');
   assert.equal(tr.released, 1);
   assert.equal(await isRunning(pid), false);
@@ -147,7 +153,7 @@ test('repeated cancels share one cleanup, and a revoke that never answers does n
   );
   assert.match(errors[0]?.message ?? '', /timed out/);
   assert.equal(terminal(await events.rest()), undefined);
-  await handle.cancel();
+  await assert.rejects(handle.cancel(), /revoke model access failed/);
   assert.equal(tr.revoked, 1);
 });
 
@@ -225,4 +231,27 @@ test('when the record of a restored sandbox cannot be written, that lease is rel
   assert.match(JSON.stringify(events), /disk full/);
   assert.equal(tr.acquired, 2, 'a sandbox was restored');
   assertClean(h, tr);
+});
+
+test('a cancel whose processes could not be stopped is refused, so the stop stays owed, and a stop by id still finishes it', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  await h.setMode('hang');
+  const handle = await h.runners.claude.start(await h.spec('tsk_c_unreachable'));
+  const events = reader(handle);
+  await events.until(WORKING);
+  const pid = await h.runPid('tsk_c_unreachable');
+
+  // The sandbox cannot be reached for the kill.
+  h.fake.onExec = (request) =>
+    request.body.cmd.includes('SURVIVORS')
+      ? { status: 503, error: { code: 'host_unavailable', message: 'down', retryable: false } }
+      : undefined;
+  await assert.rejects(handle.cancel(), 'the cancel did not stop the run, and must not say it did');
+  assert.equal(await isRunning(pid), true, 'the process is still there');
+
+  h.fake.onExec = undefined;
+  await h.makeRunners().claude.stopOrphaned('tsk_c_unreachable');
+  assert.equal(await isRunning(pid), false);
+  await events.rest();
 });
