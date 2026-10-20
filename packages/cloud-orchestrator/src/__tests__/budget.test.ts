@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { FakeRun } from '../fake-runner.js';
+import type { RunnerEvent } from '../runner.js';
 import { MemoryTaskStore } from '../store.js';
 import { OrchestratorError, type StoredEvent, type TaskEvent } from '../types.js';
 import { eventQueued, eventually, GatedStore, makeHarness } from './harness.js';
@@ -141,6 +142,78 @@ test('spend a run reports while it is cancelled is recorded', async (t) => {
     'the spend that settled during the cancel',
   );
   assert.equal(h.orchestrator.status(conductor, task.taskId).state, 'cancelled');
+});
+
+/** A run whose stream reaches the orchestrator a macrotask late, as a slow transport does. */
+function slowStream(run: FakeRun): void {
+  const source = run.events;
+  const slow: AsyncIterable<RunnerEvent> = {
+    [Symbol.asyncIterator]: () => {
+      const iterator = source[Symbol.asyncIterator]();
+      return {
+        next: async () => {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          return iterator.next();
+        },
+        return: () => iterator.return?.() ?? Promise.resolve({ done: true, value: undefined }),
+      };
+    },
+  };
+  Object.defineProperty(run, 'events', { value: slow });
+}
+
+test('a cancel returns the spend the run reported while it stopped', async (t) => {
+  const h = await makeHarness(t, {
+    fake: {
+      onStart: (run: FakeRun) => {
+        settlesOnCancel(run, 0.7);
+        slowStream(run);
+      },
+    },
+  });
+  const conductor = h.session();
+  const task = await h.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'x',
+    budgetUsd: 5,
+  });
+  await eventually(() => h.fake.runs.length === 1, 'the run');
+  const view = await h.orchestrator.cancel(conductor, task.taskId);
+  assert.equal(view.state, 'cancelled');
+  assert.equal(view.costUsd, 0.7, 'what settled during the cancel is in the view it returns');
+  assert.equal(view.treeStopPending, undefined);
+});
+
+test('a cancel whose stream stays open reads as possibly spending until the stream ends', async (t) => {
+  // The run stops on cancel() but keeps its stream open: the spend it will still report is not in yet.
+  const h = await makeHarness(t, {
+    orchestrator: { controlTimeoutMs: 10 },
+    fake: {
+      onStart: (run: FakeRun) => {
+        run.cancel = async () => {
+          run.cancelCalls += 1;
+        };
+      },
+    },
+  });
+  const conductor = h.session();
+  const task = await h.orchestrator.delegate(conductor, {
+    runner: 'fake',
+    brief: 'x',
+    budgetUsd: 5,
+  });
+  await eventually(() => h.fake.runs.length === 1, 'the run');
+  const run = h.fake.runFor(task.taskId);
+  const view = await h.orchestrator.cancel(conductor, task.taskId);
+  assert.equal(view.state, 'cancelled');
+  assert.equal(view.treeStopPending, true, 'the cost of the task is not final');
+  run.usage(0.7);
+  run.end();
+  await eventually(
+    () => h.orchestrator.status(conductor, task.taskId).treeStopPending === undefined,
+    'the stream ended',
+  );
+  assert.equal(h.orchestrator.status(conductor, task.taskId).costUsd, 0.7);
 });
 
 test('spend a child reports after its top-level task ended is recorded on the ended task', async (t) => {

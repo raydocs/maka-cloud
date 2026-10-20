@@ -275,6 +275,8 @@ test("a task's view says its tree may still run while a task below it owes a sto
         if (taskId === parentId) return;
         childStops += 1;
         if (childStops <= 2) throw new Error('sandbox unreachable');
+        // The run is gone, and its stream with it: the spend it reported is all there is.
+        h.fake.runFor(taskId).end();
       },
     },
   });

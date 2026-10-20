@@ -161,6 +161,11 @@ export class Orchestrator {
    * reads as still running until it succeeds.
    */
   private readonly cancelRetries = new Map<TaskId, AbortController>();
+  /**
+   * Runs whose stream is still being read, by task. What a run reports while it stops is only
+   * recorded once its stream has been read to the end, so until then the tree's spend is not final.
+   */
+  private readonly readers = new Map<TaskId, Promise<void>>();
   private closed = false;
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
@@ -776,8 +781,10 @@ export class Orchestrator {
     // Nothing durable can be owed for a run that cannot be stopped by id: the
     // task reads as still running from before the first try until one succeeds.
     if (!this.stopsById(taskId)) return this.retryCancel(taskId, handle, true);
-    if (await cancelHandle(handle)) await this.recordStopped(taskId);
-    else await this.recordStopPending(taskId, 'cancel_failed');
+    if (await cancelHandle(handle)) {
+      await this.readerEnded(taskId);
+      await this.recordStopped(taskId);
+    } else await this.recordStopPending(taskId, 'cancel_failed');
   }
 
   private stopsById(taskId: TaskId): boolean {
@@ -914,6 +921,10 @@ export class Orchestrator {
         reports = resolve;
       }),
     ).catch(() => undefined);
+    this.readers.set(taskId, reading);
+    void reading.finally(() => {
+      if (this.readers.get(taskId) === reading) this.readers.delete(taskId);
+    });
     let recorded = false;
     try {
       // The hand-off. A cancel or an ended ancestor may have landed while the
@@ -1013,6 +1024,7 @@ export class Orchestrator {
       if (!(await reports)) return;
       // The stream broke; the remote run may still be alive, so the handle
       // stays registered and is cancelled when the task ends.
+      this.readers.delete(taskId);
       await this.recordRunnerOutcome({
         type: 'task_failed',
         taskId,
@@ -1023,6 +1035,7 @@ export class Orchestrator {
     if (!(await reports)) return;
     // A clean end of the stream does not prove the remote run stopped, so the
     // handle stays registered and is cancelled when the task ends.
+    this.readers.delete(taskId);
     await this.recordRunnerOutcome({
       type: 'task_failed',
       taskId,
@@ -1033,6 +1046,7 @@ export class Orchestrator {
   /** The runner reported its own end, so there is nothing left to cancel. */
   private runnerOver(taskId: TaskId, handle: RunHandle): void {
     if (this.handles.get(taskId) === handle) this.handles.delete(taskId);
+    this.readers.delete(taskId);
   }
 
   /** Concurrent callers for one task share a single cancel. */
@@ -1050,8 +1064,10 @@ export class Orchestrator {
     // Taken out of the map first: ending the task cancels any handle left in it.
     this.handles.delete(taskId);
     if (handle) {
+      let cancelled = false;
       try {
         await handle.cancel();
+        cancelled = true;
       } catch (error) {
         await this.record({
           type: 'task_progress',
@@ -1061,8 +1077,29 @@ export class Orchestrator {
         // Owed before the task ends, so no restart in between can lose it.
         await this.cancelFailed(taskId, handle);
       }
+      // The run reports what settled while it stopped on its stream, which closes with the cancel:
+      // the task ends once that is recorded, so what it reads as costing is what the run spent.
+      if (cancelled) await this.readerEnded(taskId);
     }
     await this.record({ type: 'task_cancelled', taskId });
+  }
+
+  /**
+   * Resolves once the stream of the task's run has been read to the end, or after the control
+   * timeout. A stream that is still open then keeps the task reading as possibly running.
+   */
+  private async readerEnded(taskId: TaskId): Promise<void> {
+    const reading = this.readers.get(taskId);
+    if (!reading) return;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.controlTimeoutMs);
+    });
+    try {
+      await Promise.race([reading, late]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -1227,11 +1264,17 @@ export class Orchestrator {
     // A start still under way may yet hand back a run, whether or not its runner can stop it by
     // id, and a run whose cancel is being retried is still going.
     const mayRun =
-      this.starting.has(taskId) || this.cancelRetries.has(taskId) || this.belowStillRuns(taskId);
+      this.starting.has(taskId) ||
+      this.cancelRetries.has(taskId) ||
+      (isTerminal(task.state) && this.readers.has(taskId)) ||
+      this.belowStillRuns(taskId);
     return mayRun ? { ...view, treeStopPending: true } : view;
   }
 
-  /** True when a task below `rootId` has not ended, is still starting, owes a stop, or has its cancel retried. */
+  /**
+   * True when a task below `rootId` has not ended, is still starting, owes a stop, has its cancel
+   * retried, or has a stream still being read.
+   */
   private belowStillRuns(rootId: TaskId): boolean {
     const seen = new Set<TaskId>([rootId]);
     let level = this.store.childrenOf(rootId);
@@ -1246,7 +1289,8 @@ export class Orchestrator {
           !isTerminal(task.state) ||
           task.stopPending ||
           this.starting.has(id) ||
-          this.cancelRetries.has(id)
+          this.cancelRetries.has(id) ||
+          this.readers.has(id)
         ) {
           return true;
         }
