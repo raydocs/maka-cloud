@@ -146,6 +146,11 @@ interface Turn extends ActiveTurn {
   finalText: string[];
   errors: string[];
   completeReason?: string;
+  /**
+   * Whether the conversation was tainted when this turn's last conductor model request was sent:
+   * the context the model decided its tool calls on (T15). Unset before the first request.
+   */
+  contextTainted?: boolean;
 }
 
 type Job =
@@ -966,7 +971,13 @@ export class Conductor {
         this.askBudget(turn, 0);
       }
     }
-    if (!refusal) return;
+    if (!refusal) {
+      // Read as the request goes out, after every result in it was stored with its taint.
+      if (this.turns.get(makaSessionId) === turn) {
+        turn.contextTainted = this.state.taintOf(turn.conversationId) !== undefined;
+      }
+      return;
+    }
     this.requestStop(turn, 'gated');
     throw new Error(`Model request not sent: ${refusal}.`);
   }
@@ -1089,6 +1100,8 @@ export class Conductor {
         const delegation = this.state.delegationOfTask(taskId);
         if (delegation && delegation.state !== 'settled') this.settleView(delegation, view);
       },
+      // Fail closed: a call with no request on record counts as decided on tainted context.
+      decidedOnTaint: (active) => (active as Turn).contextTainted ?? true,
       approverAuthorized: (approvedBy, conversationId) =>
         this.approverAuthorized ? this.approverAuthorized(approvedBy, conversationId) : true,
     };
