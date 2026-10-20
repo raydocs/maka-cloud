@@ -10,6 +10,7 @@ import {
   type ModelPrices,
   OPUS_5_5_PRICES,
 } from './config.js';
+import { playbookToolPolicy } from './guard.js';
 import { MakaHost } from './maka-host.js';
 import { type ConductorAccess, OrchestratorLink } from './orchestrator-link.js';
 import type {
@@ -78,6 +79,11 @@ export interface UserMessage {
   conversationId: string;
   messageId: string;
   text: string;
+  /**
+   * The text comes from outside the user (an issue or comment someone else wrote): the
+   * conversation is tainted before the message is admitted, and stays tainted (T15).
+   */
+  external?: boolean;
 }
 
 export interface UserAnswer {
@@ -194,6 +200,8 @@ export class Conductor {
   private closed: Promise<void> | undefined;
 
   private constructor(options: ConductorOptions) {
+    // A tool without a valid T15 policy is refused before anything is opened.
+    for (const spec of options.tools ?? []) playbookToolPolicy(spec);
     this.now = options.now ?? Date.now;
     this.state = new ConductorState(join(options.root, 'conductor.db'), this.now);
     this.outbox = options.outbox;
@@ -272,6 +280,7 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
+    if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
       message.messageId,
