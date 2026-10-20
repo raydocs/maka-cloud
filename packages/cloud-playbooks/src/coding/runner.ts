@@ -86,6 +86,8 @@ export interface CodingRunnerOptions {
   loop?: Partial<LoopLimits>;
   /** How often the workspace is sampled for edit loops while an agent runs. Default 15 s. */
   sampleIntervalMs?: number;
+  /** How long a released agent run's stream may take to end while its last spend is read. Default 10 s. */
+  lastSpendMs?: number;
   /** A cleanup step that failed. Cleanup goes on; this is how it is seen. */
   onCleanupError?(failure: { taskId: TaskId; step: string; error: unknown }): void;
 }
@@ -101,6 +103,7 @@ export interface CodingRunnerStats {
 }
 
 const MAX_NOTE_CHARS = 500;
+const DEFAULT_LAST_SPEND_MS = 10_000;
 const MAX_REASON_CHARS = 2_000;
 const BLOB_CHUNK_BYTES = 192 * 1024;
 const MAX_REPRO_BYTES = 16 * 1024;
@@ -526,10 +529,14 @@ class CodingRun implements RunHandle {
     });
     let terminal: RunnerEvent | undefined;
     let runCost = 0;
+    const iterator = handle.events[Symbol.asyncIterator]();
+    // The pull a cancel gave up on: it may still return a report.
+    let pending: Promise<IteratorResult<RunnerEvent>> | undefined;
     try {
-      const iterator = handle.events[Symbol.asyncIterator]();
       for (;;) {
-        const next = await this.guard(iterator.next());
+        pending = iterator.next();
+        const next = await this.guard(pending);
+        pending = undefined;
         if (next.done) break;
         const event = next.value;
         if (event.type === 'progress') this.progress(event.note);
@@ -541,10 +548,17 @@ class CodingRun implements RunHandle {
         } else terminal ??= event;
       }
     } finally {
-      this.spentBefore += runCost;
-      await sampler.stop();
-      // Wait for the agent run's own cleanup before anything else touches the task directory.
-      await this.releaseAgent(handle);
+      try {
+        await sampler.stop();
+        // Wait for the agent run's own cleanup before anything else touches the task directory.
+        await this.releaseAgent(handle);
+        // A cancel leaves the loop above before the stream ends, but the run reports what its last
+        // requests cost while it stops: that is spent, and is reported before this task ends.
+        runCost = await this.lastSpend(iterator, pending, runCost);
+      } finally {
+        this.spentBefore += runCost;
+        this.meter(this.spentBefore);
+      }
     }
     this.checkCancelled();
     // A spent budget ends the task: it is not a vendor failure, so nothing is handed over.
@@ -567,6 +581,49 @@ class CodingRun implements RunHandle {
     } catch (error) {
       return { ok: false, reason: `its result could not be read (${errorMessage(error)})` };
     }
+  }
+
+  /**
+   * Reads what is left of a stopped agent run's stream and returns its last reported spend. The
+   * stream closes when the run is released; one that does not within `lastSpendMs` is reported
+   * and the spend so far stands.
+   */
+  private async lastSpend(
+    iterator: AsyncIterator<RunnerEvent>,
+    pending: Promise<IteratorResult<RunnerEvent>> | undefined,
+    spent: number,
+  ): Promise<number> {
+    let cost = spent;
+    const read = (async () => {
+      try {
+        let next = pending ?? iterator.next();
+        for (;;) {
+          const result = await next;
+          if (result.done) return;
+          if (result.value.type === 'usage') cost = result.value.costUsd;
+          next = iterator.next();
+        }
+      } catch {
+        // The stream broke: what it reported before is all there is.
+      }
+    })();
+    const limitMs = this.options.lastSpendMs ?? DEFAULT_LAST_SPEND_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), limitMs);
+    });
+    try {
+      if (await Promise.race([read.then(() => false), late])) {
+        this.options.onCleanupError?.({
+          taskId: this.spec.taskId,
+          step: 'read the last spend of the agent run',
+          error: new Error(`its stream did not end within ${limitMs} ms of its release`),
+        });
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    return cost;
   }
 
   /** Samples the workspace while an agent runs and calls `onLoop` once if the edits loop. */

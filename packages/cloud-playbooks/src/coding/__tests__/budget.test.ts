@@ -65,3 +65,71 @@ test('each agent run gets what is left of the budget, and the task stops when it
   zeroStats(h.runner);
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
 });
+
+test('the spend an agent run reports as the task is cancelled is reported before the task ends', async (t) => {
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    turn.usage(0.2);
+    // A metered run settles its last requests as it stops.
+    turn.signal.addEventListener('abort', () => turn.usage(0.9), { once: true });
+    await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
+    return 'ok';
+  };
+  const handle = await h.runner.start(await h.spec('tsk_cancelcost'));
+  // The task is cancelled once it has reported the first spend, so the agent run is being read.
+  const reading = gate();
+  const usage: number[] = [];
+  const ended = (async () => {
+    for await (const event of handle.events) {
+      if (event.type !== 'usage') continue;
+      usage.push(event.costUsd);
+      reading.open();
+    }
+  })();
+  await reading.promise;
+  await handle.cancel();
+  await ended;
+  assert.deepEqual(usage, [0.2, 0.9]);
+  zeroStats(h.runner);
+});
+
+test('an agent run whose stream stays open after its release does not hold the cancel: the spend read so far stands and the failure is reported', async (t) => {
+  const failures: string[] = [];
+  const h = await setup(t, {
+    lastSpendMs: 20,
+    onCleanupError: (failure) => failures.push(failure.step),
+  });
+  h.claude.script = async (turn) => {
+    turn.usage(0.2);
+    turn.signal.addEventListener('abort', () => turn.usage(0.9), { once: true });
+    await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
+    return 'ok';
+  };
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    const handle = await realStart(spec);
+    return {
+      ...handle,
+      events: (async function* () {
+        yield* handle.events;
+        await new Promise<never>(() => {});
+      })(),
+    };
+  };
+  const handle = await h.runner.start(await h.spec('tsk_hungstream'));
+  const reading = gate();
+  const usage: number[] = [];
+  const ended = (async () => {
+    for await (const event of handle.events) {
+      if (event.type !== 'usage') continue;
+      usage.push(event.costUsd);
+      reading.open();
+    }
+  })();
+  await reading.promise;
+  await handle.cancel();
+  await ended;
+  assert.deepEqual(usage, [0.2, 0.9]);
+  assert.deepEqual(failures, ['read the last spend of the agent run']);
+  zeroStats(h.runner);
+});
