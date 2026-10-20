@@ -8,7 +8,7 @@ export class SupervisorDatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const APPEND_ONLY = ['item_events', 'answer_log', 'verifier_spend'];
 
@@ -178,6 +178,14 @@ ALTER TABLE answers ADD COLUMN caller TEXT;
 `;
 
 /**
+ * Added in schema 4: whose digest it is. A digest summarizes the items of one owner, so its
+ * model call is that owner's spend; NULL is the digest of items nobody owns.
+ */
+const SCHEMA_V4 = `
+ALTER TABLE digests ADD COLUMN owner TEXT;
+`;
+
+/**
  * Opens the supervisor's own database for this process alone. The write paths
  * (answer claims, the hourly cap, digest slots) check and write inside one
  * transaction and assume nobody else writes, so a second opener fails at once.
@@ -219,7 +227,8 @@ function migrate(db: DatabaseSync): void {
   try {
     if (row.user_version === 0) db.exec(SCHEMA);
     if (row.user_version < 2) db.exec(SCHEMA_V2);
-    db.exec(SCHEMA_V3);
+    if (row.user_version < 3) db.exec(SCHEMA_V3);
+    db.exec(SCHEMA_V4);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {

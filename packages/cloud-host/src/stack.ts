@@ -37,6 +37,7 @@ import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 import { PauseSwitch, PauseWatcher } from './pause.js';
+import { accountLedgerOf } from './spend.js';
 
 /** What a user is told when the operator's pause switch stopped their work. */
 export const PAUSED_NOTICE =
@@ -137,20 +138,7 @@ export async function startStack(
       warn,
       gatewayPrices(config.gateway.models, config.inbox.verifierModels),
       journal,
-      journal.accountLedger({
-        limitsOf: (inviteId) => {
-          const set = inviteStore.limits(inviteId);
-          return (
-            set && {
-              dailyUsd: set.dailyUsd ?? config.spend.inviteDailyUsd,
-              monthlyUsd: set.monthlyUsd ?? config.spend.inviteMonthlyUsd,
-            }
-          );
-        },
-        serverDailyUsd: () => config.spend.serverDailyUsd,
-        // While paused every reservation is refused, whoever asks.
-        paused: () => pause.isPaused(),
-      }),
+      accountLedgerOf(journal, inviteStore, config.spend, pause),
       // A cap that ends spending is told to the conversation and raised as a budget item.
       capReporter({
         raise: (input) => {
@@ -243,7 +231,8 @@ export async function startStack(
             dbPath: config.supervisorDbPath,
             config: config.inbox,
             gateway: gateway.gateway,
-            summaryBudget: journal.dailyLimit('digest summary', SUMMARY_DAILY_CAP_USD),
+            summaryBudget: (owner) =>
+              journal.dailyLimit(`digest summary ${owner}`, SUMMARY_DAILY_CAP_USD),
             accountOf: (conversationId) => {
               const inviteId = ownerOfConversation?.(conversationId);
               return inviteId === undefined ? undefined : { inviteId };
