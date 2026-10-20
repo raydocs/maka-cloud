@@ -351,6 +351,50 @@ export class SqliteSpendJournal implements SpendJournal {
   }
 }
 
+/** What a journal file holds, read from outside the process that writes it. */
+export interface JournalTotals {
+  /** Per task: what was settled plus what is still held, all processes. */
+  taskUsd: Map<string, number>;
+  /** Per invite, for the UTC day of `at`: settled plus held. The server's own account is `server`. */
+  accountDayUsd: Map<string, number>;
+  /** All accounts, for that day. */
+  serverDayUsd: number;
+}
+
+/**
+ * Reads a journal without taking part in it: a separate read-only connection, no epoch of its own
+ * and nothing forgotten. Task spend of a process that has since restarted moves into the task log
+ * and leaves the journal, so read this before a restart to compare it with the task log.
+ */
+export function readJournalTotals(path: string, at: number = Date.now()): JournalTotals {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 5000');
+    const day = new Date(at).toISOString().slice(0, 10);
+    const taskUsd = new Map<string, number>();
+    for (const row of db
+      .prepare(
+        `SELECT task_id AS id, SUM(usd) AS usd FROM
+           (SELECT task_id, usd FROM spent UNION ALL SELECT task_id, usd FROM holds)
+         GROUP BY task_id`,
+      )
+      .all() as Array<{ id: string; usd: number }>) {
+      taskUsd.set(row.id, row.usd);
+    }
+    const accountDayUsd = new Map<string, number>();
+    let serverDayUsd = 0;
+    for (const row of db
+      .prepare('SELECT account, SUM(usd) AS usd FROM account_spend WHERE day = ? GROUP BY account')
+      .all(day) as Array<{ account: string; usd: number }>) {
+      accountDayUsd.set(row.account, row.usd);
+      serverDayUsd += row.usd;
+    }
+    return { taskUsd, accountDayUsd, serverDayUsd };
+  } finally {
+    db.close();
+  }
+}
+
 const EPSILON = 1e-9;
 
 /** What an invite may spend. */

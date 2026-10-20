@@ -11,6 +11,8 @@ import {
 } from './config.js';
 import { createLogger, createScrubber } from './log.js';
 import { PauseSwitch } from './pause.js';
+import { smokeCommand } from './smoke-live.js';
+import { SMOKE_VARIABLES } from './smoke.js';
 import { startStack } from './stack.js';
 
 const USAGE = `Usage:
@@ -24,12 +26,18 @@ const USAGE = `Usage:
   maka-cloud restore <name>
                      put a backup back; the server must be stopped. What was there is moved to
                      <data dir>/pre-restore-*, nothing is deleted
+  maka-cloud smoke   run the live smoke test against a running server; spends real money, so it
+                     refuses unless MAKA_CLOUD_LIVE=1 and the MAKA_CLOUD_SMOKE_* settings are set
+                     (see docs/fork/deploy.md)
 
 Starting runs nothing by itself: tasks start only when a user posts a message.
 Invites are made with: cloud-server invite create --invites <data dir>/invites.db --label <text>
 
 Environment:
-${ENV_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}`;
+${ENV_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}
+
+Only for maka-cloud smoke:
+${SMOKE_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}`;
 
 function pauseCommand(command: 'pause' | 'resume', env: NodeJS.ProcessEnv): number {
   const dataDir = env.MAKA_CLOUD_DATA_DIR?.trim();
@@ -102,6 +110,7 @@ async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
     return backupCommand(command, rest, env);
   }
   if (command === 'restore' && rest.length === 1) return backupCommand(command, rest, env);
+  if (command === 'smoke' && rest.length === 0) return smokeCommand(env);
   if ((command !== 'check' && command !== 'start') || rest.length > 0) {
     console.error(USAGE);
     return 2;
