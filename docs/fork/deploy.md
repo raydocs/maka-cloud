@@ -11,6 +11,86 @@ Every command below that starts with `maka-cloud` is
 alias or a one-line script if you want the short form. `cloud-server` is
 `node /opt/maka-cloud/packages/cloud-server/dist/cli.js`.
 
+## First live run: what you provide
+
+Everything the first live run needs from you, in the order you will need it.
+Nothing here is spent or sent until you run the smoke command at the end. The
+steps below were checked in a dry run on a clean checkout (build, `check`, a
+start on loopback with fake keys and a local stand-in for the model and
+sandbox APIs, a backup and a restore, `pause` and `resume`, and the web app
+through a proxy); the real model, sandbox and GitHub calls, the proxy, systemd
+and Compose were not run.
+
+**1. A host and three names**
+
+- One Linux host with Node 22.19 or later (or 24) and `git`. It makes outbound
+  HTTPS calls to `api.anthropic.com`, `api.instabox.sh` and `api.github.com`,
+  and to `api.openai.com` and the DeepSeek API if you set those keys.
+- Three DNS names with TLS certificates that point at the host: one for the
+  app and API (`app.example.com`), one for the MCP endpoint
+  (`mcp.example.com`) and one for the model gateway (`models.example.com`).
+  The sandboxes reach the last two over the internet; the server itself binds
+  to loopback and the proxy is the only thing listening on 443. See the proxy
+  section for nginx and Caddy files.
+
+**2. Keys, in `/etc/maka-cloud.env` (root only, never in the repository)**
+
+| Variable | When | What it is |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | required | Claude, through the gateway (conductor, runs, checks). Set a monthly limit on this key at the vendor as well. |
+| `INSTABOX_API_KEY` | required | the sandbox provider's API key |
+| `MAKA_CLOUD_SANDBOXES` | required | `'{"<invite id>":"<machine id>"}'`, one sandbox machine per invite, none shared |
+| `MAKA_CLOUD_MCP_PUBLIC_URL`, `MAKA_CLOUD_GATEWAY_PUBLIC_URL` | required | `https://mcp.example.com/mcp` and `https://models.example.com` |
+| `MAKA_GITHUB_TOKEN` | for a pull request | a fine-grained token (it starts `github_pat_`) limited to the scratch repository, with Contents and Pull requests read and write. Classic, OAuth and app tokens are refused. |
+| `DEEPSEEK_API_KEY` | recommended | web search for research tasks; without it they get no search tool |
+| `OPENAI_API_KEY`, `MAKA_CLOUD_GATEWAY_MODELS`, `MAKA_CLOUD_VERIFIER_MODELS` | recommended | a model of another vendor that checks finished work; without a verifier model only the checks that need none run |
+| `CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` | optional | Web Push; make the pair with `node_modules/.bin/web-push generate-vapid-keys` in the checkout (it works offline) |
+
+**3. A sandbox machine for each invite**
+
+- Create the machine in the sandbox provider's console, from an image with
+  `node` and `npm`, `git`, `bash` and the usual coreutils, and with outbound
+  HTTPS (to your two public names, to `github.com` and to the npm registry).
+  The first task on a machine installs the Claude CLI there with `npm`.
+- Make one for you and one more for the smoke invite. Never share a machine
+  between invites.
+
+**4. The scratch repository for the coding scenario**
+
+- Make it **public**. The sandbox clones `https://github.com/<repo>.git`
+  without a token; the token stays on the server and is used only to push the
+  branch and open the pull request. A private repository fails at the clone.
+- Put one commit in it (a README), so there is a branch to start from.
+
+**5. Two invites and their limits**
+
+```sh
+cloud-server invite create --invites /var/lib/maka-cloud/invites.db --label "owner"
+cloud-server invite create --invites /var/lib/maka-cloud/invites.db --label "smoke"
+cloud-server invite limits --invites /var/lib/maka-cloud/invites.db inv_<smoke> --daily 5 --monthly 10
+```
+
+Add both ids to `MAKA_CLOUD_SANDBOXES` and restart. While you test, also set
+`MAKA_CLOUD_SERVER_DAILY_USD` to the same amount as the smoke budget, so the
+whole server cannot spend more than that in a day either.
+
+**6. The gated smoke run**
+
+Fill `/etc/maka-cloud-smoke.env` as in the smoke section below, with
+`MAKA_CLOUD_SMOKE_MAX_USD=5` and the smoke invite's daily limit at 5 or less
+(the command refuses otherwise), then run the one command:
+
+```sh
+sudo -u maka-cloud bash -c 'set -a; . /etc/maka-cloud-smoke.env; set +a; \
+  exec node /opt/maka-cloud/packages/cloud-host/dist/cli.js smoke'
+```
+
+The hard cap is the smoke invite's daily limit, which the gateway enforces; the
+budget is also the amount at which the run stops starting new scenarios. The
+run refuses without `MAKA_CLOUD_LIVE=1`, so nothing happens by accident. If a
+model key is wrong, the research and coding scenarios say so within seconds
+instead of waiting out their timeouts.
+
 ## What runs
 
 `maka-cloud start` is one Node process (Node 22.19 or later, or 24) that listens
