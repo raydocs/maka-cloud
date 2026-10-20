@@ -25,8 +25,9 @@ test('the cleanup of a finished run cannot kill the turn that resumed after it',
   };
 
   const first = reader(await h.runners.claude.start(spec));
-  await first.until((event) => event.type === 'finished');
-  await parked.promise; // the orchestrator has its terminal event; the cleanup has not run yet
+  // The run is over and its cleanup is parked at the kill: its end is not out until the kill is
+  // confirmed, but a caller that resumes the task now must not have its new turn killed.
+  await parked.promise;
   await h.setMode('wait');
   const second = await h.runners.claude.resume('tsk_next', { prompt: 'again', spec });
   await until(() => exists(join(h.home, 'fake-cli', 'waiting'))); // the new turn is running

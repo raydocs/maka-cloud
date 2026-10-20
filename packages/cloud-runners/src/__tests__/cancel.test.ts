@@ -172,7 +172,8 @@ for (const mode of ['sync-throw', 'reject'] as const) {
     t.after(() => h.cleanup());
     const events = await settles(collect(await h.runners.claude.start(await h.spec('tsk_c_rev'))));
     assert.notEqual(events, 'stuck', 'the stream never closed');
-    assert.equal(terminal(events === 'stuck' ? [] : events)?.type, 'finished');
+    // The key may still be live, so the run is not reported over: the stop stays owed.
+    assert.equal(terminal(events === 'stuck' ? [] : events), undefined);
     assertClean(h, tr);
     assert.equal(tr.revoked, 1);
     assert.deepEqual(errors, ['revoke model access']);
@@ -255,3 +256,48 @@ test('a cancel whose processes could not be stopped is refused, so the stop stay
   assert.equal(await isRunning(pid), false);
   await events.rest();
 });
+
+const KILL_FAILS = (request: { body: { cmd: string } }) =>
+  request.body.cmd.includes('SURVIVORS')
+    ? { status: 503, error: { code: 'host_unavailable', message: 'down', retryable: false } }
+    : undefined;
+
+for (const exit of ['finished', 'failed'] as const) {
+  test(`a run that ${exit} on its own but could not be stopped publishes no end, so the stop stays owed`, async (t) => {
+    const h = await setup();
+    t.after(() => h.cleanup());
+    if (exit === 'failed') await h.setMode('fail');
+    h.fake.onExec = (request) => KILL_FAILS(request);
+    const handle = await h.runners.claude.start(await h.spec(`tsk_c_auto_${exit}`));
+    const events = await settles(collect(handle));
+    assert.notEqual(events, 'stuck');
+    const seen = events === 'stuck' ? [] : events;
+    assert.equal(
+      terminal(seen),
+      undefined,
+      'an end was published for a run not known to be stopped',
+    );
+    assert.ok(
+      seen.some(
+        (event) => event.type === 'progress' && /could not be confirmed stopped/.test(event.note),
+      ),
+      'the stream says why',
+    );
+    await assert.rejects(handle.cancel(), /stop processes failed/);
+    h.fake.onExec = undefined;
+    await h.makeRunners().claude.stopOrphaned(`tsk_c_auto_${exit}`);
+  });
+
+  test(`a run that ${exit} on its own whose model access could not be revoked publishes no end`, async (t) => {
+    const tr = new Tracking();
+    tr.revokeMode = 'reject';
+    const h = await setup({ cloud: { modelAccess: tr.access, sandboxes: tr.sandboxes } });
+    t.after(() => h.cleanup());
+    if (exit === 'failed') await h.setMode('fail');
+    const events = await settles(
+      collect(await h.runners.claude.start(await h.spec(`tsk_c_rv_${exit}`))),
+    );
+    assert.notEqual(events, 'stuck');
+    assert.equal(terminal(events === 'stuck' ? [] : events), undefined);
+  });
+}
