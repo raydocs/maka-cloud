@@ -294,6 +294,11 @@ class CodingRun implements RunHandle {
   private lastReportedUsd: number | undefined;
   /** Set once the task has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
+  /**
+   * Set when a cleanup step that stops something the task started failed: an agent run or a check
+   * may still be running. `cancel` refuses with it, so the stop stays owed.
+   */
+  private stopFailure: Error | undefined;
   private readonly hostDir: string;
 
   constructor(
@@ -314,6 +319,8 @@ class CodingRun implements RunHandle {
       this.abort.abort();
     }
     await this.cleanup();
+    // A cancel that returns says everything the task started is stopped: when it could not be, it says so.
+    if (this.stopFailure) throw this.stopFailure;
   }
 
   private get signal(): AbortSignal {
@@ -1133,7 +1140,7 @@ class CodingRun implements RunHandle {
   private releaseAgent(handle: RunHandle): Promise<void> {
     let released = this.agentReleases.get(handle);
     if (!released) {
-      released = this.step('stop agent run', () => handle.cancel()).finally(() => {
+      released = this.step('stop agent run', () => handle.cancel(), true).finally(() => {
         if (this.agentHandle === handle) this.agentHandle = undefined;
         this.runner.stats.agentRuns--;
       });
@@ -1207,10 +1214,14 @@ class CodingRun implements RunHandle {
     this.events.push({ type: 'progress', note: clipText(note, MAX_NOTE_CHARS) });
   }
 
-  private async step(name: string, work: () => Promise<void>): Promise<void> {
+  /** A failing step is reported and the cleanup goes on; one that `stops` something also fails `cancel`. */
+  private async step(name: string, work: () => Promise<void>, stops = false): Promise<void> {
     try {
       await work();
     } catch (error) {
+      if (stops) {
+        this.stopFailure ??= new Error(clipText(`${name} failed: ${errorMessage(error)}`, 300));
+      }
       this.options.onCleanupError?.({ taskId: this.spec.taskId, step: name, error });
     }
   }
@@ -1225,7 +1236,7 @@ class CodingRun implements RunHandle {
       if (handle) await this.releaseAgent(handle);
       const workspace = this.workspace;
       // Everything the task's agent runs and checks started is stopped, however the task ended.
-      if (workspace) await this.step('stop checks', () => workspace.stopAll());
+      if (workspace) await this.step('stop checks', () => workspace.stopAll(), true);
       if (workspace && this.baseCheckActive) {
         await this.step('restore the change', () => this.restoreBase(undefined));
       }
