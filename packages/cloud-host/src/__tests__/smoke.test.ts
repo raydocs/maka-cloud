@@ -18,6 +18,7 @@ const REPO = 'scratch-owner/scratch-repo';
 
 interface Faults {
   researchFails?: boolean;
+  conductorFails?: boolean;
   noPullRequestLink?: boolean;
   cancelNeverConfirmed?: boolean;
   spendAfterCancel?: boolean;
@@ -169,6 +170,13 @@ class World implements SmokeDeps {
     const conversation = this.conversations.get(conversationId);
     assert.ok(conversation, 'a known conversation');
     conversation.transcript.push(`you: ${text}`);
+    if (this.faults.conductorFails) {
+      // The conductor's own model run failed, so no task is ever created.
+      conversation.transcript.push(
+        'The run failed: the model service refused the key (status=401)',
+      );
+      return;
+    }
     const kind = text.includes('pull request')
       ? 'coding'
       : text.startsWith('Are you')
@@ -300,6 +308,23 @@ test('a failing research task is reported, and the other scenarios still run', a
   assert.equal(report.ok, false);
   assert.equal(report.results.length, NAMES.length);
   assert.match(formatSmokeReport(report).join('\n'), /Some scenarios failed/u);
+});
+
+test('a conductor run that fails before any task started fails the scenario at once, with its reason', async () => {
+  const world = new World({ conductorFails: true });
+  const report = await runSmoke(world, options);
+  const results = byName(report);
+  for (const name of ['research task', 'coding task and pull request', 'cancel mid-run']) {
+    assert.equal(results[name]?.ok, false, name);
+    assert.match(
+      results[name]?.detail ?? '',
+      /^no task started: The run failed: the model service refused the key \(status=401\)$/u,
+      name,
+    );
+  }
+  assert.equal(report.ok, false);
+  // Nothing waited out a timeout (60 s each on the fake clock) for a task that could never come.
+  assert.equal(world.clock < 60_000, true, `the fake clock read ${world.clock}`);
 });
 
 test('the coding scenario fails when no pull request link appears, and approves nothing else', async () => {
