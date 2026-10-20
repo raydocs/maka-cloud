@@ -411,8 +411,20 @@ class CodingRun implements RunHandle {
       // on: the task is not over, and its cost not final, until that is recorded.
       while (this.lateSpends.size > 0) await Promise.all([...this.lateSpends]);
       // The terminal event goes out only after everything the task held is released, so
-      // nothing that follows it (a new task, a restart) meets this one's leftovers.
-      if (this.terminal && !this.cancelled) this.events.push(this.terminal);
+      // nothing that follows it (a new task, a restart) meets this one's leftovers. It also means
+      // nothing is left to stop: when a stop failed it is not sent, the stream just closes, and
+      // the task ends with the stop owed (and retried by id).
+      if (this.terminal && !this.cancelled) {
+        if (this.stopFailure) {
+          this.events.push({
+            type: 'progress',
+            note: clipText(
+              `the task could not be confirmed stopped (${this.stopFailure.message}); its end is not reported and the stop stays owed`,
+              MAX_NOTE_CHARS,
+            ),
+          });
+        } else this.events.push(this.terminal);
+      }
       this.events.close();
       stats.runs--;
     }
