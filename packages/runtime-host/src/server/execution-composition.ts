@@ -454,6 +454,10 @@ export async function createExecutionRuntimeHostComposition(
     const personalAssistant = (assistant = new PersonalAssistantService(
       join(context.owner.controlDirectory, 'personal-assistant'),
       {
+        prepareBotWake: async (ownerId, workerId) => {
+          if (await interactions.hasPendingSession(workerId)) return 'deferred';
+          return sessionCatalog.synchronizeAssistantBotModel(ownerId, workerId);
+        },
         stopSessions: async () => {
           if (!rootCoordinator) return;
           const failures: unknown[] = [];
