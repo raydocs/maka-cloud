@@ -6,6 +6,7 @@ import {
   pausePathOf,
   readStackConfig,
 } from './config.js';
+import { createLogger, createScrubber } from './log.js';
 import { PauseSwitch } from './pause.js';
 import { startStack } from './stack.js';
 
@@ -61,18 +62,17 @@ async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
   for (const line of describeConfig(config)) console.log(line);
   if (command === 'check') return 0;
 
-  const stack = await startStack(config, env, {
-    onWarning: (message, detail) => console.warn(`warning: ${message}`, detail ?? ''),
-  });
-  console.log(`listening:           ${stack.cloud.server.url}`);
+  const log = createLogger({ write: (line) => process.stdout.write(`${line}\n`), env });
+  const stack = await startStack(config, env, { onWarning: log.warning });
+  log.info('server.listening', { url: stack.cloud.server.url });
   if (stack.pause.isPaused()) {
-    console.log('spending is PAUSED: run "maka-cloud resume" to allow it again');
+    log.warn('spending.paused', { hint: 'run "maka-cloud resume" to allow it again' });
   }
   await new Promise<void>((resolve) => {
     process.once('SIGINT', resolve);
     process.once('SIGTERM', resolve);
   });
-  console.log('shutting down');
+  log.info('server.closing');
   await stack.close();
   return 0;
 }
@@ -82,7 +82,10 @@ main(process.argv.slice(2), process.env).then(
     process.exitCode = code;
   },
   (error: unknown) => {
-    console.error(error);
+    const scrub = createScrubber(process.env);
+    console.error(
+      scrub(error instanceof Error ? `${error.name}: ${error.message}` : String(error)),
+    );
     process.exitCode = 1;
   },
 );

@@ -13,3 +13,4 @@ export { PauseSwitch, PauseWatcher, type PauseWatcherOptions } from './pause.js'
 export { accountLedgerOf, openServerLedger, type ServerLedger } from './spend.js';
 /** For tools that run next to the server (the evals) and need to read or make its invites. */
 export { InviteStore } from '@maka-cloud/server';
+export { createLogger, createScrubber, type Logger, type LogLevel } from './log.js';
