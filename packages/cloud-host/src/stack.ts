@@ -343,6 +343,12 @@ export async function startStack(
           thresholdUsd: config.spendAlert.usd,
           ownerInvite: config.spendAlert.ownerInvite,
           spentToday: () => journal.serverDaySpendUsd(),
+          // An alert asked for and not delivered is kept in the journal until it is.
+          owed: {
+            save: (alert) => journal.savePendingAlert(alert),
+            list: () => journal.pendingAlerts(),
+            clear: (inviteId, key) => journal.clearPendingAlert(inviteId, key),
+          },
           alert: (inviteId, key) => cloud.server.pushAlert(inviteId, key),
           onAlert: (day) => dependencies.onInfo?.('spend.alerted', { day }),
           onWarning: warn,

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { SpendAlertWatcher } from '../spend-alert.js';
 
 const NOON = Date.UTC(2026, 9, 20, 12, 0, 0);
@@ -237,4 +241,133 @@ test('the wait between attempts is capped, and a check made by hand does not wai
   await w.made.tick();
   await w.made.tick();
   assert.equal(w.asked.length, 14, 'a hand-made check asks at once');
+});
+
+/** A watcher whose push service fails until `push.up` is set. */
+function flaky(
+  spent: { usd: number },
+  over: Partial<ConstructorParameters<typeof SpendAlertWatcher>[0]> = {},
+) {
+  const push = { up: false };
+  const w: ReturnType<typeof watcher> = watcher(spent, {
+    alert: async (inviteId, key) => {
+      w.asked.push([inviteId, key]);
+      return push.up;
+    },
+    pollMs: 60_000,
+    ...over,
+  });
+  return { w, push };
+}
+
+const MINUTE = 60_000;
+
+test('an undelivered alert is asked again after the spend drops back under the threshold', async () => {
+  const spent = { usd: 20 };
+  const { w, push } = flaky(spent);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 1);
+  // The reservation that took the day over the threshold settles lower.
+  spent.usd = 4;
+  w.advance(2 * MINUTE);
+  push.up = true;
+  await w.made.tick(true);
+  assert.deepEqual(
+    w.asked.map(([, key]) => key),
+    ['spend:2026-10-20', 'spend:2026-10-20'],
+    'the owner is asked again though today’s spend is under the threshold',
+  );
+  assert.deepEqual(w.days, ['2026-10-20']);
+  // Delivered: nothing is owed, so a spend under the threshold asks nothing more.
+  w.advance(5 * MINUTE);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 2);
+});
+
+test('an alert that failed before midnight UTC is still asked for after it, under its own day', async () => {
+  const spent = { usd: 20 };
+  const { w, push } = flaky(spent);
+  w.advance(11 * 60 * MINUTE + 59 * MINUTE); // 23:59
+  await w.made.tick(true);
+  assert.deepEqual(w.asked, [[OWNER, 'spend:2026-10-20']]);
+  // The new day starts with no spend; the push service comes back.
+  w.advance(3 * MINUTE);
+  spent.usd = 0;
+  push.up = true;
+  await w.made.tick(true);
+  assert.deepEqual(w.asked, [
+    [OWNER, 'spend:2026-10-20'],
+    [OWNER, 'spend:2026-10-20'],
+  ]);
+  assert.deepEqual(w.days, ['2026-10-20'], 'reported for the day it was about');
+});
+
+test('an alert that keeps failing is given up a day after it was first asked for, with a warning', async () => {
+  const spent = { usd: 20 };
+  const { w } = flaky(spent);
+  await w.made.tick(true);
+  spent.usd = 0;
+  w.advance(DAY - MINUTE);
+  await w.made.tick(true);
+  const before = w.asked.length;
+  assert.ok(before > 1, 'still being tried just under a day on');
+  w.advance(2 * MINUTE);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, before, 'a day on it is not asked again');
+  assert.ok(w.warnings.some((message) => /giving up/u.test(message)));
+  w.advance(30 * MINUTE);
+  await w.made.tick(true);
+  assert.equal(w.asked.length, before, 'and stays given up');
+});
+
+test('an owed alert survives a restart: a new watcher over the same journal asks for it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'spend-alert-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'spend.db');
+  const owedBy = (journal: SqliteSpendJournal) => ({
+    save: (alert: Parameters<SqliteSpendJournal['savePendingAlert']>[0]) =>
+      journal.savePendingAlert(alert),
+    list: () => journal.pendingAlerts(),
+    clear: (inviteId: string, key: string) => journal.clearPendingAlert(inviteId, key),
+  });
+  const spent = { usd: 20 };
+  const first = new SqliteSpendJournal(path);
+  const before = flaky(spent, { owed: owedBy(first) });
+  await before.w.made.tick(true);
+  assert.equal(before.w.asked.length, 1);
+  first.close();
+
+  // The process restarts, and the spend of the day is under the threshold now.
+  spent.usd = 1;
+  const second = new SqliteSpendJournal(path);
+  t.after(() => second.close());
+  const after = flaky(spent, { owed: owedBy(second) });
+  after.push.up = true;
+  after.w.advance(3 * MINUTE);
+  await after.w.made.tick(true);
+  assert.deepEqual(after.w.asked, [[OWNER, 'spend:2026-10-20']]);
+  assert.deepEqual(second.pendingAlerts(), [], 'delivered, so no longer owed');
+  assert.deepEqual(after.w.days, ['2026-10-20']);
+});
+
+test('what is owed waits out its backoff after a restart, as before it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'spend-alert-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const journal = new SqliteSpendJournal(join(dir, 'spend.db'));
+  t.after(() => journal.close());
+  const owed = {
+    save: (alert: Parameters<SqliteSpendJournal['savePendingAlert']>[0]) =>
+      journal.savePendingAlert(alert),
+    list: () => journal.pendingAlerts(),
+    clear: (inviteId: string, key: string) => journal.clearPendingAlert(inviteId, key),
+  };
+  const spent = { usd: 20 };
+  const { w } = flaky(spent, { owed });
+  await w.made.tick(true);
+  const [stored] = journal.pendingAlerts();
+  assert.equal(stored?.failures, 1);
+  assert.equal(stored?.retryAt, NOON + 2 * MINUTE);
+  spent.usd = 0;
+  await w.made.tick(true);
+  assert.equal(w.asked.length, 1, 'inside the wait nothing is asked');
 });
