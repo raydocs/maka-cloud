@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { before, describe, test } from 'node:test';
+import type { Divergence } from '../checks.js';
 import type { RunResult } from '../runs.js';
 import { executeRun, RUNS, type RunId } from '../runs.js';
 
@@ -17,9 +18,6 @@ const run = (id: RunId): RunResult => {
   assert.ok(result, `run ${id} did not execute`);
   return result;
 };
-
-/** Strict-prefix causes that are by design on every request (see the findings doc). */
-const BY_DESIGN_CAUSES = new Set(['request_only_context_and_cache_control']);
 
 function assertAllTurnsCompleted(result: RunResult): void {
   for (const turn of result.turns) {
@@ -40,12 +38,30 @@ function assertAppendOnly(result: RunResult): void {
   assert.deepEqual(report.breakpoints.failures, []);
   assert.deepEqual(report.systemChanges, []);
   assert.deepEqual(report.toolsChanges, []);
-  // Check 1 as the brief states it: byte-identical. It fails on every pair,
-  // and only for the two by-design reasons.
-  assert.equal(report.strictPrefix.breaks.length, report.pairs);
-  for (const divergence of report.strictPrefix.breaks) {
-    assert.ok(BY_DESIGN_CAUSES.has(divergence.cause), JSON.stringify(divergence));
+  // Check 1 as the brief states it: byte-identical. Host context is now a
+  // durable message and the cache marker is the top-level automatic one, so
+  // nothing in an earlier request is rewritten or moved.
+  assert.deepEqual(report.strictPrefix.breaks, []);
+}
+
+/**
+ * Every break after the checkpoint is the same redacted_thinking drop, one per
+ * turn boundary where such a block was emitted since the fold.
+ */
+function assertLaterBreaksAreRedactedDrops(
+  result: RunResult,
+  checkpointRequest: number,
+): Divergence[] {
+  const later = result.report.contentPrefix.breaks.filter((d) => d.to !== checkpointRequest);
+  for (const divergence of later) {
+    assert.equal(divergence.before, '"redacted_thinking"');
+    assert.equal(
+      result.requests[divergence.to]!.turn,
+      result.requests[divergence.from]!.turn! + 1,
+      'dropped at a turn boundary',
+    );
   }
+  return later;
 }
 
 /** The first request that carries a history-compact checkpoint block. */
@@ -132,8 +148,11 @@ describe('history integrity through Maka runtime (fake Anthropic endpoint)', () 
     assertAllTurnsCompleted(result);
     const checkpoint = firstCheckpointRequest(result);
     assertCompactionBreak(result, checkpoint);
-    assert.equal(result.report.contentPrefix.breaks.length, 1);
     assertRedactedThinkingDroppedAfterCheckpoint(result, checkpoint);
+    // The checkpoint, then the drop at the two later turn boundaries that
+    // follow a redacted_thinking block (one break in total before the
+    // Host-context change of runtime #6177; see the findings doc).
+    assert.equal(assertLaterBreaksAreRedactedDrops(result, checkpoint).length, 2);
   });
 
   test('E: reactive overflow recovery compacts mid-turn and the turn completes', () => {
@@ -156,11 +175,7 @@ describe('history integrity through Maka runtime (fake Anthropic endpoint)', () 
     assertCompactionBreak(result, checkpoint);
     assertRedactedThinkingDroppedAfterCheckpoint(result, checkpoint);
     // Each later break is that same drop, at a turn boundary.
-    for (const divergence of result.report.contentPrefix.breaks.filter(
-      (d) => d.to !== checkpoint,
-    )) {
-      assert.equal(divergence.before, '"redacted_thinking"');
-    }
+    assertLaterBreaksAreRedactedDrops(result, checkpoint);
   });
 
   test('G: a restart onto the same stores keeps content and thinking append-only', () => {

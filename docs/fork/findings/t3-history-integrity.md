@@ -43,24 +43,42 @@ turns:
 
 | Run | Setting | Turns ok | Strict prefix breaks | Content prefix breaks | Thinking failures | Breakpoint failures |
 |---|---|---|---|---|---|---|
-| A | Defaults as runtime-host wires them | 30/30 | 69 request_only_context_and_cache_control | 0 | 0 of 70 | 0 |
-| B | Pruning and compaction off (no context budget policy) | 30/30 | 69 request_only_context_and_cache_control | 0 | 0 of 70 | 0 |
-| C | Pruning on, tool results over 7,500 bytes, first archive write fails | 30/30 | 68 request_only_context_and_cache_control, 1 rewrite | 1 | 0 of 70 | 0 |
-| D | Proactive compaction (low compaction threshold) | 30/30 | 68 request_only_context_and_cache_control, 1 rewrite | 1 | 67 of 70 | 1 |
-| E | Reactive overflow recovery (one context-overflow 400 at turn 20) | 30/30 | 66 request_only_context_and_cache_control, 4 rewrite | 4 | 49 of 70 | 1 |
-| F | Manual compaction before turn 16 | 30/30 | 63 request_only_context_and_cache_control, 6 rewrite | 6 | 40 of 70 | 1 |
-| G | Restart after turn 15 (new SessionManager and backend, same stores) | 30/30 | 69 request_only_context_and_cache_control | 0 | 0 of 70 | 0 |
-| H | Defaults, but the session has no llmConnectionId | 30/30 | 40 request_only_context_and_cache_control, 29 rewrite | 29 | 68 of 70 | 0 |
+| A | Defaults as runtime-host wires them | 30/30 | 0 | 0 | 0 of 70 | 0 |
+| B | Pruning and compaction off (no context budget policy) | 30/30 | 0 | 0 | 0 of 70 | 0 |
+| C | Pruning on, tool results over 7,500 bytes, first archive write fails | 30/30 | 1 rewrite | 1 | 0 of 70 | 0 |
+| D | Proactive compaction (low compaction threshold) | 30/30 | 3 rewrite | 3 | 57 of 70 | 1 |
+| E | Reactive overflow recovery (one context-overflow 400 at turn 20) | 30/30 | 4 rewrite | 4 | 49 of 70 | 1 |
+| F | Manual compaction before turn 16 | 30/30 | 6 rewrite | 6 | 40 of 70 | 1 |
+| G | Restart after turn 15 (new SessionManager and backend, same stores) | 30/30 | 0 | 0 | 0 of 70 | 0 |
+| H | Defaults, but the session has no llmConnectionId | 30/30 | 29 rewrite | 29 | 68 of 70 | 0 |
 
 `system` and `tools` were byte-stable between all requests in every run. No request carried more
-than 2 cache markers: the top-level automatic one and one message marker.
+than 2 cache markers.
+
+### Re-measured after the upstream sync of 2026-10-20 (apache/maka #6177)
+
+The table above is the current measurement. It differs from the first one (kept in the git
+history of this file) in two ways, both from upstream's "preserve context history for prompt
+caching":
+
+- Host context (`runtime.environment`) is no longer appended to each request. It is stored as a
+  `runtime_context` event and replayed in place, once per change. The history cache marker is no
+  longer a message-level `cache_control` that moves; the only marker is the top-level automatic one
+  (Anthropic places it on the last cacheable block). So the strict prefix now holds on every
+  request pair in runs A, B and G (paths 1 and 2 below no longer occur), and check 4 treats a
+  top-level marker with no message marker as a marker on the request's final block.
+- Run D now has 3 content breaks instead of 1: the checkpoint, plus the path 5 drop at two later
+  turn boundaries (turn 26 to 27, 29 to 30), the same drop run F shows. Thinking failures in D
+  fell from 67 to 57 of 70. I did not root-cause why D now shows path 5 at turn boundaries where
+  it showed one break before; E, F and H are unchanged. Compaction is off for the conductor (runs
+  A, B and G), so the product is not exposed to it.
 
 ## What breaks what
 
 | # | Path | Breaks | Where | When |
 |---|---|---|---|---|
-| 1 | Moving history cache marker | Strict prefix only. The previous marked block loses its `cache_control` key; content is unchanged | `packages/runtime/src/model-adapter.ts:1382-1405`, called at `:347`, index from `ai-sdk-turn.ts:1660`, enabled by `model-factory.ts:540` | Every request on a `providerType: 'anthropic'` connection |
-| 2 | Request-only contexts after the history | Strict prefix only. Request N ends with a context text block that request N+1 no longer has | `packages/runtime/src/ai-sdk-turn.ts:1571-1573` and `:1631`; the production source is `runtime-host/src/server/execution-model-composition.ts:485-497` (`runtime.environment`, every turn) | Every request in runtime-host |
+| 1 | Moving history cache marker (gone since the sync above) | Strict prefix only. The previous marked block loses its `cache_control` key; content is unchanged | `packages/runtime/src/model-adapter.ts:1382-1405`, called at `:347`, index from `ai-sdk-turn.ts:1660`, enabled by `model-factory.ts:540` | Every request on a `providerType: 'anthropic'` connection |
+| 2 | Request-only contexts after the history (gone since the sync above) | Strict prefix only. Request N ends with a context text block that request N+1 no longer has | `packages/runtime/src/ai-sdk-turn.ts:1571-1573` and `:1631`; the production source is `runtime-host/src/server/execution-model-composition.ts:485-497` (`runtime.environment`, every turn) | Every request in runtime-host |
 | 3 | Late tool-result archive | Content prefix: a tool_result already sent in full becomes a `maka.archived_tool_result` placeholder | Threshold `read-page.ts:25` (7,500 bytes) at `tool-result-archive-transition.ts:242`; a failed write is swallowed at `tool-result-archive-transition.ts:115-139`; the retry happens at the next prune, `ai-sdk-turn.ts:1359` and `ai-sdk-compaction.ts:618-635` | Only after an archive write fails. Large results whose write succeeds are archived before their first send (run C: every other large result) |
 | 4 | Compaction checkpoint replay | Content prefix and thinking: the covered prefix becomes one checkpoint block, so all earlier thinking is gone and the marker moves back to block 1 | Pre-turn: `history-compaction.ts:513-568`. Proactive mid-turn: `ai-sdk-compaction.ts:908-916`. Reactive overflow: `ai-sdk-compaction.ts:1229-1314`. Manual: `ai-sdk-compaction.ts:277-498` | Proactive only when the user declares `compactionThreshold` (`core/src/model-thinking.ts:269-274`, otherwise inert). Reactive on any context-overflow error (on by default). Manual on `/compact` |
 | 5 | **Bug:** redacted_thinking dropped after a checkpoint | Thinking and content prefix. Every redacted_thinking produced after a checkpoint disappears: at the next turn after a pre-turn checkpoint (run F), or at the next step of the same turn after a mid-turn checkpoint (runs D and E). Signed thinking is unaffected | A redacted block is stored as a thinking event with empty text (`model-adapter.ts:1064-1075`, `session-event-runtime-mapper.ts:234-244`). `estimateRuntimeEventChars` counts only text (`model-history.ts:417-418`), so `isHistoryCompactContentEvent` is false (`history-compact-checkpoint.ts:863-865`), and checkpoint replay keeps only content events (`history-compaction.ts:520`; mid-turn `ai-sdk-turn.ts:1370`). The cause is read from the code; runs D, E and F confirm the effect | Once any checkpoint exists in the session |
@@ -74,9 +92,8 @@ results. Restarting onto the same stores keeps everything (run G).
 - Create every conductor session with an `llmConnectionId`, and register the backend so that it
   reports a stable `providerStateIdentity` (a prepared backend factory, as `runtime-host` does).
   Otherwise path 6 drops all prior-turn thinking.
-- Send no per-request contexts. Put the environment line in the user message once, or in the
-  system prompt. Then the only strict-prefix difference left is the moving `cache_control` key
-  (path 1), which is Anthropic's documented incremental caching pattern.
+- Per-request contexts are durable since the sync of 2026-10-20 (see above), so they no longer break
+  the strict prefix. Before that sync, the advice was to send none.
 - Leave `compactionThreshold` undefined for Opus 5.5 on its 1M window, so proactive compaction
   stays off. Reactive overflow recovery stays as the last resort; when it fires, it is a deliberate
   break.
