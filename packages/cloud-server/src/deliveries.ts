@@ -1,10 +1,15 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { type MessageMeta, MessageMetaSchema } from './conversations.js';
 
 export interface PendingMessage {
   conversationId: string;
   messageId: string;
   text: string;
   sessionId: string;
+  /** The text comes from outside the owner (T23): the conversation is tainted before the message is admitted. */
+  external?: boolean;
+  /** The limits of the run this message starts, when a standing duty sent it. */
+  run?: NonNullable<MessageMeta['run']>;
 }
 
 export interface DeliveryOptions {
@@ -28,6 +33,8 @@ interface PendingRow {
   attempts: number;
   text: string;
   session_id: string;
+  external: number | null;
+  run: string | null;
 }
 
 /**
@@ -98,10 +105,11 @@ export class MessageDeliveries {
     if (this.stopped || this.inFlight.has(messageId)) return;
     const row = this.db
       .prepare(
-        `SELECT d.message_id, d.conversation_id, d.attempts, m.text, c.session_id
+        `SELECT d.message_id, d.conversation_id, d.attempts, m.text, c.session_id, mm.external, mm.run
          FROM message_deliveries d
          JOIN messages m ON m.message_id = d.message_id
          JOIN conversations c ON c.conversation_id = d.conversation_id
+         LEFT JOIN message_meta mm ON mm.message_id = d.message_id
          WHERE d.message_id = ? AND d.delivered_at IS NULL`,
       )
       .get(messageId) as unknown as PendingRow | undefined;
@@ -125,6 +133,7 @@ export class MessageDeliveries {
           messageId: row.message_id,
           text: row.text,
           sessionId: row.session_id,
+          ...metaOf(row),
         });
         // The handler acknowledged it: record that even when stopping, so it is not sent again.
         if (this.db.isOpen) {
@@ -185,4 +194,18 @@ export class MessageDeliveries {
     for (const row of due) this.attempt(row.message_id);
     this.arm();
   }
+}
+
+/**
+ * What the message carries besides its text. A row that cannot be read throws, so the delivery is
+ * retried and noisy: handing the message over without its limits would start an unlimited run.
+ */
+function metaOf(row: PendingRow): Pick<PendingMessage, 'external' | 'run'> {
+  if (row.external === null) return {};
+  const run = row.run === null ? undefined : (JSON.parse(row.run) as unknown);
+  const parsed = MessageMetaSchema.parse({
+    external: row.external === 1,
+    ...(run === undefined ? {} : { run }),
+  });
+  return { external: parsed.external, ...(parsed.run === undefined ? {} : { run: parsed.run }) };
 }

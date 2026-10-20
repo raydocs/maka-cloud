@@ -12,9 +12,15 @@ import {
 import { type ArtifactRead, type ArtifactSource, FileArtifactSource } from './artifacts.js';
 import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
 import type { ComputerSource } from './computer.js';
-import { ConversationStore } from './conversations.js';
+import {
+  ConversationStore,
+  MAX_MESSAGE_BYTES,
+  type MessageMeta,
+  MessageMetaSchema,
+} from './conversations.js';
 import { openDatabase } from './db.js';
 import { type DeliveryOptions, type DeliveryStats, MessageDeliveries } from './deliveries.js';
+import { type DutyService, DutyRoutes } from './duties.js';
 import { ExtensionFeed, type ExtensionEvent } from './extension-feed.js';
 import { type FeedEntry, FeedHub, readFeed } from './feed.js';
 import { type AnswerOutcome, DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
@@ -24,6 +30,9 @@ import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
 import { SqliteSessionStore } from './sqlite-session-store.js';
 import { SqliteTaskStore } from './sqlite-task-store.js';
+
+/** Webhook requests accepted per minute, from every sender together. */
+const WEBHOOKS_PER_MINUTE = 600;
 
 /** What T6's runners package returns to clean up after a previous process. */
 export type SweepOrphans = (knownTaskIds: Iterable<string>) => Promise<{
@@ -41,7 +50,15 @@ export interface ConductorAccess {
 
 export interface ConversationHandler {
   onUserMessage(
-    message: { conversationId: string; messageId: string; text: string },
+    message: {
+      conversationId: string;
+      messageId: string;
+      text: string;
+      /** The text comes from outside the owner (a standing duty's event): taint the conversation first. */
+      external?: boolean;
+      /** The limits of the run this message starts, from a standing duty. */
+      run?: NonNullable<MessageMeta['run']>;
+    },
     conductor: ConductorAccess,
   ): void | Promise<void>;
   /**
@@ -187,9 +204,40 @@ export interface CloudServerOptions {
    * routes answer 404 and nothing else changes.
    */
   supervisor?: (parts: SupervisorParts) => InboxService | Promise<InboxService>;
+  /**
+   * The duties engine behind `POST /github/webhook` and `/v1/projects`. Without it both answer
+   * like any unknown path. The caller owns it and closes it after the server.
+   */
+  duties?: DutyService;
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
 }
+
+/** What an in-process caller starts a conversation with. Public routes cannot send any of it. */
+export interface StartConversationInput {
+  /** The invite that will own the conversation. It must be active. */
+  owner: string;
+  /** Starting twice with the same key (per owner) starts one conversation and posts one message. */
+  key: string;
+  title?: string;
+  text: string;
+  meta: MessageMeta;
+}
+
+export interface CreateConversationInput {
+  owner: string;
+  /** Creating twice with the same key (per owner) makes one conversation. */
+  key: string;
+  title?: string;
+}
+
+export type CreateConversationResult =
+  | { ok: true; conversationId: string }
+  | { ok: false; reason: 'owner_inactive' | 'invalid' };
+
+export type StartConversationResult =
+  | { ok: true; conversationId: string; messageId: string; duplicate: boolean }
+  | { ok: false; reason: 'owner_inactive' | 'invalid' };
 
 export interface CloudServer {
   /** Base URL of the public API. */
@@ -214,6 +262,16 @@ export interface CloudServer {
    * because the push service kept failing (ask again later); without Web Push it resolves `true`.
    */
   pushAlert(inviteId: string, key: string): Promise<boolean>;
+  /**
+   * Starts a conversation owned by `owner` with a first message that carries `meta`, for a
+   * standing duty. Idempotent on `key`. The message is delivered at least once with its meta.
+   */
+  startConversation(input: StartConversationInput): StartConversationResult;
+  /**
+   * Creates an empty conversation owned by `owner`, which nothing runs in: a place for an inbox
+   * item that belongs to no chat yet. Idempotent on `key`.
+   */
+  createConversation(input: CreateConversationInput): CreateConversationResult;
   close(): Promise<void>;
 }
 
@@ -344,6 +402,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
                 conversationId: message.conversationId,
                 messageId: message.messageId,
                 text: message.text,
+                ...(message.external === undefined ? {} : { external: message.external }),
+                ...(message.run === undefined ? {} : { run: message.run }),
               },
               accessFor(message.sessionId),
             ),
@@ -455,6 +515,16 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       limits,
       onMessage: deliverMessage,
       ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
+      ...(options.duties
+        ? {
+            duties: new DutyRoutes(
+              options.duties,
+              new RateLimiter(limits.controlPerMinute),
+              new RateLimiter(WEBHOOKS_PER_MINUTE),
+              { active: (inviteId) => ownInviteStore.active(inviteId) },
+            ),
+          }
+        : {}),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
@@ -515,6 +585,35 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
       pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(true),
+      createConversation: (input) => {
+        if (!/^[A-Za-z0-9_:.-]{1,128}$/u.test(input.key)) return { ok: false, reason: 'invalid' };
+        if (!ownInviteStore.active(input.owner)) return { ok: false, reason: 'owner_inactive' };
+        const conversation = conversations.create(input.owner, input.title, input.key);
+        return { ok: true, conversationId: conversation.conversationId };
+      },
+      startConversation: (input) => {
+        const meta = MessageMetaSchema.safeParse(input.meta);
+        const keyOk = /^[A-Za-z0-9_:.-]{1,128}$/u.test(input.key);
+        const textOk = input.text.length > 0 && Buffer.byteLength(input.text) <= MAX_MESSAGE_BYTES;
+        if (!meta.success || !keyOk || !textOk) return { ok: false, reason: 'invalid' };
+        // Checked right before the effect, with nothing awaited in between.
+        if (!ownInviteStore.active(input.owner)) return { ok: false, reason: 'owner_inactive' };
+        const conversation = conversations.create(input.owner, input.title, input.key);
+        const posted = conversations.post(
+          conversation.conversationId,
+          input.text,
+          input.key,
+          meta.data,
+        );
+        if (!posted.found) return { ok: false, reason: 'invalid' };
+        deliverMessage({ messageId: posted.messageId });
+        return {
+          ok: true,
+          conversationId: conversation.conversationId,
+          messageId: posted.messageId,
+          duplicate: posted.duplicate,
+        };
+      },
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       close: () => {
         closing ??= shutdown();

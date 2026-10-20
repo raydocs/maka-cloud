@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { IssuedSession } from '@maka-cloud/orchestrator';
+import { z } from 'zod';
 import { transaction } from './db.js';
 import { appendFeed, type FeedHub } from './feed.js';
 
@@ -12,6 +13,25 @@ export interface ConversationInfo {
 
 export const MAX_TITLE_LENGTH = 200;
 export const MAX_MESSAGE_BYTES = 32_000;
+
+/**
+ * What an in-process caller (a standing duty) attaches to a message. `external`: the text comes
+ * from outside the owner. `run`: the limits of the run the message starts.
+ */
+export const MessageMetaSchema = z
+  .object({
+    external: z.boolean(),
+    run: z
+      .object({
+        dutyId: z.string().min(1).max(100),
+        authority: z.enum(['read-only', 'open-pr', 'merge-when-green']),
+        budgetUsd: z.number().positive().max(1000),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type MessageMeta = z.infer<typeof MessageMetaSchema>;
 
 export type PostResult =
   | { found: false }
@@ -27,10 +47,31 @@ export class ConversationStore {
   ) {}
 
   /** `owner` is the invite id of the caller; everything in the conversation belongs to it. */
-  create(owner: string, title?: string): ConversationInfo {
+  create(owner: string, title?: string, startKey?: string): ConversationInfo {
     const conversationId = `cnv_${randomUUID().replaceAll('-', '')}`;
     const createdAt = this.now();
-    transaction(this.db, () => {
+    // Keys are per owner, so one invite's key can never find or block another's.
+    const key = startKey === undefined ? undefined : `${owner}\u0000${startKey}`;
+    const earlier = transaction(this.db, (): ConversationInfo | undefined => {
+      // A start with a key that was used before returns that conversation: a retry makes none.
+      if (key !== undefined) {
+        const row = this.db
+          .prepare(
+            `SELECT c.conversation_id, c.title, c.created_at FROM system_starts s
+             JOIN conversations c ON c.conversation_id = s.conversation_id
+             WHERE s.start_key = ? AND c.owner = ?`,
+          )
+          .get(key, owner) as
+          | { conversation_id: string; title: string | null; created_at: number }
+          | undefined;
+        if (row) {
+          return {
+            conversationId: row.conversation_id,
+            title: row.title,
+            createdAt: row.created_at,
+          };
+        }
+      }
       // The conversation's orchestrator session is stored by the session store,
       // inside this same transaction.
       const session = this.issueSession();
@@ -44,8 +85,15 @@ export class ConversationStore {
           'INSERT INTO conversations (conversation_id, n, title, session_id, created_at, owner) VALUES (?, ?, ?, ?, ?, ?)',
         )
         .run(conversationId, n, title ?? null, session.sessionId, createdAt, owner);
+      if (key !== undefined) {
+        this.db
+          .prepare('INSERT INTO system_starts (start_key, conversation_id) VALUES (?, ?)')
+          .run(key, conversationId);
+      }
       appendFeed(this.db, 'conversation.created', conversationId, conversationId, createdAt);
+      return undefined;
     });
+    if (earlier) return earlier;
     this.hub.notify();
     return { conversationId, title: title ?? null, createdAt };
   }
@@ -117,7 +165,12 @@ export class ConversationStore {
     return Number(result.changes);
   }
 
-  post(conversationId: string, text: string, clientMessageId?: string): PostResult {
+  post(
+    conversationId: string,
+    text: string,
+    clientMessageId?: string,
+    meta?: MessageMeta,
+  ): PostResult {
     const at = this.now();
     const result = transaction(this.db, (): PostResult => {
       const sessionId = this.sessionOf(conversationId);
@@ -151,6 +204,15 @@ export class ConversationStore {
         )
         .run(n, messageId, conversationId, text, clientMessageId ?? null, at);
       appendFeed(this.db, 'message.posted', conversationId, messageId, at);
+      if (meta !== undefined) {
+        this.db
+          .prepare('INSERT INTO message_meta (message_id, external, run) VALUES (?, ?, ?)')
+          .run(
+            messageId,
+            meta.external ? 1 : 0,
+            meta.run === undefined ? null : JSON.stringify(meta.run),
+          );
+      }
       // Committed with the message, so a crash before the handler acks leaves it to retry.
       this.db
         .prepare(

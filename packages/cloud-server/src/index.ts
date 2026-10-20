@@ -3,6 +3,10 @@ export {
   type CloudServerOptions,
   type ConductorAccess,
   type ConversationHandler,
+  type CreateConversationInput,
+  type CreateConversationResult,
+  type StartConversationInput,
+  type StartConversationResult,
   startCloudServer,
   type SupervisorParts,
   type SweepOrphans,
@@ -23,6 +27,7 @@ export {
   type HttpLimits,
   MAX_ANSWER_TEXT_LENGTH,
 } from './http.js';
+export { type DutyOwners, type DutyService } from './duties.js';
 export { type InboxAnswerResult, type InboxService } from './inbox.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
 export { scrubErrorText } from './public-view.js';
