@@ -833,3 +833,243 @@ test('a send queued for a subscription that was deleted and registered again is 
   assert.deepEqual(sent, [fresh]);
   assert.ok(!sent.includes(queued));
 });
+
+const DAY_KEY = 'spend:2026-10-20';
+const alertRows = (db: ReturnType<typeof openDatabase>, endpoint: string): number =>
+  (
+    db
+      .prepare('SELECT COUNT(*) AS n FROM push_deliveries WHERE endpoint = ? AND task_id = ?')
+      .get(endpoint, `alert:${DAY_KEY}`) as { n: number }
+  ).n;
+
+test('an alert reaches the devices of the invite it is for and nobody else, with the type and nothing more', async (t) => {
+  const { service, fake } = await serviceOnly(t);
+  const a = device();
+  const a2 = device();
+  const other = device();
+  service.register('inv_1', { endpoint: a.endpoint, ...a.keys });
+  service.register('inv_1', { endpoint: a2.endpoint, ...a2.keys });
+  service.register('inv_2', { endpoint: other.endpoint, ...other.keys });
+  service.start();
+  await service.alert('inv_1', DAY_KEY);
+  assert.deepEqual(
+    fake.calls.map((call) => call.endpoint).sort(),
+    [a.endpoint, a2.endpoint].sort(),
+  );
+  for (const call of fake.calls) {
+    const mine = call.endpoint === a.endpoint ? a : a2;
+    assert.deepEqual(payloadOf(call, mine), { type: 'spend.alert' });
+    assert.match(call.headers.Authorization ?? '', /^vapid /u);
+    assert.equal(call.headers.Urgency, 'high');
+    assert.ok(!call.body.includes(Buffer.from('spend')), 'the body is encrypted');
+  }
+  await service.alert('inv_3', DAY_KEY);
+  assert.equal(fake.calls.length, 2, 'an invite with no device sends nothing and still resolves');
+});
+
+test('a device is told once per alert key: asking again sends nothing, the next key sends again', async (t) => {
+  const { service, db, fake } = await serviceOnly(t);
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  service.start();
+  await service.alert('inv_1', DAY_KEY);
+  await service.alert('inv_1', DAY_KEY);
+  await Promise.all([service.alert('inv_1', DAY_KEY), service.alert('inv_1', DAY_KEY)]);
+  assert.equal(fake.calls.length, 1);
+  assert.equal(alertRows(db, d.endpoint), 1);
+  await service.alert('inv_1', 'spend:2026-10-21');
+  assert.equal(fake.calls.length, 2, 'a new day is a new alert');
+});
+
+test('what was sent is not sent again after a restart, and a device that was missed is told once', async (t) => {
+  const first = fakeTransport();
+  const ctx = await setup(t, { transport: first.transport });
+  const d = device();
+  await subscribe(ctx.h, d);
+  const owner = ctx.h.server.invites.list()[0]?.inviteId ?? '';
+  await ctx.h.server.pushAlert(owner, DAY_KEY);
+  assert.equal(first.calls.length, 1);
+
+  const second = fakeTransport();
+  await ctx.restart({ ...config, transport: second.transport, retryDelayMs: 1 });
+  await ctx.h.server.pushAlert(owner, DAY_KEY);
+  assert.equal(second.calls.length, 0, 'the restart does not repeat it');
+
+  // A device that subscribed after the alert is told when the alert is asked for again.
+  const late = device();
+  await subscribe(ctx.h, late);
+  await ctx.h.server.pushAlert(owner, DAY_KEY);
+  assert.deepEqual(
+    second.calls.map((call) => call.endpoint),
+    [late.endpoint],
+  );
+});
+
+test('a revoked invite gets no alert, whether its devices are forgotten or the revoke is only seen at send time', async (t) => {
+  const { service, db, fake, control } = await serviceOnly(t);
+  const d = device();
+  const e = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  service.register('inv_2', { endpoint: e.endpoint, ...e.keys });
+  service.start();
+  control.revoked.add('inv_1');
+  await service.alert('inv_1', DAY_KEY);
+  assert.equal(fake.calls.length, 0);
+  assert.equal(alertRows(db, d.endpoint), 1, 'recorded as revoked, so it is not retried');
+  control.revoke('inv_2');
+  await service.alert('inv_2', DAY_KEY);
+  assert.equal(fake.calls.length, 0);
+});
+
+test('an alert for the old invite is cut off when its device moves, and the new invite owes nothing for it', async (t) => {
+  const { service, db, fake } = await serviceOnly(t);
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  fake.state.behave = (call) =>
+    new Promise((_resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  service.start();
+  const asked = service.alert('inv_1', DAY_KEY);
+  await eventually(() => fake.calls.length === 1, 'the send under way');
+  const inflight = fake.calls[0] as Call;
+  service.register('inv_2', { endpoint: d.endpoint, ...d.keys });
+  await eventually(() => inflight.signal.aborted, 'the old invite’s send is cut off');
+  await asked;
+  assert.equal(alertRows(db, d.endpoint), 0, 'nothing is recorded for the device’s new invite');
+  fake.state.behave = async () => ({ status: 201 });
+  await service.alert('inv_2', DAY_KEY);
+  assert.equal(fake.calls.length, 2, 'the new invite is told on its own account');
+  assert.equal(alertRows(db, d.endpoint), 1);
+});
+
+test('an alert queued for a device that moved or was deleted and registered again is not sent to it', async (t) => {
+  const { service, fake } = await serviceOnly(t, { concurrency: 1 });
+  const first = device();
+  const queued = device();
+  service.register('inv_1', { endpoint: first.endpoint, ...first.keys });
+  service.register('inv_1', { endpoint: queued.endpoint, ...queued.keys });
+  let release: () => void = () => undefined;
+  fake.state.behave = (call) =>
+    new Promise((resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      release = () => resolve({ status: 201 });
+    });
+  service.start();
+  const asked = service.alert('inv_1', DAY_KEY);
+  await eventually(() => fake.calls.length === 1, 'the first send under way');
+  // The second device is queued behind it; it moves to another invite before its turn.
+  const [held, waiting] =
+    fake.calls[0]?.endpoint === first.endpoint ? [first, queued] : [queued, first];
+  service.register('inv_2', { endpoint: waiting.endpoint, ...waiting.keys });
+  release();
+  fake.state.behave = async () => ({ status: 201 });
+  await asked;
+  assert.deepEqual(
+    fake.calls.map((call) => call.endpoint),
+    [held.endpoint],
+    'the device that moved was not sent inv_1’s alert',
+  );
+});
+
+test('an alert queued for a subscription that was deleted and registered again is sent to the new one afresh, once', async (t) => {
+  const { service, db, fake } = await serviceOnly(t, { concurrency: 1 });
+  const first = device();
+  const again = device();
+  service.register('inv_1', { endpoint: first.endpoint, ...first.keys });
+  service.register('inv_1', { endpoint: again.endpoint, ...again.keys });
+  let release: () => void = () => undefined;
+  fake.state.behave = (call) =>
+    new Promise((resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      release = () => resolve({ status: 201 });
+    });
+  service.start();
+  const asked = service.alert('inv_1', DAY_KEY);
+  await eventually(() => fake.calls.length === 1, 'the first send under way');
+  const held = fake.calls[0]?.endpoint;
+  const waiting = held === first.endpoint ? again : first;
+  // The waiting device is deleted and registered again by the same invite: a new subscription.
+  assert.equal(service.remove('inv_1', waiting.endpoint), true);
+  assert.equal(
+    service.register('inv_1', { endpoint: waiting.endpoint, ...waiting.keys }),
+    'created',
+  );
+  fake.state.behave = async () => ({ status: 201 });
+  release();
+  await asked;
+  const sentTo = fake.calls.map((call) => call.endpoint).sort();
+  assert.deepEqual(sentTo, [first.endpoint, again.endpoint].sort(), 'each device is told once');
+  assert.equal(alertRows(db, waiting.endpoint), 1);
+});
+
+test('a failing push service is retried to the limit, then the alert is given up on and recorded', async (t) => {
+  // The retry timer does not keep a process alive (the server's sockets do); the test holds it.
+  const hold = setInterval(() => undefined, 1000);
+  t.after(() => clearInterval(hold));
+  const { service, db, fake } = await serviceOnly(t, { maxAttempts: 2 });
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  fake.state.behave = async () => ({ status: 503 });
+  service.start();
+  await service.alert('inv_1', DAY_KEY);
+  assert.equal(fake.calls.length, 2);
+  assert.equal(alertRows(db, d.endpoint), 1);
+  await service.alert('inv_1', DAY_KEY);
+  assert.equal(fake.calls.length, 2, 'a given-up alert is not asked again within its key');
+});
+
+test('a gone subscription is deleted by the alert and the alert still resolves', async (t) => {
+  const { service, db, fake } = await serviceOnly(t);
+  const gone = device();
+  const good = device();
+  service.register('inv_1', { endpoint: gone.endpoint, ...gone.keys });
+  service.register('inv_1', { endpoint: good.endpoint, ...good.keys });
+  fake.state.behave = async (call) => ({ status: call.endpoint === gone.endpoint ? 410 : 201 });
+  service.start();
+  await service.alert('inv_1', DAY_KEY);
+  const remaining = db.prepare('SELECT endpoint FROM push_subscriptions').all() as Array<{
+    endpoint: string;
+  }>;
+  assert.deepEqual(
+    remaining.map((row) => row.endpoint),
+    [good.endpoint],
+  );
+});
+
+test('an alert key is a short plain name, and an alert does not disturb task messages', async (t) => {
+  const { service, fake, finish } = await serviceOnly(t);
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  service.start();
+  for (const bad of ['', 'Spend', 'x y', 'a'.repeat(65), '../x', 'spend\nalert']) {
+    await assert.rejects(service.alert('inv_1', bad), /Invalid alert key/u, JSON.stringify(bad));
+  }
+  assert.equal(fake.calls.length, 0);
+  await service.alert('inv_1', DAY_KEY);
+  const taskId = await finish('ses_1');
+  await eventually(() => fake.calls.length === 2, 'the task message');
+  assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    type: 'task.finished',
+    conversationId: 'cnv_1',
+    taskId,
+    state: 'succeeded',
+  });
+});
+
+test('closing the service while an alert is being sent lets whoever asked for it go on', async (t) => {
+  const { service, fake } = await serviceOnly(t);
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  fake.state.behave = (call) =>
+    new Promise((_resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  service.start();
+  const asked = service.alert('inv_1', DAY_KEY);
+  await eventually(() => fake.calls.length === 1, 'the send under way');
+  await service.close();
+  await asked;
+  await service.alert('inv_1', 'spend:2026-10-21');
+  assert.equal(fake.calls.length, 1, 'nothing is sent once closed');
+});

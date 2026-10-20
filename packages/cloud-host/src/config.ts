@@ -23,6 +23,11 @@ export interface StackConfig {
   gatewaySpendPath: string;
   /** Where the server writes its daily backups. Unset: it writes none. */
   backupDir?: string;
+  /**
+   * Tell `ownerInvite`'s devices (Web Push) once the server's spend of a UTC day reaches
+   * `usd` dollars. Unset: no alert.
+   */
+  spendAlert?: { usd: number; ownerInvite: string };
   /** The operator's kill switch: while this file exists, nothing may spend. See `PauseSwitch`. */
   pausePath: string;
   host: string;
@@ -178,6 +183,14 @@ export const ENV_VARIABLES = [
   [
     'MAKA_CLOUD_BACKUP_DIR',
     'directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups',
+  ],
+  [
+    'MAKA_CLOUD_SPEND_ALERT_USD',
+    'send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push',
+  ],
+  [
+    'MAKA_CLOUD_OWNER_INVITE',
+    'the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app',
   ],
   ['MAKA_CLOUD_HOST', 'public API host (default 127.0.0.1)'],
   ['MAKA_CLOUD_PORT', 'public API port (default 8080)'],
@@ -351,6 +364,24 @@ export function readStackConfig(
     if (problem === undefined) config.backupDir = backupDir;
     else problems.push(problem);
   }
+  const alertUsd = value('MAKA_CLOUD_SPEND_ALERT_USD');
+  const ownerInvite = value('MAKA_CLOUD_OWNER_INVITE');
+  if (alertUsd !== undefined || ownerInvite !== undefined) {
+    const usd = Number(alertUsd);
+    if (alertUsd === undefined || ownerInvite === undefined) {
+      problems.push('MAKA_CLOUD_SPEND_ALERT_USD and MAKA_CLOUD_OWNER_INVITE go together');
+    } else if (!/^\d+(\.\d+)?$/u.test(alertUsd) || !(usd > 0) || usd > 100_000) {
+      problems.push('MAKA_CLOUD_SPEND_ALERT_USD must be a number of dollars above 0, up to 100000');
+    } else if (!/^inv_[0-9a-f]{12}$/u.test(ownerInvite)) {
+      problems.push('MAKA_CLOUD_OWNER_INVITE must be an invite id such as inv_0123456789ab');
+    } else if (!config.pushSet) {
+      problems.push(
+        'MAKA_CLOUD_SPEND_ALERT_USD needs Web Push: set the CLOUD_PUSH_* variables, or there is nobody to tell',
+      );
+    } else {
+      config.spendAlert = { usd, ownerInvite };
+    }
+  }
   const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
   if (publicUrl !== undefined) config.mcp.publicUrl = publicUrl;
   // Checked here, read only by the gateway: the key is kept out of the config the stack passes on.
@@ -490,6 +521,7 @@ export function describeConfig(config: StackConfig): string[] {
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
+    `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,
     `digest summary:      ${config.inbox.summaryModel}`,
     `spend limits:        invite $${config.spend.inviteDailyUsd}/day and $${config.spend.inviteMonthlyUsd}/month unless set per invite, server $${config.spend.serverDailyUsd}/day`,

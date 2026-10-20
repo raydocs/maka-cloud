@@ -333,6 +333,19 @@ export class SqliteSpendJournal implements SpendJournal {
     };
   }
 
+  /**
+   * Everything the accounts spent on the UTC day of `at`, in USD: what settled plus what is still
+   * held at its reserved amount. This is the number the server's daily cap counts.
+   */
+  serverDaySpendUsd(at: number = Date.now()): number {
+    const day = new Date(at).toISOString().slice(0, 10);
+    return (
+      this.db
+        .prepare('SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE day = ?')
+        .get(day) as { usd: number }
+    ).usd;
+  }
+
   close(): void {
     this.db.close();
   }

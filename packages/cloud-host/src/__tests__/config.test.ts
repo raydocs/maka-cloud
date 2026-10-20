@@ -350,3 +350,42 @@ test('the backup directory is optional, absolute and apart from the data directo
     );
   }
 });
+
+test('the spend alert needs an amount, the owner’s invite and Web Push, and says what is missing', () => {
+  const push = {
+    CLOUD_PUSH_VAPID_PUBLIC: 'public',
+    CLOUD_PUSH_VAPID_PRIVATE: 'private',
+    CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+  };
+  const good = {
+    ...ENV,
+    ...push,
+    MAKA_CLOUD_SPEND_ALERT_USD: '12.5',
+    MAKA_CLOUD_OWNER_INVITE: 'inv_0123456789ab',
+  };
+  assert.deepEqual(readStackConfig(good).spendAlert, {
+    usd: 12.5,
+    ownerInvite: 'inv_0123456789ab',
+  });
+  assert.equal(readStackConfig(ENV).spendAlert, undefined);
+  const problem = (env: NodeJS.ProcessEnv): string =>
+    problemsOf(env)
+      .filter((text) => /SPEND_ALERT|OWNER_INVITE/u.test(text))
+      .join(' | ');
+  assert.match(problem({ ...good, MAKA_CLOUD_OWNER_INVITE: undefined }), /go together/u);
+  assert.match(problem({ ...good, MAKA_CLOUD_SPEND_ALERT_USD: undefined }), /go together/u);
+  for (const bad of ['0', '-1', '1e3', 'ten', '100001', '']) {
+    if (bad === '') continue;
+    assert.match(problem({ ...good, MAKA_CLOUD_SPEND_ALERT_USD: bad }), /above 0/u, bad);
+  }
+  for (const bad of ['owner', 'inv_123', 'INV_0123456789AB', 'inv_0123456789abc']) {
+    assert.match(problem({ ...good, MAKA_CLOUD_OWNER_INVITE: bad }), /invite id/u, bad);
+  }
+  const {
+    CLOUD_PUSH_VAPID_PUBLIC: _a,
+    CLOUD_PUSH_VAPID_PRIVATE: _b,
+    CLOUD_PUSH_SUBJECT: _c,
+    ...noPush
+  } = good;
+  assert.match(problem(noPush), /needs Web Push/u);
+});

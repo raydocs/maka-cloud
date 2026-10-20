@@ -22,7 +22,7 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
-import { InviteStore, pushConfigFromEnv } from '@maka-cloud/server';
+import { InviteStore, type PushTransport, pushConfigFromEnv } from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
 import {
   conductorGateway,
@@ -37,6 +37,7 @@ import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 import { PauseSwitch, PauseWatcher } from './pause.js';
+import { SpendAlertWatcher } from './spend-alert.js';
 import { BackupScheduler } from './backup-schedule.js';
 import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
 import { accountLedgerOf } from './spend.js';
@@ -62,6 +63,9 @@ export interface StackDependencies {
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
   pausePollMs?: number;
   /** Timing of the daily backup, for tests. */
+  spendAlertTiming?: { pollMs?: number };
+  /** Replaces the Web Push transport, for tests; the product sends over HTTPS. */
+  pushTransport?: PushTransport;
   backupTiming?: {
     tickMs?: number;
     firstTickMs?: number;
@@ -83,6 +87,8 @@ export interface Stack {
   pause: PauseSwitch;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
+  /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
+  checkSpendAlert(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -214,7 +220,14 @@ export async function startStack(
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the
     // environment and goes to the server only; it is not part of the config the stack describes.
-    const push = config.pushSet ? pushConfigFromEnv(env) : undefined;
+    const pushSettings = config.pushSet ? pushConfigFromEnv(env) : undefined;
+    const push =
+      pushSettings === undefined
+        ? undefined
+        : {
+            ...pushSettings,
+            ...(dependencies.pushTransport ? { transport: dependencies.pushTransport } : {}),
+          };
     cloud = await startCloud({
       ...(push === undefined ? {} : { push }),
       dbPath: config.dbPath,
@@ -321,6 +334,19 @@ export async function startStack(
           ...dependencies.backupTiming,
         });
   backups?.start();
+  const alerts =
+    config.spendAlert === undefined
+      ? undefined
+      : new SpendAlertWatcher({
+          thresholdUsd: config.spendAlert.usd,
+          ownerInvite: config.spendAlert.ownerInvite,
+          spentToday: () => journal.serverDaySpendUsd(),
+          alert: (inviteId, key) => cloud.server.pushAlert(inviteId, key),
+          onAlert: (day) => dependencies.onInfo?.('spend.alerted', { day }),
+          onWarning: warn,
+          ...dependencies.spendAlertTiming,
+        });
+  alerts?.start();
   let closing: Promise<void> | undefined;
   return {
     cloud,
@@ -329,11 +355,13 @@ export async function startStack(
     gateway,
     pause,
     backup,
+    checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
     // Closing twice closes once.
     close: () => {
       closing ??= (async () => {
         try {
+          await alerts?.close();
           await backups?.close();
           await watcher.close();
         } finally {

@@ -199,6 +199,11 @@ export interface CloudServer {
    * server holds that file exclusively, so only the server can make this copy.
    */
   backupDatabase(destination: string): Promise<void>;
+  /**
+   * Sends the operator's alert `key` to the devices of `inviteId`, each at most once per key.
+   * Resolves when they were told or given up on; without Web Push it resolves at once.
+   */
+  pushAlert(inviteId: string, key: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -475,6 +480,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       publisher,
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
+      pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(),
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       close: () => {
         closing ??= shutdown();

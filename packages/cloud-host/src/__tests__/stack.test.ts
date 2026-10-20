@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { InviteStore } from '@maka-cloud/server';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
@@ -50,8 +51,11 @@ async function start(
   /** False: tasks are owned only through conversations, as in the product. */
   ownerSeam = true,
   extra: Partial<StackDependencies> = {},
+  /** Settings that depend on the data directory, such as an invite made in it before the start. */
+  prepare?: (dir: string) => NodeJS.ProcessEnv,
 ): Promise<Started> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
+  env = { ...env, ...prepare?.(dir) };
   let requests = 0;
   const modelKeys: string[] = [];
   let messageArrived = (): void => undefined;
@@ -89,7 +93,9 @@ async function start(
           ([name]) =>
             name.startsWith('CLOUD_PUSH_') ||
             name === 'MAKA_CLOUD_SANDBOXES' ||
-            name === 'MAKA_CLOUD_BACKUP_DIR',
+            name === 'MAKA_CLOUD_BACKUP_DIR' ||
+            name === 'MAKA_CLOUD_SPEND_ALERT_USD' ||
+            name === 'MAKA_CLOUD_OWNER_INVITE',
         ),
       ),
     }),
@@ -792,4 +798,80 @@ test('the stack writes the day’s backup by itself once it is running, and says
 test('without MAKA_CLOUD_BACKUP_DIR the stack writes no backups and refuses to be asked for one', async (t) => {
   const started = await start(t);
   await assert.rejects(started.stack.backup(), /MAKA_CLOUD_BACKUP_DIR is not set/u);
+});
+
+test('the owner’s devices are told once when the day’s spend reaches the alert amount, and nobody else’s', async (t) => {
+  const vapid = vapidKeys();
+  const calls: Array<{ endpoint: string; headers: Record<string, string> }> = [];
+  let owner: { inviteId: string; token: string } | undefined;
+  const started = await start(
+    t,
+    undefined,
+    {
+      CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+      CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+      CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+      MAKA_CLOUD_SPEND_ALERT_USD: '1',
+    },
+    true,
+    {
+      spendAlertTiming: { pollMs: 3_600_000 },
+      pushTransport: async (request) => {
+        calls.push({ endpoint: request.endpoint, headers: request.headers });
+        return { status: 201 };
+      },
+    },
+    (dir) => {
+      // The owner exists before the stack starts, so its id can be set as the alert's owner.
+      const store = new InviteStore(join(dir, 'invites.db'));
+      owner = store.create('owner');
+      store.close();
+      return { MAKA_CLOUD_OWNER_INVITE: owner.inviteId };
+    },
+  );
+  assert.ok(owner);
+  const other = started.stack.cloud.server.invites.create('someone else');
+  const subscribe = async (token: string, endpoint: string): Promise<void> => {
+    const response = await fetch(`${started.stack.cloud.server.url}/v1/push/subscriptions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        endpoint,
+        keys: { p256dh: vapid.publicKey, auth: randomBytes(16).toString('base64url') },
+      }),
+    });
+    assert.equal(response.status, 201);
+  };
+  const ownerDevice = 'https://fcm.googleapis.com/fcm/send/owner-1';
+  const otherDevice = 'https://fcm.googleapis.com/fcm/send/other-1';
+  await subscribe(owner.token, ownerDevice);
+  await subscribe(other.token, otherDevice);
+
+  // Another process books spend into the same ledger file the gateway counts against.
+  const books = new SqliteSpendJournal(join(started.dataDir, 'gateway-spend.db'));
+  t.after(() => books.close());
+  const ledger = books.accountLedger({
+    limitsOf: () => ({ dailyUsd: 100, monthlyUsd: 1000 }),
+    serverDailyUsd: () => 1000,
+  });
+  assert.deepEqual(ledger.reserve({ inviteId: other.inviteId }, 'k1', 0.6), { ok: true });
+  await started.stack.checkSpendAlert();
+  assert.equal(calls.length, 0, 'below the amount nobody is told');
+
+  assert.deepEqual(ledger.reserve({ inviteId: other.inviteId }, 'k2', 0.5), { ok: true });
+  await started.stack.checkSpendAlert();
+  assert.deepEqual(
+    calls.map((call) => call.endpoint),
+    [ownerDevice],
+    'only the owner’s device, once',
+  );
+  assert.equal(calls[0]?.headers.Urgency, 'high');
+  await started.stack.checkSpendAlert();
+  await started.stack.checkSpendAlert();
+  assert.equal(calls.length, 1, 'asking again the same day sends nothing');
+});
+
+test('without a spend alert set the check does nothing', async (t) => {
+  const started = await start(t);
+  await started.stack.checkSpendAlert();
 });
