@@ -100,6 +100,8 @@ interface Pending {
   endpoint: string;
   /** The invite that owned the subscription and the conversation when the row was read. */
   inviteId: string;
+  /** The endpoint's generation when the row was read; a delete, move or re-create changes it. */
+  generation: number;
   p256dh: string;
   auth: string;
   taskId: string;
@@ -153,8 +155,16 @@ export class PushService {
   private running: Promise<void> | undefined;
   private unsubscribe: (() => void) | undefined;
   private offRevoke: (() => void) | undefined;
-  /** Sends under way, so a revoke can cut them off. */
+  /** Sends under way, so a revoke, delete or move can cut them off. */
   private readonly inflight = new Map<string, { inviteId: string; controller: AbortController }>();
+  /**
+   * Endpoints whose subscription was deleted, moved or created while a pass was
+   * under way. A queue item or a send belongs to the generation its endpoint had when it
+   * was read, so it cannot outlive the subscription it was read for. Nothing needs to
+   * outlive a pass, so the table is emptied when one ends.
+   */
+  private readonly generations = new Map<string, number>();
+  private lastGeneration = 0;
   private timer: NodeJS.Timeout | undefined;
   private closed = false;
 
@@ -213,7 +223,7 @@ export class PushService {
           )
           .run(inviteId, input.p256dh, input.auth, id, at, input.endpoint);
         this.db.prepare('DELETE FROM push_deliveries WHERE endpoint = ?').run(input.endpoint);
-        this.release(input.endpoint, existing.invite_id);
+        this.invalidate(input.endpoint);
         return 'updated';
       }
       const count = (sql: string, ...args: string[]) =>
@@ -233,6 +243,7 @@ export class PushService {
           'INSERT INTO push_subscriptions (endpoint, invite_id, p256dh, auth, since_feed_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
         )
         .run(input.endpoint, inviteId, input.p256dh, input.auth, id, at);
+      this.invalidate(input.endpoint);
       return 'created';
     });
   }
@@ -242,7 +253,9 @@ export class PushService {
     const result = this.db
       .prepare('DELETE FROM push_subscriptions WHERE endpoint = ? AND invite_id = ?')
       .run(endpoint, inviteId);
-    return Number(result.changes) > 0;
+    const removed = Number(result.changes) > 0;
+    if (removed) this.invalidate(endpoint);
+    return removed;
   }
 
   /** Starts watching the feed and sends what a previous run left undone. */
@@ -293,6 +306,14 @@ export class PushService {
   }
 
   private async pass(): Promise<void> {
+    try {
+      await this.passOnce();
+    } finally {
+      this.generations.clear();
+    }
+  }
+
+  private async passOnce(): Promise<void> {
     const { id: mark } = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM feed').get() as {
       id: number;
     };
@@ -321,6 +342,7 @@ export class PushService {
     return rows.map((row) => ({
       endpoint: row.endpoint,
       inviteId: row.invite_id,
+      generation: this.generations.get(row.endpoint) ?? 0,
       p256dh: row.p256dh,
       auth: row.auth,
       taskId: row.task_id,
@@ -340,6 +362,7 @@ export class PushService {
 
   private async deliver(item: Pending): Promise<void> {
     const key = keyOf(item);
+    if (this.generationOf(item.endpoint) !== item.generation) return;
     // The owner is read again here: the device may have moved since the batch was read.
     const current = this.db
       .prepare(
@@ -393,7 +416,8 @@ export class PushService {
     } finally {
       this.inflight.delete(key);
     }
-    // A revoke or a move while the send was out: it is no longer this invite's to record.
+    // A revoke, delete or move while the send was out: it is no longer this invite's to record.
+    if (this.generationOf(item.endpoint) !== item.generation) return;
     if (!this.subscribed(item.endpoint, inviteId)) return;
     if (status !== undefined && status >= 200 && status < 300) return this.finish(item, 'sent');
     if (status === 404 || status === 410) return this.forget(item.endpoint);
@@ -429,13 +453,21 @@ export class PushService {
     );
   }
 
-  /** Drops what is waiting to be retried for an endpoint and cuts off its sends in flight for one invite. */
-  private release(endpoint: string, inviteId: string): void {
+  private generationOf(endpoint: string): number {
+    return this.generations.get(endpoint) ?? 0;
+  }
+
+  /**
+   * The endpoint's subscription is gone, moved or new: what was queued, waiting to
+   * be retried or in flight for the one before is dropped, whoever held it.
+   */
+  private invalidate(endpoint: string): void {
+    if (this.running) this.generations.set(endpoint, ++this.lastGeneration);
     for (const key of [...this.cooling.keys()]) {
       if (key.startsWith(`${endpoint}\n`)) this.cooling.delete(key);
     }
     for (const [key, entry] of this.inflight) {
-      if (key.startsWith(`${endpoint}\n`) && entry.inviteId === inviteId) entry.controller.abort();
+      if (key.startsWith(`${endpoint}\n`)) entry.controller.abort();
     }
   }
 
@@ -457,9 +489,7 @@ export class PushService {
       this.db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
       this.db.prepare('DELETE FROM push_deliveries WHERE endpoint = ?').run(endpoint);
     });
-    for (const key of [...this.cooling.keys()]) {
-      if (key.startsWith(`${endpoint}\n`)) this.cooling.delete(key);
-    }
+    this.invalidate(endpoint);
   }
 
   private vapid() {

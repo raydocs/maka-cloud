@@ -782,3 +782,54 @@ test('a send in flight for the old invite is cut off when the device moves, and 
     .get(d.endpoint) as { n: number };
   assert.equal(rows.n, 1);
 });
+
+test("a subscription that is deleted and registered again, by anyone, is a new one: the old one's send in flight is cut off", async (t) => {
+  for (const next of ['inv_1', 'inv_2']) {
+    const { service, fake, finish } = await serviceOnly(t);
+    const d = device();
+    service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+    fake.state.behave = (call) =>
+      new Promise((_resolve, reject) => {
+        call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    service.start();
+    await finish('ses_1');
+    await eventually(() => fake.calls.length === 1, `the send under way, then ${next}`);
+    const inflight = fake.calls[0] as Call;
+    assert.equal(service.remove('inv_1', d.endpoint), true);
+    // Deleting is enough to end the send; registering again must not be what does it.
+    assert.equal(inflight.signal.aborted, true, 'the delete cuts the send off');
+    assert.equal(service.register(next, { endpoint: d.endpoint, ...d.keys }), 'created');
+    fake.state.behave = async () => ({ status: 201 });
+    const fresh = await finish(next === 'inv_1' ? 'ses_1' : 'ses_2');
+    await eventually(() => fake.calls.length === 2, 'the push to the new subscription');
+    assert.equal(payloadOf(fake.calls[1] as Call, d).taskId, fresh);
+  }
+});
+
+test('a send queued for a subscription that was deleted and registered again is not made', async (t) => {
+  const { service, fake, finish } = await serviceOnly(t, { concurrency: 1 });
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  const held = await finish('ses_1');
+  const queued = await finish('ses_1');
+  let release: () => void = () => undefined;
+  fake.state.behave = (call) =>
+    new Promise((resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      release = () => resolve({ status: 201 });
+    });
+  service.start();
+  await eventually(() => fake.calls.length === 1, 'the first send under way');
+  assert.equal(payloadOf(fake.calls[0] as Call, d).taskId, held);
+  service.remove('inv_1', d.endpoint);
+  // The same invite, the same browser: still a new subscription, owed nothing from before.
+  assert.equal(service.register('inv_1', { endpoint: d.endpoint, ...d.keys }), 'created');
+  release();
+  fake.state.behave = async () => ({ status: 201 });
+  const fresh = await finish('ses_1');
+  await eventually(() => fake.calls.length >= 2, 'the new subscription push');
+  const sent = fake.calls.slice(1).map((call) => payloadOf(call, d).taskId);
+  assert.deepEqual(sent, [fresh]);
+  assert.ok(!sent.includes(queued));
+});
