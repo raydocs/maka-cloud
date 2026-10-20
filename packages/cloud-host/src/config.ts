@@ -1,7 +1,8 @@
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { type ModelPrice, priceProblem } from '@maka-cloud/gateway';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { pushConfigFromEnv } from '@maka-cloud/server';
+import type { BackupLayout } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
 /**
@@ -20,6 +21,13 @@ export interface StackConfig {
   supervisorDbPath: string;
   /** The model gateway's journal of what tasks spent, read back after a restart. */
   gatewaySpendPath: string;
+  /** Where the server writes its daily backups. Unset: it writes none. */
+  backupDir?: string;
+  /**
+   * Tell `ownerInvite`'s devices (Web Push) once the server's spend of a UTC day reaches
+   * `usd` dollars. Unset: no alert.
+   */
+  spendAlert?: { usd: number; ownerInvite: string };
   /** The operator's kill switch: while this file exists, nothing may spend. See `PauseSwitch`. */
   pausePath: string;
   host: string;
@@ -73,6 +81,73 @@ export interface StackConfig {
   githubTokenProblem?: string;
 }
 
+/** Why a backup directory cannot be used with a data directory, if it cannot. */
+export function backupDirProblem(dataDir: string, backupDir: string): string | undefined {
+  const inside = (parent: string, child: string): boolean => {
+    const rel = relative(resolve(parent), resolve(child));
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  };
+  if (!isAbsolute(backupDir)) return 'MAKA_CLOUD_BACKUP_DIR must be an absolute path';
+  if (inside(dataDir, backupDir) || inside(backupDir, dataDir)) {
+    return 'MAKA_CLOUD_BACKUP_DIR must not be inside the data directory or contain it';
+  }
+  return undefined;
+}
+
+/** Where the server keeps its state under a data directory. */
+export function dataPathsOf(
+  dataDir: string,
+): Pick<
+  StackConfig,
+  | 'dbPath'
+  | 'invitesPath'
+  | 'handoffRoot'
+  | 'conductorRoot'
+  | 'runnerSessionsPath'
+  | 'codingDeliveriesPath'
+  | 'supervisorDbPath'
+  | 'gatewaySpendPath'
+> {
+  return {
+    dbPath: join(dataDir, 'cloud.db'),
+    invitesPath: join(dataDir, 'invites.db'),
+    handoffRoot: join(dataDir, 'handoff'),
+    conductorRoot: join(dataDir, 'conductor'),
+    runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
+    codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
+    supervisorDbPath: join(dataDir, 'supervisor.db'),
+    gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
+  };
+}
+
+/** What a backup holds: every database and file the server keeps its state in, and nothing else. */
+export function backupLayoutOf(dataDir: string): BackupLayout {
+  const paths = dataPathsOf(dataDir);
+  const rel = (path: string): string => relative(dataDir, path);
+  const cloud = rel(paths.dbPath);
+  return {
+    databases: [
+      cloud,
+      rel(paths.invitesPath),
+      rel(paths.supervisorDbPath),
+      rel(paths.gatewaySpendPath),
+    ],
+    files: [rel(paths.runnerSessionsPath), rel(paths.codingDeliveriesPath)],
+    trees: [rel(paths.conductorRoot), rel(paths.handoffRoot)],
+    redact: {
+      // A device's push secret lets whoever holds it read what the server sends that device, so
+      // a backup keeps no subscriptions: devices turn notifications on again after a restore.
+      [cloud]: (copy) => {
+        try {
+          copy.exec('DELETE FROM push_subscriptions');
+        } catch (error) {
+          if (!/no such table/iu.test(String((error as Error).message))) throw error;
+        }
+      },
+    },
+  };
+}
+
 /** Where the kill switch lives under a data directory. */
 export function pausePathOf(dataDir: string): string {
   return join(dataDir, 'paused');
@@ -104,6 +179,18 @@ export const ENV_VARIABLES = [
   [
     'MAKA_CLOUD_DATA_DIR',
     'required: directory for the databases, handoff files and conductor storage',
+  ],
+  [
+    'MAKA_CLOUD_BACKUP_DIR',
+    'directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups',
+  ],
+  [
+    'MAKA_CLOUD_SPEND_ALERT_USD',
+    'send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push',
+  ],
+  [
+    'MAKA_CLOUD_OWNER_INVITE',
+    'the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app',
   ],
   ['MAKA_CLOUD_HOST', 'public API host (default 127.0.0.1)'],
   ['MAKA_CLOUD_PORT', 'public API port (default 8080)'],
@@ -234,14 +321,7 @@ export function readStackConfig(
   const dataDir = required('MAKA_CLOUD_DATA_DIR');
   const config: StackConfig = {
     dataDir,
-    dbPath: join(dataDir, 'cloud.db'),
-    invitesPath: join(dataDir, 'invites.db'),
-    handoffRoot: join(dataDir, 'handoff'),
-    conductorRoot: join(dataDir, 'conductor'),
-    runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
-    codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
-    supervisorDbPath: join(dataDir, 'supervisor.db'),
-    gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
+    ...dataPathsOf(dataDir),
     pausePath: pausePathOf(dataDir),
     host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
     port: port('MAKA_CLOUD_PORT', 8080),
@@ -278,6 +358,30 @@ export function readStackConfig(
   }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
+  const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
+  if (backupDir !== undefined) {
+    const problem = backupDirProblem(dataDir, backupDir);
+    if (problem === undefined) config.backupDir = backupDir;
+    else problems.push(problem);
+  }
+  const alertUsd = value('MAKA_CLOUD_SPEND_ALERT_USD');
+  const ownerInvite = value('MAKA_CLOUD_OWNER_INVITE');
+  if (alertUsd !== undefined || ownerInvite !== undefined) {
+    const usd = Number(alertUsd);
+    if (alertUsd === undefined || ownerInvite === undefined) {
+      problems.push('MAKA_CLOUD_SPEND_ALERT_USD and MAKA_CLOUD_OWNER_INVITE go together');
+    } else if (!/^\d+(\.\d+)?$/u.test(alertUsd) || !(usd > 0) || usd > 100_000) {
+      problems.push('MAKA_CLOUD_SPEND_ALERT_USD must be a number of dollars above 0, up to 100000');
+    } else if (!/^inv_[0-9a-f]{12}$/u.test(ownerInvite)) {
+      problems.push('MAKA_CLOUD_OWNER_INVITE must be an invite id such as inv_0123456789ab');
+    } else if (!config.pushSet) {
+      problems.push(
+        'MAKA_CLOUD_SPEND_ALERT_USD needs Web Push: set the CLOUD_PUSH_* variables, or there is nobody to tell',
+      );
+    } else {
+      config.spendAlert = { usd, ownerInvite };
+    }
+  }
   const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
   if (publicUrl !== undefined) config.mcp.publicUrl = publicUrl;
   // Checked here, read only by the gateway: the key is kept out of the config the stack passes on.
@@ -416,6 +520,8 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
+    `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
+    `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,
     `digest summary:      ${config.inbox.summaryModel}`,
     `spend limits:        invite $${config.spend.inviteDailyUsd}/day and $${config.spend.inviteMonthlyUsd}/month unless set per invite, server $${config.spend.serverDailyUsd}/day`,

@@ -97,6 +97,8 @@ export function parsePushEndpoint(endpoint: string, allowedHosts: string[]): URL
 }
 
 interface Pending {
+  /** A task that ended, or an alert the operator asked for. */
+  kind: 'task' | 'alert';
   endpoint: string;
   /** The invite that owned the subscription and the conversation when the row was read. */
   inviteId: string;
@@ -108,6 +110,10 @@ interface Pending {
   conversationId: string | null;
   type: string;
 }
+
+/** A name for one alert: it is sent once per device, however often it is asked for. */
+const ALERT_KEY = /^[a-z][a-z0-9:._-]{0,63}$/u;
+const ALERT_PREFIX = 'alert:';
 
 const STATE_OF: Record<string, string> = {
   task_succeeded: 'succeeded',
@@ -165,6 +171,11 @@ export class PushService {
    */
   private readonly generations = new Map<string, number>();
   private lastGeneration = 0;
+  /** Alerts asked for and not yet sent to every device of their invite, by invite and key. */
+  private readonly alerts = new Map<
+    string,
+    { inviteId: string; key: string; waiters: Array<() => void> }
+  >();
   private timer: NodeJS.Timeout | undefined;
   private closed = false;
 
@@ -258,6 +269,25 @@ export class PushService {
     return removed;
   }
 
+  /**
+   * Tells every device of `inviteId`, and no other, that the operator's alert `key` happened: the
+   * message carries the type `spend.alert` and nothing else. A device is told once per key, so the
+   * same call again, from this process or after a restart, sends nothing it already sent. Sends go
+   * through the same retries, revoke handling and subscription generations as a task message.
+   * Resolves when every device has been told or given up on.
+   */
+  alert(inviteId: string, key: string): Promise<void> {
+    if (!ALERT_KEY.test(key)) return Promise.reject(new Error('Invalid alert key'));
+    if (this.closed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const id = `${inviteId}\n${key}`;
+      const entry = this.alerts.get(id) ?? { inviteId, key, waiters: [] };
+      entry.waiters.push(resolve);
+      this.alerts.set(id, entry);
+      this.kick();
+    });
+  }
+
   /** Starts watching the feed and sends what a previous run left undone. */
   start(): void {
     if (this.closed || this.unsubscribe) return;
@@ -277,6 +307,8 @@ export class PushService {
       await this.running;
     } finally {
       this.closeTransport();
+      for (const entry of this.alerts.values()) for (const done of entry.waiters) done();
+      this.alerts.clear();
     }
   }
 
@@ -317,13 +349,15 @@ export class PushService {
     const { id: mark } = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM feed').get() as {
       id: number;
     };
-    const batch = this.pending(100 + this.cooling.size);
+    const batch = [...this.pending(100 + this.cooling.size), ...this.pendingAlerts()];
     const due = batch.filter(
       (item) => (this.cooling.get(keyOf(item))?.notBefore ?? 0) <= this.now(),
     );
     for (let i = 0; i < due.length && !this.closed; i += this.concurrency) {
       await Promise.all(due.slice(i, i + this.concurrency).map((item) => this.deliver(item)));
     }
+    // A device skipped because its subscription changed under the pass is listed afresh by the next.
+    if (this.settleAlerts() && this.cooling.size === 0 && due.length > 0) this.dirty = true;
     if (batch.length === 0 && this.cooling.size === 0) this.floor = Math.max(this.floor, mark);
     if (batch.length > due.length || due.length === 100) this.dirty = true;
     this.schedule();
@@ -340,6 +374,7 @@ export class PushService {
       type: string;
     }>;
     return rows.map((row) => ({
+      kind: 'task' as const,
       endpoint: row.endpoint,
       inviteId: row.invite_id,
       generation: this.generations.get(row.endpoint) ?? 0,
@@ -349,6 +384,57 @@ export class PushService {
       conversationId: row.conversation_id,
       type: row.type,
     }));
+  }
+
+  /** The devices of each asked-for alert's invite that were not told yet. */
+  private pendingAlerts(): Pending[] {
+    const items: Pending[] = [];
+    for (const { inviteId, key } of this.alerts.values()) {
+      const taskId = `${ALERT_PREFIX}${key}`;
+      const rows = this.db
+        .prepare(
+          `SELECT s.endpoint, s.p256dh, s.auth FROM push_subscriptions s
+           LEFT JOIN push_deliveries d ON d.endpoint = s.endpoint AND d.task_id = ?
+           WHERE s.invite_id = ? AND d.task_id IS NULL
+           ORDER BY s.endpoint`,
+        )
+        .all(taskId, inviteId) as unknown as Array<{
+        endpoint: string;
+        p256dh: string;
+        auth: string;
+      }>;
+      for (const row of rows) {
+        items.push({
+          kind: 'alert',
+          endpoint: row.endpoint,
+          inviteId,
+          generation: this.generations.get(row.endpoint) ?? 0,
+          p256dh: row.p256dh,
+          auth: row.auth,
+          taskId,
+          conversationId: null,
+          type: 'alert',
+        });
+      }
+    }
+    return items;
+  }
+
+  /** An alert with no device left to tell is done; whoever asked for it is told. True while some are not. */
+  private settleAlerts(): boolean {
+    for (const [id, entry] of [...this.alerts]) {
+      const left = this.db
+        .prepare(
+          `SELECT 1 FROM push_subscriptions s
+           LEFT JOIN push_deliveries d ON d.endpoint = s.endpoint AND d.task_id = ?
+           WHERE s.invite_id = ? AND d.task_id IS NULL LIMIT 1`,
+        )
+        .get(`${ALERT_PREFIX}${entry.key}`, entry.inviteId);
+      if (left !== undefined) continue;
+      this.alerts.delete(id);
+      for (const done of entry.waiters) done();
+    }
+    return this.alerts.size > 0;
   }
 
   /** Wakes the pump for the earliest retry. */
@@ -364,15 +450,24 @@ export class PushService {
     const key = keyOf(item);
     if (this.generationOf(item.endpoint) !== item.generation) return;
     // The owner is read again here: the device may have moved since the batch was read.
-    const current = this.db
-      .prepare(
-        `SELECT s.invite_id, s.p256dh, s.auth, c.owner
-         FROM push_subscriptions s, conversations c
-         WHERE s.endpoint = ? AND c.conversation_id = ?`,
-      )
-      .get(item.endpoint, item.conversationId) as
-      | { invite_id: string; p256dh: string; auth: string; owner: string | null }
-      | undefined;
+    const current =
+      item.kind === 'alert'
+        ? ((this.db
+            .prepare(
+              'SELECT invite_id, p256dh, auth, invite_id AS owner FROM push_subscriptions WHERE endpoint = ?',
+            )
+            .get(item.endpoint) as
+            | { invite_id: string; p256dh: string; auth: string; owner: string | null }
+            | undefined) ?? undefined)
+        : (this.db
+            .prepare(
+              `SELECT s.invite_id, s.p256dh, s.auth, c.owner
+               FROM push_subscriptions s, conversations c
+               WHERE s.endpoint = ? AND c.conversation_id = ?`,
+            )
+            .get(item.endpoint, item.conversationId) as
+            | { invite_id: string; p256dh: string; auth: string; owner: string | null }
+            | undefined);
     if (!current) return;
     const { invite_id: inviteId } = current;
     if (inviteId !== item.inviteId || current.owner !== inviteId) return;
@@ -381,13 +476,21 @@ export class PushService {
     try {
       request = webpush.generateRequestDetails(
         { endpoint: item.endpoint, keys: { p256dh: current.p256dh, auth: current.auth } },
-        JSON.stringify({
-          type: 'task.finished',
-          conversationId: item.conversationId,
-          taskId: item.taskId,
-          state: STATE_OF[item.type] ?? item.type,
-        }),
-        { vapidDetails: this.vapid(), TTL: TTL_SECONDS, urgency: 'normal' },
+        JSON.stringify(
+          item.kind === 'alert'
+            ? { type: 'spend.alert' }
+            : {
+                type: 'task.finished',
+                conversationId: item.conversationId,
+                taskId: item.taskId,
+                state: STATE_OF[item.type] ?? item.type,
+              },
+        ),
+        {
+          vapidDetails: this.vapid(),
+          TTL: TTL_SECONDS,
+          urgency: item.kind === 'alert' ? 'high' : 'normal',
+        },
       );
     } catch {
       // Keys that cannot encrypt will not start to work: forget the subscription.

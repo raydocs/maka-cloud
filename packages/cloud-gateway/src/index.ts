@@ -32,7 +32,9 @@ export {
 export {
   type AccountLedgerOptions,
   type AccountLimits,
+  type JournalTotals,
   journaledPort,
+  readJournalTotals,
   type SpendJournal,
   SqliteSpendJournal,
   type UnrecordedSpend,
