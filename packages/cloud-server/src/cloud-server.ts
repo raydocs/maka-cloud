@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { DatabaseSync } from 'node:sqlite';
+import { backup as sqliteBackup, type DatabaseSync } from 'node:sqlite';
 import {
   Orchestrator,
   type OrchestratorOptions,
@@ -194,6 +194,11 @@ export interface CloudServer {
   openStreams(): number;
   /** Where handing user messages to the handler stands; undefined without a handler. */
   deliveryStats(): DeliveryStats | undefined;
+  /**
+   * Writes a consistent copy of the main database to `destination` while the server runs. The
+   * server holds that file exclusively, so only the server can make this copy.
+   */
+  backupDatabase(destination: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -470,6 +475,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       publisher,
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
+      backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       close: () => {
         closing ??= shutdown();
         return closing;

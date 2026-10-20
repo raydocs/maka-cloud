@@ -1,17 +1,25 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { createECDH } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createECDH, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
-import { readStackConfig } from '../config.js';
-import { PAUSED_NOTICE, STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
+import { listBackups, restoreBackup, verifyBackup } from '../backup.js';
+import { backupLayoutOf, readStackConfig } from '../config.js';
+import {
+  PAUSED_NOTICE,
+  STACK_PLAYBOOKS,
+  type Stack,
+  type StackDependencies,
+  startStack,
+} from '../stack.js';
 
 /** The machine of the invite the tests create first; any other invite has none. */
 const SANDBOXES = JSON.stringify({ inv_000000000001: 'mch_test' });
@@ -41,6 +49,7 @@ async function start(
   env: NodeJS.ProcessEnv = {},
   /** False: tasks are owned only through conversations, as in the product. */
   ownerSeam = true,
+  extra: Partial<StackDependencies> = {},
 ): Promise<Started> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
   let requests = 0;
@@ -77,7 +86,10 @@ async function start(
       ...(publicUrl === undefined ? {} : { MAKA_CLOUD_MCP_PUBLIC_URL: publicUrl }),
       ...Object.fromEntries(
         Object.entries(env).filter(
-          ([name]) => name.startsWith('CLOUD_PUSH_') || name === 'MAKA_CLOUD_SANDBOXES',
+          ([name]) =>
+            name.startsWith('CLOUD_PUSH_') ||
+            name === 'MAKA_CLOUD_SANDBOXES' ||
+            name === 'MAKA_CLOUD_BACKUP_DIR',
         ),
       ),
     }),
@@ -100,6 +112,7 @@ async function start(
   const owners = new Map<string, string>();
   const warnings: string[] = [];
   const stack = await startStack(config, env, {
+    ...extra,
     pausePollMs: 10,
     onWarning: (message) => warnings.push(message),
     ...(ownerSeam
@@ -665,3 +678,118 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+test('a running stack backs itself up: the copy restores, holds no key and no push subscription', async (t) => {
+  const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const vapid = vapidKeys();
+  const env = {
+    MAKA_CLOUD_BACKUP_DIR: backupDir,
+    CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+    CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+    CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+  };
+  const started = await start(t, undefined, env);
+  const { stack, dataDir } = started;
+  const invite = stack.cloud.server.invites.create('backed up');
+  const headers = { authorization: `Bearer ${invite.token}`, 'content-type': 'application/json' };
+  const created = await fetch(`${stack.cloud.server.url}/v1/conversations`, {
+    method: 'POST',
+    headers,
+    body: '{}',
+  });
+  const { conversationId } = (await created.json()) as { conversationId: string };
+  const deviceSecret = randomBytes(16).toString('base64url');
+  const subscribed = await fetch(`${stack.cloud.server.url}/v1/push/subscriptions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      endpoint: 'https://fcm.googleapis.com/fcm/send/device-1',
+      keys: { p256dh: vapid.publicKey, auth: deviceSecret },
+    }),
+  });
+  assert.equal(subscribed.status, 201);
+
+  const done = await stack.backup();
+  const layout = backupLayoutOf(dataDir);
+  const manifest = await verifyBackup(done.path, layout);
+  for (const name of ['cloud.db', 'invites.db', 'supervisor.db', 'gateway-spend.db']) {
+    assert.ok(
+      manifest.files.some((file) => file.path === name),
+      `${name} is in the backup`,
+    );
+  }
+  const secrets = [
+    'sk-test-not-a-key',
+    'ibx-test-not-a-key',
+    vapid.privateKey,
+    deviceSecret,
+    invite.token,
+    invite.token.split('.')[1] ?? 'missing',
+  ];
+  for (const file of manifest.files) {
+    const bytes = await readFile(join(done.path, file.path));
+    for (const secret of secrets) {
+      assert.ok(
+        !bytes.includes(Buffer.from(secret)),
+        `${file.path} holds no ${secret.slice(0, 6)}…`,
+      );
+    }
+  }
+
+  await stack.close();
+  const restored = await restoreBackup({
+    dataDir,
+    backupDir,
+    stamp: done.stamp,
+    layout,
+  });
+  assert.ok(restored.files >= 4);
+  const cloud = new DatabaseSync(join(dataDir, 'cloud.db'), { readOnly: true });
+  assert.equal(
+    cloud
+      .prepare('SELECT count(*) AS n FROM conversations WHERE conversation_id = ?')
+      .get(conversationId)?.n,
+    1,
+    'the conversation survived the round trip',
+  );
+  assert.equal(cloud.prepare('SELECT count(*) AS n FROM push_subscriptions').get()?.n, 0);
+  cloud.close();
+  const invites = new DatabaseSync(join(dataDir, 'invites.db'), { readOnly: true });
+  assert.equal(
+    invites.prepare('SELECT count(*) AS n FROM invites WHERE invite_id = ?').get(invite.inviteId)
+      ?.n,
+    1,
+  );
+  invites.close();
+});
+
+test('the stack writes the day’s backup by itself once it is running, and says so', async (t) => {
+  const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  let written: (event: string) => void = () => undefined;
+  const first = new Promise<string>((resolve) => {
+    written = resolve;
+  });
+  const events: Array<[string, Record<string, string | number>]> = [];
+  const started = await start(t, undefined, { MAKA_CLOUD_BACKUP_DIR: backupDir }, true, {
+    backupTiming: { firstTickMs: 5, tickMs: 5 },
+    onInfo: (event, fields) => {
+      events.push([event, fields]);
+      if (event === 'backup.written') written(String(fields.stamp));
+    },
+  });
+  const stamp = await first;
+  assert.deepEqual(
+    (await listBackups(backupDir)).map((entry) => entry.stamp),
+    [stamp],
+  );
+  assert.equal(events[0]?.[0], 'backup.written');
+  await started.stack.close();
+  assert.deepEqual(started.warnings, [], 'nothing was reported');
+});
+
+test('without MAKA_CLOUD_BACKUP_DIR the stack writes no backups and refuses to be asked for one', async (t) => {
+  const started = await start(t);
+  await assert.rejects(started.stack.backup(), /MAKA_CLOUD_BACKUP_DIR is not set/u);
+});

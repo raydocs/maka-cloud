@@ -334,3 +334,19 @@ test('spend limits are small unless the environment raises them, and a bad numbe
     assert.ok((names as string[]).includes(name), `${name} is in the usage text`);
   }
 });
+
+test('the backup directory is optional, absolute and apart from the data directory', () => {
+  assert.equal(readStackConfig(ENV).backupDir, undefined);
+  assert.equal(
+    readStackConfig({ ...ENV, MAKA_CLOUD_BACKUP_DIR: '/srv/backups' }).backupDir,
+    '/srv/backups',
+  );
+  for (const bad of ['backups', '/srv/maka', '/srv/maka/backups', '/srv', '/']) {
+    assert.ok(
+      problemsOf({ ...ENV, MAKA_CLOUD_BACKUP_DIR: bad }).some((problem) =>
+        problem.startsWith('MAKA_CLOUD_BACKUP_DIR'),
+      ),
+      bad,
+    );
+  }
+});

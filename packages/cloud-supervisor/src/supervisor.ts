@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { backup as sqliteBackup } from 'node:sqlite';
 import { openDatabase } from './db.js';
 import { buildDigest, type Digest } from './digest.js';
 import { signalOf } from './events.js';
@@ -195,6 +196,11 @@ export class Supervisor {
     this.abort.abort();
     while (this.inflight.size > 0) await Promise.allSettled([...this.inflight]);
     this.store.db.close();
+  }
+
+  /** A consistent copy of the supervisor's database, which this process holds exclusively. */
+  async backupTo(destination: string): Promise<void> {
+    await sqliteBackup(this.store.db, destination);
   }
 
   /**

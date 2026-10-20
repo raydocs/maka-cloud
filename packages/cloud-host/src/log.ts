@@ -35,19 +35,24 @@ const SECRET_SHAPES: readonly RegExp[] = [
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
-/**
- * Removes secrets and vendor names from text. Secrets are the values of the environment variables
- * whose names say so (exactly, wherever they appear) and anything shaped like a key or token;
- * vendor names go the way client-facing error text does.
- */
-export function createScrubber(env: NodeJS.ProcessEnv = process.env): (text: string) => string {
-  const values = Object.entries(env)
+/** The values of the environment variables whose names say they hold a secret, longest first. */
+export function secretValuesOf(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
     .filter(
       (entry): entry is [string, string] =>
         SECRET_NAME.test(entry[0]) && (entry[1]?.trim().length ?? 0) >= MIN_SECRET_LENGTH,
     )
     .map(([, value]) => value.trim())
     .sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Removes secrets and vendor names from text. Secrets are the values of the environment variables
+ * whose names say so (exactly, wherever they appear) and anything shaped like a key or token;
+ * vendor names go the way client-facing error text does.
+ */
+export function createScrubber(env: NodeJS.ProcessEnv = process.env): (text: string) => string {
+  const values = secretValuesOf(env);
   const exact = values.length === 0 ? undefined : new RegExp(values.map(escape).join('|'), 'gu');
   return (text) => {
     let out = text.normalize('NFKC').replace(/\p{Cf}/gu, '');

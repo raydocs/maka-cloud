@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, relative } from 'node:path';
 import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { type Orchestrator, RunnerRegistry, type TaskId } from '@maka-cloud/orchestrator';
@@ -23,7 +23,7 @@ import {
   TenantMachineProvider,
 } from '@maka-cloud/runners';
 import { InviteStore, pushConfigFromEnv } from '@maka-cloud/server';
-import type { StackConfig } from './config.js';
+import { backupLayoutOf, type StackConfig } from './config.js';
 import {
   conductorGateway,
   gatewayModelAccess,
@@ -37,6 +37,8 @@ import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 import { PauseSwitch, PauseWatcher } from './pause.js';
+import { BackupScheduler } from './backup-schedule.js';
+import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
 import { accountLedgerOf } from './spend.js';
 
 /** What a user is told when the operator's pause switch stopped their work. */
@@ -59,7 +61,16 @@ export interface StackDependencies {
   ownerOfTask?: (taskId: string) => string | undefined;
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
   pausePollMs?: number;
+  /** Timing of the daily backup, for tests. */
+  backupTiming?: {
+    tickMs?: number;
+    firstTickMs?: number;
+    retryAfterMs?: number;
+    now?: () => number;
+  };
   onWarning?: (message: string, detail?: unknown) => void;
+  /** Routine events worth a log line, such as a finished backup. */
+  onInfo?: (event: string, fields: Record<string, string | number>) => void;
 }
 
 export interface Stack {
@@ -70,6 +81,8 @@ export interface Stack {
   gateway: StackGateway;
   /** The operator's kill switch, as the stack reads it. */
   pause: PauseSwitch;
+  /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
+  backup(): Promise<BackupResult>;
   close(): Promise<void>;
 }
 
@@ -102,6 +115,7 @@ export async function startStack(
   let ownerOfConversation: ((conversationId: string) => string | undefined) | undefined;
   let conversationOfTask: ((taskId: string) => string | undefined) | undefined;
   // Set when the supervisor starts: a spending limit that stops work raises an item in its inbox.
+  let supervisorRef: { backupTo(destination: string): Promise<void> } | undefined;
   let raiseCapHit:
     | ((input: { conversationId: string; taskId?: string; key: string; ask: string }) => void)
     | undefined;
@@ -238,6 +252,7 @@ export async function startStack(
               return inviteId === undefined ? undefined : { inviteId };
             },
             onStarted: (supervisor) => {
+              supervisorRef = supervisor;
               raiseCapHit = (input) => supervisor.raiseCapHit(input);
             },
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
@@ -268,6 +283,44 @@ export async function startStack(
     ...(dependencies.pausePollMs === undefined ? {} : { pollMs: dependencies.pausePollMs }),
   });
   watcher.start();
+  const layout = backupLayoutOf(config.dataDir);
+  const backup = (): Promise<BackupResult> => {
+    if (config.backupDir === undefined) {
+      return Promise.reject(new BackupError('MAKA_CLOUD_BACKUP_DIR is not set'));
+    }
+    return backupAll({
+      dataDir: config.dataDir,
+      backupDir: config.backupDir,
+      layout,
+      env,
+      inProcess: {
+        // These two files are held exclusively by this process, so only it can copy them.
+        [relative(config.dataDir, config.dbPath)]: (to) => cloud.server.backupDatabase(to),
+        [relative(config.dataDir, config.supervisorDbPath)]: (to) =>
+          supervisorRef
+            ? supervisorRef.backupTo(to)
+            : Promise.reject(new Error('The inbox is not running')),
+      },
+    });
+  };
+  const backups =
+    config.backupDir === undefined
+      ? undefined
+      : new BackupScheduler({
+          latest: async () => (await listBackups(config.backupDir as string))[0]?.createdAt,
+          run: async () => {
+            const done = await backup();
+            dependencies.onInfo?.('backup.written', {
+              stamp: done.stamp,
+              files: done.files,
+              bytes: done.bytes,
+              removed: done.removed.length,
+            });
+          },
+          onWarning: warn,
+          ...dependencies.backupTiming,
+        });
+  backups?.start();
   let closing: Promise<void> | undefined;
   return {
     cloud,
@@ -275,11 +328,13 @@ export async function startStack(
     coding,
     gateway,
     pause,
+    backup,
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
     // Closing twice closes once.
     close: () => {
       closing ??= (async () => {
         try {
+          await backups?.close();
           await watcher.close();
         } finally {
           try {
