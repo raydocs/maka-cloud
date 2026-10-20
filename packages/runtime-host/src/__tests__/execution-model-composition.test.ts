@@ -31,8 +31,9 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import { z } from 'zod';
+import { installRefreshedModelMetadata } from '@maka/core/model-metadata';
 import {
   DEFAULT_BASH_TIMEOUT_MS,
   MAX_FOREGROUND_BASH_TIMEOUT_MS,
@@ -145,6 +146,11 @@ import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 
 const MODEL_ID = 'hosted-real-model';
 const API_KEY = 'hosted-provider-key';
+
+// A composed Host refreshes the model catalog from models.dev and installs it
+// process-wide. Without this a later test reads live data instead of the
+// bundled snapshot it was written against.
+afterEach(() => installRefreshedModelMetadata(undefined));
 const RESPONSE_TEXT = 'Hosted real-model execution completed.';
 const SUMMARY_TEXT = '## Goal\nContinue hosted real-model execution.';
 // History compaction validates checkpoint structure (#3029), so its requests

@@ -100,6 +100,37 @@ export function orderByDescendingWeight(dirs, weigh) {
   return [...dirs].sort((left, right) => weights.get(right) - weights.get(left));
 }
 
+/**
+ * Reads the test count `node --test` prints at the end of a run (`# tests N`,
+ * or `ℹ tests N` in the spec reporter), from chunks of the run's output. A
+ * suite that matched no test file still exits 0, so the count is what tells an
+ * empty run from a passing one. Runs chained in one script add up.
+ */
+export function createTestCounter() {
+  let pending = '';
+  let total = 0;
+  let reported = false;
+  const read = (line) => {
+    const match = /^(?:#|ℹ) tests (\d+)\s*$/u.exec(line);
+    if (!match) return;
+    reported = true;
+    total += Number(match[1]);
+  };
+  return {
+    push(chunk) {
+      const lines = (pending + chunk.toString('utf8')).split(/\r?\n/u);
+      pending = lines.pop() ?? '';
+      for (const line of lines) read(line);
+    },
+    /** The count once the output is complete; undefined when none was printed. */
+    finish() {
+      read(pending);
+      pending = '';
+      return reported ? total : undefined;
+    },
+  };
+}
+
 export function nameForDir(dir) {
   return dir.replace(/^(packages|apps)\//, '');
 }
@@ -134,11 +165,17 @@ export async function runWorkspace(
     console.log(`\n[${name}] start: ${command}`);
     const child = spawn(command, {
       cwd,
-      stdio: 'inherit',
+      // The output is read for the test count and passed on as it comes.
+      stdio: ['inherit', 'pipe', 'inherit'],
       shell: true,
       detached: process.platform !== 'win32',
       // TMPDIR is what os.tmpdir() reads on POSIX, TMP/TEMP on Windows.
       env: { ...process.env, TMPDIR: tempRoot, TMP: tempRoot, TEMP: tempRoot },
+    });
+    const counter = createTestCounter();
+    child.stdout?.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      counter.push(chunk);
     });
     const completion = new Promise((resolvePromise, reject) => {
       let settled = false;
@@ -152,7 +189,11 @@ export async function runWorkspace(
       });
       child.on('close', (code) => {
         settle(() => {
-          if (code === 0) {
+          const tests = counter.finish();
+          if (code === 0 && !tests) {
+            // Exit 0 with no tests (or no count at all) is not a pass: the suite did not run.
+            reject(new Error(`[${name}] ran no tests`));
+          } else if (code === 0) {
             console.log(`[${name}] passed`);
             resolvePromise(name);
           } else {
