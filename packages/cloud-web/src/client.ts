@@ -6,6 +6,8 @@ import {
   type ArtifactListing,
   type Conversation,
   type FeedEvent,
+  type InboxAnswerRequest,
+  type InboxAnswerResult,
   type TaskControl,
   type TaskView,
 } from './contract';
@@ -15,6 +17,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code?: string,
+    /** The error body, as the server sent it (a refused inbox answer carries the refreshed item). */
+    readonly body?: unknown,
   ) {
     super(`Request failed (${status}).`);
   }
@@ -118,7 +122,11 @@ export class CloudClient {
       throw new Unsupported('This action is not available on this server.');
     }
     const body = (await response.json().catch(() => undefined)) as { error?: unknown } | undefined;
-    throw new ApiError(response.status, typeof body?.error === 'string' ? body.error : undefined);
+    throw new ApiError(
+      response.status,
+      typeof body?.error === 'string' ? body.error : undefined,
+      body,
+    );
   }
 
   async request<T>(path: string, init: RequestInit = {}, feature?: string): Promise<T> {
@@ -161,6 +169,13 @@ export class CloudClient {
   /** A 404 is a question that is gone or not yours: the route is absent only where no conductor runs, and then there is no question. */
   answer(id: string, answer: AnswerRequest) {
     return this.request<AnswerResult>(routes.answers(id), {
+      method: 'POST',
+      body: JSON.stringify(answer),
+    });
+  }
+  /** 200 closed or recorded, 202 still being delivered; a refusal is an ApiError whose body may carry the refreshed item. */
+  answerInbox(item: string, answer: InboxAnswerRequest) {
+    return this.request<InboxAnswerResult>(routes.inboxAnswer(item), {
       method: 'POST',
       body: JSON.stringify(answer),
     });

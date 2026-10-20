@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, expect, test } from 'vitest';
 import { ConversationView, QuestionCard } from '../src/App';
 import { CloudClient } from '../src/client';
-import type { Conversation, Question } from '../src/contract';
+import type { Conversation, InboxItem, Question } from '../src/contract';
+import { InboxCard, InboxPanel, visibleInbox } from '../src/Inbox';
 
 afterEach(cleanup);
 
@@ -246,4 +247,128 @@ test('all server text is presentation-filtered', async () => {
   expect(
     screen.getAllByText('assistant, assistant, assistant, assistant, assistant').length,
   ).toBeGreaterThan(2);
+});
+
+const item: InboxItem = {
+  itemId: 'itm_1',
+  kind: 'finished',
+  conversationId: 'cnv_1',
+  taskId: 'tsk_1',
+  ask: '“Report” finished (independently checked): “Done.”',
+  options: [{ id: 'ok', label: 'Got it', recommended: true }],
+  allowText: false,
+  evidence: [],
+  state: 'open',
+  closeReason: null,
+  preconditionHash: 'hash_1',
+  version: 1,
+  interrupts: false,
+  delivery: 'none',
+  createdAt: 1,
+  updatedAt: 1,
+};
+
+test('the supervisor’s check label is shown as sent, whichever it is, and never added when absent', () => {
+  const labels = [
+    'finished (independently checked): “Done.”',
+    'finished (not independently checked): “Done.”',
+    'finished: “Done.”',
+  ];
+  for (const label of labels) {
+    const { unmount } = render(
+      <InboxCard
+        item={{ ...item, ask: `“Report” ${label}` }}
+        disabled={false}
+        onAnswer={() => {}}
+      />,
+    );
+    expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(`“Report” ${label}`);
+    // Nothing else on the card says a result was checked.
+    expect(screen.queryAllByText(/checked/iu)).toHaveLength(label.includes('checked') ? 1 : 0);
+    unmount();
+  }
+});
+
+test('an inbox card puts the recommended answer first, takes context only when allowed, and sends one answer', () => {
+  const answers: unknown[] = [];
+  render(
+    <InboxCard
+      item={{
+        ...item,
+        kind: 'decision',
+        ask: 'The result came back with low confidence.',
+        allowText: true,
+        options: [
+          { id: 'accept', label: 'Accept it as is', recommended: false },
+          { id: 'redo', label: 'Ask the agent to redo it', recommended: true },
+        ],
+      }}
+      disabled={false}
+      onAnswer={(optionId, text) => answers.push({ optionId, text })}
+    />,
+  );
+  const buttons = screen.getAllByRole('button').map((button) => button.textContent);
+  expect(buttons).toEqual(['Ask the agent to redo it', 'Accept it as is']);
+  fireEvent.change(screen.getByLabelText('Additional context (optional)'), {
+    target: { value: '  Use the Q3 numbers ' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to redo it' }));
+  expect(answers).toEqual([{ optionId: 'redo', text: 'Use the Q3 numbers' }]);
+});
+
+test('an item with no text field offers none, and an answer being delivered offers no buttons', () => {
+  const { rerender } = render(<InboxCard item={item} disabled={false} onAnswer={() => {}} />);
+  expect(screen.queryByLabelText('Additional context (optional)')).toBeNull();
+  rerender(
+    <InboxCard
+      item={{ ...item, state: 'answering', delivery: 'retrying' }}
+      disabled={false}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(screen.queryByRole('button')).toBeNull();
+  expect(screen.getByRole('status').textContent).toContain('keep trying');
+});
+
+test('an open item that repeats a question the conversation is asking is shown once', () => {
+  const asked = {
+    ...item,
+    itemId: 'itm_q',
+    kind: 'decision' as const,
+    ask: 'Which direction feels right?',
+  };
+  const other = { ...item, itemId: 'itm_o', kind: 'blocked' as const, ask: 'A step may be stuck.' };
+  const shown = visibleInbox([asked, other], new Set(['Which direction feels right?']));
+  expect(shown.live.map((entry) => entry.itemId)).toEqual(['itm_o']);
+  // Once the question is answered, the item is the only record of it.
+  expect(visibleInbox([asked, other], new Set()).live).toHaveLength(2);
+  // A closed item keeps its words under “Done”.
+  render(
+    <InboxPanel
+      items={[{ ...asked, state: 'closed', closeReason: 'answered' }]}
+      openQuestions={new Set()}
+      disabled={false}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(screen.getByText('Done (1)')).toBeTruthy();
+});
+
+test('inbox text is presentation-filtered like every other server string', () => {
+  render(
+    <InboxCard
+      item={{
+        ...item,
+        ask: 'Claude and OpenAI GPT disagreed.',
+        evidence: [
+          { kind: 'link', url: 'https://example.com/openai', label: 'Anthropic notes' },
+          { kind: 'action', tool: 'open_pull_request', args: '{"model":"gpt-5"}' },
+        ],
+        options: [{ id: 'ok', label: 'Ask Codex', recommended: false }],
+      }}
+      disabled={false}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(document.body.textContent).not.toMatch(/claude|openai|gpt|anthropic|codex/iu);
 });

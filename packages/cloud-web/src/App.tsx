@@ -6,13 +6,22 @@ import {
   type ArtifactContent,
   type ArtifactListing,
   type Conversation,
+  type InboxItem,
   type Question,
   TERMINAL,
   type TaskView,
 } from './contract';
+import { InboxPanel } from './Inbox';
 import { displayText, dollars, publicLink } from './presentation';
 import { disablePush, enablePush } from './push';
-import { applyEvent, type ConversationState, emptyState, mergeViews, totalCost } from './state';
+import {
+  applyEvent,
+  applyInboxItem,
+  type ConversationState,
+  emptyState,
+  mergeViews,
+  totalCost,
+} from './state';
 
 const ERROR_TEXT: Record<string, string> = {
   pause_unsupported: 'This task cannot be paused.',
@@ -23,6 +32,13 @@ const ERROR_TEXT: Record<string, string> = {
   unknown_option: 'That answer is not one of the options.',
   text_too_long: 'The additional context is too long.',
   artifact_too_large: 'This result is too large to show here.',
+  stale: 'This changed while you were looking. It has been refreshed; check it before you answer.',
+  already_answered: 'This was already answered.',
+  question_open:
+    'The conversation is still waiting for an answer to its own question. Answer that first.',
+  invalid_option: 'That answer is not one of the options.',
+  text_not_allowed: 'This item does not take additional context.',
+  stopped: 'The inbox is restarting. Try again in a moment.',
   invalid_endpoint: 'This browser’s notification service is not accepted by this server.',
   invalid_keys: 'This browser’s notification keys were not accepted.',
   too_many_subscriptions: 'Notifications are already on for as many devices as are allowed.',
@@ -435,11 +451,45 @@ export function ConversationView({
     }
   }
 
+  // One id per distinct answer, reused when the same answer is sent again: the server counts a
+  // retry of an answer it already took as the same answer, not a second one.
+  const answerIds = useRef(new Map<string, string>());
+  function answerItem(item: InboxItem, optionId: string, text?: string) {
+    void act('inbox', async () => {
+      const key = [item.itemId, item.preconditionHash, optionId, text ?? ''].join('\u0000');
+      const answerId = answerIds.current.get(key) ?? crypto.randomUUID();
+      answerIds.current.set(key, answerId);
+      try {
+        const result = await client.answerInbox(item.itemId, {
+          answerId,
+          optionId,
+          ...(text ? { text } : {}),
+          preconditionHash: item.preconditionHash,
+        });
+        setState((previous) => applyInboxItem(previous, result.item));
+        answerIds.current.delete(key);
+      } catch (e) {
+        // A refused answer carries the item as it is now (stale, closed, already answered).
+        if (e instanceof ApiError && typeof e.body === 'object' && e.body !== null) {
+          const refreshed = (e.body as { item?: unknown }).item;
+          setState((previous) => applyInboxItem(previous, refreshed));
+          answerIds.current.delete(key);
+        }
+        throw e;
+      }
+    });
+  }
+
   const tasks = Object.values(state.tasks);
   const running = tasks.filter((task) => task.state === 'running').length;
   const total = totalCost(tasks);
   const withResults = tasks.filter((task) => artifacts[task.taskId]);
   const questions = Object.values(state.questions);
+  const openQuestions = new Set(
+    questions
+      .filter((question) => state.answers[question.questionId] === undefined)
+      .map((question) => displayText(question.question).trim()),
+  );
 
   return (
     <div className="app-shell">
@@ -500,6 +550,12 @@ export function ConversationView({
               }
             />
           ))}
+          <InboxPanel
+            items={Object.values(state.inbox)}
+            openQuestions={openQuestions}
+            disabled={Boolean(busy)}
+            onAnswer={answerItem}
+          />
           {error && (
             <p role="alert" className="error">
               {error}
