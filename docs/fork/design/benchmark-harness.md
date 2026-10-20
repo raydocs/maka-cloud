@@ -65,7 +65,12 @@ stop that could not be confirmed, or a grader error is `infra_failed` (replaced 
 - A live spec runs only with `--live` and `--approve-budget <usd>` at least cells x `taskBudgetUsd`, and a total budget
   not above the approval (`assertLiveApproved`, before anything is built or contacted). **No thread runs `--live`
   without win's explicit OK.** The real wiring (`createLiveDeps`) needs `INSTABOX_API_KEY`, `INSTABOX_MACHINE_ID`, the
-  model keys, `MAKA_EVALS_DATA_DIR` (a `swe-bench-verified.jsonl`) and `MAKA_EVALS_PYTHON`.
+  model keys, `MAKA_EVALS_DATA_DIR` (a `swe-bench-verified.jsonl`) and `MAKA_EVALS_PYTHON`. It is booked to the
+  server it runs next to: `MAKA_CLOUD_DATA_DIR` is that server's data directory (its `invites.db`, `gateway-spend.db`
+  and `paused` file) and `MAKA_EVALS_INVITE_ID` an active invite of it. Every request is reserved against that invite's
+  daily and monthly caps and the server's daily cap, and is refused while the server is paused, as for any invite; the
+  approved experiment budget is a further limit on top. Run it with the server's environment (the cap defaults come from
+  it), and never with the experiment directory as the server's.
 - **Keys.** Model calls go through the model gateway (`design/model-gateway.md`), started inside the run with the
   vendor keys from the environment. A sandbox gets a token for its own cell's budget and the gateway URL, never a vendor
   key. `createLiveDeps` refuses, before it builds a fleet, when a subject's vendor has no key (`ANTHROPIC_API_KEY` for

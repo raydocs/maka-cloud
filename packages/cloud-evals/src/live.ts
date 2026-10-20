@@ -1,8 +1,14 @@
 import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { ExperimentSpec } from '@maka/eval';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
-import { gatewayModelAccess, gatewayPrices, readStackConfig, startGateway } from '@maka-cloud/host';
+import {
+  gatewayModelAccess,
+  gatewayPrices,
+  openServerLedger,
+  readStackConfig,
+  startGateway,
+} from '@maka-cloud/host';
 import {
   FleetCodingSandbox,
   JsonFileCodingDeliveries,
@@ -123,6 +129,20 @@ export async function createLiveDeps(
     { ...env, MAKA_CLOUD_DATA_DIR: options.stateDir },
     { sandboxes: 'single-machine' },
   );
+  // Real money is spent against the server's caps, whoever spends it: the benchmark is booked to
+  // an invite of the server it runs next to, and its approved budget is a limit on top of theirs.
+  const serverDir = env.MAKA_CLOUD_DATA_DIR?.trim();
+  if (!serverDir) {
+    throw new Error('MAKA_CLOUD_DATA_DIR is not set: a live run is booked to the server there.');
+  }
+  const accountInvite = env.MAKA_EVALS_INVITE_ID?.trim();
+  if (!accountInvite) {
+    throw new Error('MAKA_EVALS_INVITE_ID is not set: a live run is booked to that invite.');
+  }
+  const serverConfig = readStackConfig({ ...env }, { sandboxes: 'single-machine' });
+  if (resolve(serverConfig.gatewaySpendPath) === resolve(config.gatewaySpendPath)) {
+    throw new Error('the experiment directory is the server data directory');
+  }
   for (const vendor of vendors) {
     if (!env[VENDOR_KEYS[vendor]]?.trim()) {
       throw new Error(`${VENDOR_KEYS[vendor]} is not set, and a subject of this spec needs it.`);
@@ -134,27 +154,34 @@ export async function createLiveDeps(
   const datasetPath = join(dataDir, 'swe-bench-verified.jsonl');
   const dataset = await SweBenchDataset.read(datasetPath);
 
+  const ledger = openServerLedger(serverConfig);
+  if (!ledger.hasInvite(accountInvite)) {
+    ledger.close();
+    throw new Error(`MAKA_EVALS_INVITE_ID is not an active invite of the server: ${accountInvite}`);
+  }
   await mkdir(options.stateDir, { recursive: true });
+  const warn = options.onWarning ?? (() => undefined);
   const journal = new SqliteSpendJournal(config.gatewaySpendPath);
   let gateway: Awaited<ReturnType<typeof startGateway>>;
   try {
     gateway = await startGateway(
       config.gateway,
       env,
-      options.onWarning ?? (() => undefined),
+      warn,
       gatewayPrices(config.gateway.models, []),
       journal,
+      ledger.accounts,
+      (event) => warn('A spending limit stopped the benchmark', event.cap),
     );
   } catch (error) {
     journal.close();
+    ledger.close();
     throw error;
   }
   let closing: Promise<void> | undefined;
   try {
-    // This gateway has no invites and no account ledger: the benchmark is limited by its own
-    // budget and journal, so every task is "owned" by the benchmark.
     const modelAccess = gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, () => ({
-      inviteId: 'evals',
+      inviteId: accountInvite,
     }));
     const cloud = (options.createRunners ?? ((o) => createCloudRunnersFromEnv(env, o)))({
       modelAccess,
@@ -175,6 +202,7 @@ export async function createLiveDeps(
         closing ??= (async () => {
           await gateway.close();
           journal.close();
+          ledger.close();
         })();
         return closing;
       },
@@ -182,6 +210,7 @@ export async function createLiveDeps(
   } catch (error) {
     await gateway.close();
     journal.close();
+    ledger.close();
     throw error;
   }
 }
