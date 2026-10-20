@@ -155,6 +155,11 @@ export interface CloudServerOptions {
      * with nothing in between.
      */
     authorized(caller: string, conversationId: string): boolean;
+    /**
+     * The invite that owns the conversation a task belongs to, or undefined when the task is
+     * unknown or its conversation has no owner (a pre-v5 one nobody adopted). Never a guess.
+     */
+    ownerOfTask(taskId: string): string | undefined;
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
@@ -269,6 +274,12 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             return sessionId === undefined ? undefined : accessFor(sessionId);
           },
           authorized,
+          ownerOfTask: (taskId) => {
+            const sessionId = orchestrator.rootSessionOfTask(taskId);
+            const conversationId =
+              sessionId === undefined ? undefined : conversations.conversationOf(sessionId);
+            return conversationId === undefined ? undefined : conversations.ownerOf(conversationId);
+          },
         })
       : options.handler;
     const ownHandler = handler;

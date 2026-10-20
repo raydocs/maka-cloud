@@ -43,7 +43,10 @@ export interface CloudRunnersOptions {
    * refuses to start otherwise. Default `/dev/shm/maka-logs`.
    */
   logRoot?: string;
-  /** Which tenant a task belongs to. Default: the single tenant. */
+  /**
+   * Which tenant a task belongs to. Default: the single tenant. It throws for a task it cannot
+   * place, and that task fails to start without a machine being asked for.
+   */
   tenantOf?: (taskId: TaskId) => string;
   /** Maps the orchestrator's MCP URL to one the sandbox can reach. Default: unchanged. */
   mcpUrlForSandbox?: (url: string) => string;

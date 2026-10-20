@@ -57,6 +57,7 @@ export interface SandboxLease {
  * Where a task runs. A machine is never shared across tenants: the provider decides the
  * machine from `tenantId`. Tasks of one tenant share it, each in its own directory and all
  * as the same sandbox user, so one tenant's tasks can read each other's process environment.
+ * The product's tenant is the invite that owns the task, so invites never share a machine.
  */
 export interface SandboxProvider {
   acquire(input: { tenantId: string; taskId: TaskId }): Promise<SandboxLease>;

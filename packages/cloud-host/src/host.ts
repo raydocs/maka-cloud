@@ -33,7 +33,12 @@ export interface CloudOptions
    * Called with the restored orchestrator and the new conductor before the server listens, so no
    * task or tool call can reach what it sets up first.
    */
-  onReady?(parts: { orchestrator: Orchestrator; conductor: Conductor }): void;
+  onReady?(parts: {
+    orchestrator: Orchestrator;
+    conductor: Conductor;
+    /** The invite that owns a task's conversation; undefined for an unknown task or an unowned conversation. */
+    ownerOfTask(taskId: string): string | undefined;
+  }): void;
   /**
    * Starts the supervisor with the server's in-process parts and the conductor, after the
    * conductor exists and before the server listens; it stops before the conductor closes.
@@ -76,7 +81,13 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
           },
         }
       : {}),
-    createHandler: async ({ publisher, orchestrator, conductorAccess, authorized }) => {
+    createHandler: async ({
+      publisher,
+      orchestrator,
+      conductorAccess,
+      authorized,
+      ownerOfTask,
+    }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
         ...conductorOptions,
@@ -89,7 +100,7 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
         onWarning: warn,
       });
       conductor = created;
-      onReady?.({ orchestrator, conductor: created });
+      onReady?.({ orchestrator, conductor: created, ownerOfTask });
       return {
         onUserMessage: (message, access) => created.onUserMessage(message, access),
         onAnswer: (answer, access) => created.onAnswer(answer, access),

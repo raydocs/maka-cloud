@@ -82,8 +82,9 @@ export function createCloudRunners(options: CloudRunnersOptions): CloudRunners {
 }
 
 /**
- * Reads `INSTABOX_API_KEY` and `INSTABOX_MACHINE_ID` (optionally `INSTABOX_API_URL`). Model access
- * is `overrides.modelAccess`: without it every run fails to start.
+ * Reads `INSTABOX_API_KEY` (optionally `INSTABOX_API_URL`) and, unless `overrides.sandboxes` says
+ * where tasks run, `INSTABOX_MACHINE_ID`. Model access is `overrides.modelAccess`: without it every
+ * run fails to start.
  */
 export function createCloudRunnersFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -92,13 +93,14 @@ export function createCloudRunnersFromEnv(
   const apiKey = env.INSTABOX_API_KEY;
   const machineId = env.INSTABOX_MACHINE_ID;
   if (!apiKey) throw new Error('INSTABOX_API_KEY is not set.');
-  if (!machineId) throw new Error('INSTABOX_MACHINE_ID is not set.');
+  if (!machineId && !overrides.sandboxes) throw new Error('INSTABOX_MACHINE_ID is not set.');
   return createCloudRunners({
     client: new InstaboxClient({
       apiKey,
       baseUrl: env.INSTABOX_API_URL ?? DEFAULT_INSTABOX_BASE_URL,
     }),
-    sandboxes: new FixedMachineProvider(machineId),
+    // Without an INSTABOX_MACHINE_ID the caller's provider is the only one; never an empty fixed one.
+    sandboxes: overrides.sandboxes ?? new FixedMachineProvider(machineId as string),
     ...overrides,
   });
 }

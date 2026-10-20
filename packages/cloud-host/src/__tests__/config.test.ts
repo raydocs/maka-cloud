@@ -10,7 +10,7 @@ const ENV = {
   MAKA_CLOUD_DATA_DIR: '/srv/maka',
   ANTHROPIC_API_KEY: 'sk-secret-anthropic',
   INSTABOX_API_KEY: 'ibx-secret-instabox',
-  INSTABOX_MACHINE_ID: 'mch_1',
+  MAKA_CLOUD_SANDBOXES: JSON.stringify({ inv_000000000001: 'mch_1' }),
 };
 
 function problemsOf(env: NodeJS.ProcessEnv): readonly string[] {
@@ -34,7 +34,8 @@ test('the minimal environment gives the data layout and the defaults', () => {
   assert.equal(config.port, 8080);
   assert.deepEqual(config.mcp, { host: '127.0.0.1', port: 8081 });
   assert.deepEqual(config.conductor, {});
-  assert.deepEqual(config.instabox, { machineId: 'mch_1' });
+  assert.deepEqual(config.instabox, {});
+  assert.deepEqual(config.sandboxes, { inv_000000000001: 'mch_1' });
   assert.equal(config.openAiKeySet, false);
   assert.equal(config.searchKeySet, false);
   assert.match(config.githubTokenProblem ?? '', /MAKA_GITHUB_TOKEN is not set/);
@@ -81,7 +82,7 @@ test('optional settings are read', () => {
   });
   assert.deepEqual(config.conductor, { connectionId: 'conn-prod' });
   assert.equal(config.gateway.anthropicBaseUrl, 'https://gateway.example.test');
-  assert.deepEqual(config.instabox, { machineId: 'mch_1', apiUrl: 'https://sandbox.example.test' });
+  assert.deepEqual(config.instabox, { apiUrl: 'https://sandbox.example.test' });
   assert.equal(config.openAiKeySet, true);
 });
 
@@ -107,7 +108,7 @@ test('every missing required variable is reported at once', () => {
     'MAKA_CLOUD_DATA_DIR is not set',
     'ANTHROPIC_API_KEY is not set',
     'INSTABOX_API_KEY is not set',
-    'INSTABOX_MACHINE_ID is not set',
+    'MAKA_CLOUD_SANDBOXES is not set',
   ]);
 });
 
@@ -214,7 +215,7 @@ test('a missing variable or an unknown command exits with 2 and says why', async
     const failed = error as { code: number; stderr: string };
     assert.equal(failed.code, 2);
     assert.match(failed.stderr, /MAKA_CLOUD_DATA_DIR is not set/);
-    assert.match(failed.stderr, /INSTABOX_MACHINE_ID is not set/);
+    assert.match(failed.stderr, /MAKA_CLOUD_SANDBOXES is not set/);
     return true;
   });
   await assert.rejects(run(process.execPath, [CLI, 'serve'], { env: ENV }), (error: unknown) => {
@@ -251,4 +252,50 @@ test('the usage text lists the Web Push variables, and the summary never prints 
   assert.match(lines, /Web Push:\s+on/);
   assert.ok(!lines.includes('sk-secret-vapid-private'));
   assert.ok(!lines.includes('public-key-value'));
+});
+
+test('each invite gets its own machine: a shared, empty, malformed or legacy setting is refused', () => {
+  const sandboxes = (value: unknown): readonly string[] =>
+    problemsOf({ ...ENV, MAKA_CLOUD_SANDBOXES: JSON.stringify(value) });
+  assert.deepEqual(
+    readStackConfig({
+      ...ENV,
+      MAKA_CLOUD_SANDBOXES: JSON.stringify({ inv_aaaaaaaaaaaa: 'm_a', inv_bbbbbbbbbbbb: 'm_b' }),
+    }).sandboxes,
+    { inv_aaaaaaaaaaaa: 'm_a', inv_bbbbbbbbbbbb: 'm_b' },
+  );
+  assert.deepEqual(sandboxes({ inv_aaaaaaaaaaaa: 'm_a', inv_bbbbbbbbbbbb: 'm_a' }), [
+    'MAKA_CLOUD_SANDBOXES: inv_bbbbbbbbbbbb and inv_aaaaaaaaaaaa share a machine',
+  ]);
+  assert.deepEqual(sandboxes({}), ['MAKA_CLOUD_SANDBOXES has no entry']);
+  assert.deepEqual(sandboxes([]), ['MAKA_CLOUD_SANDBOXES must be a JSON object']);
+  assert.deepEqual(sandboxes({ default: 'm_a' }), [
+    'MAKA_CLOUD_SANDBOXES: a key is not an invite id (inv_ and 12 hex digits)',
+  ]);
+  assert.deepEqual(sandboxes({ inv_aaaaaaaaaaaa: '' }), [
+    'MAKA_CLOUD_SANDBOXES: the machine of inv_aaaaaaaaaaaa is not a machine id',
+  ]);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_SANDBOXES: '{' }), [
+    'MAKA_CLOUD_SANDBOXES is not JSON',
+  ]);
+  // The old single-machine variable would put every invite on one machine: it stops the start.
+  assert.match(
+    problemsOf({ ...ENV, INSTABOX_MACHINE_ID: 'mch_1' }).join('\n'),
+    /INSTABOX_MACHINE_ID is no longer used/,
+  );
+});
+
+test('a caller with no invites reads the single-machine setting instead', () => {
+  const { MAKA_CLOUD_SANDBOXES: _sandboxes, ...base } = ENV;
+  assert.deepEqual(problemsOf(base), ['MAKA_CLOUD_SANDBOXES is not set']);
+  const config = readStackConfig(
+    { ...base, INSTABOX_MACHINE_ID: 'mch_1' },
+    { sandboxes: 'single-machine' },
+  );
+  assert.deepEqual(config.sandboxes, {});
+  assert.throws(
+    () => readStackConfig(base, { sandboxes: 'single-machine' }),
+    (error: unknown) =>
+      error instanceof ConfigError && error.problems.includes('INSTABOX_MACHINE_ID is not set'),
+  );
 });

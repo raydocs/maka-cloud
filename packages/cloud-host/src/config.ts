@@ -33,9 +33,14 @@ export interface StackConfig {
     connectionId?: string;
   };
   instabox: {
-    machineId: string;
     apiUrl?: string;
   };
+  /**
+   * The sandbox machine of each invite, by invite id. A task runs only on its invite's machine, so
+   * invites never share a machine, a Unix user or a process table. An invite with no entry cannot
+   * run tasks.
+   */
+  sandboxes: Record<string, string>;
   /** The model gateway sandbox runs reach the vendors through. It reads the vendor keys itself. */
   gateway: {
     host: string;
@@ -87,7 +92,10 @@ export const ENV_VARIABLES = [
   ['ANTHROPIC_BASE_URL', 'Messages API base URL, for the conductor and the model gateway'],
   ['MAKA_CLOUD_LLM_CONNECTION_ID', 'stable id of the conductor’s model connection'],
   ['INSTABOX_API_KEY', 'required: sandbox API key'],
-  ['INSTABOX_MACHINE_ID', 'required: the sandbox machine tasks run in'],
+  [
+    'MAKA_CLOUD_SANDBOXES',
+    'required: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks',
+  ],
   ['INSTABOX_API_URL', 'sandbox API base URL'],
   ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
   ['OPENAI_BASE_URL', 'Responses API base URL for the model gateway'],
@@ -125,7 +133,19 @@ export const ENV_VARIABLES = [
   ],
 ] as const;
 
-export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
+export interface ReadStackConfigOptions {
+  /**
+   * Where tasks run. `per-invite` (default, the product) needs `MAKA_CLOUD_SANDBOXES` and refuses
+   * `INSTABOX_MACHINE_ID`. `single-machine` is for a caller with no invites, such as the benchmark
+   * harness: it needs `INSTABOX_MACHINE_ID`, and `sandboxes` stays empty.
+   */
+  sandboxes?: 'per-invite' | 'single-machine';
+}
+
+export function readStackConfig(
+  env: NodeJS.ProcessEnv,
+  options: ReadStackConfigOptions = {},
+): StackConfig {
   const problems: string[] = [];
   const value = (name: string): string | undefined => {
     const raw = env[name]?.trim();
@@ -185,7 +205,8 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
       port: port('MAKA_CLOUD_MCP_PORT', 8081),
     },
     conductor: {},
-    instabox: { machineId: '' },
+    instabox: {},
+    sandboxes: {},
     gateway: {
       host: value('MAKA_CLOUD_GATEWAY_HOST') ?? '127.0.0.1',
       port: port('MAKA_CLOUD_GATEWAY_PORT', 8082),
@@ -226,7 +247,16 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
   const connectionId = value('MAKA_CLOUD_LLM_CONNECTION_ID');
   if (connectionId !== undefined) config.conductor.connectionId = connectionId;
   required('INSTABOX_API_KEY');
-  config.instabox.machineId = required('INSTABOX_MACHINE_ID');
+  if (options.sandboxes === 'single-machine') {
+    required('INSTABOX_MACHINE_ID');
+  } else {
+    if (value('INSTABOX_MACHINE_ID') !== undefined) {
+      problems.push(
+        'INSTABOX_MACHINE_ID is no longer used: one machine for every invite lets invites read each other, set MAKA_CLOUD_SANDBOXES',
+      );
+    }
+    config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
+  }
   const apiUrl = url('INSTABOX_API_URL');
   if (apiUrl !== undefined) config.instabox.apiUrl = apiUrl;
   if (config.port === config.mcp.port && config.host === config.mcp.host) {
@@ -246,6 +276,47 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
 
 function isLoopback(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/u.test(hostname);
+}
+
+const INVITE_ID = /^inv_[0-9a-f]{12}$/u;
+const MACHINE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+
+/** `{"<inviteId>": "<machine>"}`, at least one entry, and no machine used by two invites. */
+function sandboxTable(raw: string | undefined, problems: string[]): Record<string, string> {
+  if (raw === undefined) {
+    problems.push('MAKA_CLOUD_SANDBOXES is not set');
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    problems.push('MAKA_CLOUD_SANDBOXES is not JSON');
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    problems.push('MAKA_CLOUD_SANDBOXES must be a JSON object');
+    return {};
+  }
+  const table: Record<string, string> = {};
+  const owners = new Map<string, string>();
+  const entries = Object.entries(parsed);
+  if (entries.length === 0) problems.push('MAKA_CLOUD_SANDBOXES has no entry');
+  for (const [inviteId, machineId] of entries) {
+    if (!INVITE_ID.test(inviteId)) {
+      problems.push('MAKA_CLOUD_SANDBOXES: a key is not an invite id (inv_ and 12 hex digits)');
+    } else if (typeof machineId !== 'string' || !MACHINE_ID.test(machineId)) {
+      problems.push(`MAKA_CLOUD_SANDBOXES: the machine of ${inviteId} is not a machine id`);
+    } else if (owners.has(machineId)) {
+      problems.push(
+        `MAKA_CLOUD_SANDBOXES: ${inviteId} and ${owners.get(machineId)} share a machine`,
+      );
+    } else {
+      owners.set(machineId, inviteId);
+      table[inviteId] = machineId;
+    }
+  }
+  return table;
 }
 
 function gatewayModels(raw: string | undefined, problems: string[]): ModelPrice[] {
@@ -282,7 +353,7 @@ export function describeConfig(config: StackConfig): string[] {
     `MCP URL for tasks:   ${config.mcp.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `model API base URL:  ${config.gateway.anthropicBaseUrl ?? '(default)'}`,
     `model connection id: ${config.conductor.connectionId ?? '(default)'}`,
-    `sandbox machine:     ${config.instabox.machineId}`,
+    `sandbox machines:    ${Object.keys(config.sandboxes).length} (one per invite)`,
     `sandbox API URL:     ${config.instabox.apiUrl ?? '(default)'}`,
     `Codex runner key:    ${config.openAiKeySet ? 'set' : 'not set (Codex tasks will fail)'}`,
     `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
