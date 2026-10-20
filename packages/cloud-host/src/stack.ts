@@ -231,7 +231,8 @@ export async function startStack(
             dbPath: config.supervisorDbPath,
             config: config.inbox,
             gateway: gateway.gateway,
-            summaryBudget: journal.dailyLimit('digest summary', SUMMARY_DAILY_CAP_USD),
+            summaryBudget: (owner) =>
+              journal.dailyLimit(`digest summary ${owner}`, SUMMARY_DAILY_CAP_USD),
             accountOf: (conversationId) => {
               const inviteId = ownerOfConversation?.(conversationId);
               return inviteId === undefined ? undefined : { inviteId };

@@ -221,22 +221,27 @@ export function createGatewayVerifierModel(
 /** The digest summary's daily limit. */
 export const SUMMARY_DAILY_CAP_USD = 0.5;
 
-/** The digest summary through the model gateway, charged to `budget`. */
+/**
+ * The digest summary through the model gateway. A digest is one owner's, so the call is that
+ * invite's spend: it counts against the invite's caps and the server's, and against the
+ * summary's daily limit of that invite (`budgetOf`). Items nobody owns get no model call.
+ */
 export function createGatewaySummaryModel(
   modelId: string,
   gateway: GatewayClients,
-  budget: BudgetPort,
+  budgetOf: (owner: string) => BudgetPort,
   deps: Pick<ModelDeps, 'generateText'> = {},
 ): SummaryModel {
   const generate = deps.generateText ?? (generateText as unknown as GenerateText);
   return {
-    async summarize(input, signal) {
-      // The summary belongs to no invite: it counts against the server's cap only.
+    async summarize(input, signal, owner) {
+      if (owner === undefined)
+        throw new Error('The digest has no owning invite, so no model access');
       const client = gateway.inProcess({
         vendor: 'anthropic',
         subject: 'digest summary',
-        budget,
-        account: 'server',
+        budget: budgetOf(owner),
+        account: { inviteId: owner },
       });
       let result: Awaited<ReturnType<GenerateText>>;
       try {

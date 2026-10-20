@@ -37,10 +37,10 @@ export interface InboxSetup {
    */
   gateway?: Gateway;
   /**
-   * The digest summary's limit of `SUMMARY_DAILY_CAP_USD` per day, kept where a restart reads it
-   * back. Without it the inbox does not build the summary model.
+   * The digest summary's limit of `SUMMARY_DAILY_CAP_USD` per day for an invite, kept where a
+   * restart reads it back. Without it the inbox does not build the summary model.
    */
-  summaryBudget?: BudgetPort;
+  summaryBudget?: (owner: string) => BudgetPort;
   /**
    * Whose caps a check's spend counts against: the invite that owns the checked task's
    * conversation. Without it the inbox builds no check model.
@@ -75,6 +75,11 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     notifier: conductorNotifier(conductor),
     answers: parts.answers,
     messages: parts.messages,
+    // A digest is built per owner, so each owner pays for the summary of their own items.
+    ownerOf: (conversationId) => {
+      const account = setup.accountOf?.(conversationId);
+      return account === undefined || account === 'server' ? undefined : account.inviteId;
+    },
     onWarning: parts.onWarning,
   };
   const gateway = setup.gateway;
@@ -90,11 +95,11 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     throw new Error('The digest summary needs a daily limit that survives a restart.');
   }
   if (
-    override.models === undefined &&
-    setup.config.verifierModels.length > 0 &&
-    setup.accountOf === undefined
+    setup.accountOf === undefined &&
+    ((override.models === undefined && setup.config.verifierModels.length > 0) ||
+      override.summary === undefined)
   ) {
-    throw new Error('The checks need to know whose spend they are.');
+    throw new Error('The checks and the digest summary need to know whose spend they are.');
   }
   const accountOf = setup.accountOf ?? (() => undefined);
   const models =
@@ -107,7 +112,7 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     createGatewaySummaryModel(
       setup.config.summaryModel,
       gateway as Gateway,
-      setup.summaryBudget as BudgetPort,
+      setup.summaryBudget as (owner: string) => BudgetPort,
       override.modelDeps,
     );
   const supervisor = await Supervisor.start({
