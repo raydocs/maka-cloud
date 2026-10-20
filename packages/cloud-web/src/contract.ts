@@ -9,6 +9,11 @@ export interface Conversation {
   createdAt: number;
 }
 
+export interface MemoryProfile {
+  facts: { id: string; text: string }[];
+  summaries: { id: string; conversationId: string; text: string }[];
+}
+
 export interface Manifest {
   summary: string;
   done: string[];

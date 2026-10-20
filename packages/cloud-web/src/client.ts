@@ -8,6 +8,7 @@ import {
   type FeedEvent,
   type InboxAnswerRequest,
   type InboxAnswerResult,
+  type MemoryProfile,
   type TaskControl,
   type TaskView,
 } from './contract';
@@ -136,6 +137,21 @@ export class CloudClient {
 
   listConversations() {
     return this.request<{ conversations: Conversation[] }>(routes.conversations);
+  }
+  memory() {
+    return this.request<MemoryProfile>('/v1/memory');
+  }
+  addFact(text: string) {
+    return this.request('/v1/memory/facts', { method: 'POST', body: JSON.stringify({ text }) });
+  }
+  editFact(id: string, text: string) {
+    return this.request(`/v1/memory/facts/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ text }),
+    });
+  }
+  deleteFact(id: string) {
+    return this.request(`/v1/memory/facts/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
   createConversation() {
     return this.request<{ conversationId: string }>(routes.conversations, {

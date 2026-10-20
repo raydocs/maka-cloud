@@ -12,6 +12,7 @@ import {
   type TaskView,
 } from './contract';
 import { InboxPanel } from './Inbox';
+import { MemoryPanel } from './Memory';
 import { displayText, dollars, publicLink } from './presentation';
 import { disablePush, enablePush } from './push';
 import {
@@ -32,6 +33,9 @@ const ERROR_TEXT: Record<string, string> = {
   unknown_option: 'That answer is not one of the options.',
   text_too_long: 'The additional context is too long.',
   artifact_too_large: 'This result is too large to show here.',
+  forgotten_fact: 'That fact was forgotten and cannot be saved again.',
+  invalid_fact: 'Enter a fact between 1 and 500 characters.',
+  fact_limit: 'You can save up to 50 facts. Delete one before adding another.',
   stale: 'This changed while you were looking. It has been refreshed; check it before you answer.',
   already_answered: 'This was already answered.',
   question_open:
@@ -837,6 +841,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           onClick={() => setChosen('')}
         />
       </nav>
+      <MemoryPanel client={session.client} errorText={errorText} />
       {error && (
         <p className="error" role="alert">
           {error}

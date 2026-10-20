@@ -27,8 +27,11 @@ export interface CloudOptions
   extends Omit<CloudServerOptions, 'handler' | 'createHandler' | 'supervisor'> {
   /** The conductor's own storage: its database and Maka's sessions. One process owns it. */
   conductorRoot: string;
-  /** Passed to the conductor; `root`, `outbox` and `orchestratorAccess` are set here. */
-  conductor: Omit<ConductorOptions, 'root' | 'outbox' | 'orchestratorAccess' | 'onWarning'>;
+  /** Storage, output, memory and orchestrator access are composed here. */
+  conductor: Omit<
+    ConductorOptions,
+    'root' | 'outbox' | 'orchestratorAccess' | 'onWarning' | 'turnContext'
+  >;
   /**
    * Called with the restored orchestrator and the new conductor before the server listens, so no
    * task or tool call can reach what it sets up first.
@@ -87,12 +90,14 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
       conductorAccess,
       authorized,
       ownerOfTask,
+      memory,
     }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
         ...conductorOptions,
         root: conductorRoot,
-        outbox: new ServerOutbox(publisher, warn),
+        outbox: new ServerOutbox(publisher, warn, memory.remember),
+        turnContext: memory.context,
         orchestratorAccess: conductorAccess,
         // An approved irreversible call runs only while its approver's invite is active and owns the conversation.
         approverAuthorized: (approvedBy, conversationId) =>

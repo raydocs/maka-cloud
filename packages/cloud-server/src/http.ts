@@ -1,6 +1,7 @@
 import { once } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
+import { MemoryError, type MemoryStore } from '@maka-cloud/memory';
 import {
   KeyedCounter,
   type Orchestrator,
@@ -104,6 +105,7 @@ const ANSWER_STATUS: Record<Extract<AnswerOutcome, { accepted: false }>['reason'
 
 export interface PublicApiDeps {
   db: DatabaseSync;
+  memory: MemoryStore;
   invites: InviteStore;
   conversations: ConversationStore;
   tasks: SqliteTaskStore;
@@ -246,6 +248,10 @@ export class PublicApi {
         respond(res, error.status, { error: error.code }, error.headers);
         return;
       }
+      if (error instanceof MemoryError) {
+        respond(res, error.code === 'invalid_fact' ? 400 : 409, { error: error.code });
+        return;
+      }
       respond(res, 500, { error: 'internal_error' });
     }
   }
@@ -300,6 +306,40 @@ export class PublicApi {
   ): Promise<void> {
     const path = url.pathname;
     const method = req.method ?? 'GET';
+    if (path === '/v1/memory' && method === 'GET') {
+      return respond(res, 200, this.deps.memory.profile(invite.inviteId));
+    }
+    const fact = /^\/v1\/memory\/facts(?:\/([^/]+))?$/u.exec(path);
+    if (fact) {
+      const id = fact[1];
+      if (id !== undefined && !this.deps.memory.fact(invite.inviteId, id)) {
+        throw new HttpError(404, 'not_found');
+      }
+      if (id !== undefined && method === 'GET') {
+        return respond(res, 200, this.deps.memory.fact(invite.inviteId, id));
+      }
+      if (id !== undefined && method === 'DELETE') {
+        await discard(req);
+        this.reauthenticate(invite);
+        this.deps.memory.delete(invite.inviteId, id);
+        return respond(res, 204, undefined);
+      }
+      if ((id === undefined && method === 'POST') || (id !== undefined && method === 'PATCH')) {
+        const body = z
+          .object({ text: z.string() })
+          .strict()
+          .safeParse(await readJson(req, false));
+        if (!body.success) throw new HttpError(400, 'invalid_request');
+        this.reauthenticate(invite);
+        const saved =
+          id === undefined
+            ? this.deps.memory.add(invite.inviteId, body.data.text)
+            : this.deps.memory.edit(invite.inviteId, id, body.data.text);
+        if (!saved) throw new HttpError(404, 'not_found');
+        return respond(res, id === undefined ? 201 : 200, saved);
+      }
+      throw new HttpError(405, 'method_not_allowed');
+    }
     if (path === '/v1/conversations') {
       if (method === 'POST') return this.createConversation(req, res, invite);
       if (method === 'GET') {
