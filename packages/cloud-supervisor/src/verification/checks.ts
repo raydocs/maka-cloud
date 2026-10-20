@@ -398,7 +398,8 @@ export async function prepareResearch(input: {
   const delivery = await deliveredRenderings(read);
   unverified.push(...delivery.problems);
   unavailable.push(...delivery.unavailable);
-  if (delivery.delivered.size > 0 && unverified.length === 0 && unavailable.length === 0) {
+  // Always read, with or without renderings: a pass rests on a record that was read and validated.
+  if (unverified.length === 0 && unavailable.length === 0) {
     const exported = await read('verification.json');
     if (!exported.ok && exported.reason === 'unavailable') {
       unavailable.push({ reason: 'verification.json could not be read', transient: true });
