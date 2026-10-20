@@ -60,9 +60,9 @@ export class SqliteSpendJournal implements SpendJournal {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`
+      PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
-      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS holds (
         key TEXT PRIMARY KEY,
         epoch TEXT NOT NULL,
