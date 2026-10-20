@@ -437,6 +437,14 @@ default), T26.
 - Tests with a fake instabox desktop and PTY and a fake CLI that records
   actions: no agent action while the user holds control, resume continues the
   same session, and isolation and revoke on the real host wiring.
+- The sandbox provider stays instabox. Before writing the adapter, read Cua
+  (github.com/trycua/cua) and borrow what fits: the cua-driver desktop layer
+  (screen, input and terminal for an agent, MCP and SDKs) and the Cua Spaces
+  handoff model, where the human and the agent share one desktop with
+  separate cursors, the human steps in and hands back. Prefer that model if
+  it maps onto instabox's desktop; otherwise keep pause and resume. Check the
+  licence of each piece before copying or depending on it: the libraries are
+  MIT, the Spaces app is FSL-1.1-MIT. Say in the PR what was borrowed.
 
 ---
 
