@@ -346,7 +346,8 @@ export class Conductor {
    * Stops every open run, in every conversation, the way a user's stop does: its turn, queued
    * inputs and tasks (cancelled through the orchestrator), and tells the user why. For the
    * operator's pause switch. A conversation the orchestrator gives no access to has its tasks
-   * marked as owed a cancel, which is retried when it next has access. Returns how many runs it stopped.
+   * marked as owed a cancel, which is retried when it next has access. Cancels still owed from an
+   * earlier stop are retried too, whether or not any run is open. Returns how many runs it stopped.
    */
   async stopAll(reason: string, notice: string): Promise<number> {
     if (this.closing.signal.aborted) return 0;
@@ -363,6 +364,13 @@ export class Conductor {
         stopped += 1;
         this.sendOutbox(run.conversationId);
       }
+    }
+    // A stop that could not reach the orchestrator left its tasks running and its runs closed, so
+    // the scan above never sees them again: every call asks for what is still owed.
+    for (const conversationId of this.state.conversationsWithPendingCancels()) {
+      const access = this.orchestratorAccess?.(conversationId);
+      // Taking the access queues the retry.
+      if (access) this.lane(conversationId, access);
     }
     return stopped;
   }
@@ -815,6 +823,7 @@ export class Conductor {
     link: OrchestratorLink,
   ): Promise<void> {
     this.state.markCancelPending(delegations.map((delegation) => delegation.key));
+    const failed = new Set<string>();
     for (const delegation of delegations) {
       const target =
         delegation.taskId === null
@@ -824,12 +833,23 @@ export class Conductor {
         const result = await link.call('task_cancel', target);
         if (result.isError) {
           this.warn(`Cancelling delegation ${delegation.key} failed`, result.text);
+          failed.add(delegation.conversationId);
           continue;
         }
         this.settleView(delegation, result.structured);
       } catch (error) {
         this.warn(`Cancelling delegation ${delegation.key} failed`, error);
+        failed.add(delegation.conversationId);
       }
+    }
+    // The delegation stays owed and reserved; ask again after a while, with nobody having to call.
+    for (const conversationId of failed) this.checkStopLater(conversationId);
+    // Nothing owed any more: the check that was waiting for it has nothing to ask.
+    for (const conversationId of new Set(delegations.map((d) => d.conversationId))) {
+      if (this.state.hasPendingCancels(conversationId)) continue;
+      const timer = this.stopChecks.get(conversationId);
+      if (timer) clearTimeout(timer);
+      this.stopChecks.delete(conversationId);
     }
   }
 

@@ -676,3 +676,84 @@ test('stopAll after a restart that gives no orchestrator access still ends the w
   assert.equal(reopened.state.runsInState('cancelled')[0]?.endReason, 'paused');
   assertReleased(reopened);
 });
+
+test('a cancel that fails after a pause is retried by the next stopAll, with no open run left, and its reservation is held until the stop is confirmed', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { orchestratorAccess: (conversationId) => h.access(conversationId) },
+  });
+  const cancel = h.orchestrator.cancel.bind(h.orchestrator);
+  let failing = true;
+  let attempts = 0;
+  h.orchestrator.cancel = async (...args) => {
+    attempts += 1;
+    if (failing) throw new Error('orchestrator unavailable');
+    return cancel(...args);
+  };
+  const started = onRunStart(h);
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_a', 'Go.');
+  await started;
+  await held.started;
+
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 1);
+  await h.conductor.idle();
+  held.release();
+  assert.equal(attempts, 1);
+  assert.equal(h.orchestrator.stats().activeTasks, 1, 'the failed cancel left the task running');
+  assert.equal(h.conductor.state.runsInState('cancelled').length, 1, 'the run itself is over');
+  const [owed] = h.conductor.state.unsettledDelegations();
+  assert.ok(owed?.cancelPending, 'the cancel is owed, so the reservation is still held');
+
+  // The connection comes back. Nothing is open, but the pause watcher keeps calling stopAll.
+  failing = false;
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 0, 'no run is stopped again');
+  await h.conductor.idle();
+  assert.ok(attempts >= 2, 'the owed cancel was tried again');
+  await assertNoTasks(h);
+  assert.deepEqual(
+    h.conductor.state.unsettledDelegations(),
+    [],
+    'settled once the stop is confirmed',
+  );
+  assertReleased(h.conductor);
+});
+
+test('a cancel that fails after a user stop is retried on a timer, without any further call', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: {
+      orchestratorAccess: (conversationId) => h.access(conversationId),
+      limits: { stopCheckMs: 5 },
+    },
+  });
+  const cancel = h.orchestrator.cancel.bind(h.orchestrator);
+  let failures = 0;
+  const retried = gate();
+  h.orchestrator.cancel = async (...args) => {
+    if (failures < 2) {
+      failures += 1;
+      throw new Error('orchestrator unavailable');
+    }
+    const view = await cancel(...args);
+    retried.open();
+    return view;
+  };
+  const started = onRunStart(h);
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_a', 'Go.');
+  await started;
+  await held.started;
+  assert.equal(await h.conductor.stop('cnv_a'), true);
+  held.release();
+  await retried.promise;
+  await h.conductor.idle();
+  assert.equal(failures, 2, 'it kept trying until the orchestrator answered');
+  await assertNoTasks(h);
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+  assertReleased(h.conductor);
+});
