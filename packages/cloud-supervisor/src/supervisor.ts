@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { backup as sqliteBackup } from 'node:sqlite';
 import { openDatabase } from './db.js';
 import { buildDigest, type Digest } from './digest.js';
 import { signalOf } from './events.js';
 import type { Interrupt, SummaryModel, SupervisorHost } from './host.js';
-import { applySignal, type Reassessment, reassess, stallPass } from './rules.js';
+import { applySignal, capSpec, openItem, type Reassessment, reassess, stallPass } from './rules.js';
 import {
   dueDigestSlot,
   inQuietHours,
@@ -195,6 +196,11 @@ export class Supervisor {
     this.abort.abort();
     while (this.inflight.size > 0) await Promise.allSettled([...this.inflight]);
     this.store.db.close();
+  }
+
+  /** A consistent copy of the supervisor's database, which this process holds exclusively. */
+  async backupTo(destination: string): Promise<void> {
+    await sqliteBackup(this.store.db, destination);
   }
 
   /**
@@ -452,45 +458,92 @@ export class Supervisor {
     const at = this.now();
     const slot = dueDigestSlot(this.settings(), at);
     if (slot !== undefined) {
-      const digestId = `dig_${randomUUID().replaceAll('-', '')}`;
-      const claimed = this.store.tx(() => this.store.claimDigestSlot(digestId, slot, at));
-      if (claimed) await this.completeDigest(digestId, at);
+      // One digest for each owner who has items, and one for items nobody owns (always, so a
+      // day with nothing to say still says so). Each is claimed once per day on its own.
+      for (const owner of [undefined, ...this.digestOwners(at)]) {
+        const digestId = `dig_${randomUUID().replaceAll('-', '')}`;
+        const key = owner === undefined ? slot : `${slot}|${owner}`;
+        const claimed = this.store.tx(() => this.store.claimDigestSlot(digestId, key, at, owner));
+        if (claimed) await this.completeDigest(digestId, at, owner);
+        if (this.stopped) return;
+      }
     }
     // A slot claimed by a process that stopped before it finished.
-    for (const empty of this.store.emptySlots()) await this.completeDigest(empty.digestId, at);
+    for (const empty of this.store.emptySlots()) {
+      await this.completeDigest(empty.digestId, at, empty.owner);
+    }
   }
 
-  private async completeDigest(digestId: string, at: number): Promise<void> {
+  /** Who owns the items a digest would list, when the host knows owners. */
+  private digestOwners(at: number): string[] {
+    const ownerOf = this.host.ownerOf;
+    if (!ownerOf) return [];
+    // Whoever had anything open, or anything change in the last two days, gets a digest.
+    const since = at - 2 * 24 * 60 * 60 * 1000;
+    const owners = new Set<string>();
+    const items = [
+      ...this.store.listItems({ states: ['open', 'answering'], afterN: 0, limit: 500 }),
+      ...this.store.itemsClosedSince(since),
+      ...this.store.itemsCreatedSince(since),
+    ];
+    for (const item of items) {
+      const owner = ownerOf(item.conversationId);
+      if (owner !== undefined) owners.add(owner);
+    }
+    return [...owners].sort();
+  }
+
+  private async completeDigest(digestId: string, at: number, owner?: string): Promise<void> {
     if (this.stopped) return;
-    const digest = await this.compose(digestId, at);
+    const digest = await this.compose(digestId, at, owner);
     if (this.stopped) return;
     this.store.tx(() => this.store.setDigestBody(digestId, digest));
   }
 
-  private async compose(digestId: string, at: number): Promise<Digest> {
-    const since = this.store.lastDigestAt();
+  /**
+   * One owner's digest: only the items of conversations they own, summarized by a call that is
+   * theirs to pay for. With no owner it holds the items nobody owns, or every item when the host
+   * knows no owners.
+   */
+  private async compose(digestId: string, at: number, owner?: string): Promise<Digest> {
+    const since = this.store.lastDigestAt(owner);
+    const ownerOf = this.host.ownerOf;
+    const belongs = (item: ItemRecord): boolean =>
+      ownerOf === undefined ? owner === undefined : ownerOf(item.conversationId) === owner;
     return buildDigest({
       digestId,
       at,
       since,
-      active: this.store.listItems({ states: ['open', 'answering'], afterN: 0, limit: 500 }),
-      recent: this.store.itemsClosedSince(since).concat(this.store.itemsCreatedSince(since)),
-      ...(this.options.summary ? { model: this.options.summary } : {}),
+      active: this.store
+        .listItems({ states: ['open', 'answering'], afterN: 0, limit: 500 })
+        .filter(belongs),
+      recent: this.store
+        .itemsClosedSince(since)
+        .concat(this.store.itemsCreatedSince(since))
+        .filter(belongs),
+      // Items nobody owns have nobody to pay for a summary: they get the template.
+      ...(this.options.summary && (ownerOf === undefined || owner !== undefined)
+        ? { model: this.options.summary }
+        : {}),
+      ...(owner === undefined ? {} : { owner }),
       timeoutMs: this.options.summaryTimeoutMs ?? 20_000,
       signal: this.abort.signal,
       onWarning: (message, detail) => this.warn(message, detail),
     });
   }
 
-  /** Builds a digest now, for a request. It is stored and published like a scheduled one. */
-  async digest(): Promise<Digest> {
+  /**
+   * Builds a digest now, for a request: one owner's, or (without one) the items nobody owns. It is
+   * stored and published like a scheduled one.
+   */
+  async digest(owner?: string): Promise<Digest> {
     return this.track(
       (async () => {
         this.catchUp();
         const at = this.now();
         const digestId = `dig_${randomUUID().replaceAll('-', '')}`;
-        const digest = await this.compose(digestId, at);
-        this.store.tx(() => this.store.insertDigest(digestId, digest, at));
+        const digest = await this.compose(digestId, at, owner);
+        this.store.tx(() => this.store.insertDigest(digestId, digest, at, owner));
         await this.publishDirty();
         return digest;
       })(),
@@ -530,6 +583,23 @@ export class Supervisor {
       items: rows.map((row) => ({ ...toView(row, this.store.answerOfItem(row.itemId)), n: row.n })),
       next: rows.length === limit ? (rows.at(-1)?.n ?? null) : null,
     };
+  }
+
+  /**
+   * Raises a budget item for a spending limit that stopped work, which stays until the human
+   * acknowledges it. One open item per `key`: more hits on the same limit change nothing. Durable
+   * when this returns; the push and the stream follow from the supervisor's own pass.
+   */
+  raiseCapHit(input: { conversationId: string; taskId?: string; key: string; ask: string }): void {
+    if (this.stopped) return;
+    this.store.tx(() =>
+      openItem(
+        this.store,
+        capSpec(this.store, { ...input, taskId: input.taskId ?? null }),
+        this.now(),
+      ),
+    );
+    this.kick();
   }
 
   getItem(itemId: string): ItemView | undefined {

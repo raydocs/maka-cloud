@@ -38,7 +38,7 @@ not code. We combine the two:
   detail (plan, steps, diff, tests, review, cost); minimal and phone first.
 
 Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
-T26, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
+T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
 T23 and T24.
 
 Rules for all tasks:
@@ -377,8 +377,19 @@ proposals and T20 items).
 - Projects: the list, and per project its duties (on or off, authority,
   budget) and tasks. A task page shows the plan, steps, diff, test evidence,
   review verdict, cost and the PR link.
-- Look: minimal, generous whitespace, one accent colour, system font, light
-  and dark, phone first. Never show model or vendor names.
+- Look: flat and minimal like Hark, not Apple Liquid Glass. A calm
+  background (dark: a soft navy-to-slate gradient; light: off-white), opaque
+  or slightly translucent surfaces with no shadows, pill-shaped controls,
+  round icon buttons, thin line icons, a sans-serif system font with
+  hierarchy by weight, and one restrained accent colour. Generous whitespace,
+  phone first. Never show model or vendor names.
+- Density by page: Home and Chat are airy; a task page (diff, test output,
+  terminal) is dense and uses a monospace font for code, because that is
+  where a programmer reads.
+- Only floating chrome (the top navigation and the composer) may use a light
+  backdrop blur; no refraction or glass effects over code. Native Liquid
+  Glass waits for the iOS app (T18), which gets it from the system.
+- Light and dark themes both, dark by default; check contrast on both.
 - Tests: Playwright at desktop and phone width for Home, a project and a task
   page; a stale card refreshes instead of acting; one tap answers exactly
   once.
@@ -416,6 +427,96 @@ Depends on: T6, T8, T23.
   `merge-when-green`.
 - Tests with a fake instabox and a fake GitHub: idle pause, no pause while a
   task runs, resume on a message, the ship path, and the bounded CI fix loop.
+
+## T27: the user's own Claude and ChatGPT plans, on many boxes
+
+Depends on: T6, T21, T25, T26.
+
+Like Amp: the user links their own Claude and ChatGPT plans once in Settings,
+and from then on every coding task can run the real `claude` and `codex` CLIs
+on that plan, many tasks at once, each on its own instabox. That is the
+cheapest way for the user: model use is billed to plans they already pay
+for, and we pay only for boxes.
+
+- Connections in Settings, per invite: Claude plan, ChatGPT plan, and the
+  existing API-key path through the gateway. Each shows linked or not, when it
+  was linked, when it expires, and Unlink. The conductor, planner, verifier
+  and helpers keep using the gateway with its reservations; only the coding
+  runners use a linked plan.
+- Claude plan: the user runs `claude setup-token` on their own computer
+  (Anthropic's own sign-in) and pastes the one-year token, the way
+  Anthropic's devcontainer docs describe for a Codespaces secret. Store it
+  encrypted at rest per invite, never log it, never send it to the browser
+  again. Inject it as `CLAUDE_CODE_OAUTH_TOKEN` only into the `claude`
+  process's environment on that invite's boxes, never into a shell profile or
+  a file. The token has no refresh, so any number of boxes can use it at once.
+  Warn 30 days before it expires. Run the unmodified Claude Code binary.
+- ChatGPT plan: run Codex through the Codex app-server, not `codex exec`, in
+  host-token mode (`account/login/start` with `chatgptAuthTokens`). The
+  server is the only owner of the refresh token: it hands each box a
+  short-lived access token and answers `account/chatgptAuthTokens/refresh`
+  itself, with one refresh at a time per invite. The refresh token never
+  enters a box, so many boxes never race on a refresh (OpenAI's docs say one
+  `auth.json` per machine, never shared). The user links through the device
+  code flow (`codex login --device-auth`) run by the server, never by
+  pasting `auth.json`. When OpenAI approves us for "Sign in with ChatGPT",
+  replace the device flow with it.
+- The runner guards in `cloud-runners/src/vendors.ts` that refuse a
+  subscription login stay for the API-key path. The plan path is a separate,
+  explicit runner mode chosen per task from the invite's connections; a box
+  never holds both a plan credential and a gateway key for the same vendor.
+- Many boxes per invite: a pool of instabox machines per invite with a
+  maximum (default 3), one task per box, boxes from T26 that sleep when idle.
+  Boxes of different invites never share a machine, a credential or a
+  checkout. Box time is counted by T21 per invite.
+- Spend: plan use costs us nothing per token, so a plan task reserves box
+  time, not model money. When the plan says its usage limit is reached, the
+  task pauses and tells the user (with the reset time when the CLI gives
+  one); it falls back to the API-key path only if the user turned that on.
+- Unlink deletes the stored credential, stops injecting it, and tells the
+  user to also revoke it at claude.ai or ChatGPT. A 401 from either CLI marks
+  the connection broken and asks the user to link again; it never retries
+  with another invite's credential.
+- Internal beta only with the owner's own plans. Before other people link
+  plans: confirm the setup with Anthropic (their terms forbid platforms to
+  "collect, store, or intermediate" claude.ai credentials, while their
+  devcontainer docs show a stored setup token) and apply to OpenAI's "Sign in
+  with ChatGPT" partner programme. This is a launch gate, not a coding task.
+- Tests with fakes: the token reaches only the `claude` process of that
+  invite's box and never logs, files, events or the browser; concurrent boxes
+  share one Claude token; Codex boxes get access tokens only, and concurrent
+  401s cause one refresh; unlink stops new tasks at once; a usage-limit
+  message pauses the task; another invite's task never sees the credential;
+  the pool never exceeds its maximum.
+
+## T14b: live computer handoff on real runners
+
+Depends on: T14 (the web and server seam from PR #99, routes off by
+default), T26.
+
+- Give the active `RunHandle` of `SandboxCliRunner` (and the coding runner)
+  real pause and resume: the agent CLI stops taking actions while the user
+  holds control and continues the same session afterwards. A session restart
+  is not a pause.
+- A trusted adapter from the invite's instabox machine (desktop and terminal
+  routes, VNC and PTY) to T14's `ComputerSource`, wired in the host from the
+  task to its invite's machine. Never expose provider URLs or sandbox
+  credentials to the browser.
+- Turn the T14 routes on only when this adapter is configured. T14's
+  isolation, revoke and abort contracts must still hold: another invite gets
+  404, revoke closes the stream and aborts held input, and a failed handback
+  keeps the task paused.
+- Tests with a fake instabox desktop and PTY and a fake CLI that records
+  actions: no agent action while the user holds control, resume continues the
+  same session, and isolation and revoke on the real host wiring.
+- The sandbox provider stays instabox. Before writing the adapter, read Cua
+  (github.com/trycua/cua) and borrow what fits: the cua-driver desktop layer
+  (screen, input and terminal for an agent, MCP and SDKs) and the Cua Spaces
+  handoff model, where the human and the agent share one desktop with
+  separate cursors, the human steps in and hands back. Prefer that model if
+  it maps onto instabox's desktop; otherwise keep pause and resume. Check the
+  licence of each piece before copying or depending on it: the libraries are
+  MIT, the Spaces app is FSL-1.1-MIT. Say in the PR what was borrowed.
 
 ---
 

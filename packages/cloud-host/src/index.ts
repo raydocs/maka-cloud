@@ -9,3 +9,18 @@ export {
   startGateway,
 } from './gateway.js';
 export { ConfigError, readStackConfig, type StackConfig } from './config.js';
+export { PauseSwitch, PauseWatcher, type PauseWatcherOptions } from './pause.js';
+export { accountLedgerOf, openServerLedger, type ServerLedger } from './spend.js';
+/** For tools that run next to the server (the evals) and need to read or make its invites. */
+export { InviteStore } from '@maka-cloud/server';
+export { createLogger, createScrubber, type Logger, type LogLevel } from './log.js';
+export { createLiveSmokeDeps, type LiveSmokeIo, smokeCommand } from './smoke-live.js';
+export {
+  formatSmokeReport,
+  runSmoke,
+  type SmokeDeps,
+  type SmokeReport,
+  type SmokeSettings,
+  SMOKE_VARIABLES,
+  smokeGate,
+} from './smoke.js';

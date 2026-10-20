@@ -299,3 +299,93 @@ test('a caller with no invites reads the single-machine setting instead', () => 
       error instanceof ConfigError && error.problems.includes('INSTABOX_MACHINE_ID is not set'),
   );
 });
+
+test('spend limits are small unless the environment raises them, and a bad number stops the start', () => {
+  const defaults = readStackConfig(ENV).spend;
+  assert.deepEqual(defaults, { inviteDailyUsd: 5, inviteMonthlyUsd: 50, serverDailyUsd: 25 });
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /invite \$5\/day and \$50\/month/u);
+
+  const raised = readStackConfig({
+    ...ENV,
+    MAKA_CLOUD_INVITE_DAILY_USD: '12.5',
+    MAKA_CLOUD_INVITE_MONTHLY_USD: '100',
+    MAKA_CLOUD_SERVER_DAILY_USD: '0',
+  }).spend;
+  assert.deepEqual(raised, { inviteDailyUsd: 12.5, inviteMonthlyUsd: 100, serverDailyUsd: 0 });
+
+  for (const name of [
+    'MAKA_CLOUD_INVITE_DAILY_USD',
+    'MAKA_CLOUD_INVITE_MONTHLY_USD',
+    'MAKA_CLOUD_SERVER_DAILY_USD',
+  ]) {
+    for (const bad of ['-1', 'abc', '1e3', '1,5', '999999999']) {
+      assert.match(
+        problemsOf({ ...ENV, [name]: bad }).join('\n'),
+        new RegExp(`${name} must be`, 'u'),
+      );
+    }
+  }
+  const names = ENV_VARIABLES.map(([name]) => name);
+  for (const name of [
+    'MAKA_CLOUD_INVITE_DAILY_USD',
+    'MAKA_CLOUD_INVITE_MONTHLY_USD',
+    'MAKA_CLOUD_SERVER_DAILY_USD',
+  ]) {
+    assert.ok((names as string[]).includes(name), `${name} is in the usage text`);
+  }
+});
+
+test('the backup directory is optional, absolute and apart from the data directory', () => {
+  assert.equal(readStackConfig(ENV).backupDir, undefined);
+  assert.equal(
+    readStackConfig({ ...ENV, MAKA_CLOUD_BACKUP_DIR: '/srv/backups' }).backupDir,
+    '/srv/backups',
+  );
+  for (const bad of ['backups', '/srv/maka', '/srv/maka/backups', '/srv', '/']) {
+    assert.ok(
+      problemsOf({ ...ENV, MAKA_CLOUD_BACKUP_DIR: bad }).some((problem) =>
+        problem.startsWith('MAKA_CLOUD_BACKUP_DIR'),
+      ),
+      bad,
+    );
+  }
+});
+
+test('the spend alert needs an amount, the owner’s invite and Web Push, and says what is missing', () => {
+  const push = {
+    CLOUD_PUSH_VAPID_PUBLIC: 'public',
+    CLOUD_PUSH_VAPID_PRIVATE: 'private',
+    CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+  };
+  const good = {
+    ...ENV,
+    ...push,
+    MAKA_CLOUD_SPEND_ALERT_USD: '12.5',
+    MAKA_CLOUD_OWNER_INVITE: 'inv_0123456789ab',
+  };
+  assert.deepEqual(readStackConfig(good).spendAlert, {
+    usd: 12.5,
+    ownerInvite: 'inv_0123456789ab',
+  });
+  assert.equal(readStackConfig(ENV).spendAlert, undefined);
+  const problem = (env: NodeJS.ProcessEnv): string =>
+    problemsOf(env)
+      .filter((text) => /SPEND_ALERT|OWNER_INVITE/u.test(text))
+      .join(' | ');
+  assert.match(problem({ ...good, MAKA_CLOUD_OWNER_INVITE: undefined }), /go together/u);
+  assert.match(problem({ ...good, MAKA_CLOUD_SPEND_ALERT_USD: undefined }), /go together/u);
+  for (const bad of ['0', '-1', '1e3', 'ten', '100001', '']) {
+    if (bad === '') continue;
+    assert.match(problem({ ...good, MAKA_CLOUD_SPEND_ALERT_USD: bad }), /above 0/u, bad);
+  }
+  for (const bad of ['owner', 'inv_123', 'INV_0123456789AB', 'inv_0123456789abc']) {
+    assert.match(problem({ ...good, MAKA_CLOUD_OWNER_INVITE: bad }), /invite id/u, bad);
+  }
+  const {
+    CLOUD_PUSH_VAPID_PUBLIC: _a,
+    CLOUD_PUSH_VAPID_PRIVATE: _b,
+    CLOUD_PUSH_SUBJECT: _c,
+    ...noPush
+  } = good;
+  assert.match(problem(noPush), /needs Web Push/u);
+});

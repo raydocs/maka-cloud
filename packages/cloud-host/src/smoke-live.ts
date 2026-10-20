@@ -1,0 +1,387 @@
+import { execFile } from 'node:child_process';
+import { join } from 'node:path';
+import { type JournalTotals, readJournalTotals } from '@maka-cloud/gateway';
+import { InviteStore } from '@maka-cloud/server';
+import {
+  formatSmokeReport,
+  runSmoke,
+  type SmokeDeps,
+  type SmokeQuestion,
+  type SmokeSettings,
+  type SmokeTask,
+  type SmokeTotals,
+  smokeGate,
+} from './smoke.js';
+
+/**
+ * `SmokeDeps` over a running server: its public HTTP API as the smoke invite, its gateway journal
+ * and invites file read from the data directory, and its restart command. Nothing here is reached
+ * unless `smokeGate` said yes; the tests drive it against a stub server and a temporary directory.
+ *
+ * Errors name the route and the status, never a body, header or token.
+ */
+
+const REQUEST_TIMEOUT_MS = 30_000;
+const STREAM_QUIET_MS = 800;
+const STREAM_MAX_MS = 15_000;
+const STREAM_MAX_BYTES = 4_000_000;
+const MAX_TASK_PAGES = 20;
+const RESTART_TIMEOUT_MS = 60_000;
+
+export interface LiveSmokeIo {
+  fetch?: typeof fetch;
+  readTotals?: (path: string, at: number) => JournalTotals;
+  openInvites?: (path: string) => Pick<InviteStore, 'limits' | 'setLimits' | 'close'>;
+  run?: (command: readonly string[]) => Promise<void>;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  log?: (line: string) => void;
+  /** How long a stream may stay quiet before what it replayed counts as everything. */
+  streamQuietMs?: number;
+}
+
+interface FeedFrame {
+  event: string;
+  data: Record<string, unknown>;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+function runCommand(command: readonly string[]): Promise<void> {
+  const [file, ...args] = command;
+  return new Promise((resolve, reject) => {
+    if (file === undefined) {
+      reject(new Error('the restart command is empty'));
+      return;
+    }
+    // The command's output is dropped: it can carry anything the host prints.
+    execFile(file, args, { timeout: RESTART_TIMEOUT_MS, windowsHide: true }, (error) => {
+      if (error === null) {
+        resolve();
+        return;
+      }
+      const code = (error as { code?: unknown }).code;
+      reject(
+        new Error(
+          `the restart command failed${typeof code === 'number' || typeof code === 'string' ? ` (${String(code)})` : ''}`,
+        ),
+      );
+    });
+  });
+}
+
+export function createLiveSmokeDeps(settings: SmokeSettings, io: LiveSmokeIo = {}): SmokeDeps {
+  const doFetch = io.fetch ?? fetch;
+  const readTotals = io.readTotals ?? readJournalTotals;
+  const openInvites = io.openInvites ?? ((path: string) => new InviteStore(path));
+  const run = io.run ?? runCommand;
+  const now = io.now ?? Date.now;
+  const quietMs = io.streamQuietMs ?? STREAM_QUIET_MS;
+  const log = io.log ?? (() => {});
+  const invitesPath = join(settings.dataDir, 'invites.db');
+  const journalPath = join(settings.dataDir, 'gateway-spend.db');
+  const auth = { authorization: `Bearer ${settings.token}` };
+  let originalDailyUsd: number | undefined;
+
+  const request = async (
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> => {
+    const route = path.split('?')[0] ?? path;
+    let response: Response;
+    try {
+      response = await doFetch(`${settings.url}${path}`, {
+        method,
+        headers: {
+          ...auth,
+          accept: 'application/json',
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error(`${method} ${route} could not reach the server`);
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`${method} ${route} answered ${response.status}`);
+    }
+    if (response.status === 204) return undefined;
+    try {
+      return (await response.json()) as unknown;
+    } catch {
+      throw new Error(`${method} ${route} answered something that is not JSON`);
+    }
+  };
+
+  /** Everything the conversation's feed replays, read until the stream goes quiet. */
+  const feed = async (conversationId: string): Promise<FeedFrame[]> => {
+    const route = `/v1/events?conversation=${encodeURIComponent(conversationId)}&after=0`;
+    const controller = new AbortController();
+    const frames: FeedFrame[] = [];
+    const stop = setTimeout(() => controller.abort(), STREAM_MAX_MS);
+    try {
+      let response: Response;
+      try {
+        response = await doFetch(`${settings.url}${route}`, {
+          headers: { ...auth, accept: 'text/event-stream' },
+          signal: controller.signal,
+        });
+      } catch {
+        throw new Error('GET /v1/events could not reach the server');
+      }
+      if (!response.ok || response.body === null) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error(`GET /v1/events answered ${response.status}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let bytes = 0;
+      for (;;) {
+        let quiet: NodeJS.Timeout | undefined;
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<'quiet'>((resolve) => {
+            quiet = setTimeout(() => resolve('quiet'), quietMs);
+          }),
+        ]).finally(() => clearTimeout(quiet));
+        if (next === 'quiet' || next.done) break;
+        bytes += next.value.byteLength;
+        if (bytes > STREAM_MAX_BYTES) break;
+        buffer += decoder.decode(next.value, { stream: true });
+        for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+          const frame = parseFrame(buffer.slice(0, end));
+          buffer = buffer.slice(end + 2);
+          if (frame) frames.push(frame);
+        }
+      }
+      await reader.cancel().catch(() => {});
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      clearTimeout(stop);
+      controller.abort();
+    }
+    return frames;
+  };
+
+  const text = (frame: FeedFrame): string | undefined =>
+    typeof frame.data.text === 'string' ? frame.data.text : undefined;
+
+  return {
+    now,
+    sleep: io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    log,
+
+    async startConversation() {
+      const body = await request('POST', '/v1/conversations', { title: 'smoke test' });
+      const id = isRecord(body) ? body.conversationId : undefined;
+      if (typeof id !== 'string' || id === '') throw new Error('no conversation id came back');
+      return id;
+    },
+
+    async say(conversationId, message) {
+      await request('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        text: message,
+      });
+    },
+
+    async tasks(conversationId) {
+      const found: SmokeTask[] = [];
+      let after = 0;
+      for (let page = 0; page < MAX_TASK_PAGES; page += 1) {
+        const body = await request(
+          'GET',
+          `/v1/conversations/${encodeURIComponent(conversationId)}/tasks?after=${after}`,
+        );
+        if (!isRecord(body) || !Array.isArray(body.tasks)) {
+          throw new Error('the task list has an unexpected shape');
+        }
+        for (const raw of body.tasks) {
+          const task = toTask(raw);
+          if (task) found.push(task);
+        }
+        if (typeof body.next !== 'number') break;
+        after = body.next;
+      }
+      return found;
+    },
+
+    async openQuestions(conversationId) {
+      const frames = await feed(conversationId);
+      const answered = new Set(
+        frames
+          .filter((frame) => frame.event === 'conductor.answered')
+          .map((frame) => frame.data.questionId),
+      );
+      return frames
+        .filter((frame) => frame.event === 'conductor.question')
+        .flatMap((frame) => {
+          const question = toQuestion(frame.data);
+          return question && !answered.has(question.questionId) ? [question] : [];
+        });
+    },
+
+    async answer(conversationId, questionId, optionId) {
+      await request('POST', `/v1/conversations/${encodeURIComponent(conversationId)}/answers`, {
+        questionId,
+        optionId,
+      });
+    },
+
+    async transcript(conversationId) {
+      const frames = await feed(conversationId);
+      return frames
+        .filter((frame) => frame.event === 'message.posted' || frame.event === 'conductor.notice')
+        .flatMap((frame) => {
+          const line = text(frame);
+          return line === undefined ? [] : [line];
+        });
+    },
+
+    async cancel(taskId) {
+      await request('POST', `/v1/tasks/${encodeURIComponent(taskId)}/cancel`);
+    },
+
+    async restart() {
+      await run(settings.restartCommand);
+    },
+
+    async healthy() {
+      try {
+        const response = await doFetch(`${settings.url}/healthz`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body: unknown = await response.json();
+        return response.ok && isRecord(body) && body.status === 'ok';
+      } catch {
+        return false;
+      }
+    },
+
+    async totals(): Promise<SmokeTotals> {
+      const journal = readTotals(journalPath, now());
+      return {
+        taskUsd: journal.taskUsd,
+        inviteDayUsd: journal.accountDayUsd.get(settings.inviteId) ?? 0,
+        serverDayUsd: journal.serverDayUsd,
+      };
+    },
+
+    async setDailyCap(usd) {
+      const invites = openInvites(invitesPath);
+      try {
+        if (usd === undefined) {
+          if (originalDailyUsd === undefined) return;
+          invites.setLimits(settings.inviteId, { dailyUsd: originalDailyUsd });
+          log(`  the smoke invite's daily cap is back at $${originalDailyUsd}`);
+          originalDailyUsd = undefined;
+          return;
+        }
+        const limits = invites.limits(settings.inviteId);
+        if (limits === undefined) throw new Error('the smoke invite is unknown or revoked');
+        if (limits.dailyUsd === null) {
+          // setLimits cannot clear a cap, so a run that lowered an unset one could not put it back.
+          throw new Error(
+            'the smoke invite has no daily cap of its own, so it could not be put back; set one first with "cloud-server invite limits"',
+          );
+        }
+        if (originalDailyUsd === undefined) {
+          originalDailyUsd = limits.dailyUsd;
+          log(
+            `  the smoke invite's daily cap was $${limits.dailyUsd}; it is put back at the end of the scenario (if this run is killed, restore it with "cloud-server invite limits")`,
+          );
+        }
+        invites.setLimits(settings.inviteId, { dailyUsd: usd });
+      } finally {
+        invites.close();
+      }
+    },
+  };
+}
+
+function parseFrame(block: string): FeedFrame | undefined {
+  let event = 'message';
+  const data: string[] = [];
+  for (const line of block.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+  }
+  if (data.length === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(data.join('\n'));
+    return isRecord(parsed) ? { event, data: parsed } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toTask(raw: unknown): SmokeTask | undefined {
+  if (!isRecord(raw) || typeof raw.taskId !== 'string' || typeof raw.state !== 'string') {
+    return undefined;
+  }
+  return {
+    taskId: raw.taskId,
+    state: raw.state,
+    ...(typeof raw.parentTaskId === 'string' ? { parentTaskId: raw.parentTaskId } : {}),
+    ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
+    ...(typeof raw.costUsd === 'number' ? { costUsd: raw.costUsd } : {}),
+    ...(raw.budgetExceeded === true ? { budgetExceeded: true } : {}),
+    ...(raw.stopPending === true ? { stopPending: true } : {}),
+    ...(typeof raw.failureReason === 'string' ? { failureReason: raw.failureReason } : {}),
+  };
+}
+
+function toQuestion(data: Record<string, unknown>): SmokeQuestion | undefined {
+  const { questionId, reason, question, options, recommended, action } = data;
+  if (
+    typeof questionId !== 'string' ||
+    typeof reason !== 'string' ||
+    typeof question !== 'string' ||
+    typeof recommended !== 'string' ||
+    !Array.isArray(options)
+  ) {
+    return undefined;
+  }
+  const choices = options.flatMap((option) =>
+    isRecord(option) && typeof option.id === 'string' && typeof option.label === 'string'
+      ? [{ id: option.id, label: option.label }]
+      : [],
+  );
+  return {
+    questionId,
+    reason,
+    question,
+    options: choices,
+    recommended,
+    ...(isRecord(action) && typeof action.tool === 'string'
+      ? { action: { tool: action.tool } }
+      : {}),
+  };
+}
+
+/**
+ * `maka-cloud smoke`. The gate comes first: without `MAKA_CLOUD_LIVE=1` and every setting nothing
+ * is read, opened or sent, and the exit code is 2.
+ */
+export async function smokeCommand(
+  env: NodeJS.ProcessEnv,
+  io: LiveSmokeIo & { print?: (line: string) => void } = {},
+): Promise<number> {
+  const print = io.print ?? ((line: string) => console.log(line));
+  const gate = smokeGate(env);
+  if (!gate.ok) {
+    for (const problem of gate.problems) print(problem);
+    return 2;
+  }
+  const { settings } = gate;
+  print(`smoke test of ${settings.url} as ${settings.inviteId}, budget $${settings.maxUsd}`);
+  const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
+  const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
+  for (const line of formatSmokeReport(report)) print(line);
+  return report.ok ? 0 : 1;
+}

@@ -67,7 +67,11 @@ test('another invite’s finished task never shows up in this workspace', async 
   // the other invite has is not reachable by id from this token.
   const [{ conversationId }] = await conversationsOf(request, invite.token);
   await finishedTask(request, conversationId, 'Mine');
-  await expect(page.getByRole('heading', { level: 3 }).filter({ hasText: 'Mine' })).toBeVisible({
+  // Wait until the supervisor's item has arrived too, so the check below sees both headings.
+  await expect(
+    page.getByRole('heading', { level: 3, name: /finished/u }).filter({ hasText: 'Mine' }),
+  ).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('heading', { level: 3, name: 'Mine', exact: true })).toBeVisible({
     timeout: 20_000,
   });
   await expect(page.getByText('Not yours')).toHaveCount(0);

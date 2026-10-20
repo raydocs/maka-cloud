@@ -8,7 +8,14 @@ import {
   countedInputTokens,
   DEFAULT_BOUND_LIMITS,
 } from './bound.js';
-import { Allowance, type BudgetPort, LimitPort, type ReserveResult } from './budget.js';
+import { type Account, accountPort, type SpendAccounts } from './accounts.js';
+import {
+  Allowance,
+  type BudgetPort,
+  type CapHit,
+  LimitPort,
+  type ReserveResult,
+} from './budget.js';
 import { cutEvent, plainRefusal, type Refusal, refusalResponse } from './errors.js';
 import { journaledPort, type SpendJournal } from './journal.js';
 import { costUsd, type ModelPrice, modelTable, type Vendor, worstCaseUsd } from './pricing.js';
@@ -61,8 +68,29 @@ export interface GatewayOptions {
    * request is sent and when it settles, so a restart can charge what was in flight.
    */
   journal?: SpendJournal;
+  /**
+   * The caps on invites and on the server. When set, every grant must name its `account`, and a
+   * request is reserved against the account's caps too (after the grant's own budget).
+   */
+  accounts?: SpendAccounts;
+  /**
+   * Called once per grant, the first time an account cap refuses one of its requests, so the
+   * user can be told. Never carries a body, a token or a key; a throw is reported and ignored.
+   */
+  onCap?: (event: CapEvent) => void;
   /** A problem worth knowing. Never carries a body, a header value, a token or a key. */
   onWarning?: (message: string, detail?: Record<string, string | number>) => void;
+}
+
+/** A cap that stopped a grant's spending. */
+export interface CapEvent {
+  cap: CapHit;
+  /** Who the grant was for (a task id, a run id), as in `IssueInput`. */
+  subject: string;
+  taskId?: string;
+  /** Where to tell the user, when the caller named it. */
+  conversationId?: string;
+  account: Account;
 }
 
 export interface SearchOptions {
@@ -85,6 +113,10 @@ export interface IssueInput {
    * first grant of the pool), so grants issued side by side cannot together exceed it.
    */
   budget: BudgetPort | { limitUsd: number; poolId?: string };
+  /** Whose caps the grant's spend counts against. Required when the gateway has `accounts`. */
+  account?: Account;
+  /** The conversation to tell if a cap stops the grant. Informational: it grants nothing. */
+  conversationId?: string;
 }
 
 export interface SpendState {
@@ -92,6 +124,8 @@ export interface SpendState {
   spentUsd: number;
   /** A request was refused because the budget could not cover it. */
   exhausted: boolean;
+  /** Why, when it was an account cap and not the grant's own budget. */
+  exhaustedReason?: string;
 }
 
 export interface GrantHandle {
@@ -164,6 +198,7 @@ class Grant {
   revoked = false;
   spentUsd = 0;
   exhausted = false;
+  exhaustedReason: string | undefined;
   readonly flights = new Set<Flight>();
   readonly listeners = new Set<(state: SpendState) => void>();
   onRevoke: (() => void) | undefined;
@@ -175,10 +210,16 @@ class Grant {
     readonly subject: string,
     readonly taskId: string | undefined,
     readonly port: BudgetPort,
+    readonly account: Account | undefined,
+    readonly conversationId: string | undefined,
   ) {}
 
   state(): SpendState {
-    return { spentUsd: roundUsd(this.spentUsd), exhausted: this.exhausted };
+    return {
+      spentUsd: roundUsd(this.spentUsd),
+      exhausted: this.exhausted,
+      ...(this.exhaustedReason === undefined ? {} : { exhaustedReason: this.exhaustedReason }),
+    };
   }
 
   notify(): void {
@@ -694,10 +735,23 @@ export class Gateway {
       if (budget.poolId !== undefined) pool = this.pool(budget.poolId, budget.limitUsd);
       port = new LimitPort(pool ? [own, pool.allowance] : [own]);
     }
+    if (this.options.accounts) {
+      if (input.account === undefined) {
+        throw new Error('The grant has no owning account, so it gets no model access.');
+      }
+      port = accountPort(port, this.options.accounts, input.account);
+    }
     if (this.options.journal && input.taskId !== undefined) {
       port = journaledPort(port, this.options.journal, input.taskId);
     }
-    const grant = new Grant(input.vendor, input.subject, input.taskId, port);
+    const grant = new Grant(
+      input.vendor,
+      input.subject,
+      input.taskId,
+      port,
+      input.account,
+      input.conversationId,
+    );
     if (pool) pool.open++;
     this.grants.add(grant);
     grant.onRevoke = () => {
@@ -741,9 +795,28 @@ export class Gateway {
     }
     if (!result.ok && result.budget && !grant.exhausted) {
       grant.exhausted = true;
+      if (result.cap) {
+        grant.exhaustedReason = result.reason;
+        this.capped(grant, result.cap);
+      }
       grant.notify();
     }
     return result;
+  }
+
+  private capped(grant: Grant, cap: CapHit): void {
+    if (!this.options.onCap || grant.account === undefined) return;
+    try {
+      this.options.onCap({
+        cap,
+        subject: grant.subject,
+        ...(grant.taskId === undefined ? {} : { taskId: grant.taskId }),
+        ...(grant.conversationId === undefined ? {} : { conversationId: grant.conversationId }),
+        account: grant.account,
+      });
+    } catch {
+      this.warn('A spending cap could not be reported', { subject: grant.subject });
+    }
   }
 
   private settle(grant: Grant, key: string, usd: number): void {

@@ -64,7 +64,7 @@ export type PushState = 'none' | 'pending' | 'sent' | 'held' | 'muted';
 /** What item text and the precondition hash are built from. Agent-written parts are always quoted. */
 export interface ItemContext {
   /** Which state the item depends on; picks the precondition and the reassessment. */
-  subject: 'question' | 'stall' | 'failed_twice' | 'result' | 'verification';
+  subject: 'question' | 'stall' | 'failed_twice' | 'result' | 'verification' | 'cap';
   taskTitle?: string;
   taskId?: string;
   questionId?: string;

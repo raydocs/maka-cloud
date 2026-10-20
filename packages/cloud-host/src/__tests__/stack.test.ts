@@ -1,17 +1,26 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { createECDH } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createECDH, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { InviteStore } from '@maka-cloud/server';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
-import { readStackConfig } from '../config.js';
-import { STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
+import { listBackups, restoreBackup, verifyBackup } from '../backup.js';
+import { backupLayoutOf, readStackConfig } from '../config.js';
+import {
+  PAUSED_NOTICE,
+  STACK_PLAYBOOKS,
+  type Stack,
+  type StackDependencies,
+  startStack,
+} from '../stack.js';
 
 /** The machine of the invite the tests create first; any other invite has none. */
 const SANDBOXES = JSON.stringify({ inv_000000000001: 'mch_test' });
@@ -27,14 +36,26 @@ interface Started {
   firstMessage: Promise<void>;
   sweeps: string[][];
   dataDir: string;
+  /** The invite that owns every task of `owners` unless a test maps it to another. */
+  inviteId: string;
+  /** Which invite owns a task, for the tasks the tests issue model access to directly. */
+  owners: Map<string, string>;
+  /** What the stack warned about. */
+  warnings: string[];
 }
 
 async function start(
   t: TestContext,
   publicUrl?: string,
   env: NodeJS.ProcessEnv = {},
+  /** False: tasks are owned only through conversations, as in the product. */
+  ownerSeam = true,
+  extra: Partial<StackDependencies> = {},
+  /** Settings that depend on the data directory, such as an invite made in it before the start. */
+  prepare?: (dir: string) => NodeJS.ProcessEnv,
 ): Promise<Started> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
+  env = { ...env, ...prepare?.(dir) };
   let requests = 0;
   const modelKeys: string[] = [];
   let messageArrived = (): void => undefined;
@@ -69,7 +90,12 @@ async function start(
       ...(publicUrl === undefined ? {} : { MAKA_CLOUD_MCP_PUBLIC_URL: publicUrl }),
       ...Object.fromEntries(
         Object.entries(env).filter(
-          ([name]) => name.startsWith('CLOUD_PUSH_') || name === 'MAKA_CLOUD_SANDBOXES',
+          ([name]) =>
+            name.startsWith('CLOUD_PUSH_') ||
+            name === 'MAKA_CLOUD_SANDBOXES' ||
+            name === 'MAKA_CLOUD_BACKUP_DIR' ||
+            name === 'MAKA_CLOUD_SPEND_ALERT_USD' ||
+            name === 'MAKA_CLOUD_OWNER_INVITE',
         ),
       ),
     }),
@@ -88,7 +114,16 @@ async function start(
   const codex = new FakeRunner({ name: 'codex' });
   const sweeps: string[][] = [];
   let options: Partial<CloudRunnersOptions> = {};
+  let inviteId = '';
+  const owners = new Map<string, string>();
+  const warnings: string[] = [];
   const stack = await startStack(config, env, {
+    ...extra,
+    pausePollMs: 10,
+    onWarning: (message) => warnings.push(message),
+    ...(ownerSeam
+      ? { ownerOfTask: (taskId) => owners.get(taskId) ?? (inviteId === '' ? undefined : inviteId) }
+      : {}),
     createRunners: (given) => {
       options = given;
       return {
@@ -103,6 +138,7 @@ async function start(
       } as unknown as CloudRunners;
     },
   });
+  inviteId = stack.cloud.server.invites.create('stack test').inviteId;
   t.after(async () => {
     await stack.close();
     await new Promise<void>((resolve) => model.close(() => resolve()));
@@ -117,6 +153,9 @@ async function start(
     firstMessage,
     sweeps,
     dataDir: dir,
+    inviteId,
+    owners,
+    warnings,
   };
 }
 
@@ -310,6 +349,7 @@ test('a stack that fails to start closes its gateway', async (t) => {
       config,
       { ANTHROPIC_API_KEY: 'sk-test-not-a-key' },
       {
+        ownerOfTask: () => 'inv_early',
         createRunners: (given) => {
           issued = given.modelAccess?.issue({
             taskId: 'tsk_early',
@@ -478,4 +518,360 @@ test('Web Push settings that cannot sign stop the start, without the key in the 
       return true;
     },
   );
+});
+
+test('model access is charged to the invite that owns the task, and a task nobody owns gets none', async (t) => {
+  const { stack, options, modelKeys, owners } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const invites = stack.cloud.server.invites;
+  const open = invites.create('open').inviteId;
+  const shut = invites.create('shut').inviteId;
+  owners.set('tsk_open', open);
+  owners.set('tsk_shut', shut);
+  invites.setLimits(shut, { dailyUsd: 0 });
+  const access = options.modelAccess;
+  assert.ok(access);
+  const grant = async (taskId: string) =>
+    access.issue({ taskId, runner: 'claude-agent-sdk', budgetUsd: 1, budgetRootId: taskId });
+  const ask = async (given: ModelAccess) => {
+    const response = await fetch(`${given.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': given.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    await response.arrayBuffer();
+    return response.status;
+  };
+  const sentToVendor = () => modelKeys.filter((line) => line.startsWith('/v1/messages ')).length;
+
+  // The invite whose daily limit is 0 spends nothing; the other is not affected by it.
+  assert.equal(await ask(await grant('tsk_shut')), 402);
+  assert.equal(sentToVendor(), 0, 'the refused request never reached the vendor');
+  assert.equal(await ask(await grant('tsk_open')), 500, 'the vendor answered');
+  assert.equal(sentToVendor(), 1);
+  // A change from the command line (here the same store) applies to the running server.
+  invites.setLimits(shut, { dailyUsd: 5 });
+  assert.equal(await ask(await grant('tsk_shut')), 500);
+  assert.equal(sentToVendor(), 2);
+  invites.revoke(shut);
+  assert.equal(await ask(await grant('tsk_shut')), 402, 'a revoked invite may not spend');
+  assert.equal(sentToVendor(), 2);
+});
+
+test('a spending limit that stops a task nobody can be told about is warned, and still refuses', async (t) => {
+  const { stack, options, modelKeys, owners, warnings } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const shut = stack.cloud.server.invites.create('shut').inviteId;
+  stack.cloud.server.invites.setLimits(shut, { dailyUsd: 0 });
+  owners.set('tsk_shut', shut);
+  const access = options.modelAccess;
+  assert.ok(access);
+  const given = await access.issue({
+    taskId: 'tsk_shut',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_shut',
+  });
+  const response = await fetch(`${given.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': given.apiKey },
+    body: JSON.stringify({
+      model: 'claude-haiku-5-5',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  await response.arrayBuffer();
+  assert.equal(response.status, 402);
+  assert.deepEqual(
+    modelKeys.filter((line) => line.startsWith('/v1/messages ')),
+    [],
+  );
+  assert.equal(
+    warnings.filter((message) => /no conversation could be told/u.test(message)).length,
+    1,
+    'a limit with nobody to tell is never silent',
+  );
+});
+
+test('a task that no conversation owns gets no model access, and nothing reaches the vendor', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {}, false);
+  const orchestrator = stack.cloud.server.orchestrator;
+  const loose = orchestrator.authenticate(orchestrator.issueSession().token);
+  assert.ok(loose);
+  const task = await orchestrator.delegate(loose, { runner: 'claude-agent-sdk', brief: 'x' });
+  const access = options.modelAccess;
+  assert.ok(access);
+  for (const taskId of [task.taskId, 'tsk_unknown']) {
+    await assert.rejects(
+      access.issue({ taskId, runner: 'claude-agent-sdk', budgetUsd: 1 }),
+      /no owning invite/u,
+    );
+  }
+  assert.deepEqual(modelKeys, []);
+});
+
+test('pausing refuses the next model request at once as unavailable, and resuming allows it', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const access = options.modelAccess;
+  assert.ok(access);
+  const grant = await access.issue({
+    taskId: 'tsk_paused',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_paused',
+  });
+  const ask = async () => {
+    const response = await fetch(`${grant.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': grant.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const text = await response.text();
+    return { status: response.status, text };
+  };
+  const sent = () => modelKeys.filter((line) => line.startsWith('/v1/messages ')).length;
+
+  assert.equal((await ask()).status, 500, 'the vendor answered');
+  assert.equal(sent(), 1);
+  stack.pause.pause();
+  const refused = await ask();
+  assert.equal(refused.status, 503, 'unavailable, not out of budget');
+  assert.match(refused.text, /spending is paused/u);
+  assert.equal(sent(), 1, 'the paused request never reached the vendor');
+  assert.equal(grant.meter?.spentUsd(), 0, 'and cost nothing');
+  stack.pause.resume();
+  assert.equal((await ask()).status, 500, 'spending is allowed again');
+  assert.equal(sent(), 2);
+});
+
+test('while paused the stack stops what is open through the conductor, and closing twice closes once', async (t) => {
+  const { stack } = await start(t);
+  const stops: Array<[string, string]> = [];
+  const asked = deferred();
+  const conductor = stack.cloud.conductor;
+  conductor.stopAll = async (reason, notice) => {
+    stops.push([reason, notice]);
+    asked.resolve();
+    return 0;
+  };
+  assert.deepEqual(stops, [], 'not paused: nothing is stopped');
+  stack.pause.pause();
+  await asked.promise;
+  assert.equal(stops[0]?.[0], 'paused');
+  assert.equal(stops[0]?.[1], PAUSED_NOTICE);
+  stack.pause.resume();
+  await stack.close();
+  await stack.close();
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test('a running stack backs itself up: the copy restores, holds no key and no push subscription', async (t) => {
+  const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const vapid = vapidKeys();
+  const env = {
+    MAKA_CLOUD_BACKUP_DIR: backupDir,
+    CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+    CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+    CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+  };
+  const started = await start(t, undefined, env);
+  const { stack, dataDir } = started;
+  const invite = stack.cloud.server.invites.create('backed up');
+  const headers = { authorization: `Bearer ${invite.token}`, 'content-type': 'application/json' };
+  const created = await fetch(`${stack.cloud.server.url}/v1/conversations`, {
+    method: 'POST',
+    headers,
+    body: '{}',
+  });
+  const { conversationId } = (await created.json()) as { conversationId: string };
+  const deviceSecret = randomBytes(16).toString('base64url');
+  const subscribed = await fetch(`${stack.cloud.server.url}/v1/push/subscriptions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      endpoint: 'https://fcm.googleapis.com/fcm/send/device-1',
+      keys: { p256dh: vapid.publicKey, auth: deviceSecret },
+    }),
+  });
+  assert.equal(subscribed.status, 201);
+
+  const done = await stack.backup();
+  const layout = backupLayoutOf(dataDir);
+  const manifest = await verifyBackup(done.path, layout);
+  for (const name of ['cloud.db', 'invites.db', 'supervisor.db', 'gateway-spend.db']) {
+    assert.ok(
+      manifest.files.some((file) => file.path === name),
+      `${name} is in the backup`,
+    );
+  }
+  const secrets = [
+    'sk-test-not-a-key',
+    'ibx-test-not-a-key',
+    vapid.privateKey,
+    deviceSecret,
+    invite.token,
+    invite.token.split('.')[1] ?? 'missing',
+  ];
+  for (const file of manifest.files) {
+    const bytes = await readFile(join(done.path, file.path));
+    for (const secret of secrets) {
+      assert.ok(
+        !bytes.includes(Buffer.from(secret)),
+        `${file.path} holds no ${secret.slice(0, 6)}…`,
+      );
+    }
+  }
+
+  await stack.close();
+  const restored = await restoreBackup({
+    dataDir,
+    backupDir,
+    stamp: done.stamp,
+    layout,
+  });
+  assert.ok(restored.files >= 4);
+  const cloud = new DatabaseSync(join(dataDir, 'cloud.db'), { readOnly: true });
+  assert.equal(
+    cloud
+      .prepare('SELECT count(*) AS n FROM conversations WHERE conversation_id = ?')
+      .get(conversationId)?.n,
+    1,
+    'the conversation survived the round trip',
+  );
+  assert.equal(cloud.prepare('SELECT count(*) AS n FROM push_subscriptions').get()?.n, 0);
+  cloud.close();
+  const invites = new DatabaseSync(join(dataDir, 'invites.db'), { readOnly: true });
+  assert.equal(
+    invites.prepare('SELECT count(*) AS n FROM invites WHERE invite_id = ?').get(invite.inviteId)
+      ?.n,
+    1,
+  );
+  invites.close();
+});
+
+test('the stack writes the day’s backup by itself once it is running, and says so', async (t) => {
+  const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  let written: (event: string) => void = () => undefined;
+  const first = new Promise<string>((resolve) => {
+    written = resolve;
+  });
+  const events: Array<[string, Record<string, string | number>]> = [];
+  const started = await start(t, undefined, { MAKA_CLOUD_BACKUP_DIR: backupDir }, true, {
+    backupTiming: { firstTickMs: 5, tickMs: 5 },
+    onInfo: (event, fields) => {
+      events.push([event, fields]);
+      if (event === 'backup.written') written(String(fields.stamp));
+    },
+  });
+  const stamp = await first;
+  assert.deepEqual(
+    (await listBackups(backupDir)).map((entry) => entry.stamp),
+    [stamp],
+  );
+  assert.equal(events[0]?.[0], 'backup.written');
+  await started.stack.close();
+  assert.deepEqual(started.warnings, [], 'nothing was reported');
+});
+
+test('without MAKA_CLOUD_BACKUP_DIR the stack writes no backups and refuses to be asked for one', async (t) => {
+  const started = await start(t);
+  await assert.rejects(started.stack.backup(), /MAKA_CLOUD_BACKUP_DIR is not set/u);
+});
+
+test('the owner’s devices are told once when the day’s spend reaches the alert amount, and nobody else’s', async (t) => {
+  const vapid = vapidKeys();
+  const calls: Array<{ endpoint: string; headers: Record<string, string> }> = [];
+  let owner: { inviteId: string; token: string } | undefined;
+  const started = await start(
+    t,
+    undefined,
+    {
+      CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+      CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+      CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+      MAKA_CLOUD_SPEND_ALERT_USD: '1',
+    },
+    true,
+    {
+      spendAlertTiming: { pollMs: 3_600_000 },
+      pushTransport: async (request) => {
+        calls.push({ endpoint: request.endpoint, headers: request.headers });
+        return { status: 201 };
+      },
+    },
+    (dir) => {
+      // The owner exists before the stack starts, so its id can be set as the alert's owner.
+      const store = new InviteStore(join(dir, 'invites.db'));
+      owner = store.create('owner');
+      store.close();
+      return { MAKA_CLOUD_OWNER_INVITE: owner.inviteId };
+    },
+  );
+  assert.ok(owner);
+  const other = started.stack.cloud.server.invites.create('someone else');
+  const subscribe = async (token: string, endpoint: string): Promise<void> => {
+    const response = await fetch(`${started.stack.cloud.server.url}/v1/push/subscriptions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        endpoint,
+        keys: { p256dh: vapid.publicKey, auth: randomBytes(16).toString('base64url') },
+      }),
+    });
+    assert.equal(response.status, 201);
+  };
+  const ownerDevice = 'https://fcm.googleapis.com/fcm/send/owner-1';
+  const otherDevice = 'https://fcm.googleapis.com/fcm/send/other-1';
+  await subscribe(owner.token, ownerDevice);
+  await subscribe(other.token, otherDevice);
+
+  // Another process books spend into the same ledger file the gateway counts against.
+  const books = new SqliteSpendJournal(join(started.dataDir, 'gateway-spend.db'));
+  t.after(() => books.close());
+  const ledger = books.accountLedger({
+    limitsOf: () => ({ dailyUsd: 100, monthlyUsd: 1000 }),
+    serverDailyUsd: () => 1000,
+  });
+  assert.deepEqual(ledger.reserve({ inviteId: other.inviteId }, 'k1', 0.6), { ok: true });
+  await started.stack.checkSpendAlert();
+  assert.equal(calls.length, 0, 'below the amount nobody is told');
+
+  assert.deepEqual(ledger.reserve({ inviteId: other.inviteId }, 'k2', 0.5), { ok: true });
+  await started.stack.checkSpendAlert();
+  assert.deepEqual(
+    calls.map((call) => call.endpoint),
+    [ownerDevice],
+    'only the owner’s device, once',
+  );
+  assert.equal(calls[0]?.headers.Urgency, 'high');
+  await started.stack.checkSpendAlert();
+  await started.stack.checkSpendAlert();
+  assert.equal(calls.length, 1, 'asking again the same day sends nothing');
+});
+
+test('without a spend alert set the check does nothing', async (t) => {
+  const started = await start(t);
+  await started.stack.checkSpendAlert();
 });

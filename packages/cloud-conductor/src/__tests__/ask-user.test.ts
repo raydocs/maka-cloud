@@ -172,6 +172,7 @@ const publish: ConductorToolSpec = {
   description: 'Publish a page to the public web.',
   parameters: z.object({ title: z.string() }),
   irreversible: true,
+  effects: ['writes_outside_sandbox', 'irreversible'],
   impl: async (args) => {
     published.push(args);
     return { published: true };
@@ -406,6 +407,7 @@ const deleteAccount: ConductorToolSpec = {
   description: 'Delete a customer account.',
   parameters: z.object({ accountId: z.string(), reason: z.string() }),
   irreversible: true,
+  effects: ['writes_outside_sandbox', 'irreversible'],
   impl: async (args) => {
     deleted.push(args);
     return { deleted: true };

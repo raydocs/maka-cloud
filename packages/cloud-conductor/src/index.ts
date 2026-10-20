@@ -1,4 +1,5 @@
 export * from './config.js';
+export { TOOL_EFFECTS, type ToolEffect } from './guard.js';
 export {
   type AnswerOutcome,
   Conductor,

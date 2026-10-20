@@ -124,6 +124,9 @@ export function fingerprint(store: Store, context: ItemContext): unknown {
         taskId: context.taskId,
         manifestDigest: context.manifestDigest ?? null,
       };
+    // A spending limit that stopped work stays true until the human acknowledges it.
+    case 'cap':
+      return { subject: 'cap', key: context.detail ?? null };
     case 'verification': {
       const verification = store.verification(context.taskId ?? '');
       return {
@@ -208,6 +211,26 @@ const LOW_CONFIDENCE_OPTIONS: ItemOption[] = [
 const FINISHED_OPTIONS: ItemOption[] = [
   { id: 'ok', label: 'Got it', recommended: true, effect: 'local', closeReason: 'acknowledged' },
 ];
+
+/** A budget item for a spending limit (an invite's or the server's) that stopped work. */
+export function capSpec(
+  store: Store,
+  input: { conversationId: string; taskId: string | null; key: string; ask: string },
+): ItemSpec {
+  const context: ItemContext = { subject: 'cap', detail: input.key };
+  return {
+    kind: 'budget',
+    conversationId: input.conversationId,
+    taskId: input.taskId,
+    dedupeKey: `cap:${input.key}`,
+    ask: clip(input.ask, MAX_ASK),
+    options: FINISHED_OPTIONS,
+    allowText: false,
+    evidence: [],
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
 
 export function stallSpec(store: Store, task: TaskRecord, at: number): ItemSpec {
   const context: ItemContext = {
@@ -616,6 +639,7 @@ export function reassess(store: Store, item: ItemRecord, at: number): Reassessme
       };
     }
     case 'result':
+    case 'cap':
       return { action: 'keep' };
     case 'verification':
       // Checked again, or settled differently, since the human looked.
