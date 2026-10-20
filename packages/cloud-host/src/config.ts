@@ -133,7 +133,19 @@ export const ENV_VARIABLES = [
   ],
 ] as const;
 
-export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
+export interface ReadStackConfigOptions {
+  /**
+   * Where tasks run. `per-invite` (default, the product) needs `MAKA_CLOUD_SANDBOXES` and refuses
+   * `INSTABOX_MACHINE_ID`. `single-machine` is for a caller with no invites, such as the benchmark
+   * harness: it needs `INSTABOX_MACHINE_ID`, and `sandboxes` stays empty.
+   */
+  sandboxes?: 'per-invite' | 'single-machine';
+}
+
+export function readStackConfig(
+  env: NodeJS.ProcessEnv,
+  options: ReadStackConfigOptions = {},
+): StackConfig {
   const problems: string[] = [];
   const value = (name: string): string | undefined => {
     const raw = env[name]?.trim();
@@ -235,12 +247,16 @@ export function readStackConfig(env: NodeJS.ProcessEnv): StackConfig {
   const connectionId = value('MAKA_CLOUD_LLM_CONNECTION_ID');
   if (connectionId !== undefined) config.conductor.connectionId = connectionId;
   required('INSTABOX_API_KEY');
-  if (value('INSTABOX_MACHINE_ID') !== undefined) {
-    problems.push(
-      'INSTABOX_MACHINE_ID is no longer used: one machine for every invite lets invites read each other, set MAKA_CLOUD_SANDBOXES',
-    );
+  if (options.sandboxes === 'single-machine') {
+    required('INSTABOX_MACHINE_ID');
+  } else {
+    if (value('INSTABOX_MACHINE_ID') !== undefined) {
+      problems.push(
+        'INSTABOX_MACHINE_ID is no longer used: one machine for every invite lets invites read each other, set MAKA_CLOUD_SANDBOXES',
+      );
+    }
+    config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
   }
-  config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
   const apiUrl = url('INSTABOX_API_URL');
   if (apiUrl !== undefined) config.instabox.apiUrl = apiUrl;
   if (config.port === config.mcp.port && config.host === config.mcp.host) {

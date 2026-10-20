@@ -118,7 +118,11 @@ export async function createLiveDeps(
   }
   // The stack's own reader checks the gateway's settings (ports, URL scheme, prices). Its data
   // directory is this run's, so no product database or journal is touched.
-  const config = readStackConfig({ ...env, MAKA_CLOUD_DATA_DIR: options.stateDir });
+  // The harness has no invites: one machine runs every cell, so it keeps INSTABOX_MACHINE_ID.
+  const config = readStackConfig(
+    { ...env, MAKA_CLOUD_DATA_DIR: options.stateDir },
+    { sandboxes: 'single-machine' },
+  );
   for (const vendor of vendors) {
     if (!env[VENDOR_KEYS[vendor]]?.trim()) {
       throw new Error(`${VENDOR_KEYS[vendor]} is not set, and a subject of this spec needs it.`);

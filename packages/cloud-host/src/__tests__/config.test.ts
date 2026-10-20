@@ -284,3 +284,18 @@ test('each invite gets its own machine: a shared, empty, malformed or legacy set
     /INSTABOX_MACHINE_ID is no longer used/,
   );
 });
+
+test('a caller with no invites reads the single-machine setting instead', () => {
+  const { MAKA_CLOUD_SANDBOXES: _sandboxes, ...base } = ENV;
+  assert.deepEqual(problemsOf(base), ['MAKA_CLOUD_SANDBOXES is not set']);
+  const config = readStackConfig(
+    { ...base, INSTABOX_MACHINE_ID: 'mch_1' },
+    { sandboxes: 'single-machine' },
+  );
+  assert.deepEqual(config.sandboxes, {});
+  assert.throws(
+    () => readStackConfig(base, { sandboxes: 'single-machine' }),
+    (error: unknown) =>
+      error instanceof ConfigError && error.problems.includes('INSTABOX_MACHINE_ID is not set'),
+  );
+});

@@ -418,7 +418,10 @@ function vapidKeys(): { publicKey: string; privateKey: string } {
   ecdh.generateKeys();
   return {
     publicKey: ecdh.getPublicKey().toString('base64url'),
-    privateKey: ecdh.getPrivateKey().toString('base64url'),
+    // A private key is 32 bytes, but getPrivateKey() drops leading zero bytes (1 key in 256).
+    privateKey: Buffer.concat([Buffer.alloc(32), ecdh.getPrivateKey()])
+      .subarray(-32)
+      .toString('base64url'),
   };
 }
 
