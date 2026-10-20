@@ -41,6 +41,23 @@ Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
 T28, T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
 T23 and T24.
 
+Borrow before building (2026-10-20). The owner wants to start testing as
+soon as possible, so a task takes a working piece from these projects before
+writing its own. Copy only from the licences listed, keep the original
+licence header and add the source to `docs/fork/THIRD_PARTY.md` (Apache-2.0
+code also needs its NOTICE). Say in the PR what was taken and from where.
+
+| Source | Licence | Take | For |
+|---|---|---|---|
+| Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) | Anthropic terms | `query()` with `spawnClaudeCodeProcess` (run the unmodified `claude` binary on the box over our exec channel), `sessionStore` (the transcript mirror), hooks (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) for the step log, streaming input for steering | T28, T27 |
+| Codex app-server (`codex app-server`, JSON-RPC) | Apache-2.0 | `thread/start`, `thread/resume` by id, `thread/inject_items` for cut-off calls, dynamic tools, `chatgptAuthTokens` | T27, T28 |
+| vercel-labs/durable-harness | Apache-2.0 | step log and fencing design; `harness-process/src/tail.ts` (file tail), `recovery.ts` (recovery note), `harness-claude-code/src/env.ts` and `spawn.ts` (env allowlist, path rewrite of mirrored lines, upload of `projects/**` only), `harness-codex/src/config.ts` (gateway provider, `shell_environment_policy` excluding token variables), `rollout.ts` (rollout path checks) | T28 |
+| CopilotKit/OpenBot | MIT | `agent-claude-sdk` (setup-token handling: refuse both a token and an API key), routines limits, approvals pages, the component gallery, the per-tool-call policy check with an audit row first | T27, T23, T20, T13, T15 |
+| CopilotKit/openmuse | MIT | rich thread cards (`docs/RICH-THREADS.md`) and the browser "Take control" flow; the headless mobile client for later | T24, T14b, T18 |
+| CopilotKit/OpenDots | MIT | approval cards ("Approve & run" for write tools), interrupted scheduled-run recovery | T20, T23 |
+| trycua/cua (libraries, not the Spaces app) | MIT | `cua-driver` on the box: open what the agent built, click through it, take the screenshot that the delivery card shows and the reviewer checks | T24, T25, T14b |
+| reason-machines/reason-network | Apache-2.0 | `src/files.rs` rules for files an agent sends out (no hidden files, no `~/.ssh`, `~/.aws` and similar, size caps), the loop guard | T15, T23 |
+
 Rules for all tasks:
 
 - No live model or sandbox calls and no spend. Tests use fakes. A live smoke
@@ -474,6 +491,12 @@ Vercel Sandbox. Keep our SQLite stores, our gateway and instabox.
   epoch and the log sequence it read; a stale writer (an old process, a late
   handle, an old box) is refused at its first write, starts nothing, and
   stops. This replaces the case-by-case late-handle and stop-pending fixes.
+- Build the Claude Code side on the Claude Agent SDK instead of `claude -p`:
+  `query()` with `spawnClaudeCodeProcess` runs the unmodified `claude` binary
+  on the box through our exec channel, `sessionStore` gives the transcript
+  mirror below without tailing files, its hooks give the step log for tool
+  calls, and its streaming input gives steering. Codex uses the app-server
+  for the same (T27 moves to it anyway).
 - Transcript mirroring: copy every line the CLI appends to its session file
   into the server as it is written (Claude Code: the session JSONL under
   `CLAUDE_CONFIG_DIR/projects/`; Codex: the rollout JSONL under
