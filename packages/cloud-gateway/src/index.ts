@@ -33,6 +33,7 @@ export {
   type AccountLedgerOptions,
   type AccountLimits,
   type JournalTotals,
+  type PendingAlert,
   journaledPort,
   readJournalTotals,
   type SpendJournal,

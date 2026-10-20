@@ -109,6 +109,14 @@ function openJournal(path: string): DatabaseSync {
         invite_monthly_usd REAL NOT NULL,
         server_daily_usd REAL NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS pending_alerts (
+        invite_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        first_at INTEGER NOT NULL,
+        failures INTEGER NOT NULL,
+        retry_at INTEGER NOT NULL,
+        PRIMARY KEY (invite_id, key)
+      );
       `);
       return db;
     } catch (error) {
@@ -131,6 +139,18 @@ export interface SpendPolicy {
   inviteDailyUsd: number;
   inviteMonthlyUsd: number;
   serverDailyUsd: number;
+}
+
+/** An alert asked for and not yet delivered to every device, with the wait before the next try. */
+export interface PendingAlert {
+  inviteId: string;
+  key: string;
+  /** When it was first asked for, in milliseconds since the epoch. */
+  firstAt: number;
+  /** Rounds that left a device owed. */
+  failures: number;
+  /** The earliest the timer may try again, in milliseconds since the epoch. */
+  retryAt: number;
 }
 
 /**
@@ -183,6 +203,47 @@ export class SqliteSpendJournal implements SpendJournal {
         serverDailyUsd: row.server_daily_usd,
       }
     );
+  }
+
+  /** Writes an alert down as owed, or updates its wait. Survives a restart. */
+  savePendingAlert(alert: PendingAlert): void {
+    this.db
+      .prepare(
+        `INSERT INTO pending_alerts (invite_id, key, first_at, failures, retry_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (invite_id, key) DO UPDATE SET failures = excluded.failures,
+           retry_at = excluded.retry_at`,
+      )
+      .run(alert.inviteId, alert.key, alert.firstAt, alert.failures, alert.retryAt);
+  }
+
+  /** The alerts still owed, oldest first. */
+  pendingAlerts(): PendingAlert[] {
+    const rows = this.db
+      .prepare(
+        'SELECT invite_id, key, first_at, failures, retry_at FROM pending_alerts ORDER BY first_at, key',
+      )
+      .all() as Array<{
+      invite_id: string;
+      key: string;
+      first_at: number;
+      failures: number;
+      retry_at: number;
+    }>;
+    return rows.map((row) => ({
+      inviteId: row.invite_id,
+      key: row.key,
+      firstAt: row.first_at,
+      failures: row.failures,
+      retryAt: row.retry_at,
+    }));
+  }
+
+  /** Ends an alert: it was delivered, or will never be. */
+  clearPendingAlert(inviteId: string, key: string): void {
+    this.db
+      .prepare('DELETE FROM pending_alerts WHERE invite_id = ? AND key = ?')
+      .run(inviteId, key);
   }
 
   hold(taskId: string, key: string, usd: number): void {
