@@ -592,6 +592,66 @@ test('a listed rendering that is missing or cannot be read is not independently 
   await none.r.stop();
 });
 
+test('with no rendering listed, a result is independently checked only if verification.json was read and is valid', async () => {
+  const REPORT_AND_RECORD = ['out/report.json', 'out/verification.json'];
+  const cases: Array<[string, (w: ReturnType<typeof world>) => void, string[]?]> = [
+    ['report.json alone', (w) => researchFiles(w, 't1'), ['out/report.json']],
+    [
+      'a record that is listed but missing',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.files.delete('t1/verification.json');
+      },
+    ],
+    [
+      'a record that is not JSON',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.set('t1', 'verification.json', '{not json');
+      },
+    ],
+    [
+      'a record with a status that does not exist',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.set(
+          't1',
+          'verification.json',
+          JSON.stringify({
+            mode: 'keep',
+            claims: [
+              { id: 'c1', status: 'looks_fine', removed: false },
+              { id: 'c2', status: 'quote_verified', removed: false },
+            ],
+          }),
+        );
+      },
+    ],
+    [
+      'a record that names other claims than the report',
+      (w) => {
+        researchFiles(w, 't1');
+        w.evidence.set(
+          't1',
+          'verification.json',
+          JSON.stringify({
+            mode: 'keep',
+            claims: [{ id: 'c1', status: 'quote_verified', removed: false }],
+          }),
+        );
+      },
+    ],
+  ];
+  for (const [label, setup, artifacts] of cases) {
+    await assertUnverified(await checkedResearch(setup, artifacts ?? REPORT_AND_RECORD), label);
+  }
+
+  // A valid record needs no rendering to be believed: the report is still checked in full.
+  const valid = await checkedResearch((w) => researchFiles(w, 't1'), REPORT_AND_RECORD);
+  assert.match(itemsOf(valid.r, 'finished')[0]?.ask ?? '', /independently checked/);
+  await valid.r.stop();
+});
+
 test('a record never takes a claim out of report.json, however exactly the renderings match', async () => {
   // The uncited c2 is in report.json, the record calls it removed, and the renderings are exactly
   // what the renderer makes: only c1 would have been checked. Now c2 is, and it fails.
