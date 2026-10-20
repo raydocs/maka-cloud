@@ -20,6 +20,8 @@ export interface StackConfig {
   supervisorDbPath: string;
   /** The model gateway's journal of what tasks spent, read back after a restart. */
   gatewaySpendPath: string;
+  /** The operator's kill switch: while this file exists, nothing may spend. See `PauseSwitch`. */
+  pausePath: string;
   host: string;
   port: number;
   mcp: {
@@ -69,6 +71,11 @@ export interface StackConfig {
   pushSet: boolean;
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
+}
+
+/** Where the kill switch lives under a data directory. */
+export function pausePathOf(dataDir: string): string {
+  return join(dataDir, 'paused');
 }
 
 export interface SpendCaps {
@@ -235,6 +242,7 @@ export function readStackConfig(
     codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
     supervisorDbPath: join(dataDir, 'supervisor.db'),
     gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
+    pausePath: pausePathOf(dataDir),
     host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
     port: port('MAKA_CLOUD_PORT', 8080),
     mcp: {

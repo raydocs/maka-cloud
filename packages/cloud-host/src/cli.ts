@@ -1,10 +1,20 @@
 #!/usr/bin/env node
-import { ConfigError, describeConfig, ENV_VARIABLES, readStackConfig } from './config.js';
+import {
+  ConfigError,
+  describeConfig,
+  ENV_VARIABLES,
+  pausePathOf,
+  readStackConfig,
+} from './config.js';
+import { PauseSwitch } from './pause.js';
 import { startStack } from './stack.js';
 
 const USAGE = `Usage:
   maka-cloud check   read the configuration from the environment and print it, without secrets
   maka-cloud start   start the stack and serve until SIGINT or SIGTERM
+  maka-cloud pause   stop all spending: new model requests are refused and running work is
+                     stopped within seconds (needs MAKA_CLOUD_DATA_DIR; works while the server runs)
+  maka-cloud resume  allow spending again; work that was stopped is not restarted
 
 Starting runs nothing by itself: tasks start only when a user posts a message.
 Invites are made with: cloud-server invite create --invites <data dir>/invites.db --label <text>
@@ -12,8 +22,30 @@ Invites are made with: cloud-server invite create --invites <data dir>/invites.d
 Environment:
 ${ENV_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}`;
 
+function pauseCommand(command: 'pause' | 'resume', env: NodeJS.ProcessEnv): number {
+  const dataDir = env.MAKA_CLOUD_DATA_DIR?.trim();
+  if (!dataDir) {
+    console.error('MAKA_CLOUD_DATA_DIR is not set');
+    return 2;
+  }
+  const spending = new PauseSwitch(pausePathOf(dataDir));
+  if (command === 'pause') {
+    console.log(
+      spending.pause()
+        ? 'paused: new model requests are refused and running work is stopped within seconds'
+        : `already paused${spending.pausedAt() ? ` since ${spending.pausedAt()}` : ''}`,
+    );
+  } else {
+    console.log(spending.resume() ? 'resumed: spending is allowed again' : 'was not paused');
+  }
+  return 0;
+}
+
 async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const [command, ...rest] = argv;
+  if ((command === 'pause' || command === 'resume') && rest.length === 0) {
+    return pauseCommand(command, env);
+  }
   if ((command !== 'check' && command !== 'start') || rest.length > 0) {
     console.error(USAGE);
     return 2;
@@ -33,6 +65,9 @@ async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
     onWarning: (message, detail) => console.warn(`warning: ${message}`, detail ?? ''),
   });
   console.log(`listening:           ${stack.cloud.server.url}`);
+  if (stack.pause.isPaused()) {
+    console.log('spending is PAUSED: run "maka-cloud resume" to allow it again');
+  }
   await new Promise<void>((resolve) => {
     process.once('SIGINT', resolve);
     process.once('SIGTERM', resolve);

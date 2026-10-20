@@ -32,8 +32,13 @@ import {
   startGateway,
 } from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
+import { PauseSwitch, PauseWatcher } from './pause.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
+
+/** What a user is told when the operator's pause switch stopped their work. */
+export const PAUSED_NOTICE =
+  'This work was stopped because spending was paused by the operator. Send your request again once it resumes.';
 
 /** The playbooks the stack runs: T7's research playbook, T8's coding playbook and the free one. */
 export const STACK_PLAYBOOKS = [researchPlaybook, codingPlaybook, FREE_PLAYBOOK] as const;
@@ -49,6 +54,8 @@ export interface StackDependencies {
    * invite gets no model access.
    */
   ownerOfTask?: (taskId: string) => string | undefined;
+  /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
+  pausePollMs?: number;
   onWarning?: (message: string, detail?: unknown) => void;
 }
 
@@ -58,6 +65,8 @@ export interface Stack {
   coding: CodingRunner;
   /** The model gateway: sandbox runs get a token for it, never a vendor key. */
   gateway: StackGateway;
+  /** The operator's kill switch, as the stack reads it. */
+  pause: PauseSwitch;
   close(): Promise<void>;
 }
 
@@ -103,6 +112,7 @@ export async function startStack(
   // it cost: the orchestrator records it on restore.
   await mkdir(dirname(config.gatewaySpendPath), { recursive: true });
   const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  const pause = new PauseSwitch(config.pausePath);
   // Every model request is also reserved against its invite's daily and monthly caps (read from
   // the invites file each time, so the command line changes them at once) and the server's.
   let invites: InviteStore | undefined;
@@ -127,6 +137,8 @@ export async function startStack(
           );
         },
         serverDailyUsd: () => config.spend.serverDailyUsd,
+        // While paused every reservation is refused, whoever asks.
+        paused: () => pause.isPaused(),
       }),
     );
   } catch (error) {
@@ -226,20 +238,39 @@ export async function startStack(
     journal.close();
     throw error;
   }
+  // While spending is paused, every open run is stopped through the conductor's normal stop path,
+  // which cancels the tasks through the orchestrator.
+  const watcher = new PauseWatcher({
+    switch: pause,
+    onPause: () => cloud.conductor.stopAll('paused', PAUSED_NOTICE),
+    onWarning: warn,
+    ...(dependencies.pausePollMs === undefined ? {} : { pollMs: dependencies.pausePollMs }),
+  });
+  watcher.start();
+  let closing: Promise<void> | undefined;
   return {
     cloud,
     runners,
     coding,
     gateway,
-    // The runs stop first, then the gateway cuts whatever is still in flight.
-    close: async () => {
-      try {
-        await cloud.close();
-      } finally {
-        await gateway.close();
-        invites?.close();
-        journal.close();
-      }
+    pause,
+    // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
+    // Closing twice closes once.
+    close: () => {
+      closing ??= (async () => {
+        try {
+          await watcher.close();
+        } finally {
+          try {
+            await cloud.close();
+          } finally {
+            await gateway.close();
+            invites?.close();
+            journal.close();
+          }
+        }
+      })();
+      return closing;
     },
   };
 }

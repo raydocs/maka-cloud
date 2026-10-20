@@ -11,7 +11,7 @@ import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
 import { readStackConfig } from '../config.js';
-import { STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
+import { PAUSED_NOTICE, STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
 
 /** The machine of the invite the tests create first; any other invite has none. */
 const SANDBOXES = JSON.stringify({ inv_000000000001: 'mch_test' });
@@ -97,6 +97,7 @@ async function start(
   let inviteId = '';
   const owners = new Map<string, string>();
   const stack = await startStack(config, env, {
+    pausePollMs: 10,
     ...(ownerSeam
       ? { ownerOfTask: (taskId) => owners.get(taskId) ?? (inviteId === '' ? undefined : inviteId) }
       : {}),
@@ -554,3 +555,71 @@ test('a task that no conversation owns gets no model access, and nothing reaches
   }
   assert.deepEqual(modelKeys, []);
 });
+
+test('pausing refuses the next model request at once as unavailable, and resuming allows it', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const access = options.modelAccess;
+  assert.ok(access);
+  const grant = await access.issue({
+    taskId: 'tsk_paused',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_paused',
+  });
+  const ask = async () => {
+    const response = await fetch(`${grant.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': grant.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const text = await response.text();
+    return { status: response.status, text };
+  };
+  const sent = () => modelKeys.filter((line) => line.startsWith('/v1/messages ')).length;
+
+  assert.equal((await ask()).status, 500, 'the vendor answered');
+  assert.equal(sent(), 1);
+  stack.pause.pause();
+  const refused = await ask();
+  assert.equal(refused.status, 503, 'unavailable, not out of budget');
+  assert.match(refused.text, /spending is paused/u);
+  assert.equal(sent(), 1, 'the paused request never reached the vendor');
+  assert.equal(grant.meter?.spentUsd(), 0, 'and cost nothing');
+  stack.pause.resume();
+  assert.equal((await ask()).status, 500, 'spending is allowed again');
+  assert.equal(sent(), 2);
+});
+
+test('while paused the stack stops what is open through the conductor, and closing twice closes once', async (t) => {
+  const { stack } = await start(t);
+  const stops: Array<[string, string]> = [];
+  const asked = deferred();
+  const conductor = stack.cloud.conductor;
+  conductor.stopAll = async (reason, notice) => {
+    stops.push([reason, notice]);
+    asked.resolve();
+    return 0;
+  };
+  assert.deepEqual(stops, [], 'not paused: nothing is stopped');
+  stack.pause.pause();
+  await asked.promise;
+  assert.equal(stops[0]?.[0], 'paused');
+  assert.equal(stops[0]?.[1], PAUSED_NOTICE);
+  stack.pause.resume();
+  await stack.close();
+  await stack.close();
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
