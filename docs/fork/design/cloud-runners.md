@@ -135,10 +135,20 @@ another's machine. `TenantMachineProvider` refuses a table that gives one machin
 when it is built, since snapshots and the sweep treat a machine as one tenant's. The table is
 copied first and the copy is checked, so changing the caller's object afterwards changes nothing.
 
-**Accepted risk:** tasks of the same tenant share a sandbox and run as the same sandbox user. They can
-read each other's environment (`/proc/<pid>/environ`) and signal each other. That is
-acceptable for a single tenant running its own tasks; a deployment that does not trust its tasks to
-each other needs a sandbox per task.
+The product stack (`@maka-cloud/host`) makes the tenant the invite that owns the task's conversation
+(`tenantOf`, from the server's `ownerOfTask`) and builds a `TenantMachineProvider` from
+`MAKA_CLOUD_SANDBOXES`, one machine per invite id. So tasks of different invites never share a
+machine, a Unix user, a process table or an environment. Everything fails closed: a task whose
+conversation has no owner (unknown task, a pre-v5 conversation nobody adopted) has no tenant and
+fails before a machine is asked for; an invite with no entry gets "No sandbox is assigned"; a table
+that gives one machine to two invites stops the start. The old single `INSTABOX_MACHINE_ID` is
+refused by the stack, since it would put every invite on one machine. Adding an invite's machine
+means editing the table and restarting.
+
+**Accepted risk:** tasks of the same invite share its sandbox and run as the same sandbox user. They
+can read each other's environment (`/proc/<pid>/environ`) and signal each other. That is
+acceptable for one invite running its own tasks; a deployment that does not trust the tasks of one
+invite to each other needs a sandbox per task.
 
 ## Tools and inputs (research playbook support)
 
@@ -165,7 +175,7 @@ the sandbox user: no live process of the source; every requested path inside its
 symlink on the way or below it, only regular files and directories; at most 200 files, 5 MiB per file
 and 32 MiB in all. Files are copied with nofollow opens into a temporary directory that replaces
 `inputs/<taskId>` in one rename, so a repeated start gives the same result. This adds no privilege:
-tasks of one tenant share the sandbox user (see "Sandboxes and tenants"), and the copy runs as that
+tasks of one tenant (one invite in the product) share the sandbox user (see "Sandboxes and tenants"), and the copy runs as that
 user, never through `GET /files`. A refusal fails the task with its reason before the CLI starts: an
 agent missing its inputs would otherwise review files it never saw. A resumed turn does not copy again.
 Not covered: a source process that starts a write after the live-process check passes (same user, same

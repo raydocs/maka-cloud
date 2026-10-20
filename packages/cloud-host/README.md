@@ -11,7 +11,14 @@ maka-cloud start   # serve until SIGINT or SIGTERM
 
 Configuration comes from the environment only; `maka-cloud` with no command lists the variables.
 The required ones are `MAKA_CLOUD_DATA_DIR`, `ANTHROPIC_API_KEY`, `INSTABOX_API_KEY` and
-`INSTABOX_MACHINE_ID`. Models are reached with API keys only.
+`MAKA_CLOUD_SANDBOXES`. Models are reached with API keys only.
+
+Every invite runs its tasks on a sandbox machine of its own, so one invite's tasks cannot read
+another's files, environment or tokens. `MAKA_CLOUD_SANDBOXES` is a JSON object from invite id to
+machine, for example `{"inv_0123456789ab": "m_alice"}`; no machine can serve two invites. An invite
+with no entry, and a task whose conversation has no owner (a pre-v5 one nobody adopted), cannot
+start tasks. After creating an invite and its machine, add the entry and restart. The old
+`INSTABOX_MACHINE_ID` is refused, since it would put every invite on one machine.
 
 Starting runs nothing by itself: no model request is made and no task starts until a user posts a
 message. At start the server stops sandbox runs whose task its log does not know, and the

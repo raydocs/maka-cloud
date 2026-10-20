@@ -20,6 +20,7 @@ import {
   JsonFileSessionStore,
   sameConversationInputPolicy,
   type TaskDirectory,
+  TenantMachineProvider,
 } from '@maka-cloud/runners';
 import { pushConfigFromEnv } from '@maka-cloud/server';
 import type { StackConfig } from './config.js';
@@ -76,6 +77,15 @@ export async function startStack(
     rootSessionOfTask: (taskId: TaskId) => orchestrator?.rootSessionOfTask(taskId),
     taskStateOf: (taskId: TaskId) => orchestrator?.taskStateOf(taskId),
   };
+  // A task's sandbox is its invite's: the tenant is the invite that owns the task's conversation.
+  // A task with no such invite (unknown, or a conversation nobody owns) has no sandbox, so it
+  // fails to start instead of landing on a machine another invite uses.
+  let ownerOfTask: ((taskId: string) => string | undefined) | undefined;
+  const tenantOf = (taskId: TaskId): string => {
+    const owner = ownerOfTask?.(taskId);
+    if (owner === undefined) throw new Error(`Task ${taskId} has no owning invite, so no sandbox`);
+    return owner;
+  };
   const warn = dependencies.onWarning ?? (() => undefined);
   // Every request of a task's run is written down before it is sent, so a crash cannot lose what
   // it cost: the orchestrator records it on restore.
@@ -108,6 +118,8 @@ export async function startStack(
         ...(gateway.gateway.canSearch ? [await webSearchSandboxTool()] : []),
       ],
       inputs: sameConversationInputPolicy(directory),
+      tenantOf,
+      sandboxes: new TenantMachineProvider(config.sandboxes),
       ...(publicUrl === undefined ? {} : { mcpUrlForSandbox: () => publicUrl }),
     };
     runners = (
@@ -167,6 +179,7 @@ export async function startStack(
       onReady: (parts) => {
         orchestrator = parts.orchestrator;
         conductor = parts.conductor;
+        ownerOfTask = parts.ownerOfTask;
       },
       onWarning: warn,
     });

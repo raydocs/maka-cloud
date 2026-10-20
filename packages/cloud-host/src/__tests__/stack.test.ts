@@ -13,6 +13,9 @@ import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud
 import { readStackConfig } from '../config.js';
 import { STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
 
+/** The machine of the invite the tests create first; any other invite has none. */
+const SANDBOXES = JSON.stringify({ inv_000000000001: 'mch_test' });
+
 interface Started {
   stack: Stack;
   options: Partial<CloudRunnersOptions>;
@@ -62,9 +65,13 @@ async function start(
       ANTHROPIC_API_KEY: 'sk-test-not-a-key',
       ANTHROPIC_BASE_URL: modelUrl,
       INSTABOX_API_KEY: 'ibx-test-not-a-key',
-      INSTABOX_MACHINE_ID: 'mch_test',
+      MAKA_CLOUD_SANDBOXES: SANDBOXES,
       ...(publicUrl === undefined ? {} : { MAKA_CLOUD_MCP_PUBLIC_URL: publicUrl }),
-      ...Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith('CLOUD_PUSH_'))),
+      ...Object.fromEntries(
+        Object.entries(env).filter(
+          ([name]) => name.startsWith('CLOUD_PUSH_') || name === 'MAKA_CLOUD_SANDBOXES',
+        ),
+      ),
     }),
     port: 0,
   };
@@ -294,7 +301,7 @@ test('a stack that fails to start closes its gateway', async (t) => {
     MAKA_CLOUD_DATA_DIR: dir,
     ANTHROPIC_API_KEY: 'sk-test-not-a-key',
     INSTABOX_API_KEY: 'ibx-test-not-a-key',
-    INSTABOX_MACHINE_ID: 'mch_test',
+    MAKA_CLOUD_SANDBOXES: SANDBOXES,
   });
   config.gateway.port = 0;
   let issued: Promise<ModelAccess> | undefined;
@@ -361,6 +368,33 @@ test('the input policy asks the restored orchestrator: finished tasks of the sam
   );
 });
 
+test('a task runs on the machine of the invite that owns it, and on no other', async (t) => {
+  const inviteA = 'inv_aaaaaaaaaaaa';
+  const inviteB = 'inv_bbbbbbbbbbbb';
+  const { stack, options } = await start(t, undefined, {
+    MAKA_CLOUD_SANDBOXES: JSON.stringify({ [inviteA]: 'mch_a', [inviteB]: 'mch_b' }),
+  });
+  const { tenantOf, sandboxes } = options;
+  assert.ok(tenantOf && sandboxes, 'the stack decides the tenant and the sandboxes of its fleet');
+  assert.equal((await sandboxes.acquire({ tenantId: inviteA, taskId: 't1' })).machineId, 'mch_a');
+  assert.equal((await sandboxes.acquire({ tenantId: inviteB, taskId: 't2' })).machineId, 'mch_b');
+  assert.deepEqual(sandboxes.knownMachines(), ['mch_a', 'mch_b']);
+  // An invite with no machine of its own gets none, not a neighbour's.
+  await assert.rejects(
+    sandboxes.acquire({ tenantId: 'inv_cccccccccccc', taskId: 't3' }),
+    /No sandbox is assigned/,
+  );
+  await assert.rejects(sandboxes.acquire({ tenantId: 'default', taskId: 't4' }), /No sandbox/);
+
+  // A task that no invite owns has no tenant: it cannot start, so it cannot land anywhere.
+  const orchestrator = stack.cloud.server.orchestrator;
+  const loose = orchestrator.authenticate(orchestrator.issueSession().token);
+  assert.ok(loose);
+  const task = await orchestrator.delegate(loose, { runner: 'claude-agent-sdk', brief: 'x' });
+  assert.throws(() => tenantOf(task.taskId), /no owning invite/);
+  assert.throws(() => tenantOf('tsk_unknown'), /no owning invite/);
+});
+
 test('coding tasks go to the coding runner, and the stack runs the coding playbook with its pull request tool', async (t) => {
   const { stack, claude } = await start(t);
   const orchestrator = stack.cloud.server.orchestrator;
@@ -424,7 +458,7 @@ test('Web Push settings that cannot sign stop the start, without the key in the 
   const config = readStackConfig({
     MAKA_CLOUD_DATA_DIR: dir,
     INSTABOX_API_KEY: 'ibx-test-not-a-key',
-    INSTABOX_MACHINE_ID: 'mch_test',
+    MAKA_CLOUD_SANDBOXES: SANDBOXES,
     ...env,
   });
   config.port = 0;

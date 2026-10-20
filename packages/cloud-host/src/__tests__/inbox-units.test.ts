@@ -394,7 +394,7 @@ test('the stack config reports a bad pool with the other problems and prints the
     MAKA_CLOUD_DATA_DIR: '/data',
     ANTHROPIC_API_KEY: 'sk-secret-anthropic',
     INSTABOX_API_KEY: 'ibx-secret',
-    INSTABOX_MACHINE_ID: 'mch_1',
+    MAKA_CLOUD_SANDBOXES: JSON.stringify({ inv_000000000001: 'mch_1' }),
   };
   assert.throws(
     () => readStackConfig({ ...base, MAKA_CLOUD_VERIFIER_MODELS: '[{"vendor":"openai"}]' }),

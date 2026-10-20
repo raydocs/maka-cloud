@@ -122,3 +122,29 @@ test('every way a run can end releases what it holds', async (t) => {
   void InstaboxClient;
   void notes;
 });
+
+test('a task whose tenant cannot be named fails before any sandbox is acquired', async (t) => {
+  const acquired: string[] = [];
+  const h = await setup({
+    cloud: {
+      tenantOf: () => {
+        throw new Error('Task has no owning invite, so no sandbox');
+      },
+      sandboxes: {
+        knownMachines: () => [],
+        acquire: async (input) => {
+          acquired.push(input.tenantId);
+          return { machineId: 'm_shared', release: () => undefined };
+        },
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  const events = await collect(await h.runners.claude.start(await h.spec('tsk_no_tenant')));
+  const last = terminal(events);
+  assert.equal(last?.type, 'failed');
+  assert.match(last?.type === 'failed' ? last.reason : '', /no owning invite/);
+  assert.deepEqual(acquired, [], 'no machine was asked for, so none could be shared');
+  assert.equal(h.runners.fleet.openRuns, 0);
+  assert.ok(h.revoked.includes('tsk_no_tenant'), 'the run’s model access is revoked');
+});
