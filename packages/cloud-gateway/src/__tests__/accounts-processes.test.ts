@@ -139,3 +139,27 @@ setInterval(() => {}, 1000);
   assert.equal(ledger.reserve({ inviteId: 'inv_a' }, 'fits', 1).ok, true);
   assert.equal(ledger.reserve({ inviteId: 'inv_b' }, 'unaffected', 3).ok, true);
 });
+
+test('processes opening a new journal file at the same moment all get it, round after round', async (t) => {
+  // A new file is switched to WAL by whoever gets there first; the others used to be refused
+  // ("database is locked", "disk I/O error") about one open in five, so one round is not enough.
+  const script = `${OPEN}
+console.log('ready');
+await new Promise((resolve) => process.stdin.once('data', resolve));
+const journal = new SqliteSpendJournal(path);
+journal.hold('task', 'key-' + process.pid, 0.01);
+journal.close();
+console.log('opened');
+`;
+  for (let round = 0; round < 8; round += 1) {
+    const path = await journalPath(t);
+    const procs = Array.from({ length: 6 }, () => child(path, script));
+    const finished = procs.map(output);
+    await release(procs);
+    const results = await Promise.allSettled(finished);
+    const failed = results.flatMap((result) =>
+      result.status === 'rejected' ? [String(result.reason)] : [],
+    );
+    assert.deepEqual(failed, [], `round ${round}: every process opened the file`);
+  }
+});

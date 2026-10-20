@@ -49,17 +49,27 @@ export function journaledPort(port: BudgetPort, journal: SpendJournal, taskId: s
   };
 }
 
-/**
- * The journal in SQLite. Each process writes under its own epoch; at start, what earlier epochs
- * wrote is handed to the task log once (`unrecorded`) and then forgotten (`recorded`).
- */
-export class SqliteSpendJournal implements SpendJournal {
-  private readonly db: DatabaseSync;
-  private readonly epoch = randomUUID();
+/** Opening or setting up a file that another process is setting up at that moment can fail for a moment. */
+const OPEN_RETRY_MS = 10_000;
+const TRANSIENT = new Set([5, 6, 10]); // SQLITE_BUSY, SQLITE_LOCKED, SQLITE_IOERR (any extended code)
 
-  constructor(path: string) {
-    this.db = new DatabaseSync(path);
-    this.db.exec(`
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * A new file is switched to WAL by whichever process gets there first; the others can be refused
+ * ("database is locked", "disk I/O error") although `busy_timeout` is set, because SQLite does not
+ * wait where waiting could deadlock. Setting up is idempotent, so a refusal is retried from the
+ * start for a while; anything else is thrown at once.
+ */
+function openJournal(path: string): DatabaseSync {
+  const giveUpAt = Date.now() + OPEN_RETRY_MS;
+  for (;;) {
+    let db: DatabaseSync | undefined;
+    try {
+      db = new DatabaseSync(path);
+      db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
@@ -93,7 +103,33 @@ export class SqliteSpendJournal implements SpendJournal {
       );
       CREATE INDEX IF NOT EXISTS account_spend_day ON account_spend (day, account);
       CREATE INDEX IF NOT EXISTS account_spend_month ON account_spend (account, month);
-    `);
+      `);
+      return db;
+    } catch (error) {
+      try {
+        db?.close();
+      } catch {
+        // Nothing more to release.
+      }
+      const code = (error as { errcode?: unknown }).errcode;
+      if (typeof code !== 'number' || !TRANSIENT.has(code & 0xff) || Date.now() >= giveUpAt) {
+        throw error;
+      }
+      sleepSync(5 + Math.random() * 20);
+    }
+  }
+}
+
+/**
+ * The journal in SQLite. Each process writes under its own epoch; at start, what earlier epochs
+ * wrote is handed to the task log once (`unrecorded`) and then forgotten (`recorded`).
+ */
+export class SqliteSpendJournal implements SpendJournal {
+  private readonly db: DatabaseSync;
+  private readonly epoch = randomUUID();
+
+  constructor(path: string) {
+    this.db = openJournal(path);
   }
 
   hold(taskId: string, key: string, usd: number): void {
