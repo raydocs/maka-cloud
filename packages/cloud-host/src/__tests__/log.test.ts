@@ -280,3 +280,52 @@ test('a long field is cut, and a newline in a value cannot make a second line', 
   assert.ok(String(parsed(lines)[0]?.text).length <= 1_001);
   assert.equal(lines[1]?.includes('\n'), false);
 });
+
+test('bytes never print: a Buffer, a typed array or an ArrayBuffer cannot be rebuilt from the line', () => {
+  const secret = 'correct-horse-battery-staple-4815162342';
+  const bytes = Buffer.from(secret);
+  const { log, lines } = logger();
+  log.info('upload', {
+    payload: bytes,
+    view: new Uint8Array(bytes),
+    wide: new Uint16Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + 8)),
+    raw: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length),
+    shared: new SharedArrayBuffer(4),
+    data: new DataView(new Uint8Array(bytes).buffer),
+    nested: { body: [bytes] },
+  } as unknown as Parameters<typeof log.info>[1]);
+  log.warning('failed', { payload: bytes });
+  const [line] = lines;
+  assert.ok(line);
+  const asNumbers = Array.from(bytes).join(',');
+  for (const text of lines) {
+    assert.ok(!text.includes(asNumbers), 'the bytes are not listed');
+    assert.ok(!text.includes(bytes.toString('base64')));
+    assert.ok(!text.includes(bytes.toString('hex')));
+    assert.ok(!text.includes(secret));
+    // No run of three or more byte values, however it is written.
+    assert.ok(!/(?:\b\d{1,3}\b\D{1,3}){6}/u.test(text.replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/u, '')));
+  }
+  const fields = parsed(lines)[0] ?? {};
+  assert.equal(fields.payload, '[binary]');
+  assert.equal(fields.view, '[binary]');
+  assert.equal(fields.raw, '[binary]');
+  assert.deepEqual(fields.nested, { body: ['[binary]'] });
+});
+
+test('an error whose properties throw does not make warning throw', () => {
+  const { log, lines } = logger();
+  const hostile = new Error('private text');
+  for (const key of ['name', 'code', 'status', 'safeToLog', 'syscall', 'message']) {
+    Object.defineProperty(hostile, key, {
+      get() {
+        throw new Error('getter');
+      },
+    });
+  }
+  assert.doesNotThrow(() => log.warning('it failed', hostile));
+  assert.doesNotThrow(() => log.info('it failed', { cause: hostile }));
+  assert.equal(lines.length, 2, 'both lines were written');
+  assert.ok(!lines.join('').includes('private text'));
+  assert.ok(!lines.join('').includes('getter'));
+});
