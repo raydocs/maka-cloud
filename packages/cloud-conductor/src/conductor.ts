@@ -10,6 +10,7 @@ import {
   type ModelPrices,
   OPUS_5_5_PRICES,
 } from './config.js';
+import { playbookToolPolicy } from './guard.js';
 import { MakaHost } from './maka-host.js';
 import { type ConductorAccess, OrchestratorLink } from './orchestrator-link.js';
 import type {
@@ -78,6 +79,11 @@ export interface UserMessage {
   conversationId: string;
   messageId: string;
   text: string;
+  /**
+   * The text comes from outside the user (an issue or comment someone else wrote): the
+   * conversation is tainted before the message is admitted, and stays tainted (T15).
+   */
+  external?: boolean;
 }
 
 export interface UserAnswer {
@@ -194,6 +200,8 @@ export class Conductor {
   private closed: Promise<void> | undefined;
 
   private constructor(options: ConductorOptions) {
+    // A tool without a valid T15 policy is refused before anything is opened.
+    for (const spec of options.tools ?? []) playbookToolPolicy(spec);
     this.now = options.now ?? Date.now;
     this.state = new ConductorState(join(options.root, 'conductor.db'), this.now);
     this.outbox = options.outbox;
@@ -272,6 +280,7 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
+    if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
       message.messageId,
@@ -326,11 +335,53 @@ export class Conductor {
     return { accepted: true, duplicate: false };
   }
 
+  /**
+   * The conversation a running conductor or planner turn works for, so its model spend can be
+   * charged to whoever owns it. Undefined for a session with no turn running.
+   */
+  conversationOfSession(makaSessionId: string): string | undefined {
+    const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+    return turn === undefined ? undefined : this.state.run(turn.runId)?.conversationId;
+  }
+
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
     if (!run) return false;
     return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
+  }
+
+  /**
+   * Stops every open run, in every conversation, the way a user's stop does: its turn, queued
+   * inputs and tasks (cancelled through the orchestrator), and tells the user why. For the
+   * operator's pause switch. A conversation the orchestrator gives no access to has its tasks
+   * marked as owed a cancel, which is retried when it next has access. Cancels still owed from an
+   * earlier stop are retried too, whether or not any run is open. Returns how many runs it stopped.
+   */
+  async stopAll(reason: string, notice: string): Promise<number> {
+    if (this.closing.signal.aborted) return 0;
+    let stopped = 0;
+    for (const run of OPEN_RUN_STATES.flatMap((state) => this.state.runsInState(state))) {
+      const access = this.orchestratorAccess?.(run.conversationId);
+      const lane = this.lane(run.conversationId, access);
+      if (!lane.access) {
+        this.state.markCancelPending(
+          this.state.unsettledDelegations({ runId: run.runId }).map((delegation) => delegation.key),
+        );
+      }
+      if (this.stopRun(lane, run.runId, reason, notice)) {
+        stopped += 1;
+        this.sendOutbox(run.conversationId);
+      }
+    }
+    // A stop that could not reach the orchestrator left its tasks running and its runs closed, so
+    // the scan above never sees them again: every call asks for what is still owed.
+    for (const conversationId of this.state.conversationsWithPendingCancels()) {
+      const access = this.orchestratorAccess?.(conversationId);
+      // Taking the access queues the retry.
+      if (access) this.lane(conversationId, access);
+    }
+    return stopped;
   }
 
   /**
@@ -742,8 +793,8 @@ export class Conductor {
     ).then(() => undefined);
   }
 
-  private stopRun(lane: Lane, runId: string, reason: string): boolean {
-    if (!this.state.endRun(runId, 'cancelled', reason)) return false;
+  private stopRun(lane: Lane, runId: string, reason: string, notice?: string): boolean {
+    if (!this.state.endRun(runId, 'cancelled', reason, notice)) return false;
     lane.queue = lane.queue.filter((job) => job.runId !== runId);
     if (lane.current?.runId === runId) this.requestStop(lane.current, 'user');
     else this.enqueue(lane, { kind: 'cancel_tasks', runId });
@@ -781,6 +832,7 @@ export class Conductor {
     link: OrchestratorLink,
   ): Promise<void> {
     this.state.markCancelPending(delegations.map((delegation) => delegation.key));
+    const failed = new Set<string>();
     for (const delegation of delegations) {
       const target =
         delegation.taskId === null
@@ -790,12 +842,23 @@ export class Conductor {
         const result = await link.call('task_cancel', target);
         if (result.isError) {
           this.warn(`Cancelling delegation ${delegation.key} failed`, result.text);
+          failed.add(delegation.conversationId);
           continue;
         }
         this.settleView(delegation, result.structured);
       } catch (error) {
         this.warn(`Cancelling delegation ${delegation.key} failed`, error);
+        failed.add(delegation.conversationId);
       }
+    }
+    // The delegation stays owed and reserved; ask again after a while, with nobody having to call.
+    for (const conversationId of failed) this.checkStopLater(conversationId);
+    // Nothing owed any more: the check that was waiting for it has nothing to ask.
+    for (const conversationId of new Set(delegations.map((d) => d.conversationId))) {
+      if (this.state.hasPendingCancels(conversationId)) continue;
+      const timer = this.stopChecks.get(conversationId);
+      if (timer) clearTimeout(timer);
+      this.stopChecks.delete(conversationId);
     }
   }
 

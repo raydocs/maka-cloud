@@ -193,6 +193,7 @@ export class HttpError extends Error {
 export class PublicApi {
   private readonly streamsByInvite = new KeyedCounter<string>();
   private streams = 0;
+  private closing = false;
   private readonly open = new Set<ServerResponse>();
   /** How to end each open stream, by the invite it was opened with. */
   private readonly streamEnds = new Map<string, Set<() => void>>();
@@ -214,6 +215,7 @@ export class PublicApi {
 
   /** Ends every open event stream; clients reconnect with their last id. */
   closeStreams(): void {
+    this.closing = true;
     for (const res of [...this.open]) res.end();
     for (const taskId of [...this.humanComputers.keys()]) this.releaseComputer(taskId);
   }
@@ -263,9 +265,39 @@ export class PublicApi {
     this.stopWatching = undefined;
   }
 
+  /**
+   * The one route without an invite, for a proxy or a supervisor to ask whether to send
+   * traffic here. The body never says more than ok or unavailable: no counts, no names.
+   */
+  private health(req: IncomingMessage, res: ServerResponse): void {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      respond(res, 405, { error: 'method_not_allowed' }, { allow: 'GET, HEAD' });
+      return;
+    }
+    let ok = !this.closing;
+    if (ok) {
+      try {
+        this.deps.db.prepare('SELECT 1').get();
+        this.deps.invites.active('health');
+      } catch {
+        ok = false;
+      }
+    }
+    respond(
+      res,
+      ok ? 200 : 503,
+      { status: ok ? 'ok' : 'unavailable' },
+      { 'cache-control': 'no-store' },
+    );
+  }
+
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
+      if (url.pathname === '/healthz') {
+        this.health(req, res);
+        return;
+      }
       const invite = this.authenticate(req);
       await this.route(req, res, url, invite);
     } catch (error) {

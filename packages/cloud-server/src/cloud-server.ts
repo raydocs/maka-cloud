@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { DatabaseSync } from 'node:sqlite';
+import { backup as sqliteBackup, type DatabaseSync } from 'node:sqlite';
 import {
   Orchestrator,
   type OrchestratorOptions,
@@ -161,6 +161,10 @@ export interface CloudServerOptions {
      * unknown or its conversation has no owner (a pre-v5 one nobody adopted). Never a guess.
      */
     ownerOfTask(taskId: string): string | undefined;
+    /** The invite that owns the conversation, or undefined when it is unknown or has no owner. */
+    ownerOfConversation(conversationId: string): string | undefined;
+    /** The conversation a task belongs to, or undefined for an unknown task. */
+    conversationOfTask(taskId: string): string | undefined;
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
@@ -193,6 +197,16 @@ export interface CloudServer {
   openStreams(): number;
   /** Where handing user messages to the handler stands; undefined without a handler. */
   deliveryStats(): DeliveryStats | undefined;
+  /**
+   * Writes a consistent copy of the main database to `destination` while the server runs. The
+   * server holds that file exclusively, so only the server can make this copy.
+   */
+  backupDatabase(destination: string): Promise<void>;
+  /**
+   * Sends the operator's alert `key` to the devices of `inviteId`, each at most once per key.
+   * Resolves when they were told or given up on; without Web Push it resolves at once.
+   */
+  pushAlert(inviteId: string, key: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -265,6 +279,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         return rotated.token;
       },
     });
+    const conversationOfTask = (taskId: string): string | undefined => {
+      const sessionId = orchestrator.rootSessionOfTask(taskId);
+      return sessionId === undefined ? undefined : conversations.conversationOf(sessionId);
+    };
     const ownInviteStore = invites;
     const authorized = (caller: string, conversationId: string): boolean =>
       ownInviteStore.active(caller) && conversations.owns(caller, conversationId);
@@ -278,11 +296,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           },
           authorized,
           ownerOfTask: (taskId) => {
-            const sessionId = orchestrator.rootSessionOfTask(taskId);
-            const conversationId =
-              sessionId === undefined ? undefined : conversations.conversationOf(sessionId);
+            const conversationId = conversationOfTask(taskId);
             return conversationId === undefined ? undefined : conversations.ownerOf(conversationId);
           },
+          conversationOfTask,
+          ownerOfConversation: (conversationId) => conversations.ownerOf(conversationId),
         })
       : options.handler;
     const ownHandler = handler;
@@ -467,6 +485,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       publisher,
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
+      pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(),
+      backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       close: () => {
         closing ??= shutdown();
         return closing;

@@ -206,6 +206,7 @@ const failing: ConductorToolSpec = {
   name: 'flaky_lookup',
   description: 'Looks something up.',
   parameters: z.object({ q: z.string() }),
+  effects: [],
   impl: async () => {
     throw new Error('lookup broke');
   },
@@ -574,4 +575,186 @@ test('a cancel that fails at shutdown is kept and retried on the next start', as
   await reopened.idle();
   await assertNoTasks(h);
   assertReleased(reopened);
+});
+
+const PAUSED = 'Spending is paused.';
+
+test('stopAll ends every open run, cancels their tasks, tells each user why, and releases everything', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { orchestratorAccess: (conversationId) => h.access(conversationId) },
+  });
+  // One conversation waits for an answer, with no task and no turn.
+  h.model.script(
+    'conductor',
+    calls(
+      tool('ask_user', {
+        reason: 'taste',
+        question: 'A or B?',
+        options: [
+          { id: 'a', label: 'A' },
+          { id: 'b', label: 'B' },
+        ],
+        recommended: 'a',
+      }),
+    ),
+  );
+  await h.send('cnv_b', 'Choose.');
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.runsInState('waiting').length, 1);
+  // Another has a task running and a model call in flight.
+  const started = onRunStart(h);
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_a', 'Go.');
+  await started;
+  await held.started;
+
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 2);
+  await h.conductor.idle();
+  held.release();
+  assert.deepEqual(
+    h.conductor.state.runsInState('cancelled').map((run) => run.endReason),
+    ['paused', 'paused'],
+  );
+  assert.deepEqual(h.outbox.notices.map((notice) => [notice.conversationId, notice.text]).sort(), [
+    ['cnv_a', PAUSED],
+    ['cnv_b', PAUSED],
+  ]);
+  await assertNoTasks(h);
+  assertReleased(h.conductor);
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 0, 'nothing is left to stop');
+});
+
+test('stopAll with nothing open stops nothing, and a later message starts a fresh run', async (t) => {
+  const h = await makeHarness(t);
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 0);
+  h.model.script('conductor', text('Back.'));
+  await h.send('cnv_1', 'Hi.');
+  await h.conductor.idle();
+  assert.deepEqual(
+    h.outbox.messages.map((message) => message.text),
+    ['Back.'],
+  );
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 0, 'the finished run is not stopped');
+  h.model.script('conductor', text('Again.'));
+  await h.send('cnv_1', 'Once more.');
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.runsInState('cancelled').length, 0);
+  assertReleased(h.conductor);
+});
+
+test('stopAll on a closed conductor stops nothing', async (t) => {
+  const h = await makeHarness(t);
+  await h.conductor.close();
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 0);
+});
+
+test('stopAll after a restart that gives no orchestrator access still ends the waiting run', async (t) => {
+  const h = await makeHarness(t);
+  h.model.script(
+    'conductor',
+    calls(
+      tool('ask_user', {
+        reason: 'taste',
+        question: 'A or B?',
+        options: [
+          { id: 'a', label: 'A' },
+          { id: 'b', label: 'B' },
+        ],
+        recommended: 'a',
+      }),
+    ),
+  );
+  await h.send('cnv_1', 'Choose.');
+  await h.conductor.idle();
+  await h.conductor.close();
+  const reopened = await h.restart({});
+  assert.equal(reopened.state.runsInState('waiting').length, 1, 'the question survives');
+  assert.equal(await reopened.stopAll('paused', PAUSED), 1);
+  await reopened.idle();
+  assert.equal(reopened.state.runsInState('cancelled')[0]?.endReason, 'paused');
+  assertReleased(reopened);
+});
+
+test('a cancel that fails after a pause is retried by the next stopAll, with no open run left, and its reservation is held until the stop is confirmed', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { orchestratorAccess: (conversationId) => h.access(conversationId) },
+  });
+  const cancel = h.orchestrator.cancel.bind(h.orchestrator);
+  let failing = true;
+  let attempts = 0;
+  h.orchestrator.cancel = async (...args) => {
+    attempts += 1;
+    if (failing) throw new Error('orchestrator unavailable');
+    return cancel(...args);
+  };
+  const started = onRunStart(h);
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_a', 'Go.');
+  await started;
+  await held.started;
+
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 1);
+  await h.conductor.idle();
+  held.release();
+  assert.equal(attempts, 1);
+  assert.equal(h.orchestrator.stats().activeTasks, 1, 'the failed cancel left the task running');
+  assert.equal(h.conductor.state.runsInState('cancelled').length, 1, 'the run itself is over');
+  const [owed] = h.conductor.state.unsettledDelegations();
+  assert.ok(owed?.cancelPending, 'the cancel is owed, so the reservation is still held');
+
+  // The connection comes back. Nothing is open, but the pause watcher keeps calling stopAll.
+  failing = false;
+  assert.equal(await h.conductor.stopAll('paused', PAUSED), 0, 'no run is stopped again');
+  await h.conductor.idle();
+  assert.ok(attempts >= 2, 'the owed cancel was tried again');
+  await assertNoTasks(h);
+  assert.deepEqual(
+    h.conductor.state.unsettledDelegations(),
+    [],
+    'settled once the stop is confirmed',
+  );
+  assertReleased(h.conductor);
+});
+
+test('a cancel that fails after a user stop is retried on a timer, without any further call', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: {
+      orchestratorAccess: (conversationId) => h.access(conversationId),
+      limits: { stopCheckMs: 5 },
+    },
+  });
+  const cancel = h.orchestrator.cancel.bind(h.orchestrator);
+  let failures = 0;
+  const retried = gate();
+  h.orchestrator.cancel = async (...args) => {
+    if (failures < 2) {
+      failures += 1;
+      throw new Error('orchestrator unavailable');
+    }
+    const view = await cancel(...args);
+    retried.open();
+    return view;
+  };
+  const started = onRunStart(h);
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_a', 'Go.');
+  await started;
+  await held.started;
+  assert.equal(await h.conductor.stop('cnv_a'), true);
+  held.release();
+  await retried.promise;
+  await h.conductor.idle();
+  assert.equal(failures, 2, 'it kept trying until the orchestrator answered');
+  await assertNoTasks(h);
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+  assertReleased(h.conductor);
 });

@@ -55,6 +55,8 @@ export async function buildDigest(input: {
   active: ItemRecord[];
   recent: ItemRecord[];
   model?: SummaryModel;
+  /** Whose items these are; given to the model so it can charge them. */
+  owner?: string;
   timeoutMs: number;
   signal: AbortSignal;
   onWarning: (message: string, detail?: unknown) => void;
@@ -88,6 +90,7 @@ export async function buildDigest(input: {
           })),
         },
         signal,
+        input.owner,
       );
       if (signal.aborted) throw new Error('summary timed out or was stopped');
       order = validateOrder(Array.isArray(answer.order) ? answer.order : [], fallbackOrder);

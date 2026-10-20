@@ -313,10 +313,30 @@ DROP TABLE run_tasks;
   }
 }
 
+/**
+ * T15: tainted conversations. A conversation's Maka session history is
+ * append-only, so once content from outside the user is in it, it stays: a
+ * taint row is never updated or deleted. Conversations from before this step
+ * may already hold such content, so they start tainted.
+ */
+const SCHEMA_V3 = `
+CREATE TABLE taints (
+  conversation_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER taints_no_update BEFORE UPDATE ON taints
+  BEGIN SELECT RAISE(ABORT, 'taint is permanent'); END;
+CREATE TRIGGER taints_no_delete BEFORE DELETE ON taints
+  BEGIN SELECT RAISE(ABORT, 'taint is permanent'); END;
+INSERT INTO taints (conversation_id, source, at)
+  SELECT conversation_id, 'migration', created_at FROM conversations;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
-export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, schemaV2];
+export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, schemaV2, SCHEMA_V3];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
   return (
@@ -433,6 +453,26 @@ export class ConductorState {
       systemPrompt: String(row.system_prompt),
       runId: row.run_id === null ? null : String(row.run_id),
     };
+  }
+
+  // Taint (T15)
+
+  /**
+   * Marks the conversation as having read content from outside the user. The
+   * first source is kept; a conversation is never untainted.
+   */
+  taint(conversationId: string, source: string): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO taints (conversation_id, source, at) VALUES (?, ?, ?)')
+      .run(conversationId, source, this.now());
+  }
+
+  /** What first tainted the conversation, if anything has. */
+  taintOf(conversationId: string): { source: string; at: number } | undefined {
+    const row = this.db
+      .prepare('SELECT source, at FROM taints WHERE conversation_id = ?')
+      .get(conversationId) as Row | undefined;
+    return row ? { source: String(row.source), at: Number(row.at) } : undefined;
   }
 
   // Runs and inputs

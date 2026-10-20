@@ -34,7 +34,11 @@ function immediateSuccessSpawn(started) {
     assert.ok(existsSync(options.cwd), `spawned into a missing directory: ${options.cwd}`);
     started.push(options.cwd);
     const child = new EventEmitter();
-    queueMicrotask(() => child.emit('close', 0));
+    child.stdout = new EventEmitter();
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from('# tests 1\n'));
+      child.emit('close', 0);
+    });
     return child;
   };
 }
@@ -116,6 +120,78 @@ test('the run queues the heaviest workspace ahead of the lighter one', async () 
         started.map((cwd) => cwd.slice(root.length + 1)),
         ['ws-heavy', 'ws-light'],
       );
+    },
+  );
+});
+
+/** A child that prints each chunk in turn, then closes; `undefined` prints nothing. */
+function spawnPrinting(output, code = 0) {
+  const chunks = output === undefined ? [] : Array.isArray(output) ? output : [output];
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    queueMicrotask(() => {
+      for (const chunk of chunks) child.stdout.emit('data', Buffer.from(chunk));
+      child.emit('close', code);
+    });
+    return child;
+  };
+}
+
+async function runWith(spawn) {
+  return await withWorkspaceTree({ 'ws/src/a.test.ts': 'x' }, (root) =>
+    runWorkspaceTests({ repoRoot: root, workspaceDirs: ['ws'], spawn }),
+  );
+}
+
+test('a workspace that exits 0 after running zero tests fails the run', async () => {
+  await assert.rejects(
+    runWith(spawnPrinting('TAP version 13\n1..0\n# tests 0\n# suites 0\n# pass 0\n')),
+    /ws\] ran no tests/u,
+  );
+});
+
+test('a workspace that exits 0 without reporting a test count fails the run', async () => {
+  await assert.rejects(runWith(spawnPrinting('all good\n')), /ws\] ran no tests/u);
+  await assert.rejects(runWith(spawnPrinting(undefined)), /ws\] ran no tests/u);
+});
+
+test('a workspace that ran tests passes, counts add up and a split line is read whole', async () => {
+  await runWith(spawnPrinting('# tests 3\n# pass 3\n'));
+  await runWith(spawnPrinting('# tests 0\n# pass 0\n# tests 2\n# pass 2\n'));
+  await runWith(spawnPrinting(['# tests', ' 4\n']));
+});
+
+test('a failing workspace still reports its exit code, not the missing count', async () => {
+  await assert.rejects(runWith(spawnPrinting('', 1)), /ws\] failed with code 1/u);
+});
+
+test('a real workspace whose dist holds no tests fails instead of passing empty', async () => {
+  await withWorkspaceTree(
+    {
+      'empty/package.json': JSON.stringify({
+        name: 'empty',
+        scripts: { 'test:dist': 'node --test "dist/**/*.test.js"' },
+      }),
+      'full/package.json': JSON.stringify({
+        name: 'full',
+        scripts: { 'test:dist': 'node --test "dist/**/*.test.js"' },
+      }),
+      'full/dist/a.test.js': "require('node:test')('runs', () => {});\n",
+    },
+    async (root) => {
+      // Inside `node --test` a nested `node --test` would run as one of our own subtests.
+      const context = process.env.NODE_TEST_CONTEXT;
+      delete process.env.NODE_TEST_CONTEXT;
+      try {
+        await runWorkspaceTests({ repoRoot: root, workspaceDirs: ['full'] });
+        await assert.rejects(
+          runWorkspaceTests({ repoRoot: root, workspaceDirs: ['empty'] }),
+          /empty\] ran no tests/u,
+        );
+      } finally {
+        if (context !== undefined) process.env.NODE_TEST_CONTEXT = context;
+      }
     },
   );
 });

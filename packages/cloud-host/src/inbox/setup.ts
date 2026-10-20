@@ -12,7 +12,12 @@ import {
 import { conductorBudget } from './budget.js';
 import type { InboxConfig } from './config.js';
 import { artifactEvidence } from './evidence.js';
-import { createGatewaySummaryModel, createGatewayVerifierModel, type ModelDeps } from './models.js';
+import {
+  type AccountOf,
+  createGatewaySummaryModel,
+  createGatewayVerifierModel,
+  type ModelDeps,
+} from './models.js';
 import { conductorNotifier } from './notifier.js';
 import { inboxService } from './service.js';
 
@@ -32,10 +37,17 @@ export interface InboxSetup {
    */
   gateway?: Gateway;
   /**
-   * The digest summary's limit of `SUMMARY_DAILY_CAP_USD` per day, kept where a restart reads it
-   * back. Without it the inbox does not build the summary model.
+   * The digest summary's limit of `SUMMARY_DAILY_CAP_USD` per day for an invite, kept where a
+   * restart reads it back. Without it the inbox does not build the summary model.
    */
-  summaryBudget?: BudgetPort;
+  summaryBudget?: (owner: string) => BudgetPort;
+  /**
+   * Whose caps a check's spend counts against: the invite that owns the checked task's
+   * conversation. Without it the inbox builds no check model.
+   */
+  accountOf?: AccountOf;
+  /** Called with the running supervisor, so the host can raise items of its own. */
+  onStarted?: (supervisor: Supervisor) => void;
   /** Replaces what is built from the config, for tests. */
   override?: {
     models?: readonly VerifierModel[];
@@ -63,6 +75,11 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     notifier: conductorNotifier(conductor),
     answers: parts.answers,
     messages: parts.messages,
+    // A digest is built per owner, so each owner pays for the summary of their own items.
+    ownerOf: (conversationId) => {
+      const account = setup.accountOf?.(conversationId);
+      return account === undefined || account === 'server' ? undefined : account.inviteId;
+    },
     onWarning: parts.onWarning,
   };
   const gateway = setup.gateway;
@@ -77,17 +94,25 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
   if (override.summary === undefined && setup.summaryBudget === undefined) {
     throw new Error('The digest summary needs a daily limit that survives a restart.');
   }
+  if (
+    setup.accountOf === undefined &&
+    ((override.models === undefined && setup.config.verifierModels.length > 0) ||
+      override.summary === undefined)
+  ) {
+    throw new Error('The checks and the digest summary need to know whose spend they are.');
+  }
+  const accountOf = setup.accountOf ?? (() => undefined);
   const models =
     override.models ??
     setup.config.verifierModels.map((entry) =>
-      createGatewayVerifierModel(entry, gateway as Gateway, override.modelDeps),
+      createGatewayVerifierModel(entry, gateway as Gateway, accountOf, override.modelDeps),
     );
   const summary =
     override.summary ??
     createGatewaySummaryModel(
       setup.config.summaryModel,
       gateway as Gateway,
-      setup.summaryBudget as BudgetPort,
+      setup.summaryBudget as (owner: string) => BudgetPort,
       override.modelDeps,
     );
   const supervisor = await Supervisor.start({
@@ -106,5 +131,6 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
       ...(override.backoffMs === undefined ? {} : { backoffMs: override.backoffMs }),
     },
   });
+  setup.onStarted?.(supervisor);
   return inboxService(supervisor);
 }

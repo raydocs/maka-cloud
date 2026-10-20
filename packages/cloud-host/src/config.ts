@@ -1,7 +1,8 @@
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { type ModelPrice, priceProblem } from '@maka-cloud/gateway';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { pushConfigFromEnv } from '@maka-cloud/server';
+import type { BackupLayout } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
 /**
@@ -20,6 +21,15 @@ export interface StackConfig {
   supervisorDbPath: string;
   /** The model gateway's journal of what tasks spent, read back after a restart. */
   gatewaySpendPath: string;
+  /** Where the server writes its daily backups. Unset: it writes none. */
+  backupDir?: string;
+  /**
+   * Tell `ownerInvite`'s devices (Web Push) once the server's spend of a UTC day reaches
+   * `usd` dollars. Unset: no alert.
+   */
+  spendAlert?: { usd: number; ownerInvite: string };
+  /** The operator's kill switch: while this file exists, nothing may spend. See `PauseSwitch`. */
+  pausePath: string;
   host: string;
   port: number;
   mcp: {
@@ -55,6 +65,12 @@ export interface StackConfig {
     searchBaseUrl?: string;
   };
   inbox: InboxConfig;
+  /**
+   * What model spend may reach, in USD per UTC day or month. An invite with no limit of its own
+   * (`cloud-server invite limits`) gets the invite defaults. Small on purpose: a server nobody
+   * configured cannot spend much.
+   */
+  spend: SpendCaps;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
   /** With it, research runs get a `web-search` command, paid per call from their budget. */
@@ -64,6 +80,90 @@ export interface StackConfig {
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
+
+/** Why a backup directory cannot be used with a data directory, if it cannot. */
+export function backupDirProblem(dataDir: string, backupDir: string): string | undefined {
+  const inside = (parent: string, child: string): boolean => {
+    const rel = relative(resolve(parent), resolve(child));
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  };
+  if (!isAbsolute(backupDir)) return 'MAKA_CLOUD_BACKUP_DIR must be an absolute path';
+  if (inside(dataDir, backupDir) || inside(backupDir, dataDir)) {
+    return 'MAKA_CLOUD_BACKUP_DIR must not be inside the data directory or contain it';
+  }
+  return undefined;
+}
+
+/** Where the server keeps its state under a data directory. */
+export function dataPathsOf(
+  dataDir: string,
+): Pick<
+  StackConfig,
+  | 'dbPath'
+  | 'invitesPath'
+  | 'handoffRoot'
+  | 'conductorRoot'
+  | 'runnerSessionsPath'
+  | 'codingDeliveriesPath'
+  | 'supervisorDbPath'
+  | 'gatewaySpendPath'
+> {
+  return {
+    dbPath: join(dataDir, 'cloud.db'),
+    invitesPath: join(dataDir, 'invites.db'),
+    handoffRoot: join(dataDir, 'handoff'),
+    conductorRoot: join(dataDir, 'conductor'),
+    runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
+    codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
+    supervisorDbPath: join(dataDir, 'supervisor.db'),
+    gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
+  };
+}
+
+/** What a backup holds: every database and file the server keeps its state in, and nothing else. */
+export function backupLayoutOf(dataDir: string): BackupLayout {
+  const paths = dataPathsOf(dataDir);
+  const rel = (path: string): string => relative(dataDir, path);
+  const cloud = rel(paths.dbPath);
+  return {
+    databases: [
+      cloud,
+      rel(paths.invitesPath),
+      rel(paths.supervisorDbPath),
+      rel(paths.gatewaySpendPath),
+    ],
+    files: [rel(paths.runnerSessionsPath), rel(paths.codingDeliveriesPath)],
+    trees: [rel(paths.conductorRoot), rel(paths.handoffRoot)],
+    redact: {
+      // A device's push secret lets whoever holds it read what the server sends that device, so
+      // a backup keeps no subscriptions: devices turn notifications on again after a restore.
+      [cloud]: (copy) => {
+        try {
+          copy.exec('DELETE FROM push_subscriptions');
+        } catch (error) {
+          if (!/no such table/iu.test(String((error as Error).message))) throw error;
+        }
+      },
+    },
+  };
+}
+
+/** Where the kill switch lives under a data directory. */
+export function pausePathOf(dataDir: string): string {
+  return join(dataDir, 'paused');
+}
+
+export interface SpendCaps {
+  inviteDailyUsd: number;
+  inviteMonthlyUsd: number;
+  serverDailyUsd: number;
+}
+
+export const DEFAULT_SPEND_CAPS: SpendCaps = {
+  inviteDailyUsd: 5,
+  inviteMonthlyUsd: 50,
+  serverDailyUsd: 25,
+};
 
 export class ConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
@@ -79,6 +179,18 @@ export const ENV_VARIABLES = [
   [
     'MAKA_CLOUD_DATA_DIR',
     'required: directory for the databases, handoff files and conductor storage',
+  ],
+  [
+    'MAKA_CLOUD_BACKUP_DIR',
+    'directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups',
+  ],
+  [
+    'MAKA_CLOUD_SPEND_ALERT_USD',
+    'send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push',
+  ],
+  [
+    'MAKA_CLOUD_OWNER_INVITE',
+    'the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app',
   ],
   ['MAKA_CLOUD_HOST', 'public API host (default 127.0.0.1)'],
   ['MAKA_CLOUD_PORT', 'public API port (default 8080)'],
@@ -120,6 +232,15 @@ export const ENV_VARIABLES = [
     'daily cap on model checks, default 5; changeable in the inbox settings',
   ],
   ['MAKA_CLOUD_SUMMARY_MODEL', 'model that writes the digest summary (default claude-haiku-5-5)'],
+  [
+    'MAKA_CLOUD_INVITE_DAILY_USD',
+    'most an invite may spend per UTC day unless set with "cloud-server invite limits", default 5',
+  ],
+  [
+    'MAKA_CLOUD_INVITE_MONTHLY_USD',
+    'most an invite may spend per UTC month unless set with "cloud-server invite limits", default 50',
+  ],
+  ['MAKA_CLOUD_SERVER_DAILY_USD', 'most all invites together may spend per UTC day, default 25'],
   ['CLOUD_PUSH_VAPID_PUBLIC', 'Web Push: the VAPID public key (with the next two, turns push on)'],
   ['CLOUD_PUSH_VAPID_PRIVATE', 'Web Push: the VAPID private key, kept in memory only'],
   ['CLOUD_PUSH_SUBJECT', 'Web Push: the VAPID contact, a mailto: or https: URL'],
@@ -166,6 +287,16 @@ export function readStackConfig(
     }
     return parsed;
   };
+  const dollars = (name: string, fallback: number): number => {
+    const raw = value(name);
+    if (raw === undefined) return fallback;
+    const parsed = Number(raw);
+    if (!/^\d+(\.\d+)?$/u.test(raw) || !Number.isFinite(parsed) || parsed > 100_000) {
+      problems.push(`${name} must be a number of dollars from 0 to 100000`);
+      return fallback;
+    }
+    return parsed;
+  };
   const url = (name: string): string | undefined => {
     const raw = value(name);
     if (raw === undefined) return undefined;
@@ -190,14 +321,8 @@ export function readStackConfig(
   const dataDir = required('MAKA_CLOUD_DATA_DIR');
   const config: StackConfig = {
     dataDir,
-    dbPath: join(dataDir, 'cloud.db'),
-    invitesPath: join(dataDir, 'invites.db'),
-    handoffRoot: join(dataDir, 'handoff'),
-    conductorRoot: join(dataDir, 'conductor'),
-    runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
-    codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
-    supervisorDbPath: join(dataDir, 'supervisor.db'),
-    gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
+    ...dataPathsOf(dataDir),
+    pausePath: pausePathOf(dataDir),
     host: value('MAKA_CLOUD_HOST') ?? '127.0.0.1',
     port: port('MAKA_CLOUD_PORT', 8080),
     mcp: {
@@ -213,6 +338,14 @@ export function readStackConfig(
       models: gatewayModels(value('MAKA_CLOUD_GATEWAY_MODELS'), problems),
     },
     inbox: readInboxConfig(value, problems),
+    spend: {
+      inviteDailyUsd: dollars('MAKA_CLOUD_INVITE_DAILY_USD', DEFAULT_SPEND_CAPS.inviteDailyUsd),
+      inviteMonthlyUsd: dollars(
+        'MAKA_CLOUD_INVITE_MONTHLY_USD',
+        DEFAULT_SPEND_CAPS.inviteMonthlyUsd,
+      ),
+      serverDailyUsd: dollars('MAKA_CLOUD_SERVER_DAILY_USD', DEFAULT_SPEND_CAPS.serverDailyUsd),
+    },
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
@@ -225,6 +358,30 @@ export function readStackConfig(
   }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
+  const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
+  if (backupDir !== undefined) {
+    const problem = backupDirProblem(dataDir, backupDir);
+    if (problem === undefined) config.backupDir = backupDir;
+    else problems.push(problem);
+  }
+  const alertUsd = value('MAKA_CLOUD_SPEND_ALERT_USD');
+  const ownerInvite = value('MAKA_CLOUD_OWNER_INVITE');
+  if (alertUsd !== undefined || ownerInvite !== undefined) {
+    const usd = Number(alertUsd);
+    if (alertUsd === undefined || ownerInvite === undefined) {
+      problems.push('MAKA_CLOUD_SPEND_ALERT_USD and MAKA_CLOUD_OWNER_INVITE go together');
+    } else if (!/^\d+(\.\d+)?$/u.test(alertUsd) || !(usd > 0) || usd > 100_000) {
+      problems.push('MAKA_CLOUD_SPEND_ALERT_USD must be a number of dollars above 0, up to 100000');
+    } else if (!/^inv_[0-9a-f]{12}$/u.test(ownerInvite)) {
+      problems.push('MAKA_CLOUD_OWNER_INVITE must be an invite id such as inv_0123456789ab');
+    } else if (!config.pushSet) {
+      problems.push(
+        'MAKA_CLOUD_SPEND_ALERT_USD needs Web Push: set the CLOUD_PUSH_* variables, or there is nobody to tell',
+      );
+    } else {
+      config.spendAlert = { usd, ownerInvite };
+    }
+  }
   const publicUrl = url('MAKA_CLOUD_MCP_PUBLIC_URL');
   if (publicUrl !== undefined) config.mcp.publicUrl = publicUrl;
   // Checked here, read only by the gateway: the key is kept out of the config the stack passes on.
@@ -363,8 +520,11 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `invites file:        ${config.invitesPath}`,
+    `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
+    `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,
     `digest summary:      ${config.inbox.summaryModel}`,
+    `spend limits:        invite $${config.spend.inviteDailyUsd}/day and $${config.spend.inviteMonthlyUsd}/month unless set per invite, server $${config.spend.serverDailyUsd}/day`,
   ];
 }
 

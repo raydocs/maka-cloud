@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { InviteStore } from '@maka-cloud/host';
 import type { CloudRunners, CloudRunnersOptions } from '@maka-cloud/runners';
 import { createLiveDeps, type EvalDeps } from '../live.js';
 import { makeSpec } from '../spec-gen.js';
@@ -54,6 +57,11 @@ async function fakeVendor(t: TestContext): Promise<Vendor> {
 
 interface Setup {
   env: NodeJS.ProcessEnv;
+  /** The data directory of the server the run is booked to. */
+  serverDir: string;
+  /** The invite the run is booked to. */
+  inviteId: string;
+  invites: InviteStore;
   stateDir: string;
   workRoot: string;
   built: Partial<CloudRunnersOptions>[];
@@ -80,7 +88,16 @@ async function setup(
       PASS_TO_PASS: ['p'],
     })}\n`,
   );
+  // The server the run is booked to has run here: it has an invites file and a spend journal.
+  const serverDir = join(dir, 'server');
+  await mkdir(serverDir);
+  const invites = new InviteStore(join(serverDir, 'invites.db'));
+  t.after(() => invites.close());
+  const inviteId = invites.create('evals').inviteId;
+  new SqliteSpendJournal(join(serverDir, 'gateway-spend.db')).close();
   const env: NodeJS.ProcessEnv = {
+    MAKA_CLOUD_DATA_DIR: serverDir,
+    MAKA_EVALS_INVITE_ID: inviteId,
     MAKA_EVALS_DATA_DIR: dataDir,
     MAKA_EVALS_PYTHON: 'python3',
     INSTABOX_API_KEY: 'ibx-test-not-a-key',
@@ -98,6 +115,9 @@ async function setup(
   const built: Partial<CloudRunnersOptions>[] = [];
   return {
     env,
+    serverDir,
+    inviteId,
+    invites,
     stateDir,
     workRoot: join(dir, 'work'),
     built,
@@ -207,4 +227,95 @@ test('the spend journal lives in the experiment directory, not the scratch direc
   const s = await setup(t);
   await s.load();
   assert.ok((await stat(join(s.stateDir, 'gateway-spend.db'))).isFile());
+});
+
+/** One model request through the run's gateway token. */
+async function ask(s: Setup, deps: EvalDeps, taskId = 'tsk_cap'): Promise<number> {
+  void deps;
+  const access = s.built.at(-1)?.modelAccess;
+  assert.ok(access);
+  const grant = await access.issue({ taskId, runner: 'claude-agent-sdk', budgetUsd: 1 });
+  const response = await fetch(`${grant.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': grant.apiKey },
+    body: JSON.stringify({
+      model: 'claude-haiku-5-5',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  await response.arrayBuffer();
+  return response.status;
+}
+
+test('a live run is booked to an invite of the server it runs next to, and counts against its caps', async (t) => {
+  const vendor = await fakeVendor(t);
+  const s = await setup(t, {}, vendor.url);
+  const deps = await s.load();
+  assert.equal(await ask(s, deps), 500, 'within the caps, the vendor answered');
+  assert.equal(vendor.seen.length, 1);
+  const db = new DatabaseSync(join(s.serverDir, 'gateway-spend.db'), { readOnly: true });
+  t.after(() => db.close());
+  const rows = db.prepare('SELECT DISTINCT account FROM account_spend').all() as Array<{
+    account: string;
+  }>;
+  assert.deepEqual(
+    rows.map((row) => row.account),
+    [s.inviteId],
+    'the spend is the invite’s, in the server’s own ledger',
+  );
+  // The invite's own limit applies to the benchmark too.
+  s.invites.setLimits(s.inviteId, { dailyUsd: 0 });
+  assert.equal(await ask(s, deps, 'tsk_cap2'), 402);
+  assert.equal(vendor.seen.length, 1, 'the refused request never reached the vendor');
+});
+
+test('with the server’s daily cap at zero a live run sends nothing', async (t) => {
+  const vendor = await fakeVendor(t);
+  const s = await setup(t, { MAKA_CLOUD_SERVER_DAILY_USD: '0' }, vendor.url);
+  const deps = await s.load();
+  assert.equal(await ask(s, deps), 402);
+  assert.deepEqual(vendor.seen, []);
+});
+
+test('while the server is paused a live run sends nothing, and resuming lets it through', async (t) => {
+  const vendor = await fakeVendor(t);
+  const s = await setup(t, {}, vendor.url);
+  const deps = await s.load();
+  const paused = join(s.serverDir, 'paused');
+  await writeFile(paused, '{}');
+  const refused = await ask(s, deps);
+  assert.ok(refused >= 400 && refused !== 500, `refused, got ${refused}`);
+  assert.deepEqual(vendor.seen, []);
+  await rm(paused);
+  assert.equal(await ask(s, deps, 'tsk_after'), 500, 'the vendor answered once resumed');
+  assert.equal(vendor.seen.length, 1);
+});
+
+test('a live run without the server’s data directory or an invite to book to is refused before anything is built', async (t) => {
+  for (const [name, over, expected] of [
+    ['no server directory', { MAKA_CLOUD_DATA_DIR: '' }, /MAKA_CLOUD_DATA_DIR is not set/u],
+    ['no invite', { MAKA_EVALS_INVITE_ID: '' }, /MAKA_EVALS_INVITE_ID is not set/u],
+    ['unknown invite', { MAKA_EVALS_INVITE_ID: 'inv_nobody' }, /not an active invite/u],
+  ] as const) {
+    const s = await setup(t, over);
+    await assert.rejects(s.load(), expected, name);
+    assert.equal(s.built.length, 0, `${name}: no fleet was built`);
+  }
+  const revoked = await setup(t);
+  revoked.invites.revoke(revoked.inviteId);
+  await assert.rejects(revoked.load(), /not an active invite/u);
+  assert.equal(revoked.built.length, 0);
+});
+
+test('a server directory that has never run is refused, and one that is the experiment directory too', async (t) => {
+  const fresh = await setup(t);
+  await rm(join(fresh.serverDir, 'gateway-spend.db'), { force: true });
+  await rm(join(fresh.serverDir, 'gateway-spend.db-wal'), { force: true });
+  await rm(join(fresh.serverDir, 'gateway-spend.db-shm'), { force: true });
+  await assert.rejects(fresh.load(), /has not run here/u);
+  assert.equal(fresh.built.length, 0);
+  const same = await setup(t);
+  same.env.MAKA_CLOUD_DATA_DIR = same.stateDir;
+  await assert.rejects(same.load(), /is the server data directory/u);
 });

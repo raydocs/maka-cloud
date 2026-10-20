@@ -15,6 +15,7 @@ import type {
 } from '../fake-anthropic.js';
 
 const CONTEXT = 'Runtime Host environment for this turn:\n{}';
+const CONTEXT_DURABLE = 'Runtime context (runtime.environment; host metadata):\n{}';
 const options = {
   isRequestOnlyBlock: (block: WireBlock) =>
     block.type === 'text' &&
@@ -174,6 +175,39 @@ describe('breakpoint check', () => {
     ];
     const kinds = checkBreakpoints(requests, options).failures.map((failure) => failure.kind);
     assert.deepEqual(kinds, ['not_on_last_durable_block', 'moved_backwards']);
+  });
+
+  test('a top-level marker alone is a marker on the final block', () => {
+    const requests = [
+      request(0, [user(text('hi'), text(CONTEXT_DURABLE))], { cache_control: marker }),
+      request(
+        1,
+        [
+          user(text('hi'), text(CONTEXT_DURABLE)),
+          assistant(text('ok')),
+          user(text('n'), text(CONTEXT_DURABLE)),
+        ],
+        { cache_control: marker },
+      ),
+    ];
+    assert.deepEqual(checkBreakpoints(requests, options).failures, []);
+  });
+
+  test('a top-level marker alone fails when request-only context follows the history', () => {
+    const requests = [request(0, [user(text('hi'), text(CONTEXT))], { cache_control: marker })];
+    const kinds = checkBreakpoints(requests, options).failures.map((failure) => failure.kind);
+    assert.deepEqual(kinds, ['not_on_last_durable_block']);
+  });
+
+  test('a top-level marker alone that moves backwards is flagged', () => {
+    const requests = [
+      request(0, [user(text('a')), assistant(text('b')), user(text('c'))], {
+        cache_control: marker,
+      }),
+      request(1, [user(text('summary'))], { cache_control: marker }),
+    ];
+    const kinds = checkBreakpoints(requests, options).failures.map((failure) => failure.kind);
+    assert.deepEqual(kinds, ['moved_backwards']);
   });
 
   test('flags more than four markers', () => {

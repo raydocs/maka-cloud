@@ -52,6 +52,8 @@ export interface BreakpointObservation {
   readonly messageBlocks: number[];
   /** Flattened position of the last block that is not request-only context. */
   readonly lastDurableBlock: number;
+  /** Flattened position of the last block of the request. */
+  readonly finalBlock: number;
 }
 
 export interface BreakpointFailure {
@@ -431,7 +433,21 @@ export function observeBreakpoints(
     tools,
     messageBlocks,
     lastDurableBlock,
+    finalBlock: position - 1,
   };
+}
+
+/**
+ * Where the history breakpoint sits. A message-level marker is its own
+ * position. A request with none but a top-level `cache_control` (Anthropic's
+ * automatic caching) is cached up to its final block, so that block is the
+ * marker; it is then only on the last durable block when nothing request-only
+ * follows the history.
+ */
+function breakpointPosition(observation: BreakpointObservation): number | undefined {
+  return (
+    observation.messageBlocks.at(-1) ?? (observation.topLevel ? observation.finalBlock : undefined)
+  );
 }
 
 export function checkBreakpoints(
@@ -451,7 +467,7 @@ export function checkBreakpoints(
         detail: `${observation.total} breakpoints`,
       });
     }
-    const marker = observation.messageBlocks.at(-1);
+    const marker = breakpointPosition(observation);
     if (marker === undefined) {
       failures.push({
         request: observation.request,
@@ -468,7 +484,7 @@ export function checkBreakpoints(
           detail: `marker at block ${marker}, last durable block ${observation.lastDurableBlock}`,
         });
       }
-      const previousMarker = previous?.messageBlocks.at(-1);
+      const previousMarker = previous && breakpointPosition(previous);
       if (previousMarker !== undefined && marker < previousMarker) {
         failures.push({
           request: observation.request,

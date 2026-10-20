@@ -63,6 +63,8 @@ export interface AssistantDependencies {
     signal: AbortSignal,
   ): Promise<{ bytes: Uint8Array; mimeType: string }>;
   appendConversation?(sessionId: string, message: StoredMessage): Promise<void>;
+  /** Reconcile the selected model before admitting a new Bot wake. */
+  prepareBotWake(ownerId: string, workerId: string): Promise<'ready' | 'deferred'>;
   stopSessions(): Promise<void>;
   markBackgroundSessions(sessionIds: readonly string[]): Promise<void>;
   resolveTools(sessionId: string, core: readonly MakaTool[]): { tools: readonly MakaTool[] };

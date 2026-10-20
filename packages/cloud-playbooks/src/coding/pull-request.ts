@@ -72,6 +72,9 @@ export function openPullRequestTool(
       'Open a pull request with the verified change of a finished coding task. Only after the coding task is finished and verified.',
     parameters,
     irreversible: true,
+    effects: ['writes_outside_sandbox', 'irreversible'],
+    // The pull request GitHub opened and the repository, built by code.
+    externalResult: false,
     async approvalDetails(args: Args) {
       const delivery = await options.deliveries.get(args.taskId);
       const lines = [

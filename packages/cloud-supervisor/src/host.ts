@@ -74,6 +74,12 @@ export interface SupervisorHost {
       signal: AbortSignal,
     ): Promise<{ messageId: string } | { refused: string }>;
   };
+  /**
+   * The owner of a conversation (an invite), or undefined when nobody owns it. With it the
+   * digest is built per owner and its summary is that owner's to pay for; without it there is
+   * one digest of every item.
+   */
+  ownerOf?(conversationId: string): string | undefined;
   /** Reports things that must not stop the supervisor. */
   onWarning?(message: string, detail?: unknown): void;
 }
@@ -85,5 +91,7 @@ export interface SummaryModel {
       items: Array<{ id: string; kind: string; ask: string; ageMs: number }>;
     },
     signal: AbortSignal,
+    /** Whose items these are: the one who pays. Undefined for items nobody owns. */
+    owner?: string,
   ): Promise<{ order: string[]; summary: string }>;
 }

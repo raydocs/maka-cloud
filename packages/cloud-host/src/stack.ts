@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, relative } from 'node:path';
 import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { type Orchestrator, RunnerRegistry, type TaskId } from '@maka-cloud/orchestrator';
@@ -22,18 +22,29 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
-import { pushConfigFromEnv } from '@maka-cloud/server';
-import type { StackConfig } from './config.js';
+import { InviteStore, type PushTransport, pushConfigFromEnv } from '@maka-cloud/server';
+import { backupLayoutOf, type StackConfig } from './config.js';
 import {
   conductorGateway,
   gatewayModelAccess,
   gatewayPrices,
+  type Owner,
   type StackGateway,
   startGateway,
 } from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
+import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
+import { PauseSwitch, PauseWatcher } from './pause.js';
+import { SpendAlertWatcher } from './spend-alert.js';
+import { BackupScheduler } from './backup-schedule.js';
+import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
+import { accountLedgerOf } from './spend.js';
+
+/** What a user is told when the operator's pause switch stopped their work. */
+export const PAUSED_NOTICE =
+  'This work was stopped because spending was paused by the operator. Send your request again once it resumes.';
 
 /** The playbooks the stack runs: T7's research playbook, T8's coding playbook and the free one. */
 export const STACK_PLAYBOOKS = [researchPlaybook, codingPlaybook, FREE_PLAYBOOK] as const;
@@ -43,7 +54,27 @@ export interface StackDependencies {
   createRunners?: (options: Partial<CloudRunnersOptions>) => CloudRunners;
   /** Replaces the inbox's models, fetcher and timers, for tests. */
   inbox?: InboxSetup['override'];
+  /**
+   * Replaces the lookup of the invite that owns a task when model access is issued, for tests that
+   * issue it to tasks no conversation owns. Unset in the product: there a task with no owning
+   * invite gets no model access.
+   */
+  ownerOfTask?: (taskId: string) => string | undefined;
+  /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
+  pausePollMs?: number;
+  /** Timing of the daily backup, for tests. */
+  spendAlertTiming?: { pollMs?: number };
+  /** Replaces the Web Push transport, for tests; the product sends over HTTPS. */
+  pushTransport?: PushTransport;
+  backupTiming?: {
+    tickMs?: number;
+    firstTickMs?: number;
+    retryAfterMs?: number;
+    now?: () => number;
+  };
   onWarning?: (message: string, detail?: unknown) => void;
+  /** Routine events worth a log line, such as a finished backup. */
+  onInfo?: (event: string, fields: Record<string, string | number>) => void;
 }
 
 export interface Stack {
@@ -52,6 +83,12 @@ export interface Stack {
   coding: CodingRunner;
   /** The model gateway: sandbox runs get a token for it, never a vendor key. */
   gateway: StackGateway;
+  /** The operator's kill switch, as the stack reads it. */
+  pause: PauseSwitch;
+  /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
+  backup(): Promise<BackupResult>;
+  /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
+  checkSpendAlert(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -81,26 +118,62 @@ export async function startStack(
   // A task with no such invite (unknown, or a conversation nobody owns) has no sandbox, so it
   // fails to start instead of landing on a machine another invite uses.
   let ownerOfTask: ((taskId: string) => string | undefined) | undefined;
+  let ownerOfConversation: ((conversationId: string) => string | undefined) | undefined;
+  let conversationOfTask: ((taskId: string) => string | undefined) | undefined;
+  // Set when the supervisor starts: a spending limit that stops work raises an item in its inbox.
+  let supervisorRef: { backupTo(destination: string): Promise<void> } | undefined;
+  let raiseCapHit:
+    | ((input: { conversationId: string; taskId?: string; key: string; ask: string }) => void)
+    | undefined;
   const tenantOf = (taskId: TaskId): string => {
     const owner = ownerOfTask?.(taskId);
     if (owner === undefined) throw new Error(`Task ${taskId} has no owning invite, so no sandbox`);
     return owner;
+  };
+  // Whose model spend a conductor session or a check is: the invite that owns its conversation.
+  const ownerOfSession = (makaSessionId: string): Owner | undefined => {
+    const conversationId = conductor?.conversationOfSession(makaSessionId);
+    const inviteId =
+      conversationId === undefined ? undefined : ownerOfConversation?.(conversationId);
+    return inviteId === undefined || conversationId === undefined
+      ? undefined
+      : { inviteId, conversationId };
   };
   const warn = dependencies.onWarning ?? (() => undefined);
   // Every request of a task's run is written down before it is sent, so a crash cannot lose what
   // it cost: the orchestrator records it on restore.
   await mkdir(dirname(config.gatewaySpendPath), { recursive: true });
   const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  const pause = new PauseSwitch(config.pausePath);
+  // Every model request is also reserved against its invite's daily and monthly caps (read from
+  // the invites file each time, so the command line changes them at once) and the server's.
+  let invites: InviteStore | undefined;
   let gateway: StackGateway;
   try {
+    const inviteStore = new InviteStore(config.invitesPath);
+    invites = inviteStore;
     gateway = await startGateway(
       config.gateway,
       env,
       warn,
       gatewayPrices(config.gateway.models, config.inbox.verifierModels),
       journal,
+      accountLedgerOf(journal, inviteStore, config.spend, pause),
+      // A cap that ends spending is told to the conversation and raised as a budget item.
+      capReporter({
+        raise: (input) => {
+          if (raiseCapHit === undefined) throw new Error('The inbox is not running');
+          raiseCapHit(input);
+        },
+        notice: async (conversationId, text) => {
+          if (conductor === undefined) throw new Error('The conductor is not running');
+          await conductor.postNotice({ conversationId, text });
+        },
+        warn,
+      }),
     );
   } catch (error) {
+    invites?.close();
     journal.close();
     throw error;
   }
@@ -111,7 +184,14 @@ export async function startStack(
   try {
     const publicUrl = config.mcp.publicUrl;
     const runnerOptions: Partial<CloudRunnersOptions> = {
-      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl),
+      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) => {
+        const inviteId = dependencies.ownerOfTask
+          ? dependencies.ownerOfTask(taskId)
+          : ownerOfTask?.(taskId);
+        if (inviteId === undefined) return undefined;
+        const conversationId = conversationOfTask?.(taskId);
+        return conversationId === undefined ? { inviteId } : { inviteId, conversationId };
+      }),
       sessions: new JsonFileSessionStore(config.runnerSessionsPath),
       sandboxTools: [
         await citeCheckSandboxTool(),
@@ -140,7 +220,14 @@ export async function startStack(
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the
     // environment and goes to the server only; it is not part of the config the stack describes.
-    const push = config.pushSet ? pushConfigFromEnv(env) : undefined;
+    const pushSettings = config.pushSet ? pushConfigFromEnv(env) : undefined;
+    const push =
+      pushSettings === undefined
+        ? undefined
+        : {
+            ...pushSettings,
+            ...(dependencies.pushTransport ? { transport: dependencies.pushTransport } : {}),
+          };
     cloud = await startCloud({
       ...(push === undefined ? {} : { push }),
       dbPath: config.dbPath,
@@ -160,7 +247,7 @@ export async function startStack(
           ...(config.conductor.connectionId === undefined
             ? {}
             : { connectionId: config.conductor.connectionId }),
-          gateway: conductorGateway(gateway.gateway),
+          gateway: conductorGateway(gateway.gateway, ownerOfSession),
         },
         playbooks: STACK_PLAYBOOKS,
         tools: [pullRequests],
@@ -171,7 +258,16 @@ export async function startStack(
             dbPath: config.supervisorDbPath,
             config: config.inbox,
             gateway: gateway.gateway,
-            summaryBudget: journal.dailyLimit('digest summary', SUMMARY_DAILY_CAP_USD),
+            summaryBudget: (owner) =>
+              journal.dailyLimit(`digest summary ${owner}`, SUMMARY_DAILY_CAP_USD),
+            accountOf: (conversationId) => {
+              const inviteId = ownerOfConversation?.(conversationId);
+              return inviteId === undefined ? undefined : { inviteId };
+            },
+            onStarted: (supervisor) => {
+              supervisorRef = supervisor;
+              raiseCapHit = (input) => supervisor.raiseCapHit(input);
+            },
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
           context,
@@ -180,27 +276,105 @@ export async function startStack(
         orchestrator = parts.orchestrator;
         conductor = parts.conductor;
         ownerOfTask = parts.ownerOfTask;
+        ownerOfConversation = parts.ownerOfConversation;
+        conversationOfTask = parts.conversationOfTask;
       },
       onWarning: warn,
     });
   } catch (error) {
     await gateway.close();
+    invites.close();
     journal.close();
     throw error;
   }
+  // While spending is paused, every open run is stopped through the conductor's normal stop path,
+  // which cancels the tasks through the orchestrator.
+  const watcher = new PauseWatcher({
+    switch: pause,
+    onPause: () => cloud.conductor.stopAll('paused', PAUSED_NOTICE),
+    onWarning: warn,
+    ...(dependencies.pausePollMs === undefined ? {} : { pollMs: dependencies.pausePollMs }),
+  });
+  watcher.start();
+  const layout = backupLayoutOf(config.dataDir);
+  const backup = (): Promise<BackupResult> => {
+    if (config.backupDir === undefined) {
+      return Promise.reject(new BackupError('MAKA_CLOUD_BACKUP_DIR is not set'));
+    }
+    return backupAll({
+      dataDir: config.dataDir,
+      backupDir: config.backupDir,
+      layout,
+      env,
+      inProcess: {
+        // These two files are held exclusively by this process, so only it can copy them.
+        [relative(config.dataDir, config.dbPath)]: (to) => cloud.server.backupDatabase(to),
+        [relative(config.dataDir, config.supervisorDbPath)]: (to) =>
+          supervisorRef
+            ? supervisorRef.backupTo(to)
+            : Promise.reject(new Error('The inbox is not running')),
+      },
+    });
+  };
+  const backups =
+    config.backupDir === undefined
+      ? undefined
+      : new BackupScheduler({
+          latest: async () => (await listBackups(config.backupDir as string))[0]?.createdAt,
+          run: async () => {
+            const done = await backup();
+            dependencies.onInfo?.('backup.written', {
+              stamp: done.stamp,
+              files: done.files,
+              bytes: done.bytes,
+              removed: done.removed.length,
+            });
+          },
+          onWarning: warn,
+          ...dependencies.backupTiming,
+        });
+  backups?.start();
+  const alerts =
+    config.spendAlert === undefined
+      ? undefined
+      : new SpendAlertWatcher({
+          thresholdUsd: config.spendAlert.usd,
+          ownerInvite: config.spendAlert.ownerInvite,
+          spentToday: () => journal.serverDaySpendUsd(),
+          alert: (inviteId, key) => cloud.server.pushAlert(inviteId, key),
+          onAlert: (day) => dependencies.onInfo?.('spend.alerted', { day }),
+          onWarning: warn,
+          ...dependencies.spendAlertTiming,
+        });
+  alerts?.start();
+  let closing: Promise<void> | undefined;
   return {
     cloud,
     runners,
     coding,
     gateway,
-    // The runs stop first, then the gateway cuts whatever is still in flight.
-    close: async () => {
-      try {
-        await cloud.close();
-      } finally {
-        await gateway.close();
-        journal.close();
-      }
+    pause,
+    backup,
+    checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
+    // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
+    // Closing twice closes once.
+    close: () => {
+      closing ??= (async () => {
+        try {
+          await alerts?.close();
+          await backups?.close();
+          await watcher.close();
+        } finally {
+          try {
+            await cloud.close();
+          } finally {
+            await gateway.close();
+            invites?.close();
+            journal.close();
+          }
+        }
+      })();
+      return closing;
     },
   };
 }
