@@ -987,6 +987,65 @@ test('the server’s caps are read at each booking: a restart with other caps ap
   assert.equal(ledger.accounts.reserve(account, 'after-restart', 0.25).ok, true);
 });
 
+/** A second start over the data directory of a running stack, with other caps. */
+async function secondStart(started: Started, caps: string, gatewayPort = 0): Promise<unknown> {
+  const config = readStackConfig({
+    MAKA_CLOUD_DATA_DIR: started.dataDir,
+    ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+    INSTABOX_API_KEY: 'ibx-test-not-a-key',
+    MAKA_CLOUD_SANDBOXES: SANDBOXES,
+    MAKA_CLOUD_SERVER_DAILY_USD: caps,
+  });
+  config.port = 0;
+  config.mcp.port = 0;
+  config.gateway.port = gatewayPort;
+  const stack = await startStack(
+    config,
+    { ANTHROPIC_API_KEY: 'sk-test-not-a-key' },
+    {
+      createRunners: () =>
+        ({
+          runners: [],
+          fleet: {},
+          sweepOrphans: async () => ({ stopped: [], failed: [] }),
+        }) as unknown as CloudRunners,
+    },
+  ).then(
+    (running) => running,
+    (error: unknown) => error,
+  );
+  if (!(stack instanceof Error)) await (stack as Stack).close();
+  return stack;
+}
+
+test('a second start that fails never changes the caps the running server published', async (t) => {
+  const started = await start(t, undefined, { MAKA_CLOUD_SERVER_DAILY_USD: '1' });
+  const config = readStackConfig({
+    MAKA_CLOUD_DATA_DIR: started.dataDir,
+    ANTHROPIC_API_KEY: 'sk-test-not-a-key',
+    INSTABOX_API_KEY: 'ibx-test-not-a-key',
+    MAKA_CLOUD_SANDBOXES: SANDBOXES,
+  });
+  const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  t.after(() => journal.close());
+  assert.equal(journal.spendPolicy()?.serverDailyUsd, 1);
+  const gatewayPort = Number(new URL(started.stack.gateway.sandboxUrl).port);
+  // One start fails on the gateway's port, the other on the server's database, which the
+  // running server holds exclusively.
+  for (const [label, port] of [
+    ['the port', gatewayPort],
+    ['the database', 0],
+  ] as const) {
+    const outcome = await secondStart(started, '25', port);
+    assert.ok(outcome instanceof Error, `a second start failing on ${label} rejects`);
+    assert.equal(
+      journal.spendPolicy()?.serverDailyUsd,
+      1,
+      `after a second start failed on ${label}, the journal says the running server's $1`,
+    );
+  }
+});
+
 test('a data directory whose server never wrote its caps down is not booked to', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-nopolicy-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
