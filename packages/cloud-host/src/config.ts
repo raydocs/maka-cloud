@@ -257,6 +257,23 @@ export const ENV_VARIABLES = [
   ],
 ] as const;
 
+/** The spend caps an environment sets itself; one it leaves out is not listed (its default is not a choice). */
+export function explicitSpendCaps(env: NodeJS.ProcessEnv): Partial<SpendCaps> {
+  const caps: Partial<SpendCaps> = {};
+  const names = [
+    ['inviteDailyUsd', 'MAKA_CLOUD_INVITE_DAILY_USD'],
+    ['inviteMonthlyUsd', 'MAKA_CLOUD_INVITE_MONTHLY_USD'],
+    ['serverDailyUsd', 'MAKA_CLOUD_SERVER_DAILY_USD'],
+  ] as const;
+  for (const [field, name] of names) {
+    const raw = env[name]?.trim();
+    if (raw === undefined || raw === '') continue;
+    const usd = Number(raw);
+    if (Number.isFinite(usd) && usd >= 0) caps[field] = usd;
+  }
+  return caps;
+}
+
 export interface ReadStackConfigOptions {
   /**
    * Where tasks run. `per-invite` (default, the product) needs `MAKA_CLOUD_SANDBOXES` and refuses

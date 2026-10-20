@@ -144,6 +144,8 @@ export async function startStack(
   // it cost: the orchestrator records it on restore.
   await mkdir(dirname(config.gatewaySpendPath), { recursive: true });
   const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  // Any other process that books spend against this ledger (the evals) runs under these caps.
+  journal.setSpendPolicy(config.spend);
   const pause = new PauseSwitch(config.pausePath);
   // Every model request is also reserved against its invite's daily and monthly caps (read from
   // the invites file each time, so the command line changes them at once) and the server's.
