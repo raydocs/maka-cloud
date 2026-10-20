@@ -62,7 +62,8 @@ import { Prng } from './prng.js';
  *   id: nothing can be owed for it, so these checks give way to the next one.
  * Checked as each request returns: a view of an ended task that marks nothing
  * in its tree as still running (no owed stop, no `treeStopPending`) has no run
- * in that tree that may still be live, so its budget can be settled.
+ * in that tree that may still be live, and every spend a run in that tree
+ * reported is recorded, so its budget can be settled.
  * Checked after every step:
  * - the in-memory tasks and per-tree counts match the log's unfinished tasks,
  *   and their states (queued, running, paused) match the log;
@@ -1483,7 +1484,25 @@ export class FuzzWorld {
           `${request.label}: ${view.taskId} reads ${view.state} with nothing still running, but ${taskId}: ${live}`,
         );
       }
+      const unrecorded = this.unrecordedSpend(taskId);
+      if (unrecorded) {
+        this.violation(
+          `${request.label}: ${view.taskId} reads ${view.state} with nothing still running, but ${taskId}: ${unrecorded}`,
+        );
+      }
     }
+  }
+
+  /** Spend a run of this process handed the orchestrator that is not in the log yet. */
+  private unrecordedSpend(taskId: TaskId): string | undefined {
+    for (const run of this.runs) {
+      if (run.taskId !== taskId || run.epoch !== this.epoch || run.reportedUsd === 0) continue;
+      const recorded = this.chain(taskId).at(-1)?.spend.get(taskId) ?? 0;
+      if (Math.round(recorded * 100) < Math.round(run.reportedUsd * 100)) {
+        return `its run reported $${run.reportedUsd}, but $${recorded} is recorded`;
+      }
+    }
+    return undefined;
   }
 
   /** The task and everything below it. */
