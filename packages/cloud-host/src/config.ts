@@ -55,6 +55,12 @@ export interface StackConfig {
     searchBaseUrl?: string;
   };
   inbox: InboxConfig;
+  /**
+   * What model spend may reach, in USD per UTC day or month. An invite with no limit of its own
+   * (`cloud-server invite limits`) gets the invite defaults. Small on purpose: a server nobody
+   * configured cannot spend much.
+   */
+  spend: SpendCaps;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
   /** With it, research runs get a `web-search` command, paid per call from their budget. */
@@ -64,6 +70,18 @@ export interface StackConfig {
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
+
+export interface SpendCaps {
+  inviteDailyUsd: number;
+  inviteMonthlyUsd: number;
+  serverDailyUsd: number;
+}
+
+export const DEFAULT_SPEND_CAPS: SpendCaps = {
+  inviteDailyUsd: 5,
+  inviteMonthlyUsd: 50,
+  serverDailyUsd: 25,
+};
 
 export class ConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
@@ -120,6 +138,15 @@ export const ENV_VARIABLES = [
     'daily cap on model checks, default 5; changeable in the inbox settings',
   ],
   ['MAKA_CLOUD_SUMMARY_MODEL', 'model that writes the digest summary (default claude-haiku-5-5)'],
+  [
+    'MAKA_CLOUD_INVITE_DAILY_USD',
+    'most an invite may spend per UTC day unless set with "cloud-server invite limits", default 5',
+  ],
+  [
+    'MAKA_CLOUD_INVITE_MONTHLY_USD',
+    'most an invite may spend per UTC month unless set with "cloud-server invite limits", default 50',
+  ],
+  ['MAKA_CLOUD_SERVER_DAILY_USD', 'most all invites together may spend per UTC day, default 25'],
   ['CLOUD_PUSH_VAPID_PUBLIC', 'Web Push: the VAPID public key (with the next two, turns push on)'],
   ['CLOUD_PUSH_VAPID_PRIVATE', 'Web Push: the VAPID private key, kept in memory only'],
   ['CLOUD_PUSH_SUBJECT', 'Web Push: the VAPID contact, a mailto: or https: URL'],
@@ -162,6 +189,16 @@ export function readStackConfig(
     const parsed = Number(raw);
     if (!/^\d+$/u.test(raw) || parsed < 1 || parsed > 65535) {
       problems.push(`${name} must be a port number from 1 to 65535`);
+      return fallback;
+    }
+    return parsed;
+  };
+  const dollars = (name: string, fallback: number): number => {
+    const raw = value(name);
+    if (raw === undefined) return fallback;
+    const parsed = Number(raw);
+    if (!/^\d+(\.\d+)?$/u.test(raw) || !Number.isFinite(parsed) || parsed > 100_000) {
+      problems.push(`${name} must be a number of dollars from 0 to 100000`);
       return fallback;
     }
     return parsed;
@@ -213,6 +250,14 @@ export function readStackConfig(
       models: gatewayModels(value('MAKA_CLOUD_GATEWAY_MODELS'), problems),
     },
     inbox: readInboxConfig(value, problems),
+    spend: {
+      inviteDailyUsd: dollars('MAKA_CLOUD_INVITE_DAILY_USD', DEFAULT_SPEND_CAPS.inviteDailyUsd),
+      inviteMonthlyUsd: dollars(
+        'MAKA_CLOUD_INVITE_MONTHLY_USD',
+        DEFAULT_SPEND_CAPS.inviteMonthlyUsd,
+      ),
+      serverDailyUsd: dollars('MAKA_CLOUD_SERVER_DAILY_USD', DEFAULT_SPEND_CAPS.serverDailyUsd),
+    },
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
@@ -365,6 +410,7 @@ export function describeConfig(config: StackConfig): string[] {
     `invites file:        ${config.invitesPath}`,
     `work checks:        ${describeVerifiers(config.inbox)}`,
     `digest summary:      ${config.inbox.summaryModel}`,
+    `spend limits:        invite $${config.spend.inviteDailyUsd}/day and $${config.spend.inviteMonthlyUsd}/month unless set per invite, server $${config.spend.serverDailyUsd}/day`,
   ];
 }
 

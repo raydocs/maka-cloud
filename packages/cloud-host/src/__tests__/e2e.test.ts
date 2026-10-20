@@ -239,7 +239,7 @@ test('the conductor reaches the model only through the gateway: the key stays th
         return fetch(input, init);
       },
     });
-    return { apiKey: 'gateway-in-process', gateway: conductorGateway(gateway) };
+    return { apiKey: 'gateway-in-process', gateway: conductorGateway(gateway, () => 'inv_e2e') };
   });
   t.after(() => gateway?.close());
   stack.model.script('planner', text('1. Answer.'));

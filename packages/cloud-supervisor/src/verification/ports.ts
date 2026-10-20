@@ -44,6 +44,8 @@ export interface VerifierRequest {
  * worst case of the exact request it sends, before sending it, and settles what it cost.
  */
 export interface CheckCharge {
+  /** The conversation the checked task belongs to, for charging whose spend it is. */
+  conversationId: string;
   /** Reserves against the day's cap, then the conversation's budget. Returns why it was refused, or undefined. */
   reserve(usd: number): 'daily_cap' | 'conversation_budget' | undefined;
   settle(usd: number): void;

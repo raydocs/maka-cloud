@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Gate, HOUR, tmpDb } from '../../__tests__/harness.js';
+import { CONVERSATION, Gate, HOUR, tmpDb } from '../../__tests__/harness.js';
 import { openDatabase } from '../../db.js';
 import {
   Barrier,
@@ -482,6 +482,7 @@ test('a metered model reserves its own request through both limits and is charge
   w.openai.metered = true;
   w.openai.script = async (request, _signal, charge) => {
     assert.ok(charge, 'a metered model is given the charge');
+    assert.equal(charge.conversationId, CONVERSATION, 'the charge names whose spend it is');
     assert.equal(charge.reserve(0.02), undefined);
     charge.settle(0.005);
     return { ...allSupported(request), usage: usage(9_999_999, 9_999_999) };

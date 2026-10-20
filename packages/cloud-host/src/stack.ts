@@ -22,7 +22,7 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
-import { pushConfigFromEnv } from '@maka-cloud/server';
+import { InviteStore, pushConfigFromEnv } from '@maka-cloud/server';
 import type { StackConfig } from './config.js';
 import {
   conductorGateway,
@@ -43,6 +43,12 @@ export interface StackDependencies {
   createRunners?: (options: Partial<CloudRunnersOptions>) => CloudRunners;
   /** Replaces the inbox's models, fetcher and timers, for tests. */
   inbox?: InboxSetup['override'];
+  /**
+   * Replaces the lookup of the invite that owns a task when model access is issued, for tests that
+   * issue it to tasks no conversation owns. Unset in the product: there a task with no owning
+   * invite gets no model access.
+   */
+  ownerOfTask?: (taskId: string) => string | undefined;
   onWarning?: (message: string, detail?: unknown) => void;
 }
 
@@ -81,26 +87,50 @@ export async function startStack(
   // A task with no such invite (unknown, or a conversation nobody owns) has no sandbox, so it
   // fails to start instead of landing on a machine another invite uses.
   let ownerOfTask: ((taskId: string) => string | undefined) | undefined;
+  let ownerOfConversation: ((conversationId: string) => string | undefined) | undefined;
   const tenantOf = (taskId: TaskId): string => {
     const owner = ownerOfTask?.(taskId);
     if (owner === undefined) throw new Error(`Task ${taskId} has no owning invite, so no sandbox`);
     return owner;
+  };
+  // Whose model spend a conductor session or a check is: the invite that owns its conversation.
+  const ownerOfSession = (makaSessionId: string): string | undefined => {
+    const conversationId = conductor?.conversationOfSession(makaSessionId);
+    return conversationId === undefined ? undefined : ownerOfConversation?.(conversationId);
   };
   const warn = dependencies.onWarning ?? (() => undefined);
   // Every request of a task's run is written down before it is sent, so a crash cannot lose what
   // it cost: the orchestrator records it on restore.
   await mkdir(dirname(config.gatewaySpendPath), { recursive: true });
   const journal = new SqliteSpendJournal(config.gatewaySpendPath);
+  // Every model request is also reserved against its invite's daily and monthly caps (read from
+  // the invites file each time, so the command line changes them at once) and the server's.
+  let invites: InviteStore | undefined;
   let gateway: StackGateway;
   try {
+    const inviteStore = new InviteStore(config.invitesPath);
+    invites = inviteStore;
     gateway = await startGateway(
       config.gateway,
       env,
       warn,
       gatewayPrices(config.gateway.models, config.inbox.verifierModels),
       journal,
+      journal.accountLedger({
+        limitsOf: (inviteId) => {
+          const set = inviteStore.limits(inviteId);
+          return (
+            set && {
+              dailyUsd: set.dailyUsd ?? config.spend.inviteDailyUsd,
+              monthlyUsd: set.monthlyUsd ?? config.spend.inviteMonthlyUsd,
+            }
+          );
+        },
+        serverDailyUsd: () => config.spend.serverDailyUsd,
+      }),
     );
   } catch (error) {
+    invites?.close();
     journal.close();
     throw error;
   }
@@ -111,7 +141,9 @@ export async function startStack(
   try {
     const publicUrl = config.mcp.publicUrl;
     const runnerOptions: Partial<CloudRunnersOptions> = {
-      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl),
+      modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) =>
+        dependencies.ownerOfTask ? dependencies.ownerOfTask(taskId) : ownerOfTask?.(taskId),
+      ),
       sessions: new JsonFileSessionStore(config.runnerSessionsPath),
       sandboxTools: [
         await citeCheckSandboxTool(),
@@ -160,7 +192,7 @@ export async function startStack(
           ...(config.conductor.connectionId === undefined
             ? {}
             : { connectionId: config.conductor.connectionId }),
-          gateway: conductorGateway(gateway.gateway),
+          gateway: conductorGateway(gateway.gateway, ownerOfSession),
         },
         playbooks: STACK_PLAYBOOKS,
         tools: [pullRequests],
@@ -172,6 +204,10 @@ export async function startStack(
             config: config.inbox,
             gateway: gateway.gateway,
             summaryBudget: journal.dailyLimit('digest summary', SUMMARY_DAILY_CAP_USD),
+            accountOf: (conversationId) => {
+              const inviteId = ownerOfConversation?.(conversationId);
+              return inviteId === undefined ? undefined : { inviteId };
+            },
             ...(dependencies.inbox === undefined ? {} : { override: dependencies.inbox }),
           },
           context,
@@ -180,11 +216,13 @@ export async function startStack(
         orchestrator = parts.orchestrator;
         conductor = parts.conductor;
         ownerOfTask = parts.ownerOfTask;
+        ownerOfConversation = parts.ownerOfConversation;
       },
       onWarning: warn,
     });
   } catch (error) {
     await gateway.close();
+    invites.close();
     journal.close();
     throw error;
   }
@@ -199,6 +237,7 @@ export async function startStack(
         await cloud.close();
       } finally {
         await gateway.close();
+        invites?.close();
         journal.close();
       }
     },

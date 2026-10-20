@@ -3,9 +3,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import { Gateway, SqliteSpendJournal } from '@maka-cloud/gateway';
+import {
+  type AccountLimits,
+  Gateway,
+  type SpendAccounts,
+  SqliteSpendJournal,
+} from '@maka-cloud/gateway';
 import type { CheckCharge } from '@maka-cloud/supervisor';
-import { gatewayPrices } from '../gateway.js';
+import { conductorGateway, gatewayPrices } from '../gateway.js';
 import { createGatewaySummaryModel, createGatewayVerifierModel } from '../inbox/models.js';
 import { startInbox } from '../inbox/setup.js';
 
@@ -69,9 +74,10 @@ function upstream() {
   return { seen, send };
 }
 
-function rig() {
+function rig(accounts?: SpendAccounts) {
   const vendor = upstream();
   const gateway = new Gateway({
+    ...(accounts === undefined ? {} : { accounts }),
     upstreams: { anthropic: { apiKey: 'sk-master-a' }, openai: { apiKey: 'sk-master-o' } },
     models: gatewayPrices([], [CHECK]),
     fetch: vendor.send,
@@ -82,6 +88,7 @@ function rig() {
 function recordingCharge(refuse?: 'daily_cap' | 'conversation_budget') {
   const log = { reserved: [] as number[], settled: [] as number[] };
   const charge: CheckCharge = {
+    conversationId: 'cnv_a',
     reserve: (usd) => {
       log.reserved.push(usd);
       return refuse;
@@ -91,11 +98,19 @@ function recordingCharge(refuse?: 'daily_cap' | 'conversation_budget') {
   return { charge, log };
 }
 
+/** Conversation `cnv_a` is invite `inv_a`'s, `cnv_b` is `inv_b`'s, and nobody owns the rest. */
+const OWNERS = (conversationId: string) =>
+  conversationId === 'cnv_a'
+    ? { inviteId: 'inv_a' }
+    : conversationId === 'cnv_b'
+      ? { inviteId: 'inv_b' }
+      : undefined;
+
 const REQUEST = { instructions: 'Check the claims.', prompt: 'CLAIMS ...', maxOutputTokens: 500 };
 
 test('a check goes through the gateway: reserved on the exact request first, settled at the reported usage, vendor key added on the host', async () => {
   const { gateway, vendor } = rig();
-  const model = createGatewayVerifierModel(CHECK, gateway);
+  const model = createGatewayVerifierModel(CHECK, gateway, OWNERS);
   assert.equal(model.metered, true);
   const { charge, log } = recordingCharge();
   const reply = await model.verify(REQUEST, new AbortController().signal, charge);
@@ -117,7 +132,7 @@ test('a check goes through the gateway: reserved on the exact request first, set
 
 test('a check whose budget refuses is never sent', async () => {
   const { gateway, vendor } = rig();
-  const model = createGatewayVerifierModel(CHECK, gateway);
+  const model = createGatewayVerifierModel(CHECK, gateway, OWNERS);
   const { charge, log } = recordingCharge('daily_cap');
   await assert.rejects(model.verify(REQUEST, new AbortController().signal, charge));
   assert.equal(vendor.seen.length, 0);
@@ -256,4 +271,122 @@ test('check models the configuration does not price are priced from their pool e
       maxOutputTokens: 1_000,
     },
   ]);
+});
+
+async function ledgerRig(
+  t: TestContext,
+  limits: Record<string, AccountLimits>,
+  serverDailyUsd = 100,
+) {
+  const journal = (await journalFile(t)).open();
+  const accounts = journal.accountLedger({
+    limitsOf: (inviteId) => limits[inviteId],
+    serverDailyUsd: () => serverDailyUsd,
+  });
+  return rig(accounts);
+}
+
+test("a check counts against the invite that owns the checked conversation, and never another's", async (t) => {
+  // What one check reserves and what it settles at, measured on a gateway with no cap.
+  const probe = rig();
+  const measured = recordingCharge();
+  await createGatewayVerifierModel(CHECK, probe.gateway, OWNERS).verify(
+    REQUEST,
+    new AbortController().signal,
+    measured.charge,
+  );
+  const reserved = measured.log.reserved[0] ?? 0;
+  const spent = measured.log.settled[0] ?? 0;
+  assert.ok(spent > 0 && reserved > spent);
+  // inv_a's day takes one check, not two: after the first settles, a second no longer fits.
+  const cap = { dailyUsd: reserved + spent / 2, monthlyUsd: 100 };
+  const { gateway, vendor } = await ledgerRig(t, { inv_a: cap, inv_b: cap });
+  const model = createGatewayVerifierModel(CHECK, gateway, OWNERS);
+  const check = (conversationId: string) =>
+    model.verify(REQUEST, new AbortController().signal, {
+      ...recordingCharge().charge,
+      conversationId,
+    });
+  await check('cnv_a');
+  await assert.rejects(check('cnv_a'), /daily limit/u);
+  assert.equal(vendor.seen.length, 1, 'the refused check was never sent');
+  await check('cnv_b');
+  assert.equal(vendor.seen.length, 2, "inv_b is not charged for inv_a's check");
+});
+
+test('a check of a conversation nobody owns is not sent', async (t) => {
+  const { gateway, vendor } = await ledgerRig(t, { inv_a: { dailyUsd: 5, monthlyUsd: 50 } });
+  const model = createGatewayVerifierModel(CHECK, gateway, OWNERS);
+  await assert.rejects(
+    model.verify(REQUEST, new AbortController().signal, {
+      ...recordingCharge().charge,
+      conversationId: 'cnv_unowned',
+    }),
+    /no owning invite/u,
+  );
+  assert.equal(vendor.seen.length, 0);
+  assert.equal(gateway.openGrants, 0);
+});
+
+test("the digest summary counts against the server's cap and no invite's", async (t) => {
+  const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
+  const budget = (await journalFile(t)).open().dailyLimit('digest summary', 100);
+  // An invite with a zero cap does not stop the summary: it is nobody's.
+  const open = await ledgerRig(t, { inv_a: { dailyUsd: 0, monthlyUsd: 0 } });
+  const summary = createGatewaySummaryModel('claude-haiku-5-5', open.gateway, budget);
+  await summary.summarize(items, new AbortController().signal);
+  assert.equal(open.vendor.seen.length, 1);
+  // The server's own cap does.
+  const closed = await ledgerRig(t, { inv_a: { dailyUsd: 5, monthlyUsd: 50 } }, 0);
+  const refused = createGatewaySummaryModel('claude-haiku-5-5', closed.gateway, budget);
+  await assert.rejects(refused.summarize(items, new AbortController().signal));
+  assert.equal(
+    closed.vendor.seen.filter((request) => request.url.endsWith('/v1/messages')).length,
+    0,
+  );
+});
+
+test("the conductor's requests count against the invite that owns the session's conversation", async (t) => {
+  const { gateway, vendor } = await ledgerRig(t, {
+    inv_open: { dailyUsd: 5, monthlyUsd: 50 },
+    inv_shut: { dailyUsd: 0, monthlyUsd: 0 },
+  });
+  const owners = new Map([
+    ['ses_open', 'inv_open'],
+    ['ses_shut', 'inv_shut'],
+  ]);
+  const gate = conductorGateway(gateway, (sessionId) => owners.get(sessionId));
+  const held: string[] = [];
+  const charge = {
+    reserve: (key: string) => {
+      held.push(key);
+      return { ok: true } as const;
+    },
+    settle: (key: string) => {
+      held.splice(held.indexOf(key), 1);
+    },
+  };
+  const ask = (sessionId: string) =>
+    gate.open(charge, sessionId).fetch('http://in-process/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+  const sent = () => vendor.seen.filter((request) => request.url.endsWith('/v1/messages')).length;
+
+  assert.equal((await ask('ses_shut')).status, 402, 'the invite at its cap is refused');
+  assert.equal(sent(), 0);
+  assert.deepEqual(held, [], "the run ledger's hold was released, not kept");
+  const open = await ask('ses_open');
+  assert.equal(open.status, 200);
+  await open.arrayBuffer();
+  assert.equal(sent(), 1);
+  // A session no conversation owns can send nothing, and does not reach the ledger.
+  await assert.rejects(ask('ses_nobody'), /no owning invite/u);
+  assert.equal(sent(), 1);
+  assert.deepEqual(held, []);
 });

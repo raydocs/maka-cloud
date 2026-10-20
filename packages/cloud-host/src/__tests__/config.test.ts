@@ -299,3 +299,38 @@ test('a caller with no invites reads the single-machine setting instead', () => 
       error instanceof ConfigError && error.problems.includes('INSTABOX_MACHINE_ID is not set'),
   );
 });
+
+test('spend limits are small unless the environment raises them, and a bad number stops the start', () => {
+  const defaults = readStackConfig(ENV).spend;
+  assert.deepEqual(defaults, { inviteDailyUsd: 5, inviteMonthlyUsd: 50, serverDailyUsd: 25 });
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /invite \$5\/day and \$50\/month/u);
+
+  const raised = readStackConfig({
+    ...ENV,
+    MAKA_CLOUD_INVITE_DAILY_USD: '12.5',
+    MAKA_CLOUD_INVITE_MONTHLY_USD: '100',
+    MAKA_CLOUD_SERVER_DAILY_USD: '0',
+  }).spend;
+  assert.deepEqual(raised, { inviteDailyUsd: 12.5, inviteMonthlyUsd: 100, serverDailyUsd: 0 });
+
+  for (const name of [
+    'MAKA_CLOUD_INVITE_DAILY_USD',
+    'MAKA_CLOUD_INVITE_MONTHLY_USD',
+    'MAKA_CLOUD_SERVER_DAILY_USD',
+  ]) {
+    for (const bad of ['-1', 'abc', '1e3', '1,5', '999999999']) {
+      assert.match(
+        problemsOf({ ...ENV, [name]: bad }).join('\n'),
+        new RegExp(`${name} must be`, 'u'),
+      );
+    }
+  }
+  const names = ENV_VARIABLES.map(([name]) => name);
+  for (const name of [
+    'MAKA_CLOUD_INVITE_DAILY_USD',
+    'MAKA_CLOUD_INVITE_MONTHLY_USD',
+    'MAKA_CLOUD_SERVER_DAILY_USD',
+  ]) {
+    assert.ok((names as string[]).includes(name), `${name} is in the usage text`);
+  }
+});

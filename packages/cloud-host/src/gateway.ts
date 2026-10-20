@@ -5,6 +5,7 @@ import {
   type GatewayServer,
   type ModelPrice,
   modelTable,
+  type SpendAccounts,
   type SpendJournal,
   searchUrl,
   serveGateway,
@@ -22,20 +23,30 @@ function vendorOfRunner(runner: string): Vendor {
 
 /**
  * Model access for sandbox runs: a gateway token per run, for the runner's vendor only, bound to
- * the run's budget and its tree's pool. The vendor key never leaves the host. A run without a
- * budget gets no token. When the gateway has web search, the token also pays for searches.
+ * the run's budget and its tree's pool, and charged to the invite that owns the task. The vendor
+ * key never leaves the host. A run without a budget or an owning invite gets no token. When the
+ * gateway has web search, the token also pays for searches.
  */
-export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelAccessProvider {
+export function gatewayModelAccess(
+  gateway: Gateway,
+  sandboxUrl: string,
+  ownerOfTask: (taskId: string) => string | undefined,
+): ModelAccessProvider {
   return {
     async issue({ taskId, runner, budgetUsd, budgetRootId }) {
       if (budgetUsd === undefined) {
         throw new Error('The task has no budget, so it gets no model access.');
+      }
+      const inviteId = ownerOfTask(taskId);
+      if (inviteId === undefined) {
+        throw new Error('The task has no owning invite, so it gets no model access.');
       }
       const vendor = vendorOfRunner(runner);
       const grant = gateway.issue({
         vendor,
         subject: taskId,
         taskId,
+        account: { inviteId },
         budget: {
           limitUsd: budgetUsd,
           ...(budgetRootId === undefined ? {} : { poolId: budgetRootId }),
@@ -56,11 +67,30 @@ export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelA
   };
 }
 
-/** The conductor's requests through the gateway, each charged to the run ledger by the conductor's `charge`. */
-export function conductorGateway(gateway: Gateway): ModelGateway {
+/**
+ * The conductor's requests through the gateway, each charged to the run ledger by the conductor's
+ * `charge` and to the invite that owns the session's conversation. A session with no owning invite
+ * can send nothing.
+ */
+export function conductorGateway(
+  gateway: Gateway,
+  ownerOfSession: (makaSessionId: string) => string | undefined,
+): ModelGateway {
   return {
     open(charge, subject) {
-      const client = gateway.inProcess({ vendor: 'anthropic', subject, budget: charge });
+      const inviteId = ownerOfSession(subject);
+      if (inviteId === undefined) {
+        return {
+          fetch: () => Promise.reject(new Error('The conversation has no owning invite')),
+          close: () => undefined,
+        };
+      }
+      const client = gateway.inProcess({
+        vendor: 'anthropic',
+        subject,
+        budget: charge,
+        account: { inviteId },
+      });
       return { fetch: client.fetch, close: () => client.revoke() };
     },
   };
@@ -104,7 +134,7 @@ export interface StackGateway {
 /**
  * The gateway with the vendor keys from `env`, and web search when `DEEPSEEK_API_KEY` is set,
  * listening where the config says. With `journal`, the spend of every task's grants is written
- * down as it happens.
+ * down as it happens. With `accounts`, every grant must name the invite it is charged to.
  */
 export async function startGateway(
   config: StackConfig['gateway'],
@@ -112,6 +142,7 @@ export async function startGateway(
   onWarning: (message: string, detail?: unknown) => void,
   models: readonly ModelPrice[] = config.models,
   journal?: SpendJournal,
+  accounts?: SpendAccounts,
 ): Promise<StackGateway> {
   const key = (name: string): string | undefined => {
     const value = env[name]?.trim();
@@ -153,6 +184,7 @@ export async function startGateway(
           },
         }),
     ...(journal === undefined ? {} : { journal }),
+    ...(accounts === undefined ? {} : { accounts }),
     onWarning: (message, detail) => onWarning(`model gateway: ${message}`, detail),
   });
   const server = await serveGateway(gateway, { host: config.host, port: config.port });

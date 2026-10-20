@@ -326,6 +326,15 @@ export class Conductor {
     return { accepted: true, duplicate: false };
   }
 
+  /**
+   * The conversation a running conductor or planner turn works for, so its model spend can be
+   * charged to whoever owns it. Undefined for a session with no turn running.
+   */
+  conversationOfSession(makaSessionId: string): string | undefined {
+    const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+    return turn === undefined ? undefined : this.state.run(turn.runId)?.conversationId;
+  }
+
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
