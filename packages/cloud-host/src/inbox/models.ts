@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import type { BudgetPort, Gateway } from '@maka-cloud/gateway';
+import type { Account, BudgetPort, Gateway } from '@maka-cloud/gateway';
 import {
   type CheckCharge,
   inputTokenBound,
@@ -151,6 +151,9 @@ function gatewayLanguageModel(
 
 type GatewayClients = Pick<Gateway, 'inProcess'>;
 
+/** Whose caps a conversation's spend counts against; undefined when nobody owns it. */
+export type AccountOf = (conversationId: string) => Account | undefined;
+
 /**
  * A pool entry as a verifier whose request goes through the model gateway. The gateway reserves
  * the worst case of the exact request it sends against the check's charge (the day's cap, then
@@ -160,6 +163,7 @@ type GatewayClients = Pick<Gateway, 'inProcess'>;
 export function createGatewayVerifierModel(
   entry: VerifierPoolEntry,
   gateway: GatewayClients,
+  accountOf: AccountOf,
   deps: Pick<ModelDeps, 'generateText'> = {},
 ): VerifierModel {
   const generate = deps.generateText ?? (generateText as unknown as GenerateText);
@@ -171,18 +175,24 @@ export function createGatewayVerifierModel(
     maxOutputTokens: entry.maxOutputTokens,
     metered: true,
     async verify(request: VerifierRequest, signal: AbortSignal, charge?: CheckCharge) {
+      // The check's spend counts against the invite that owns the checked task's conversation.
+      const account = charge === undefined ? undefined : accountOf(charge.conversationId);
+      if (charge === undefined || account === undefined) {
+        throw new Error('The check has no owning invite, so no model access');
+      }
       const client = gateway.inProcess({
         vendor: entry.vendor,
         subject: 'verification',
+        account,
+        conversationId: charge.conversationId,
         budget: {
           reserve: (_key, usd) => {
-            if (!charge) return { ok: false, reason: 'the check has no budget' };
             const refused = charge.reserve(usd);
             return refused === undefined
               ? { ok: true }
               : { ok: false, budget: true, reason: 'the check budget cannot cover this request' };
           },
-          settle: (_key, usd) => charge?.settle(usd),
+          settle: (_key, usd) => charge.settle(usd),
         },
       });
       try {
@@ -221,7 +231,13 @@ export function createGatewaySummaryModel(
   const generate = deps.generateText ?? (generateText as unknown as GenerateText);
   return {
     async summarize(input, signal) {
-      const client = gateway.inProcess({ vendor: 'anthropic', subject: 'digest summary', budget });
+      // The summary belongs to no invite: it counts against the server's cap only.
+      const client = gateway.inProcess({
+        vendor: 'anthropic',
+        subject: 'digest summary',
+        budget,
+        account: 'server',
+      });
       let result: Awaited<ReturnType<GenerateText>>;
       try {
         result = await generate({

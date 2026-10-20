@@ -151,7 +151,11 @@ export async function createLiveDeps(
   }
   let closing: Promise<void> | undefined;
   try {
-    const modelAccess = gatewayModelAccess(gateway.gateway, gateway.sandboxUrl);
+    // This gateway has no invites and no account ledger: the benchmark is limited by its own
+    // budget and journal, so every task is "owned" by the benchmark.
+    const modelAccess = gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, () => ({
+      inviteId: 'evals',
+    }));
     const cloud = (options.createRunners ?? ((o) => createCloudRunnersFromEnv(env, o)))({
       modelAccess,
     });

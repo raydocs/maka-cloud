@@ -326,11 +326,45 @@ export class Conductor {
     return { accepted: true, duplicate: false };
   }
 
+  /**
+   * The conversation a running conductor or planner turn works for, so its model spend can be
+   * charged to whoever owns it. Undefined for a session with no turn running.
+   */
+  conversationOfSession(makaSessionId: string): string | undefined {
+    const turn = this.turns.get(makaSessionId) ?? this.plannerTurns.get(makaSessionId);
+    return turn === undefined ? undefined : this.state.run(turn.runId)?.conversationId;
+  }
+
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
     if (!run) return false;
     return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
+  }
+
+  /**
+   * Stops every open run, in every conversation, the way a user's stop does: its turn, queued
+   * inputs and tasks (cancelled through the orchestrator), and tells the user why. For the
+   * operator's pause switch. A conversation the orchestrator gives no access to has its tasks
+   * marked as owed a cancel, which is retried when it next has access. Returns how many runs it stopped.
+   */
+  async stopAll(reason: string, notice: string): Promise<number> {
+    if (this.closing.signal.aborted) return 0;
+    let stopped = 0;
+    for (const run of OPEN_RUN_STATES.flatMap((state) => this.state.runsInState(state))) {
+      const access = this.orchestratorAccess?.(run.conversationId);
+      const lane = this.lane(run.conversationId, access);
+      if (!lane.access) {
+        this.state.markCancelPending(
+          this.state.unsettledDelegations({ runId: run.runId }).map((delegation) => delegation.key),
+        );
+      }
+      if (this.stopRun(lane, run.runId, reason, notice)) {
+        stopped += 1;
+        this.sendOutbox(run.conversationId);
+      }
+    }
+    return stopped;
   }
 
   /**
@@ -742,8 +776,8 @@ export class Conductor {
     ).then(() => undefined);
   }
 
-  private stopRun(lane: Lane, runId: string, reason: string): boolean {
-    if (!this.state.endRun(runId, 'cancelled', reason)) return false;
+  private stopRun(lane: Lane, runId: string, reason: string, notice?: string): boolean {
+    if (!this.state.endRun(runId, 'cancelled', reason, notice)) return false;
     lane.queue = lane.queue.filter((job) => job.runId !== runId);
     if (lane.current?.runId === runId) this.requestStop(lane.current, 'user');
     else this.enqueue(lane, { kind: 'cancel_tasks', runId });

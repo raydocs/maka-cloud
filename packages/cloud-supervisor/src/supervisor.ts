@@ -3,7 +3,7 @@ import { openDatabase } from './db.js';
 import { buildDigest, type Digest } from './digest.js';
 import { signalOf } from './events.js';
 import type { Interrupt, SummaryModel, SupervisorHost } from './host.js';
-import { applySignal, type Reassessment, reassess, stallPass } from './rules.js';
+import { applySignal, capSpec, openItem, type Reassessment, reassess, stallPass } from './rules.js';
 import {
   dueDigestSlot,
   inQuietHours,
@@ -530,6 +530,23 @@ export class Supervisor {
       items: rows.map((row) => ({ ...toView(row, this.store.answerOfItem(row.itemId)), n: row.n })),
       next: rows.length === limit ? (rows.at(-1)?.n ?? null) : null,
     };
+  }
+
+  /**
+   * Raises a budget item for a spending limit that stopped work, which stays until the human
+   * acknowledges it. One open item per `key`: more hits on the same limit change nothing. Durable
+   * when this returns; the push and the stream follow from the supervisor's own pass.
+   */
+  raiseCapHit(input: { conversationId: string; taskId?: string; key: string; ask: string }): void {
+    if (this.stopped) return;
+    this.store.tx(() =>
+      openItem(
+        this.store,
+        capSpec(this.store, { ...input, taskId: input.taskId ?? null }),
+        this.now(),
+      ),
+    );
+    this.kick();
   }
 
   getItem(itemId: string): ItemView | undefined {

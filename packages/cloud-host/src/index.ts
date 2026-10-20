@@ -9,3 +9,4 @@ export {
   startGateway,
 } from './gateway.js';
 export { ConfigError, readStackConfig, type StackConfig } from './config.js';
+export { PauseSwitch, PauseWatcher, type PauseWatcherOptions } from './pause.js';

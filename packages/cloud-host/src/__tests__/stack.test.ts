@@ -11,7 +11,7 @@ import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
 import type { CloudRunners, CloudRunnersOptions, ModelAccess } from '@maka-cloud/runners';
 import { readStackConfig } from '../config.js';
-import { STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
+import { PAUSED_NOTICE, STACK_PLAYBOOKS, type Stack, startStack } from '../stack.js';
 
 /** The machine of the invite the tests create first; any other invite has none. */
 const SANDBOXES = JSON.stringify({ inv_000000000001: 'mch_test' });
@@ -27,12 +27,20 @@ interface Started {
   firstMessage: Promise<void>;
   sweeps: string[][];
   dataDir: string;
+  /** The invite that owns every task of `owners` unless a test maps it to another. */
+  inviteId: string;
+  /** Which invite owns a task, for the tasks the tests issue model access to directly. */
+  owners: Map<string, string>;
+  /** What the stack warned about. */
+  warnings: string[];
 }
 
 async function start(
   t: TestContext,
   publicUrl?: string,
   env: NodeJS.ProcessEnv = {},
+  /** False: tasks are owned only through conversations, as in the product. */
+  ownerSeam = true,
 ): Promise<Started> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
   let requests = 0;
@@ -88,7 +96,15 @@ async function start(
   const codex = new FakeRunner({ name: 'codex' });
   const sweeps: string[][] = [];
   let options: Partial<CloudRunnersOptions> = {};
+  let inviteId = '';
+  const owners = new Map<string, string>();
+  const warnings: string[] = [];
   const stack = await startStack(config, env, {
+    pausePollMs: 10,
+    onWarning: (message) => warnings.push(message),
+    ...(ownerSeam
+      ? { ownerOfTask: (taskId) => owners.get(taskId) ?? (inviteId === '' ? undefined : inviteId) }
+      : {}),
     createRunners: (given) => {
       options = given;
       return {
@@ -103,6 +119,7 @@ async function start(
       } as unknown as CloudRunners;
     },
   });
+  inviteId = stack.cloud.server.invites.create('stack test').inviteId;
   t.after(async () => {
     await stack.close();
     await new Promise<void>((resolve) => model.close(() => resolve()));
@@ -117,6 +134,9 @@ async function start(
     firstMessage,
     sweeps,
     dataDir: dir,
+    inviteId,
+    owners,
+    warnings,
   };
 }
 
@@ -310,6 +330,7 @@ test('a stack that fails to start closes its gateway', async (t) => {
       config,
       { ANTHROPIC_API_KEY: 'sk-test-not-a-key' },
       {
+        ownerOfTask: () => 'inv_early',
         createRunners: (given) => {
           issued = given.modelAccess?.issue({
             taskId: 'tsk_early',
@@ -479,3 +500,168 @@ test('Web Push settings that cannot sign stop the start, without the key in the 
     },
   );
 });
+
+test('model access is charged to the invite that owns the task, and a task nobody owns gets none', async (t) => {
+  const { stack, options, modelKeys, owners } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const invites = stack.cloud.server.invites;
+  const open = invites.create('open').inviteId;
+  const shut = invites.create('shut').inviteId;
+  owners.set('tsk_open', open);
+  owners.set('tsk_shut', shut);
+  invites.setLimits(shut, { dailyUsd: 0 });
+  const access = options.modelAccess;
+  assert.ok(access);
+  const grant = async (taskId: string) =>
+    access.issue({ taskId, runner: 'claude-agent-sdk', budgetUsd: 1, budgetRootId: taskId });
+  const ask = async (given: ModelAccess) => {
+    const response = await fetch(`${given.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': given.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    await response.arrayBuffer();
+    return response.status;
+  };
+  const sentToVendor = () => modelKeys.filter((line) => line.startsWith('/v1/messages ')).length;
+
+  // The invite whose daily limit is 0 spends nothing; the other is not affected by it.
+  assert.equal(await ask(await grant('tsk_shut')), 402);
+  assert.equal(sentToVendor(), 0, 'the refused request never reached the vendor');
+  assert.equal(await ask(await grant('tsk_open')), 500, 'the vendor answered');
+  assert.equal(sentToVendor(), 1);
+  // A change from the command line (here the same store) applies to the running server.
+  invites.setLimits(shut, { dailyUsd: 5 });
+  assert.equal(await ask(await grant('tsk_shut')), 500);
+  assert.equal(sentToVendor(), 2);
+  invites.revoke(shut);
+  assert.equal(await ask(await grant('tsk_shut')), 402, 'a revoked invite may not spend');
+  assert.equal(sentToVendor(), 2);
+});
+
+test('a spending limit that stops a task nobody can be told about is warned, and still refuses', async (t) => {
+  const { stack, options, modelKeys, owners, warnings } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const shut = stack.cloud.server.invites.create('shut').inviteId;
+  stack.cloud.server.invites.setLimits(shut, { dailyUsd: 0 });
+  owners.set('tsk_shut', shut);
+  const access = options.modelAccess;
+  assert.ok(access);
+  const given = await access.issue({
+    taskId: 'tsk_shut',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_shut',
+  });
+  const response = await fetch(`${given.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': given.apiKey },
+    body: JSON.stringify({
+      model: 'claude-haiku-5-5',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  await response.arrayBuffer();
+  assert.equal(response.status, 402);
+  assert.deepEqual(
+    modelKeys.filter((line) => line.startsWith('/v1/messages ')),
+    [],
+  );
+  assert.equal(
+    warnings.filter((message) => /no conversation could be told/u.test(message)).length,
+    1,
+    'a limit with nobody to tell is never silent',
+  );
+});
+
+test('a task that no conversation owns gets no model access, and nothing reaches the vendor', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {}, false);
+  const orchestrator = stack.cloud.server.orchestrator;
+  const loose = orchestrator.authenticate(orchestrator.issueSession().token);
+  assert.ok(loose);
+  const task = await orchestrator.delegate(loose, { runner: 'claude-agent-sdk', brief: 'x' });
+  const access = options.modelAccess;
+  assert.ok(access);
+  for (const taskId of [task.taskId, 'tsk_unknown']) {
+    await assert.rejects(
+      access.issue({ taskId, runner: 'claude-agent-sdk', budgetUsd: 1 }),
+      /no owning invite/u,
+    );
+  }
+  assert.deepEqual(modelKeys, []);
+});
+
+test('pausing refuses the next model request at once as unavailable, and resuming allows it', async (t) => {
+  const { stack, options, modelKeys } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const access = options.modelAccess;
+  assert.ok(access);
+  const grant = await access.issue({
+    taskId: 'tsk_paused',
+    runner: 'claude-agent-sdk',
+    budgetUsd: 1,
+    budgetRootId: 'tsk_paused',
+  });
+  const ask = async () => {
+    const response = await fetch(`${grant.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': grant.apiKey },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const text = await response.text();
+    return { status: response.status, text };
+  };
+  const sent = () => modelKeys.filter((line) => line.startsWith('/v1/messages ')).length;
+
+  assert.equal((await ask()).status, 500, 'the vendor answered');
+  assert.equal(sent(), 1);
+  stack.pause.pause();
+  const refused = await ask();
+  assert.equal(refused.status, 503, 'unavailable, not out of budget');
+  assert.match(refused.text, /spending is paused/u);
+  assert.equal(sent(), 1, 'the paused request never reached the vendor');
+  assert.equal(grant.meter?.spentUsd(), 0, 'and cost nothing');
+  stack.pause.resume();
+  assert.equal((await ask()).status, 500, 'spending is allowed again');
+  assert.equal(sent(), 2);
+});
+
+test('while paused the stack stops what is open through the conductor, and closing twice closes once', async (t) => {
+  const { stack } = await start(t);
+  const stops: Array<[string, string]> = [];
+  const asked = deferred();
+  const conductor = stack.cloud.conductor;
+  conductor.stopAll = async (reason, notice) => {
+    stops.push([reason, notice]);
+    asked.resolve();
+    return 0;
+  };
+  assert.deepEqual(stops, [], 'not paused: nothing is stopped');
+  stack.pause.pause();
+  await asked.promise;
+  assert.equal(stops[0]?.[0], 'paused');
+  assert.equal(stops[0]?.[1], PAUSED_NOTICE);
+  stack.pause.resume();
+  await stack.close();
+  await stack.close();
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}

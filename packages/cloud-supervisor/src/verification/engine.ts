@@ -155,6 +155,7 @@ export async function runCheck(input: CheckInput): Promise<Outcome> {
   if (model.metered) {
     // The model reserves the exact request it sends, through the same gate.
     charge = {
+      conversationId: task.conversationId,
       reserve: (usd) => {
         refused = input.spend.reserve(input.attemptKey, usd, task.conversationId, task.taskId);
         return refused;

@@ -1,10 +1,12 @@
 import type { ModelGateway } from '@maka-cloud/conductor';
 import {
+  type CapEvent,
   deepSeekSearch,
   Gateway,
   type GatewayServer,
   type ModelPrice,
   modelTable,
+  type SpendAccounts,
   type SpendJournal,
   searchUrl,
   serveGateway,
@@ -14,6 +16,12 @@ import {
 import type { ModelAccessProvider } from '@maka-cloud/runners';
 import type { StackConfig } from './config.js';
 
+/** Whose spend a request is, and where to tell them if a limit stops it. */
+export interface Owner {
+  inviteId: string;
+  conversationId?: string;
+}
+
 function vendorOfRunner(runner: string): Vendor {
   if (runner === 'claude-agent-sdk') return 'anthropic';
   if (runner === 'codex') return 'openai';
@@ -22,20 +30,31 @@ function vendorOfRunner(runner: string): Vendor {
 
 /**
  * Model access for sandbox runs: a gateway token per run, for the runner's vendor only, bound to
- * the run's budget and its tree's pool. The vendor key never leaves the host. A run without a
- * budget gets no token. When the gateway has web search, the token also pays for searches.
+ * the run's budget and its tree's pool, and charged to the invite that owns the task. The vendor
+ * key never leaves the host. A run without a budget or an owning invite gets no token. When the
+ * gateway has web search, the token also pays for searches.
  */
-export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelAccessProvider {
+export function gatewayModelAccess(
+  gateway: Gateway,
+  sandboxUrl: string,
+  ownerOfTask: (taskId: string) => Owner | undefined,
+): ModelAccessProvider {
   return {
     async issue({ taskId, runner, budgetUsd, budgetRootId }) {
       if (budgetUsd === undefined) {
         throw new Error('The task has no budget, so it gets no model access.');
+      }
+      const owner = ownerOfTask(taskId);
+      if (owner === undefined) {
+        throw new Error('The task has no owning invite, so it gets no model access.');
       }
       const vendor = vendorOfRunner(runner);
       const grant = gateway.issue({
         vendor,
         subject: taskId,
         taskId,
+        account: { inviteId: owner.inviteId },
+        ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
         budget: {
           limitUsd: budgetUsd,
           ...(budgetRootId === undefined ? {} : { poolId: budgetRootId }),
@@ -56,11 +75,31 @@ export function gatewayModelAccess(gateway: Gateway, sandboxUrl: string): ModelA
   };
 }
 
-/** The conductor's requests through the gateway, each charged to the run ledger by the conductor's `charge`. */
-export function conductorGateway(gateway: Gateway): ModelGateway {
+/**
+ * The conductor's requests through the gateway, each charged to the run ledger by the conductor's
+ * `charge` and to the invite that owns the session's conversation. A session with no owning invite
+ * can send nothing.
+ */
+export function conductorGateway(
+  gateway: Gateway,
+  ownerOfSession: (makaSessionId: string) => Owner | undefined,
+): ModelGateway {
   return {
     open(charge, subject) {
-      const client = gateway.inProcess({ vendor: 'anthropic', subject, budget: charge });
+      const owner = ownerOfSession(subject);
+      if (owner === undefined) {
+        return {
+          fetch: () => Promise.reject(new Error('The conversation has no owning invite')),
+          close: () => undefined,
+        };
+      }
+      const client = gateway.inProcess({
+        vendor: 'anthropic',
+        subject,
+        budget: charge,
+        account: { inviteId: owner.inviteId },
+        ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
+      });
       return { fetch: client.fetch, close: () => client.revoke() };
     },
   };
@@ -104,7 +143,7 @@ export interface StackGateway {
 /**
  * The gateway with the vendor keys from `env`, and web search when `DEEPSEEK_API_KEY` is set,
  * listening where the config says. With `journal`, the spend of every task's grants is written
- * down as it happens.
+ * down as it happens. With `accounts`, every grant must name the invite it is charged to.
  */
 export async function startGateway(
   config: StackConfig['gateway'],
@@ -112,6 +151,8 @@ export async function startGateway(
   onWarning: (message: string, detail?: unknown) => void,
   models: readonly ModelPrice[] = config.models,
   journal?: SpendJournal,
+  accounts?: SpendAccounts,
+  onCap?: (event: CapEvent) => void,
 ): Promise<StackGateway> {
   const key = (name: string): string | undefined => {
     const value = env[name]?.trim();
@@ -153,6 +194,8 @@ export async function startGateway(
           },
         }),
     ...(journal === undefined ? {} : { journal }),
+    ...(accounts === undefined ? {} : { accounts }),
+    ...(onCap === undefined ? {} : { onCap }),
     onWarning: (message, detail) => onWarning(`model gateway: ${message}`, detail),
   });
   const server = await serveGateway(gateway, { host: config.host, port: config.port });

@@ -6,8 +6,16 @@ export {
   countedInputTokens,
   DEFAULT_BOUND_LIMITS,
 } from './bound.js';
-export { Allowance, type BudgetPort, LimitPort, type ReserveResult } from './budget.js';
+export { type Account, accountPort, type SpendAccounts } from './accounts.js';
 export {
+  Allowance,
+  type BudgetPort,
+  type CapHit,
+  LimitPort,
+  type ReserveResult,
+} from './budget.js';
+export {
+  type CapEvent,
   DEFAULT_GATEWAY_LIMITS,
   Gateway,
   type GatewayLimits,
@@ -22,6 +30,8 @@ export {
   type Upstream,
 } from './gateway.js';
 export {
+  type AccountLedgerOptions,
+  type AccountLimits,
   journaledPort,
   type SpendJournal,
   SqliteSpendJournal,
