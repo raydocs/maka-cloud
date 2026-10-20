@@ -38,7 +38,7 @@ not code. We combine the two:
   detail (plan, steps, diff, tests, review, cost); minimal and phone first.
 
 Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
-T26, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
+T26, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
 T23 and T24.
 
 Rules for all tasks:
@@ -416,6 +416,27 @@ Depends on: T6, T8, T23.
   `merge-when-green`.
 - Tests with a fake instabox and a fake GitHub: idle pause, no pause while a
   task runs, resume on a message, the ship path, and the bounded CI fix loop.
+
+## T14b: live computer handoff on real runners
+
+Depends on: T14 (the web and server seam from PR #99, routes off by
+default), T26.
+
+- Give the active `RunHandle` of `SandboxCliRunner` (and the coding runner)
+  real pause and resume: the agent CLI stops taking actions while the user
+  holds control and continues the same session afterwards. A session restart
+  is not a pause.
+- A trusted adapter from the invite's instabox machine (desktop and terminal
+  routes, VNC and PTY) to T14's `ComputerSource`, wired in the host from the
+  task to its invite's machine. Never expose provider URLs or sandbox
+  credentials to the browser.
+- Turn the T14 routes on only when this adapter is configured. T14's
+  isolation, revoke and abort contracts must still hold: another invite gets
+  404, revoke closes the stream and aborts held input, and a failed handback
+  keeps the task paused.
+- Tests with a fake instabox desktop and PTY and a fake CLI that records
+  actions: no agent action while the user holds control, resume continues the
+  same session, and isolation and revoke on the real host wiring.
 
 ---
 
