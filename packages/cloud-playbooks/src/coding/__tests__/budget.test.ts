@@ -93,18 +93,21 @@ test('the spend an agent run reports as the task is cancelled is reported before
   zeroStats(h.runner);
 });
 
-test('an agent run whose stream stays open after its release does not hold the cancel: the spend read so far stands and the failure is reported', async (t) => {
-  const failures: string[] = [];
+test('a final spend that arrives after the read timed out is still reported, and the task stays open until it is', async (t) => {
+  const timedOut = gate();
   const h = await setup(t, {
     lastSpendMs: 20,
-    onCleanupError: (failure) => failures.push(failure.step),
+    onCleanupError: (failure) => {
+      if (failure.step === 'read the last spend of the agent run') timedOut.open();
+    },
   });
   h.claude.script = async (turn) => {
-    turn.usage(0.2);
-    turn.signal.addEventListener('abort', () => turn.usage(0.9), { once: true });
+    turn.usage(0.1);
     await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
     return 'ok';
   };
+  // The agent run is stopped, but its last requests settle (and are reported) only later.
+  const finalSpend = gate();
   const realStart = h.claude.start.bind(h.claude);
   h.claude.start = async (spec) => {
     const handle = await realStart(spec);
@@ -112,24 +115,32 @@ test('an agent run whose stream stays open after its release does not hold the c
       ...handle,
       events: (async function* () {
         yield* handle.events;
-        await new Promise<never>(() => {});
+        await finalSpend.promise;
+        yield { type: 'usage' as const, costUsd: 0.8 };
       })(),
     };
   };
-  const handle = await h.runner.start(await h.spec('tsk_hungstream'));
+  const handle = await h.runner.start(await h.spec('tsk_latespend'));
   const reading = gate();
   const usage: number[] = [];
+  let closed = false;
   const ended = (async () => {
     for await (const event of handle.events) {
       if (event.type !== 'usage') continue;
       usage.push(event.costUsd);
       reading.open();
     }
+    closed = true;
   })();
   await reading.promise;
   await handle.cancel();
+  await timedOut.promise;
+  // Everything the task held is released, but its cost is not final: the stream stays open.
+  while (h.leases.released < 1) await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(closed, false, 'the task is not over while its final cost is unknown');
+  finalSpend.open(undefined);
   await ended;
-  assert.deepEqual(usage, [0.2, 0.9]);
-  assert.deepEqual(failures, ['read the last spend of the agent run']);
+  assert.deepEqual(usage, [0.1, 0.8]);
   zeroStats(h.runner);
 });

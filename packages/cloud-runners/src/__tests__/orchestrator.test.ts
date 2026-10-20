@@ -124,3 +124,34 @@ async function orchestrator_delegate(
   const view = await orchestrator.delegate(info, { runner: 'claude-agent-sdk', brief: 'x' });
   return view.taskId;
 }
+
+test('a run that fails on its own and could not be stopped leaves its task failed with the stop owed, and a stop by id clears it', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  await h.setMode('fail');
+  const orchestrator = await Orchestrator.create({
+    store: new MemoryTaskStore(),
+    runners: new RunnerRegistry(h.runners.runners),
+    handoffRoot: await handoffDir(t),
+    stopRetry: { firstMs: 5, maxMs: 5 },
+  });
+  t.after(() => orchestrator.close());
+  const info = orchestrator.authenticate(orchestrator.issueSession().token);
+  assert.ok(info);
+  h.fake.onExec = (request) =>
+    request.body.cmd.includes('SURVIVORS')
+      ? { status: 503, error: { code: 'host_unavailable', message: 'down', retryable: false } }
+      : undefined;
+  const started = await orchestrator.delegate(info, { runner: 'claude-agent-sdk', brief: 'x' });
+  const done = await orchestrator.wait(info, started.taskId, 20_000);
+  assert.equal(done.state, 'failed');
+  await orchestrator.settled();
+  const owed = orchestrator.status(info, started.taskId);
+  assert.equal(owed.stopPending, true, 'the failed task must not read as settleable');
+
+  h.fake.onExec = undefined;
+  for (let i = 0; i < 200 && orchestrator.status(info, started.taskId).stopPending; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(orchestrator.status(info, started.taskId).stopPending, undefined);
+});

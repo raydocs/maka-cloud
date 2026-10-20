@@ -299,6 +299,8 @@ class CodingRun implements RunHandle {
    * may still be running. `cancel` refuses with it, so the stop stays owed.
    */
   private stopFailure: Error | undefined;
+  /** Reads of agent streams that outlived the wait for their last spend; each adds to the total when it ends. */
+  private readonly lateSpends = new Set<Promise<void>>();
   private readonly hostDir: string;
 
   constructor(
@@ -405,9 +407,24 @@ class CodingRun implements RunHandle {
     } finally {
       this.ended = true;
       await this.cleanup();
+      // An agent run whose stream was still open when the wait for its last spend ran out is read
+      // on: the task is not over, and its cost not final, until that is recorded.
+      while (this.lateSpends.size > 0) await Promise.all([...this.lateSpends]);
       // The terminal event goes out only after everything the task held is released, so
-      // nothing that follows it (a new task, a restart) meets this one's leftovers.
-      if (this.terminal && !this.cancelled) this.events.push(this.terminal);
+      // nothing that follows it (a new task, a restart) meets this one's leftovers. It also means
+      // nothing is left to stop: when a stop failed it is not sent, the stream just closes, and
+      // the task ends with the stop owed (and retried by id).
+      if (this.terminal && !this.cancelled) {
+        if (this.stopFailure) {
+          this.events.push({
+            type: 'progress',
+            note: clipText(
+              `the task could not be confirmed stopped (${this.stopFailure.message}); its end is not reported and the stop stays owed`,
+              MAX_NOTE_CHARS,
+            ),
+          });
+        } else this.events.push(this.terminal);
+      }
       this.events.close();
       stats.runs--;
     }
@@ -592,8 +609,10 @@ class CodingRun implements RunHandle {
 
   /**
    * Reads what is left of a stopped agent run's stream and returns its last reported spend. The
-   * stream closes when the run is released; one that does not within `lastSpendMs` is reported
-   * and the spend so far stands.
+   * stream closes when the run is released. One that does not within `lastSpendMs` is reported
+   * and the task goes on without waiting, but its cost is not final: the read continues, adds
+   * whatever it still reports to the task's total, and the task's own stream stays open until it
+   * has ended (`lateSpends`), so nothing settles at the cost known when the wait ran out.
    */
   private async lastSpend(
     iterator: AsyncIterator<RunnerEvent>,
@@ -626,6 +645,14 @@ class CodingRun implements RunHandle {
           step: 'read the last spend of the agent run',
           error: new Error(`its stream did not end within ${limitMs} ms of its release`),
         });
+        const known = cost;
+        const late = read.then(() => {
+          if (cost > known) this.spentBefore += cost - known;
+          this.meter(this.spentBefore, true);
+        });
+        this.lateSpends.add(late);
+        void late.finally(() => this.lateSpends.delete(late));
+        return known;
       }
     } finally {
       clearTimeout(timer);
@@ -1194,11 +1221,11 @@ class CodingRun implements RunHandle {
 
   /**
    * Reports what the task has spent so far, as the total of its agent runs. Returns true once
-   * that reaches the task's budget.
+   * that reaches the task's budget. `final` reports after the task ended: its last spend.
    */
-  private meter(total: number): boolean {
+  private meter(total: number, final = false): boolean {
     const spent = roundUsd(total);
-    if (spent !== this.lastReportedUsd && !this.ended) {
+    if (spent !== this.lastReportedUsd && (!this.ended || final)) {
       this.lastReportedUsd = spent;
       this.events.push({ type: 'usage', costUsd: spent });
     }

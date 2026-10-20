@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { CLONE_SCRIPT } from '../scripts.js';
 import {
+  type AgentScript,
   type AgentTurn,
   collect,
   FIXED_ADD,
@@ -322,3 +323,69 @@ test('a cancel whose checks could not be stopped is refused, not reported as don
   assert.equal(terminal(await events), undefined);
   zeroStats(h.runner);
 });
+
+/** A runner whose sandbox cannot confirm that the task's checks are stopped. */
+function withFailingStopAll(h: Harness): void {
+  const sandbox = h.runner.options.sandbox;
+  h.runner = h.makeRunner({
+    sandbox: {
+      stopTask: (taskId, signal) => sandbox.stopTask(taskId, signal),
+      open: async (taskId, signal) => {
+        const workspace = await sandbox.open(taskId, signal);
+        return {
+          ...workspace,
+          stopAll: async (stopSignal) => {
+            await workspace.stopAll(stopSignal);
+            throw new Error('sandbox unreachable');
+          },
+        };
+      },
+    },
+  });
+}
+
+/** Whether the stream says why it sent no end. */
+function saysNotStopped(events: Awaited<ReturnType<typeof collect>>): boolean {
+  return events.some(
+    (event) => event.type === 'progress' && /could not be confirmed stopped/.test(event.note),
+  );
+}
+
+for (const exit of ['finished', 'failed'] as const) {
+  const script: AgentScript =
+    exit === 'finished' ? fixes : async () => ({ failed: 'the CLI crashed' });
+
+  test(`a task that ${exit} on its own but whose checks could not be stopped publishes no end`, async (t) => {
+    const h = await setup(t);
+    h.claude.script = script;
+    withFailingStopAll(h);
+    const events = await collect(await h.runner.start(await h.spec(`tsk_achecks_${exit}`)));
+    assert.equal(
+      terminal(events),
+      undefined,
+      'an end was published for a task not known to be stopped',
+    );
+    assert.ok(saysNotStopped(events));
+    zeroStats(h.runner);
+  });
+
+  test(`a task that ${exit} on its own but whose agent run could not be stopped publishes no end`, async (t) => {
+    const h = await setup(t);
+    h.claude.script = script;
+    const realStart = h.claude.start.bind(h.claude);
+    h.claude.start = async (spec) => {
+      const run = await realStart(spec);
+      return {
+        ...run,
+        cancel: async () => {
+          await run.cancel();
+          throw new Error('sandbox unreachable');
+        },
+      };
+    };
+    const events = await collect(await h.runner.start(await h.spec(`tsk_aagent_${exit}`)));
+    assert.equal(terminal(events), undefined);
+    assert.ok(saysNotStopped(events));
+    zeroStats(h.runner);
+  });
+}
