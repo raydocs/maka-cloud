@@ -8,6 +8,7 @@ import {
   countedInputTokens,
   DEFAULT_BOUND_LIMITS,
 } from './bound.js';
+import { type Account, accountPort, type SpendAccounts } from './accounts.js';
 import { Allowance, type BudgetPort, LimitPort, type ReserveResult } from './budget.js';
 import { cutEvent, plainRefusal, type Refusal, refusalResponse } from './errors.js';
 import { journaledPort, type SpendJournal } from './journal.js';
@@ -61,6 +62,11 @@ export interface GatewayOptions {
    * request is sent and when it settles, so a restart can charge what was in flight.
    */
   journal?: SpendJournal;
+  /**
+   * The caps on invites and on the server. When set, every grant must name its `account`, and a
+   * request is reserved against the account's caps too (after the grant's own budget).
+   */
+  accounts?: SpendAccounts;
   /** A problem worth knowing. Never carries a body, a header value, a token or a key. */
   onWarning?: (message: string, detail?: Record<string, string | number>) => void;
 }
@@ -85,6 +91,8 @@ export interface IssueInput {
    * first grant of the pool), so grants issued side by side cannot together exceed it.
    */
   budget: BudgetPort | { limitUsd: number; poolId?: string };
+  /** Whose caps the grant's spend counts against. Required when the gateway has `accounts`. */
+  account?: Account;
 }
 
 export interface SpendState {
@@ -92,6 +100,8 @@ export interface SpendState {
   spentUsd: number;
   /** A request was refused because the budget could not cover it. */
   exhausted: boolean;
+  /** Why, when it was an account cap and not the grant's own budget. */
+  exhaustedReason?: string;
 }
 
 export interface GrantHandle {
@@ -164,6 +174,7 @@ class Grant {
   revoked = false;
   spentUsd = 0;
   exhausted = false;
+  exhaustedReason: string | undefined;
   readonly flights = new Set<Flight>();
   readonly listeners = new Set<(state: SpendState) => void>();
   onRevoke: (() => void) | undefined;
@@ -178,7 +189,11 @@ class Grant {
   ) {}
 
   state(): SpendState {
-    return { spentUsd: roundUsd(this.spentUsd), exhausted: this.exhausted };
+    return {
+      spentUsd: roundUsd(this.spentUsd),
+      exhausted: this.exhausted,
+      ...(this.exhaustedReason === undefined ? {} : { exhaustedReason: this.exhaustedReason }),
+    };
   }
 
   notify(): void {
@@ -694,6 +709,12 @@ export class Gateway {
       if (budget.poolId !== undefined) pool = this.pool(budget.poolId, budget.limitUsd);
       port = new LimitPort(pool ? [own, pool.allowance] : [own]);
     }
+    if (this.options.accounts) {
+      if (input.account === undefined) {
+        throw new Error('The grant has no owning account, so it gets no model access.');
+      }
+      port = accountPort(port, this.options.accounts, input.account);
+    }
     if (this.options.journal && input.taskId !== undefined) {
       port = journaledPort(port, this.options.journal, input.taskId);
     }
@@ -741,6 +762,7 @@ export class Gateway {
     }
     if (!result.ok && result.budget && !grant.exhausted) {
       grant.exhausted = true;
+      if (result.cap) grant.exhaustedReason = result.reason;
       grant.notify();
     }
     return result;

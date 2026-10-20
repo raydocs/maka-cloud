@@ -1,10 +1,19 @@
+/** A cap on an account's spend that refused a request. */
+export interface CapHit {
+  scope: 'invite_daily' | 'invite_monthly' | 'server_daily';
+  /** The invite whose cap it is; absent for the server-wide cap. */
+  inviteId?: string;
+  limitUsd: number;
+}
+
 export type ReserveResult =
   | { ok: true }
   /**
    * `budget`: refused because the money is not there, not because spending is closed.
    * `unavailable`: the reservation could not be recorded; the same request may pass later.
+   * `cap`: the refusal is an account cap (a `budget` refusal), not the task's own budget.
    */
-  | { ok: false; reason: string; budget?: boolean; unavailable?: boolean };
+  | { ok: false; reason: string; budget?: boolean; unavailable?: boolean; cap?: CapHit };
 
 /**
  * Where a grant's spend is charged. Both calls are synchronous, so nothing can spend between a
