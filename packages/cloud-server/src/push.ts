@@ -174,7 +174,13 @@ export class PushService {
   /** Alerts asked for and not yet sent to every device of their invite, by invite and key. */
   private readonly alerts = new Map<
     string,
-    { inviteId: string; key: string; waiters: Array<() => void> }
+    {
+      inviteId: string;
+      key: string;
+      waiters: Array<(complete: boolean) => void>;
+      /** Devices whose attempts ran out on a temporary failure; they are owed still, and not tried again in this round. */
+      stalled: Set<string>;
+    }
   >();
   private timer: NodeJS.Timeout | undefined;
   private closed = false;
@@ -274,14 +280,17 @@ export class PushService {
    * message carries the type `spend.alert` and nothing else. A device is told once per key, so the
    * same call again, from this process or after a restart, sends nothing it already sent. Sends go
    * through the same retries, revoke handling and subscription generations as a task message.
-   * Resolves when every device has been told or given up on.
+   * Resolves `true` when every device has been told or cannot be (its subscription is gone, or its
+   * push service refused it for good), and `false` when some device is still owed after the retries
+   * of this call because the push service kept failing: that is not recorded, so asking again, here
+   * or after a restart, tries those devices again.
    */
-  alert(inviteId: string, key: string): Promise<void> {
+  alert(inviteId: string, key: string): Promise<boolean> {
     if (!ALERT_KEY.test(key)) return Promise.reject(new Error('Invalid alert key'));
-    if (this.closed) return Promise.resolve();
-    return new Promise<void>((resolve) => {
+    if (this.closed) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
       const id = `${inviteId}\n${key}`;
-      const entry = this.alerts.get(id) ?? { inviteId, key, waiters: [] };
+      const entry = this.alerts.get(id) ?? { inviteId, key, waiters: [], stalled: new Set() };
       entry.waiters.push(resolve);
       this.alerts.set(id, entry);
       this.kick();
@@ -307,7 +316,7 @@ export class PushService {
       await this.running;
     } finally {
       this.closeTransport();
-      for (const entry of this.alerts.values()) for (const done of entry.waiters) done();
+      for (const entry of this.alerts.values()) for (const done of entry.waiters) done(false);
       this.alerts.clear();
     }
   }
@@ -391,6 +400,7 @@ export class PushService {
     const items: Pending[] = [];
     for (const { inviteId, key } of this.alerts.values()) {
       const taskId = `${ALERT_PREFIX}${key}`;
+      const entry = this.alerts.get(`${inviteId}\n${key}`);
       const rows = this.db
         .prepare(
           `SELECT s.endpoint, s.p256dh, s.auth FROM push_subscriptions s
@@ -404,6 +414,7 @@ export class PushService {
         auth: string;
       }>;
       for (const row of rows) {
+        if (entry?.stalled.has(row.endpoint)) continue;
         items.push({
           kind: 'alert',
           endpoint: row.endpoint,
@@ -420,19 +431,24 @@ export class PushService {
     return items;
   }
 
-  /** An alert with no device left to tell is done; whoever asked for it is told. True while some are not. */
+  /**
+   * An alert with no device left to try is done; whoever asked for it is told whether every device
+   * was told (`false` when some were left owed by a failing push service). True while some are not.
+   */
   private settleAlerts(): boolean {
     for (const [id, entry] of [...this.alerts]) {
-      const left = this.db
+      const owed = this.db
         .prepare(
-          `SELECT 1 FROM push_subscriptions s
+          `SELECT s.endpoint FROM push_subscriptions s
            LEFT JOIN push_deliveries d ON d.endpoint = s.endpoint AND d.task_id = ?
-           WHERE s.invite_id = ? AND d.task_id IS NULL LIMIT 1`,
+           WHERE s.invite_id = ? AND d.task_id IS NULL`,
         )
-        .get(`${ALERT_PREFIX}${entry.key}`, entry.inviteId);
-      if (left !== undefined) continue;
+        .all(`${ALERT_PREFIX}${entry.key}`, entry.inviteId) as unknown as Array<{
+        endpoint: string;
+      }>;
+      if (owed.some((row) => !entry.stalled.has(row.endpoint))) continue;
       this.alerts.delete(id);
-      for (const done of entry.waiters) done();
+      for (const done of entry.waiters) done(owed.length === 0);
     }
     return this.alerts.size > 0;
   }
@@ -527,7 +543,12 @@ export class PushService {
     if (status !== undefined && status !== 429 && status < 500) return this.finish(item, 'dropped');
     // Server error, rate limit, timeout or network failure: try again a few times.
     const attempts = (this.cooling.get(key)?.attempts ?? 0) + 1;
-    if (attempts >= this.maxAttempts) return this.finish(item, 'dropped');
+    if (attempts >= this.maxAttempts) {
+      // A task message is given up on. An alert is the owner's money warning: a push service that
+      // is down for a minute must not silence it for the day, so it stays owed and unrecorded.
+      if (item.kind === 'alert') return this.stall(item);
+      return this.finish(item, 'dropped');
+    }
     this.cooling.delete(key);
     this.cooling.set(key, { attempts, notBefore: this.now() + this.retryDelayMs * attempts });
     if (this.cooling.size > MAX_COOLING) {
@@ -537,6 +558,14 @@ export class PushService {
         this.warn('Push retry table is full; the oldest message was dropped');
       }
     }
+  }
+
+  /** The attempts of this round ran out on a temporary failure; the device stays owed, with nothing recorded. */
+  private stall(item: Pending): void {
+    this.cooling.delete(keyOf(item));
+    this.alerts
+      .get(`${item.inviteId}\n${item.taskId.slice(ALERT_PREFIX.length)}`)
+      ?.stalled.add(item.endpoint);
   }
 
   private finish(item: Pending, state: 'sent' | 'dropped' | 'revoked'): void {
@@ -569,6 +598,8 @@ export class PushService {
     for (const key of [...this.cooling.keys()]) {
       if (key.startsWith(`${endpoint}\n`)) this.cooling.delete(key);
     }
+    // A subscription that is gone, moved or new owes nothing from before, so it is not "stalled".
+    for (const entry of this.alerts.values()) entry.stalled.delete(endpoint);
     for (const [key, entry] of this.inflight) {
       if (key.startsWith(`${endpoint}\n`)) entry.controller.abort();
     }

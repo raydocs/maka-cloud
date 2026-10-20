@@ -1003,7 +1003,7 @@ test('an alert queued for a subscription that was deleted and registered again i
   assert.equal(alertRows(db, waiting.endpoint), 1);
 });
 
-test('a failing push service is retried to the limit, then the alert is given up on and recorded', async (t) => {
+test('a push service that keeps failing leaves the alert owed: it is reported incomplete, never recorded as given up, and sent when the service recovers', async (t) => {
   // The retry timer does not keep a process alive (the server's sockets do); the test holds it.
   const hold = setInterval(() => undefined, 1000);
   t.after(() => clearInterval(hold));
@@ -1012,11 +1012,77 @@ test('a failing push service is retried to the limit, then the alert is given up
   service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
   fake.state.behave = async () => ({ status: 503 });
   service.start();
-  await service.alert('inv_1', DAY_KEY);
+  assert.equal(await service.alert('inv_1', DAY_KEY), false, 'not every device was told');
   assert.equal(fake.calls.length, 2);
+  assert.equal(alertRows(db, d.endpoint), 0, 'nothing is recorded: the device is still owed');
+  fake.state.behave = async () => ({ status: 201 });
+  assert.equal(await service.alert('inv_1', DAY_KEY), true);
+  assert.equal(fake.calls.length, 3, 'asked again after the service recovered, it is sent');
   assert.equal(alertRows(db, d.endpoint), 1);
-  await service.alert('inv_1', DAY_KEY);
-  assert.equal(fake.calls.length, 2, 'a given-up alert is not asked again within its key');
+  assert.equal(await service.alert('inv_1', DAY_KEY), true);
+  assert.equal(fake.calls.length, 3, 'a told device is not told twice');
+});
+
+test('an alert that failed for a while is still owed after the server restarts', async (t) => {
+  const hold = setInterval(() => undefined, 1000);
+  t.after(() => clearInterval(hold));
+  const first = await serviceOnly(t, { maxAttempts: 1 });
+  const d = device();
+  first.service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  first.fake.state.behave = async () => ({ status: 503 });
+  first.service.start();
+  assert.equal(await first.service.alert('inv_1', DAY_KEY), false);
+  assert.equal(alertRows(first.db, d.endpoint), 0);
+  // A restart is a new service on the same database; the owed alert is asked for again.
+  const second = new PushService(
+    first.db,
+    first.hub,
+    { active: () => true },
+    { config, transport: first.fake.transport, retryDelayMs: 1, maxAttempts: 1 },
+  );
+  t.after(() => second.close());
+  first.fake.state.behave = async () => ({ status: 201 });
+  second.start();
+  assert.equal(await second.alert('inv_1', DAY_KEY), true);
+  assert.equal(alertRows(first.db, d.endpoint), 1);
+});
+
+test('one device that keeps failing does not hold back another, and only it is asked again', async (t) => {
+  const hold = setInterval(() => undefined, 1000);
+  t.after(() => clearInterval(hold));
+  const { service, db, fake } = await serviceOnly(t, { maxAttempts: 2 });
+  const good = device();
+  const bad = device();
+  service.register('inv_1', { endpoint: good.endpoint, ...good.keys });
+  service.register('inv_1', { endpoint: bad.endpoint, ...bad.keys });
+  fake.state.behave = async (call) => ({ status: call.endpoint === bad.endpoint ? 503 : 201 });
+  service.start();
+  assert.equal(await service.alert('inv_1', DAY_KEY), false);
+  assert.equal(alertRows(db, good.endpoint), 1);
+  assert.equal(alertRows(db, bad.endpoint), 0);
+  const before = fake.calls.length;
+  fake.state.behave = async () => ({ status: 201 });
+  assert.equal(await service.alert('inv_1', DAY_KEY), true);
+  assert.deepEqual(
+    fake.calls.slice(before).map((call) => call.endpoint),
+    [bad.endpoint],
+    'only the device that was not told',
+  );
+});
+
+test('a refusal that will not change ends the alert for that device, and a failed one does not', async (t) => {
+  const hold = setInterval(() => undefined, 1000);
+  t.after(() => clearInterval(hold));
+  const { service, db, fake } = await serviceOnly(t, { maxAttempts: 2 });
+  const refused = device();
+  service.register('inv_1', { endpoint: refused.endpoint, ...refused.keys });
+  fake.state.behave = async () => ({ status: 400 });
+  service.start();
+  assert.equal(await service.alert('inv_1', DAY_KEY), true, 'a permanent refusal is done');
+  assert.equal(alertRows(db, refused.endpoint), 1);
+  assert.equal(fake.calls.length, 1, 'and is not retried');
+  assert.equal(await service.alert('inv_1', DAY_KEY), true);
+  assert.equal(fake.calls.length, 1);
 });
 
 test('a gone subscription is deleted by the alert and the alert still resolves', async (t) => {
