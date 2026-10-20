@@ -201,9 +201,10 @@ export interface CloudServer {
   backupDatabase(destination: string): Promise<void>;
   /**
    * Sends the operator's alert `key` to the devices of `inviteId`, each at most once per key.
-   * Resolves when they were told or given up on; without Web Push it resolves at once.
+   * Resolves `true` when every device was told or cannot be, `false` when some are still owed
+   * because the push service kept failing (ask again later); without Web Push it resolves `true`.
    */
-  pushAlert(inviteId: string, key: string): Promise<void>;
+  pushAlert(inviteId: string, key: string): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -480,7 +481,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       publisher,
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
-      pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(),
+      pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(true),
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       close: () => {
         closing ??= shutdown();
