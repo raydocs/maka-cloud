@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { MakaTool, MakaToolContext } from '@maka/runtime/tool-runtime';
 import { z } from 'zod';
 import type { ConductorLimits } from './config.js';
+import { BUILTIN_TOOL_POLICY, playbookToolPolicy, type ToolEffect } from './guard.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook } from './playbooks.js';
 import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
@@ -48,12 +49,22 @@ export interface ToolHost {
   approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
 }
 
-/** A tool a playbook adds. `irreversible` tools are held until the user approves the call. */
+/**
+ * A tool a playbook adds. `irreversible` tools are held until the user approves the call; a tool
+ * with any other effect is held the same way once the conversation is tainted (T15).
+ */
 export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
   name: string;
   description: string;
   parameters: P;
   irreversible?: boolean;
+  /** What the tool does outside the conductor. Required: `[]` only for a tool that does none. */
+  effects: readonly ToolEffect[];
+  /**
+   * Whether the result can carry content from outside the user; a call with one taints the
+   * conversation before it runs. Defaults to true; set false only for a result built by code.
+   */
+  externalResult?: boolean;
   /**
    * For an irreversible tool: what the approval card must also show about a held call (what it
    * will act on), built by code from the held arguments and shown under the call itself.
@@ -408,9 +419,10 @@ export function conductorTools(
             const details = spec?.approvalDetails
               ? await spec.approvalDetails(held.args as never)
               : undefined;
+            const cause: HoldCause = spec && !alwaysHeld(spec) ? 'tainted' : 'irreversible';
             question = details
-              ? `${approvalQuestion(action)}\n\n${details}`
-              : approvalQuestion(action);
+              ? `${approvalQuestion(action, cause)}\n\n${details}`
+              : approvalQuestion(action, cause);
             note = args.question;
           }
           check = () => {
@@ -471,25 +483,45 @@ export function conductorTools(
   const extraTools = extra.map((spec) => playbookTool(host, spec));
 
   return [
-    startPlaybook,
-    delegateTask,
-    taskStatus,
-    taskWait,
-    taskCancel,
-    askUser,
-    notify,
+    ...[startPlaybook, delegateTask, taskStatus, taskWait, taskCancel, askUser, notify].map(
+      (tool) => withBuiltinPolicy(host, tool as MakaTool),
+    ),
     ...extraTools,
   ];
+}
+
+/**
+ * A built-in tool under its T15 policy: one whose result can carry outside content taints the
+ * conversation before it runs, so neither its result nor its error reaches the model before the
+ * taint is stored. A built-in with no policy, or with effects (built-ins have no held path), is
+ * refused when the tools are built.
+ */
+function withBuiltinPolicy(host: ToolHost, tool: MakaTool): MakaTool {
+  const policy = BUILTIN_TOOL_POLICY[tool.name];
+  if (!policy || policy.effects.length > 0) {
+    throw new Error(`Built-in conductor tool ${tool.name} has no guard policy.`);
+  }
+  if (!policy.externalResult) return tool;
+  return {
+    ...tool,
+    impl: async (args, ctx) => {
+      host.state.taint(host.turnFor(ctx).conversationId, `tool:${tool.name}`);
+      return tool.impl(args, ctx);
+    },
+  };
 }
 
 const MAX_ARG_CHARS = 200;
 const MAX_CALL_CHARS = 1500;
 
+/** Why a call is held: it cannot be undone, or it has effects and the conversation is tainted. */
+export type HoldCause = 'irreversible' | 'tainted';
+
 /**
  * The approval question for a held call: the tool and every argument it will
  * run with, from the held row. Long values are cut, and the cut is marked.
  */
-export function approvalQuestion(call: HeldCall): string {
+export function approvalQuestion(call: HeldCall, cause: HoldCause = 'irreversible'): string {
   const parts = Object.keys(call.args)
     .sort()
     .map((name) => {
@@ -498,16 +530,28 @@ export function approvalQuestion(call: HeldCall): string {
     });
   let shown = parts.join(', ');
   if (shown.length > MAX_CALL_CHARS) shown = `${shown.slice(0, MAX_CALL_CHARS)}… (cut)`;
-  return `Allow ${call.tool}(${shown})? It cannot be undone.`;
+  return cause === 'irreversible'
+    ? `Allow ${call.tool}(${shown})? It cannot be undone.`
+    : `Allow ${call.tool}(${shown})? This conversation has read content you did not write (such as web pages, repository files or other people's messages), so this action needs your approval.`;
+}
+
+/** Whether every call of the tool is held, tainted or not. */
+function alwaysHeld(spec: ConductorToolSpec): boolean {
+  return spec.irreversible === true || spec.effects.includes('irreversible');
 }
 
 /**
  * A playbook tool. An irreversible one never runs on the first call: the call
  * is held and the model must ask the user with its actionRef; after an
- * approval, the same call with that actionRef runs once.
+ * approval, the same call with that actionRef runs once. A tool with any other
+ * effect is held the same way while the conversation is tainted (T15), checked
+ * in code right before the call, with no await in between.
  */
 function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
-  const parameters = spec.irreversible
+  const policy = playbookToolPolicy(spec);
+  const always = alwaysHeld(spec);
+  const guarded = always || policy.effects.length > 0;
+  const parameters = guarded
     ? spec.parameters.extend({
         actionRef: z
           .string()
@@ -517,23 +561,33 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
     : spec.parameters;
   return {
     name: spec.name,
-    description: spec.irreversible
+    description: always
       ? `${spec.description} Irreversible: the first call is held for the user's approval.`
-      : spec.description,
+      : guarded
+        ? `${spec.description} Once the conversation has read outside content (task results, fetched pages, other people's messages), a call is held for the user's approval.`
+        : spec.description,
     parameters,
     impl: async (raw: Record<string, unknown>, ctx: MakaToolContext) => {
       const turn = host.turnFor(ctx);
       gate(host, turn);
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
-      if (spec.irreversible) {
+      if (guarded) {
         if (actionRef === undefined) {
-          const ref = host.state.hold(turn.runId, spec.name, args);
-          throw new ToolRefusal(
-            'needs_approval',
-            `This action cannot be undone. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
-          );
-        }
-        if (
+          if (always) {
+            const ref = host.state.hold(turn.runId, spec.name, args);
+            throw new ToolRefusal(
+              'needs_approval',
+              `This action cannot be undone. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
+            );
+          }
+          if (host.state.taintOf(turn.conversationId)) {
+            const ref = host.state.hold(turn.runId, spec.name, args);
+            throw new ToolRefusal(
+              'needs_approval',
+              `This conversation has read content from outside the user, so this action needs the user's approval. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
+            );
+          }
+        } else if (
           !host.state.consumeApproval(turn.runId, spec.name, actionRef, args, (approvedBy) =>
             host.approverAuthorized(approvedBy, turn.conversationId),
           )
@@ -544,6 +598,7 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
           );
         }
       }
+      if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
       return spec.impl(args as never, {
         runId: turn.runId,
         conversationId: turn.conversationId,

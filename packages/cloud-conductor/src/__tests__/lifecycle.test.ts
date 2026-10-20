@@ -206,6 +206,7 @@ const failing: ConductorToolSpec = {
   name: 'flaky_lookup',
   description: 'Looks something up.',
   parameters: z.object({ q: z.string() }),
+  effects: [],
   impl: async () => {
     throw new Error('lookup broke');
   },
