@@ -265,7 +265,8 @@ test('a revoke past the cleanup time limit is still waited for before the stream
   const h = await setup({
     cloud: {
       modelAccess: access.provider,
-      cleanupTimeoutMs: 1,
+      // Long enough for the other cleanup steps; the revoke below outlasts it.
+      cleanupTimeoutMs: 500,
       onCleanupError: ({ step }) => {
         if (step === 'revoke model access') timedOut.resolve();
       },

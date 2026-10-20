@@ -169,7 +169,7 @@ const ROWS: Row[] = [
   },
   {
     name: 'the revoke throws synchronously',
-    ends: 'finished',
+    ends: 'nothing',
     options: (tr) => {
       tr.revokeMode = 'sync-throw';
       return { cloud: { modelAccess: tr.access, sandboxes: tr.sandboxes } };
@@ -178,7 +178,7 @@ const ROWS: Row[] = [
   },
   {
     name: 'the revoke rejects',
-    ends: 'finished',
+    ends: 'nothing',
     options: (tr) => {
       tr.revokeMode = 'reject';
       return { cloud: { modelAccess: tr.access, sandboxes: tr.sandboxes } };

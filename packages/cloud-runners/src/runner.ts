@@ -269,14 +269,38 @@ class Run implements RunHandle {
     } finally {
       // The last requests settle and their spend is reported before the end is.
       if (this.terminal !== undefined && this.access?.meter) {
-        await this.step('revoke model access', () => this.releaseAccess(), true);
+        await this.step(
+          'revoke model access',
+          () => this.releaseAccess(),
+          this.meteredUsd === undefined,
+        );
         // A revoke past its time limit is reported, and still waited for: its cost comes first.
         await this.releasing;
       }
       this.ended = true;
-      if (this.terminal !== undefined && !this.cancelled) this.events.push(this.terminal);
+      // Its end goes out from the cleanup, once the run is known to be stopped.
       await this.cleanup();
     }
+  }
+
+  /**
+   * Reports how the run ended on its own, once the cleanup has run. An end tells the orchestrator
+   * there is nothing left to stop, so it is not reported for a run whose stop failed: the stream
+   * just closes, and the task ends with the stop owed (and retried by id).
+   */
+  private publishEnd(): void {
+    if (this.terminal === undefined || this.cancelled) return;
+    if (this.stopFailure) {
+      this.events.push({
+        type: 'progress',
+        note: this.redact(
+          `the run could not be confirmed stopped (${this.stopFailure.message}); its end is not reported and the stop stays owed`,
+          MAX_NOTE_CHARS,
+        ),
+      });
+      return;
+    }
+    this.events.push(this.terminal);
   }
 
   /**
@@ -323,7 +347,11 @@ class Run implements RunHandle {
     this.secrets.add(access.apiKey);
     if (this.spec.mcp) this.secrets.add(this.spec.mcp.token);
     if (this.cleanupPromise) {
-      void this.step('revoke model access', () => this.releaseAccess(), true);
+      void this.step(
+        'revoke model access',
+        () => this.releaseAccess(),
+        this.meteredUsd === undefined,
+      );
       return;
     }
     const meter = access.meter;
@@ -819,13 +847,14 @@ class Run implements RunHandle {
     this.stopWatch?.();
     try {
       await Promise.all([
-        this.step('revoke model access', () => this.releaseAccess(), true),
+        this.step('revoke model access', () => this.releaseAccess(), this.meteredUsd === undefined),
         this.stopAndRelease(),
       ]);
     } finally {
       // The final cost is queued before the stream closes, even after a step's time limit.
       await this.releasing;
       this.fleet.openRuns--;
+      this.publishEnd();
       this.events.close();
     }
   }
@@ -878,7 +907,15 @@ class Run implements RunHandle {
     const release = (async () => {
       await previous;
       try {
-        await access.revoke?.();
+        try {
+          await access.revoke?.();
+        } catch (error) {
+          // Judged here for a metered access, whose revoke is waited for however long it takes.
+          this.stopFailure ??= new Error(
+            this.redact(`revoke model access failed: ${errorMessage(error)}`, 300),
+          );
+          throw error;
+        }
         if (access.meter && this.meteredUsd !== undefined) {
           this.meteredUsd = access.meter.spentUsd();
           this.meter(true);
