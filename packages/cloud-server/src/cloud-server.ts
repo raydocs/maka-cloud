@@ -176,7 +176,11 @@ export interface CloudServerOptions {
     authorized(caller: string, conversationId: string): boolean;
     /** Invite-scoped memory; unknown, unowned or revoked conversations have no access. */
     memory: {
-      context(conversationId: string): string;
+      /**
+       * The memory snapshot for the conversation's next turn. `external` is true while it holds
+       * any fact or task summary, which may carry content from outside the user (T15).
+       */
+      context(conversationId: string): { text: string; external: boolean };
       remember(message: { eventId: string; conversationId: string; text: string }): void;
     };
     /**
@@ -368,7 +372,12 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           memory: {
             context: (conversationId) => {
               const owner = memoryOwner(conversationId);
-              return owner === undefined ? '' : memory.context(owner);
+              if (owner === undefined) return { text: '', external: false };
+              const { facts, summaries } = memory.profile(owner);
+              return {
+                text: memory.context(owner),
+                external: facts.length > 0 || summaries.length > 0,
+              };
             },
             remember: (message) => {
               const owner = memoryOwner(message.conversationId);

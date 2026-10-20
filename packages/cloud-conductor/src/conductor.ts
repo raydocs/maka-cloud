@@ -50,8 +50,11 @@ export interface ConductorOptions {
    */
   orchestratorAccess?: (conversationId: string) => ConductorAccess | undefined;
   playbooks?: readonly Playbook[];
-  /** Appended once to each new durable user turn, never to the system prompt or old history. */
-  turnContext?: (conversationId: string) => string;
+  /**
+   * Appended once to each new durable user turn, never to the system prompt or old history. It
+   * taints the conversation (T15) unless it says `external: false`; a non-empty string always does.
+   */
+  turnContext?: (conversationId: string) => string | TurnContext;
   /** Tools playbooks add; `irreversible` ones are held for approval. */
   tools?: readonly ConductorToolSpec[];
   limits?: Partial<ConductorLimits>;
@@ -75,6 +78,12 @@ export interface ConductorOptions {
     /** When a conversation's outbox is found empty, before its sender is released. */
     outboxDrained?(conversationId: string): void;
   };
+}
+
+/** Text added to a turn, and whether it can carry content from outside the user (T15). */
+export interface TurnContext {
+  text: string;
+  external: boolean;
 }
 
 export interface UserMessage {
@@ -632,7 +641,14 @@ export class Conductor {
         // Spent or blocked before this input arrived (a dismissed budget question): ask again, send nothing.
         this.askBudget(active, 0);
       } else if (!active.stopReason) {
-        const context = this.turnContext?.(lane.conversationId);
+        const raw = this.turnContext?.(lane.conversationId);
+        const context = typeof raw === 'string' ? raw : (raw?.text ?? '');
+        // Memory holds past task summaries and facts that may come from outside the user: the
+        // taint is stored before any request carries it (T15). Fail closed: only an explicit
+        // `external: false` leaves the conversation clean.
+        if (typeof raw === 'string' ? raw !== '' : raw !== undefined && raw.external !== false) {
+          this.state.taint(lane.conversationId, 'memory');
+        }
         const text = this.turnText(job.runId, job.text) + (context ? `\n\n${context}` : '');
         for await (const event of this.host.send(
           makaSessionId,

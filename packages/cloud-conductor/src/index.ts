@@ -11,6 +11,7 @@ export {
   Conductor,
   type ConductorOptions,
   type ConductorStats,
+  type TurnContext,
   type UserAnswer,
   MAX_ANSWER_TEXT_LENGTH,
   type UserMessage,
