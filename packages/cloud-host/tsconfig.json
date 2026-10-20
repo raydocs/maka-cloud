@@ -11,6 +11,7 @@
   "references": [
     { "path": "../cloud-orchestrator" },
     { "path": "../cloud-conductor" },
+    { "path": "../cloud-duties" },
     { "path": "../cloud-playbooks" },
     { "path": "../cloud-runners" },
     { "path": "../cloud-server" },

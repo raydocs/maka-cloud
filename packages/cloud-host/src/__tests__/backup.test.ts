@@ -55,6 +55,7 @@ async function populate(dataDir: string, tag = 'a'): Promise<void> {
     paths.invitesPath,
     paths.supervisorDbPath,
     paths.gatewaySpendPath,
+    paths.dutiesDbPath,
   ]) {
     createDb(path, [`${tag} in ${path.slice(dataDir.length)}`]);
   }
@@ -117,6 +118,7 @@ test('a backup holds every database and file, each one consistent, and a manifes
     'invites.db',
     'supervisor.db',
     'gateway-spend.db',
+    'duties.db',
     'runner-sessions.json',
     'coding-deliveries.json',
     'conductor/conductor.db',
@@ -323,7 +325,7 @@ test('a restore is refused while a server holds the databases, and nothing chang
   await assertNoServer(dataDir, layout);
 
   // What the server does with its main database and the supervisor's, from another process.
-  for (const rel of ['cloud.db', 'supervisor.db']) {
+  for (const rel of ['cloud.db', 'supervisor.db', 'duties.db']) {
     const release = await holdExclusively(t, join(dataDir, rel));
     await assert.rejects(
       restoreBackup({ dataDir, backupDir, stamp: done.stamp, layout }),

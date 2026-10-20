@@ -37,7 +37,7 @@ export interface DutyService {
     projectId: string,
   ): Promise<
     | { ok: true; proposal: unknown }
-    | { ok: false; reason: 'not_found' | 'already_set_up' | 'inspect_failed' }
+    | { ok: false; reason: 'not_found' | 'already_set_up' | 'inspect_failed' | 'unavailable' }
   >;
 }
 
@@ -55,6 +55,7 @@ const PROPOSE_FAILURE: Record<string, number> = {
   not_found: 404,
   already_set_up: 409,
   inspect_failed: 502,
+  unavailable: 503,
 };
 
 const ADD_FAILURE: Record<string, number> = { invalid: 400, not_allowed: 403, exists: 409 };

@@ -46,6 +46,8 @@ export interface InboxSetup {
    * conversation. Without it the inbox builds no check model.
    */
   accountOf?: AccountOf;
+  /** Where `proposal` options are delivered: the duties engine's decision route. Without it no proposal item is raised. */
+  proposals?: SupervisorHost['proposals'];
   /** Called with the running supervisor, so the host can raise items of its own. */
   onStarted?: (supervisor: Supervisor) => void;
   /** Replaces what is built from the config, for tests. */
@@ -75,6 +77,7 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     notifier: conductorNotifier(conductor),
     answers: parts.answers,
     messages: parts.messages,
+    ...(setup.proposals === undefined ? {} : { proposals: setup.proposals }),
     // A digest is built per owner, so each owner pays for the summary of their own items.
     ownerOf: (conversationId) => {
       const account = setup.accountOf?.(conversationId);

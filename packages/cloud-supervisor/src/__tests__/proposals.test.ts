@@ -134,6 +134,25 @@ test('a proposal already decided differently elsewhere closes the item as handle
   await r.stop();
 });
 
+test('a choice the invite has no room for closes the item, and asking for the proposal again opens a fresh one', async () => {
+  const r = await rig();
+  let full = true;
+  withEngine(r, () => (full ? { accepted: false, reason: 'duty_limit' } : undefined));
+  raise(r);
+  await r.supervisor.settled();
+  const result = await answer(r, 'set-recommended');
+  assert.equal(result.ok && result.item.closeReason, 'condition_cleared');
+  assert.equal(r.supervisor.listItems({ state: 'open' }).items.length, 0);
+
+  full = false;
+  raise(r);
+  await r.supervisor.settled();
+  const [again] = r.supervisor.listItems({ state: 'open' }).items;
+  assert.ok(again, 'the owner can decide it once there is room');
+  assert.notEqual(again.itemId, result.ok ? result.item.itemId : '');
+  await r.stop();
+});
+
 test('a second answer is refused while the first is being delivered, and the engine is asked once', async () => {
   const r = await rig();
   const gate = new Gate();

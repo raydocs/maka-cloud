@@ -389,3 +389,57 @@ test('the spend alert needs an amount, the owner’s invite and Web Push, and sa
   } = good;
   assert.match(problem(noPush), /needs Web Push/u);
 });
+
+const DUTY_SECRET = 'a-webhook-secret-of-sufficient-length';
+
+test('standing duties are off without a webhook secret, and the data layout names their database', () => {
+  const config = readStackConfig(ENV);
+  assert.equal(config.dutiesSet, false);
+  assert.deepEqual(config.dutyRepos, []);
+  assert.equal(config.dutiesDbPath, '/srv/maka/duties.db');
+  assert.match(describeConfig(config).join('\n'), /standing duties:\s+off/);
+});
+
+test('standing duties need a long enough secret and a list of repositories, and no message prints the secret', () => {
+  const on = readStackConfig({
+    ...ENV,
+    MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET,
+    MAKA_CLOUD_DUTY_REPOS: 'acme/widgets, acme/gadgets,acme/widgets',
+  });
+  assert.equal(on.dutiesSet, true);
+  assert.deepEqual(on.dutyRepos, ['acme/widgets', 'acme/gadgets']);
+  const printed = describeConfig(on).join('\n');
+  assert.match(
+    printed,
+    /standing duties:\s+on, projects may be registered for acme\/widgets, acme\/gadgets/,
+  );
+  assert.ok(!printed.includes(DUTY_SECRET));
+
+  const secretOnly = readStackConfig({ ...ENV, MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET });
+  assert.equal(secretOnly.dutiesSet, true);
+  assert.deepEqual(
+    secretOnly.dutyRepos,
+    [],
+    'no repository is allowed until the operator names one',
+  );
+  assert.match(describeConfig(secretOnly).join('\n'), /no repository yet/);
+
+  const short = problemsOf({ ...ENV, MAKA_GITHUB_WEBHOOK_SECRET: 'too-short' });
+  assert.ok(short.some((p) => /MAKA_GITHUB_WEBHOOK_SECRET must be at least 16/.test(p)));
+  assert.ok(!short.join('\n').includes('too-short'));
+  assert.ok(
+    problemsOf({ ...ENV, MAKA_CLOUD_DUTY_REPOS: 'acme/widgets' }).some((p) =>
+      /needs MAKA_GITHUB_WEBHOOK_SECRET/.test(p),
+    ),
+  );
+  for (const bad of ['widgets', 'acme/', 'a/b/c', 'acme/wid gets', '../x/y', 'acme/widgets,']) {
+    assert.ok(
+      problemsOf({
+        ...ENV,
+        MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET,
+        MAKA_CLOUD_DUTY_REPOS: bad,
+      }).some((p) => /comma separated owner\/name/.test(p)),
+      bad,
+    );
+  }
+});

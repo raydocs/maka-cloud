@@ -432,10 +432,43 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_SUBJECT` | Web Push: the VAPID contact, a mailto: or https: URL |
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
+| `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
+| `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name repositories a project may be registered for; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 
 `INSTABOX_MACHINE_ID` is not used any more and is refused: one machine for every
 invite would let invites read each other.
+
+## Standing duties and the GitHub webhook
+
+Standing duties are off until `MAKA_GITHUB_WEBHOOK_SECRET` is set. With it, the
+server accepts GitHub App deliveries at `POST /github/webhook` and an invite can
+register projects (`/v1/projects`) for the repositories named in
+`MAKA_CLOUD_DUTY_REPOS`. No other repository can be registered.
+
+1. In the GitHub App, set the webhook URL to `https://<your host>/github/webhook`
+   and a secret of 16 characters or more; put the same secret in
+   `MAKA_GITHUB_WEBHOOK_SECRET`. Subscribe the app to workflow runs, issues,
+   issue comments, pull request reviews and pull request review comments. Any
+   other event is refused.
+2. List the repositories in `MAKA_CLOUD_DUTY_REPOS` and restart.
+3. A project's owner asks for a proposal, and the server offers two to four
+   duties as one decision in the inbox. Nothing runs until the owner chooses a
+   set. `MAKA_GITHUB_TOKEN` is used read-only to look at the repository for the
+   proposal.
+
+Every delivery is checked against its signature before anything else, a
+delivery id is handled once, and a run started by an event carries text from
+outside the owner, so the conversation is marked as such. A run has the duty's
+authority level for its whole life and a budget it cannot raise. The duties
+database is `duties.db` in the data directory and is part of the daily backup.
+
+Limits that are not settings: a schedule runs at most every 15 minutes; an invite
+has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
+itself off; and at most 3 runs in a row are woken by the checks of their own
+branch before a person has to step in. Each of these, and a proposal that does
+not fit, is told to the owner as a note in a conversation of the project
+("Standing duties: owner/repo"); the note is sent at least once.
 
 ## A new invite and its sandbox
 

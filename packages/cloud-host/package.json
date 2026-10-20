@@ -20,6 +20,7 @@
     "@ai-sdk/anthropic": "4.0.82",
     "@ai-sdk/openai": "4.0.96",
     "@maka-cloud/conductor": "0.1.0",
+    "@maka-cloud/duties": "0.1.0",
     "@maka-cloud/gateway": "0.1.0",
     "@maka-cloud/orchestrator": "0.1.0",
     "@maka-cloud/playbooks": "0.1.0",

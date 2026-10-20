@@ -524,6 +524,15 @@ export class ConductorState {
     return row ? toRun(row) : undefined;
   }
 
+  /** The conversation's runs, oldest first. */
+  runsOfConversation(conversationId: string): RunRow[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM runs WHERE conversation_id = ? ORDER BY n')
+        .all(conversationId) as Row[]
+    ).map(toRun);
+  }
+
   runsInState(state: RunState): RunRow[] {
     return (
       this.db.prepare('SELECT * FROM runs WHERE state = ? ORDER BY n').all(state) as Row[]

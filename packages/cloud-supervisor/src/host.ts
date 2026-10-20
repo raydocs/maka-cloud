@@ -32,7 +32,10 @@ export type QuestionOutcome =
 
 export type ProposalOutcome =
   | { accepted: true; duplicate: boolean }
-  | { accepted: false; reason: 'not_found' | 'forbidden' | 'unknown_set' | 'conflict' };
+  | {
+      accepted: false;
+      reason: 'not_found' | 'forbidden' | 'unknown_set' | 'conflict' | 'duty_limit';
+    };
 
 /** What an interrupt carries. The channel decides how to show it. */
 export interface Interrupt {

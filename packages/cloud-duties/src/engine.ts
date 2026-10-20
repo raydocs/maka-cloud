@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import { backup as sqliteBackup, type DatabaseSync } from 'node:sqlite';
 import { buildBrief } from './brief.js';
 import { openDatabase, transaction } from './db.js';
 import { type Classified, type EventFacts, parseEvent, type ProjectView } from './events.js';
@@ -195,9 +195,9 @@ export class DutyEngine {
     this.db.close();
   }
 
-  /** A consistent copy of the database, for the daily backup. */
-  get database(): DatabaseSync {
-    return this.db;
+  /** A consistent copy of the database, which this process holds exclusively, for the daily backup. */
+  async backupTo(destination: string): Promise<void> {
+    await sqliteBackup(this.db, destination);
   }
 
   // ---------------------------------------------------------------- webhook
@@ -286,7 +286,7 @@ export class DutyEngine {
             for (const duty of matching) {
               this.notice(
                 project,
-                duty,
+                duty.duty_id,
                 `chain:${event.chain.key}:${chain.started_at}:${duty.duty_id}`,
                 `“${duty.name}” has been woken ${MAX_CHAIN_DEPTH} times in a row by the checks of its own work on ${project.repo}, and stopped. It needs you: look at the branch, or comment on the pull request to let it go on.`,
                 at,
@@ -667,6 +667,14 @@ export class DutyEngine {
       // enabled duties stay, so the chosen set must fit beside them.
       const others = this.enabledCount(project.owner, input.proposalId);
       if (others + chosen.dutyIds.length > MAX_ENABLED_DUTIES) {
+        // The item that carried the choice closes with the refusal, so the owner is told why.
+        this.notice(
+          project,
+          chosen.dutyIds[0] ?? '',
+          `limit:${input.proposalId}:${at}`,
+          `Standing duties for ${project.repo} were not set up: an invite can have ${MAX_ENABLED_DUTIES} enabled duties and this set would pass that. Switch another duty off in Projects, then ask for the proposal again.`,
+          at,
+        );
         return { ok: false, reason: 'duty_limit' };
       }
       this.db
@@ -906,7 +914,7 @@ export class DutyEngine {
     if (project) {
       this.notice(
         project,
-        duty,
+        duty.duty_id,
         `off:${duty.duty_id}:${duty.activated_at ?? 0}`,
         `“${duty.name}” on ${project.repo} failed ${MAX_CONSECUTIVE_FAILURES} times in a row and has turned itself off. Look at its last runs, then switch it on again when it is fixed.`,
         at,
@@ -915,13 +923,13 @@ export class DutyEngine {
   }
 
   /** Writes a notice for the owner once per key. Inside the caller's transaction. */
-  private notice(project: ProjectRow, duty: DutyRow, key: string, text: string, at: number): void {
+  private notice(project: ProjectRow, dutyId: string, key: string, text: string, at: number): void {
     this.db
       .prepare(
         `INSERT INTO notices (notice_key, owner, project_id, duty_id, text, created_at)
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       )
-      .run(key, project.owner, project.project_id, duty.duty_id, text, at);
+      .run(key, project.owner, project.project_id, dutyId, text, at);
   }
 
   /** Notices not yet delivered, oldest first. The host delivers them at least once. */
