@@ -86,6 +86,12 @@ const MAX_ITEMS = 20;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
+/** A Buffer, any typed array, a DataView or an ArrayBuffer: values whose content is bytes. */
+const isBinary = (value: object): boolean =>
+  ArrayBuffer.isView(value) ||
+  value instanceof ArrayBuffer ||
+  (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer);
+
 /** An error's message prints only when we wrote it (`safeToLog`) or the operating system did (it names a `syscall`). */
 function messageIsSafe(error: Error): boolean {
   const flags = error as Error & { safeToLog?: unknown; syscall?: unknown };
@@ -117,6 +123,8 @@ export function createLogger(options: LoggerOptions): Logger {
       return scrub(text) === text ? (typeof value === 'bigint' ? text : value) : '[secret]';
     }
     if (!isRecord(value)) return undefined;
+    // Bytes may be a secret (a key, a body): walking them as an object would list every byte.
+    if (isBinary(value)) return '[binary]';
     if (seen.has(value) || depth >= MAX_DEPTH) return '[cut]';
     seen.add(value);
     try {
@@ -154,12 +162,13 @@ export function createLogger(options: LoggerOptions): Logger {
   /** Detail for a warning: an error by `describeError`, an object by the allowlist, text as text. */
   const describe = (detail: unknown): string | undefined => {
     if (detail === undefined || detail === null) return undefined;
-    if (detail instanceof Error) return clip(describeError(detail));
     if (typeof detail === 'string') return clip(detail);
     if (typeof detail === 'number' || typeof detail === 'boolean') return clip(String(detail));
     if (!isRecord(detail)) return undefined;
     const kept: string[] = [];
     try {
+      // An error's properties are read inside the try: a getter that throws must not escape.
+      if (detail instanceof Error) return clip(describeError(detail));
       for (const key of DETAIL_KEYS) {
         const inner = (detail as Record<string, unknown>)[key];
         if (typeof inner === 'string' || typeof inner === 'number')
