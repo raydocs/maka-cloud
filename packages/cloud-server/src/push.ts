@@ -98,6 +98,8 @@ export function parsePushEndpoint(endpoint: string, allowedHosts: string[]): URL
 
 interface Pending {
   endpoint: string;
+  /** The invite that owned the subscription and the conversation when the row was read. */
+  inviteId: string;
   p256dh: string;
   auth: string;
   taskId: string;
@@ -112,7 +114,7 @@ const STATE_OF: Record<string, string> = {
 };
 
 const PENDING_SQL = `
-SELECT s.endpoint, s.p256dh, s.auth, t.task_id, f.conversation_id,
+SELECT s.endpoint, s.invite_id, s.p256dh, s.auth, t.task_id, f.conversation_id,
   json_extract(t.event, '$.type') AS type
 FROM feed f
 JOIN task_log t ON t.seq = CAST(f.ref AS INTEGER)
@@ -194,12 +196,24 @@ export class PushService {
       const existing = this.db
         .prepare('SELECT invite_id FROM push_subscriptions WHERE endpoint = ?')
         .get(input.endpoint) as { invite_id: string } | undefined;
+      if (existing && existing.invite_id === inviteId) {
+        this.db
+          .prepare('UPDATE push_subscriptions SET p256dh = ?, auth = ? WHERE endpoint = ?')
+          .run(input.p256dh, input.auth, input.endpoint);
+        return 'updated';
+      }
       if (existing) {
+        // The device now belongs to another invite: it starts afresh, owed nothing from before.
+        const { id } = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM feed').get() as {
+          id: number;
+        };
         this.db
           .prepare(
-            'UPDATE push_subscriptions SET invite_id = ?, p256dh = ?, auth = ? WHERE endpoint = ?',
+            'UPDATE push_subscriptions SET invite_id = ?, p256dh = ?, auth = ?, since_feed_id = ?, created_at = ? WHERE endpoint = ?',
           )
-          .run(inviteId, input.p256dh, input.auth, input.endpoint);
+          .run(inviteId, input.p256dh, input.auth, id, at, input.endpoint);
+        this.db.prepare('DELETE FROM push_deliveries WHERE endpoint = ?').run(input.endpoint);
+        this.release(input.endpoint, existing.invite_id);
         return 'updated';
       }
       const count = (sql: string, ...args: string[]) =>
@@ -297,6 +311,7 @@ export class PushService {
   private pending(limit: number): Pending[] {
     const rows = this.db.prepare(PENDING_SQL).all(this.floor, limit) as unknown as Array<{
       endpoint: string;
+      invite_id: string;
       p256dh: string;
       auth: string;
       task_id: string;
@@ -305,6 +320,7 @@ export class PushService {
     }>;
     return rows.map((row) => ({
       endpoint: row.endpoint,
+      inviteId: row.invite_id,
       p256dh: row.p256dh,
       auth: row.auth,
       taskId: row.task_id,
@@ -324,17 +340,24 @@ export class PushService {
 
   private async deliver(item: Pending): Promise<void> {
     const key = keyOf(item);
-    const inviteId = (
-      this.db
-        .prepare('SELECT invite_id FROM push_subscriptions WHERE endpoint = ?')
-        .get(item.endpoint) as { invite_id: string } | undefined
-    )?.invite_id;
-    if (inviteId === undefined) return;
+    // The owner is read again here: the device may have moved since the batch was read.
+    const current = this.db
+      .prepare(
+        `SELECT s.invite_id, s.p256dh, s.auth, c.owner
+         FROM push_subscriptions s, conversations c
+         WHERE s.endpoint = ? AND c.conversation_id = ?`,
+      )
+      .get(item.endpoint, item.conversationId) as
+      | { invite_id: string; p256dh: string; auth: string; owner: string | null }
+      | undefined;
+    if (!current) return;
+    const { invite_id: inviteId } = current;
+    if (inviteId !== item.inviteId || current.owner !== inviteId) return;
     if (!this.invites.active(inviteId)) return this.finish(item, 'revoked');
     let request: ReturnType<typeof webpush.generateRequestDetails>;
     try {
       request = webpush.generateRequestDetails(
-        { endpoint: item.endpoint, keys: { p256dh: item.p256dh, auth: item.auth } },
+        { endpoint: item.endpoint, keys: { p256dh: current.p256dh, auth: current.auth } },
         JSON.stringify({
           type: 'task.finished',
           conversationId: item.conversationId,
@@ -370,8 +393,8 @@ export class PushService {
     } finally {
       this.inflight.delete(key);
     }
-    // A revoke while the send was out removed the subscription: nothing more is recorded.
-    if (!this.subscribed(item.endpoint)) return;
+    // A revoke or a move while the send was out: it is no longer this invite's to record.
+    if (!this.subscribed(item.endpoint, inviteId)) return;
     if (status !== undefined && status >= 200 && status < 300) return this.finish(item, 'sent');
     if (status === 404 || status === 410) return this.forget(item.endpoint);
     if (status !== undefined && status !== 429 && status < 500) return this.finish(item, 'dropped');
@@ -398,11 +421,22 @@ export class PushService {
       .run(item.endpoint, item.taskId, state, this.now());
   }
 
-  private subscribed(endpoint: string): boolean {
+  private subscribed(endpoint: string, inviteId: string): boolean {
     return (
-      this.db.prepare('SELECT 1 FROM push_subscriptions WHERE endpoint = ?').get(endpoint) !==
-      undefined
+      this.db
+        .prepare('SELECT 1 FROM push_subscriptions WHERE endpoint = ? AND invite_id = ?')
+        .get(endpoint, inviteId) !== undefined
     );
+  }
+
+  /** Drops what is waiting to be retried for an endpoint and cuts off its sends in flight for one invite. */
+  private release(endpoint: string, inviteId: string): void {
+    for (const key of [...this.cooling.keys()]) {
+      if (key.startsWith(`${endpoint}\n`)) this.cooling.delete(key);
+    }
+    for (const [key, entry] of this.inflight) {
+      if (key.startsWith(`${endpoint}\n`) && entry.inviteId === inviteId) entry.controller.abort();
+    }
   }
 
   /** The invite is revoked: its devices are forgotten and sends to them are cut off. */

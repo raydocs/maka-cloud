@@ -522,7 +522,10 @@ test('the real transport refuses to connect to a private address, before any req
 });
 
 // The service on its own, so a pass can be made to fail on purpose.
-async function serviceOnly(t: TestContext, options: { maxAttempts?: number } = {}) {
+async function serviceOnly(
+  t: TestContext,
+  options: { maxAttempts?: number; concurrency?: number } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'push-service-'));
   const db = openDatabase(join(dir, 'server.sqlite'));
   const hub = new FeedHub();
@@ -567,6 +570,7 @@ async function serviceOnly(t: TestContext, options: { maxAttempts?: number } = {
       transport: fake.transport,
       retryDelayMs: 1,
       maxAttempts: options.maxAttempts ?? 2,
+      ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
       onWarning: (message) => warnings.push(message),
     },
   );
@@ -697,4 +701,84 @@ test('an invite revoked from another process is seen at the next send, which is 
     [other.endpoint],
   );
   assert.equal(payloadOf(fake.calls[0] as Call, other).taskId, own);
+});
+
+test("a device that moves to another invite starts afresh: the new invite gets nothing from before the move, and the old invite's records go", async (t) => {
+  const { service, db, fake, finish } = await serviceOnly(t);
+  const d = device();
+  assert.equal(service.register('inv_1', { endpoint: d.endpoint, ...d.keys }), 'created');
+  service.start();
+  const first = await finish('ses_1');
+  await eventually(() => fake.calls.length === 1, "the old invite's push");
+  assert.equal(payloadOf(fake.calls[0] as Call, d).taskId, first);
+  // Ended while inv_1 held the device, so it was never inv_2's to send.
+  await finish('ses_2');
+  assert.equal(service.register('inv_2', { endpoint: d.endpoint, ...d.keys }), 'updated');
+  const rows = db
+    .prepare('SELECT COUNT(*) AS n FROM push_deliveries WHERE endpoint = ?')
+    .get(d.endpoint) as { n: number };
+  assert.equal(rows.n, 0);
+  const after = await finish('ses_2');
+  await eventually(() => fake.calls.length >= 2, "the new invite's push");
+  assert.deepEqual(
+    fake.calls.slice(1).map((call) => payloadOf(call, d).taskId),
+    [after],
+  );
+  // Registering again as the same invite changes nothing about what is owed.
+  assert.equal(service.register('inv_2', { endpoint: d.endpoint, ...d.keys }), 'updated');
+  await finish('ses_1');
+  const last = await finish('ses_2');
+  await eventually(() => fake.calls.length >= 3, 'the next push');
+  assert.deepEqual(
+    fake.calls.slice(2).map((call) => payloadOf(call, d).taskId),
+    [last],
+  );
+});
+
+test('a send queued for the old invite is not made to the device once it moved', async (t) => {
+  const { service, fake, finish } = await serviceOnly(t, { concurrency: 1 });
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  const held = await finish('ses_1');
+  const queued = await finish('ses_1');
+  let release: () => void = () => undefined;
+  fake.state.behave = (call) =>
+    new Promise((resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      release = () => resolve({ status: 201 });
+    });
+  service.start();
+  await eventually(() => fake.calls.length === 1, 'the first send under way');
+  assert.equal(payloadOf(fake.calls[0] as Call, d).taskId, held);
+  service.register('inv_2', { endpoint: d.endpoint, ...d.keys });
+  release();
+  fake.state.behave = async () => ({ status: 201 });
+  const fresh = await finish('ses_2');
+  await eventually(() => fake.calls.length >= 2, "the new invite's push");
+  const sent = fake.calls.slice(1).map((call) => payloadOf(call, d).taskId);
+  assert.deepEqual(sent, [fresh]);
+  assert.ok(!sent.includes(queued));
+});
+
+test('a send in flight for the old invite is cut off when the device moves, and the new invite is not charged for it', async (t) => {
+  const { service, db, fake, finish } = await serviceOnly(t);
+  const d = device();
+  service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
+  fake.state.behave = (call) =>
+    new Promise((_resolve, reject) => {
+      call.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  service.start();
+  await finish('ses_1');
+  await eventually(() => fake.calls.length === 1, 'the send under way');
+  const inflight = fake.calls[0] as Call;
+  service.register('inv_2', { endpoint: d.endpoint, ...d.keys });
+  await eventually(() => inflight.signal.aborted, 'the old invite send is cut off');
+  fake.state.behave = async () => ({ status: 201 });
+  await finish('ses_2');
+  await eventually(() => fake.calls.length === 2, "the new invite's push");
+  const rows = db
+    .prepare('SELECT COUNT(*) AS n FROM push_deliveries WHERE endpoint = ?')
+    .get(d.endpoint) as { n: number };
+  assert.equal(rows.n, 1);
 });
