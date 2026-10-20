@@ -101,6 +101,9 @@ export function defaultCodingPrompt(repo: string): string {
 
 class SmokeFailure extends Error {}
 
+/** How the conductor starts the notice it posts when its own model run fails. */
+const RUN_FAILED = 'The run failed:';
+
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
 const topLevel = (tasks: readonly SmokeTask[]): SmokeTask[] =>
   tasks.filter((task) => task.parentTaskId === undefined);
@@ -202,6 +205,16 @@ export async function runSmoke(deps: SmokeDeps, options: SmokeOptions): Promise<
     return id;
   };
 
+  /**
+   * A conductor run that fails before it starts any task (a model key the vendor refuses, say)
+   * never will start one: say why now instead of waiting out the scenario's timeout.
+   */
+  const assertRunNotFailed = async (id: string, found: readonly SmokeTask[]): Promise<void> => {
+    if (found.length > 0) return;
+    const failed = (await deps.transcript(id)).find((line) => line.startsWith(RUN_FAILED));
+    if (failed !== undefined) throw new SmokeFailure(`no task started: ${failed}`);
+  };
+
   /** Waits until a top-level task of the conversation has ended, answering questions on the way. */
   const untilEnded = async (
     id: string,
@@ -210,13 +223,16 @@ export async function runSmoke(deps: SmokeDeps, options: SmokeOptions): Promise<
   ): Promise<SmokeTask> =>
     waitFor('a task to end', async () => {
       await answerQuestions(id, allowPullRequest, notes);
-      return topLevel(await deps.tasks(id)).find((task) => TERMINAL.has(task.state));
+      const found = topLevel(await deps.tasks(id));
+      await assertRunNotFailed(id, found);
+      return found.find((task) => TERMINAL.has(task.state));
     });
 
   const untilRunning = (id: string, notes: string[]): Promise<SmokeTask> =>
     waitFor('a task to be running', async () => {
       await answerQuestions(id, false, notes);
       const found = topLevel(await deps.tasks(id));
+      await assertRunNotFailed(id, found);
       const ended = found.find((task) => TERMINAL.has(task.state));
       if (ended)
         throw new SmokeFailure(`the task ended (${ended.state}) before it could be interrupted`);
