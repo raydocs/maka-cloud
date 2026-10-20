@@ -14,6 +14,33 @@ harnesses (Claude Agent SDK, Codex) running in instabox cloud sandboxes, with
 automatic verification of every step. The first deliverables are heavy tasks:
 coding (delivered as a PR) and deep research (every citation checked).
 
+Product direction (2026-10-20): an AI employee for software work, starting
+with coding: a programmer's assistant, not an email or errands assistant. No
+Gmail or mail integration; research stays as support for coding work.
+Users want someone they hand work to, not a tool they have to
+drive. Amp's harness and Puck still wait to be dispatched ("promising to keep
+an eye on it alone does nothing"), and Hark is proactive and simple but does
+not code. We combine the two:
+
+- Employee: given a goal once, it plans, does, verifies and delivers on its
+  own; it owns standing duties on each project and wakes on events and
+  schedules to do them; it stays inside a budget and an authority level the
+  user set; it interrupts only for real decisions; it reports in a short
+  brief.
+- Harness, learned from Amp: the user picks a mode, never a model; each mode
+  maps roles (conductor, implementer, reviewer, helpers) to models, and the
+  reviewer is always another vendor than the implementer; cheap models do
+  search, summaries and titles; sandboxes sleep when idle and wake on the next
+  message; delivery is one "Ship" action.
+- Interface, learned from Hark: four places only (Home, Chat, Projects,
+  Settings); Home leads with verb-first one-tap cards ("Merge PR #12"); one
+  chat with the employee; a project shows its duties and every task in
+  detail (plan, steps, diff, tests, review, cost); minimal and phone first.
+
+Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
+T26, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
+T23 and T24.
+
 Rules for all tasks:
 
 - No live model or sandbox calls and no spend. Tests use fakes. A live smoke
@@ -255,6 +282,143 @@ matters. Pulled forward from batch 4 because users ask for it first.
 
 ---
 
+# Batch 2.5: internal beta
+
+Goal: a few invited users run real coding and research tasks safely. Live
+runs still need the owner's budget approval; build and test with fakes.
+
+## T21: per-invite spend limits and a kill switch
+
+Depends on: T4, the model gateway.
+
+- Per-invite daily and monthly caps in USD, set with
+  `cloud-server invite limits --invites <file> <inviteId> --daily <usd> --monthly <usd>`
+  (defaults from the environment). The gateway checks them at reservation
+  time across all of the invite's task trees, together with the existing
+  per-task budgets, so concurrent tasks cannot overrun them.
+- A server-wide daily cap, and a kill switch (`maka-cloud pause` and
+  `maka-cloud resume`, persisted under the data directory): while paused, new
+  reservations are refused and running tasks are cancelled through the
+  normal stop path, so owed stops and settlement rules still hold.
+- Hitting a cap ends the task's spending and raises a T20 "budget" item; it
+  is never a silent failure.
+- Counters survive a restart (reuse the gateway spend journal).
+- Tests: concurrent tasks of one invite cannot exceed its cap; one invite's
+  spend never counts against another's; pause refuses the next reservation
+  and cancels running tasks; restart keeps the counters.
+
+## T22: deployment and operations for the beta
+
+Depends on: T21.
+
+- `docs/fork/deploy.md`: one-host runbook (service unit or compose file), TLS
+  proxy settings that keep SSE streaming, `MAKA_CLOUD_MCP_PUBLIC_URL`, how the
+  web app is served, every environment variable, `MAKA_CLOUD_SANDBOXES` setup
+  for each new invite, and file permissions for secrets.
+- Daily SQLite backups with the online backup API (keep 7) and a restore
+  command; a health endpoint; structured logs that never contain keys,
+  tokens or vendor names (scrub test).
+- A spend alert: when the day's spend passes a configured amount, notify the
+  owner by push.
+- `maka-cloud smoke`, gated on `MAKA_CLOUD_LIVE=1`: one research task, one
+  coding task that opens a PR on a scratch repo, a cancel mid-run, a budget
+  stop and a restart, then print the ledger next to the gateway journal.
+  Do not run it; the owner runs it after approving a budget.
+- Tests: backup and restore round trip, log scrubbing, health endpoint, and
+  the smoke script's dry run against fakes.
+
+---
+
+# Batch 3a: the employee (before the rest of batch 3)
+
+## T23: projects, standing duties and event triggers
+
+Depends on: T5, T15, T20, T21. Replaces T12.
+
+- Package: `packages/cloud-duties`.
+- A project is a repository plus its duties. A duty is: a trigger (CI failed
+  on the default branch or on the employee's own PR, a new issue, a review
+  comment on the employee's PR, or a schedule), an instruction in plain
+  language, an authority level (`read-only`, `open-pr`, `merge-when-green`),
+  a per-run budget and a daily cap.
+- GitHub App webhooks: verify every signature, dedupe by delivery id, and
+  stay correct under at-least-once, unordered delivery. Event content from
+  outside the user (issue and comment text) is tainted under T15.
+- When a project is added, the conductor inspects the repository (CI config,
+  open issues, recent failures) and proposes two to four duties as one T20
+  item with the recommended set first. Nothing runs until the user approves.
+- Each trigger starts a conductor run with the duty's brief and limits. The
+  authority level is enforced in code at the tool gate (an `open-pr` duty can
+  never merge). Results go to the Home brief (T24); escalations go through
+  T20.
+- Schedules: missed runs after downtime run once, never once per missed slot.
+- Tests: bad signatures rejected, duplicate deliveries ignored, authority
+  enforced, budget and daily cap stop a run, schedule catch-up, a proposal
+  runs nothing until approved, injected instructions in an issue cannot
+  trigger a guarded tool.
+
+## T24: Home, Chat and Projects in the Hark style
+
+Depends on: T9, T20, T23. Replaces T16 (suggestions come from duty
+proposals and T20 items).
+
+- `packages/cloud-web`: navigation is Home, Chat, Projects and Settings only.
+- Home: first the decisions waiting on the user, as verb-first one-tap cards
+  built on T20 items ("Merge PR #12: tests passed, review passed"; "Allow $3
+  more for this task"), with the precondition-hash refresh; then what was
+  done since the last visit, one line each with its cost; then what runs
+  next (scheduled duties).
+- Brief: a morning and an evening message in Chat summarising the same, also
+  kept on Home; it replaces the T20 digest delivery.
+- Chat: one conversation with the employee. The conductor decides whether to
+  answer directly or start a task. A running task shows one updating line
+  that expands to its steps; screenshots and terminal output are collapsed by
+  default.
+- Projects: the list, and per project its duties (on or off, authority,
+  budget) and tasks. A task page shows the plan, steps, diff, test evidence,
+  review verdict, cost and the PR link.
+- Look: minimal, generous whitespace, one accent colour, system font, light
+  and dark, phone first. Never show model or vendor names.
+- Tests: Playwright at desktop and phone width for Home, a project and a task
+  page; a stale card refreshes instead of acting; one tap answers exactly
+  once.
+
+## T25: modes and cross-vendor review
+
+Depends on: T5, T8, the model gateway.
+
+- Replace model choice with modes: `quick`, `standard` and `deep`. The user
+  may pick one; otherwise the conductor picks from the task's size and
+  budget. One versioned config maps each mode's roles (conductor,
+  implementer runner, reviewer, helpers) to models and effort, so a mode
+  keeps its meaning when models change.
+- The reviewer is always a different vendor from the implementer. Before a
+  coding task is shown as done, the reviewer checks the diff against the
+  brief and the repo's invariants; P1 findings go back to the implementer
+  once, and whatever remains is shown on the task page. In `deep`, research
+  claims get the same cross-vendor review (the optional reviewer in T7).
+- Helpers (search, summaries, titles, briefs) use the cheapest adequate model.
+- Every call goes through the gateway with its reservation.
+- Tests: the mode-to-role mapping, the reviewer's vendor always differs, the
+  per-mode budget holds, and the fix loop runs at most once.
+
+## T26: sandbox sleep and wake, and Ship
+
+Depends on: T6, T8, T23.
+
+- An invite's sandbox machine pauses after a configurable idle time (no task
+  running, no live terminal or desktop view) and resumes on the next task or
+  message with its state intact. The web app shows it as asleep.
+- Ship, one action on a coding task: commit, rebase onto the base branch, run
+  the tests, push, open the PR, then follow that commit's CI and report. A CI
+  failure on the employee's own PR wakes the task to fix it once, then
+  escalates. Merging happens only when the duty or the user grants
+  `merge-when-green`.
+- Tests with a fake instabox and a fake GitHub: idle pause, no pause while a
+  task runs, resume on a message, the ship path, and the bounded CI fix loop.
+
+---
+
 # Batch 3: personal assistant feel
 
 ## T11: memory
@@ -272,6 +436,9 @@ Depends on: T5, T9.
 
 ## T12: schedules and background work
 
+Folded into T23 (a schedule is one kind of duty trigger). Do not start it
+separately.
+
 Depends on: T5, T9.
 
 - Recurring and delayed tasks ("every Monday, summarize X"). Check Maka's
@@ -281,7 +448,7 @@ Depends on: T5, T9.
 
 ## T13: panels
 
-Depends on: T5, T9.
+Depends on: T5, T9, T24 (panels live on Home).
 
 - Generative UI cards: a JSON schema for a small set of components (table,
   checklist, timeline, comparison, form), a `render_panel` conductor tool that
@@ -303,7 +470,8 @@ Depends on: T1, T9.
 
 ## T15: prompt-injection guard
 
-Depends on: T5.
+Depends on: T5. Do it before T23: duties act on issue and comment text
+written by other people.
 
 - Content from outside the user (web pages, fetched files, third-party
   messages, tool output from external sources) marks the task context as
@@ -322,6 +490,10 @@ Gmail is out of scope for now (Google restricted-scope review). Do not add
 Gmail scopes.
 
 ## T16: proactive suggestion cards
+
+Folded into T23 (duty proposals) and T24 (Home cards). Do not start it
+separately; what is left (accept and dismiss tracking, backoff after three
+ignored cards, a daily cap) goes into T24.
 
 Depends on: T11, T12, T13, T20 (cards reuse its item store, delivery and
 noise limits).
