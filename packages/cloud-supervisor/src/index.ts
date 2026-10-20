@@ -3,6 +3,7 @@ export { SupervisorDatabaseInUseError } from './db.js';
 export type {
   FeedEntry,
   Interrupt,
+  ProposalOutcome,
   QuestionDelivery,
   QuestionOutcome,
   SummaryModel,

@@ -30,7 +30,9 @@ export type OptionEffect =
   /** Posts a user message to the conversation, built by code from `messageKey`. */
   | 'message'
   /** Records the decision and sends nothing. */
-  | 'local';
+  | 'local'
+  /** Tells the duties engine which set of standing duties the owner chose (`proposalSetId`). */
+  | 'proposal';
 
 export interface ItemOption {
   id: string;
@@ -43,6 +45,8 @@ export interface ItemOption {
   closeReason?: 'acknowledged' | 'accepted';
   /** For `local` options: a side effect inside the answer's transaction. `recheck` queues the verification again. */
   localAction?: 'recheck';
+  /** For `proposal` options: which set of the proposal this option chooses. */
+  proposalSetId?: string;
 }
 
 export type EvidenceLink =
@@ -64,7 +68,7 @@ export type PushState = 'none' | 'pending' | 'sent' | 'held' | 'muted';
 /** What item text and the precondition hash are built from. Agent-written parts are always quoted. */
 export interface ItemContext {
   /** Which state the item depends on; picks the precondition and the reassessment. */
-  subject: 'question' | 'stall' | 'failed_twice' | 'result' | 'verification' | 'cap';
+  subject: 'question' | 'stall' | 'failed_twice' | 'result' | 'verification' | 'cap' | 'proposal';
   taskTitle?: string;
   taskId?: string;
   questionId?: string;

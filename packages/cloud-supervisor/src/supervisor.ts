@@ -4,7 +4,16 @@ import { openDatabase } from './db.js';
 import { buildDigest, type Digest } from './digest.js';
 import { signalOf } from './events.js';
 import type { Interrupt, SummaryModel, SupervisorHost } from './host.js';
-import { applySignal, capSpec, openItem, type Reassessment, reassess, stallPass } from './rules.js';
+import {
+  applySignal,
+  capSpec,
+  openItem,
+  type ProposalChoice,
+  proposalSpec,
+  type Reassessment,
+  reassess,
+  stallPass,
+} from './rules.js';
 import {
   dueDigestSlot,
   inQuietHours,
@@ -602,6 +611,23 @@ export class Supervisor {
     this.kick();
   }
 
+  /**
+   * Raises a decision item for a project's proposed standing duties, in the conversation made for
+   * it. One open item per proposal. Returns false, and raises nothing, when the host cannot
+   * deliver the decision (no duties engine), because an item nobody can act on is noise.
+   */
+  raiseProposal(input: {
+    conversationId: string;
+    proposalId: string;
+    ask: string;
+    sets: ProposalChoice[];
+  }): boolean {
+    if (this.stopped || !this.host.proposals) return false;
+    this.store.tx(() => openItem(this.store, proposalSpec(this.store, input), this.now()));
+    this.kick();
+    return true;
+  }
+
   getItem(itemId: string): ItemView | undefined {
     const item = this.store.item(itemId);
     return item ? toView(item, this.store.answerOfItem(itemId)) : undefined;
@@ -779,6 +805,34 @@ export class Supervisor {
           this.store.finishAnswer(answerId, 'closed_without_delivery', at);
           this.store.logAnswer(answerId, `refused:${outcome.reason}`, at);
           // Someone answered differently, or the question is no longer open: nothing was applied here.
+          this.store.closeItem(
+            item.itemId,
+            outcome.reason === 'conflict' ? 'handled_elsewhere' : 'condition_cleared',
+            at,
+          );
+        });
+        return;
+      }
+      if (option.effect === 'proposal') {
+        const proposals = this.host.proposals;
+        if (!proposals) throw new Error('No duties engine is running to take this decision');
+        const outcome = await proposals.decide(
+          {
+            proposalId: item.context.detail ?? '',
+            setId: option.proposalSetId ?? '',
+            ...(answer.caller === null ? {} : { caller: answer.caller }),
+          },
+          this.abort.signal,
+        );
+        this.store.tx(() => {
+          const at = this.now();
+          if (outcome.accepted) {
+            this.store.finishAnswer(answerId, 'delivered', at);
+            this.store.closeItem(item.itemId, 'answered', at);
+            return;
+          }
+          this.store.finishAnswer(answerId, 'closed_without_delivery', at);
+          this.store.logAnswer(answerId, `refused:${outcome.reason}`, at);
           this.store.closeItem(
             item.itemId,
             outcome.reason === 'conflict' ? 'handled_elsewhere' : 'condition_cleared',

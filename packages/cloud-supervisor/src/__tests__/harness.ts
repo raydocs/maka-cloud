@@ -143,6 +143,9 @@ export class FakeHost implements SupervisorHost {
     this.published.push(event as never);
   };
 
+  /** Set by a test that has a duties engine: where `proposal` options are delivered. */
+  proposals?: SupervisorHost['proposals'];
+
   /** Set by a test that knows owners: the host then builds a digest per owner. */
   ownerOf?: (conversationId: string) => string | undefined;
 
