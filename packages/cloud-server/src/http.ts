@@ -17,6 +17,7 @@ import type { ComputerSource } from './computer.js';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
 import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
+import type { DutyRoutes } from './duties.js';
 import type { InboxRoutes } from './inbox.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import type { PushApi } from './push.js';
@@ -132,6 +133,8 @@ export interface PublicApiDeps {
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
   /** Absent when no supervisor runs; the `/v1/inbox` routes then answer 404. */
   inbox?: InboxRoutes;
+  /** Absent when no duties engine runs; `/github/webhook` and `/v1/projects` then answer like any unknown path. */
+  duties?: DutyRoutes;
 }
 
 const createConversation = z
@@ -300,6 +303,11 @@ export class PublicApi {
         this.health(req, res);
         return;
       }
+      // GitHub signs its webhooks instead of presenting an invite; the engine verifies the signature.
+      if (url.pathname === '/github/webhook' && this.deps.duties) {
+        await this.deps.duties.webhook(req, res);
+        return;
+      }
       const invite = this.authenticate(req);
       await this.route(req, res, url, invite);
     } catch (error) {
@@ -459,6 +467,9 @@ export class PublicApi {
       if (method === 'POST') return this.subscribePush(req, res, invite, push);
       if (method === 'DELETE') return this.unsubscribePush(req, res, invite, push);
       throw new HttpError(405, 'method_not_allowed', { allow: 'POST, DELETE' });
+    }
+    if (this.deps.duties && path.startsWith('/v1/projects')) {
+      if (await this.deps.duties.handle(req, res, url, invite)) return;
     }
     if (this.deps.inbox && path.startsWith('/v1/inbox/')) {
       if (await this.deps.inbox.handle(req, res, url, invite)) return;

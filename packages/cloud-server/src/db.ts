@@ -206,6 +206,28 @@ CREATE TABLE push_deliveries (
 );
 `;
 
+/**
+ * v8 (T23): what a message carries besides its text when it was started by a standing duty, kept
+ * with the message so a delivery that is retried after a crash still taints the conversation and
+ * still carries the run's limits. Only in-process callers write it; the public routes cannot.
+ * `system_starts` makes starting a conversation idempotent on the caller's key.
+ */
+const SCHEMA_V8 = `
+CREATE TABLE message_meta (
+  message_id TEXT PRIMARY KEY,
+  external INTEGER NOT NULL,
+  run TEXT
+);
+CREATE TRIGGER message_meta_no_update BEFORE UPDATE ON message_meta
+BEGIN SELECT RAISE(ABORT, 'message_meta is append-only'); END;
+CREATE TRIGGER message_meta_no_delete BEFORE DELETE ON message_meta
+BEGIN SELECT RAISE(ABORT, 'message_meta is append-only'); END;
+CREATE TABLE system_starts (
+  start_key TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -214,6 +236,7 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V5,
   SCHEMA_V6,
   SCHEMA_V7,
+  SCHEMA_V8,
 ];
 
 /**
