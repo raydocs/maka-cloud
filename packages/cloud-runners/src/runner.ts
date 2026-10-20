@@ -136,6 +136,11 @@ class Run implements RunHandle {
   private publishedUsd = -1;
   /** Set once the run has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
+  /**
+   * Set when a cleanup step that stops the run failed or ran out of time: its processes may be
+   * running or its model access may still be live. `cancel` refuses with it, so the stop stays owed.
+   */
+  private stopFailure: Error | undefined;
   private readonly secrets = new Set<string>();
   /** Paths the brief says the task must hand back. */
   private requiredArtifacts: string[] = [];
@@ -184,6 +189,8 @@ class Run implements RunHandle {
       this.abort.abort();
     }
     await this.cleanup();
+    // A cancel that returns says the run is stopped: when it could not be, it says so.
+    if (this.stopFailure) throw this.stopFailure;
   }
 
   private get signal(): AbortSignal {
@@ -262,7 +269,7 @@ class Run implements RunHandle {
     } finally {
       // The last requests settle and their spend is reported before the end is.
       if (this.terminal !== undefined && this.access?.meter) {
-        await this.step('revoke model access', () => this.releaseAccess());
+        await this.step('revoke model access', () => this.releaseAccess(), true);
         // A revoke past its time limit is reported, and still waited for: its cost comes first.
         await this.releasing;
       }
@@ -316,7 +323,7 @@ class Run implements RunHandle {
     this.secrets.add(access.apiKey);
     if (this.spec.mcp) this.secrets.add(this.spec.mcp.token);
     if (this.cleanupPromise) {
-      void this.step('revoke model access', () => this.releaseAccess());
+      void this.step('revoke model access', () => this.releaseAccess(), true);
       return;
     }
     const meter = access.meter;
@@ -812,7 +819,7 @@ class Run implements RunHandle {
     this.stopWatch?.();
     try {
       await Promise.all([
-        this.step('revoke model access', () => this.releaseAccess()),
+        this.step('revoke model access', () => this.releaseAccess(), true),
         this.stopAndRelease(),
       ]);
     } finally {
@@ -827,7 +834,7 @@ class Run implements RunHandle {
   private async stopAndRelease(): Promise<void> {
     const machine = this.machine;
     if (machine) {
-      await this.step('stop processes', () => this.stopProcesses(true));
+      await this.step('stop processes', () => this.stopProcesses(true), true);
       await this.step('delete activity lease', async () => {
         await this.renewing;
         await this.fleet.client.deleteActivityLease(
@@ -896,8 +903,11 @@ class Run implements RunHandle {
     return this.fleet.options.cleanupTimeoutMs ?? CLEANUP_STEP_MS;
   }
 
-  /** Runs one cleanup step with a time limit. A failure is reported, never thrown. */
-  private async step(name: string, work: () => Promise<void>): Promise<void> {
+  /**
+   * Runs one cleanup step with a time limit. A failure is reported, never thrown. A step that
+   * stops the run (`stops`) also marks it as not stopped, which `cancel` refuses with.
+   */
+  private async step(name: string, work: () => Promise<void>, stops = false): Promise<void> {
     const limit = this.cleanupTimeoutMs();
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -909,6 +919,9 @@ class Run implements RunHandle {
         }),
       ]);
     } catch (error) {
+      if (stops) {
+        this.stopFailure ??= new Error(this.redact(`${name} failed: ${errorMessage(error)}`, 300));
+      }
       try {
         this.fleet.options.onCleanupError?.({ taskId: this.spec.taskId, step: name, error });
       } catch {

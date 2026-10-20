@@ -10,6 +10,11 @@ const conductorRequests = (h: Harness) =>
 const startResearch = calls(tool('start_playbook', { playbook: 'research', goal: 'g' }));
 const plan = text('1. Do the work.');
 
+/** A run stopped by its task id is gone, and its stream closes with it. */
+function stoppedByIdAndClosed(h: Harness, taskId: string): void {
+  h.claude.runFor(taskId).end();
+}
+
 function delegate(budgetUsd: number, extra: Record<string, unknown> = {}) {
   return tool('delegate_task', {
     runner: 'claude-agent-sdk',
@@ -108,6 +113,50 @@ test('"Stop here" ends the run and cancels the tasks it started', async (t) => {
   assert.equal(run.cancelled, true, 'the running child task was cancelled');
   assert.equal(h.model.pending('conductor'), 0);
   assert.equal(h.conductor.stats().openClients, 0);
+});
+
+test('"Stop here" settles a task at what its run reported while it stopped', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    const run = (await realStart(spec)) as FakeRun;
+    // The run reports $0.70 as it stops, over a stream that reaches the orchestrator late.
+    const cancel = run.cancel.bind(run);
+    run.cancel = async () => {
+      run.usage(0.7);
+      await cancel();
+    };
+    const source = run.events;
+    Object.defineProperty(run, 'events', {
+      value: {
+        [Symbol.asyncIterator]: () => {
+          const iterator = source[Symbol.asyncIterator]();
+          return {
+            next: async () => {
+              const next = await iterator.next();
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              return next;
+            },
+            return: () => iterator.return?.() ?? Promise.resolve({ done: true, value: undefined }),
+          };
+        },
+      },
+    });
+    return run;
+  };
+  h.model.script('planner', plan);
+  h.model.script('conductor', startResearch, calls(delegate(2)), calls(delegate(4)));
+  await h.send('cnv_1', 'Research.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0]!;
+  assert.equal(question.reason, 'budget_overrun');
+
+  await h.answer('cnv_1', question.questionId, 'stop');
+  await h.conductor.idle();
+  assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
+  const budget = h.conductor.state.budget(question.runId);
+  assert.equal(budget.reservedUsd, 0);
+  assert.equal(budget.taskUsd, 0.7, 'the spend that settled while the run stopped is charged');
 });
 
 test('model spend that crosses the budget mid-turn sends no further request and asks', async (t) => {
@@ -426,8 +475,9 @@ test('a task that ended while its run may still be going keeps its reservation u
   });
   // The sandbox cannot be reached: the cancel fails, and so does a stop by id until it can.
   let reachable = false;
-  h.claude.stopOrphaned = async () => {
+  h.claude.stopOrphaned = async (taskId) => {
     if (!reachable) throw new Error('sandbox unreachable');
+    stoppedByIdAndClosed(h, taskId);
   };
   const realStart = h.claude.start.bind(h.claude);
   h.claude.start = async (spec) => {
@@ -484,6 +534,7 @@ test('a delegation keeps its reservation while a task below its task may still r
   let reachable = false;
   h.claude.stopOrphaned = async (taskId) => {
     if (taskId === childId && !reachable) throw new Error('sandbox unreachable');
+    stoppedByIdAndClosed(h, taskId);
   };
   let starts = 0;
   const realStart = h.claude.start.bind(h.claude);
@@ -571,9 +622,11 @@ test('a task_status answer keeps the reservation while a task below the delegate
   let reachable = false;
   const childStopTried = gate();
   h.claude.stopOrphaned = async (taskId) => {
-    if (taskId !== childId || reachable) return;
-    childStopTried.open();
-    throw new Error('sandbox unreachable');
+    if (taskId === childId && !reachable) {
+      childStopTried.open();
+      throw new Error('sandbox unreachable');
+    }
+    stoppedByIdAndClosed(h, taskId);
   };
   let starts = 0;
   const childStarted = gate();

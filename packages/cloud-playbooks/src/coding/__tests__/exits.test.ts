@@ -260,3 +260,65 @@ test('an edit loop stops the agent and hands the task to the other vendor', asyn
   );
   zeroStats(h.runner);
 });
+
+test('a cancel whose agent run could not be stopped is refused, not reported as done', async (t) => {
+  const h = await setup(t);
+  const running = gate();
+  h.claude.script = async (turn) => {
+    running.open();
+    await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
+    return 'ok';
+  };
+  const realStart = h.claude.start.bind(h.claude);
+  h.claude.start = async (spec) => {
+    const run = await realStart(spec);
+    return {
+      ...run,
+      // The run stops, but the runner cannot confirm it.
+      cancel: async () => {
+        await run.cancel();
+        throw new Error('sandbox unreachable');
+      },
+    };
+  };
+  const failures: string[] = [];
+  h.runner = h.makeRunner({ onCleanupError: (failure) => failures.push(failure.step) });
+  const handle = await h.runner.start(await h.spec('tsk_cnostop'));
+  const events = collect(handle);
+  await running.promise;
+  await assert.rejects(handle.cancel(), /stop agent run failed: sandbox unreachable/);
+  assert.equal(terminal(await events), undefined);
+  assert.deepEqual(failures, ['stop agent run']);
+  assert.deepEqual(h.leases, { acquired: 1, released: 1 }, 'the rest of the cleanup still ran');
+  zeroStats(h.runner);
+});
+
+test('a cancel whose checks could not be stopped is refused, not reported as done', async (t) => {
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    await hangingRepro(turn);
+    return 'ok';
+  };
+  const sandbox = h.runner.options.sandbox;
+  h.runner = h.makeRunner({
+    sandbox: {
+      stopTask: (taskId, signal) => sandbox.stopTask(taskId, signal),
+      open: async (taskId, signal) => {
+        const workspace = await sandbox.open(taskId, signal);
+        return {
+          ...workspace,
+          stopAll: async (stopSignal) => {
+            await workspace.stopAll(stopSignal);
+            throw new Error('sandbox unreachable');
+          },
+        };
+      },
+    },
+  });
+  const handle = await h.runner.start(await h.spec('tsk_cnocheck'));
+  const events = collect(handle);
+  await hangingPid(h, events);
+  await assert.rejects(handle.cancel(), /stop checks failed: sandbox unreachable/);
+  assert.equal(terminal(await events), undefined);
+  zeroStats(h.runner);
+});
