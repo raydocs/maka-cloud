@@ -1,13 +1,37 @@
-import { type FeedEvent, type Question, TERMINAL, type TaskView } from './contract';
+import { type FeedEvent, type InboxItem, type Question, TERMINAL, type TaskView } from './contract';
 
 export interface ConversationState {
   messages: { id: string; role: 'user' | 'assistant' | 'notice'; text: string }[];
   tasks: Record<string, TaskView>;
   questions: Record<string, Question>;
   answers: Record<string, string>;
+  /** The supervisor's inbox items of this conversation, by id; the highest version wins. */
+  inbox: Record<string, InboxItem>;
 }
 export function emptyState(): ConversationState {
-  return { messages: [], tasks: {}, questions: {}, answers: {} };
+  return { messages: [], tasks: {}, questions: {}, answers: {}, inbox: {} };
+}
+
+/** A frame is only taken as an item when it has what the view relies on. */
+function isInboxItem(value: unknown): value is InboxItem {
+  if (typeof value !== 'object' || value === null) return false;
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.itemId === 'string' &&
+    typeof item.ask === 'string' &&
+    typeof item.version === 'number' &&
+    typeof item.preconditionHash === 'string' &&
+    Array.isArray(item.options) &&
+    (item.state === 'open' || item.state === 'answering' || item.state === 'closed')
+  );
+}
+
+/** Takes an item the server sent, unless this view already holds a newer version of it. */
+export function applyInboxItem(state: ConversationState, item: unknown): ConversationState {
+  if (!isInboxItem(item)) return state;
+  const held = state.inbox[item.itemId];
+  if (held && held.version > item.version) return state;
+  return { ...state, inbox: { ...state.inbox, [item.itemId]: item } };
 }
 
 const MAX_PROGRESS_NOTES = 20;
@@ -39,6 +63,8 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
     case 'conductor.question':
       next.questions = { ...state.questions, [frame.data.questionId]: frame.data };
       break;
+    case 'inbox.item':
+      return applyInboxItem(state, frame.data);
     case 'conductor.answered':
       next.answers = { ...state.answers, [frame.data.questionId]: frame.data.optionId };
       break;

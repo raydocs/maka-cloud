@@ -525,3 +525,16 @@ textarea {
 .held-action code {
   overflow-wrap: anywhere;
 }
+.inbox-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.inbox details {
+  margin: 0 0 24px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.inbox li {
+  overflow-wrap: anywhere;
+}

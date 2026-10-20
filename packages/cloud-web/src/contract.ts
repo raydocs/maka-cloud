@@ -97,10 +97,63 @@ export type Events = {
   'conductor.notice': { noticeId: string; text: string; at: number };
   'conductor.question': Question & { at: number };
   'conductor.answered': { questionId: string; optionId: string; text?: string; at: number };
+  /** The supervisor's inbox item, one frame per version. */
+  'inbox.item': InboxItem;
 };
 export type FeedEvent = {
   [K in keyof Events]: { id: number; kind: K; data: Events[K] & { conversationId: string } };
 }[keyof Events];
+
+export type InboxKind =
+  | 'decision'
+  | 'approval'
+  | 'blocked'
+  | 'verification_failed'
+  | 'budget'
+  | 'finished';
+
+export type InboxEvidence =
+  | { kind: 'artifact'; taskId: string; name: string }
+  | { kind: 'link'; url: string; label: string }
+  | { kind: 'action'; tool: string; args: string };
+
+/**
+ * An item of the supervisor's "needs you" inbox as the public API shows it. `ask`
+ * is the supervisor's own text, label included ("(independently checked)" or
+ * "(not independently checked)" on a finished task): the app shows it and never
+ * works that label out itself.
+ */
+export interface InboxItem {
+  itemId: string;
+  kind: InboxKind;
+  conversationId: string;
+  taskId: string | null;
+  ask: string;
+  options: { id: string; label: string; recommended: boolean }[];
+  allowText: boolean;
+  evidence: InboxEvidence[];
+  state: 'open' | 'answering' | 'closed';
+  closeReason: string | null;
+  /** Echoed in the answer: it only applies to the state the human saw. */
+  preconditionHash: string;
+  version: number;
+  interrupts: boolean;
+  delivery: 'none' | 'sending' | 'retrying';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InboxAnswerRequest {
+  /** 1 to 64 letters, digits, "_" or "-". A retry of the same answer reuses it. */
+  answerId: string;
+  optionId: string;
+  text?: string;
+  preconditionHash: string;
+}
+export interface InboxAnswerResult {
+  duplicate: boolean;
+  item: InboxItem;
+}
 
 export interface AnswerRequest {
   questionId: string;
@@ -138,6 +191,7 @@ export const routes = {
   answers: (id: string) => `/v1/conversations/${encodeURIComponent(id)}/answers`,
   events: (id: string) => `/v1/events?conversation=${encodeURIComponent(id)}`,
   control: (task: string, action: TaskControl) => `/v1/tasks/${encodeURIComponent(task)}/${action}`,
+  inboxAnswer: (item: string) => `/v1/inbox/items/${encodeURIComponent(item)}/answer`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,
   // Web Push answers 404 until the server is configured with its signing key.

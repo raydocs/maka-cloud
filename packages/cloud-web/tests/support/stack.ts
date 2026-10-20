@@ -9,9 +9,11 @@ import {
   RunnerRegistry,
   type SessionInfo,
 } from '../../../cloud-orchestrator/dist/index.js';
+import { createSourceFetcher, Supervisor } from '../../../cloud-supervisor/dist/index.js';
 import {
   type AnswerOutcome,
   type CloudServer,
+  type InboxService,
   type ConversationHandler,
   type ConversationPublisher,
   type PushTransport,
@@ -94,7 +96,7 @@ function vapidKeys() {
 }
 
 export async function startStack(
-  options: { pausable?: boolean; port?: number; push?: boolean } = {},
+  options: { pausable?: boolean; port?: number; push?: boolean; inbox?: boolean } = {},
 ): Promise<Stack> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
   const fake = new FakeRunner({ pausable: options.pausable ?? true });
@@ -168,6 +170,45 @@ export async function startStack(
       return handlerFor();
     },
     http: { messagesPerMinute: 1_000_000, controlPerMinute: 1_000_000, heartbeatMs: 1000 },
+    // The real supervisor, started the way the host starts it but with no model, no key and
+    // nothing to read: a result it cannot check is shown at once, as it words that itself.
+    ...(options.inbox === false
+      ? {}
+      : {
+          supervisor: async (parts): Promise<InboxService> => {
+            const supervisor = await Supervisor.start({
+              dbPath: join(dir, 'supervisor.sqlite'),
+              host: {
+                feed: parts.feed,
+                publish: (event) => parts.publish(event),
+                notifier: { interrupt: () => undefined },
+                answers: parts.answers,
+                messages: parts.messages,
+              },
+              // The maintenance pass publishes item changes; the host's default is 15 s.
+              tickMs: 50,
+              verification: {
+                evidence: { readArtifact: async () => ({ ok: false, reason: 'not_found' }) },
+                fetcher: createSourceFetcher(),
+                budget: {
+                  reserve: () => ({ ok: false, reason: 'no budget' }),
+                  settle: () => undefined,
+                },
+                models: [],
+              },
+            });
+            return {
+              list: async (query) => supervisor.listItems(query),
+              answer: async (request) => supervisor.answer(request),
+              // The mutes, settings and digest are not kept per owner yet: the server never calls these.
+              setMute: () => ({ ok: false }),
+              settings: () => supervisor.getSettings(),
+              updateSettings: () => ({ ok: false }),
+              digest: () => supervisor.digest(),
+              stop: () => supervisor.stop(),
+            };
+          },
+        }),
     ...(options.push === false
       ? {}
       : {

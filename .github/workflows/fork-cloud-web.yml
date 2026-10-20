@@ -37,10 +37,22 @@ jobs:
       - name: Install root dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Build the server
+      # The inbox tests also start the real supervisor, which builds on the
+      # playbooks, conductor and runners (and the runtime they import).
+      - name: Build the server and the supervisor
         run: |
+          npm --workspace @maka/core run build
+          npm --workspace @maka/storage run build
+          npm --workspace @maka/mcp run build
+          npm --workspace @maka/runtime run build
           npm --workspace @maka-cloud/orchestrator run build
           npm --workspace @maka-cloud/server run build
+          npm --workspace @maka-cloud/instabox run build
+          npm --workspace @maka-cloud/runners run build
+          npm --workspace @maka-cloud/conductor-checks run build
+          npm --workspace @maka-cloud/conductor run build
+          npm --workspace @maka-cloud/playbooks run build
+          npm --workspace @maka-cloud/supervisor run build
 
       - name: Install cloud-web dependencies
         run: npm --prefix packages/cloud-web ci --workspaces=false --ignore-scripts --no-audit --no-fund

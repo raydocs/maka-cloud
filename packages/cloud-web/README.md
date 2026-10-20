@@ -95,10 +95,28 @@ presentation policy, not a secret-redaction system.
 A result is never described as checked or verified by this app: it shows what
 the server and the runner sent, and nothing it infers.
 
+## Needs you (inbox)
+
+The server's supervisor raises items that need a person: a finished task to
+acknowledge, and approvals, budget and other decisions. The app shows them in
+the conversation under "Needs you (n)", most urgent first, from the
+`inbox.item` frames of the same event stream. An item the supervisor already
+raised as a conversation question is shown once. Each card shows the
+supervisor's sentence exactly as sent (the app adds, infers and rewords
+nothing, so "(independently checked)" or "(not independently checked)"
+appears only when the supervisor wrote it, and is absent when the server has
+no verification configured), its evidence, and its options with the
+recommended one first and filled. An answer carries the item's
+`preconditionHash` and a client-chosen `answerId` that a retry reuses, so a
+double click or a dropped connection answers once. A refusal (`stale`,
+`already_answered`, `stopped`, ...) is shown in words and the refreshed item
+the server sent with it replaces the card. Answered items move to a "Done"
+list. The server publishes item changes on its maintenance tick (15 s by
+default), so the app applies the answer's response at once and the stream
+confirms later.
+
 ## Not done yet
 
-- **Inbox ("needs you") view and the supervisor's own check label** for a
-  finished task: the routes exist (`/v1/inbox/*`), the view is the next PR.
 - **Web Push is wired to the server's routes** and tested end to end against the
   real server with a throwaway signing key and a fake transport (nothing
   leaves the machine). The browser's own push transport is stubbed in the

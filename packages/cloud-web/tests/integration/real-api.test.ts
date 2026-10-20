@@ -377,3 +377,117 @@ test('a server without Web Push says so with a 404, and the client hides the con
   expect(Object.keys(await keyed.json())).toEqual(['publicKey']);
   expect((await fetch(`${stack.url}${routes.pushKey}`)).status).toBe(401);
 });
+
+/** Finishes a top-level task and waits for the supervisor's "finished" item to reach the view. */
+async function finishedItem(view: ReturnType<typeof watch>, conversationId: string, title: string) {
+  const task = await stack.delegate(conversationId, { title });
+  (await stack.run(task)).complete(MANIFEST);
+  const state = await view.until(
+    (s) => Object.values(s.inbox).some((item) => item.taskId === task && item.kind === 'finished'),
+    'the finished item',
+  );
+  return Object.values(state.inbox).find(
+    (item) => item.taskId === task && item.kind === 'finished',
+  );
+}
+
+test('a finished task reaches the inbox with the supervisor’s own words, and one answer closes it once', async () => {
+  const { client, conversationId } = await fresh();
+  const view = watch(client, conversationId);
+  const item = await finishedItem(view, conversationId, 'Weekly report');
+  if (!item) throw new Error('no item');
+  // The label is the supervisor's: with no verification configured it says so itself.
+  expect(item.ask).toContain('(not independently checked)');
+  expect(item.ask).not.toContain('(independently checked)');
+  expect(item.state).toBe('open');
+  expect(item.options.map((o) => [o.id, o.recommended])).toEqual([['ok', true]]);
+  expect(JSON.stringify(view.frames)).not.toMatch(NAMES);
+
+  // An answer to a state the person did not see is refused with the item as it is now.
+  const stale = await client
+    .answerInbox(item.itemId, { answerId: 'a_stale', optionId: 'ok', preconditionHash: 'not-it' })
+    .catch((error: unknown) => error);
+  expect(stale).toBeInstanceOf(ApiError);
+  expect(stale).toMatchObject({ status: 409, code: 'stale' });
+  expect((stale as ApiError).body).toMatchObject({ item: { itemId: item.itemId } });
+
+  const answered = await client.answerInbox(item.itemId, {
+    answerId: 'a_one',
+    optionId: 'ok',
+    preconditionHash: item.preconditionHash,
+  });
+  expect(answered.duplicate).toBe(false);
+  expect(answered.item.state).toBe('closed');
+  const closed = await view.until(
+    (s) => s.inbox[item.itemId]?.state === 'closed',
+    'the item to close in the view',
+  );
+  expect(closed.inbox[item.itemId]?.closeReason).toBe('acknowledged');
+
+  // The same answer again is the same answer; a different one comes too late.
+  const again = await client.answerInbox(item.itemId, {
+    answerId: 'a_one',
+    optionId: 'ok',
+    preconditionHash: item.preconditionHash,
+  });
+  expect(again.duplicate).toBe(true);
+  await expect(
+    client.answerInbox(item.itemId, {
+      answerId: 'a_two',
+      optionId: 'ok',
+      preconditionHash: item.preconditionHash,
+    }),
+  ).rejects.toMatchObject({ status: 409 });
+  await view.stop();
+});
+
+test('another invite cannot see or answer an item, and a revoked invite cannot either', async () => {
+  const { client, conversationId } = await fresh();
+  const view = watch(client, conversationId);
+  const item = await finishedItem(view, conversationId, 'Private report');
+  if (!item) throw new Error('no item');
+  const other = stack.newInvite();
+  const outsider = clientFor(other.token);
+  await expect(
+    outsider.answerInbox(item.itemId, {
+      answerId: 'x_one',
+      optionId: 'ok',
+      preconditionHash: item.preconditionHash,
+    }),
+  ).rejects.toMatchObject({ status: 404 });
+  // Nothing happened to it, and the outsider's own stream never carried it.
+  expect(
+    (await view.until((s) => s.inbox[item.itemId], 'the item')).inbox[item.itemId]?.state,
+  ).toBe('open');
+  const abort = new AbortController();
+  const response = await fetch(`${stack.url}/v1/events`, {
+    headers: { authorization: `Bearer ${other.token}`, accept: 'text/event-stream' },
+    signal: abort.signal,
+  });
+  const seen: FeedEvent[] = [];
+  const reading = readEvents(response, (frame) => seen.push(frame)).catch(() => {});
+  // Its own conversation proves the stream flows; the item is not in it.
+  await outsider.createConversation();
+  await until(() => seen.length > 0, 'the outsider’s own events');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  abort.abort();
+  await reading;
+  expect(JSON.stringify(seen)).not.toContain(item.itemId);
+
+  const own = stack.newInvite();
+  const ownClient = clientFor(own.token);
+  const mine = await ownClient.createConversation();
+  const ownView = watch(ownClient, mine.conversationId);
+  const ownItem = await finishedItem(ownView, mine.conversationId, 'Mine');
+  if (!ownItem) throw new Error('no item');
+  expect(stack.server.invites.revoke(own.inviteId)).toBe(true);
+  await expect(
+    ownClient.answerInbox(ownItem.itemId, {
+      answerId: 'r_one',
+      optionId: 'ok',
+      preconditionHash: ownItem.preconditionHash,
+    }),
+  ).rejects.toMatchObject({ status: 401 });
+  await ownView.stop();
+  await view.stop();
+});
