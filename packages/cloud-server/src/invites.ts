@@ -8,6 +8,15 @@ export interface InviteInfo {
   revokedAt: number | null;
 }
 
+/**
+ * What an invite may spend, in USD. `null` is "not set": the server's default applies. The model
+ * gateway reads these on every request, so a change from the command line applies at once.
+ */
+export interface InviteLimits {
+  dailyUsd: number | null;
+  monthlyUsd: number | null;
+}
+
 export interface CreatedInvite extends InviteInfo {
   /** Shown once; only its SHA-256 is stored. */
   token: string;
@@ -28,6 +37,8 @@ export const INVITE_MIGRATIONS: readonly string[] = [
     created_at INTEGER NOT NULL,
     revoked_at INTEGER
   )`,
+  `ALTER TABLE invites ADD COLUMN daily_limit_usd REAL;
+   ALTER TABLE invites ADD COLUMN monthly_limit_usd REAL`,
 ];
 
 function digest(token: string): Buffer {
@@ -98,6 +109,39 @@ export class InviteStore {
       .prepare('SELECT revoked_at FROM invites WHERE invite_id = ?')
       .get(inviteId) as { revoked_at: number | null } | undefined;
     return row !== undefined && row.revoked_at === null;
+  }
+
+  /**
+   * Sets the caps an active invite may spend per UTC day and month; a cap left out keeps its
+   * value. Returns false for an invite that is unknown or revoked. A cap of 0 lets it spend
+   * nothing; one that is not a finite number of at least 0 is refused.
+   */
+  setLimits(inviteId: string, limits: { dailyUsd?: number; monthlyUsd?: number }): boolean {
+    for (const usd of [limits.dailyUsd, limits.monthlyUsd]) {
+      if (usd !== undefined && (!Number.isFinite(usd) || usd < 0)) {
+        throw new RangeError('A spend cap is a number of dollars, 0 or more');
+      }
+    }
+    const result = this.db
+      .prepare(
+        `UPDATE invites SET daily_limit_usd = COALESCE(?, daily_limit_usd),
+           monthly_limit_usd = COALESCE(?, monthly_limit_usd)
+         WHERE invite_id = ? AND revoked_at IS NULL`,
+      )
+      .run(limits.dailyUsd ?? null, limits.monthlyUsd ?? null, inviteId);
+    return Number(result.changes) > 0;
+  }
+
+  /** The caps of an active invite, or nothing for one that is unknown or revoked. Read from the file every time. */
+  limits(inviteId: string): InviteLimits | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT daily_limit_usd, monthly_limit_usd FROM invites WHERE invite_id = ? AND revoked_at IS NULL',
+      )
+      .get(inviteId) as
+      | { daily_limit_usd: number | null; monthly_limit_usd: number | null }
+      | undefined;
+    return row && { dailyUsd: row.daily_limit_usd, monthlyUsd: row.monthly_limit_usd };
   }
 
   /** Called after a revoke through this store. Returns the unsubscribe function. */
