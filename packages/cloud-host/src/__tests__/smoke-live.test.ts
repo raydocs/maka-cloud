@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { JournalTotals } from '@maka-cloud/gateway';
-import { createLiveSmokeDeps, smokeCommand } from '../smoke-live.js';
+import { createLiveSmokeDeps, smokeCapProblem, smokeCommand } from '../smoke-live.js';
 import { SMOKE_VARIABLES, type SmokeSettings, smokeGate } from '../smoke.js';
 
 const TOKEN = 'mki_secret-token-for-the-smoke-invite';
@@ -465,6 +465,50 @@ test('restart runs the configured command as an argument list, and a failure car
     (error: Error) =>
       /restart command failed/u.test(error.message) && !error.message.includes(TOKEN),
   );
+});
+
+test('the budget is a hard cap only with a daily cap of the invite’s own at most the budget, so a run without one is refused before any request', async () => {
+  const cases: Array<
+    [string, { dailyUsd: number | null; monthlyUsd: number | null } | undefined, RegExp]
+  > = [
+    ['no daily cap', { dailyUsd: null, monthlyUsd: 50 }, /no daily cap of its own/u],
+    [
+      'a cap above the budget',
+      { dailyUsd: 5.01, monthlyUsd: 50 },
+      /\$5\.01\) is above MAKA_CLOUD_SMOKE_MAX_USD \(\$5\)/u,
+    ],
+    ['an unknown or revoked invite', undefined, /names no invite/u],
+  ];
+  for (const [name, limits, expected] of cases) {
+    const { io, touched, printed } = untouchable();
+    const invites = fakeInvites(limits);
+    io.openInvites = invites.open_ as never;
+    assert.equal(await smokeCommand(LIVE_ENV, io), 2, name);
+    assert.deepEqual(touched, [], `${name}: no request, journal read or restart`);
+    assert.match(printed.join('\n'), expected, name);
+    assert.equal(printed.join('\n').includes(TOKEN), false);
+    assert.equal(invites.open, 0, `${name}: the invites file is closed`);
+    assert.deepEqual(
+      invites.calls.filter((call) => call.startsWith('set')),
+      [],
+      `${name}: nothing is changed`,
+    );
+  }
+});
+
+test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {
+  const settings = settingsFor('http://127.0.0.1:1', { dataDir: '/srv/maka', maxUsd: 5 });
+  for (const dailyUsd of [5, 0.5, 0]) {
+    const invites = fakeInvites({ dailyUsd, monthlyUsd: null });
+    assert.equal(smokeCapProblem(settings, { openInvites: invites.open_ as never }), undefined);
+    assert.equal(invites.open, 0);
+  }
+  const problem = smokeCapProblem(settings, {
+    openInvites: () => {
+      throw new Error('unable to open database file: /srv/maka/invites.db');
+    },
+  });
+  assert.equal(problem, 'the invites file in MAKA_CLOUD_DATA_DIR could not be read');
 });
 
 test('the maka-cloud smoke command refuses without the flag, and its usage lists the smoke settings', () => {

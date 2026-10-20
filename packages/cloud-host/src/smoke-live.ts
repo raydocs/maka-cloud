@@ -365,6 +365,36 @@ function toQuestion(data: Record<string, unknown>): SmokeQuestion | undefined {
 }
 
 /**
+ * Why the run may not start: the budget is a hard cap only when the smoke invite has a daily cap
+ * of its own that is at most the budget, because the gateway refuses requests past that cap while
+ * `MAKA_CLOUD_SMOKE_MAX_USD` only keeps a scenario from starting once the server has spent it.
+ */
+export function smokeCapProblem(settings: SmokeSettings, io: LiveSmokeIo): string | undefined {
+  const openInvites = io.openInvites ?? ((path: string) => new InviteStore(path));
+  let limits: ReturnType<Pick<InviteStore, 'limits'>['limits']>;
+  try {
+    const invites = openInvites(join(settings.dataDir, 'invites.db'));
+    try {
+      limits = invites.limits(settings.inviteId);
+    } finally {
+      invites.close();
+    }
+  } catch {
+    return 'the invites file in MAKA_CLOUD_DATA_DIR could not be read';
+  }
+  if (limits === undefined) {
+    return 'MAKA_CLOUD_SMOKE_INVITE_ID names no invite in MAKA_CLOUD_DATA_DIR, or it was revoked';
+  }
+  if (limits.dailyUsd === null) {
+    return 'the smoke invite has no daily cap of its own, so its spending is not limited by this budget; set one with "cloud-server invite limits --daily"';
+  }
+  if (limits.dailyUsd > settings.maxUsd) {
+    return `the smoke invite's daily cap ($${limits.dailyUsd}) is above MAKA_CLOUD_SMOKE_MAX_USD ($${settings.maxUsd}), so the budget would not be a hard cap; lower the cap with "cloud-server invite limits --daily" or raise the budget`;
+  }
+  return undefined;
+}
+
+/**
  * `maka-cloud smoke`. The gate comes first: without `MAKA_CLOUD_LIVE=1` and every setting nothing
  * is read, opened or sent, and the exit code is 2.
  */
@@ -379,6 +409,11 @@ export async function smokeCommand(
     return 2;
   }
   const { settings } = gate;
+  const problem = smokeCapProblem(settings, io);
+  if (problem !== undefined) {
+    print(problem);
+    return 2;
+  }
   print(`smoke test of ${settings.url} as ${settings.inviteId}, budget $${settings.maxUsd}`);
   const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
   const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
