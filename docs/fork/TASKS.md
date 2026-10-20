@@ -377,8 +377,19 @@ proposals and T20 items).
 - Projects: the list, and per project its duties (on or off, authority,
   budget) and tasks. A task page shows the plan, steps, diff, test evidence,
   review verdict, cost and the PR link.
-- Look: minimal, generous whitespace, one accent colour, system font, light
-  and dark, phone first. Never show model or vendor names.
+- Look: flat and minimal like Hark, not Apple Liquid Glass. A calm
+  background (dark: a soft navy-to-slate gradient; light: off-white), opaque
+  or slightly translucent surfaces with no shadows, pill-shaped controls,
+  round icon buttons, thin line icons, a sans-serif system font with
+  hierarchy by weight, and one restrained accent colour. Generous whitespace,
+  phone first. Never show model or vendor names.
+- Density by page: Home and Chat are airy; a task page (diff, test output,
+  terminal) is dense and uses a monospace font for code, because that is
+  where a programmer reads.
+- Only floating chrome (the top navigation and the composer) may use a light
+  backdrop blur; no refraction or glass effects over code. Native Liquid
+  Glass waits for the iOS app (T18), which gets it from the system.
+- Light and dark themes both, dark by default; check contrast on both.
 - Tests: Playwright at desktop and phone width for Home, a project and a task
   page; a stale card refreshes instead of acting; one tap answers exactly
   once.
