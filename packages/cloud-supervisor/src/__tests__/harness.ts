@@ -143,6 +143,9 @@ export class FakeHost implements SupervisorHost {
     this.published.push(event as never);
   };
 
+  /** Set by a test that knows owners: the host then builds a digest per owner. */
+  ownerOf?: (conversationId: string) => string | undefined;
+
   onWarning = (message: string): void => {
     this.warnings.push(message);
   };
@@ -247,11 +250,18 @@ export const MANIFEST = {
 /** A summary model that answers from a script. */
 export class ScriptedSummary implements SummaryModel {
   calls = 0;
+  /** What each call was given: whose items, and which. */
+  readonly seen: Array<{ owner: string | undefined; ids: string[] }> = [];
   constructor(private readonly answer: (input: { items: Array<{ id: string }> }) => unknown) {}
-  async summarize(input: {
-    items: Array<{ id: string; kind: string; ask: string; ageMs: number }>;
-  }) {
+  async summarize(
+    input: {
+      items: Array<{ id: string; kind: string; ask: string; ageMs: number }>;
+    },
+    _signal?: AbortSignal,
+    owner?: string,
+  ) {
     this.calls += 1;
+    this.seen.push({ owner, ids: input.items.map((item) => item.id) });
     return this.answer(input) as { order: string[]; summary: string };
   }
 }

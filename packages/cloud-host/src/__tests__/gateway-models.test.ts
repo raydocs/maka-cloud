@@ -9,7 +9,7 @@ import {
   type SpendAccounts,
   SqliteSpendJournal,
 } from '@maka-cloud/gateway';
-import type { CheckCharge } from '@maka-cloud/supervisor';
+import type { CheckCharge, Supervisor } from '@maka-cloud/supervisor';
 import { conductorGateway, gatewayPrices } from '../gateway.js';
 import { createGatewaySummaryModel, createGatewayVerifierModel } from '../inbox/models.js';
 import { startInbox } from '../inbox/setup.js';
@@ -169,9 +169,9 @@ test('the digest summary goes through the gateway on its own daily limit', async
   // Haiku at $0.1 / $0.5: a summary reserves about $0.001 and settles at $0.00015, so a $0.002
   // day takes a handful before the next reservation no longer fits.
   const limit = (await journalFile(t)).open().dailyLimit('digest summary', 0.002, () => now);
-  const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, limit);
+  const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, () => limit);
   const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
-  assert.deepEqual(await summary.summarize(items, new AbortController().signal), {
+  assert.deepEqual(await summary.summarize(items, new AbortController().signal, 'inv_a'), {
     order: ['a'],
     summary: 'One thing needs you.',
   });
@@ -179,7 +179,7 @@ test('the digest summary goes through the gateway on its own daily limit', async
   let sent = 1;
   while (sent < 20) {
     try {
-      await summary.summarize(items, new AbortController().signal);
+      await summary.summarize(items, new AbortController().signal, 'inv_a');
       sent += 1;
     } catch {
       break;
@@ -190,7 +190,7 @@ test('the digest summary goes through the gateway on its own daily limit', async
   assert.ok(sent < 20, 'the day’s limit stops the summaries');
   assert.equal(messages().length, sent, 'a refused summary is not sent');
   now += 24 * 60 * 60 * 1000;
-  await summary.summarize(items, new AbortController().signal);
+  await summary.summarize(items, new AbortController().signal, 'inv_a');
   assert.equal(messages().length, sent + 1, 'a new day has its own limit');
 });
 
@@ -201,10 +201,10 @@ test("a restart does not start the digest summary's day afresh", async (t) => {
   const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
   const messages = () => vendor.seen.filter((request) => request.url.endsWith('/v1/messages'));
   const summarizeUntilRefused = async (budget: ReturnType<SqliteSpendJournal['dailyLimit']>) => {
-    const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, budget);
+    const summary = createGatewaySummaryModel('claude-haiku-5-5', gateway, () => budget);
     for (let sent = 0; sent < 20; sent += 1) {
       try {
-        await summary.summarize(items, new AbortController().signal);
+        await summary.summarize(items, new AbortController().signal, 'inv_a');
       } catch {
         return sent;
       }
@@ -328,22 +328,55 @@ test('a check of a conversation nobody owns is not sent', async (t) => {
   assert.equal(gateway.openGrants, 0);
 });
 
-test("the digest summary counts against the server's cap and no invite's", async (t) => {
+test("the digest summary is its owner's spend: an invite with no allowance gets no summary, and another invite is not affected", async (t) => {
   const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
-  const budget = (await journalFile(t)).open().dailyLimit('digest summary', 100);
-  // An invite with a zero cap does not stop the summary: it is nobody's.
-  const open = await ledgerRig(t, { inv_a: { dailyUsd: 0, monthlyUsd: 0 } });
-  const summary = createGatewaySummaryModel('claude-haiku-5-5', open.gateway, budget);
-  await summary.summarize(items, new AbortController().signal);
-  assert.equal(open.vendor.seen.length, 1);
-  // The server's own cap does.
-  const closed = await ledgerRig(t, { inv_a: { dailyUsd: 5, monthlyUsd: 50 } }, 0);
-  const refused = createGatewaySummaryModel('claude-haiku-5-5', closed.gateway, budget);
-  await assert.rejects(refused.summarize(items, new AbortController().signal));
-  assert.equal(
-    closed.vendor.seen.filter((request) => request.url.endsWith('/v1/messages')).length,
-    0,
-  );
+  const journal = (await journalFile(t)).open();
+  const budgetOf = (owner: string) => journal.dailyLimit(`digest summary ${owner}`, 100);
+  const asked = (rigged: Awaited<ReturnType<typeof ledgerRig>>) =>
+    rigged.vendor.seen.filter((request) => request.url.endsWith('/v1/messages')).length;
+  const open = await ledgerRig(t, {
+    inv_none: { dailyUsd: 0, monthlyUsd: 0 },
+    inv_ok: { dailyUsd: 5, monthlyUsd: 50 },
+  });
+  const summary = createGatewaySummaryModel('claude-haiku-5-5', open.gateway, budgetOf);
+  const signal = new AbortController().signal;
+  // The invite whose caps are zero pays nothing, so its digest falls back to the template.
+  await assert.rejects(summary.summarize(items, signal, 'inv_none'));
+  assert.equal(asked(open), 0, 'a refused summary never reaches the vendor');
+  // Another invite's summary goes through.
+  await summary.summarize(items, signal, 'inv_ok');
+  assert.equal(asked(open), 1);
+  // An invite the ledger does not know may not spend either, and items nobody owns get no call.
+  await assert.rejects(summary.summarize(items, signal, 'inv_unknown'));
+  await assert.rejects(summary.summarize(items, signal), /no owning invite/u);
+  assert.equal(asked(open), 1);
+  // The server's own cap stops every owner.
+  const closed = await ledgerRig(t, { inv_ok: { dailyUsd: 5, monthlyUsd: 50 } }, 0);
+  const refused = createGatewaySummaryModel('claude-haiku-5-5', closed.gateway, budgetOf);
+  await assert.rejects(refused.summarize(items, signal, 'inv_ok'));
+  assert.equal(asked(closed), 0);
+});
+
+test("one invite's digest summaries are limited per invite, not shared with another's", async (t) => {
+  const items = { items: [{ id: 'a', kind: 'question', ask: 'x', ageMs: 1 }] } as never;
+  const journal = (await journalFile(t)).open();
+  const budgetOf = (owner: string) => journal.dailyLimit(`digest summary ${owner}`, 0.002);
+  const rigged = await ledgerRig(t, {
+    inv_a: { dailyUsd: 5, monthlyUsd: 50 },
+    inv_b: { dailyUsd: 5, monthlyUsd: 50 },
+  });
+  const summary = createGatewaySummaryModel('claude-haiku-5-5', rigged.gateway, budgetOf);
+  const signal = new AbortController().signal;
+  let sentA = 0;
+  for (; sentA < 20; sentA += 1) {
+    try {
+      await summary.summarize(items, signal, 'inv_a');
+    } catch {
+      break;
+    }
+  }
+  assert.ok(sentA > 0 && sentA < 20, 'inv_a uses up its own summary day');
+  await summary.summarize(items, signal, 'inv_b');
 });
 
 test("the conductor's requests count against the invite that owns the session's conversation", async (t) => {
@@ -392,4 +425,90 @@ test("the conductor's requests count against the invite that owns the session's 
   await assert.rejects(ask('ses_nobody'), /no owning invite/u);
   assert.equal(sent(), 1);
   assert.deepEqual(held, []);
+});
+
+test('the inbox builds each owner’s digest on its own: the summary call gets only that invite’s items and that invite as its owner', async (t) => {
+  const entries: Array<{
+    id: number;
+    kind: string;
+    conversationId: string;
+    at: number;
+    data: unknown;
+  }> = [];
+  const question = (id: number, conversationId: string) => ({
+    id,
+    kind: 'conductor.question',
+    conversationId,
+    at: Date.now(),
+    data: {
+      questionId: `q${id}`,
+      reason: 'taste',
+      question: `Which for ${conversationId}?`,
+      options: [
+        { id: 'a', label: 'A' },
+        { id: 'b', label: 'B' },
+      ],
+      recommended: 'a',
+    },
+  });
+  entries.push(question(1, 'cnv_a'), question(2, 'cnv_b'), question(3, 'cnv_x'));
+  const calls: Array<{ owner: string | undefined; asks: string[] }> = [];
+  const dir = await mkdtemp(join(tmpdir(), 'host-inbox-owner-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let started: Supervisor | undefined;
+  await startInbox(
+    {
+      dbPath: join(dir, 'supervisor.db'),
+      config: { verifierModels: [], summaryModel: 'm', dailyCapUsd: 5 },
+      onStarted: (supervisor) => {
+        started = supervisor;
+      },
+      accountOf: (conversationId) =>
+        ({ cnv_a: { inviteId: 'inv_a' }, cnv_b: { inviteId: 'inv_b' } })[
+          conversationId as 'cnv_a' | 'cnv_b'
+        ],
+      override: {
+        summary: {
+          summarize: async (input, _signal, owner) => {
+            calls.push({ owner, asks: input.items.map((item) => item.ask) });
+            return { order: input.items.map((item) => item.id), summary: `for ${owner}` };
+          },
+        },
+        tickMs: 0,
+      },
+    },
+    {
+      parts: {
+        feed: {
+          read: (after: number, limit: number) =>
+            entries.filter((e) => e.id > after).slice(0, limit),
+          subscribe: () => () => undefined,
+        },
+        publish: () => undefined,
+        answers: { deliver: async () => ({ accepted: true, duplicate: false }) },
+        messages: { post: async () => ({ messageId: 'm' }) },
+        onWarning: () => undefined,
+      },
+      conductor: { postNotice: async () => undefined },
+    } as never,
+  );
+  const supervisor = started as Supervisor | undefined;
+  assert.ok(supervisor);
+  t.after(() => supervisor.stop());
+  for (const owner of ['inv_a', 'inv_b']) {
+    const digest = await supervisor.digest(owner);
+    assert.equal(digest.items.length, 1, `${owner}'s digest lists only their conversation`);
+    assert.equal(digest.summary, `for ${owner}`);
+  }
+  assert.deepEqual(
+    calls.map((call) => [call.owner, call.asks]),
+    [
+      ['inv_a', ['Which for cnv_a?']],
+      ['inv_b', ['Which for cnv_b?']],
+    ],
+    'each call got only its own invite’s items',
+  );
+  const unowned = await supervisor.digest();
+  assert.equal(unowned.items.length, 1, 'the digest of items nobody owns lists only cnv_x’s');
+  assert.equal(calls.length, 2, 'and makes no model call');
 });

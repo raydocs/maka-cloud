@@ -636,22 +636,24 @@ export class Store {
   // digests
 
   /** Claims a scheduled slot once. Returns false when it was claimed before. */
-  claimDigestSlot(digestId: string, slot: string, at: number): boolean {
+  claimDigestSlot(digestId: string, slot: string, at: number, owner?: string): boolean {
     const result = this.run(
-      "INSERT OR IGNORE INTO digests (digest_id, slot, at, body, published) VALUES (?, ?, ?, '', 0)",
+      "INSERT OR IGNORE INTO digests (digest_id, slot, at, body, published, owner) VALUES (?, ?, ?, '', 0, ?)",
       digestId,
       slot,
       at,
+      owner ?? null,
     );
     return result.changes === 1;
   }
 
-  insertDigest(digestId: string, body: unknown, at: number): void {
+  insertDigest(digestId: string, body: unknown, at: number, owner?: string): void {
     this.run(
-      'INSERT INTO digests (digest_id, slot, at, body, published) VALUES (?, NULL, ?, ?, 0)',
+      'INSERT INTO digests (digest_id, slot, at, body, published, owner) VALUES (?, NULL, ?, ?, 0, ?)',
       digestId,
       at,
       JSON.stringify(body),
+      owner ?? null,
     );
   }
 
@@ -669,8 +671,12 @@ export class Store {
     ).map((row) => ({ digestId: str(row.digest_id), body: JSON.parse(str(row.body)) as unknown }));
   }
 
-  lastDigestAt(): number {
-    const row = this.get("SELECT MAX(at) AS at FROM digests WHERE body != ''");
+  /** When the owner's last digest was built (`undefined`: the digest of items nobody owns). */
+  lastDigestAt(owner?: string): number {
+    const row = this.get(
+      "SELECT MAX(at) AS at FROM digests WHERE body != '' AND owner IS ?",
+      owner ?? null,
+    );
     return row && row.at !== null ? Number(row.at) : 0;
   }
 
@@ -845,10 +851,13 @@ export class Store {
   }
 
   /** Slots claimed whose digest was never built (a crash in between). */
-  emptySlots(): Array<{ digestId: string }> {
-    return this.all("SELECT digest_id FROM digests WHERE body = '' ORDER BY at").map((row) => ({
-      digestId: str(row.digest_id),
-    }));
+  emptySlots(): Array<{ digestId: string; owner: string | undefined }> {
+    return this.all("SELECT digest_id, owner FROM digests WHERE body = '' ORDER BY at").map(
+      (row) => ({
+        digestId: str(row.digest_id),
+        owner: row.owner === null ? undefined : str(row.owner),
+      }),
+    );
   }
 }
 
