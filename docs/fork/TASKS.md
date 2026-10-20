@@ -388,6 +388,20 @@ proposals and T20 items).
   pill with the result beside it, and a swipe or Escape to go back. A diff
   opens the same way. Running tasks show a live thumbnail of the box's screen
   when it has one (T14b) and fall back to the step line.
+- Sources and links, as Hark shows a search answer: a short answer first
+  (the pick, then one alternative per need, ending in one plain-text offer
+  such as "Want me to set one up?"), then the sources as a small fanned stack
+  of up to three cards below it, slightly rotated and overlapping (about -5,
+  0 and +4 degrees), the middle one on top with the deepest shadow. Each card
+  is about 215 by 190 px with a 12 px radius: a preview image on the top 60
+  percent, then a title (14 px, medium, two lines at most) and a grey meta
+  line (12 px: site, a dot, and a short label saying why it is there, such as
+  "the docs" or "an alternative"). On a phone the stack becomes a horizontal
+  swipe. A coding task uses the same stack for its PR, its preview and its
+  test report. Preview images are fetched by the server through a proxy that
+  refuses private and local addresses, caps size and time, and caches; the
+  browser never loads them from the source site, and a page without one gets
+  a plain card with the site's initial.
 - Briefs end with one offer ("Want me to update the two failing
   dependencies?") and say the offer is also saved on Home.
 - Projects: the list, and per project its duties (on or off, authority,
