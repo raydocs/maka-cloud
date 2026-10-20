@@ -5,6 +5,7 @@ import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import {
   gatewayModelAccess,
   gatewayPrices,
+  explicitSpendCaps,
   openServerLedger,
   readStackConfig,
   startGateway,
@@ -154,7 +155,9 @@ export async function createLiveDeps(
   const datasetPath = join(dataDir, 'swe-bench-verified.jsonl');
   const dataset = await SweBenchDataset.read(datasetPath);
 
-  const ledger = openServerLedger(serverConfig);
+  // The caps are the running server's, read from its data directory; a cap this environment sets
+  // for itself that the server does not run under refuses the run.
+  const ledger = openServerLedger(serverConfig, { expected: explicitSpendCaps(env) });
   if (!ledger.hasInvite(accountInvite)) {
     ledger.close();
     throw new Error(`MAKA_EVALS_INVITE_ID is not an active invite of the server: ${accountInvite}`);

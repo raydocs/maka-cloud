@@ -96,7 +96,8 @@ test('a delegation over the budget is not sent: code asks to raise or stop, and 
 test('"Stop here" ends the run and cancels the tasks it started', async (t) => {
   const h = await makeHarness(t, { autoComplete: false });
   h.model.script('planner', plan);
-  h.model.script('conductor', startResearch, calls(delegate(2)), calls(delegate(4)));
+  // In one response: the second is decided on clean context, so it meets the budget, not a hold.
+  h.model.script('conductor', startResearch, calls(delegate(2), delegate(4)));
   await h.send('cnv_1', 'Research.');
   await h.conductor.idle();
   assert.equal(h.claude.runs.length, 1);
@@ -145,7 +146,7 @@ test('"Stop here" settles a task at what its run reported while it stopped', asy
     return run;
   };
   h.model.script('planner', plan);
-  h.model.script('conductor', startResearch, calls(delegate(2)), calls(delegate(4)));
+  h.model.script('conductor', startResearch, calls(delegate(2), delegate(4)));
   await h.send('cnv_1', 'Research.');
   await h.conductor.idle();
   const question = h.outbox.questions[0]!;

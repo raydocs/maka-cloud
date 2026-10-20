@@ -45,6 +45,11 @@ export interface ToolHost {
   postNotice(turn: ActiveTurn, text: string): void;
   /** Settles the delegation behind a task view once the view shows the task ended. */
   settleTask(view: Record<string, unknown> | undefined): void;
+  /**
+   * Whether the model decided this turn's current tool calls on tainted context: the
+   * conversation was tainted when the request they answer was sent (T15).
+   */
+  decidedOnTaint(turn: ActiveTurn): boolean;
   /** Whether who approved a held call may still have it run (their invite is active and owns the conversation). */
   approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
 }
@@ -228,6 +233,8 @@ export function conductorTools(
       }
       const { mode, timeoutMs, ...forwarded } = args;
       const signal = signalOf(turn, ctx);
+      // From here the orchestrator answers with task views (T15 `ownTaint`).
+      host.state.taint(turn.conversationId, 'tool:delegate_task');
       // Always async, so the task id comes back (and is stored) at once; a
       // "wait" is a separate task_wait the stop can interrupt with the id known.
       // If this call throws (abort, broken connection) the task may exist: the
@@ -418,8 +425,13 @@ export function conductorTools(
             const spec = extra.find((tool) => tool.name === held.tool);
             const details = spec?.approvalDetails
               ? await spec.approvalDetails(held.args as never)
-              : undefined;
-            const cause: HoldCause = spec && !alwaysHeld(spec) ? 'tainted' : 'irreversible';
+              : held.tool === 'delegate_task'
+                ? DELEGATION_DETAILS
+                : undefined;
+            // A built-in is held only for taint; a playbook tool also when it is irreversible.
+            const builtin = BUILTIN_TOOL_POLICY[held.tool] !== undefined;
+            const cause: HoldCause =
+              builtin || (spec && !alwaysHeld(spec)) ? 'tainted' : 'irreversible';
             question = details
               ? `${approvalQuestion(action, cause)}\n\n${details}`
               : approvalQuestion(action, cause);
@@ -491,25 +503,95 @@ export function conductorTools(
 }
 
 /**
- * A built-in tool under its T15 policy: one whose result can carry outside content taints the
- * conversation before it runs, so neither its result nor its error reaches the model before the
- * taint is stored. A built-in with no policy, or with effects (built-ins have no held path), is
+ * A built-in tool under its T15 policy. One with effects is held for the user's approval while
+ * the conversation is tainted, decided before this call's own result can taint it. One whose
+ * result can carry outside content taints the conversation before it runs, so neither its result
+ * nor its error reaches the model before the taint is stored. A built-in with no policy is
  * refused when the tools are built.
  */
 function withBuiltinPolicy(host: ToolHost, tool: MakaTool): MakaTool {
   const policy = BUILTIN_TOOL_POLICY[tool.name];
-  if (!policy || policy.effects.length > 0) {
-    throw new Error(`Built-in conductor tool ${tool.name} has no guard policy.`);
-  }
-  if (!policy.externalResult) return tool;
+  if (!policy) throw new Error(`Built-in conductor tool ${tool.name} has no guard policy.`);
+  const guarded = policy.effects.length > 0;
+  if (!guarded && !policy.externalResult) return tool;
   return {
     ...tool,
-    impl: async (args, ctx) => {
-      host.state.taint(host.turnFor(ctx).conversationId, `tool:${tool.name}`);
+    ...(guarded
+      ? {
+          description: `${tool.description} ${TAINT_HOLD_NOTE}`,
+          parameters: (tool.parameters as z.ZodObject).extend({ actionRef: ACTION_REF }),
+        }
+      : {}),
+    impl: async (raw: Record<string, unknown>, ctx: MakaToolContext) => {
+      const turn = host.turnFor(ctx);
+      let args = raw;
+      if (guarded) {
+        gate(host, turn);
+        const { actionRef, ...rest } = raw as Record<string, unknown> & { actionRef?: string };
+        holdUnlessApproved(host, turn, tool.name, rest, actionRef, false);
+        args = rest;
+      }
+      if (policy.externalResult && !policy.ownTaint) {
+        host.state.taint(turn.conversationId, `tool:${tool.name}`);
+      }
       return tool.impl(args, ctx);
     },
   };
 }
+
+const ACTION_REF = z
+  .string()
+  .optional()
+  .describe('The approved actionRef, after the user approved');
+
+const TAINT_HOLD_NOTE =
+  "Once the conversation has read outside content (task results, fetched pages, other people's messages), a call is held for the user's approval.";
+
+/**
+ * The approval gate of a guarded call: returns when it may run. A call with an actionRef runs
+ * only on an approval of that exact call, used once. Without one, an always-held call, or any
+ * guarded call the model decided on tainted context, is held and refused with its actionRef.
+ * Tainted context is what the request the call answers carried, so calls made in one response
+ * are judged alike, whatever order they run in. Synchronous, so nothing can change between the
+ * check and the hold.
+ */
+function holdUnlessApproved(
+  host: ToolHost,
+  turn: ActiveTurn,
+  tool: string,
+  args: Record<string, unknown>,
+  actionRef: string | undefined,
+  always: boolean,
+): void {
+  if (actionRef !== undefined) {
+    if (
+      !host.state.consumeApproval(turn.runId, tool, actionRef, args, (approvedBy) =>
+        host.approverAuthorized(approvedBy, turn.conversationId),
+      )
+    ) {
+      throw new ToolRefusal('not_approved', `Action ${actionRef} is not approved for this call.`);
+    }
+    return;
+  }
+  if (always) {
+    const ref = host.state.hold(turn.runId, tool, args);
+    throw new ToolRefusal(
+      'needs_approval',
+      `This action cannot be undone. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
+    );
+  }
+  if (host.decidedOnTaint(turn)) {
+    const ref = host.state.hold(turn.runId, tool, args);
+    throw new ToolRefusal(
+      'needs_approval',
+      `This conversation has read content from outside the user, so this action needs the user's approval. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
+    );
+  }
+}
+
+/** Under a held delegation: what the brief can do once it runs. */
+const DELEGATION_DETAILS =
+  'The runner works with full permissions and internet access, so it can send anything the brief asks for. Approve only a brief you would send yourself.';
 
 const MAX_ARG_CHARS = 200;
 const MAX_CALL_CHARS = 1500;
@@ -551,53 +633,20 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
   const policy = playbookToolPolicy(spec);
   const always = alwaysHeld(spec);
   const guarded = always || policy.effects.length > 0;
-  const parameters = guarded
-    ? spec.parameters.extend({
-        actionRef: z
-          .string()
-          .optional()
-          .describe('The approved actionRef, after the user approved'),
-      })
-    : spec.parameters;
+  const parameters = guarded ? spec.parameters.extend({ actionRef: ACTION_REF }) : spec.parameters;
   return {
     name: spec.name,
     description: always
       ? `${spec.description} Irreversible: the first call is held for the user's approval.`
       : guarded
-        ? `${spec.description} Once the conversation has read outside content (task results, fetched pages, other people's messages), a call is held for the user's approval.`
+        ? `${spec.description} ${TAINT_HOLD_NOTE}`
         : spec.description,
     parameters,
     impl: async (raw: Record<string, unknown>, ctx: MakaToolContext) => {
       const turn = host.turnFor(ctx);
       gate(host, turn);
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
-      if (guarded) {
-        if (actionRef === undefined) {
-          if (always) {
-            const ref = host.state.hold(turn.runId, spec.name, args);
-            throw new ToolRefusal(
-              'needs_approval',
-              `This action cannot be undone. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
-            );
-          }
-          if (host.state.taintOf(turn.conversationId)) {
-            const ref = host.state.hold(turn.runId, spec.name, args);
-            throw new ToolRefusal(
-              'needs_approval',
-              `This conversation has read content from outside the user, so this action needs the user's approval. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
-            );
-          }
-        } else if (
-          !host.state.consumeApproval(turn.runId, spec.name, actionRef, args, (approvedBy) =>
-            host.approverAuthorized(approvedBy, turn.conversationId),
-          )
-        ) {
-          throw new ToolRefusal(
-            'not_approved',
-            `Action ${actionRef} is not approved for this call.`,
-          );
-        }
-      }
+      if (guarded) holdUnlessApproved(host, turn, spec.name, args, actionRef, always);
       if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
       return spec.impl(args as never, {
         runId: turn.runId,

@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, expect, test } from 'vitest';
 import { ConversationView, QuestionCard } from '../src/App';
 import { CloudClient } from '../src/client';
-import type { Conversation, InboxItem, Question } from '../src/contract';
+import type { Conversation, InboxItem, Question, TaskView } from '../src/contract';
+import { Computer } from '../src/Computer';
 import { InboxCard, InboxPanel, visibleInbox } from '../src/Inbox';
 
 afterEach(cleanup);
@@ -371,4 +372,49 @@ test('inbox text is presentation-filtered like every other server string', () =>
     />,
   );
   expect(document.body.textContent).not.toMatch(/claude|openai|gpt|anthropic|codex/iu);
+});
+
+test('computer output is inert and name-filtered; unsupported pause never enables input', async () => {
+  const task: TaskView = {
+    taskId: 'task_one',
+    state: 'running',
+    createdAt: 0,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+  };
+  const client = new CloudClient('fake-invite', (async (_url, init) => {
+    if (init?.method === 'POST')
+      return Response.json({ error: 'pause_unsupported' }, { status: 409 });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              `id: 1\nevent: computer\ndata: ${JSON.stringify({ controller: 'agent', terminal: 'Ｉｎｓｔａｂｏｘ Claude <script>bad()</script>\n' })}\n\n`,
+            ),
+          );
+          init?.signal?.addEventListener('abort', () => controller.close(), { once: true });
+        },
+      }),
+    );
+  }) as typeof fetch);
+  render(<Computer client={client} task={task} />);
+  const details = screen.getByText('Open computer').closest('details')!;
+  details.open = true;
+  fireEvent(details, new Event('toggle'));
+  await waitFor(() =>
+    expect(screen.getByLabelText('Live terminal output').textContent).toContain(
+      '<script>bad()</script>',
+    ),
+  );
+  expect(document.body.textContent).not.toMatch(/instabox|claude/iu);
+  expect(document.querySelector('script')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Take control' }));
+  await waitFor(() =>
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Watching only; no control was granted',
+    ),
+  );
+  expect((screen.getByLabelText('Terminal input') as HTMLInputElement).disabled).toBe(true);
 });

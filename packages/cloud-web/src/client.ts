@@ -5,6 +5,9 @@ import {
   type ArtifactContent,
   type ArtifactListing,
   type Conversation,
+  type ComputerFrame,
+  type ComputerInput,
+  type ComputerState,
   type FeedEvent,
   type InboxAnswerRequest,
   type InboxAnswerResult,
@@ -28,9 +31,9 @@ export class ApiError extends Error {
 export class Unsupported extends Error {}
 
 /** Authenticated fetch SSE: native EventSource cannot carry the invite header. */
-export async function readEvents(
+export async function readEvents<T = FeedEvent>(
   response: Response,
-  receive: (event: FeedEvent) => void,
+  receive: (event: T) => void,
 ): Promise<void> {
   if (!response.body) throw new Error('Missing event stream');
   const reader = response.body.getReader();
@@ -49,7 +52,7 @@ export async function readEvents(
           // A frame that is not JSON is skipped; the ones after it still count.
         }
         if (typeof parsed === 'object' && parsed !== null) {
-          receive({ id: Number(id), kind, data: parsed } as FeedEvent);
+          receive({ id: Number(id), kind, data: parsed } as T);
         }
       }
       kind = '';
@@ -181,6 +184,29 @@ export class CloudClient {
   /** The server answers with the task's view; the event stream carries the same change. */
   async control(task: string, action: TaskControl): Promise<void> {
     await this.request<unknown>(routes.control(task, action), { method: 'POST', body: '{}' });
+  }
+  computerControl(task: string, action: 'takeover' | 'handback') {
+    return this.request<ComputerState>(`${routes.computer(task)}/${action}`, {
+      method: 'POST',
+      body: '{}',
+    });
+  }
+  computerInput(task: string, input: ComputerInput) {
+    return this.request(`${routes.computer(task)}/input`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+  async watchComputer(task: string, receive: (frame: ComputerFrame) => void, signal: AbortSignal) {
+    const response = await this.send(`${routes.computer(task)}/stream`, { signal });
+    await readEvents<{ kind: string; data: ComputerFrame }>(response, (event) => {
+      if (!signal.aborted && event.kind === 'computer') receive(event.data);
+    });
+    if (!signal.aborted) {
+      // EOF can mean a revoked invite, not merely a broken connection.
+      await this.send(routes.computer(task), { signal });
+      throw new Error('Computer stream ended');
+    }
   }
   /** A 404 is a question that is gone or not yours: the route is absent only where no conductor runs, and then there is no question. */
   answer(id: string, answer: AnswerRequest) {

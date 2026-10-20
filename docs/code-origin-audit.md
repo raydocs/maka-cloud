@@ -259,6 +259,7 @@ rejected even if a path is listed here.
 - `apps/desktop/build/*.png`: contributor-submitted DMG artwork from pull request #3817; that contribution records Codex as review and verification assistance, not as the source of the artwork.
 - `apps/desktop/resources/status/*.png`: the status images recorded above and reproducibly rendered by `scripts/generate-cu-status-icons.mjs`.
 - `docs/images/**/*.png`: screenshots of Maka's own user interface committed as review evidence, including pull requests #3584 and #3588.
+- `packages/cloud-web/tests/fixtures/desktop.png`: T14's synthetic desktop test fixture, drawn locally with ImageMagick from original shapes and text; no sandbox capture, third-party image, logo or artwork input. SHA-256: `68d312378086fd624dae2c8839790abe4b4d426a350745a88f03dc2e495c5b3b`.
 - `packages/runtime-host/src/protocol/artifact.ts`: Apache-licensed protocol source containing literal C0 and DEL characters in the control-character rejection expression.
 - `packages/storage/src/__tests__/mcp-config-store.test.ts`: Apache-licensed validation fixture containing a literal control character in a rejected MCP tool name.
 - `patches/@xterm+xterm+6.0.0.patch`: MIT-licensed xterm.js patch attributed in root `LICENSE`; upstream context includes literal terminal control characters whose bytes must be preserved for patch application.

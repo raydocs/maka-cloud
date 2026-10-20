@@ -188,6 +188,18 @@ export interface PushRegistration {
 
 export type TaskControl = 'cancel' | 'pause' | 'resume';
 
+export interface ComputerState {
+  controller: 'human' | 'agent';
+}
+export interface ComputerFrame extends ComputerState {
+  desktop?: { mime: 'image/png' | 'image/jpeg'; base64: string };
+  terminal?: string;
+}
+export type ComputerInput =
+  | { type: 'terminal'; text: string }
+  | { type: 'key'; key: string }
+  | { type: 'pointer'; x: number; y: number; button: 0 | 1 | 2 };
+
 /** All paths are same-origin; opaque ids are URL-encoded. */
 export const routes = {
   conversations: '/v1/conversations',
@@ -196,6 +208,7 @@ export const routes = {
   answers: (id: string) => `/v1/conversations/${encodeURIComponent(id)}/answers`,
   events: (id: string) => `/v1/events?conversation=${encodeURIComponent(id)}`,
   control: (task: string, action: TaskControl) => `/v1/tasks/${encodeURIComponent(task)}/${action}`,
+  computer: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/computer`,
   inboxAnswer: (item: string) => `/v1/inbox/items/${encodeURIComponent(item)}/answer`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,
