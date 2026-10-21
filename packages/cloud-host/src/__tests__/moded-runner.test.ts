@@ -4,7 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { DEFAULT_MODES, implementerFor, MODE_IDS, withModeLine } from '@maka-cloud/modes';
-import type { Recovery, RunHandle, Runner, RunSpec, TaskId } from '@maka-cloud/orchestrator';
+import {
+  FakeRunner,
+  MemoryTaskStore,
+  Orchestrator,
+  type Recovery,
+  type RunHandle,
+  type Runner,
+  RunnerRegistry,
+  type RunSpec,
+  type TaskId,
+} from '@maka-cloud/orchestrator';
 import { withModes } from '../moded-runner.js';
 
 const dir = await mkdtemp(join(tmpdir(), 'moded-runner-'));
@@ -141,4 +151,39 @@ test('a resumed task with a bad brief is refused and a runner without recover or
   const bare = withModes(fake('claude-agent-sdk', false).runner, DEFAULT_MODES);
   assert.equal('recover' in bare, false, 'not resumable stays not resumable');
   assert.equal('stopOrphaned' in bare, false);
+});
+
+test('the wrapper takes messages exactly when the runner under it does', () => {
+  const open = new FakeRunner({ name: 'claude-agent-sdk', steerable: true });
+  const closed = new FakeRunner({ name: 'codex', steerable: false });
+  assert.equal(withModes(open, DEFAULT_MODES).steerable, true);
+  assert.ok(!withModes(closed, DEFAULT_MODES).steerable);
+  assert.ok(!withModes(fake('codex').runner, DEFAULT_MODES).steerable, 'no flag, no messages');
+});
+
+test('a message to a task of a steerable runner registered through the wrapper reaches its run', async () => {
+  const inner = new FakeRunner({ name: 'claude-agent-sdk', steerable: true });
+  const orchestrator = await Orchestrator.create({
+    store: new MemoryTaskStore(),
+    runners: new RunnerRegistry([withModes(inner, DEFAULT_MODES)]),
+    handoffRoot: dir,
+  });
+  const issued = orchestrator.issueSession();
+  const session = orchestrator.authenticate(issued.token);
+  assert.ok(session);
+  const { taskId } = await orchestrator.delegate(session, {
+    runner: 'claude-agent-sdk',
+    brief: 'work',
+  });
+  for (let i = 0; i < 400 && inner.runs.length === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const run = inner.runFor(taskId);
+  const sent = await orchestrator.steerAs(
+    { sessionId: session.sessionId, authorize: () => undefined },
+    taskId,
+    { steerId: 'm1', text: 'Use the v2 API.' },
+  );
+  assert.equal(sent.steerId, 'm1');
+  assert.deepEqual(run.waiting, [{ steerId: 'm1', text: 'Use the v2 API.' }]);
 });

@@ -109,6 +109,9 @@ async function callHook(event, tool, extra) {
   if (!hooks[event]) return undefined;
   const answer = await ask({ subtype: 'hook_callback', callback_id: hooks[event], input: toolInput(event, tool, extra), tool_use_id: tool.id });
   fs.appendFileSync(path.join(ctl, 'hooks.log'), JSON.stringify({ event, id: tool.id, answer }) + '\\n');
+  // Like the real CLI, what a hook adds to the conversation is a line of its transcript.
+  const added = answer && answer.hookSpecificOutput && answer.hookSpecificOutput.additionalContext;
+  if (added) keep('attachment', { content: added });
   return answer;
 }
 

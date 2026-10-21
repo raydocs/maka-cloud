@@ -9,6 +9,7 @@ import {
   FIXED_ADD,
   fixes,
   readJson,
+  reviewsNothing,
   setup,
   terminal,
   testOnly,
@@ -26,10 +27,7 @@ test('a change that passes the checks on the first run is delivered with a runne
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
 
   const manifest = await readJson(spec.resultPath);
-  // Nothing but the missing review is wrong with it: without a reviewer it is not a verified change.
-  const verdict = verifyCodingManifest(manifest);
-  assert.equal(verdict.problems.length, 1);
-  assert.match(verdict.problems[0] ?? '', /^the change was not independently reviewed: not done/);
+  assert.deepEqual(verifyCodingManifest(manifest), { ok: true, problems: [] });
   assert.match(
     manifest.done[0],
     /^verified: `bash tests\/run.sh` passed; the reproduction test `bash tests\/test_add.sh` failed on base [0-9a-f]{12} and passes/,
@@ -53,7 +51,7 @@ test('a change that passes the checks on the first run is delivered with a runne
   assert.match(patch, /^\+add\(\) \{ echo \$\(\( \$1 \+ \$2 \)\); \}$/mu);
 
   assert.equal(h.claude.turns.length, 1);
-  assert.equal(h.codex.turns.length, 0);
+  assert.equal(h.codex.turns.length, 1, 'the other vendor reviewed it');
   const brief = await fs.readFile(h.claude.turns[0]!.spec.briefPath, 'utf8');
   assert.match(brief, new RegExp(`checked out at commit \`${h.baseSha}\``));
   assert.match(brief, /repro\.json/);
@@ -73,7 +71,7 @@ test('a failed check resumes the same vendor with the failure, and a fixed chang
     h.claude.turns[1]!.prompt ?? '',
     /the reproduction test `bash tests\/test_add.sh` fails with your change \(exit 1\)/,
   );
-  assert.equal(h.codex.turns.length, 0);
+  assert.equal(h.codex.turns.length, 1, 'and the other vendor reviews the repaired change');
   const verification = await readJson(join(h.handoff, 'tsk_repair', 'verification.json'));
   assert.deepEqual(
     verification.attempts[0].turns.map((turn: { outcome: string }) => turn.outcome),
@@ -119,7 +117,8 @@ test('a reproduction test that passes without the change is rejected, and the ch
 
 test('after two failures the task goes to the other vendor once, from the base commit, with a failure brief', async (t) => {
   const h = await setup(t);
-  h.claude.script = testOnly;
+  // Its third run is the review of the other vendor's change.
+  h.claude.script = (turn) => (turn.n <= 2 ? testOnly(turn) : reviewsNothing(turn));
   let seen:
     | { add: string; testExists: boolean; brief: string; failure: any; reproLeft: boolean }
     | undefined;
@@ -144,7 +143,8 @@ test('after two failures the task goes to the other vendor once, from the base c
 
   assert.deepEqual(
     h.claude.turns.map((turn) => turn.kind),
-    ['start', 'resume'],
+    ['start', 'resume', 'start'],
+    'two failed runs, then the review of the other vendor',
   );
   assert.deepEqual(
     h.codex.turns.map((turn) => turn.kind),
@@ -171,9 +171,7 @@ test('after two failures the task goes to the other vendor once, from the base c
   assert.ok(
     manifest.done.includes('claude-agent-sdk failed (2 failed runs); codex made the change'),
   );
-  const problems = verifyCodingManifest(manifest).problems;
-  assert.equal(problems.length, 1);
-  assert.match(problems[0] ?? '', /^the change was not independently reviewed/);
+  assert.deepEqual(verifyCodingManifest(manifest), { ok: true, problems: [] });
   zeroStats(h.runner);
 });
 

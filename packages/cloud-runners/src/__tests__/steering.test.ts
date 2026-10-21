@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { RunHandle, RunnerEvent, StepIntentResult, StepLog } from '@maka-cloud/orchestrator';
 import { steerContext } from '../hooks.js';
+import { MemoryTranscriptStore, type TranscriptKey, type TranscriptLine } from '../transcripts.js';
 import { sdkSetup } from './sdk-harness.js';
 import { API_KEY, collect, deferred, type Harness, terminal, until } from './harness.js';
 
@@ -163,5 +164,86 @@ test('the text the agent reads names the user as its source and keeps messages a
   assert.match(
     text,
     /<user_message>\nONE\n<\/user_message>\n<user_message>\nTWO\n<\/user_message>/u,
+  );
+});
+
+/** A transcript store that holds back the append of lines carrying a message to the agent, until told. */
+class GatedTranscripts extends MemoryTranscriptStore {
+  readonly reached = deferred();
+  readonly release = deferred();
+  override async append(
+    taskId: string,
+    key: TranscriptKey,
+    lines: readonly TranscriptLine[],
+  ): Promise<void> {
+    if (lines.some((line) => line.json.includes('<user_message id='))) {
+      this.reached.resolve();
+      await this.release.promise;
+    }
+    return super.append(taskId, key, lines);
+  }
+}
+
+test('a message is reported read only once the kept transcript shows the agent has it', async (t) => {
+  const transcripts = new GatedTranscripts();
+  const h = await sdkSetup(t, { transcripts });
+  const { steps, gate } = gatedSteps();
+  const { handle, events, done } = await started(h, steps, [
+    { id: 'toolu_1', name: 'Read', input: { file_path: '/work/a.txt' } },
+  ]);
+  handle.steer?.({ steerId: 'm1', text: 'Use the v2 API.' });
+  gate.resolve();
+
+  // The hook has answered and the CLI has the message, but the transcript line is not kept yet.
+  await Promise.race([transcripts.reached.promise, done]);
+  const post = (await hookAnswers(h)).find((entry) => entry.event === 'PostToolUse');
+  assert.match(
+    contextOf(post?.answer) ?? '',
+    /<user_message id="m1">/u,
+    'the agent’s copy names the key',
+  );
+  assert.deepEqual(reads(events), [], 'not read while the transcript does not show it');
+
+  transcripts.release.resolve();
+  assert.equal(terminal(await done)?.type, 'finished');
+  assert.deepEqual(reads(events), ['m1']);
+});
+
+test('a restarted run does not give the agent a message its kept transcript shows it has, and gives the others', async (t) => {
+  const transcripts = new MemoryTranscriptStore();
+  const h = await sdkSetup(t, { transcripts });
+  const tools = [{ id: 'toolu_1', name: 'Read', input: { file_path: '/work/a.txt' } }];
+  const first = gatedSteps();
+  const one = await started(h, first.steps, tools);
+  one.handle.steer?.({ steerId: 'm1', text: 'Use the v2 API.' });
+  first.gate.resolve();
+  assert.equal(terminal(await one.done)?.type, 'finished');
+  assert.deepEqual(reads(one.events), ['m1']);
+
+  // The server died before it could write down that m1 was read, and offers it again.
+  await fs.rm(fakeFile(h, 'hooks.log'));
+  const second = gatedSteps();
+  second.gate.resolve();
+  const spec = await h.spec('tsk_steer', { steps: second.steps });
+  const handle = (await h.runners.claude.recover({
+    ...spec,
+    recovery: { epoch: 2, resumes: 1, note: 'the server restarted' },
+  })) as RunHandle;
+  const events: RunnerEvent[] = [];
+  const done = (async () => {
+    for await (const event of handle.events) events.push(event);
+  })();
+  handle.steer?.({ steerId: 'm1', text: 'Use the v2 API.' });
+  handle.steer?.({ steerId: 'm2', text: 'And keep the tests.' });
+  await done;
+
+  const post = (await hookAnswers(h)).filter((entry) => entry.event === 'PostToolUse');
+  const context = post.map((entry) => contextOf(entry.answer) ?? '').join('\n');
+  assert.match(context, /And keep the tests\./u);
+  assert.doesNotMatch(context, /Use the v2 API\./u, 'the agent has m1 already');
+  assert.deepEqual(
+    reads(events).sort(),
+    ['m1', 'm2'],
+    'm1 is reported read without being given again',
   );
 });
