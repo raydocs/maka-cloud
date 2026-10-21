@@ -177,6 +177,35 @@ describe('applyEgressGuard', () => {
     );
   });
 
+  it('refuses to keep a chain with a rule that lets traffic through, however the rest reads', async () => {
+    await make();
+    await run();
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -A ${EGRESS_CHAIN} -j ACCEPT`,
+    });
+    // An ACCEPT behind the reply rule: every REJECT is still there, but the chain is not ours.
+    await run();
+    assert.ok(!v4().some((rule) => rule.includes('ACCEPT')), v4().join('\n'));
+  });
+
+  it('does not accept rejects that are narrowed to one source', async () => {
+    await make();
+    await run();
+    const cmds = EGRESS_BLOCKED_V4.flatMap((net) => [
+      `iptables -w -D ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp-port-unreachable`,
+      `iptables -w -A ${EGRESS_CHAIN} -s 192.0.2.7/32 -d ${net} -j REJECT`,
+    ]);
+    await h.client.exec(h.fake.machineId, { cmd: cmds.join(' && ') });
+    assert.ok(v4().every((rule) => !rule.includes('REJECT') || rule.includes('-s 192.0.2.7/32')));
+    await run();
+    assert.deepEqual(
+      v4().filter((rule) => rule.includes('-s 192.0.2.7/32')),
+      [],
+      'a reject that only applies to one source is not a reject',
+    );
+    for (const net of EGRESS_BLOCKED_V4) assert.ok(v4().includes(reject4(net)), net);
+  });
+
   it('never takes the hook away before the new chain has one', async () => {
     await make();
     await run();

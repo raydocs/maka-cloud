@@ -108,4 +108,20 @@ describe('applyEgressGuard against the real iptables', () => {
     );
     assert.ok(!iptables('iptables', '-S').includes(`${EGRESS_CHAIN}_NEW`), 'no scratch chain left');
   });
+
+  it('does not keep a rule that lets traffic through, or rejects narrowed to one source', async (t) => {
+    if (!holder) return t.skip('no network namespace to try it in');
+    await run();
+    const clean = iptables('iptables', '-S', EGRESS_CHAIN);
+    iptables('iptables', '-I', EGRESS_CHAIN, '2', '-j', 'ACCEPT');
+    await run();
+    assert.equal(iptables('iptables', '-S', EGRESS_CHAIN), clean);
+    for (const net of EGRESS_BLOCKED_V4) {
+      iptables('iptables', '-D', EGRESS_CHAIN, '-d', net, '-j', 'REJECT');
+      iptables('iptables', '-A', EGRESS_CHAIN, '-s', '192.0.2.7/32', '-d', net, '-j', 'REJECT');
+    }
+    assert.ok(iptables('iptables', '-S', EGRESS_CHAIN).includes('-s 192.0.2.7/32'));
+    await run();
+    assert.equal(iptables('iptables', '-S', EGRESS_CHAIN), clean);
+  });
 });
