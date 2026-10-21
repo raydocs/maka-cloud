@@ -267,7 +267,7 @@ function runtimeRig(over: Partial<Parameters<typeof createDuties>[0]> = {}) {
   const runtime = createDuties({
     dbPath: ':memory:',
     webhookSecret: SECRET,
-    repos: ['acme/widgets'],
+    links: [{ repo: 'acme/widgets', installationId: 7, inviteId: OWNER }],
     inspector: { inspect: async () => FACTS },
     every: (fn, ms) => {
       const timer = { fn, ms, released: false };
@@ -363,6 +363,30 @@ test('a proposal nobody can decide is not offered', async () => {
   }
 });
 
+test('a repository is claimed only by the invite and under the installation the operator tied it to', async () => {
+  const r = runtimeRig();
+  const SQUATTER = 'inv_0000000000ff';
+  // Another invite names the allowlisted repository: refused, and it takes nothing from the owner.
+  assert.deepEqual(r.runtime.service.addProject(SQUATTER, REGISTER), {
+    ok: false,
+    reason: 'not_allowed',
+  });
+  // The right invite under another installation id is refused too, and it squats nothing.
+  assert.deepEqual(r.runtime.service.addProject(OWNER, { ...REGISTER, installationId: 8 }), {
+    ok: false,
+    reason: 'not_allowed',
+  });
+  assert.deepEqual(r.runtime.service.listProjects(SQUATTER), []);
+  assert.deepEqual(r.runtime.service.listProjects(OWNER), []);
+  assert.ok(r.runtime.service.addProject(OWNER, REGISTER).ok, 'the owner can still register it');
+  // The repository belongs to one project: the squatter cannot take it after the owner either.
+  assert.deepEqual(r.runtime.service.addProject(SQUATTER, REGISTER), {
+    ok: false,
+    reason: 'not_allowed',
+  });
+  r.runtime.close();
+});
+
 test('only repositories the operator named can be registered, and only by the decision of the owner', async () => {
   const r = runtimeRig();
   assert.deepEqual(r.runtime.service.addProject(OWNER, { ...REGISTER, repo: 'evil/repo' }), {
@@ -373,7 +397,7 @@ test('only repositories the operator named can be registered, and only by the de
     r.runtime.service.addProject(OWNER, { ...REGISTER, repo: 'Acme/Widgets' }).ok,
     'case does not matter',
   );
-  const none = runtimeRig({ repos: [] });
+  const none = runtimeRig({ links: [] });
   assert.equal(none.runtime.service.addProject(OWNER, REGISTER).ok, false, 'no list, no project');
   for (const caller of [undefined, 'inv_somebody_else']) {
     const proposed = await r.runtime.engine.propose(

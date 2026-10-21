@@ -438,7 +438,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
-| `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name repositories a project may be registered for; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
+| `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 
 `INSTABOX_MACHINE_ID` is not used any more and is refused: one machine for every
@@ -448,15 +448,22 @@ invite would let invites read each other.
 
 Standing duties are off until `MAKA_GITHUB_WEBHOOK_SECRET` is set. With it, the
 server accepts GitHub App deliveries at `POST /github/webhook` and an invite can
-register projects (`/v1/projects`) for the repositories named in
-`MAKA_CLOUD_DUTY_REPOS`. No other repository can be registered.
+register projects (`/v1/projects`) through the links named in
+`MAKA_CLOUD_DUTY_REPOS`. Each link ties a repository to the GitHub App
+installation it lives in and to the one invite that owns it
+(`acme/widgets@12345678=inv_0123456789ab`); only that invite, under that
+installation id, can register the repository. A repository name alone proves
+nothing, so no other invite or installation can claim it, and none can be
+registered that the operator did not link.
 
 1. In the GitHub App, set the webhook URL to `https://<your host>/github/webhook`
    and a secret of 16 characters or more; put the same secret in
    `MAKA_GITHUB_WEBHOOK_SECRET`. Subscribe the app to workflow runs, issues,
    issue comments, pull request reviews and pull request review comments. Any
    other event is refused.
-2. List the repositories in `MAKA_CLOUD_DUTY_REPOS` and restart.
+2. Make the owner's invite first, find the installation id of the app on that
+   repository (the number in the installation's URL), write the link in
+   `MAKA_CLOUD_DUTY_REPOS` and restart. A repository can be linked once.
 3. A project's owner asks for a proposal, and the server offers two to four
    duties as one decision in the inbox. Nothing runs until the owner chooses a
    set. `MAKA_GITHUB_TOKEN` is used read-only to look at the repository for the

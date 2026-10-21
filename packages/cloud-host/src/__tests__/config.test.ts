@@ -349,6 +349,14 @@ test('the backup directory is optional, absolute and apart from the data directo
       bad,
     );
   }
+  // A repository belongs to one invite and one installation: naming it twice is refused.
+  assert.ok(
+    problemsOf({
+      ...ENV,
+      MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET,
+      MAKA_CLOUD_DUTY_REPOS: `acme/widgets@7=${INVITE_A},ACME/Widgets@7=${INVITE_B}`,
+    }).some((p) => /names acme\/widgets more than once/.test(p)),
+  );
 });
 
 test('the spend alert needs an amount, the owner’s invite and Web Push, and says what is missing', () => {
@@ -391,11 +399,13 @@ test('the spend alert needs an amount, the owner’s invite and Web Push, and sa
 });
 
 const DUTY_SECRET = 'a-webhook-secret-of-sufficient-length';
+const INVITE_A = 'inv_00000000000a';
+const INVITE_B = 'inv_00000000000b';
 
 test('standing duties are off without a webhook secret, and the data layout names their database', () => {
   const config = readStackConfig(ENV);
   assert.equal(config.dutiesSet, false);
-  assert.deepEqual(config.dutyRepos, []);
+  assert.deepEqual(config.dutyLinks, []);
   assert.equal(config.dutiesDbPath, '/srv/maka/duties.db');
   assert.match(describeConfig(config).join('\n'), /standing duties:\s+off/);
 });
@@ -404,10 +414,13 @@ test('standing duties need a long enough secret and a list of repositories, and 
   const on = readStackConfig({
     ...ENV,
     MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET,
-    MAKA_CLOUD_DUTY_REPOS: 'acme/widgets, acme/gadgets,acme/widgets',
+    MAKA_CLOUD_DUTY_REPOS: `Acme/Widgets@7=${INVITE_A}, acme/gadgets@9=${INVITE_B}`,
   });
   assert.equal(on.dutiesSet, true);
-  assert.deepEqual(on.dutyRepos, ['acme/widgets', 'acme/gadgets']);
+  assert.deepEqual(on.dutyLinks, [
+    { repo: 'acme/widgets', installationId: 7, inviteId: INVITE_A },
+    { repo: 'acme/gadgets', installationId: 9, inviteId: INVITE_B },
+  ]);
   const printed = describeConfig(on).join('\n');
   assert.match(
     printed,
@@ -418,7 +431,7 @@ test('standing duties need a long enough secret and a list of repositories, and 
   const secretOnly = readStackConfig({ ...ENV, MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET });
   assert.equal(secretOnly.dutiesSet, true);
   assert.deepEqual(
-    secretOnly.dutyRepos,
+    secretOnly.dutyLinks,
     [],
     'no repository is allowed until the operator names one',
   );
@@ -428,17 +441,31 @@ test('standing duties need a long enough secret and a list of repositories, and 
   assert.ok(short.some((p) => /MAKA_GITHUB_WEBHOOK_SECRET must be at least 16/.test(p)));
   assert.ok(!short.join('\n').includes('too-short'));
   assert.ok(
-    problemsOf({ ...ENV, MAKA_CLOUD_DUTY_REPOS: 'acme/widgets' }).some((p) =>
+    problemsOf({ ...ENV, MAKA_CLOUD_DUTY_REPOS: `acme/widgets@7=${INVITE_A}` }).some((p) =>
       /needs MAKA_GITHUB_WEBHOOK_SECRET/.test(p),
     ),
   );
-  for (const bad of ['widgets', 'acme/', 'a/b/c', 'acme/wid gets', '../x/y', 'acme/widgets,']) {
+  for (const bad of [
+    'acme/widgets',
+    `widgets@7=${INVITE_A}`,
+    `acme/@7=${INVITE_A}`,
+    `a/b/c@7=${INVITE_A}`,
+    `acme/wid gets@7=${INVITE_A}`,
+    `../x/y@7=${INVITE_A}`,
+    `acme/widgets@7=${INVITE_A},`,
+    `acme/widgets@0=${INVITE_A}`,
+    `acme/widgets@-1=${INVITE_A}`,
+    `acme/widgets@7x=${INVITE_A}`,
+    'acme/widgets@7=',
+    'acme/widgets@7=inv_xyz',
+    'acme/widgets@7=someone',
+  ]) {
     assert.ok(
       problemsOf({
         ...ENV,
         MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET,
         MAKA_CLOUD_DUTY_REPOS: bad,
-      }).some((p) => /comma separated owner\/name/.test(p)),
+      }).some((p) => /comma separated owner\/name@<installation id>=<invite id>/.test(p)),
       bad,
     );
   }

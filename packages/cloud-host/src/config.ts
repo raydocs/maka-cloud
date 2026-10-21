@@ -84,8 +84,12 @@ export interface StackConfig {
    * `/github/webhook`. The secret itself is read from the environment by the stack.
    */
   dutiesSet: boolean;
-  /** The repositories (`owner/name`) a project may be registered for. Empty: none, whatever the invites ask. */
-  dutyRepos: string[];
+  /**
+   * The repositories a project may be registered for, each tied by the operator to the GitHub
+   * App installation it lives in and to the one invite that owns it. Empty: none, whatever the
+   * invites ask.
+   */
+  dutyLinks: DutyLink[];
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
@@ -276,7 +280,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_DUTY_REPOS',
-    'comma separated owner/name repositories a project may be registered for; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
+    'comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
   ],
 ] as const;
 
@@ -393,7 +397,7 @@ export function readStackConfig(
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
     dutiesSet: false,
-    dutyRepos: [],
+    dutyLinks: [],
   };
   try {
     config.pushSet = pushConfigFromEnv(env) !== undefined;
@@ -412,15 +416,15 @@ export function readStackConfig(
       config.dutiesSet = true;
     }
   }
-  const dutyRepos = value('MAKA_CLOUD_DUTY_REPOS');
-  if (dutyRepos !== undefined) {
-    const repos = dutyRepos.split(',').map((repo) => repo.trim());
-    if (!repos.every((repo) => /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u.test(repo))) {
-      problems.push('MAKA_CLOUD_DUTY_REPOS must be comma separated owner/name repositories');
+  const dutyLinks = value('MAKA_CLOUD_DUTY_REPOS');
+  if (dutyLinks !== undefined) {
+    const links = parseDutyLinks(dutyLinks);
+    if (typeof links === 'string') {
+      problems.push(`MAKA_CLOUD_DUTY_REPOS ${links}`);
     } else if (webhookSecret === undefined) {
       problems.push('MAKA_CLOUD_DUTY_REPOS needs MAKA_GITHUB_WEBHOOK_SECRET');
     } else {
-      config.dutyRepos = [...new Set(repos)];
+      config.dutyLinks = links;
     }
   }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
@@ -503,6 +507,36 @@ function isLoopback(hostname: string): boolean {
 }
 
 const INVITE_ID = /^inv_[0-9a-f]{12}$/u;
+
+/** One repository of a standing duty, the installation it lives in and the invite that owns it. */
+export interface DutyLink {
+  /** `owner/name`, lower case. */
+  repo: string;
+  installationId: number;
+  inviteId: string;
+}
+
+const DUTY_LINK =
+  /^([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})@([1-9][0-9]{0,15})=(inv_[0-9a-f]{12})$/u;
+
+/**
+ * `owner/name@<installation id>=<invite id>`, comma separated. A repository belongs to one invite
+ * and one installation: the operator is the one who knows who owns what, so a repository named
+ * twice is a mistake, not a choice. The problem as text, or the links.
+ */
+function parseDutyLinks(text: string): DutyLink[] | string {
+  const links: DutyLink[] = [];
+  for (const entry of text.split(',').map((part) => part.trim())) {
+    const match = DUTY_LINK.exec(entry);
+    if (!match) {
+      return 'must be comma separated owner/name@<installation id>=<invite id> links';
+    }
+    const repo = (match[1] as string).toLowerCase();
+    if (links.some((link) => link.repo === repo)) return `names ${repo} more than once`;
+    links.push({ repo, installationId: Number(match[2]), inviteId: match[3] as string });
+  }
+  return links;
+}
 const MACHINE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 /** `{"<inviteId>": "<machine>"}`, at least one entry, and no machine used by two invites. */
@@ -586,7 +620,7 @@ export function describeConfig(config: StackConfig): string[] {
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
-    `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyRepos.length === 0 ? 'no repository yet' : config.dutyRepos.join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
     `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,

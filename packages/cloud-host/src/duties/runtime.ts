@@ -8,6 +8,7 @@ import {
 } from '@maka-cloud/duties';
 import type { CloudServer, DutyService } from '@maka-cloud/server';
 import type { ProposalOutcome, SupervisorHost } from '@maka-cloud/supervisor';
+import type { DutyLink } from '../config.js';
 import { serverLauncher } from './launcher.js';
 import { type DutyRunView, RunSettler } from './settle.js';
 
@@ -15,8 +16,11 @@ export interface DutiesSetup {
   dbPath: string;
   /** The GitHub App's webhook secret. Read from the environment by the caller; never logged. */
   webhookSecret: string;
-  /** `owner/name` of the repositories projects may be registered for. Empty: none may. */
-  repos: readonly string[];
+  /**
+   * The repositories projects may be registered for, each with the installation it lives in and
+   * the one invite that owns it. Empty: none may.
+   */
+  links: readonly DutyLink[];
   /** Replaces the GitHub reader, for tests. */
   inspector?: RepoInspector;
   /** How often schedules are looked at and finished runs settled. Default one minute. */
@@ -62,12 +66,18 @@ export interface DutiesRuntime {
 const PROPOSAL_TITLE_MAX = 120;
 
 export function createDuties(setup: DutiesSetup): DutiesRuntime {
-  const allowed = new Set(setup.repos.map((repo) => repo.toLowerCase()));
   const engine = new Engine({
     dbPath: setup.dbPath,
     webhookSecret: setup.webhookSecret,
-    // Fail closed: only repositories the operator named may be registered.
-    allowProject: ({ repo }) => allowed.has(repo.toLowerCase()),
+    // Fail closed: a repository is registered only by the invite and under the installation the
+    // operator tied it to. Naming a repository is not proof that it is yours.
+    allowProject: ({ owner, repo, installationId }) =>
+      setup.links.some(
+        (link) =>
+          link.repo === repo.toLowerCase() &&
+          link.installationId === installationId &&
+          link.inviteId === owner,
+      ),
     ...setup.engine,
     ...(setup.onWarning === undefined ? {} : { onWarning: setup.onWarning }),
   });
