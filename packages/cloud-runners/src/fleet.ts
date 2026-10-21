@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { InstaboxClient } from '@maka-cloud/instabox';
+import { applyEgressGuard, type InstaboxClient } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
 import { DEFAULT_EXPORT_LIMITS, type ExportLimits } from './export.js';
 import type { InputPolicy } from './inputs.js';
@@ -51,6 +51,13 @@ export interface CloudRunnersOptions {
    * place, and that task fails to start without a machine being asked for.
    */
   tenantOf?: (taskId: TaskId) => string;
+  /**
+   * Closes a box's network to its host's own addresses (the cloud metadata address, private ranges,
+   * loopback) before a run, an install or a resume starts anything in it. Default: the instabox
+   * firewall rules from `applyEgressGuard`. A box where it fails is refused and the task fails.
+   * A replacement is for a box whose network is closed some other way.
+   */
+  egressGuard?: (client: InstaboxClient, machineId: string, signal?: AbortSignal) => Promise<void>;
   /** Maps the orchestrator's MCP URL to one the sandbox can reach. Default: unchanged. */
   mcpUrlForSandbox?: (url: string) => string;
   /** CLI versions to install. Defaults are pinned in the vendor adapters. */
@@ -188,12 +195,17 @@ export class Fleet {
   machine(machineId: string): RemoteMachine {
     let machine = this.machines.get(machineId);
     if (!machine) {
+      const guard = this.options.egressGuard;
       machine = new RemoteMachine(
         this.client,
         machineId,
         this.root,
         this.logRoot,
         this.options.agentChannel?.user,
+        (signal) =>
+          guard
+            ? guard(this.client, machineId, signal)
+            : applyEgressGuard(this.client, machineId, signal ? { signal } : {}),
       );
       this.machines.set(machineId, machine);
     }

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   promises as fs,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -97,6 +98,8 @@ export interface FakeFirewall {
   rules(tool: 'iptables' | 'ip6tables', chain: string): string[];
   /** Every call, as `tool args`. */
   calls(): string[];
+  /** Forgets every rule, as a box restored from a snapshot or resumed after a restart may have. */
+  reset(): void;
 }
 
 export interface FakeSnapshot {
@@ -194,6 +197,10 @@ export class FakeInstabox {
     this.firewall = {
       rules: (tool, chain) => read(`${tool}.${chain}`).split('\n').filter(Boolean),
       calls: () => read('log').split('\n').filter(Boolean),
+      reset: () => {
+        if (!state) return;
+        for (const name of readdirSync(state)) if (name !== 'log') rmSync(join(state, name));
+      },
     };
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
