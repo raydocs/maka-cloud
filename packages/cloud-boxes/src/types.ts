@@ -52,6 +52,12 @@ export interface BoxPoolOptions {
    * failure to tell counts as "yes": the box stays awake.
    */
   recentWrite?: (machineId: string) => Promise<boolean>;
+  /**
+   * When unused boxes are looked at: a lost box is tried again after `lostGraceMs` (default 30 min)
+   * and deleted after `lostDeleteMs` (default 24 h); a box idle for `idleDeleteMs` is deleted (never
+   * by default).
+   */
+  cleanup?: { lostGraceMs?: number; lostDeleteMs?: number; idleDeleteMs?: number };
   onWarning?: (message: string, detail?: unknown) => void;
   /** Test seams. */
   now?: () => number;
