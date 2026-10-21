@@ -18,6 +18,13 @@ export const MAX_EXPORT_TOTAL_BYTES = 8 * 1024 * 1024;
  */
 export const EXPORTED_PREFIX = 'runner-exported:';
 
+/**
+ * A `done` entry that starts this way says the playbook kept a change for the owner instead of
+ * delivering it. Only the playbook's own host code writes it, so a manifest an agent wrote loses
+ * every such line before the runner hands it on.
+ */
+export const KEPT_PREFIX = 'kept:';
+
 export interface ExportLimits {
   maxFiles: number;
   maxFileBytes: number;
@@ -47,7 +54,7 @@ export async function writeHandoffFile(
 ): Promise<void> {
   if (!isPlainPath(ref)) throw new Error('not a plain relative path');
   const parts = ref.split('/');
-  if (parts.length === 1 && reserved.includes(ref)) throw new Error('that name is reserved');
+  if (reserved.includes(parts[0] as string)) throw new Error('that name is reserved');
   await requireDirectory(handoffDir, 'the task directory');
   let dir = handoffDir;
   for (const part of parts.slice(0, -1)) {
@@ -179,7 +186,10 @@ export async function exportArtifacts(input: {
  */
 export function attestExports(bytes: Buffer, exported: readonly string[]): Buffer {
   const manifest = JSON.parse(bytes.toString('utf8')) as { done: string[] };
-  const kept = manifest.done.filter((entry) => !entry.trimStart().startsWith(EXPORTED_PREFIX));
+  const kept = manifest.done.filter((entry) => {
+    const line = entry.trimStart();
+    return !line.startsWith(EXPORTED_PREFIX) && !line.startsWith(KEPT_PREFIX);
+  });
   if (kept.length === manifest.done.length && exported.length === 0) return bytes;
   manifest.done =
     exported.length > 0 ? [...kept, `${EXPORTED_PREFIX} ${exported.join(' ')}`] : kept;
