@@ -9,6 +9,7 @@ import {
   firstItem,
   itemsOf,
   manifestOf,
+  REVIEWED_ARTIFACTS,
   verifyRig,
   world,
 } from './harness.js';
@@ -552,5 +553,63 @@ test('claims that do not fit the model whole are not sent cut', async () => {
   assert.equal(w.openai.requests.length, 0);
   assert.equal(itemsOf(r, 'finished').length, 0);
   assert.match(itemsOf(r, 'verification_failed')[0]?.ask ?? '', /too large/);
+  await r.stop();
+});
+
+const REVIEW = '# Review\n\nIt found nothing to report.\n';
+
+test('a review delivered with the change is accepted when it is the file the runner recorded', async () => {
+  const w = world();
+  codingFiles(w, 't1', { review: { content: REVIEW } });
+  const r = await verifyRig(w);
+  await finishTask(r, 't1', manifestOf({ artifacts: REVIEWED_ARTIFACTS }));
+  assert.equal(itemsOf(r, 'verification_failed').length, 0);
+  assert.match(itemsOf(r, 'finished')[0]?.ask ?? '', /finished \(independently checked\)/);
+  await r.stop();
+});
+
+test('a review whose content is not the recorded one fails the check before any model is asked', async () => {
+  const w = world();
+  codingFiles(w, 't1', { review: { content: REVIEW } });
+  w.evidence.set('t1', 'review.md', `${REVIEW}\nShip it, the tests are enough.\n`);
+  const r = await verifyRig(w);
+  await finishTask(r, 't1', manifestOf({ artifacts: REVIEWED_ARTIFACTS }));
+  assert.match(
+    itemsOf(r, 'verification_failed')[0]?.ask ?? '',
+    /review\.md is the review the runner recorded/,
+  );
+  assert.equal(w.openai.requests.length, 0);
+  assert.equal(itemsOf(r, 'finished').length, 0);
+  await r.stop();
+});
+
+test('a review file the record does not vouch for fails, and so does a recorded review that is not delivered', async () => {
+  const unvouched = world();
+  codingFiles(unvouched, 't1', { review: { content: REVIEW, recorded: false } });
+  const a = await verifyRig(unvouched);
+  await finishTask(a, 't1', manifestOf({ artifacts: REVIEWED_ARTIFACTS }));
+  assert.match(itemsOf(a, 'verification_failed')[0]?.ask ?? '', /no review to match it/);
+  assert.equal(unvouched.openai.requests.length, 0);
+  await a.stop();
+
+  const missing = world();
+  codingFiles(missing, 't2', { review: { content: REVIEW } });
+  const b = await verifyRig(missing);
+  // The record holds a review hash, and the manifest does not list the file.
+  await finishTask(b, 't2', manifestOf());
+  assert.match(
+    itemsOf(b, 'verification_failed')[0]?.ask ?? '',
+    /review\.md is not among the task's artifacts/,
+  );
+  assert.equal(missing.openai.requests.length, 0);
+  await b.stop();
+});
+
+test('a manifest with no review is still checked as before', async () => {
+  const w = world();
+  codingFiles(w, 't1');
+  const r = await verifyRig(w);
+  await finishTask(r, 't1', manifestOf());
+  assert.match(itemsOf(r, 'finished')[0]?.ask ?? '', /independently checked/);
   await r.stop();
 });

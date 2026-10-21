@@ -51,6 +51,8 @@ const CODING_FILES: ReadonlySet<string> = new Set([
   'changes.json',
   'change.patch',
   'verification.json',
+  // The review of the change. The coding check ties it to the runner's record by its hash.
+  'review.md',
 ]);
 const RESEARCH_FILES: ReadonlySet<string> = new Set([
   'report.json',
