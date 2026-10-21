@@ -84,8 +84,12 @@ test('the actions are the pull request then the preview, public links only, at m
     ],
   );
   expect(model?.actions).toEqual([
-    { label: 'Open pull request', url: 'https://github.com/example/repo/pull/7' },
-    { label: 'Open preview', url: 'https://preview.example/app' },
+    {
+      label: 'Open pull request',
+      url: 'https://github.com/example/repo/pull/7',
+      host: 'github.com',
+    },
+    { label: 'Open preview', url: 'https://preview.example/app', host: 'preview.example' },
   ]);
   expect(deliveryModel(task(), [], [])?.actions).toEqual([]);
 });

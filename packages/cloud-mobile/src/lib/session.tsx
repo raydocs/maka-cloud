@@ -151,7 +151,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setSession(next);
     } catch (e) {
       const refused = e instanceof ApiError && e.status === 401;
-      if (refused) await removeSecure(ACCOUNT_KEY).catch(() => {});
+      // A newer sign-in may have saved a different account by now; only the current attempt may delete.
+      if (refused && generation.current === mine) await removeSecure(ACCOUNT_KEY).catch(() => {});
       if (generation.current === mine)
         setSession({
           status: 'out',
@@ -165,12 +166,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // The key an earlier build used for the token alone is removed, so no secret is left behind.
     void removeSecure('maka.token').catch(() => {});
-    void restore();
+    void serialise(restore);
     return () => {
       // Whatever was still loading is not shown once the provider is gone.
       generation.current += 1;
     };
-  }, [restore]);
+  }, [restore, serialise]);
 
   const api = useMemo<SessionApi>(
     () => ({

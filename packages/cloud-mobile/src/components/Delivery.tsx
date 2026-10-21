@@ -22,13 +22,15 @@ import { Card, PillButton, Solid, StatusMark, T } from './ui';
 const MONO = Platform.OS === 'ios' ? mono.fontFamily : 'monospace';
 
 const DIFF_LINES_SHOWN = 400;
+/** The most lines ever drawn; a diff beyond this is read on the web. */
+const DIFF_LINES_MAX = 5000;
 
 /** A diff, line by line, on an opaque page: added lines green, removed lines red. A very long one is cut short. */
 export function DiffLines({ text }: { text: string }) {
   const t = useTheme();
   const [all, setAll] = useState(false);
   const lines = text.split('\n');
-  const shown = all ? lines : lines.slice(0, DIFF_LINES_SHOWN);
+  const shown = lines.slice(0, all ? DIFF_LINES_MAX : DIFF_LINES_SHOWN);
   return (
     <Solid>
       <ScrollView horizontal showsHorizontalScrollIndicator>
@@ -49,8 +51,14 @@ export function DiffLines({ text }: { text: string }) {
           ))}
         </View>
       </ScrollView>
-      {lines.length > shown.length && (
-        <PillButton label={`Show all ${lines.length} lines`} onPress={() => setAll(true)} />
+      {lines.length > shown.length && !all && (
+        <PillButton
+          label={`Show ${Math.min(lines.length, DIFF_LINES_MAX)} of ${lines.length} lines`}
+          onPress={() => setAll(true)}
+        />
+      )}
+      {all && lines.length > DIFF_LINES_MAX && (
+        <T kind="small">{`Showing the first ${DIFF_LINES_MAX} of ${lines.length} lines. Read the rest on the web.`}</T>
       )}
     </Solid>
   );
@@ -207,7 +215,7 @@ export function DeliveryCard({
       {actions.map((action, i) => (
         <PillButton
           key={action.label}
-          label={`${action.label} ↗`}
+          label={`${action.label} · ${action.host} ↗`}
           primary={i === 0}
           onPress={() => openLink(action.url)}
         />
@@ -350,7 +358,7 @@ export function TaskDelivery({
   listings: readonly ArtifactListing[];
   onOpenTask?: (task: TaskView) => void;
 }) {
-  const sources = useSources(client, task.taskId, `${task.state}:${task.progress.length}`);
+  const sources = useSources(client, task.taskId, task.state);
   const model = deliveryModel(task, listings, sources);
   return (
     <>

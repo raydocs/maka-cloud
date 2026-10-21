@@ -22,8 +22,12 @@ const model = (over: Partial<DeliveryModel> = {}): DeliveryModel => ({
   outcome: 'The login page no longer loops.',
   caption: 'The changes',
   actions: [
-    { label: 'Open pull request', url: 'https://github.com/example/repo/pull/12' },
-    { label: 'Open preview', url: 'https://preview.example.test/' },
+    {
+      label: 'Open pull request',
+      url: 'https://github.com/example/repo/pull/12',
+      host: 'github.com',
+    },
+    { label: 'Open preview', url: 'https://preview.example.test/', host: 'preview.example.test' },
   ],
   diff: { index: 1, name: 'out/changes.diff', kind: 'file' },
   ...over,
@@ -42,7 +46,7 @@ test('the card says the outcome, offers the changes and opens each action as a l
     wrap(<DeliveryCard client={client} task={task} model={model()} onOpenTask={() => {}} />),
   );
   expect(screen.getByText('The login page no longer loops.')).toBeTruthy();
-  await fireEvent.press(screen.getByRole('button', { name: 'Open pull request ↗' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Open pull request · github.com ↗' }));
   expect(open).toHaveBeenCalledWith('https://github.com/example/repo/pull/12');
   await fireEvent.press(screen.getByRole('button', { name: 'View the changes' }));
   expect(await screen.findByText('+redirect once')).toBeTruthy();
@@ -68,6 +72,17 @@ test('a very long diff shows its first lines and the rest only when asked for', 
   await render(wrap(<DiffLines text={text} />));
   expect(screen.getByText('+line 399')).toBeTruthy();
   expect(screen.queryByText('+line 400')).toBeNull();
-  await fireEvent.press(screen.getByRole('button', { name: 'Show all 1000 lines' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Show 1000 of 1000 lines' }));
   expect(screen.getByText('+line 999')).toBeTruthy();
+});
+
+test('even "show more" stops at a hard cap, and says where to read the rest', async () => {
+  const text = Array.from({ length: 6000 }, (_, i) => `+line ${i}`).join('\n');
+  await render(wrap(<DiffLines text={text} />));
+  await fireEvent.press(screen.getByRole('button', { name: 'Show 5000 of 6000 lines' }));
+  expect(screen.getByText('+line 4999')).toBeTruthy();
+  expect(screen.queryByText('+line 5000')).toBeNull();
+  expect(
+    screen.getByText('Showing the first 5000 of 6000 lines. Read the rest on the web.'),
+  ).toBeTruthy();
 });

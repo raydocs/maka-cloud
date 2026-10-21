@@ -333,25 +333,40 @@ test('the timeline is read from the task’s timeline route', async () => {
   expect(calls[0]?.url).toBe('/v1/tasks/tsk_1/timeline');
 });
 
-test('a feed that is stopped and started again resumes after the last event instead of replaying it', async () => {
+test('a feed stopped and started again replays from the start without doubling anything', async () => {
   const seen: (string | null)[] = [];
   const notice = (id: number) =>
     `id: ${id}\nevent: conductor.notice\ndata: {"conversationId":"c1","noticeId":"n${id}","text":"note ${id}","at":${id}}\n\n`;
+  const task = (id: number, event: object) =>
+    `id: ${id}\nevent: task.event\ndata: ${JSON.stringify({ conversationId: 'c1', at: id, event })}\n\n`;
+  const replay = () =>
+    sse(
+      posted(1, 'hello'),
+      notice(2),
+      task(3, { type: 'task_created', taskId: 't1', sessionId: 's', mode: 'async' }),
+      task(4, { type: 'task_started', taskId: 't1' }),
+      task(5, { type: 'task_progress', taskId: 't1', note: 'step one' }),
+      task(6, { type: 'task_progress', taskId: 't1', note: 'step two' }),
+    );
   const { client } = served({
     '/v1/events': (_url, init) => {
-      const last = new Headers(init.headers).get('Last-Event-ID');
-      seen.push(last);
-      return last === null ? sse(posted(1, 'hello'), notice(2)) : sse(posted(3, 'back'));
+      seen.push(new Headers(init.headers).get('Last-Event-ID'));
+      return replay();
     },
   });
   const feed = new ConversationFeed(client, 'c1');
   feed.start();
-  await until(() => feed.getSnapshot().state.messages.length === 2, 'the first run');
+  await until(() => feed.getSnapshot().state.tasks.t1?.progress.length === 2, 'the first run');
   feed.stop();
   feed.start();
-  await until(() => feed.getSnapshot().state.messages.length === 3, 'the second run');
-  expect(seen[0]).toBeNull();
-  expect(seen[1]).toBe('2');
-  expect(feed.getSnapshot().state.messages.map((m) => m.text)).toEqual(['hello', 'note 2', 'back']);
+  await until(() => seen.length === 2, 'the second request');
+  await until(() => feed.getSnapshot().state.tasks.t1?.progress.length === 2, 'the second run');
+  await new Promise((r) => setTimeout(r, 30));
+  // No remembered id is sent (after a restored backup it would be higher than the server's), and
+  // the replay changes nothing.
+  expect(seen).toEqual([null, null]);
+  const { state } = feed.getSnapshot();
+  expect(state.messages.map((m) => m.text)).toEqual(['hello', 'note 2']);
+  expect(state.tasks.t1?.progress).toEqual(['step one', 'step two']);
   feed.stop();
 });

@@ -65,6 +65,11 @@ export function publicLink(value: string | undefined): string | undefined {
   }
 }
 
+/** The host of an address `publicLink` accepted, to show beside a link the agent chose. */
+export function hostOf(url: string): string {
+  return /^https:\/\/([^/?#]+)/u.exec(url)?.[1] ?? '';
+}
+
 export function dollars(value: number | undefined): string {
   return value !== undefined && Number.isFinite(value) && value >= 0
     ? new Intl.NumberFormat('en-US', {

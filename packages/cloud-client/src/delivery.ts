@@ -1,6 +1,6 @@
 import type { CloudClient } from './client';
 import type { ArtifactListing, SourceListing, TaskView } from './contract';
-import { captionOf, displayText, firstSentence, publicLink } from './presentation';
+import { captionOf, displayText, firstSentence, hostOf, publicLink } from './presentation';
 
 /** What a result is, said in a person's words; a name is only a name. */
 export const isDiffListing = (listing: ArtifactListing): boolean =>
@@ -11,6 +11,8 @@ const PULL_REQUEST = /\/pull\/\d+/u;
 export interface DeliveryAction {
   label: string;
   url: string;
+  /** Where it goes; the agent chose the link, so a phone shows this beside the label. */
+  host: string;
 }
 
 /** A finished task as one result card: the outcome, one visual proof, a caption, at most two actions. */
@@ -42,8 +44,8 @@ export function deliveryModel(
     .find((url) => url !== undefined && PULL_REQUEST.test(url));
   const preview = publicLink(sources.find((source) => source.label === 'preview')?.url);
   const actions: DeliveryAction[] = [];
-  if (pull) actions.push({ label: 'Open pull request', url: pull });
-  if (preview) actions.push({ label: 'Open preview', url: preview });
+  if (pull) actions.push({ label: 'Open pull request', url: pull, host: hostOf(pull) });
+  if (preview) actions.push({ label: 'Open preview', url: preview, host: hostOf(preview) });
   return {
     outcome: displayText(firstSentence(summary)),
     ...(shot ? { shot } : {}),

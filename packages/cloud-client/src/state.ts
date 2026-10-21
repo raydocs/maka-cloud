@@ -116,7 +116,10 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
           default:
             if (ended) return state;
             applyLive(task, event, at);
-            if (event.type === 'task_pause_failed' || event.type === 'task_resume_failed')
+            if (
+              (event.type === 'task_pause_failed' || event.type === 'task_resume_failed') &&
+              !state.messages.some((m) => m.id === `${frame.id}`)
+            )
               next.messages = [
                 ...state.messages,
                 {
@@ -146,6 +149,8 @@ function applyLive(
     case 'task_started':
       task.state = 'running';
       task.startedAt = at;
+      // The task's story starts here, so a replay of the stream rebuilds its notes instead of doubling them.
+      task.progress = [];
       break;
     case 'task_progress':
       task.progress = [...task.progress, event.note].slice(-MAX_PROGRESS_NOTES);

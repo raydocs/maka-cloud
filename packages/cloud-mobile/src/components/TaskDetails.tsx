@@ -3,6 +3,7 @@ import {
   displayText,
   dollars,
   errorText,
+  hostOf,
   type InboxItem,
   type LoadedResult,
   loadTaskResults,
@@ -48,18 +49,25 @@ function ImageResult({ name, blob }: { name: string; blob: Blob }) {
 }
 
 const REPORT_CHARS = 20_000;
+/** The most characters ever drawn; a report beyond this is read on the web. */
+const REPORT_CHARS_MAX = 200_000;
 
 /** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
 function Report({ text }: { text: string }) {
   const t = useTheme();
   const [all, setAll] = useState(false);
-  const shown = all ? text : text.slice(0, REPORT_CHARS);
+  const shown = text.slice(0, all ? REPORT_CHARS_MAX : REPORT_CHARS);
   return (
     <Solid>
       <T kind="body" selectable style={{ color: t.solidInk }}>
         {displayText(shown)}
       </T>
-      {shown.length < text.length && <PillButton label="Show all" onPress={() => setAll(true)} />}
+      {shown.length < text.length && !all && (
+        <PillButton label="Show more" onPress={() => setAll(true)} />
+      )}
+      {all && text.length > REPORT_CHARS_MAX && (
+        <T kind="small">Showing the first part of this report. Read the rest on the web.</T>
+      )}
     </Solid>
   );
 }
@@ -134,7 +142,13 @@ export function TaskDetails({
               {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
             </T>
           </View>
-          {pull && <PillButton label="Pull request ↗" primary onPress={() => openLink(pull)} />}
+          {pull && (
+            <PillButton
+              label={`Pull request · ${hostOf(pull)} ↗`}
+              primary
+              onPress={() => openLink(pull)}
+            />
+          )}
           {task.failureReason ? <T kind="error">{displayText(task.failureReason)}</T> : null}
           {manifest && (
             <View style={{ gap: 8 }}>
