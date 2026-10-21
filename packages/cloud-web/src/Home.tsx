@@ -21,6 +21,7 @@ import { InboxCard } from './Inbox';
 import { ModePicker } from './ModePicker';
 import { SuggestionCard } from './Suggestion';
 import { submitOnEnter } from './keys';
+import { Onboarding, onboardingSkipped } from './Onboarding';
 
 /** What the browser remembers about when this invite last looked at Home. Never the token. */
 function visitKey(fingerprint: string) {
@@ -75,6 +76,7 @@ export function Home({
   now?: () => number;
 }) {
   const [draft, setDraft] = useState('');
+  const [onboarding, setOnboarding] = useState(() => !onboardingSkipped());
   const [workMode, setWorkMode] = useState<Mode | undefined>();
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
@@ -175,6 +177,17 @@ export function Home({
             </p>
           )}
         </section>
+      )}
+
+      {onboarding && conversations.length === 0 && (
+        <Onboarding
+          onPick={(sentence) => {
+            setDraft(sentence);
+            starter.draftEdited();
+            document.getElementById('first-message')?.focus();
+          }}
+          onSkip={() => setOnboarding(false)}
+        />
       )}
 
       <section className="card start" aria-label="Start something">
