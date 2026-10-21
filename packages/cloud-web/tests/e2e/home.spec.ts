@@ -107,3 +107,41 @@ test('a first visit has no decisions, no results and no schedule: just the start
   }
   await noHorizontalScroll(page);
 });
+
+test('the mode picker sits on the start card and in the chat, fits the screen, and a pick is sent with the message', async ({
+  page,
+  request,
+}, info) => {
+  await signIn(page, request);
+  const startPicker = page.getByRole('group', { name: 'How much care this needs' });
+  await expect(startPicker).toBeVisible();
+  await expect(startPicker.getByLabel('Let it decide')).toBeChecked();
+  await noHorizontalScroll(page);
+  // The labels are the tap targets: tall enough for a thumb.
+  for (const label of ['Let it decide', 'Quick', 'Standard', 'Deep']) {
+    const box = await startPicker.getByText(label, { exact: true }).boundingBox();
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(40);
+  }
+  await startPicker.getByLabel('Deep').check();
+  await expect(startPicker.getByLabel('Deep')).toBeChecked();
+  const sent = page.waitForRequest(
+    (r) => r.method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/u.test(r.url()),
+  );
+  await page.getByLabel('What would you like to get done?').fill('Weekly report');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  expect((await sent).postDataJSON()).toMatchObject({ text: 'Weekly report', mode: 'deep' });
+
+  // In the chat the picker starts from "Let it decide" again, and sends no mode until one is picked.
+  await expect(page.getByRole('log')).toContainText('Weekly report');
+  const chatPicker = page.getByRole('group', { name: 'How much care this needs' });
+  await expect(chatPicker).toBeVisible();
+  await expect(chatPicker.getByLabel('Let it decide')).toBeChecked();
+  await noHorizontalScroll(page);
+  const next = page.waitForRequest(
+    (r) => r.method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/u.test(r.url()),
+  );
+  await page.getByLabel('Keep the conversation going').fill('And the month before');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  expect(Object.keys((await next).postDataJSON()).sort()).toEqual(['clientMessageId', 'text']);
+  await page.screenshot({ path: info.outputPath('modes.png') });
+});

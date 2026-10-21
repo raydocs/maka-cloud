@@ -1,5 +1,5 @@
 import { ApiError, type CloudClient } from './client';
-import type { ArtifactListing, InboxItem, Question, TaskControl } from './contract';
+import type { ArtifactListing, InboxItem, Mode, Question, TaskControl } from './contract';
 import { errorText } from './errors';
 import { randomId } from './ids';
 import { inboxAnswerer } from './inboxAnswer';
@@ -197,12 +197,12 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   }
 
   /** Posts a message. A retry of the same text (after a failed post) reuses its id; see `draftEdited`. */
-  send(text: string): Promise<boolean> {
+  send(text: string, mode?: Mode): Promise<boolean> {
     const body = text.trim();
     if (!body) return Promise.resolve(false);
     return this.act('message', async () => {
       this.messageId ??= randomId();
-      await this.client.postMessage(this.conversationId, body, this.messageId);
+      await this.client.postMessage(this.conversationId, body, this.messageId, mode);
       this.messageId = null;
     });
   }

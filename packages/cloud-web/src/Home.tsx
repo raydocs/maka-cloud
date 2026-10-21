@@ -8,6 +8,7 @@ import {
   dollars,
   errorText,
   HomeFeed,
+  type Mode,
   nextRuns,
   recentConversations,
   relativeTime,
@@ -16,6 +17,7 @@ import {
   type VisitStore,
 } from '@maka-cloud/client';
 import { InboxCard } from './Inbox';
+import { ModePicker } from './ModePicker';
 
 /** What the browser remembers about when this invite last looked at Home. Never the token. */
 function visitKey(fingerprint: string) {
@@ -70,6 +72,7 @@ export function Home({
   now?: () => number;
 }) {
   const [draft, setDraft] = useState('');
+  const [workMode, setWorkMode] = useState<Mode | undefined>();
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
   const starter = useMemo(() => new ConversationStarter(client), [client]);
@@ -157,7 +160,7 @@ export function Home({
             if (!draft.trim() || starting) return;
             setStarting(true);
             setStartError('');
-            void starter.start(draft).then(onStarted, (failure: unknown) => {
+            void starter.start(draft, workMode).then(onStarted, (failure: unknown) => {
               setStartError(errorText(failure));
               setStarting(false);
             });
@@ -187,6 +190,12 @@ export function Home({
               <span aria-hidden="true">↑</span>
             </button>
           </div>
+          <ModePicker
+            value={workMode}
+            onChange={setWorkMode}
+            idPrefix="start"
+            disabled={starting}
+          />
         </form>
         {startError && (
           <p role="alert" className="error">
