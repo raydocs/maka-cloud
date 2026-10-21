@@ -48,6 +48,9 @@ export {
   claudeAdapter,
   codexAdapter,
   DEFAULT_PRICES,
+  EFFORT_LEVELS,
+  MODEL_ID,
+  runSettingsProblem,
   type TokenPrices,
   type VendorAdapter,
 } from './vendors.js';

@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { DEFAULT_MODES, EFFORTS, MODEL_ID as MODES_MODEL_ID } from '@maka-cloud/modes';
+import { EFFORT_LEVELS, MODEL_ID as RUNNERS_MODEL_ID } from '@maka-cloud/runners';
 import { ConfigError, describeConfig, ENV_VARIABLES, readStackConfig } from '../config.js';
 
 const ENV = {
@@ -469,4 +471,72 @@ test('standing duties need a long enough secret and a list of repositories, and 
       bad,
     );
   }
+});
+
+test('the modes default to the built-in ones, and the built-in ones are priced by the gateway', () => {
+  assert.deepEqual(readStackConfig(ENV).modes, DEFAULT_MODES);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /modes: +quick, standard, deep/);
+});
+
+test('MAKA_CLOUD_MODES replaces the modes, and a Codex model it names needs a gateway price', () => {
+  const modes = structuredClone(DEFAULT_MODES);
+  modes.modes.deep.reviewer.codex = { model: 'codex-test', effort: 'high' };
+  const price = {
+    vendor: 'openai',
+    model: 'codex-test',
+    inputPerMTokUsd: 1,
+    outputPerMTokUsd: 10,
+    maxOutputTokens: 9_000,
+  };
+  const config = readStackConfig({
+    ...ENV,
+    MAKA_CLOUD_MODES: JSON.stringify(modes),
+    MAKA_CLOUD_GATEWAY_MODELS: JSON.stringify([price]),
+  });
+  assert.deepEqual(config.modes, modes);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_MODES: JSON.stringify(modes) }), [
+    'MAKA_CLOUD_MODES names the openai model "codex-test", which the gateway has no price for: add it to MAKA_CLOUD_GATEWAY_MODELS',
+  ]);
+});
+
+test('a MAKA_CLOUD_MODES that is not JSON, of another version or not the schema is refused, never half read', () => {
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_MODES: '{' }), [
+    'MAKA_CLOUD_MODES config: not valid JSON',
+  ]);
+  assert.match(
+    problemsOf({ ...ENV, MAKA_CLOUD_MODES: JSON.stringify({ ...DEFAULT_MODES, version: 2 }) }).join(
+      '\n',
+    ),
+    /MAKA_CLOUD_MODES version/,
+  );
+  assert.match(
+    problemsOf({ ...ENV, MAKA_CLOUD_MODES: JSON.stringify({ version: 1, modes: {} }) }).join('\n'),
+    /MAKA_CLOUD_MODES modes\.quick/,
+  );
+});
+
+test('the modes package and the runners agree on the efforts and the model ids a run may carry', () => {
+  assert.deepEqual([...EFFORTS], [...EFFORT_LEVELS]);
+  assert.equal(MODES_MODEL_ID.source, RUNNERS_MODEL_ID.source);
+  assert.equal(MODES_MODEL_ID.flags, RUNNERS_MODEL_ID.flags);
+});
+
+test('"modes" prints the modes in force as JSON that MAKA_CLOUD_MODES accepts', async () => {
+  const { stdout } = await run(process.execPath, [CLI, 'modes'], { env: {} });
+  assert.deepEqual(JSON.parse(stdout), DEFAULT_MODES);
+  const edited = structuredClone(DEFAULT_MODES);
+  edited.modes.quick.budget.defaultRunUsd = 3;
+  const again = await run(process.execPath, [CLI, 'modes'], {
+    env: { MAKA_CLOUD_MODES: JSON.stringify(edited) },
+  });
+  assert.deepEqual(JSON.parse(again.stdout), edited);
+  await assert.rejects(
+    run(process.execPath, [CLI, 'modes'], { env: { MAKA_CLOUD_MODES: '{' } }),
+    (error: unknown) => {
+      const failed = error as { code: number; stderr: string };
+      assert.equal(failed.code, 2);
+      assert.match(failed.stderr, /MAKA_CLOUD_MODES/);
+      return true;
+    },
+  );
 });

@@ -1,5 +1,12 @@
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { type ModelPrice, priceProblem } from '@maka-cloud/gateway';
+import { type ModelPrice, modelTable, priceProblem } from '@maka-cloud/gateway';
+import {
+  DEFAULT_MODES,
+  type ModesConfig,
+  modelsOf,
+  parseModesConfig,
+  unnamedModels,
+} from '@maka-cloud/modes';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { pushConfigFromEnv } from '@maka-cloud/server';
 import type { BackupLayout } from './backup.js';
@@ -67,6 +74,11 @@ export interface StackConfig {
     searchBaseUrl?: string;
   };
   inbox: InboxConfig;
+  /**
+   * The modes (quick, standard, deep): which model and effort each role runs with, and the budget
+   * of each. Every model it names has a price in the gateway, or the config is refused.
+   */
+  modes: ModesConfig;
   /**
    * What model spend may reach, in USD per UTC day or month. An invite with no limit of its own
    * (`cloud-server invite limits`) gets the invite defaults. Small on purpose: a server nobody
@@ -246,6 +258,10 @@ export const ENV_VARIABLES = [
     'JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one',
   ],
   [
+    'MAKA_CLOUD_MODES',
+    'JSON: the modes (quick, standard, deep) as "maka-cloud modes" prints them: per mode the conductor, implementer, reviewer and helper models and effort, and the budgets; every model named needs a gateway price. Unset: the built-in modes',
+  ],
+  [
     'MAKA_CLOUD_VERIFIER_MODELS',
     'JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run',
   ],
@@ -385,6 +401,7 @@ export function readStackConfig(
       models: gatewayModels(value('MAKA_CLOUD_GATEWAY_MODELS'), problems),
     },
     inbox: readInboxConfig(value, problems),
+    modes: DEFAULT_MODES,
     spend: {
       inviteDailyUsd: dollars('MAKA_CLOUD_INVITE_DAILY_USD', DEFAULT_SPEND_CAPS.inviteDailyUsd),
       inviteMonthlyUsd: dollars(
@@ -399,6 +416,8 @@ export function readStackConfig(
     dutiesSet: false,
     dutyLinks: [],
   };
+  const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
+  if (modes !== undefined) config.modes = modes;
   try {
     config.pushSet = pushConfigFromEnv(env) !== undefined;
   } catch (error) {
@@ -577,6 +596,33 @@ function sandboxTable(raw: string | undefined, problems: string[]): Record<strin
   return table;
 }
 
+/**
+ * The modes the environment sets, or undefined for the built-in ones. A config that does not
+ * parse, or that names a model the gateway has no price for, is a problem: a run on such a model
+ * would be refused at the gateway, so it is refused here, at start.
+ */
+export function readModes(
+  raw: string | undefined,
+  prices: readonly ModelPrice[],
+  problems: string[],
+): ModesConfig | undefined {
+  const parsed = raw === undefined ? undefined : parseModesConfig(raw);
+  if (parsed && !parsed.ok) {
+    for (const problem of parsed.problems) problems.push(`MAKA_CLOUD_MODES ${problem}`);
+    return undefined;
+  }
+  const config = parsed?.config ?? DEFAULT_MODES;
+  const table = modelTable(prices);
+  for (const { vendor, model } of modelsOf(config)) {
+    if (!table.has(`${vendor}:${model}`)) {
+      problems.push(
+        `${raw === undefined ? 'the built-in modes name' : 'MAKA_CLOUD_MODES names'} the ${vendor} model "${model}", which the gateway has no price for: add it to MAKA_CLOUD_GATEWAY_MODELS`,
+      );
+    }
+  }
+  return parsed?.config;
+}
+
 function gatewayModels(raw: string | undefined, problems: string[]): ModelPrice[] {
   if (raw === undefined) return [];
   let list: unknown;
@@ -617,6 +663,7 @@ export function describeConfig(config: StackConfig): string[] {
     `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
     `gateway for tasks:   ${config.gateway.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `gateway models:      ${describeModels(config.gateway.models)}`,
+    `modes:               ${describeModes(config.modes)}`,
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
@@ -628,6 +675,12 @@ export function describeConfig(config: StackConfig): string[] {
     `digest summary:      ${config.inbox.summaryModel}`,
     `spend limits:        invite $${config.spend.inviteDailyUsd}/day and $${config.spend.inviteMonthlyUsd}/month unless set per invite, server $${config.spend.serverDailyUsd}/day`,
   ];
+}
+
+function describeModes(modes: ModesConfig): string {
+  const open = unnamedModels(modes).length;
+  const standard = modes.modes.standard.budget;
+  return `quick, standard, deep (config version ${modes.version}, standard budget $${standard.defaultRunUsd}); ${open === 0 ? 'every role names its model' : `${open} Codex role(s) use the CLI's default model, which the gateway cannot price: name them with MAKA_CLOUD_MODES (see "maka-cloud modes")`}`;
 }
 
 function describeModels(models: readonly ModelPrice[]): string {

@@ -7,8 +7,10 @@ import {
   describeConfig,
   ENV_VARIABLES,
   pausePathOf,
+  readModes,
   readStackConfig,
 } from './config.js';
+import { DEFAULT_MODES } from '@maka-cloud/modes';
 import { createLogger, createScrubber } from './log.js';
 import { PauseSwitch } from './pause.js';
 import { smokeCommand } from './smoke-live.js';
@@ -17,6 +19,7 @@ import { startStack } from './stack.js';
 
 const USAGE = `Usage:
   maka-cloud check   read the configuration from the environment and print it, without secrets
+  maka-cloud modes   print the modes (quick, standard, deep) in force as JSON, to copy into MAKA_CLOUD_MODES
   maka-cloud start   start the stack and serve until SIGINT or SIGTERM
   maka-cloud pause   stop all spending: new model requests are refused and running work is
                      stopped within seconds (needs MAKA_CLOUD_DATA_DIR; works while the server runs)
@@ -101,8 +104,22 @@ async function backupCommand(
   }
 }
 
+function modesCommand(env: NodeJS.ProcessEnv): number {
+  const problems: string[] = [];
+  // Prices are not needed to print the modes: only the JSON is checked.
+  const parsed = readModes(env.MAKA_CLOUD_MODES?.trim() || undefined, [], problems);
+  const unpriced = problems.filter((problem) => !problem.includes('has no price'));
+  if (unpriced.length > 0) {
+    console.error(unpriced.join('\n'));
+    return 2;
+  }
+  console.log(JSON.stringify(parsed ?? DEFAULT_MODES, null, 2));
+  return 0;
+}
+
 async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const [command, ...rest] = argv;
+  if (command === 'modes' && rest.length === 0) return modesCommand(env);
   if ((command === 'pause' || command === 'resume') && rest.length === 0) {
     return pauseCommand(command, env);
   }
