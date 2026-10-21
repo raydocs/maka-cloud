@@ -190,7 +190,7 @@ ALTER TABLE digests ADD COLUMN owner TEXT;
  * operator's. One row per owner, so one owner's choice never reaches another's pushes.
  */
 const SCHEMA_V5 = `
-CREATE TABLE owner_settings (owner TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS owner_settings (owner TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
 /**
