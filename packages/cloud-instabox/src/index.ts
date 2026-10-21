@@ -5,9 +5,11 @@ export {
   DEFAULT_INSTABOX_BASE_URL,
   InstaboxClient,
   type InstaboxClientOptions,
+  type InstaboxCreateMachineRequest,
   type InstaboxExecRequest,
   type InstaboxExecResult,
   type InstaboxFiles,
+  type InstaboxListMachinesOptions,
   type InstaboxMachine,
   type InstaboxMachineState,
   type InstaboxOperation,
@@ -17,6 +19,7 @@ export {
   InstaboxApiError,
   InstaboxOperationError,
   InstaboxTransportError,
+  isQuotaExceeded,
   type InstaboxErrorEnvelope,
 } from './errors.js';
 export {
