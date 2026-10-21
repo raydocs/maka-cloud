@@ -136,6 +136,8 @@ function openJournal(path: string): DatabaseSync {
       addColumn(db, 'account_spend', 'booked_at', 'INTEGER NOT NULL DEFAULT 0');
       addColumn(db, 'run_budget', 'run_id', "TEXT NOT NULL DEFAULT ''");
       addColumn(db, 'run_budget', 'heartbeat_at', 'INTEGER NOT NULL DEFAULT 0');
+      addColumn(db, 'run_budget', 'since_seq', 'INTEGER');
+      db.exec(`DROP TRIGGER IF EXISTS run_budget_guard_v1`);
       db.exec(RUN_BUDGET_TRIGGERS);
       return db;
     } catch (error) {
@@ -165,7 +167,17 @@ function addColumn(db: DatabaseSync, table: string, column: string, definition: 
   }
 }
 
-const TRIGGER_GUARD = 'run_budget_guard_v1';
+/**
+ * Whether a row of `account_spend` counts toward the budget in `run` (a `run_budget` row in scope):
+ * it was booked after the budget was set, which the row sequence tells exactly (`since_seq` is the
+ * highest rowid when the budget was set) and the clock tells only to the millisecond. Either
+ * counts it, so a stamp that truncated below the start, or a clock that stepped back, cannot let a
+ * booking escape the window.
+ */
+const IN_RUN_WINDOW =
+  '(booked_at >= run.since_ms OR (run.since_seq IS NOT NULL AND account_spend.rowid > run.since_seq))';
+
+const TRIGGER_GUARD = 'run_budget_guard_v2';
 const TRIGGER_STAMP = 'run_budget_stamp_v1';
 
 /**
@@ -173,7 +185,7 @@ const TRIGGER_STAMP = 'run_budget_stamp_v1';
  * it, whatever code that process runs: a server on an older version, or one that is still running
  * while a newer one fails to start, books through the same `account_spend` table.
  *
- * `run_budget_guard_v1` aborts an insert that would take what the account booked since the budget
+ * `run_budget_guard_v2` aborts an insert that would take what the account booked since the budget
  * began above its limit, and `run_budget_stamp_v1` gives a row inserted without a time (by a
  * process that does not know the column) the time of its insert, so its spend counts from then on.
  * Both are in the file once any process on this code has opened it, and a connection that is open
@@ -186,7 +198,7 @@ const RUN_BUDGET_TRIGGERS = `
     WHERE run.account = NEW.account
       AND (
         SELECT COALESCE(SUM(usd), 0) FROM account_spend
-        WHERE account = NEW.account AND booked_at >= run.since_ms
+        WHERE account = NEW.account AND ${IN_RUN_WINDOW}
       ) + NEW.usd > run.limit_usd + 1e-9
   )
   BEGIN
@@ -279,13 +291,19 @@ export function setRunBudget(
       if (held && held.run_id !== runId && held.heartbeat_at + RUN_LEASE_MS > now) {
         throw new RunBudgetHeld('another run holds the run budget of this invite');
       }
+      // Rows after this one were booked after the budget was set, whatever their timestamps say.
+      const { seq } = db
+        .prepare('SELECT COALESCE(MAX(rowid), 0) AS seq FROM account_spend')
+        .get() as {
+        seq: number;
+      };
       db.prepare(
-        `INSERT INTO run_budget (account, limit_usd, since_ms, run_id, heartbeat_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO run_budget (account, limit_usd, since_ms, since_seq, run_id, heartbeat_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (account) DO UPDATE SET limit_usd = excluded.limit_usd,
-           since_ms = excluded.since_ms, run_id = excluded.run_id,
+           since_ms = excluded.since_ms, since_seq = excluded.since_seq, run_id = excluded.run_id,
            heartbeat_at = excluded.heartbeat_at`,
-      ).run(inviteId, budget.limitUsd, budget.sinceMs, runId, now);
+      ).run(inviteId, budget.limitUsd, budget.sinceMs, seq, runId, now);
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
@@ -582,7 +600,7 @@ export class SqliteSpendJournal implements SpendJournal {
     this.db
       .prepare('DELETE FROM account_spend WHERE day < ?')
       .run(new Date(now() - 62 * 86_400_000).toISOString().slice(0, 10));
-    const sum = (where: string, ...args: Array<string | number>): number =>
+    const sum = (where: string, ...args: Array<string | number | null>): number =>
       (
         this.db
           .prepare(`SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE ${where}`)
@@ -621,14 +639,23 @@ export class SqliteSpendJournal implements SpendJournal {
           const refusal = ((): ReserveResult | undefined => {
             if (inviteId !== undefined && limits) {
               const run = this.db
-                .prepare('SELECT limit_usd, since_ms FROM run_budget WHERE account = ?')
-                .get(name) as { limit_usd: number; since_ms: number } | undefined;
+                .prepare('SELECT limit_usd, since_ms, since_seq FROM run_budget WHERE account = ?')
+                .get(name) as
+                | { limit_usd: number; since_ms: number; since_seq: number | null }
+                | undefined;
               if (run) {
                 if (!Number.isFinite(run.limit_usd) || !Number.isFinite(run.since_ms)) {
                   return { ok: false, budget: true, reason: 'this invite may not spend' };
                 }
                 if (
-                  sum('account = ? AND booked_at >= ?', name, run.since_ms) + usd >
+                  sum(
+                    'account = ? AND (booked_at >= ? OR (? IS NOT NULL AND rowid > ?))',
+                    name,
+                    run.since_ms,
+                    run.since_seq,
+                    run.since_seq,
+                  ) +
+                    usd >
                   run.limit_usd + EPSILON
                 ) {
                   return capRefusal({ scope: 'invite_run', inviteId, limitUsd: run.limit_usd });
