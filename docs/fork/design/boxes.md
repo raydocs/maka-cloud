@@ -107,6 +107,11 @@ box's current claim frees the box. A woken box stays `waking` until its `.agents
 every ask for it in that time waits on the same wake, so a second ask cannot return (and release) a box
 that is still being set up.
 
+Identity is read again, not remembered: before a cached box is handed out the pool fetches it and checks
+the pool label, invite, slot, name and machine id (and that no other live task holds it); the sleep sweep and
+a restore check the same, without the task label. A box that fails is `refused`: it keeps its slot, is listed by
+`refusedBoxes()`, is never used, relabelled, slept or deleted by the pool, and the task takes another box.
+
 ## Setup snapshots and `.agents/resume`
 
 - A task can name the setup snapshot of its repository (`setupOf(tenantId, taskId)`). A free box that
