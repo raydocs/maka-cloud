@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   InstaboxApiError,
   type InstaboxClient,
@@ -19,6 +19,9 @@ import {
   RESULT_STAGE_SCRIPT,
   STAGE_INPUTS_SCRIPT,
   SWEEP_SCRIPT,
+  TRANSCRIPT_ABORT_SCRIPT,
+  TRANSCRIPT_CHUNK_SCRIPT,
+  TRANSCRIPT_PROBE_SCRIPT,
   TOOL_ABORT_SCRIPT,
   TOOL_CHECK_SCRIPT,
   TOOL_CHUNK_SCRIPT,
@@ -30,6 +33,8 @@ export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
 const RESULT_CHUNK_BYTES = 256 * 1024;
 
 const TOOL_CHUNK_BYTES = 256 * 1024;
+const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
+const TRANSCRIPT_ATTEMPTS = 3;
 
 /** Caps on what one task may copy from another's workspace. */
 export interface StageLimits {
@@ -74,6 +79,14 @@ export class RemoteMachine {
   logDir(dirName: string): string {
     this.taskDir(dirName);
     return `${this.logRoot}/${dirName}`;
+  }
+
+  /**
+   * The Claude CLI's configuration directory for a task: its transcripts are under `projects/`.
+   * Kept in the task's own directory, so no other task reads it and removing the task removes it.
+   */
+  configDir(dirName: string): string {
+    return `${this.taskDir(dirName)}/claude-config`;
   }
 
   /**
@@ -416,4 +429,73 @@ export class RemoteMachine {
       await this.exec(FILE_CLEAN_SCRIPT, callOptions({})).catch(() => undefined);
     }
   }
+
+  /** Lines in a session's transcript in the task's configuration directory (0 when there is none). */
+  async transcriptLines(dirName: string, projectKey: string, sessionId: string): Promise<number> {
+    const out = await this.execOk(TRANSCRIPT_PROBE_SCRIPT, {
+      envs: transcriptEnvs(this.taskDir(dirName), projectKey, sessionId),
+    });
+    const lines = Number(out.trim());
+    return Number.isSafeInteger(lines) && lines >= 0 ? lines : 0;
+  }
+
+  /**
+   * Puts a session's transcript where the CLI looks for it, from a stream of its bytes: in chunks
+   * into a temporary file, checked by sha256 and renamed into place at the end. A chunk whose answer
+   * was lost is sent again safely (the file's size says whether it landed). A failed upload removes
+   * its temporary file.
+   */
+  async installTranscript(input: {
+    dirName: string;
+    projectKey: string;
+    sessionId: string;
+    bytes: AsyncIterable<Buffer>;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    const base = transcriptEnvs(this.taskDir(input.dirName), input.projectKey, input.sessionId);
+    const hash = createHash('sha256');
+    let offset = 0;
+    let held: Buffer | undefined;
+    const send = async (chunk: Buffer, last: boolean): Promise<void> => {
+      const envs = {
+        ...base,
+        MAKA_OFFSET: String(offset),
+        MAKA_LEN: String(chunk.length),
+        MAKA_LAST: last ? '1' : '0',
+        ...(last ? { MAKA_HASH: hash.copy().digest('hex') } : {}),
+      };
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await this.execOk(TRANSCRIPT_CHUNK_SCRIPT, {
+            envs,
+            stdin: chunk.toString('base64'),
+            ...(input.signal ? { signal: input.signal } : {}),
+          });
+          break;
+        } catch (error) {
+          if (attempt >= TRANSCRIPT_ATTEMPTS || input.signal?.aborted) throw error;
+        }
+      }
+      offset += chunk.length;
+    };
+    try {
+      for await (const piece of input.bytes) {
+        hash.update(piece);
+        for (let at = 0; at < piece.length; at += TRANSCRIPT_CHUNK_BYTES) {
+          // One chunk is held back so that the last one is known to be the last.
+          if (held) await send(held, false);
+          held = piece.subarray(at, at + TRANSCRIPT_CHUNK_BYTES);
+        }
+      }
+      await send(held ?? Buffer.alloc(0), true);
+    } catch (error) {
+      await this.exec(TRANSCRIPT_ABORT_SCRIPT, { envs: base }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+}
+
+function transcriptEnvs(dir: string, projectKey: string, sessionId: string): Record<string, string> {
+  return { MAKA_DIR: dir, MAKA_KEY: projectKey, MAKA_SESSION: sessionId };
 }

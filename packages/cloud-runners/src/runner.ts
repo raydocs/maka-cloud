@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { SessionStore } from '@anthropic-ai/claude-agent-sdk';
 import { StringDecoder } from 'node:string_decoder';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
@@ -19,6 +20,7 @@ import { LineSplitter } from './lines.js';
 import { type AgentChannel, asAgent } from './agent-user.js';
 import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
 import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
+import { restoreTranscript, transcriptSessionStore } from './transcripts.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage, shq } from './shell.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
@@ -190,6 +192,8 @@ class Run implements RunHandle {
   /** Paths the brief says the task must hand back. */
   private requiredArtifacts: string[] = [];
   private machine: RemoteMachine | undefined;
+  /** The task goes on in a new sandbox from its stored conversation: its files are not there. */
+  private freshBox = false;
   private record: RunnerSessionRecord | undefined;
   private access: ModelAccess | undefined;
   /** What the gateway settled for this run's access, when the access is metered. */
@@ -271,7 +275,8 @@ class Run implements RunHandle {
       if (!header.ok) return this.fail(header.reason);
       this.requiredArtifacts = header.artifacts;
       if (resumed) {
-        await machine.prepare(spec.taskId, undefined, this.signal);
+        // A new sandbox has no brief: the conversation refers to it.
+        await machine.prepare(spec.taskId, this.freshBox ? brief : undefined, this.signal);
       } else {
         await machine.prepare(spec.taskId, brief, this.signal);
         if (header.requests.length > 0) {
@@ -458,6 +463,24 @@ class Run implements RunHandle {
 
     const snapshotId = existing.snapshotIds.at(-1);
     if (!snapshotId || !fleet.sandboxes.restoreFromSnapshot) {
+      // No sandbox and no snapshot: with the conversation kept off the sandbox, the task goes on
+      // in a new one, without its files.
+      if (await this.conversationKept(existing)) {
+        this.adoptLease(await fleet.sandboxes.acquire({ tenantId: existing.tenantId, taskId: spec.taskId }));
+        this.checkCancelled();
+        const machineId = (this.lease as SandboxLease).machineId;
+        const record = await fleet.updateRecord(spec.taskId, (current) => ({
+          ...(current ?? existing),
+          machineId,
+          snapshotIds: [],
+          updatedAt: fleet.now(),
+        }));
+        this.freshBox = true;
+        this.progress(
+          'the sandbox is gone and has no snapshot: the task goes on in a new one from its stored conversation, without its files',
+        );
+        return { record };
+      }
       throw new Error(
         'cannot resume: the sandbox is gone and there is no snapshot to restore it from',
       );
@@ -477,6 +500,66 @@ class Run implements RunHandle {
       updatedAt: fleet.now(),
     }));
     return { record };
+  }
+
+  /** Whether the transcript store holds this record's conversation, so a new sandbox can take it over. */
+  private async conversationKept(record: RunnerSessionRecord): Promise<boolean> {
+    const { fleet, vendor } = this;
+    if (vendor.name !== 'claude-agent-sdk' || !fleet.options.agentSdk) return false;
+    const store = fleet.options.transcripts;
+    if (!store || !record.sessionId) return false;
+    return (await store.locate(this.spec.taskId, record.sessionId)) !== undefined;
+  }
+
+  /**
+   * Gets the conversation ready for an SDK turn when transcripts are kept: a resumed session is put
+   * on the sandbox first if it is not there (a new sandbox, or one restored from an older snapshot),
+   * and the SDK is given the store that keeps every line the CLI writes from here on. A resumed
+   * session the store never saw (it began before transcripts were kept) goes on as it is on the
+   * sandbox, unmirrored.
+   */
+  private async prepareMirror(
+    machine: RemoteMachine,
+    resumeSessionId: string | undefined,
+  ): Promise<{ store: SessionStore; configDir: string } | undefined> {
+    const { fleet, spec } = this;
+    const transcripts = fleet.options.transcripts;
+    if (!transcripts) return undefined;
+    if (resumeSessionId) {
+      let restored: Awaited<ReturnType<typeof restoreTranscript>>;
+      try {
+        restored = await this.guard(
+          restoreTranscript({
+            machine,
+            store: transcripts,
+            taskId: spec.taskId,
+            sessionId: resumeSessionId,
+            signal: this.signal,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof CancelledError) throw error;
+        throw new Error(`the conversation could not be put on the sandbox: ${errorMessage(error)}`);
+      }
+      if (restored.status === 'absent') {
+        this.progress(
+          'this conversation was not kept off the sandbox (it began before that was on); this turn is not saved',
+        );
+        return undefined;
+      }
+      if (restored.status === 'restored') {
+        this.progress(`the conversation (${restored.lines} lines) was put back on the sandbox`);
+      }
+    }
+    return {
+      store: transcriptSessionStore({
+        taskId: spec.taskId,
+        store: transcripts,
+        redact: (text) => this.scrub(text),
+        onProblem: (message) => this.progress(message),
+      }),
+      configDir: machine.configDir(spec.taskId),
+    };
   }
 
   private async machineUsable(machineId: string): Promise<boolean> {
@@ -563,6 +646,11 @@ class Run implements RunHandle {
   private resumedPrompt(dir: string, prompt: string): string {
     return [
       prompt,
+      ...(this.freshBox
+        ? [
+            `The sandbox you were working in is gone and this is a new one. Your conversation is restored, but the files in ${dir}/workspace are not: only the brief (${dir}/brief.md) is here. Rebuild what you need from what you did before, and check what already reached the outside world (a push, a pull request, a message) before you do it again.`,
+          ]
+        : []),
       `When you are finished, write ${dir}/result.json as ${manifestShape()}.`,
       'Write that file as the very last step, then stop. Report only what you actually did and checked.',
     ].join('\n\n');
@@ -635,12 +723,14 @@ class Run implements RunHandle {
     const reader = this.openReader();
     let drive: Drive;
     try {
+      const mirror = sdk ? await this.prepareMirror(machine, resumeSessionId) : undefined;
       drive = sdk
         ? await this.driveAgentSdk(sdk, reader, channel as AgentChannel, {
             prompt,
             run,
             dir,
             launchRun,
+            ...(mirror ? { mirror } : {}),
             ...(resumeSessionId ? { resumeSessionId } : {}),
             ...(mcpUrl ? { mcpUrl } : {}),
             ...(model ? { model } : {}),
@@ -817,6 +907,7 @@ class Run implements RunHandle {
       mcpUrl?: string;
       model?: string;
       effort?: string;
+      mirror?: { store: SessionStore; configDir: string };
       launchRun(
         script: string,
         extraEnvs?: Record<string, string>,
@@ -840,6 +931,7 @@ class Run implements RunHandle {
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
       ...(spec.steps ? { steps: spec.steps } : {}),
+      ...(input.mirror ? { mirror: input.mirror } : {}),
       redact: (text) => this.scrub(text),
       onProblem: (message) => this.progress(message),
       spawn: ({ args, env, signal }) => {
@@ -882,8 +974,11 @@ class Run implements RunHandle {
 
     let sdkError: unknown;
     try {
-      for await (const _message of query) {
+      for await (const message of query) {
         this.checkCancelled();
+        if (message.type === 'system' && message.subtype === 'mirror_error') {
+          this.progress(`a transcript batch was not kept: ${this.scrub(message.error)}`);
+        }
         if (this.budgetStop) stopNow({ ok: false, reason: this.budgetStop });
         if (stopped) break;
       }

@@ -16,6 +16,7 @@ import { DEFAULT_TENANT, noModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
 import { MemorySessionStore, referencedSnapshotIds } from './session-store.js';
 import { errorMessage, shq } from './shell.js';
+import type { TranscriptStore } from './transcripts.js';
 import type {
   ModelAccessProvider,
   RunnerSessionRecord,
@@ -93,6 +94,12 @@ export interface CloudRunnersOptions {
    * machine is checked once (`checkAgentIsolation`) before it runs one.
    */
   agentChannel?: AgentChannel;
+  /**
+   * Keeps the conversation of SDK-driven Claude tasks off the sandbox, so a task whose sandbox is
+   * gone goes on from its stored conversation. Needs `agentSdk`. Without it the conversation lives
+   * only in the sandbox's own files.
+   */
+  transcripts?: TranscriptStore;
   /**
    * How often a run driven by the SDK is polled: every hook the CLI waits for costs a poll, so
    * these runs are polled much faster than `pollIntervalMs` while output is coming, and back off
@@ -225,7 +232,10 @@ export class Fleet {
   }
 
   private async installCli(machine: RemoteMachine, vendor: VendorAdapter): Promise<void> {
-    const version = this.options.versions?.[vendor.name] ?? vendor.defaultVersion;
+    // Driven by the SDK, the CLI is the one the SDK was built for: it passes flags older ones lack.
+    const sdkVersion =
+      vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
+    const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
     const check = await machine.exec(cliCheckScript(vendor.binary), {
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },

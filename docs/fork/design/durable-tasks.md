@@ -8,7 +8,7 @@ Status of the pieces (updated by each PR):
 |---|---|---|
 | 1 | Step log and epoch fencing | merged (#162), section 1 |
 | 2 | Resume instead of fail | merged (#164), section 2 |
-| 3 | Process channel and Agent SDK runner | section 3 (off until a deployment passes `agentSdk`) |
+| 3 | Process channel and Agent SDK runner | merged (#166), section 3 (off until a deployment passes `agentSdk`) |
 | 4 | Transcript mirror and fresh-box resume | not built |
 | 5 | Spend follows the step log, per-task budgets | not built |
 | 6 | Steering, `restart` event, catch-up, stream fence | not built |
