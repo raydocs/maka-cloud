@@ -55,6 +55,8 @@ export interface FakeInstaboxOptions {
    * `none` leaves the real tools (or none) in reach, for a test of a box without a firewall tool.
    */
   firewall?: 'shim' | 'none';
+  /** Runs every exec'd command behind this prefix (`nsenter --net=...`, to give it a network of its own). */
+  commandPrefix?: string[];
 }
 
 /**
@@ -69,10 +71,23 @@ if [ -n "\${SHIM_FAIL:-}" ] && [[ "$*" =~ $SHIM_FAIL ]]; then exit 3; fi
 [ "$1" = -w ] && shift
 op="$1"; shift
 rules() { echo "$SHIM_STATE/$tool.$1"; }
+# What iptables prints is not what it was given: states in its own order, a host as a /32 or /128,
+# the default reject reason, the protocol match, ICMPv6 types as numbers. A rule is stored the way
+# iptables would print it, so a check written against the arguments alone does not pass here.
+norm() {
+  sed -E \\
+    -e 's/--ctstate ESTABLISHED,RELATED/--ctstate RELATED,ESTABLISHED/' \\
+    -e 's/-d ([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+) /-d \\1\\/32 /' \\
+    -e 's/-d ([0-9a-f]*:[0-9a-f:]*) /-d \\1\\/128 /' \\
+    -e 's/-p (udp|tcp) --dport/-p \\1 -m \\1 --dport/' \\
+    -e 's/-p ipv6-icmp --icmpv6-type neighbour-solicitation/-p ipv6-icmp -m icmp6 --icmpv6-type 135/' \\
+    -e 's/-p ipv6-icmp --icmpv6-type neighbour-advertisement/-p ipv6-icmp -m icmp6 --icmpv6-type 136/' \\
+    -e 's/-p ipv6-icmp --icmpv6-type router-solicitation/-p ipv6-icmp -m icmp6 --icmpv6-type 133/'
+}
 case "$op" in
   -N) [ -e "$(rules "$1")" ] && exit 1; : > "$(rules "$1")" ;;
   -F) : > "$(rules "$1")" ;;
-  -A) chain="$1"; shift; echo "-A $chain $*" >> "$(rules "$chain")" ;;
+  -A) chain="$1"; shift; echo "-A $chain $* " | norm | sed -E -e 's/ $//' -e "s/-j REJECT\$/-j REJECT --reject-with $([ "$tool" = ip6tables ] && echo icmp6-port-unreachable || echo icmp-port-unreachable)/" >> "$(rules "$chain")" ;;
   -I) chain="$1"; shift 2; { echo "-A $chain $*"; cat "$(rules "$chain")" 2>/dev/null; true; } > "$SHIM_STATE/tmp" \\
         && mv "$SHIM_STATE/tmp" "$(rules "$chain")" ;;
   -C) chain="$1"; shift; grep -Fxq -- "-A $chain $*" "$(rules "$chain")" 2>/dev/null ;;
@@ -168,6 +183,7 @@ export class FakeInstabox {
   private execCount = 0;
   private operationCount = 0;
   private readonly execPath: string | undefined;
+  private readonly commandPrefix: string[];
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
   private readonly listenOn: { host: string; port: number };
@@ -181,6 +197,7 @@ export class FakeInstabox {
     this.apiKey = options.apiKey ?? 'ibk_test_key';
     this.machineId = options.machineId ?? 'm_aaaaaaaaaaaaaaaaaaaaaaaaaa';
     this.execPath = options.execPath;
+    this.commandPrefix = options.commandPrefix ?? [];
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
     this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
@@ -562,7 +579,13 @@ export class FakeInstabox {
         resolve({ stdout: '', stderr: 'closed', exitCode: 1, timedOut: false, truncated: false });
         return;
       }
-      const child = spawn(BASH, ['-c', body.cmd], {
+      const [program = BASH, ...prefixArgs] = this.commandPrefix.length
+        ? this.commandPrefix
+        : [BASH];
+      const args = this.commandPrefix.length
+        ? [...prefixArgs, BASH, '-c', body.cmd]
+        : ['-c', body.cmd];
+      const child = spawn(program, args, {
         cwd: body.cwd ?? '/',
         env,
         detached: true,
