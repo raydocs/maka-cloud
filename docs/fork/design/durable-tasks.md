@@ -8,8 +8,8 @@ Status of the pieces (updated by each PR):
 |---|---|---|
 | 1 | Step log and epoch fencing | merged (#162), section 1 |
 | 2 | Resume instead of fail | merged (#164), section 2 |
-| 3 | Process channel and Agent SDK runner | section 3 (off until a deployment passes `agentSdk`) |
-| 4 | Transcript mirror and fresh-box resume | not built |
+| 3 | Process channel and Agent SDK runner | merged (#166), section 3 (off until a deployment passes `agentSdk`) |
+| 4 | Transcript mirror and fresh-box resume | in review, section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
 | 5 | Spend follows the step log, per-task budgets | not built |
 | 6 | Steering, `restart` event, catch-up, stream fence | not built |
 | 7 | Run timeline | not built |
@@ -86,13 +86,15 @@ If `recover` throws or its run reports it cannot resume (no recorded session), t
 
 With `CloudRunnersOptions.agentSdk` set (`loadAgentSdk()` loads the installed package), the Claude
 runner drives its CLI through the Claude Agent SDK instead of running `claude -p` on its own.
-Without it nothing changes; the host does not pass it yet (piece 4 wires it, together with the
-transcript mirror, in the host's stack). The Codex runner is untouched.
+Without it nothing changes; the host passes it (with the agent account and the transcript store)
+only when `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` are set. The Codex runner is untouched.
 
 **Why.** The SDK gives the host two things the plain CLI cannot: hooks that call back into the host
 before and after every tool (the step log of section 1 needs exactly that), and, in piece 4, a
 `sessionStore` that mirrors the transcript off the box. The cost is a conversation with the CLI in
 both directions, which `exec` (one request, one answer) cannot carry. Hence the channel.
+
+**Who can write the channel.** Whatever arrives on the CLI's stdin can answer its permission questions, so an agent that could append to the input file could approve its own denied tool calls. The channel therefore lives in `<task>/chan/` (mode 700, owned by the sandbox user; the scripts refuse a link in its place, a file that is a link, or anything not ours), and with the SDK the CLI runs as another account (`agentChannel: { user, group }`, `agent-user.ts`): `sudo -n -u <user>` wraps the command, the workspace belongs to the shared group (setgid, group-writable), and the task directory can be entered by the group but not listed. Stopping a run goes through `sudo -n kill` for the agent's processes. Each box is probed once before it runs an SDK turn (`checkAgentIsolation`): the account is not the sandbox user, cannot use sudo, cannot enter, list, read or write the channel directory, and can write a workspace the sandbox user can clean up; any other answer refuses the turn. Without `agentChannel`, an SDK turn is refused. Assumed, not verified on a real box: that instabox's sandbox user has passwordless `sudo -n` (the egress guard assumes the same), that an unprivileged account and a shared group exist in the image, and that the CLI binary is readable by that account. The tests run the real separation (`nobody`, `nogroup`) when the machine is root with sudo, and skip it otherwise.
 
 **The process channel** (`process-channel.ts`). `ExecProcess` is the SDK's `SpawnedProcess` for a
 process on the box:
@@ -168,4 +170,54 @@ that the note now lists the tool calls that were cut off, because the hooks logg
   The turn that was in progress is not continued mid-sentence: the agent is told what the log knows.
 - Input files stay in the task directory (they hold the prompt, like `brief.md`) and are in a
   snapshot of it; they are removed with the directory.
-- A box lost with no snapshot still cannot be resumed (piece 4).
+- A box lost with no snapshot can be resumed only for a conversation the store kept (section 4); a
+  task that began before transcripts were kept goes on from the box's own files or fails as before.
+
+## 4. Transcript mirror and fresh-box resume
+
+With `CloudRunnersOptions.transcripts` set (a `TranscriptStore`) an SDK run keeps the conversation
+off the box. The SDK mirrors every line the CLI writes to a `SessionStore` it is given
+(`sessionStoreFlush: 'eager'`, so a crash loses at most the line in flight); `transcriptSessionStore`
+(`transcripts.ts`) takes the run's secrets out of each line (`Run.scrub`) and appends it to the
+store. The CLI's configuration directory is the task's own (`<task>/claude-config`, passed as
+`CLAUDE_CONFIG_DIR` to both the SDK and the CLI, which the SDK checks the transcript paths against).
+
+**The store.** `TranscriptStore` is `append` (a line with a `uuid` already kept for that transcript
+is skipped, so a batch sent again lands once), `locate`, `read` (pages, by line index) and
+`deleteTask`. Keys are plain names (a project key, a UUID session id, a subagent subpath), a task
+keeps one project key, and a line, a batch, a task and the number of transcripts are capped; a batch
+that breaks a cap keeps nothing of itself. `MemoryTranscriptStore` is for tests; the server uses
+`SqliteTranscriptStore` (`transcripts.db` in the data directory: exclusive, WAL, one write
+transaction per call, part of the daily backup). The backup copy has private-key headers and the
+system's own tokens taken out of the lines (a repository file the agent read may hold one, and the
+backup scan refuses a copy that does), the live file keeps them.
+
+**Putting it back.** Before a resumed SDK turn the box's transcript is compared with the store's
+(`restoreTranscript`): when the box has fewer lines (a new box, or a snapshot older than the
+store) the stored transcript is streamed to the box in chunks into a temporary file, checked by
+sha256 and renamed into place, so the CLI never reads a half-written file; a chunk whose answer was
+lost is sent again safely by its offset, and a failed upload removes its temporary file. A
+conversation the store never saw (it began before transcripts were kept) goes on as it is on the
+box, unmirrored, and says so.
+
+**A box lost with no snapshot.** `resume` finds the store holds the conversation, asks the provider
+for a new box, and goes on there: the brief is written again, the transcript is put back, and the
+prompt says the files in the workspace are gone and to check what already reached the outside world
+before doing it again. Without a stored conversation the old failure stays ("cannot resume: the
+sandbox is gone…").
+
+**With the agent account.** `claude-config` is made by `prepareAgent` as a setgid directory of the
+shared group; the agent writes its transcripts there and the sandbox user reads them and writes the
+restored one (umask 007). The restore scripts refuse a link as the configuration directory, its
+`projects` or the key directory, and create the temporary file without following a link planted at
+its name. Assumed: no agent process is running while a transcript is put back (the turn that wrote
+it has ended and the run was stopped) — a process of the agent account that outlived its turn could
+swap a link between the check and the write.
+
+**The CLI version.** The sandbox installs the `claude` version the SDK was built for
+(`claudeCodeVersion` in the SDK's package.json), since the mirror flags are new.
+
+Known limits: the store keeps subagent transcripts but does not put them back; a conversation is
+kept in full (capped at 256 MB per task); nothing here is verified on a real box, only against the
+stand-in CLI and the real SDK.
+

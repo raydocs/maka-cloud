@@ -1,32 +1,31 @@
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
 import { ChoicePanel } from '@maka/ui';
 import { useMode } from './theme';
 import {
   ApiError,
-  applyEvent,
-  applyInboxItem,
   type ArtifactContent,
   type ArtifactListing,
   CloudClient,
   type Conversation,
-  type ConversationState,
+  ConversationFeed,
+  conversationSummary,
   displayJson,
   displayText,
   dollars,
-  emptyState,
   errorText,
   exactText,
-  inboxAnswerer,
   type InboxItem,
-  mergeViews,
   publicLink,
   type Question,
   stepsOf,
+  type TaskArtifacts,
+  type TaskControl,
   taskLabel,
   type TaskView,
   TERMINAL,
   totalCost,
+  openWorkspace,
   Unsupported,
 } from '@maka-cloud/client';
 import { Home } from './Home';
@@ -161,7 +160,7 @@ function TaskBranch({
   tasks: TaskView[];
   noPause: ReadonlySet<string>;
   busy: boolean;
-  act: (key: string, work: () => Promise<unknown>) => Promise<void>;
+  act: (key: string, work: () => Promise<unknown>) => Promise<boolean>;
   control: (task: string, action: 'cancel' | 'pause' | 'resume') => Promise<void>;
   ancestors?: string[];
 }) {
@@ -263,11 +262,6 @@ export function Picture({ name, blob }: { name: string; blob: Blob }) {
   return src ? <img className="picture" alt={displayText(name)} src={src} /> : null;
 }
 
-interface TaskArtifacts {
-  listings: ArtifactListing[];
-  failed?: boolean;
-}
-
 function ArtifactList({
   client,
   taskId,
@@ -281,7 +275,7 @@ function ArtifactList({
   title: string;
   entry: TaskArtifacts;
   busy: boolean;
-  act: (key: string, work: () => Promise<unknown>) => Promise<void>;
+  act: (key: string, work: () => Promise<unknown>) => Promise<boolean>;
 }) {
   const [content, setContent] = useState<Record<number, ArtifactContent>>({});
   return (
@@ -341,15 +335,6 @@ function ArtifactList({
   );
 }
 
-const REFRESH_AFTER = new Set([
-  'task_succeeded',
-  'task_failed',
-  'task_cancelled',
-  'task_cancel_requested',
-  'task_stop_pending',
-  'task_stopped',
-]);
-
 export function ConversationView({
   client,
   conversation,
@@ -362,124 +347,24 @@ export function ConversationView({
   /** The conversation chooser, shown in the heading (the app owns which conversation is open). */
   picker?: ReactNode;
 }) {
-  const [state, setState] = useState<ConversationState>(emptyState);
-  const [status, setStatus] = useState('Connecting…');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState('');
-  const pending = useRef(false);
+  const feed = useMemo(
+    () => new ConversationFeed(client, conversation.conversationId),
+    [client, conversation.conversationId],
+  );
+  useEffect(() => {
+    feed.start();
+    return () => feed.stop();
+  }, [feed]);
+  const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
+  const { state, status, error, busy, artifacts, noPause } = snapshot;
   const [draft, setDraft] = useState('');
-  const messageId = useRef<string | null>(null);
-  const [artifacts, setArtifacts] = useState<Record<string, TaskArtifacts>>({});
-  const [noPause, setNoPause] = useState<ReadonlySet<string>>(new Set());
-  useEffect(() => {
-    const controller = new AbortController();
-    let refresh: ReturnType<typeof setTimeout> | undefined;
-    // The stream replays the conversation from the start; the task list adds
-    // what only the server works out (cost, budget, stops still owed).
-    const reconcile = () => {
-      clearTimeout(refresh);
-      refresh = setTimeout(() => {
-        client
-          .listTasks(conversation.conversationId)
-          .then((views) => {
-            if (!controller.signal.aborted) setState((previous) => mergeViews(previous, views));
-          })
-          .catch(() => {});
-      }, 250);
-    };
-    client
-      .subscribe(
-        conversation.conversationId,
-        (event) => {
-          if (event.data.conversationId !== conversation.conversationId) return;
-          setState((previous) => applyEvent(previous, event));
-          if (event.kind === 'task.event' && REFRESH_AFTER.has(event.data.event.type)) reconcile();
-        },
-        setStatus,
-        controller.signal,
-      )
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setError(errorText(undefined));
-          setStatus('Disconnected');
-        }
-      });
-    return () => {
-      controller.abort();
-      clearTimeout(refresh);
-    };
-  }, [client, conversation.conversationId]);
+  const act = (key: string, work: () => Promise<unknown>) => feed.act(key, work);
+  const control = (taskId: string, action: TaskControl) => feed.control(taskId, action);
+  const answerItem = (item: InboxItem, optionId: string, text?: string) =>
+    void feed.answerItem(item, optionId, text);
 
-  // A finished task with results: ask the server what they are, once.
-  const listed = useRef(new Set<string>());
-  useEffect(() => {
-    for (const task of Object.values(state.tasks)) {
-      if (
-        task.state !== 'succeeded' ||
-        !task.manifest?.artifacts?.length ||
-        listed.current.has(task.taskId)
-      )
-        continue;
-      listed.current.add(task.taskId);
-      client
-        .listArtifacts(task.taskId)
-        .then(({ artifacts: listings }) =>
-          setArtifacts((previous) => ({
-            ...previous,
-            [task.taskId]: { listings },
-          })),
-        )
-        .catch(() => {
-          setArtifacts((previous) => ({
-            ...previous,
-            [task.taskId]: { listings: [], failed: true },
-          }));
-        });
-    }
-  }, [client, state.tasks]);
-
-  async function act(key: string, work: () => Promise<unknown>) {
-    if (pending.current) return;
-    pending.current = true;
-    setBusy(key);
-    setError('');
-    try {
-      await work();
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      pending.current = false;
-      setBusy('');
-    }
-  }
-
-  async function control(taskId: string, action: 'cancel' | 'pause' | 'resume') {
-    try {
-      await client.control(taskId, action);
-    } catch (e) {
-      if (e instanceof ApiError && e.code === 'pause_unsupported')
-        setNoPause((previous) => new Set(previous).add(taskId));
-      throw e;
-    }
-  }
-
-  const answerInbox = useRef(
-    inboxAnswerer(client, (item) => setState((previous) => applyInboxItem(previous, item))),
-  );
-  function answerItem(item: InboxItem, optionId: string, text?: string) {
-    void act('inbox', () => answerInbox.current(item, optionId, text));
-  }
-
-  const tasks = Object.values(state.tasks);
-  const running = tasks.filter((task) => task.state === 'running').length;
+  const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
-  const withResults = tasks.filter((task) => artifacts[task.taskId]);
-  const questions = Object.values(state.questions);
-  const openQuestions = new Set(
-    questions
-      .filter((question) => state.answers[question.questionId] === undefined)
-      .map((question) => displayText(question.question).trim()),
-  );
 
   return (
     <div className="chat">
@@ -525,23 +410,7 @@ export function ConversationView({
             question={question}
             answered={state.answers[question.questionId]}
             disabled={Boolean(busy)}
-            onAnswer={(optionId, text) =>
-              void act('answer', async () => {
-                // 200 means the server recorded it (a repeat of the same answer is a duplicate).
-                await client.answer(conversation.conversationId, {
-                  questionId: question.questionId,
-                  optionId,
-                  ...(text ? { text } : {}),
-                });
-                setState((previous) => ({
-                  ...previous,
-                  answers: {
-                    ...previous.answers,
-                    [question.questionId]: optionId,
-                  },
-                }));
-              })
-            }
+            onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
           />
         ))}
         <InboxPanel
@@ -559,17 +428,7 @@ export function ConversationView({
           className="composer"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!draft.trim()) return;
-            void act('message', async () => {
-              messageId.current ??= crypto.randomUUID();
-              await client.postMessage(
-                conversation.conversationId,
-                draft.trim(),
-                messageId.current,
-              );
-              setDraft('');
-              messageId.current = null;
-            });
+            void feed.send(draft).then((sent) => sent && setDraft(''));
           }}
         >
           <label htmlFor="message" className="sr-only">
@@ -583,7 +442,7 @@ export function ConversationView({
               value={draft}
               onChange={(e) => {
                 setDraft(displayText(e.target.value));
-                messageId.current = null;
+                feed.draftEdited();
               }}
               placeholder="What would you like to do next?"
             />
@@ -838,7 +697,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     setBusy(true);
     setError('');
     try {
-      const client = new CloudClient(token, {
+      const workspace = await openWorkspace(token, {
         onRevoked: () => {
           // The invite is gone: leave the workspace and keep nothing of it.
           setSession(null);
@@ -848,12 +707,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           setError('Your invite is no longer valid. Please reconnect.');
         },
       });
-      const result = await client.listConversations();
-      setSession({ client, conversations: result.conversations });
-      const latest = result.conversations.at(-1)?.conversationId ?? '';
-      setChosen(latest);
-      // Someone with conversations lands in the latest one; a first visit lands on Home.
-      setView(latest ? 'chat' : 'home');
+      setSession({ client: workspace.client, conversations: workspace.conversations });
+      setChosen(workspace.chosen);
+      setView(workspace.landing);
     } catch (e) {
       setError(errorText(e));
     } finally {

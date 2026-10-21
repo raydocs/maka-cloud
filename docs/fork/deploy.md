@@ -364,6 +364,8 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | --- | --- |
 | `MAKA_CLOUD_DATA_DIR` | required: directory for the databases, handoff files and conductor storage |
 | `MAKA_CLOUD_BACKUP_DIR` | directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups |
+| `MAKA_CLOUD_AGENT_USER` | the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly |
+| `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
 | `MAKA_CLOUD_SPEND_ALERT_USD` | send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push |
 | `MAKA_CLOUD_OWNER_INVITE` | the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app |
 | `MAKA_CLOUD_HOST` | public API host (default 127.0.0.1) |
@@ -421,6 +423,18 @@ CLI's own default model, which the gateway cannot price, so a Codex run (and wit
 it the review of a Claude change) is refused: `maka-cloud check` says how many
 roles are in that state.
 
+How a mode is chosen: a mode the user picks for a message that starts a run is that
+run's mode, and the run starts with that mode's default budget; the conductor cannot
+choose another. Without a pick, the conductor may name a mode for each delegation
+(`workMode`), and the run's budget decides whether it is affordable (never `deep`
+by itself). The mode's own cap on one delegation holds either way. The mode reaches
+the runner as one `maka-mode:` line the conductor's code adds to the brief, right
+after any `maka-inputs:` and `maka-artifacts:` lines; a brief the model wrote with
+such a line in it is refused. The conductor keeps one model for a conversation, so
+a mode sets how hard it thinks, not which model it is; its own thinking effort is
+fixed when the conversation's first run opens its session, and its planner's effort
+follows each run's mode.
+
 ## Standing duties and the GitHub webhook
 
 Standing duties are off until `MAKA_GITHUB_WEBHOOK_SECRET` is set. With it, the
@@ -451,6 +465,15 @@ delivery id is handled once, and a run started by an event carries text from
 outside the owner, so the conversation is marked as such. A run has the duty's
 authority level for its whole life and a budget it cannot raise. The duties
 database is `duties.db` in the data directory and is part of the daily backup.
+
+### Claude through the Agent SDK
+
+Set `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` to run Claude tasks through the Agent SDK:
+the step log, resume after a restart and the stored conversation (`transcripts.db` in the data
+directory, part of the daily backup) need it. The box image must have that account (no sudo, not the
+sandbox user), a group the sandbox user shares with it, a `claude` binary it can read, and
+passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
+that fails the check refuses the turn with the reason. Unset, Claude runs the CLI directly as before.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns

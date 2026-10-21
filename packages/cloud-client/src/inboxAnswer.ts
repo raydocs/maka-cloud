@@ -1,5 +1,6 @@
 import { ApiError, type CloudClient } from './client';
 import type { InboxItem } from './contract';
+import { randomId } from './ids';
 
 /**
  * One tap, one answer. A decision is answered with an id that is the same for the same answer to
@@ -12,7 +13,7 @@ export function inboxAnswerer(client: CloudClient, onItem: (item: unknown) => vo
   const ids = new Map<string, string>();
   return async function answer(item: InboxItem, optionId: string, text?: string): Promise<void> {
     const key = [item.itemId, item.preconditionHash, optionId, text ?? ''].join('\u0000');
-    const answerId = ids.get(key) ?? crypto.randomUUID();
+    const answerId = ids.get(key) ?? randomId();
     ids.set(key, answerId);
     try {
       const result = await client.answerInbox(item.itemId, {

@@ -1,123 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   type CloudClient,
   type Conversation,
+  ConversationStarter,
   displayText,
+  doneSince,
   dollars,
   errorText,
-  firstSentence,
-  inboxAnswerer,
-  type InboxItem,
-  mergeInboxItem,
-  type ProjectView,
+  HomeFeed,
+  nextRuns,
+  recentConversations,
+  relativeTime,
   type TaskView,
-  TERMINAL,
-  Unsupported,
+  verbOf,
+  type VisitStore,
 } from '@maka-cloud/client';
 import { InboxCard } from './Inbox';
-
-const DAY_MS = 86_400_000;
-const RECENT_CONVERSATIONS = 5;
-const DONE_LINES = 8;
-
-export interface DoneEntry {
-  conversationId: string;
-  taskId: string;
-  title: string;
-  state: TaskView['state'];
-  outcome: string;
-  costUsd: number | undefined;
-  finishedAt: number;
-  task: TaskView;
-}
-
-/** What finished since `since`: top-level tasks only (a subtask is part of its parent's story), newest first. */
-export function doneSince(
-  byConversation: ReadonlyMap<string, readonly TaskView[]>,
-  since: number,
-): DoneEntry[] {
-  const entries: DoneEntry[] = [];
-  for (const [conversationId, tasks] of byConversation) {
-    for (const task of tasks) {
-      if (task.parentTaskId !== undefined || !TERMINAL.has(task.state)) continue;
-      if (task.finishedAt === undefined || task.finishedAt <= since) continue;
-      const outcome =
-        task.state === 'succeeded'
-          ? firstSentence(task.manifest?.summary ?? 'Finished.')
-          : task.state === 'cancelled'
-            ? 'Stopped before it finished.'
-            : firstSentence(task.failureReason ?? 'It did not finish.');
-      entries.push({
-        conversationId,
-        taskId: task.taskId,
-        title: task.title ?? 'Task',
-        state: task.state,
-        outcome,
-        costUsd: task.costUsd,
-        finishedAt: task.finishedAt,
-        task,
-      });
-    }
-  }
-  return entries.sort((a, b) => b.finishedAt - a.finishedAt).slice(0, DONE_LINES);
-}
-
-export interface NextRun {
-  dutyId: string;
-  name: string;
-  repo: string;
-  at: number;
-}
-
-/**
- * Scheduled duties that are on, soonest first. A schedule runs every `everyMinutes`, counted from the
- * moment the duty was approved; duties that wake on a GitHub event have no time, so they are counted.
- */
-export function nextRuns(
-  projects: readonly ProjectView[],
-  now: number,
-): { scheduled: NextRun[]; watching: number } {
-  const scheduled: NextRun[] = [];
-  let watching = 0;
-  for (const project of projects) {
-    for (const duty of project.duties) {
-      if (duty.state !== 'active') continue;
-      const period = (duty.trigger.everyMinutes ?? 0) * 60_000;
-      if (duty.trigger.kind !== 'schedule' || period <= 0 || duty.activatedAt === null) {
-        if (duty.trigger.kind !== 'schedule') watching += 1;
-        continue;
-      }
-      const slots = Math.max(0, Math.floor((now - duty.activatedAt) / period)) + 1;
-      scheduled.push({
-        dutyId: duty.dutyId,
-        name: duty.name,
-        repo: project.repo,
-        at: duty.activatedAt + slots * period,
-      });
-    }
-  }
-  return { scheduled: scheduled.sort((a, b) => a.at - b.at), watching };
-}
-
-/** "in 5 min", "in 3 h", "in 2 days": a time ahead, in the words a person would use. */
-export function relativeTime(at: number, now: number): string {
-  const minutes = Math.max(0, Math.round((at - now) / 60_000));
-  if (minutes < 1) return 'any moment now';
-  if (minutes < 60) return `in ${minutes} min`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `in ${hours} h`;
-  return `in ${Math.round(hours / 24)} days`;
-}
-
-const VERB: Record<string, string> = {
-  approval: 'Approve',
-  budget: 'Decide',
-  decision: 'Decide',
-  blocked: 'Unblock',
-  verification_failed: 'Review',
-  finished: 'Review',
-};
-export const verbOf = (kind: string) => VERB[kind] ?? 'Decide';
 
 /** What the browser remembers about when this invite last looked at Home. Never the token. */
 function visitKey(fingerprint: string) {
@@ -138,6 +36,8 @@ function writeVisit(fingerprint: string, at: number) {
     // Then every visit is a first one: the last day is shown.
   }
 }
+
+const localVisits: VisitStore = { read: readVisit, write: writeVisit };
 
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
@@ -172,120 +72,37 @@ export function Home({
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
-  // A retry after a failed post reuses the conversation and the message id.
-  const attempt = useRef<{
-    conversationId: string;
-    clientMessageId: string;
-  } | null>(null);
-
-  const [items, setItems] = useState<Record<string, InboxItem>>({});
-  const [busy, setBusy] = useState(false);
-  const [answerError, setAnswerError] = useState('');
-  const pending = useRef(false);
-  const answer = useRef(
-    inboxAnswerer(client, (item) => setItems((held) => mergeInboxItem(held, item))),
+  const starter = useMemo(() => new ConversationStarter(client), [client]);
+  // `now` may be a new function each render; the feed keeps asking the latest one.
+  const clock = useRef(now);
+  clock.current = now;
+  const feed = useMemo(() => new HomeFeed(client, localVisits, () => clock.current()), [client]);
+  const { items, busy, answerError, since, done, projects } = useSyncExternalStore(
+    feed.subscribe,
+    feed.getSnapshot,
   );
 
-  const [since, setSince] = useState<number | undefined>();
-  const [done, setDone] = useState<Map<string, readonly TaskView[]> | undefined>();
-  const [projects, setProjects] = useState<ProjectView[] | undefined>();
-  const [tick, setTick] = useState(0);
-
-  // Come back to this tab and the decisions, results and schedule are read again.
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') setTick((n) => n + 1);
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, []);
-
-  useEffect(() => {
-    let current = true;
-    client
-      .listInbox('open')
-      .then((list) => {
-        if (!current) return;
-        setItems((held) => list.reduce((all, item) => mergeInboxItem(all, item), held));
-      })
-      .catch(() => {});
-    return () => {
-      current = false;
-    };
-  }, [client, tick]);
-
-  useEffect(() => {
-    let current = true;
-    client
-      .listProjects()
-      .then((list) => current && setProjects(list))
-      .catch((error: unknown) => {
-        if (current && !(error instanceof Unsupported)) setProjects([]);
-      });
-    return () => {
-      current = false;
-    };
-  }, [client, tick]);
-
   // The last visit is read once; it is written when the person leaves, so a reload is a visit.
+  // Come back to this tab and the decisions, results and schedule are read again.
+  const latestConversations = useRef(conversations);
   useEffect(() => {
-    let current = true;
-    let print: string | undefined;
-    const leave = () => {
-      if (print !== undefined) writeVisit(print, now());
+    feed.start(latestConversations.current);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') feed.refresh();
     };
-    client
-      .fingerprint()
-      .then((value) => {
-        if (!current) return;
-        print = value;
-        setSince(readVisit(value) ?? now() - DAY_MS);
-      })
-      .catch(() => current && setSince(now() - DAY_MS));
+    const leave = () => feed.leave();
+    document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('pagehide', leave);
     return () => {
-      current = false;
+      document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('pagehide', leave);
-      leave();
+      feed.stop();
     };
-  }, [client, now]);
-
-  const recentIds = [...conversations]
-    .reverse()
-    .slice(0, RECENT_CONVERSATIONS)
-    .map((c) => c.conversationId)
-    .join('\u0000');
+  }, [feed]);
   useEffect(() => {
-    let current = true;
-    const ids = recentIds === '' ? [] : recentIds.split('\u0000');
-    void tick;
-    Promise.all(
-      ids.map((id) =>
-        client
-          .listTasks(id)
-          .then((tasks) => [id, tasks] as const)
-          .catch(() => [id, [] as TaskView[]] as const),
-      ),
-    ).then((pairs) => current && setDone(new Map(pairs)));
-    return () => {
-      current = false;
-    };
-  }, [client, recentIds, tick]);
-
-  async function act(work: () => Promise<void>) {
-    if (pending.current) return;
-    pending.current = true;
-    setBusy(true);
-    setAnswerError('');
-    try {
-      await work();
-    } catch (e) {
-      setAnswerError(errorText(e));
-    } finally {
-      pending.current = false;
-      setBusy(false);
-    }
-  }
+    latestConversations.current = conversations;
+    feed.conversationsChanged(conversations);
+  }, [feed, conversations]);
 
   const open = Object.values(items)
     .filter((item) => item.state !== 'closed')
@@ -299,7 +116,7 @@ export function Home({
       conversations.find((c) => c.conversationId === conversationId)?.title ??
         'Untitled conversation',
     );
-  const recent = [...conversations].reverse().slice(0, RECENT_CONVERSATIONS);
+  const recent = recentConversations(conversations);
 
   return (
     <div className="page">
@@ -312,7 +129,7 @@ export function Home({
               <InboxCard
                 item={item}
                 disabled={busy}
-                onAnswer={(optionId, text) => void act(() => answer.current(item, optionId, text))}
+                onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
               />
               <button
                 type="button"
@@ -340,25 +157,10 @@ export function Home({
             if (!draft.trim() || starting) return;
             setStarting(true);
             setStartError('');
-            void (async () => {
-              try {
-                attempt.current ??= {
-                  conversationId: (await client.createConversation()).conversationId,
-                  clientMessageId: crypto.randomUUID(),
-                };
-                const { conversationId, clientMessageId } = attempt.current;
-                await client.postMessage(conversationId, draft.trim(), clientMessageId);
-                attempt.current = null;
-                onStarted({
-                  conversationId,
-                  title: null,
-                  createdAt: Date.now(),
-                });
-              } catch (failure) {
-                setStartError(errorText(failure));
-                setStarting(false);
-              }
-            })();
+            void starter.start(draft).then(onStarted, (failure: unknown) => {
+              setStartError(errorText(failure));
+              setStarting(false);
+            });
           }}
         >
           <label htmlFor="first-message" className="sr-only">
@@ -373,7 +175,7 @@ export function Home({
               value={draft}
               onChange={(e) => {
                 setDraft(displayText(e.target.value));
-                if (attempt.current) attempt.current.clientMessageId = crypto.randomUUID();
+                starter.draftEdited();
               }}
             />
             <button

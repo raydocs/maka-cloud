@@ -39,6 +39,16 @@ test('a shell command is safe only when it is one plain read-only command', () =
     'npm run build',
     'grep -rn foo src',
     'node --test dist',
+    'find . -name "*.ts" -type f',
+    'git branch',
+    'git branch -a',
+    'git remote -v',
+    'sort -u names.txt',
+    'uniq names.txt',
+    'date',
+    'date +%s',
+    'env',
+    'rg -n foo src',
   ]) {
     assert.equal(bash(command), 'safe', command);
   }
@@ -58,6 +68,37 @@ test('a shell command is safe only when it is one plain read-only command', () =
     'git status; rm -rf /',
     'bash -c "ls"',
     'npm install left-pad',
+    // A harmless first word does not make the command harmless.
+    'env gh pr merge 123 --merge',
+    'env FOO=1 git push',
+    'find . -delete',
+    'find . -name x -exec rm {} +',
+    'find . -fprint out.txt',
+    'git branch -D release',
+    'git branch newname',
+    'git branch -m old new',
+    'git -c core.pager=sh log',
+    'git -C /elsewhere status',
+    'git diff --output=patch.diff',
+    'git remote add evil https://example.test/x.git',
+    'git remote set-url origin https://example.test/x.git',
+    'git config --global user.name x',
+    'sort -o out.txt in.txt',
+    'sort --output=out.txt in.txt',
+    'uniq in.txt out.txt',
+    'tree -o listing.txt',
+    'date -s 2020-01-01',
+    'date 010100002020',
+    'rg --pre ./hook pattern',
+    'npm run publish',
+    'npm run deploy',
+    'node script.js',
+    'cargo install foo',
+    'make deploy',
+    '/bin/ls',
+    'FOO=1 ls',
+    'constructor',
+    'git constructor',
     '',
   ]) {
     assert.equal(bash(command), 'never', JSON.stringify(command));
@@ -129,8 +170,9 @@ const call = async (
 test('every answer of the intent has an answer for the CLI', async () => {
   const cases: Array<[StepIntentResult, 'allow' | 'deny', RegExp?]> = [
     [{ status: 'recorded' }, 'allow'],
-    [{ status: 'running' }, 'allow'],
-    [{ status: 'completed', ok: true }, 'allow'],
+    [{ status: 'running' }, 'deny', /already running/],
+    [{ status: 'completed', ok: true }, 'deny', /already finished and is not run again/],
+    [{ status: 'completed', ok: false }, 'deny', /already failed/],
     [{ status: 'interrupted' }, 'deny', /cut off by a restart/],
     [{ status: 'refused', reason: 'a newer attempt drives this task' }, 'deny', /newer attempt/],
   ];
@@ -161,7 +203,7 @@ test('a refusal reason that holds a secret is redacted before the agent reads it
   assert.ok(!answer.includes('sk-secret'));
 });
 
-test('a log that throws denies a step that must not run twice and lets a safe one through, saying so', async () => {
+test('a log that throws denies every step, safe or not, saying so', async () => {
   const problems: string[] = [];
   const hooks = stepHooks(
     logWith(async () => {
@@ -174,11 +216,11 @@ test('a log that throws denies a step that must not run twice and lets a safe on
     hookSpecificOutput?: { permissionDecision?: string };
   };
   assert.equal(never.hookSpecificOutput?.permissionDecision, 'deny');
-  const safe = await call(hooks, 'PreToolUse', {
+  const safe = (await call(hooks, 'PreToolUse', {
     tool_name: 'Read',
     tool_input: { file_path: '/a' },
-  });
-  assert.deepEqual(safe, {});
+  })) as { hookSpecificOutput?: { permissionDecision?: string } };
+  assert.equal(safe.hookSpecificOutput?.permissionDecision, 'deny');
   assert.deepEqual(problems, [
     'a step could not be recorded: disk full',
     'a step could not be recorded: disk full',
@@ -220,4 +262,21 @@ test('an outcome that cannot be recorded does not fail the tool', async () => {
   );
   assert.deepEqual(await call(hooks, 'PostToolUse'), {});
   assert.deepEqual(problems, ['a step outcome could not be recorded: no space']);
+});
+
+test('a finished step is not run again, and the agent is told what it reported, with secrets taken out', async () => {
+  const answer = (await call(
+    stepHooks(
+      logWith(async () => ({
+        status: 'completed',
+        ok: true,
+        output: 'pushed sk-secret-123456 ok',
+      })),
+      (text) => text.replaceAll('sk-secret-123456', '[redacted]'),
+    ),
+    'PreToolUse',
+  )) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+  assert.equal(answer.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(answer.hookSpecificOutput?.permissionDecisionReason ?? '', /pushed \[redacted\] ok/);
+  assert.ok(!(answer.hookSpecificOutput?.permissionDecisionReason ?? '').includes('sk-secret'));
 });

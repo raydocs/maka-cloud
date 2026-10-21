@@ -6,6 +6,7 @@ import {
   type InboxEvidence,
   type InboxItem,
   publicLink,
+  visibleInbox,
 } from '@maka-cloud/client';
 
 const HEADING: Record<string, string> = {
@@ -16,30 +17,6 @@ const HEADING: Record<string, string> = {
   verification_failed: 'A check of the result failed',
   finished: 'Finished',
 };
-
-/** Kinds the supervisor builds from a conductor question, which the conversation already shows as a decision card. */
-const QUESTION_KINDS = new Set(['approval', 'budget', 'decision']);
-
-/**
- * The items to show, newest first within each state. An open item that repeats a question the
- * conversation is still asking word for word is left out: answering either one answers both, so a
- * missed match only shows the same ask twice.
- */
-export function visibleInbox(items: InboxItem[], openQuestions: ReadonlySet<string>) {
-  const byRecency = [...items].sort((a, b) => b.updatedAt - a.updatedAt);
-  const live = byRecency.filter((item) => item.state !== 'closed');
-  return {
-    live: live.filter(
-      (item) =>
-        !(
-          item.state === 'open' &&
-          QUESTION_KINDS.has(item.kind) &&
-          openQuestions.has(displayText(item.ask).trim())
-        ),
-    ),
-    closed: byRecency.filter((item) => item.state === 'closed'),
-  };
-}
 
 function Evidence({ evidence, exact }: { evidence: InboxEvidence; exact: boolean }) {
   if (evidence.kind === 'artifact') {

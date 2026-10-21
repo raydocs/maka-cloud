@@ -16,6 +16,12 @@
  *   noise    print lines that are not messages around the messages, then like ok
  *   hang     report progress, then run until killed
  *   slowexit like ok, but leave 600 ms after its input ended
+ *   leak     like ok, but its transcript also holds the run's API key and MCP token
+ *
+ * With `--session-mirror` it keeps a transcript like the real CLI: lines in
+ * `$CLAUDE_CONFIG_DIR/projects/<cwd with non-letters as dashes>/<session>.jsonl`, each also sent as
+ * a `transcript_mirror` frame. A session id given to `--resume` must have such a file, or it exits 1
+ * ("No conversation found"); what it read is copied to `$HOME/fake-cli/resumed-<n>.jsonl`.
  *
  * The hook answers it received are appended to `$HOME/fake-cli/hooks.log` as JSON lines.
  */
@@ -36,9 +42,26 @@ fs.writeFileSync(path.join(ctl, 'claude-' + n + '.env'), Object.entries(process.
 fs.writeFileSync(path.join(ctl, 'pid'), String(process.pid));
 const mode = (() => { try { return fs.readFileSync(path.join(ctl, 'mode'), 'utf8').trim(); } catch { return 'ok'; } })();
 const resumeArg = process.argv.slice(2).find((a) => a.startsWith('--resume='));
-const sid = resumeArg ? resumeArg.slice('--resume='.length) : 'sess-1';
+const mirrored = process.argv.slice(2).includes('--session-mirror');
+const sid = resumeArg ? resumeArg.slice('--resume='.length) : mirrored ? '11111111-2222-4333-8444-555555555555' : 'sess-1';
+const transcriptFile = mirrored
+  ? path.join(process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude'), 'projects', process.cwd().replace(/[^a-zA-Z0-9]/g, '-'), sid + '.jsonl')
+  : undefined;
+if (mirrored && resumeArg) {
+  let kept;
+  try { kept = fs.readFileSync(transcriptFile, 'utf8'); } catch { kept = undefined; }
+  if (kept === undefined) { console.error('No conversation found with session ID: ' + sid); process.exit(1); }
+  fs.writeFileSync(path.join(ctl, 'resumed-' + n + '.jsonl'), kept);
+}
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+function keep(type, message) {
+  if (!transcriptFile) return;
+  const entry = { type, uuid: require('node:crypto').randomUUID(), timestamp: new Date().toISOString(), sessionId: sid, message };
+  fs.mkdirSync(path.dirname(transcriptFile), { recursive: true });
+  fs.appendFileSync(transcriptFile, JSON.stringify(entry) + '\\n');
+  send({ type: 'transcript_mirror', filePath: transcriptFile, entries: [entry] });
+}
 const hooks = {};
 const pending = new Map();
 let requests = 0;
@@ -88,8 +111,11 @@ async function callHook(event, tool, extra) {
 
 async function run(prompt) {
   send({ type: 'system', subtype: 'init', session_id: sid });
+  keep('user', { content: prompt });
+  if (mode === 'leak') keep('assistant', { content: 'key ' + process.env.ANTHROPIC_API_KEY + ' token ' + process.env.MAKA_MCP_TOKEN });
   if (mode === 'noise') { console.log('some warning text'); console.error('stderr text'); console.log('{"level":"warn"}'); }
   send({ type: 'assistant', message: { id: 'm0', content: [{ type: 'text', text: 'working on it' }] } });
+  keep('assistant', { content: 'working on it' });
   if (mode === 'hang') { setInterval(() => {}, 1000); return; }
   if (mode === 'exit3') process.exit(3);
   if (mode === 'fail') {
@@ -117,6 +143,7 @@ async function run(prompt) {
   if (result) {
     fs.writeFileSync(result, JSON.stringify({ summary: 'fake run complete', done: ['the brief'], notDone: [], confidence: 'high', knownIssues: [] }));
   }
+  keep('assistant', { content: 'all done' });
   send({ type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: sid, ...(mode === 'spend' ? { total_cost_usd: 0.5 } : {}) });
   const leave = () => setTimeout(() => process.exit(0), mode === 'slowexit' ? 600 : 0);
   if (inputEnded) leave(); else onInputEnd = leave;

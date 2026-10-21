@@ -17,6 +17,7 @@
     "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\""
   },
   "dependencies": {
+    "@maka-cloud/modes": "0.1.0",
     "@maka/core": "0.1.0",
     "@maka/runtime": "0.1.0",
     "@maka/storage": "0.1.0",
