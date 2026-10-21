@@ -16,6 +16,9 @@ services:
       target: server
     image: maka-cloud:local
     entrypoint: ["node", "deploy/rehearsal/stubs.mjs"]
+    volumes:
+      # The image carries no rehearsal code (the build context is an allowlist), so the script is mounted.
+      - ./rehearsal/stubs.mjs:/app/deploy/rehearsal/stubs.mjs:ro
     environment:
       INSTABOX_API_KEY: ibk_rehearsal
     healthcheck:
