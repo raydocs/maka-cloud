@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
@@ -603,15 +604,15 @@ function downServer(onFirstRequest: () => void): NonNullable<Parameters<typeof s
 test('the run budget of the smoke command holds across UTC midnight, where the daily cap starts over', async (t) => {
   const clock = { now: Date.now() };
   const { dir, ledger } = await serverLedger(t, clock);
-  const account = { inviteId: INVITE };
+  const account = () => ({ inviteId: INVITE, generation: ledger.generationOf?.(INVITE) });
   const outcomes: ReserveResult[] = [];
   const io = downServer(() => {
     // Research spends $4 late on one UTC day and coding $4 early on the next: the budget is $5.
     clock.now = Date.now();
-    outcomes.push(ledger.reserve(account, 'research', 4));
+    outcomes.push(ledger.reserve(account(), 'research', 4));
     ledger.settle('research', 4);
     clock.now += 25 * 3_600_000;
-    outcomes.push(ledger.reserve(account, 'coding', 4));
+    outcomes.push(ledger.reserve(account(), 'coding', 4));
   });
   const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
   assert.equal(await smokeCommand(env, io), 1, 'the scenarios failed against a down server');
@@ -619,7 +620,7 @@ test('the run budget of the smoke command holds across UTC midnight, where the d
   assert.equal(outcomes[1]?.ok, false, 'the second $4 is past the $5 of the run');
   assert.equal(outcomes[1]?.ok ? undefined : outcomes[1]?.cap?.scope, 'invite_run');
   // The budget is gone when the run is: the invite is held to its daily and monthly caps again.
-  assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
+  assert.deepEqual(ledger.reserve(account(), 'later', 4), { ok: true });
 });
 
 test('the smoke command starts nothing when the journal does not enforce the run budget it set, and sets and clears the budget around a run', async (t) => {
@@ -672,7 +673,7 @@ test('the smoke command starts nothing when the journal does not enforce the run
 test('a second smoke run is refused while the first holds the invite’s run budget, and the first run’s cleanup leaves only its own', async (t) => {
   const clock = { now: Date.now() };
   const { dir, ledger } = await serverLedger(t, clock);
-  const account = { inviteId: INVITE };
+  const account = () => ({ inviteId: INVITE, generation: ledger.generationOf?.(INVITE) });
   const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
   const printedB: string[] = [];
   let codeB: number | undefined;
@@ -694,7 +695,7 @@ test('a second smoke run is refused while the first holds the invite’s run bud
   assert.equal(codeB, 2, 'the second run is refused before any request');
   assert.match(printedB.join('\n'), /another smoke run holds the run budget/u);
   // B did not replace A's budget and did not clear it either: A's own cleanup ended it.
-  assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
+  assert.deepEqual(ledger.reserve(account(), 'later', 4), { ok: true });
 });
 
 test('a smoke run that takes over an abandoned budget fences the earlier run’s credentials and cancels the tasks it left running', async (t) => {
@@ -753,6 +754,111 @@ test('a smoke run that takes over an abandoned budget fences the earlier run’s
   journal.close();
   await smokeCommand({ ...env, MAKA_CLOUD_DATA_DIR: fresh }, io);
   assert.deepEqual(cancelled, []);
+});
+
+test('a smoke run that cannot stop what the earlier run left running starts nothing', async (t) => {
+  for (const failure of ['cancel', 'list'] as const) {
+    const clock = { now: Date.now() };
+    const { dir } = await serverLedger(t, clock);
+    const journalPath = join(dir, 'gateway-spend.db');
+    setRunBudget(
+      journalPath,
+      INVITE,
+      { limitUsd: 5, sinceMs: clock.now - 3_600_000 },
+      'run_old',
+      clock.now - 3 * RUN_LEASE_MS,
+    );
+    const requests: string[] = [];
+    const printed: string[] = [];
+    const answer = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+    const io = downServer(() => {});
+    io.print = (line) => printed.push(line);
+    io.runId = 'run_new';
+    io.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      requests.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+      if (url.pathname === '/v1/conversations' && (init?.method ?? 'GET') === 'GET') {
+        if (failure === 'list') throw new Error('the server is down');
+        return answer({ conversations: [{ conversationId: 'cnv_old' }] });
+      }
+      if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+        // The task is still running after the cancel failed.
+        return answer({ tasks: [{ taskId: 'tsk_running', state: 'running' }] });
+      }
+      if (init?.method === 'POST' && url.pathname.endsWith('/cancel')) {
+        return new Response('{}', { status: 500 });
+      }
+      throw new Error('the scenario started');
+    }) as typeof fetch;
+    const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+
+    assert.equal(await smokeCommand(env, io), 2, failure);
+    assert.match(printed.join('\n'), /could not stop what the earlier run left running/u, failure);
+    assert.match(printed.join('\n'), /nothing was started/u, failure);
+    assert.ok(
+      !requests.some(
+        (line) => line.startsWith('POST /v1/conversations') && !line.endsWith('/cancel'),
+      ),
+      `${failure}: no scenario was started (${requests.join(', ')})`,
+    );
+    // The run's budget is gone with it, so the next run starts clean.
+    const check = new DatabaseSync(journalPath, { readOnly: true });
+    try {
+      assert.equal(
+        (check.prepare('SELECT COUNT(*) AS n FROM run_budget').get() as { n: number }).n,
+        0,
+        failure,
+      );
+    } finally {
+      check.close();
+    }
+  }
+});
+
+test('a task whose cancel failed but which has ended since does not stop the run from starting', async (t) => {
+  const clock = { now: Date.now() };
+  const { dir } = await serverLedger(t, clock);
+  const journalPath = join(dir, 'gateway-spend.db');
+  setRunBudget(
+    journalPath,
+    INVITE,
+    { limitUsd: 5, sinceMs: clock.now - 3_600_000 },
+    'run_old',
+    clock.now - 3 * RUN_LEASE_MS,
+  );
+  const printed: string[] = [];
+  let cancelRequested = false;
+  const answer = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  const io = downServer(() => {});
+  io.print = (line) => printed.push(line);
+  io.runId = 'run_new';
+  io.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/v1/conversations' && (init?.method ?? 'GET') === 'GET') {
+      return answer({ conversations: [{ conversationId: 'cnv_old' }] });
+    }
+    if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+      // The task ends on its own just as the cancel is refused.
+      return answer({
+        tasks: [{ taskId: 'tsk_x', state: cancelRequested ? 'succeeded' : 'running' }],
+      });
+    }
+    if (init?.method === 'POST' && url.pathname.endsWith('/cancel')) {
+      cancelRequested = true;
+      return new Response('{}', { status: 409 });
+    }
+    throw new Error('the server is down');
+  }) as typeof fetch;
+  const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+  const code = await smokeCommand(env, io);
+  assert.equal(
+    code,
+    1,
+    `the scenarios ran (and failed against a down server): ${printed.join(' | ')}`,
+  );
+  assert.doesNotMatch(printed.join('\n'), /nothing was started/u);
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {
