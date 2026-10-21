@@ -1,4 +1,10 @@
-import { scrubErrorText, scrubSecretShapes, setKnownSecrets } from '@maka-cloud/server';
+import {
+  linkedSecretKeys,
+  linkedSecretPair,
+  scrubErrorText,
+  scrubSecretShapes,
+  setKnownSecrets,
+} from '@maka-cloud/server';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 /** Scalars are the norm; anything else (an object, a list) is scrubbed value by value before it prints. */
@@ -123,14 +129,21 @@ export function createLogger(options: LoggerOptions): Logger {
     seen.add(value);
     try {
       if (Array.isArray(value)) {
-        const items = value.slice(0, MAX_ITEMS).map((item) => safe(item, depth + 1, seen));
+        // A header written as a pair: the name says what the next one is.
+        const pair = linkedSecretPair(value);
+        const items = value
+          .slice(0, MAX_ITEMS)
+          .map((item, index) => (pair && index > 0 ? '[secret]' : safe(item, depth + 1, seen)));
         return value.length > MAX_ITEMS ? [...items, `[${value.length - MAX_ITEMS} more]`] : items;
       }
       if (value instanceof Error) return clip(describeError(value));
       const out: Record<string, unknown> = {};
+      // `{ scheme: 'Basic', value }` and `{ name: 'Authorization', value }`: the field beside it says.
+      const linked = linkedSecretKeys(value);
       for (const [key, inner] of Object.entries(value).slice(0, MAX_ITEMS)) {
         const name = clip(key);
-        out[name] = SECRET_NAME.test(key) ? '[secret]' : safe(inner, depth + 1, seen);
+        out[name] =
+          SECRET_NAME.test(key) || linked.has(key) ? '[secret]' : safe(inner, depth + 1, seen);
       }
       return out;
     } catch {

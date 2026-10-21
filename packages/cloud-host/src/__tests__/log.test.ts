@@ -339,3 +339,29 @@ test('the secrets the process was given are removed from the text the server sho
   logger();
   assert.equal(scrubErrorText(probe), 'the gateway refused [secret]');
 });
+
+test('a credential written as a scheme and a value, or a header name and a value, is scrubbed when logged as an object', () => {
+  const { log, lines } = logger();
+  const basic = 'dXNlcjpwYXNzd29yZDEyMw==';
+  log.warn('upstream_refused', {
+    auth: { scheme: 'Basic', value: basic },
+    headers: [
+      { name: 'Authorization', value: basic },
+      ['X-Api-Key', basic],
+      { name: 'Accept', value: 'text/plain' },
+    ],
+  });
+  const text = lines.join('\n');
+  assert.ok(!text.includes(basic), text);
+  assert.match(text, /text\/plain/u, 'an ordinary header stays');
+});
+
+test('a credential serialised again inside a string is scrubbed in the text a log line carries', () => {
+  const { log, lines } = logger();
+  const basic = 'dXNlcjpwYXNzd29yZDEyMw==';
+  const once = JSON.stringify({ scheme: 'Basic', value: basic });
+  const twice = JSON.stringify({ body: once });
+  log.warn('upstream_refused', { detail: once, more: twice });
+  const text = lines.join('\n');
+  assert.ok(!text.includes(basic), text);
+});
