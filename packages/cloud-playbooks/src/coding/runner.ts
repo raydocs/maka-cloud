@@ -2,6 +2,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
+  implementerFor,
+  type ModeId,
+  type ModesConfig,
+  reviewerFor,
+  splitBudget,
+} from '@maka-cloud/modes';
+import {
   type ResultManifest,
   ResultManifestSchema,
   type RunHandle,
@@ -13,6 +20,17 @@ import {
 import { agentBrief, type CheckProblem, type FailureBrief, repairPrompt } from './briefs.js';
 import type { ChangedFile, ChangeSet, CodingDeliveries } from './deliveries.js';
 import { DEFAULT_LOOP_LIMITS, type LoopLimits, LoopDetector, parseSample } from './loop.js';
+import {
+  MAX_REVIEW_BYTES,
+  parseReviewFile,
+  plain,
+  type ReviewRecord,
+  reviewBrief,
+  reviewLine,
+  reviewMarkdown,
+  type ReviewSummary,
+  summarizeReview,
+} from './review.js';
 import type { CodingSandbox, SandboxWorkspace } from './sandbox.js';
 import {
   BASE_RESTORE_SCRIPT,
@@ -82,6 +100,11 @@ export interface CodingRunnerOptions {
   repoUrl?: (repo: string) => string;
   /** The vendor that tries first when the brief does not name one. Default `claude-agent-sdk`. */
   firstVendor?: Vendor;
+  /**
+   * The modes: which model and effort each agent run uses, how a task's budget is split between
+   * the work and its review, and who reviews. Without it no review is done, and the manifest says so.
+   */
+  modes?: ModesConfig;
   limits?: Partial<CodingLimits>;
   loop?: Partial<LoopLimits>;
   /** How often the workspace is sampled for edit loops while an agent runs. Default 15 s. */
@@ -102,6 +125,8 @@ export interface CodingRunnerStats {
   timers: number;
 }
 
+/** The least a review is worth starting with: below this the change is delivered unreviewed. */
+const MIN_REVIEW_USD = 0.05;
 const MAX_NOTE_CHARS = 500;
 const DEFAULT_LAST_SPEND_MS = 10_000;
 const MAX_REASON_CHARS = 2_000;
@@ -240,6 +265,7 @@ interface Verification {
   testCommand: string;
   result: 'verified' | 'failed';
   repro?: Repro;
+  review?: ReviewSummary;
   attempts: AttemptRecord[];
   changedFiles?: { path: string; status: string }[];
 }
@@ -250,6 +276,14 @@ type TurnOutcome =
   | { ok: true; manifest: ResultManifest }
   | { ok: false; reason: string }
   | { loop: string };
+
+/** What an agent run is for: the work is the task's own, the review has a budget of its own. */
+interface TurnOptions {
+  phase: 'work' | 'review';
+  /** The model and effort of the role; absent: the runner's default. */
+  model?: string;
+  effort?: string;
+}
 
 interface Collected {
   changeSet: ChangeSet;
@@ -294,6 +328,13 @@ class CodingRun implements RunHandle {
   private lastReportedUsd: number | undefined;
   /** Set once the task has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
+  /** The mode the brief names; the work and the review follow its roles and its budget split. */
+  private mode: ModeId = 'standard';
+  /**
+   * What the agent runs may spend in all: the task's budget, less the share kept for the review
+   * while the work runs, and the review's own limit (below the budget) while it does.
+   */
+  private limitUsd: number | undefined;
   /**
    * Set when a cleanup step that stops something the task started failed: an agent run or a check
    * may still be running. `cancel` refuses with it, so the stop stays owed.
@@ -347,6 +388,8 @@ class CodingRun implements RunHandle {
       const parsed = parseCodingBrief(brief);
       if (!parsed.ok) return this.setTerminal({ type: 'failed', reason: parsed.reason });
       const task = parsed.task;
+      this.mode = task.mode ?? 'standard';
+      this.limitUsd = this.workLimit();
 
       this.adoptWorkspace(
         await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal)),
@@ -380,7 +423,8 @@ class CodingRun implements RunHandle {
             path: file.path,
             status: file.status,
           }));
-          await this.deliver(task, verification, outcome);
+          const review = await this.review(task, baseSha, brief, vendor, outcome);
+          await this.deliver(task, verification, outcome, review);
           return this.setTerminal({ type: 'finished' });
         }
         attempt.end = outcome.reason;
@@ -455,14 +499,19 @@ class CodingRun implements RunHandle {
     let prompt: string | undefined;
     for (;;) {
       const kind = prompt === undefined ? 'start' : 'resume';
-      const turn = await this.agentTurn(vendor, detector, prompt, () =>
-        agentBrief({
-          task,
-          baseSha,
-          dir: this.ws.dir,
-          conductorBrief,
-          ...(failure ? { failure: { vendor: failure.vendor, reason: failure.reason } } : {}),
-        }),
+      const turn = await this.agentTurn(
+        vendor,
+        detector,
+        prompt,
+        () =>
+          agentBrief({
+            task,
+            baseSha,
+            dir: this.ws.dir,
+            conductorBrief,
+            ...(failure ? { failure: { vendor: failure.vendor, reason: failure.reason } } : {}),
+          }),
+        { phase: 'work', ...this.settingsOf(implementerFor, vendor) },
       );
       const run = this.runs;
       if ('loop' in turn) {
@@ -519,18 +568,24 @@ class CodingRun implements RunHandle {
     detector: LoopDetector,
     prompt: string | undefined,
     brief: () => string,
+    options: TurnOptions,
   ): Promise<TurnOutcome> {
     const { stats } = this.runner;
-    const budget = this.spec.budgetUsd;
-    if (this.budgetStop) throw new Error(this.budgetStop);
+    const limit = this.limitUsd;
+    if (this.budgetStop) {
+      if (options.phase === 'work') throw new Error(this.budgetStop);
+      return { ok: false, reason: this.budgetStop };
+    }
     const n = ++this.runs;
     const spec: RunSpec = {
       taskId: this.spec.taskId,
       runner: vendor,
       briefPath: join(this.hostDir, `agent-${n}-brief.md`),
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
-      // Each agent run may spend what is left of the task's budget.
-      ...(budget === undefined ? {} : { budgetUsd: roundUsd(budget - this.spentBefore) }),
+      // Each agent run may spend what is left of its phase's limit.
+      ...(limit === undefined ? {} : { budgetUsd: roundUsd(limit - this.spentBefore) }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
     };
@@ -585,8 +640,12 @@ class CodingRun implements RunHandle {
       }
     }
     this.checkCancelled();
-    // A spent budget ends the task: it is not a vendor failure, so nothing is handed over.
-    if (this.budgetStop) throw new Error(this.budgetStop);
+    // A spent budget ends the task: it is not a vendor failure, so nothing is handed over. A review
+    // that spent its own limit only ends the review.
+    if (this.budgetStop) {
+      if (options.phase === 'work') throw new Error(this.budgetStop);
+      return { ok: false, reason: this.budgetStop };
+    }
     if (loop !== undefined) return { loop };
     if (!(await this.ws.agentOnSameMachine())) {
       throw new Error('the agent ran on a different machine than the task workspace');
@@ -715,6 +774,145 @@ class CodingRun implements RunHandle {
         stats.samplers--;
       },
     };
+  }
+
+  // -- the review ----------------------------------------------------------------------------------
+
+  /** What the work may spend in all: the budget less the share the review keeps. */
+  private workLimit(): number | undefined {
+    const budget = this.spec.budgetUsd;
+    if (budget === undefined) return undefined;
+    const { modes } = this.options;
+    return modes ? splitBudget(modes, this.mode, budget).workUsd : budget;
+  }
+
+  /** The model and effort `role` gives `vendor` in this task's mode. */
+  private settingsOf(
+    role: typeof implementerFor | typeof reviewerFor,
+    vendor: Vendor,
+  ): { model?: string; effort?: string } {
+    const { modes } = this.options;
+    if (!modes) return {};
+    const agent = role(modes, this.mode, vendor);
+    return { ...(agent.model ? { model: agent.model } : {}), effort: agent.effort };
+  }
+
+  /**
+   * An agent of the other vendor reviews the change that passed the runner's checks. Whatever
+   * happens to the review (it cannot start, runs out of its budget, fails, writes nothing usable),
+   * the verified change is still delivered, and the record says the change was not reviewed and
+   * why. Only a cancel ends the task here.
+   */
+  private async review(
+    task: CodingTask,
+    baseSha: string,
+    conductorBrief: string,
+    implementer: Vendor,
+    outcome: { repro: Repro; collected: Collected },
+  ): Promise<ReviewRecord> {
+    const { modes } = this.options;
+    if (!modes) {
+      return {
+        mode: this.mode,
+        modesVersion: 0,
+        status: 'not_configured',
+        reason: 'no reviewer is configured',
+      };
+    }
+    const base = { mode: this.mode, modesVersion: modes.version } as const;
+    const reviewer = reviewerFor(modes, this.mode, implementer);
+    const unavailable = (reason: string): ReviewRecord => ({
+      ...base,
+      status: 'unavailable',
+      reviewer: reviewer.vendor,
+      reason: plain(reason, 300),
+    });
+    const budget = this.spec.budgetUsd;
+    if (budget !== undefined) {
+      const reviewLimit = Math.min(
+        budget,
+        this.spentBefore + splitBudget(modes, this.mode, budget).reviewUsd,
+      );
+      if (reviewLimit - this.spentBefore < MIN_REVIEW_USD) {
+        return unavailable(
+          `the budget leaves $${Math.max(0, reviewLimit - this.spentBefore).toFixed(2)} for a review, too little to start one`,
+        );
+      }
+      this.limitUsd = reviewLimit;
+    }
+    try {
+      this.progress('a second agent reviews the change');
+      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- review.json\n`, {});
+      const turn = await this.agentTurn(
+        reviewer.vendor,
+        new LoopDetector(this.runner.loopLimits),
+        undefined,
+        () =>
+          reviewBrief({
+            repo: task.repo,
+            baseSha,
+            dir: this.ws.dir,
+            goal: task.goal,
+            testCommand: task.testCommand,
+            repro: outcome.repro,
+            conductorBrief,
+          }),
+        { phase: 'review', ...this.settingsOf(reviewerFor, implementer) },
+      );
+      if ('loop' in turn) return unavailable(`the reviewer was stopped: ${turn.loop}`);
+      if (!turn.ok) {
+        return unavailable(
+          this.budgetStop
+            ? `the review ran out of its budget (${this.budgetStop})`
+            : `the reviewer's run failed: ${turn.reason}`,
+        );
+      }
+      const text = await this.readTaskFile('review.json', MAX_REVIEW_BYTES);
+      if (!text.ok) return unavailable(text.reason);
+      const parsed = parseReviewFile(text.text);
+      if (!parsed.ok) return unavailable(parsed.reason);
+      // The reviewer reads; it does not change. If the repository is not what was verified, the
+      // review is not of the change that will be delivered.
+      const again = await this.collect(task, baseSha);
+      if ('reason' in again)
+        return unavailable(`the change could not be read again (${again.reason})`);
+      if (changeKey(again) !== changeKey(outcome.collected)) {
+        return unavailable('the reviewer changed the repository, so its review was not used');
+      }
+      return {
+        ...base,
+        status: 'reviewed',
+        reviewer: reviewer.vendor,
+        findings: parsed.findings,
+        ...(parsed.summary ? { summary: parsed.summary } : {}),
+      };
+    } catch (error) {
+      if (this.cancelled || error instanceof CancelledError) throw error;
+      return unavailable(errorMessage(error));
+    } finally {
+      // The review's own limit ends the review, not the task: the work finished before it began.
+      this.budgetStop = undefined;
+    }
+  }
+
+  /** A small file in the task directory, read as the sandbox user: no symlink, no more than `max` bytes. */
+  private async readTaskFile(
+    name: string,
+    max: number,
+  ): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+    const out = (
+      await this.exec(READ_SMALL_SCRIPT, { MAKA_FILE: name, MAKA_MAX: String(max) })
+    ).stdout.trim();
+    if (!out.startsWith('OK ')) {
+      const why: Record<string, string> = {
+        MISSING: `${name} was not written`,
+        SYMLINK: `${name} is a symlink`,
+        NOTFILE: `${name} is not a regular file`,
+        TOOBIG: `${name} is larger than ${max} bytes`,
+      };
+      return { ok: false, reason: why[out] ?? `${name} could not be read` };
+    }
+    return { ok: true, text: Buffer.from(out.slice(3), 'base64').toString('utf8') };
   }
 
   // -- checks --------------------------------------------------------------------------------------
@@ -1026,12 +1224,17 @@ class CodingRun implements RunHandle {
     task: CodingTask,
     verification: Verification,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    review: ReviewRecord,
   ): Promise<void> {
     const changesPath = join(this.hostDir, 'changes.json');
     const verificationPath = join(this.hostDir, 'verification.json');
     const changes = JSON.stringify(outcome.collected.changeSet);
     await this.guard(writeHostFile(changesPath, changes));
     await this.guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
+    // review.md first: verification.json holds its hash, and the supervisor holds the two together.
+    const reviewText = reviewMarkdown(review);
+    await this.guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
+    verification.review = summarizeReview(review, reviewText);
     await this.guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
     await this.guard(
       this.options.deliveries.record({
@@ -1051,6 +1254,7 @@ class CodingRun implements RunHandle {
       summary: `Verified change to ${task.repo}: ${agent.summary}`,
       done: [
         verifiedLine(task, outcome.repro, verification.baseSha),
+        reviewLine(review),
         `${files.length} file(s) changed: ${clipText(files.map((file) => file.path).join(', '), 500)}`,
         ...(vendors.length > 1
           ? [
@@ -1062,7 +1266,7 @@ class CodingRun implements RunHandle {
       notDone: agent.notDone,
       confidence: agent.confidence,
       knownIssues: agent.knownIssues,
-      artifacts: ['change.patch', 'changes.json', 'verification.json'],
+      artifacts: ['change.patch', 'changes.json', 'verification.json', 'review.md'],
     };
     await this.guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));
   }
@@ -1229,9 +1433,9 @@ class CodingRun implements RunHandle {
       this.lastReportedUsd = spent;
       this.events.push({ type: 'usage', costUsd: spent });
     }
-    const budget = this.spec.budgetUsd;
-    if (budget === undefined || spent < budget || this.budgetStop) return false;
-    this.budgetStop = budgetReached(budget, spent);
+    const limit = this.limitUsd;
+    if (limit === undefined || spent < limit || this.budgetStop) return false;
+    this.budgetStop = budgetReached(limit, spent);
     this.progress(this.budgetStop);
     return true;
   }
@@ -1271,6 +1475,11 @@ class CodingRun implements RunHandle {
     })();
     return this.cleanupPromise;
   }
+}
+
+/** What identifies a collected change: the hash of its change set. */
+function changeKey(collected: Collected): string {
+  return createHash('sha256').update(JSON.stringify(collected.changeSet)).digest('hex');
 }
 
 function verifiedLine(task: CodingTask, repro: Repro, baseSha: string): string {

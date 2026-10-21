@@ -77,20 +77,42 @@ test('workspace samples are parsed', () => {
 test('verify accepts only a manifest the coding runner wrote', () => {
   const manifest = {
     summary: 's',
-    done: ['verified: `npm test` passed; ...', 'agent: did it'],
+    done: [
+      'verified: `npm test` passed; ...',
+      'review: an independent agent reviewed the change and reported no findings (see review.md)',
+      'agent: did it',
+    ],
     notDone: [],
     confidence: 'high' as const,
     knownIssues: [],
-    artifacts: ['change.patch', 'changes.json', 'verification.json'],
+    artifacts: ['change.patch', 'changes.json', 'verification.json', 'review.md'],
   };
   assert.deepEqual(codingPlaybook.verify(manifest), { ok: true, problems: [] });
   assert.match(
     verifyCodingManifest({ ...manifest, done: ['agent: tests pass'] }).problems.join(),
     /not verified by the coding runner/,
   );
+  // Whether the change was reviewed is always said, once, in the runner's words.
+  const verified = manifest.done[0] as string;
+  assert.match(
+    verifyCodingManifest({ ...manifest, done: [verified] }).problems.join(),
+    /does not say whether the change was reviewed/,
+  );
+  assert.match(
+    verifyCodingManifest({
+      ...manifest,
+      done: [verified, 'review: not done (x)', 'review: reviewed'],
+    }).problems.join(),
+    /more than one review line/,
+  );
+  assert.equal(
+    verifyCodingManifest({ ...manifest, done: [verified, 'review: not done (no budget)'] }).ok,
+    true,
+    'a change that was not reviewed says so and is still a verified change',
+  );
   assert.match(
     verifyCodingManifest({ ...manifest, artifacts: ['change.patch'] }).problems.join(),
-    /artifacts do not list: changes.json, verification.json/,
+    /artifacts do not list: changes.json, verification.json, review.md/,
   );
   assert.equal(verifyCodingManifest({ ...manifest, confidence: 'low' }).ok, false);
   assert.deepEqual(codingPlaybook.allowedRunners, ['coding']);

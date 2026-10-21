@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { DEFAULT_MODES } from '@maka-cloud/modes';
 import { InviteStore } from '@maka-cloud/server';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
@@ -458,6 +459,8 @@ test('coding tasks go to the coding runner, and the stack runs the coding playbo
     ['research', 'coding', 'free'],
   );
   assert.equal(STACK_PLAYBOOKS[1], codingPlaybook);
+  // The coding runner reviews with the modes in force, so a change is never shown done unreviewed by accident.
+  assert.deepEqual(stack.coding.options.modes, DEFAULT_MODES);
 });
 
 /** A VAPID key pair the way a deployment would generate one: a P-256 key, base64url. */

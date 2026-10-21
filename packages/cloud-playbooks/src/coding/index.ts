@@ -4,6 +4,7 @@ export * from './github.js';
 export * from './loop.js';
 export * from './playbook.js';
 export * from './pull-request.js';
+export * from './review.js';
 export * from './runner.js';
 export * from './sandbox.js';
 export * from './scripts.js';
