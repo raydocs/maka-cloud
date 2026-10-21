@@ -79,7 +79,25 @@ the guard (`beforeUse(machineId, 'wake')`, the egress guard) runs and a box that
 In both cases the task goes on to another box. Awake boxes are preferred to sleeping ones, and a
 sleeping box is woken before a new one is made. A box found asleep after a restart is `suspended`.
 
-Not here: `.agents/resume` after a wake (with the setup snapshots), deleting `lost` boxes (the cleanup piece).
+Not here: `.agents/resume` after a wake (with the setup snapshots).
+
+## Cleanup
+
+`cleanup()` (called every few minutes, like `sweepIdle()`) looks after boxes nobody uses:
+
+- A `lost` box that has been lost for 30 minutes is tried once more (woken with the longest limit, then
+  guarded). If that works it is `ready` again; if not it waits 30 minutes before the next try.
+- A box lost for 24 hours is deleted. With `cleanup.idleDeleteMs` set, a box that has done nothing for
+  that long, and that nobody has looked at for as long, is deleted too (off by default).
+- Before any delete: compare-and-set to `deleting` (a synchronous step; nothing can take the box, and a task
+  that arrives meanwhile gets another), then a fresh `getMachine`: it must still carry this pool's labels
+  for this slot, its task label (read now) must not name a live task, and `recentWrite` must say no. Any
+  doubt puts the box back as it was and waits 30 minutes. A box already gone leaves the registry without a
+  delete call.
+- Boxes the pool refused (wrong name, slot out of range, duplicates) are listed by `refusedBoxes()` and are
+  never deleted: whose they are is for the operator to say, and a label alone is not proof.
+- Not decided: deleting an idle box of one invite to make room for another when the account is at its
+  limit. It would lose that box's files, so it is not done.
 
 ## Restoring
 
