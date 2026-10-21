@@ -7,6 +7,7 @@ import {
   toPublicEvent,
   toPublicItem,
   toPublicView,
+  WITHHELD_APPROVAL,
 } from '../public-view.js';
 
 test("an approval item's ask reaches the client exactly as the approval binds it; other asks are scrubbed (T15)", () => {
@@ -133,4 +134,54 @@ test('conductor notices and the note of a question carry no secret; the held cal
   assert.deepEqual(asked.action, action);
   const answered = { questionId: 'q1', optionId: 'yes', text: 'my own words' };
   assert.deepEqual(toPublicConductorData('conductor.answered', answered), answered);
+});
+
+const KEY = 'ghp_0123456789abcdef0123456789abcdef0123';
+
+test('a success manifest, in the task view and in task_succeeded, carries no key', () => {
+  const manifest = {
+    summary: `deployed with token=${KEY}`,
+    done: [`set GITHUB_TOKEN=${KEY}`, 'ran the tests'],
+    notDone: [`Authorization: Bearer ${KEY}`],
+    confidence: 'high' as const,
+    knownIssues: [`{"api_key":"${KEY}"}`],
+    artifacts: [`out/${KEY}.log`],
+  };
+  const clean = (value: unknown) => assert.ok(!JSON.stringify(value).includes(KEY.slice(4, 30)));
+  const view = toPublicView({
+    taskId: 'tsk_1',
+    state: 'succeeded',
+    manifest,
+  } as unknown as TaskView);
+  clean(view.manifest);
+  const event = toPublicEvent({ type: 'task_succeeded', taskId: 'tsk_1', manifest } as TaskEvent);
+  clean(event);
+  assert.equal((event as { manifest: { confidence: string } }).manifest.confidence, 'high');
+  assert.equal((event as { manifest: { done: string[] } }).manifest.done[1], 'ran the tests');
+});
+
+test('an approval that carries a key is withheld whole, with no way to approve; a clean one is untouched (T15)', () => {
+  const clean = {
+    kind: 'approval',
+    ask: 'Allow publish_page(title: "Hello")? It cannot be undone.',
+    options: [
+      { id: 'approve', label: 'Go ahead' },
+      { id: 'reject', label: "Don't do it" },
+    ],
+    evidence: [{ kind: 'action', tool: 'publish_page', args: '{"title":"Hello"}' }],
+  };
+  assert.deepEqual(toPublicItem(clean), clean);
+  for (const carrier of [
+    { ...clean, ask: `Allow publish_page(title: "${KEY}")? It cannot be undone.` },
+    { ...clean, evidence: [{ kind: 'action', tool: 'publish_page', args: `{"token":"${KEY}"}` }] },
+  ]) {
+    const shown = toPublicItem(carrier) as typeof clean;
+    assert.equal(shown.ask, WITHHELD_APPROVAL);
+    assert.deepEqual(shown.evidence, []);
+    assert.deepEqual(
+      shown.options.map((option) => option.id),
+      ['reject'],
+    );
+    assert.ok(!JSON.stringify(shown).includes(KEY.slice(4, 30)));
+  }
 });

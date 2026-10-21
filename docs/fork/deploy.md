@@ -238,7 +238,9 @@ and the sandbox, on `app.localhost`, `mcp.localhost` and `models.localhost` with
 certificate authority, and runs the whole first-user flow on them: sign in with an invite, a task and
 its result card, an approval answered once, a restart in the middle of a task, a backup and a restore.
 CI runs it on every pull request and daily (`.github/workflows/fork-deploy-rehearsal.yml`); to run it
-by hand, see `deploy/rehearsal/README.md`. It costs nothing and uses no key. What it does not cover is
+by hand, see `deploy/rehearsal/README.md`. It runs in its own Compose project (`maka-rehearsal`), with its
+own volumes and image tags, and refuses to touch anything else, so it cannot stop or delete a deployment
+on the same host. It costs nothing and uses no key. What it does not cover is
 the real model, the real sandbox, GitHub, a real certificate and a real domain: the first live run
 still needs everything under "First live run: what you provide".
 
