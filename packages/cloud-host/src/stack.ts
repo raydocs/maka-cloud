@@ -410,11 +410,26 @@ export async function startStack(
           },
           alert: (inviteId, key) => cloud.server.pushAlert(inviteId, key),
           // An alert that never reached a device must not hide a cap breach: it becomes a budget
-          // item in the owner's inbox (in the owner's oldest conversation, as the inbox is
-          // per owner). An owner with no conversation has nowhere to see one, so only the log says.
+          // item in the owner's inbox (in the owner's oldest conversation, as the inbox is per
+          // owner; an owner with none gets an empty one made for it). Once raised it is written
+          // down by (invite, alert key), so a restart, or a failed clearing of the owed alert,
+          // does not raise it a second time after the first was answered. An owner who is no
+          // longer active has no inbox, so only the log says.
           onDropped: (alert) => {
-            const conversationId = cloud.server.conversationsOf(alert.inviteId)[0];
-            if (conversationId === undefined) return;
+            if (journal.alertRaised(alert.inviteId, alert.key)) return;
+            let conversationId = cloud.server.conversationsOf(alert.inviteId)[0];
+            if (conversationId === undefined) {
+              const made = cloud.server.createConversation({
+                owner: alert.inviteId,
+                key: 'spend_alert',
+                title: 'Spend alerts',
+              });
+              if (!made.ok) {
+                if (made.reason === 'owner_inactive') return;
+                throw new Error(`The spend alert's conversation could not be made: ${made.reason}`);
+              }
+              conversationId = made.conversationId;
+            }
             if (raiseCapHit === undefined) throw new Error('The inbox is not running');
             const day = alert.key.slice('spend:'.length);
             raiseCapHit({
@@ -422,6 +437,7 @@ export async function startStack(
               key: `spend_alert:${day}`,
               ask: `The alert that the server's spend reached its limit on ${day} was never delivered to your devices, so you may not have been told. Check the day's spend.`,
             });
+            journal.markAlertRaised(alert.inviteId, alert.key, Date.now());
           },
           onAlert: (day) => dependencies.onInfo?.('spend.alerted', { day }),
           onWarning: warn,

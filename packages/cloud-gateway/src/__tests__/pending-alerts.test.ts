@@ -37,3 +37,22 @@ test('an owed alert is kept across a reopen, keeps its first time as its wait gr
     ['spend:2026-10-21'],
   );
 });
+
+test('a raised alert is remembered per invite and key across a reopen, and clearing the owed alert does not forget it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'raised-alerts-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'spend.db');
+  const first = new SqliteSpendJournal(path);
+  assert.equal(first.alertRaised(ALERT.inviteId, ALERT.key), false);
+  first.savePendingAlert(ALERT);
+  first.markAlertRaised(ALERT.inviteId, ALERT.key, 5);
+  first.markAlertRaised(ALERT.inviteId, ALERT.key, 9);
+  first.clearPendingAlert(ALERT.inviteId, ALERT.key);
+  first.close();
+
+  const second = new SqliteSpendJournal(path);
+  t.after(() => second.close());
+  assert.equal(second.alertRaised(ALERT.inviteId, ALERT.key), true);
+  assert.equal(second.alertRaised(ALERT.inviteId, 'spend:2026-10-21'), false, 'per key');
+  assert.equal(second.alertRaised('inv_ffffffffffff', ALERT.key), false, 'per invite');
+});
