@@ -803,6 +803,7 @@ export class Conductor {
     switch (event.type) {
       case 'tool_start':
         turn.sawTool = true;
+        this.state.markToolCalled(turn.runId);
         turn.finalText = [];
         break;
       case 'tool_result':
@@ -955,6 +956,8 @@ export class Conductor {
       turn.errorKind !== undefined &&
       TRANSIENT_MODEL_ERRORS.has(turn.errorKind) &&
       !turn.sawTool &&
+      // Not only this turn: an earlier turn of the run may have planned, spent, notified or asked.
+      this.state.run(runId)?.toolCalled === false &&
       this.state.tasksOf(runId).length === 0
     );
   }

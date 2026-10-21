@@ -41,6 +41,8 @@ export interface RunRow {
   hardBudget: boolean;
   /** The mode the user picked for this run (T25); null: none, and the conductor and the budget choose per delegation. */
   mode: ModeId | null;
+  /** Whether any turn of this run called a tool: a failed run that did is never retried, however its last turn ended. */
+  toolCalled: boolean;
 }
 
 /** What a duty fixes about the run it starts. */
@@ -379,6 +381,10 @@ const SCHEMA_V7 = `
 ALTER TABLE delegations ADD COLUMN mode TEXT;
 `;
 
+const SCHEMA_V8 = `
+ALTER TABLE runs ADD COLUMN tool_called INTEGER NOT NULL DEFAULT 0;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -390,6 +396,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V5,
   SCHEMA_V6,
   SCHEMA_V7,
+  SCHEMA_V8,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -538,6 +545,13 @@ export class ConductorState {
     return row ? toRun(row) : undefined;
   }
 
+  /** Records that a turn of the run called a tool; it stays true for the run's life. */
+  markToolCalled(runId: string): void {
+    this.db
+      .prepare('UPDATE runs SET tool_called = 1 WHERE run_id = ? AND tool_called = 0')
+      .run(runId);
+  }
+
   /** The conversation's run that is still active or waiting for an answer, if any. */
   openRun(conversationId: string): RunRow | undefined {
     const row = this.db
@@ -636,6 +650,7 @@ export class ConductorState {
       authority: limits?.authority ?? null,
       hardBudget: limits !== undefined,
       mode: mode ?? null,
+      toolCalled: false,
     };
   }
 
@@ -1541,6 +1556,7 @@ function toRun(row: Row): RunRow {
     authority: row.authority === null ? null : (String(row.authority) as RunAuthority),
     hardBudget: Number(row.hard_budget) === 1,
     mode: isModeId(row.mode) ? row.mode : null,
+    toolCalled: Number(row.tool_called) === 1,
   };
 }
 
