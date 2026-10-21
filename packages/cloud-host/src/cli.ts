@@ -117,6 +117,9 @@ function modesCommand(env: NodeJS.ProcessEnv): number {
   return 0;
 }
 
+/** How long the process may take to exit after the stack has closed. */
+const FORCED_EXIT_MS = 10_000;
+
 async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const [command, ...rest] = argv;
   if (command === 'modes' && rest.length === 0) return modesCommand(env);
@@ -157,6 +160,12 @@ async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
     process.once('SIGTERM', resolve);
   });
   log.info('server.closing');
+  // Whatever is still alive after the stack has closed (a run's poll, a socket) must not hold the
+  // process past the container's grace period: the next process recovers what was in flight.
+  setTimeout(() => {
+    log.warn('server.exit_forced', { afterMs: FORCED_EXIT_MS });
+    process.exit(0);
+  }, FORCED_EXIT_MS).unref();
   await stack.close();
   return 0;
 }
