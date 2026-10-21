@@ -60,13 +60,14 @@ test('the values this process holds are removed however they are written, and or
   assert.equal(scrubSecretShapes(`still ${key}`), `still ${key}`);
 });
 
-test("a short registered value that is a plain word is left alone, so a host's AUTH_PROVIDER does not eat the text", () => {
-  setKnownSecrets(['google', 'invite', 'sqlite']);
+test('a short registered value is a key whatever it looks like; only a few characters are not', () => {
+  setKnownSecrets(['hunter', '123456', 'a1b2', 'abc']);
   assert.equal(
-    scrubSecretShapes('Sign in with google or invite to sandbox'),
-    'Sign in with google or invite to sandbox',
+    scrubSecretShapes('pw hunter and 123456 and a1b2'),
+    'pw [secret] and [secret] and [secret]',
   );
-  assert.equal(containsSecret({ question: 'Sign in with google?' }), false);
+  assert.equal(containsSecret({ question: 'Sign in with hunter?' }), true);
+  assert.equal(scrubSecretShapes('the abc of it'), 'the abc of it');
 });
 
 test('a short registered key is removed too, in every form, and a blank one is not a key', () => {
@@ -250,6 +251,64 @@ test('a long token followed by a lone percent sign or backslash is scrubbed in l
   }
 });
 
+test('a long run of backslashes or of escaped quotes is scrubbed in linear time', () => {
+  const runs = [
+    '\\'.repeat(200_000),
+    '\\"'.repeat(100_000),
+    '"\\'.repeat(100_000),
+    `'${'\\'.repeat(200_000)}`,
+    `${'\\'.repeat(100_000)}"password`,
+    `${'\\'.repeat(100_000)}"password"`,
+    `${'\\\\"'.repeat(50_000)}x`,
+  ];
+  for (const text of runs) {
+    for (const scrub of [scrubSecretShapes, scrubSecretText]) {
+      const started = Date.now();
+      scrub(text);
+      assert.ok(
+        Date.now() - started < 1500,
+        `took ${Date.now() - started} ms for ${text.slice(0, 12)}`,
+      );
+    }
+    const started = Date.now();
+    containsSecret(text);
+    assert.ok(Date.now() - started < 1500, `containsSecret took ${Date.now() - started} ms`);
+  }
+});
+
+test('a long text of credential-like pairs without a brace is scrubbed in linear time', () => {
+  for (const unit of [
+    '"value":"x",',
+    '"token":"[secret]",',
+    '"scheme":"Basic",',
+    '"name":"Authorization",',
+  ]) {
+    const text = unit.repeat(Math.ceil(240_000 / unit.length));
+    for (const scrub of [scrubSecretShapes, scrubSecretText]) {
+      const started = Date.now();
+      scrub(text);
+      assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms for ${unit}`);
+    }
+  }
+});
+
+test('a scheme and its credential are found when other fields sit between them, up to a bound', () => {
+  const gap = (n: number) => `"x":"${'a'.repeat(n)}",`;
+  // Not a JSON text as a whole (a log line with a piece of one), so only the patterns read it.
+  const pair = (n: number) => `sent "scheme":"Basic",${gap(n)}"value":"dXNlcjpwYXNzd29yZA==" ok`;
+  assert.ok(!scrubSecretShapes(pair(100)).includes('dXNlcjpwYXNzd29yZA'));
+  assert.ok(!scrubSecretShapes(pair(400)).includes('dXNlcjpwYXNzd29yZA'));
+  // Known limit: with more than 512 characters of other fields between the two, the pair is not
+  // recognised by its shape (a JSON text that parses is read field by field instead, and a registered secret is still found).
+  assert.ok(scrubSecretShapes(pair(2000)).includes('dXNlcjpwYXNzd29yZA'));
+});
+
+test('known limit: a secret field whose quote follows a lone backslash is no longer read as one', () => {
+  // Well-formed JSON never writes a key right after a backslash; text that does (a Windows path
+  // printed before a field) was matched before the pattern started only at the start of a run.
+  assert.ok(scrubSecretShapes('C:\\"token":"abc12345"').includes('abc12345'));
+});
+
 test('JSON nested past the stack is not read as JSON and does not throw', () => {
   const deep = `${'['.repeat(6000)}${']'.repeat(6000)}`;
   assert.doesNotThrow(() => scrubSecretShapes(deep));
@@ -308,13 +367,4 @@ test('text of scripts that are written with combining marks is shown as written,
   // A secret with marks of its own script inside it is found too, at the price of those marks.
   setKnownSecrets(['पुस्तक-secret-9']);
   assert.equal(scrubSecretText('x पुस्‍तक-secret-9 y'), 'x [secret] y');
-});
-
-test('a short registered value that is a number or a version is left alone, a mixed one is a key', () => {
-  setKnownSecrets(['1.0.0', '604800', '123456', 'en-US']);
-  assert.equal(
-    scrubSecretShapes('Node 1.0.0, ttl 604800, 123456'),
-    'Node 1.0.0, ttl 604800, 123456',
-  );
-  assert.equal(scrubSecretShapes('locale en-US'), 'locale [secret]');
 });

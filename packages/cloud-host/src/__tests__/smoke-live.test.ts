@@ -233,7 +233,7 @@ test('the adapter speaks the public API as the smoke invite, with its token and 
   }
 });
 
-test('tasks are read across pages, and a malformed task is left out', async () => {
+test('tasks are read across pages, and a malformed task is an error, not a task left out', async () => {
   const server = await stub();
   try {
     server.setHandler((req, res) => {
@@ -252,14 +252,26 @@ test('tasks are read across pages, and a malformed task is left out', async () =
       });
     });
     const deps = createLiveSmokeDeps(settingsFor(server.url));
+    // The malformed entry on the first page is not skipped: a task not seen is a task not stopped.
+    await assert.rejects(deps.tasks('c1'), /entry of an unexpected shape/u);
+    server.setHandler((req, res) => {
+      const after = new URL(req.url ?? '', 'http://x').searchParams.get('after');
+      if (after === '0') {
+        return json(res, 200, {
+          tasks: [
+            { taskId: 't1', state: 'running', costUsd: 0.5, title: 'research', progress: [] },
+          ],
+          next: 7,
+        });
+      }
+      json(res, 200, {
+        tasks: [{ taskId: 't2', parentTaskId: 't1', state: 'failed', failureReason: 'broke' }],
+      });
+    });
     assert.deepEqual(await deps.tasks('c1'), [
       { taskId: 't1', state: 'running', costUsd: 0.5, title: 'research' },
       { taskId: 't2', parentTaskId: 't1', state: 'failed', failureReason: 'broke' },
     ]);
-    assert.deepEqual(
-      server.requests.map((r) => r.path),
-      ['/v1/conversations/c1/tasks?after=0', '/v1/conversations/c1/tasks?after=7'],
-    );
   } finally {
     await server.close();
   }
@@ -991,6 +1003,70 @@ test('only a stop the server confirms counts: the cancel answer, not the list, s
   const calm = await run(() => [{ ...ended, finishedAt: 1 }], undefined, longAgo);
   assert.deepEqual(calm.server.cancelled, ['tsk_end']);
   assert.doesNotMatch(calm.printed, /nothing was started/u, calm.printed);
+});
+
+test('an enumeration that is not complete starts nothing: a next page that never ends, a bad cursor or a bad shape', async (t) => {
+  const answer = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  const run = async (conversations: unknown, tasksBody: (after: number) => unknown) => {
+    const { dir } = await serverLedger(t, { now: Date.now() });
+    const printed: string[] = [];
+    const requests: string[] = [];
+    const io = downServer(() => {});
+    io.print = (line) => printed.push(line);
+    io.runId = 'run_new';
+    io.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      requests.push(`${method} ${url.pathname}`);
+      if (url.pathname === '/v1/conversations' && method === 'GET') return answer(conversations);
+      if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+        return answer(tasksBody(Number(url.searchParams.get('after'))));
+      }
+      throw new Error('the server is down');
+    }) as typeof fetch;
+    const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+    return { code: await smokeCommand(env, io), printed: printed.join('\n'), requests };
+  };
+  const one = { conversations: [{ conversationId: 'cnv_old' }] };
+  const done = (taskId: string) => ({ taskId, state: 'succeeded' });
+
+  // A list with a next page after the last page that is read is not a shorter list.
+  const endless = await run(one, (after) => ({ tasks: [done(`tsk_${after}`)], next: after + 1 }));
+  assert.equal(endless.code, 2, endless.printed);
+  assert.match(endless.printed, /longer than \d+ pages/u);
+  assert.ok(!startedAScenario(endless.requests));
+
+  // A cursor that does not move forward, is not a number, or comes with a task of no shape.
+  for (const body of [
+    { tasks: [], next: 0 },
+    { tasks: [], next: 'more' },
+    { tasks: [done('tsk_a'), { nonsense: true }] },
+    { nothing: true },
+  ]) {
+    const bad = await run(one, () => body);
+    assert.equal(bad.code, 2, `${JSON.stringify(body)}: ${bad.printed}`);
+    assert.ok(!startedAScenario(bad.requests), JSON.stringify(body));
+  }
+
+  // A conversation list that is not a list, or holds an entry with no id, is not an empty one.
+  for (const conversations of [
+    { conversations: 'none' },
+    {},
+    { conversations: [{ title: 'x' }] },
+  ]) {
+    const bad = await run(conversations, () => ({ tasks: [] }));
+    assert.equal(bad.code, 2, `${JSON.stringify(conversations)}: ${bad.printed}`);
+    assert.ok(!startedAScenario(bad.requests), JSON.stringify(conversations));
+  }
+
+  // A complete enumeration of two pages goes on.
+  const fine = await run(one, (after) =>
+    after === 0 ? { tasks: [done('tsk_a')], next: 1 } : { tasks: [done('tsk_b')] },
+  );
+  // It got past the enumeration: both tasks were asked about.
+  assert.ok(fine.requests.includes('POST /v1/tasks/tsk_a/cancel'), fine.requests.join(' | '));
+  assert.ok(fine.requests.includes('POST /v1/tasks/tsk_b/cancel'), fine.requests.join(' | '));
 });
 
 test('a refused cancel is not taken for a stop, even when the task list shows the task ended', async (t) => {

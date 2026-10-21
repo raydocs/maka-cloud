@@ -74,9 +74,14 @@ export type TaskEvent =
    */
   | { type: 'task_restarted'; taskId: TaskId; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
-  | { type: 'task_failed'; taskId: TaskId; reason: string }
+  /**
+   * `kept` is the manifest of a change the runner kept for the owner to look at but could not
+   * deliver (the task failed or was stopped before its review ended). It is never a result: the
+   * task did not succeed. It only lets the owner see what was kept.
+   */
+  | { type: 'task_failed'; taskId: TaskId; reason: string; kept?: ResultManifest }
   | { type: 'task_cancel_requested'; taskId: TaskId; by: SessionId | 'system' }
-  | { type: 'task_cancelled'; taskId: TaskId }
+  | { type: 'task_cancelled'; taskId: TaskId; kept?: ResultManifest }
   /** Someone asked for the run to pause; the task stays `running` until `task_paused`. */
   | { type: 'task_pause_requested'; taskId: TaskId; by: SessionId }
   | { type: 'task_paused'; taskId: TaskId }
@@ -218,6 +223,8 @@ export interface TaskRecord {
   runSince?: number;
   progress: string[];
   manifest?: ResultManifest;
+  /** What the runner kept for the owner when the task ended without a result; see `task_failed`. */
+  kept?: ResultManifest;
   failureReason?: string;
   cancelRequestedBy?: SessionId | 'system';
   /** A pause was asked for and has neither happened nor failed yet, or has happened. Cleared by a failed pause or a resume. */
@@ -250,6 +257,8 @@ export interface TaskView {
   finishedAt?: number;
   progress: string[];
   manifest?: ResultManifest;
+  /** What the runner kept for the owner when the task ended without a result; see `task_failed`. */
+  kept?: ResultManifest;
   failureReason?: string;
   cancelRequested: boolean;
   /** On a top-level task: what its whole tree reported spending. Absent when no runner reported any. */

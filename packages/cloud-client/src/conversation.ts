@@ -131,8 +131,8 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   private listResults(): void {
     for (const task of Object.values(this.getSnapshot().state.tasks)) {
       if (
-        task.state !== 'succeeded' ||
-        !task.manifest?.artifacts?.length ||
+        (task.state !== 'succeeded' && !task.kept) ||
+        !(task.manifest ?? task.kept)?.artifacts?.length ||
         this.listed.has(task.taskId)
       )
         continue;

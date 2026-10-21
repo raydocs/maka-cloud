@@ -20,7 +20,9 @@ export interface Logger {
 }
 
 const SECRET_NAME = /key|token|secret|password|passphrase|private|credential|auth/iu;
-const MIN_SECRET_LENGTH = 6;
+/** Settings whose value is registered as a secret. `auth` alone is not enough (AUTH_PROVIDER=google, AUTH_MODE=invite). */
+const SECRET_ENV_NAME = /key|token|secret|password|passphrase|private|credential|authoriz/iu;
+const MIN_SECRET_LENGTH = 4;
 const MAX_FIELD_LENGTH = 1_000;
 const NAME = /^[a-z][a-z0-9_.]{0,63}$/u;
 const RESERVED = new Set(['ts', 'level', 'event']);
@@ -33,12 +35,24 @@ const LOG_ONLY_SHAPES: readonly RegExp[] = [
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
+/** Settings a name test can catch that are not secrets: a limit, a port, a flag. */
+const NOT_A_SECRET = /^(?:[\d.\-_]{0,9}|true|false|yes|no|on|off|null|none)$/iu;
+
+/**
+ * A value worth registering: long enough, and not a short number or a switch (`MAX_OUTPUT_TOKENS=32000`,
+ * `PARALLELISM=false`). A long run of digits is a PIN or a numeric password and stays.
+ */
+function looksLikeSecret(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.length >= MIN_SECRET_LENGTH && !NOT_A_SECRET.test(trimmed);
+}
+
 /** The values of the environment variables whose names say they hold a secret, longest first. */
 export function secretValuesOf(env: NodeJS.ProcessEnv): string[] {
   return Object.entries(env)
     .filter(
       (entry): entry is [string, string] =>
-        SECRET_NAME.test(entry[0]) && (entry[1]?.trim().length ?? 0) >= MIN_SECRET_LENGTH,
+        SECRET_ENV_NAME.test(entry[0]) && looksLikeSecret(entry[1] ?? ''),
     )
     .map(([, value]) => value.trim())
     .sort((a, b) => b.length - a.length);

@@ -167,6 +167,7 @@ function applyLive(
     case 'task_failed':
       task.state = 'failed';
       task.failureReason = event.reason;
+      if (event.kept !== undefined) task.kept = event.kept;
       task.finishedAt = at;
       break;
     case 'task_cancel_requested':
@@ -174,6 +175,7 @@ function applyLive(
       break;
     case 'task_cancelled':
       task.state = 'cancelled';
+      if (event.kept !== undefined) task.kept = event.kept;
       task.finishedAt = at;
       break;
     case 'task_pause_requested':

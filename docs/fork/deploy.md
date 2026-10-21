@@ -666,9 +666,11 @@ Preparation:
    its tree is still being stopped. It sends the cancel again every 5 seconds,
    for up to 3 minutes a task (the server itself retries a stop that failed with
    a growing delay), until the answer says the task ended with nothing pending.
-   A task not seen stopped, or a task list it cannot read, means it starts
-   nothing and exits 2, naming the last error: stop those tasks by hand and run
-   again. A task that started after the list was read is not seen. The
+   A task not seen stopped, or a conversation or task list it cannot read to
+   its end (a next page after the last one it reads, a cursor that does not move
+   forward, an entry of an unexpected shape), means it starts nothing and exits
+   2, naming the last error: stop those tasks by hand and run again. A task that
+   started after the list was read is not seen. The
    cleanup is repeated by the next run even though the run that failed it has
    cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
