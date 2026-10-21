@@ -45,6 +45,24 @@ export function asAgent(commandLine: string, channel: AgentChannel): string {
   return `${agentPrefix(user)}sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
 }
 
+/** A whole script (any text, quoted here) run under bash as the agent's user, as `asAgent` does a command. */
+export function asAgentScript(script: string, channel: AgentChannel): string {
+  return asAgent(`bash -c ${shq(script)}`, channel);
+}
+
+/**
+ * A whole script run as root through the sandbox user's passwordless sudo, for what only root can
+ * see of the agent's processes (their namespaces) or end. sudo drops the environment, so the
+ * variables the script reads are named and handed over by `env`.
+ */
+export function asRootScript(script: string, envNames: readonly string[]): string {
+  for (const name of envNames) {
+    if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) throw new Error(`Unsafe variable name: ${name}`);
+  }
+  const vars = envNames.map((name) => `${name}="$${name}"`).join(' ');
+  return `sudo -n env ${vars} bash -c ${shq(script)}`;
+}
+
 /** What every command of `asAgent` starts with; `RemoteMachine.launch` looks for it in a task's script. */
 export function agentPrefix(user: string): string {
   return `sudo -n -u ${shq(user)} --preserve-env -- `;
@@ -64,10 +82,6 @@ mkdir -p handoff
 chgrp "$MAKA_AGENT_GROUP" "$root" . workspace handoff
 chmod 710 "$root" .
 chmod 2770 workspace handoff
-if [ -f handoff/brief.md ]; then
-  chgrp "$MAKA_AGENT_GROUP" handoff/brief.md
-  chmod 640 handoff/brief.md
-fi
 # The CLI's configuration directory (its transcripts): the agent writes it, the sandbox user puts a
 # kept conversation back into it.
 mkdir -p claude-config

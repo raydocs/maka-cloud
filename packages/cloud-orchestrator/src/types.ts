@@ -201,6 +201,8 @@ export interface TaskRecord {
    * (key `<epoch>:<taskId>`).
    */
   spendByRun?: Record<string, number>;
+  /** On a top-level task: the sum of `spendByRun`, kept as it moves (`costUsd` is this, rounded). */
+  spendSum?: number;
   /** On a top-level task: the sum of `spendByRun`. */
   costUsd?: number;
   state: TaskState;

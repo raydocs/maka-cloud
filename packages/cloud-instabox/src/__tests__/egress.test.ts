@@ -143,6 +143,38 @@ describe('applyEgressGuard', () => {
     await pending;
   });
 
+  it('keeps the live hook when a rebuild was stopped after the old chain went, and leaves nothing behind', async () => {
+    await make();
+    await run();
+    // The state of a box whose last rebuild stopped between deleting the old chain and renaming
+    // the new one: the only hook points at the chain that has not been renamed yet.
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -E ${EGRESS_CHAIN} ${EGRESS_CHAIN}_NEW`,
+    });
+    assert.deepEqual(v4(), []);
+    h.fake.firewall.arm();
+    await run();
+    assert.deepEqual(h.fake.firewall.gaps(), [], 'the box was without a guard during the retry');
+    assert.ok(v4().includes(replies));
+    assert.deepEqual(h.fake.firewall.rules('iptables', 'OUTPUT'), [`-A OUTPUT -j ${EGRESS_CHAIN}`]);
+    const listed = await h.client.exec(h.fake.machineId, { cmd: 'iptables -w -S' });
+    assert.doesNotMatch(listed.stdout, /^-N MAKA_EGRESS_/mu, 'a chain was left behind');
+  });
+
+  it('removes an unhooked chain a stopped run left and hooks only the new one', async () => {
+    await make();
+    await run();
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -N ${EGRESS_CHAIN}_NEW123 && iptables -w -A ${EGRESS_CHAIN}_NEW123 -j RETURN`,
+    });
+    h.fake.firewall.arm();
+    h.fake.firewall.reset();
+    await run();
+    const listed = await h.client.exec(h.fake.machineId, { cmd: 'iptables -w -S' });
+    assert.doesNotMatch(listed.stdout, /MAKA_EGRESS_/u);
+    assert.deepEqual(h.fake.firewall.rules('iptables', 'OUTPUT'), [`-A OUTPUT -j ${EGRESS_CHAIN}`]);
+  });
+
   const isMutation = (call: string) => /(^| )-(N|F|A|I|D|X|E) /u.test(call);
   const live = (calls: string[]) => calls.filter((call) => !call.includes(`${EGRESS_CHAIN}_NEW`));
 
@@ -297,12 +329,12 @@ describe('applyEgressGuard', () => {
 
   it('refuses when the hook cannot be installed', async () => {
     await make({ env: { SHIM_FAIL: '-I OUTPUT' } });
-    await assert.rejects(run(), /cannot hook MAKA_EGRESS_NEW into OUTPUT/u);
+    await assert.rejects(run(), /cannot hook MAKA_EGRESS_NEW\d+ into OUTPUT/u);
   });
 
   it('refuses when the rules read back are not the ones it wrote', async () => {
     await make({ env: { SHIM_LIE: '1' } });
-    await assert.rejects(run(), /cannot read MAKA_EGRESS_NEW back/u);
+    await assert.rejects(run(), /cannot read MAKA_EGRESS_NEW[\d_]+ back/u);
   });
 
   it('refuses when the IPv6 half fails on a box that has IPv6', async () => {

@@ -69,6 +69,12 @@ interface ExecOptions {
    * (default). Task code turns this off: after a wake its caller must look at the box again first.
    */
   wake?: boolean;
+  /**
+   * The command runs repo or task code. Such a command only reaches a box whose egress was checked
+   * since the box was last woken here: after a wake, and while a check has failed, it is guarded
+   * first and a failure is final (the box is awake, which is not the same as closed).
+   */
+  taskCode?: boolean;
   envs?: Record<string, string>;
   stdin?: string;
   timeoutSeconds?: number;
@@ -105,6 +111,16 @@ export class RemoteMachine {
   ) {}
 
   private guarding: Promise<void> | undefined;
+  /** This machine was woken here (or a check failed) and has not passed a check since. */
+  private unguarded = false;
+  /** Errors the egress check threw: a retry must not start task code after one of these. */
+  private readonly refusals = new WeakSet<object>();
+
+  /** Wakes the box. Its rules may be gone, so nothing runs in it until the next check passes. */
+  private async wake(signal?: AbortSignal): Promise<void> {
+    this.unguarded = true;
+    await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
+  }
 
   /**
    * The egress guard, checked right now. One check at a time: callers that arrive while it runs
@@ -113,19 +129,28 @@ export class RemoteMachine {
    */
   private guardEgress(signal?: AbortSignal): Promise<void> {
     if (!this.egress) {
-      return Promise.reject(new Error('this sandbox has no egress guard, so no task starts in it'));
+      const missing = new Error('this sandbox has no egress guard, so no task starts in it');
+      this.refusals.add(missing);
+      return Promise.reject(missing);
     }
     const egress = this.egress;
     this.guarding ??= (async () => {
       try {
         // No caller's signal: the check is shared and one caller giving up must not fail the rest.
         try {
-          await egress();
+          try {
+            await egress();
+          } catch (error) {
+            if (!isAsleep(error)) throw error;
+            // Asleep: wake it, and look again, because its rules may be gone.
+            await this.wake();
+            await egress();
+          }
+          this.unguarded = false;
         } catch (error) {
-          if (!isAsleep(error)) throw error;
-          // Asleep: wake it, and look again, because its rules may be gone.
-          await this.client.ensureRunning(this.machineId);
-          await egress();
+          this.unguarded = true;
+          if (typeof error === 'object' && error !== null) this.refusals.add(error);
+          throw error;
         }
       } finally {
         this.guarding = undefined;
@@ -175,11 +200,14 @@ export class RemoteMachine {
       ...(options.timeoutSeconds ? { timeoutSeconds: options.timeoutSeconds } : {}),
     };
     const call = options.signal ? { signal: options.signal } : {};
+    // A box that was woken here, or whose last check failed, may have no rules: look first.
+    if (options.taskCode && this.unguarded) await this.guardEgress(options.signal);
     try {
       return await this.client.exec(this.machineId, request, call);
     } catch (error) {
       if (!isAsleep(error) || options.wake === false) throw error;
-      await this.client.ensureRunning(this.machineId, call);
+      await this.wake(options.signal);
+      if (options.taskCode) await this.guardEgress(options.signal);
       return await this.client.exec(this.machineId, request, call);
     }
   }
@@ -196,10 +224,18 @@ export class RemoteMachine {
   }
 
   /** Creates the task directory and, when given, writes the brief into it. */
-  async prepare(dirName: string, brief?: string, signal?: AbortSignal): Promise<void> {
+  async prepare(
+    dirName: string,
+    brief?: string,
+    signal?: AbortSignal,
+    agentGroup?: string,
+  ): Promise<void> {
     await this.execOk(PREPARE_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
+        ...(agentGroup === undefined
+          ? {}
+          : { MAKA_AGENT_GROUP: assertSafeId('group', agentGroup) }),
         ...(brief === undefined ? {} : { MAKA_WRITE_BRIEF: '1' }),
       },
       ...(brief === undefined ? {} : { stdin: brief }),
@@ -269,9 +305,14 @@ export class RemoteMachine {
         return out.includes('ALREADY') ? 'already' : 'started';
       } catch (error) {
         input.signal?.throwIfAborted();
+        // A box that failed its check is refused for good: retrying would find it awake and open.
+        if (typeof error === 'object' && error !== null && this.refusals.has(error)) throw error;
         if (error instanceof InstaboxApiError && !error.retryable) throw error;
         // The answer was lost. Look before trying again; the lock file makes a second try safe.
+        // The look does not wake the box: asleep, nothing of ours is running, and the retry below
+        // wakes it through startOnce, which checks it first.
         const state = await this.execOk(INSPECT_SCRIPT, {
+          wake: false,
           envs: { MAKA_DIR: envs.MAKA_DIR, MAKA_RUN: envs.MAKA_RUN },
           ...(input.signal ? { signal: input.signal } : {}),
         }).catch(() => undefined);
@@ -297,7 +338,7 @@ export class RemoteMachine {
       return await run();
     } catch (error) {
       if (!isAsleep(error)) throw error;
-      await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
+      await this.wake(signal);
       await this.guardEgress(signal);
       return await run();
     }
