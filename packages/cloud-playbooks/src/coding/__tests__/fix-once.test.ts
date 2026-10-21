@@ -15,6 +15,7 @@ import {
   fixes,
   gate,
   type Harness,
+  keptAfterStop,
   readJson,
   setup,
   terminal,
@@ -322,7 +323,7 @@ test('a fix that spends the review’s limit ends the fix, and the first change 
 
 // -- every exit ----------------------------------------------------------------------------------
 
-test('cancel while the fix runs: its run is cancelled, nothing is delivered and everything is released', async (t) => {
+test('cancel while the fix runs: its run is cancelled, the first verified change is kept and everything is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   const running = gate();
   let aborted = false;
@@ -343,11 +344,11 @@ test('cancel while the fix runs: its run is cancelled, nothing is delivered and 
   assert.equal(h.claude.open, 0);
   assert.equal(h.codex.open, 0);
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
-  assert.equal(await h.deliveries.get('tsk_cfix'), undefined);
+  await keptAfterStop(h, 'tsk_cfix');
   zeroStats(h.runner);
 });
 
-test('cancel while the fixed change is reviewed again: nothing is delivered and everything is released', async (t) => {
+test('cancel while the fixed change is reviewed again: the first verified change is kept and everything is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   const running = gate();
@@ -367,7 +368,7 @@ test('cancel while the fixed change is reviewed again: nothing is delivered and 
   assert.equal(aborted, true);
   assert.equal(h.claude.open, 0);
   assert.equal(h.codex.open, 0);
-  assert.equal(await h.deliveries.get('tsk_crev2'), undefined);
+  await keptAfterStop(h, 'tsk_crev2');
   zeroStats(h.runner);
 });
 

@@ -15,6 +15,7 @@ import {
   fixes,
   gate,
   type Harness,
+  keptAfterStop,
   readJson,
   setup,
   terminal,
@@ -487,7 +488,7 @@ test('without modes there is no reviewer, so a change that passes its checks is 
 
 // -- every exit ----------------------------------------------------------------------------------
 
-test('cancel while the reviewer runs: its run is cancelled and everything is released', async (t) => {
+test('cancel while the reviewer runs: its run is cancelled, the verified change is kept and everything is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = fixes;
   const running = gate();
@@ -507,15 +508,11 @@ test('cancel while the reviewer runs: its run is cancelled and everything is rel
   assert.equal(h.codex.open, 0);
   assert.equal(h.claude.open, 0);
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
-  assert.equal(
-    await h.deliveries.get('tsk_crev'),
-    undefined,
-    'nothing is delivered after a cancel',
-  );
+  await keptAfterStop(h, 'tsk_crev');
   zeroStats(h.runner);
 });
 
-test('cancel while the review file is being read: nothing is delivered and everything is released', async (t) => {
+test('cancel while the review file is being read: the change is kept and everything is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = fixes;
   h.codex.script = reviews();
@@ -539,7 +536,7 @@ test('cancel while the review file is being read: nothing is delivered and every
   held.open();
   assert.equal(h.codex.open, 0);
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
-  assert.equal(await h.deliveries.get('tsk_cread'), undefined);
+  await keptAfterStop(h, 'tsk_cread');
   zeroStats(h.runner);
 });
 

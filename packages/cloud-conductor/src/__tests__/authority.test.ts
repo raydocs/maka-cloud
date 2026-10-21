@@ -440,3 +440,28 @@ test('a database from before this step opens, and its runs have no authority', a
   assert.equal(run?.dutyId, null);
   state.close();
 });
+
+test('a run from before the tool history was recorded counts as having called a tool', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const path = join(mkdtempSync(join(tmpdir(), 'conductor-mig-')), 'c.db');
+  const old = new DatabaseSync(path);
+  const before = CONDUCTOR_MIGRATIONS.slice(0, 7);
+  for (const step of before) {
+    if (typeof step === 'string') old.exec(step);
+    else step(old);
+  }
+  old.exec('PRAGMA user_version = 7');
+  old.exec(
+    "INSERT INTO runs (run_id, n, conversation_id, state, budget_usd, created_at) VALUES ('run_old', 1, 'cnv_old', 'waiting', 3, 0)",
+  );
+  old.close();
+  const state = new ConductorState(path);
+  assert.equal(
+    state.run('run_old')?.toolCalled,
+    true,
+    'a run that may already have had effects is not retried as if it had none',
+  );
+  state.close();
+});
