@@ -35,8 +35,11 @@ export {
   linkedSecretKeys,
   linkedSecretPair,
   scrubSecretFields,
+  scrubReading,
   scrubSecretShapes,
   setKnownSecrets,
+  withoutHidden,
+  withoutInvisible,
 } from './secret-shapes.js';
 export { SqliteSessionStore } from './sqlite-session-store.js';
 export { SqliteTaskStore } from './sqlite-task-store.js';

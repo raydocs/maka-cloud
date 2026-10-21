@@ -276,11 +276,21 @@ test('an approval covers only the card the owner saw: when the card would now re
 });
 
 test('an approval runs the call whose card reads as the owner saw it, once (T15)', async (t) => {
+  // The tool is given the card the owner approved, to act on exactly what it named.
+  const approvedCards: (string | undefined)[] = [];
+  const ran: unknown[] = [];
   const target = fixture(
     'post_comment',
     ['sends'],
     { target: 'issue#1', body: 'Thanks \u202Efor the report.' },
-    { approvalDetails: () => 'Repository: acme/widgets' },
+    {
+      approvalDetails: () => 'Repository: acme/widgets',
+      impl: async (input, context) => {
+        approvedCards.push(context.approved);
+        ran.push(input);
+        return { ok: true };
+      },
+    },
   );
   const h = await makeHarness(t, { autoComplete: false, conductor: { tools: [target.spec] } });
   h.model.script('planner', text('1. Fetch the notes. 2. Summarise them.'));
@@ -314,7 +324,10 @@ test('an approval runs the call whose card reads as the owner saw it, once (T15)
   );
   await h.answer('cnv_1', question.questionId, 'approve');
   await h.conductor.idle();
-  assert.deepEqual(target.ran, [target.args]);
+  assert.deepEqual(ran, [target.args]);
+  assert.equal(approvedCards.length, 1);
+  assert.ok(approvedCards[0]?.endsWith('\n\nRepository: acme/widgets'), String(approvedCards[0]));
+  assert.equal(approvedCards[0], question.question);
 });
 
 test('the clean path: with no outside content read, guarded tools that can be undone run with no approval', async (t) => {

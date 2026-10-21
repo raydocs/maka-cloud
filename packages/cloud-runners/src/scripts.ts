@@ -204,12 +204,37 @@ done
  * With `MAKA_ONLY_RUNS` (run names, space separated) it touches those runs alone: their process
  * groups, locks and raw output files, never another run of the task. A run's cleanup uses this, so
  * that it cannot reach a later turn of the same task that has started since.
+ *
+ * With `MAKA_UP_TO_ATTEMPT` it leaves alone the runs of a later attempt: a run is named
+ * \`e<attempt>.t<turn>\` when its attempt is known, and one whose attempt is after the asking one is
+ * the new driver's own (a slow stop from an earlier attempt can arrive after another process took
+ * the task over). It prints \`LEFT <run>\` for each run it left alone; a run with no attempt in its
+ * name is older than attempts and is stopped.
  */
 export const KILL_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+newer_attempt() {
+  [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ] || return 1
+  case "$1" in
+    e[0-9]*.*)
+      n="\${1#e}"
+      n="\${n%%.*}"
+      case "$n" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$n" -gt "$MAKA_UP_TO_ATTEMPT" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
 cleanup_logs() {
   [ -n "\${MAKA_LOG_DIR:-}" ] || return 0
   if [ -n "\${MAKA_ONLY_RUNS:-}" ]; then
     for run in $MAKA_ONLY_RUNS; do rm -f -- "$MAKA_LOG_DIR/$run.out"; done
+  elif [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ]; then
+    for out in "$MAKA_LOG_DIR"/*.out; do
+      [ -f "$out" ] || continue
+      name="\${out##*/}"
+      name="\${name%.out}"
+      newer_attempt "$name" || rm -f -- "$out"
+    done
   else
     rm -rf -- "$MAKA_LOG_DIR"
   fi
@@ -227,6 +252,7 @@ for run in \${MAKA_CANCEL_RUNS:-}; do : > "$run.cancel"; done
 for lockf in $locks; do
   [ -f "$lockf" ] || continue
   lockbase="\${lockf%.lock}"
+  newer_attempt "\${lockbase#./}" && continue
   [ -f "$lockbase.exit" ] || : > "$lockbase.cancel"
 done
 found=0
@@ -234,6 +260,10 @@ survivors=0
 for pidf in $pids; do
   [ -f "$pidf" ] || continue
   base="\${pidf%.pid}"
+  if newer_attempt "\${base#./}"; then
+    echo "LEFT \${base#./}"
+    continue
+  fi
   pid=$(cat "$pidf" 2>/dev/null) || continue
   case "$pid" in ''|*[!0-9]*) continue ;; esac
   group_is_run "$base" "$pid" || continue

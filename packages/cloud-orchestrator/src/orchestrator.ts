@@ -947,7 +947,7 @@ export class Orchestrator {
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(
-      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId))),
+      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch)),
     );
     const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
@@ -1252,12 +1252,16 @@ export class Orchestrator {
       if (signal.aborted) return release();
       const task = this.lookup(taskId);
       if (!task?.stopPending) return release();
+      // A newer attempt (another process) drives the task: the stop is its to finish, and a run
+      // or an access of its own is not this attempt's to stop.
+      if (this.fenced.has(taskId)) return release();
       // A start still under way may yet hand back a run: try again after it.
       if (this.starting.has(taskId)) continue;
       try {
         // Only a confirmed stop clears the obligation: a runner that is gone or
-        // can no longer stop by id leaves it owed.
-        if ((await this.stopLeftover(task)) !== 'stopped' || signal.aborted) continue;
+        // can no longer stop by id leaves it owed. It stops what this attempt or an earlier one
+        // started, and nothing of a later one.
+        if ((await this.stopLeftover(task, task.epoch)) !== 'stopped' || signal.aborted) continue;
         await this.recordStopped(taskId);
       } catch {
         // The store failed; the obligation is still in the log, so try again.

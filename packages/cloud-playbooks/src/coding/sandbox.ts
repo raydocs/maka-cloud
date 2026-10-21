@@ -8,7 +8,7 @@ import {
 import { CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
 
 /** What CHECK_STOP_SCRIPT reads from its environment. */
-const CHECK_STOP_ENV = ['MAKA_CHECK_TAG'];
+const CHECK_STOP_ENV = ['MAKA_CHECK_TAG', 'MAKA_CHECK_UP_TO'];
 
 export interface ExecResult {
   stdout: string;
@@ -50,9 +50,10 @@ export interface SandboxWorkspace {
 }
 
 export interface CodingSandbox {
-  open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace>;
+  /** `attempt`: the attempt (epoch) of the run that opens it; its stop leaves a later attempt's runs alone. */
+  open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace>;
   /** Stops whatever a task left running, found by id alone (after a restart). Idempotent. */
-  stopTask(taskId: string, signal?: AbortSignal): Promise<void>;
+  stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void>;
 }
 
 /**
@@ -62,7 +63,7 @@ export interface CodingSandbox {
 export class FleetCodingSandbox implements CodingSandbox {
   constructor(private readonly fleet: Fleet) {}
 
-  async open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace> {
+  async open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace> {
     const { fleet } = this;
     const lease = await fleet.sandboxes.acquire({ tenantId: fleet.tenantOf(taskId), taskId });
     if (signal?.aborted) {
@@ -105,8 +106,11 @@ export class FleetCodingSandbox implements CodingSandbox {
       execCheckStop: (script, options = {}) =>
         run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options),
       stopAll: async (stopSignal) => {
-        await machine.kill(taskId, stopSignal ? { signal: stopSignal } : {});
-        await stopChecks(machine, taskId, stopSignal, channel);
+        await machine.kill(taskId, {
+          ...(stopSignal ? { signal: stopSignal } : {}),
+          ...(attempt === undefined ? {} : { upToAttempt: attempt }),
+        });
+        await stopChecks(machine, taskId, stopSignal, channel, attempt);
       },
       agentOnSameMachine: async () =>
         (await fleet.sessions.get(taskId))?.machineId === lease.machineId,
@@ -118,10 +122,10 @@ export class FleetCodingSandbox implements CodingSandbox {
     };
   }
 
-  async stopTask(taskId: string, signal?: AbortSignal): Promise<void> {
+  async stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void> {
     const { fleet } = this;
     let failure: unknown;
-    await fleet.stopTask(taskId, signal).catch((error: unknown) => {
+    await fleet.stopTask(taskId, signal, upToAttempt).catch((error: unknown) => {
       failure = error;
     });
     // The checks ran on the machine the task's lease gives, as in open().
@@ -133,6 +137,7 @@ export class FleetCodingSandbox implements CodingSandbox {
           taskId,
           signal,
           fleet.options.agentChannel,
+          upToAttempt,
         );
       } finally {
         await lease.release();
@@ -150,11 +155,19 @@ async function stopChecks(
   taskId: string,
   signal: AbortSignal | undefined,
   channel: AgentChannel | undefined,
+  upToAttempt?: number,
 ): Promise<void> {
+  // A bound that is not a whole attempt number would make the script stop everything.
+  if (upToAttempt !== undefined && !Number.isSafeInteger(upToAttempt)) {
+    throw new Error(`not an attempt number: ${upToAttempt}`);
+  }
   const out = await machine.exec(
     channel === undefined ? CHECK_STOP_SCRIPT : asRootScript(CHECK_STOP_SCRIPT, CHECK_STOP_ENV),
     {
-      envs: { MAKA_CHECK_TAG: checkTagPrefix(taskId) },
+      envs: {
+        MAKA_CHECK_TAG: checkTagPrefix(taskId),
+        ...(upToAttempt === undefined ? {} : { MAKA_CHECK_UP_TO: String(upToAttempt) }),
+      },
       timeoutSeconds: 30,
       ...(signal ? { signal } : {}),
     },

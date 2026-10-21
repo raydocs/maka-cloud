@@ -13,7 +13,7 @@ import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox'
 import {
   type Orchestrator,
   RunnerRegistry,
-  scrubSecretShapes,
+  containsSecret,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
@@ -405,7 +405,7 @@ export async function startStack(
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
         scrubTaskText: scrubErrorText,
-        carriesSecret: (text) => scrubSecretShapes(text) !== text,
+        carriesSecret: (value) => containsSecret(value),
       },
       supervisor: (context) =>
         startInbox(

@@ -38,9 +38,18 @@ const STREAM_MAX_MS = 15_000;
 const STREAM_MAX_BYTES = 4_000_000;
 const MAX_TASK_PAGES = 20;
 const RESTART_TIMEOUT_MS = 60_000;
-/** How long a cancelled task may take to show that its stop is confirmed. */
-const STOP_CONFIRM_POLL_MS = 1_000;
-const STOP_CONFIRM_POLLS = 30;
+/**
+ * How long a task may take to show that its stop is confirmed. The server retries a stop that failed
+ * with a backoff that grows to minutes, so the wait is minutes too; one request per task per poll
+ * stays well under the control rate limit (30 a minute).
+ */
+const STOP_CONFIRM_POLL_MS = 5_000;
+const STOP_CONFIRM_POLLS = 36;
+/**
+ * An ended task is asked about again only when it ended this recently: the tree flag lives in the
+ * server's memory, so a task that ended long ago, or before a restart, has nothing left to wait for.
+ */
+const RECENT_END_MS = 10 * 60_000;
 const ENDED_STATES = ['succeeded', 'failed', 'cancelled'];
 
 export interface LiveSmokeIo {
@@ -106,7 +115,10 @@ function runCommand(command: readonly string[]): Promise<void> {
 export function createLiveSmokeDeps(
   settings: SmokeSettings,
   io: LiveSmokeIo = {},
-): SmokeDeps & { cancelLeftovers(): Promise<number> } {
+): SmokeDeps & {
+  cancelLeftovers(): Promise<number>;
+  cancelView(taskId: string): Promise<SmokeTask | undefined>;
+} {
   const doFetch = io.fetch ?? fetch;
   const readTotals = io.readTotals ?? readJournalTotals;
   const openInvites = io.openInvites ?? ((path: string) => new InviteStore(path));
@@ -142,7 +154,9 @@ export function createLiveSmokeDeps(
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new Error(`${method} ${route} answered ${response.status}`);
+      throw Object.assign(new Error(`${method} ${route} answered ${response.status}`), {
+        status: response.status,
+      });
     }
     if (response.status === 204) return undefined;
     try {
@@ -279,7 +293,18 @@ export function createLiveSmokeDeps(
     },
 
     async cancel(taskId) {
-      await request('POST', `/v1/tasks/${encodeURIComponent(taskId)}/cancel`);
+      await this.cancelView(taskId);
+    },
+
+    /**
+     * A cancel, and the task as the server answers it. Only this answer carries `treeStopPending`
+     * (the task list is read from the log and cannot know that a stream is still being read or a
+     * cancel retried), so it is what a stop is confirmed by. Cancelling a task that ended changes
+     * nothing but asks again about its tree.
+     */
+    async cancelView(taskId) {
+      const answer = await request('POST', `/v1/tasks/${encodeURIComponent(taskId)}/cancel`);
+      return isRecord(answer) ? toTask(answer.task) : undefined;
     },
 
     async restart() {
@@ -288,54 +313,60 @@ export function createLiveSmokeDeps(
 
     /**
      * Stops every task of the smoke invite that is still going: what an earlier run left behind.
-     * A task counts as going until it has ended AND no stop of it or its tree is pending, so an
-     * ended task whose processes may still live is waited for, not skipped. A cancel that was
-     * accepted does not count either: the stop must be seen confirmed. Returns how many cancels
-     * took effect. A task that is not confirmed stopped, or a list that cannot be read, is an error:
-     * the run must not start beside work it could not stop.
+     * A task counts as stopped only when the server's own answer to a cancel says it ended and that
+     * neither its stop nor its tree's is pending: a task that ended a moment ago is asked about
+     * again, not skipped, and a cancel that failed (whatever the answer) is sent again at the next poll. Returns how many
+     * tasks were running when this started. A task not confirmed stopped, or a list that cannot be
+     * read, is an error: the run must not start beside work it could not stop.
      */
     async cancelLeftovers() {
       const listed = await request('GET', '/v1/conversations');
       const conversations =
         isRecord(listed) && Array.isArray(listed.conversations) ? listed.conversations : [];
-      const going = (task: SmokeTask): boolean =>
-        !ENDED_STATES.includes(task.state) ||
-        task.stopPending === true ||
-        task.treeStopPending === true;
       const sleep = io.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-      const open: Array<{ conversationId: string; taskId: string; sent: boolean }> = [];
+      const stopped = (task: SmokeTask): boolean =>
+        ENDED_STATES.includes(task.state) &&
+        task.stopPending !== true &&
+        task.treeStopPending !== true;
+      const open: Array<SmokeTask & { conversationId: string }> = [];
       for (const conversation of conversations) {
         const id = isRecord(conversation) ? conversation.conversationId : undefined;
         if (typeof id !== 'string') continue;
         for (const task of await this.tasks(id)) {
-          if (!going(task)) continue;
-          let sent = false;
-          if (!ENDED_STATES.includes(task.state)) {
-            try {
-              await this.cancel(task.taskId);
-              sent = true;
-            } catch {
-              // It may have ended in the meantime; whether it did is read below.
-            }
+          const recent = task.finishedAt === undefined || task.finishedAt >= now() - RECENT_END_MS;
+          if (!ENDED_STATES.includes(task.state) || task.stopPending === true || recent) {
+            open.push({ ...task, conversationId: id });
           }
-          open.push({ conversationId: id, taskId: task.taskId, sent });
         }
       }
       let cancelled = 0;
       const stuck: string[] = [];
-      for (const { conversationId, taskId, sent } of open) {
+      let lastError: string | undefined;
+      for (const task of open) {
+        const wasRunning = !ENDED_STATES.includes(task.state);
+        // After one task could not be stopped the run fails anyway: the rest are asked once, so they
+        // are stopped too, and not waited for.
+        const polls = stuck.length > 0 ? 0 : STOP_CONFIRM_POLLS;
         let confirmed = false;
-        for (let poll = 0; poll <= STOP_CONFIRM_POLLS && !confirmed; poll += 1) {
+        for (let poll = 0; poll <= polls && !confirmed; poll += 1) {
           if (poll > 0) await sleep(STOP_CONFIRM_POLL_MS);
-          const now = (await this.tasks(conversationId)).find((other) => other.taskId === taskId);
-          confirmed = now !== undefined && !going(now);
+          try {
+            const view = await this.cancelView(task.taskId);
+            confirmed = view !== undefined && stopped(view);
+          } catch (error) {
+            // Sent again at the next poll; the cause is kept for the message. A refusal is never taken
+            // for a stop: the task list, which cannot show a tree that is still stopping, is not asked.
+            lastError = error instanceof Error ? error.message : String(error);
+          }
         }
-        if (!confirmed) stuck.push(taskId);
-        else if (sent) cancelled += 1;
+        if (!confirmed) stuck.push(task.taskId);
+        else if (wasRunning) cancelled += 1;
       }
       if (stuck.length > 0) {
         throw new Error(
-          `could not confirm the stop of ${stuck.length} task(s): ${stuck.join(', ')}`,
+          `could not confirm the stop of ${stuck.length} task(s): ${stuck.join(', ')}${
+            lastError === undefined ? '' : ` (the last error: ${lastError})`
+          }`,
         );
       }
       return cancelled;
@@ -423,6 +454,7 @@ function toTask(raw: unknown): SmokeTask | undefined {
     ...(raw.budgetExceeded === true ? { budgetExceeded: true } : {}),
     ...(raw.stopPending === true ? { stopPending: true } : {}),
     ...(raw.treeStopPending === true ? { treeStopPending: true } : {}),
+    ...(typeof raw.finishedAt === 'number' ? { finishedAt: raw.finishedAt } : {}),
     ...(typeof raw.failureReason === 'string' ? { failureReason: raw.failureReason } : {}),
   };
 }
