@@ -1,5 +1,12 @@
 import type { ResultManifest, TaskEvent, TaskView } from '@maka-cloud/orchestrator';
-import { scrubSecretFields, scrubSecretShapes } from './secret-shapes.js';
+import {
+  containsSecret,
+  scrubSecretFields,
+  scrubSecretShapes,
+  scrubSecretText,
+} from './secret-shapes.js';
+
+export { scrubSecretText };
 
 /**
  * What the public API shows of a task. The runner id names the vendor behind a
@@ -23,18 +30,6 @@ export function scrubErrorText(value: string): string {
     HIDDEN_NAMES,
     'assistant',
   );
-}
-
-/**
- * Text as clients see it when only the secrets must go: what an assistant wrote, or a manifest a
- * runner returned, may name any vendor but must not carry a key. Text with nothing in it comes
- * back untouched, so an emoji joined by a zero-width joiner survives; text that hides a key behind
- * invisible characters comes back without them.
- */
-export function scrubSecretText(value: string): string {
-  const plain = value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
-  const scrubbed = scrubSecretShapes(plain);
-  return scrubbed === plain ? scrubSecretShapes(value) : scrubbed;
 }
 
 /** A result manifest as clients see it. Every line of it is the runner's own words. */
@@ -88,24 +83,23 @@ export const WITHHELD_APPROVAL =
  * rule) is withheld whole and offers no way to approve.
  */
 function toPublicApproval(item: object): unknown {
-  const carries = (value: unknown) => {
-    const text = JSON.stringify(value) ?? '';
-    return scrubSecretText(text) !== text;
-  };
   const { ask, evidence, options } = item as {
     ask?: unknown;
     evidence?: unknown;
     options?: unknown;
   };
-  if (!carries(ask) && !carries(evidence)) return item;
+  if (!containsSecret({ ask, evidence, options })) return item;
   return {
     ...item,
     ask: WITHHELD_APPROVAL,
     evidence: [],
-    ...(Array.isArray(options)
-      ? { options: options.filter((option) => (option as { id?: unknown })?.id !== 'approve') }
-      : {}),
+    ...(Array.isArray(options) ? { options: withoutApprove(options) } : {}),
   };
+}
+
+/** The options of a question with the one that approves taken out. */
+function withoutApprove(options: unknown[]): unknown[] {
+  return options.filter((option) => (option as { id?: unknown })?.id !== 'approve');
 }
 
 export function toPublicView(view: TaskView): PublicTaskView {
@@ -134,6 +128,21 @@ export function toPublicConductorData(kind: string, data: unknown): unknown {
     typeof value === 'string' ? scrubErrorText(value) : value;
   if (kind === 'conductor.notice') return { ...record, text: text(record.text) };
   if (kind === 'conductor.question') {
+    // A question that was stored with a key in it (before the conductor stopped asking those) is
+    // withheld whole, the call it would run included, and offers no way to approve: the card binds
+    // the call word for word, so it cannot be shown edited, and the backend refuses to run it.
+    if (
+      record.action !== undefined &&
+      containsSecret({ question: record.question, action: record.action })
+    ) {
+      return {
+        ...record,
+        question: WITHHELD_APPROVAL,
+        note: null,
+        action: undefined,
+        options: Array.isArray(record.options) ? withoutApprove(record.options) : record.options,
+      };
+    }
     return {
       ...record,
       question: text(record.question),

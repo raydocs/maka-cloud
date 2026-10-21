@@ -18,6 +18,7 @@ import {
   type Runner,
   type RunnerEvent,
   type RunSpec,
+  scrubSecretText,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { agentBrief, type CheckProblem, type FailureBrief, repairPrompt } from './briefs.js';
@@ -297,8 +298,10 @@ interface Collected {
   patch: string;
 }
 
-function clipText(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+export function clipText(text: string, max: number): string {
+  // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
+  const shown = scrubSecretText(text);
+  return shown.length <= max ? shown : `${shown.slice(0, max - 1)}…`;
 }
 
 /** How many serious (P1) findings a finished review still carries. */

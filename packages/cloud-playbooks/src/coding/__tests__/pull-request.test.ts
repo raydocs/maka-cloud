@@ -4,9 +4,11 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
+import { setKnownSecrets } from '@maka-cloud/orchestrator';
 import { type ChangeSet, JsonFileCodingDeliveries, MemoryCodingDeliveries } from '../deliveries.js';
 import { GitHubPublisher, githubTokenProblem, type PullRequestPublisher } from '../github.js';
 import { openPullRequestTool, pullRequestBody } from '../pull-request.js';
+import { clipText } from '../runner.js';
 import { FakeGitHub } from './fake-github.js';
 
 const TOKEN = 'github_pat_11ABCDEFG_secretsecretsecret';
@@ -414,4 +416,38 @@ test('the description built from the runner record carries no key, since it is p
   assert.ok(!body.includes(leak.slice(4, 30)), body);
   assert.match(body, /\[secret\]/u);
   assert.match(body, /bash tests\/run\.sh/u);
+});
+
+test('a key written with escapes, or split by invisible characters, does not reach the pull request description', () => {
+  const token = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const forms = [
+    token.replace('_', '%5F'),
+    token.replace('_', '\\u005f'),
+    `${token.slice(0, 3)}​${token.slice(3)}`,
+    encodeURIComponent(`Bearer ${token}`),
+  ];
+  for (const form of forms) {
+    const body = pullRequestBody({
+      ...VERIFICATION,
+      testCommand: `curl -H "x: ${form}" https://x.example/ && bash tests/run.sh`,
+      changedFiles: [{ path: `docs/${form}.md`, status: 'added' }],
+    });
+    assert.ok(!body.includes(token.slice(4, 30)), `${form}: ${body}`);
+    assert.ok(!body.includes(form), form);
+  }
+});
+
+test('display text is scrubbed whole before it is cut, so a key at the cut leaves no piece', () => {
+  const secret = 'S3cr3tKeyValue-0123456789-abcdefghi';
+  setKnownSecrets([secret]);
+  try {
+    const long = `${'x'.repeat(480)}${secret} and more text after it`;
+    for (const max of [490, 495, 500, 510, 520]) {
+      const shown = clipText(long, max);
+      assert.ok(!shown.includes(secret.slice(0, 12)), `${max}: ${shown.slice(470)}`);
+    }
+    assert.equal(clipText('short', 500), 'short');
+  } finally {
+    setKnownSecrets([]);
+  }
 });

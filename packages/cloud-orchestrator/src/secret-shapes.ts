@@ -301,10 +301,59 @@ function scrubParsed(text: string): string | undefined {
   return cleaned === JSON.stringify(parsed) ? undefined : cleaned;
 }
 
+/**
+ * Runs of text written with escapes (`%5F`, `\u005f`, `\x5f`): a token whose escapes were put in
+ * to get past the patterns. Each is read with the escapes undone (up to three rounds, as a token
+ * can be escaped again); one that holds a secret once read is replaced whole.
+ */
+const ESCAPE = String.raw`%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}`;
+const ESCAPED_RUN = new RegExp(
+  `(?:[\\w.~+/=:@-]|${ESCAPE})*(?:${ESCAPE})(?:[\\w.~+/=:@-]|${ESCAPE})*`,
+  'gu',
+);
+
+function unescapeRun(run: string): string {
+  let text = run;
+  for (let round = 0; round < 3; round++) {
+    const next = text
+      .replace(/\\u([0-9A-Fa-f]{4})/gu, (_, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+      )
+      .replace(/\\x([0-9A-Fa-f]{2})/gu, (_, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+      )
+      .replace(/(?:%[0-9A-Fa-f]{2})+/gu, (seq) => {
+        try {
+          return decodeURIComponent(seq);
+        } catch {
+          return seq;
+        }
+      });
+    if (next === text) break;
+    text = next;
+  }
+  return text;
+}
+
+function scrubEscapedRuns(text: string): string {
+  if (!text.includes('%') && !text.includes('\\')) return text;
+  return text.replace(ESCAPED_RUN, (run) => {
+    const plain = unescapeRun(run);
+    return plain !== run && scrubShapes(plain) !== plain ? '[secret]' : run;
+  });
+}
+
 /** `text` with every secret-shaped run replaced by `[secret]`. */
 export function scrubSecretShapes(text: string): string {
   let out = knownSecrets ? text.replace(knownSecrets, '[secret]') : text;
   out = scrubParsed(out) ?? out;
+  out = scrubEscapedRuns(out);
+  return scrubShapes(out);
+}
+
+/** The patterns, on text as it is written. */
+function scrubShapes(text: string): string {
+  let out = knownSecrets ? text.replace(knownSecrets, '[secret]') : text;
   out = scrubJsonFields(out);
   for (const [pair, quote] of SECRET_PAIRS) out = out.replace(pair, `$1${quote}[secret]${quote}`);
   out = out.replace(SECRET_PARAM, '$1[secret]');
@@ -314,6 +363,34 @@ export function scrubSecretShapes(text: string): string {
     );
   }
   return out;
+}
+
+/**
+ * Text as clients see it when only the secrets must go. Invisible and compatibility characters
+ * are read away first, so one cannot split a token past the patterns; text with nothing in it
+ * comes back untouched, so an emoji joined by a zero-width joiner survives.
+ */
+export function scrubSecretText(value: string): string {
+  const plain = value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+  const scrubbed = scrubSecretShapes(plain);
+  return scrubbed === plain ? scrubSecretShapes(value) : scrubbed;
+}
+
+/**
+ * Whether anything in a value is a secret: every string in it and every key, read as it is and
+ * read without invisible characters, and fields that are secrets by their name or by the field
+ * beside them. The value is walked as it is, never written out as one text first, so what was
+ * escaped by being nested is found where it sits.
+ */
+export function containsSecret(value: unknown, depth = 0): boolean {
+  if (typeof value === 'string') {
+    const plain = value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+    return scrubSecretShapes(plain) !== plain || scrubSecretShapes(value) !== value;
+  }
+  if (depth > 12 || typeof value !== 'object' || value === null) return false;
+  if (JSON.stringify(scrubSecretFields(value)) !== JSON.stringify(value)) return true;
+  const items = Array.isArray(value) ? value : [...Object.keys(value), ...Object.values(value)];
+  return items.some((item) => containsSecret(item, depth + 1));
 }
 
 const SECRET_KEY = new RegExp(`^(?:${SECRET_FIELD})$`, 'iu');

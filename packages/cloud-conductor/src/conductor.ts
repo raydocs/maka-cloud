@@ -71,7 +71,7 @@ export interface ConductorOptions {
    * card that carries one is not asked: the owner cannot be shown it and it cannot be edited.
    * The host sets it from the server's scrubber; without it no card is checked.
    */
-  carriesSecret?: (text: string) => boolean;
+  carriesSecret?: (value: unknown) => boolean;
   playbooks?: readonly Playbook[];
   /**
    * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
@@ -266,7 +266,7 @@ export class Conductor {
   private readonly followDelays = new Map<string, number>();
   private readonly tasksSurviveRestart: boolean;
   private readonly scrubTaskText: ((text: string) => string) | undefined;
-  private readonly carriesSecret: ((text: string) => boolean) | undefined;
+  private readonly carriesSecret: ((value: unknown) => boolean) | undefined;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -1431,7 +1431,7 @@ export class Conductor {
       decidedOnTaint: (active) => (active as Turn).contextTainted ?? true,
       approverAuthorized: (approvedBy, conversationId) =>
         this.approverAuthorized ? this.approverAuthorized(approvedBy, conversationId) : true,
-      carriesSecret: (text) => this.carriesSecret?.(text) ?? false,
+      carriesSecret: (value) => this.carriesSecret?.(value) ?? false,
     };
   }
 
