@@ -110,22 +110,24 @@ let knownSecrets: RegExp | undefined;
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
+/** The shortest value that is registered as a secret. */
+const MIN_KNOWN_SECRET_LENGTH = 4;
+
 /**
  * The secret values this process holds (the keys it was given), replaced wherever they appear in
  * text that leaves it: as they are, URL-encoded, escaped for JSON, or as the base64 of a Basic
- * credential that has them in it. Replaces the earlier list. A short value counts when it is not a
- * plain word (it has a digit or a symbol in it, like `p@ss/w?`): a key is not left in the text for
- * being short. Under eight characters and only letters (`google`, `invite`) it is a word, which the
- * environment of a host holds under names like AUTH_PROVIDER, and is left alone.
+ * credential that has them in it. Replaces the earlier list. A short value counts, however plain it
+ * looks (`hunter2`, `google`, `123456`): the caller chose it as a secret, and a key is not left in
+ * the text for being short. Only under four characters is a value left out, as it would eat the
+ * text around it.
  */
 export function setKnownSecrets(values: readonly string[]): void {
   const forms = new Set<string>();
   for (const value of values) {
     const secret = value.trim();
-    // A short value that is only letters is a word (a provider, a mode), one with no letter at all a number
-    // (a port, a version, a ttl): either would eat ordinary text.
-    if (secret.length < 8 && /^(?:\p{L}*|[\d.\-_]*)$/u.test(secret)) continue;
-    if (secret === '') continue;
+    // Under four characters a value is not a key, and replacing it would eat the text around it. Above
+    // that it is kept whatever it looks like (a word, a number): the caller chose it as a secret.
+    if (secret.length < MIN_KNOWN_SECRET_LENGTH) continue;
     for (const form of secretForms(secret)) forms.add(form);
   }
   knownSecrets = formsPattern(forms);

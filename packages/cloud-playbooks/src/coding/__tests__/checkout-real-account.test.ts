@@ -54,6 +54,16 @@ test('the agent account reads and writes the nested files of a checkout, and of 
   git(origin, 'init', '-q');
   git(origin, 'add', '-A');
   git(origin, 'commit', '-q', '-m', 'base');
+  // The machine running the test may carry file capabilities of its own (a media helper, say), which
+  // the box check refuses; what is tested here is the checkout, so its capability scan reads nothing.
+  const noCaps = join(tmp, 'no-caps');
+  await fs.mkdir(noCaps);
+  await fs.writeFile(join(noCaps, 'getcap'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${noCaps}:${path ?? ''}`;
+  t.after(() => {
+    process.env.PATH = path;
+  });
   const fake = await new FakeInstabox({ home }).start();
   t.after(async () => {
     await fake.close();
@@ -101,6 +111,10 @@ test('the agent account reads and writes the nested files of a checkout, and of 
   await asAgent(
     'umask 022 && echo two > lib/deep/a.txt && rm lib/deep/gone.txt && mkdir -p lib/new && echo n > lib/new/f',
   );
+
+  // Git, run by the agent in a checkout the sandbox user owns, is not refused as someone else's.
+  assert.equal(await asAgent('git log -1 --format=%H'), base);
+  assert.match(await asAgent('git status --short'), /M lib\/deep\/a\.txt/u);
 
   // The base check puts the base's files back: the agent reads and writes them, and the change returns.
   const reverted = await ws.exec(BASE_REVERT_SCRIPT, {
