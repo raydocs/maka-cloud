@@ -108,7 +108,9 @@ function openJournal(path: string): DatabaseSync {
       CREATE TABLE IF NOT EXISTS run_budget (
         account TEXT PRIMARY KEY,
         limit_usd REAL NOT NULL,
-        since_ms INTEGER NOT NULL
+        since_ms INTEGER NOT NULL,
+        run_id TEXT NOT NULL DEFAULT '',
+        heartbeat_at INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS spend_policy (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -125,7 +127,9 @@ function openJournal(path: string): DatabaseSync {
         PRIMARY KEY (invite_id, key)
       );
       `);
-      addBookedAt(db);
+      addColumn(db, 'account_spend', 'booked_at', 'INTEGER NOT NULL DEFAULT 0');
+      addColumn(db, 'run_budget', 'run_id', "TEXT NOT NULL DEFAULT ''");
+      addColumn(db, 'run_budget', 'heartbeat_at', 'INTEGER NOT NULL DEFAULT 0');
       return db;
     } catch (error) {
       try {
@@ -142,12 +146,12 @@ function openJournal(path: string): DatabaseSync {
   }
 }
 
-/** A journal made before spend was timed has no `booked_at`; rows from then count for no run. */
-function addBookedAt(db: DatabaseSync): void {
-  const columns = db.prepare('PRAGMA table_info(account_spend)').all() as Array<{ name: string }>;
-  if (columns.some((column) => column.name === 'booked_at')) return;
+/** A journal made before a column existed does not have it; rows from then get the default. */
+function addColumn(db: DatabaseSync, table: string, column: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((found) => found.name === column)) return;
   try {
-    db.exec('ALTER TABLE account_spend ADD COLUMN booked_at INTEGER NOT NULL DEFAULT 0');
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   } catch (error) {
     // Another process added it between the check and the statement.
     if (!/duplicate column/iu.test(error instanceof Error ? error.message : '')) throw error;
@@ -194,11 +198,29 @@ function withJournal<T>(path: string, body: (db: DatabaseSync) => T): T {
   }
 }
 
+/** How long a run may go without renewing its hold on an invite's run budget before another run may take it. */
+export const RUN_LEASE_MS = 120_000;
+
+/** Another run holds the run budget of this invite and is still renewing it. */
+export class RunBudgetHeld extends Error {
+  override name = 'RunBudgetHeld';
+}
+
 /**
- * Starts the run budget of `inviteId`, replacing any earlier one. From now on the account ledger
- * refuses a reservation that would take what the invite booked since `sinceMs` above `limitUsd`.
+ * Starts the run budget of `inviteId` for the run `runId`. From now on the account ledger refuses
+ * a reservation that would take what the invite booked since `sinceMs` above `limitUsd`.
+ *
+ * One run holds an invite's budget at a time: while another run renewed it within `RUN_LEASE_MS`
+ * this throws `RunBudgetHeld` and changes nothing; a budget nobody renews (its run was killed) is
+ * taken over, which starts the budget afresh. Renew it with `renewRunBudget` while the run lasts.
  */
-export function setRunBudget(path: string, inviteId: string, budget: RunBudget): void {
+export function setRunBudget(
+  path: string,
+  inviteId: string,
+  budget: RunBudget,
+  runId: string,
+  now: number = Date.now(),
+): void {
   if (
     !Number.isFinite(budget.limitUsd) ||
     budget.limitUsd < 0 ||
@@ -206,20 +228,63 @@ export function setRunBudget(path: string, inviteId: string, budget: RunBudget):
   ) {
     throw new RangeError('A run budget is a number of dollars, 0 or more, from a point in time');
   }
+  if (runId === '') throw new RangeError('A run budget belongs to a run with an id');
   withJournal(path, (db) => {
-    db.prepare(
-      `INSERT INTO run_budget (account, limit_usd, since_ms) VALUES (?, ?, ?)
-       ON CONFLICT (account) DO UPDATE SET limit_usd = excluded.limit_usd,
-         since_ms = excluded.since_ms`,
-    ).run(inviteId, budget.limitUsd, budget.sinceMs);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const held = db
+        .prepare('SELECT run_id, heartbeat_at FROM run_budget WHERE account = ?')
+        .get(inviteId) as { run_id: string; heartbeat_at: number } | undefined;
+      if (held && held.run_id !== runId && held.heartbeat_at + RUN_LEASE_MS > now) {
+        throw new RunBudgetHeld('another run holds the run budget of this invite');
+      }
+      db.prepare(
+        `INSERT INTO run_budget (account, limit_usd, since_ms, run_id, heartbeat_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (account) DO UPDATE SET limit_usd = excluded.limit_usd,
+           since_ms = excluded.since_ms, run_id = excluded.run_id,
+           heartbeat_at = excluded.heartbeat_at`,
+      ).run(inviteId, budget.limitUsd, budget.sinceMs, runId, now);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
   });
 }
 
-/** Ends the run budget of `inviteId`; the invite is then held to its daily and monthly caps alone. */
-export function clearRunBudget(path: string, inviteId: string): void {
-  withJournal(path, (db) => {
-    db.prepare('DELETE FROM run_budget WHERE account = ?').run(inviteId);
-  });
+/** Keeps the hold of run `runId` on the invite's run budget. False when the run no longer holds it. */
+export function renewRunBudget(
+  path: string,
+  inviteId: string,
+  runId: string,
+  now: number = Date.now(),
+): boolean {
+  return withJournal(
+    path,
+    (db) =>
+      Number(
+        db
+          .prepare('UPDATE run_budget SET heartbeat_at = ? WHERE account = ? AND run_id = ?')
+          .run(now, inviteId, runId).changes,
+      ) > 0,
+  );
+}
+
+/**
+ * Ends the run budget of `inviteId` if run `runId` holds it; another run's budget is never
+ * touched. The invite is then held to its daily and monthly caps alone. False when it was not
+ * this run's.
+ */
+export function clearRunBudget(path: string, inviteId: string, runId: string): boolean {
+  return withJournal(
+    path,
+    (db) =>
+      Number(
+        db.prepare('DELETE FROM run_budget WHERE account = ? AND run_id = ?').run(inviteId, runId)
+          .changes,
+      ) > 0,
+  );
 }
 
 /** What an invite may spend per UTC day and month unless it has caps of its own, and what the whole server may spend per day. */
