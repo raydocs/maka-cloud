@@ -255,20 +255,59 @@ test('a conversation that began before transcripts were kept goes on as it is, u
   assert.equal(await store.locate('tsk_tr_legacy', 'sess-1'), undefined);
 });
 
-test('a store that refuses lines is reported, and the task still finishes', async (t) => {
+test('a store that refuses lines stops the turn: a conversation that is not all kept is not carried on', async (t) => {
   const down = new MemoryTranscriptStore();
   down.append = async () => {
     throw new Error('the transcript database is full');
   };
   const r = await rig(t, { store: down });
   const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_down')));
-  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', JSON.stringify(notes(events)));
+  assert.match(
+    end?.type === 'failed' ? end.reason : '',
+    /conversation could not be kept.*the transcript database is full/u,
+  );
   assert.ok(
     notes(events).some((note) =>
       /a transcript batch was not kept: the transcript database is full/.test(note),
     ),
     JSON.stringify(notes(events)),
   );
+});
+
+test('a store that fails only on the last lines still ends the turn as a failure', async (t) => {
+  const late = new MemoryTranscriptStore();
+  const append = late.append.bind(late);
+  late.append = async (taskId, key, lines) => {
+    if (lines.some((line) => line.json.includes('all done'))) {
+      throw new Error('the transcript database went away');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: late });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_late')));
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', JSON.stringify(notes(events)));
+  assert.match(end?.type === 'failed' ? end.reason : '', /the transcript database went away/u);
+});
+
+test('a refusal that the SDK retries and the store then keeps does not fail the turn', async (t) => {
+  const busy = new MemoryTranscriptStore();
+  const append = busy.append.bind(busy);
+  const refusedOnce = new Set<string>();
+  busy.append = async (taskId, key, lines) => {
+    const batch = lines.map((line) => line.json).join('\n');
+    if (!refusedOnce.has(batch)) {
+      refusedOnce.add(batch);
+      throw new Error('the transcript database is busy');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: busy });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_busy')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  assert.ok(refusedOnce.size > 0);
 });
 
 test('a conversation that cannot be put on the sandbox fails the turn before the CLI starts', async (t) => {
