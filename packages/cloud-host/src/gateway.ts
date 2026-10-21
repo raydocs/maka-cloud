@@ -78,7 +78,7 @@ export function gatewayModelAccess(
         },
       };
     },
-    revokeForTask: (taskId) => gateway.revokeForTask(taskId),
+    revokeForTask: (taskId, options) => gateway.revokeForTask(taskId, options),
   };
 }
 

@@ -43,6 +43,11 @@ export function checkTagPrefix(taskId: string): string {
   return `maka-check:${taskId}:`;
 }
 
+/** The part of a check's tag that follows the task's prefix and names the attempt that runs it, when known. */
+export function checkAttemptMark(attempt: number | undefined): string {
+  return attempt === undefined ? '' : `e${Math.trunc(attempt)}.`;
+}
+
 /**
  * Runs one check (a test command) to its end, inside one exec, so its exit status is the exec's
  * own, which the sandbox API reports to the host; nothing the check writes is read as its result.
@@ -80,14 +85,30 @@ exit "$rc"
  * Stops the checks whose tag starts with \`$MAKA_CHECK_TAG\` (one check, or with
  * checkTagPrefix every check of a task): kills the processes that carry the tag, which ends their
  * namespaces, then waits until no process of those namespaces is left. Prints STOPPED, NONE or
- * SURVIVORS.
+ * SURVIVORS. With \`$MAKA_CHECK_UP_TO\` a check whose tag names a later attempt (\`e<attempt>.\`
+ * after the prefix) is left alone: it is the new driver's, and a stop that arrives late from an
+ * earlier attempt must not reach it.
  */
 export const CHECK_STOP_SCRIPT = `set -u
 self=$(readlink /proc/self/ns/pid)
 tagged() {
-  local arg
+  local arg rest n
   while IFS= read -r -d '' arg; do
-    case "$arg" in "$MAKA_CHECK_TAG"*) return 0 ;; esac
+    case "$arg" in
+      "$MAKA_CHECK_TAG"*)
+        rest="\${arg#"$MAKA_CHECK_TAG"}"
+        if [ -n "\${MAKA_CHECK_UP_TO:-}" ]; then
+          case "$rest" in
+            e[0-9]*.*)
+              n="\${rest#e}"
+              n="\${n%%.*}"
+              case "$n" in ''|*[!0-9]*) ;; *) [ "$n" -gt "$MAKA_CHECK_UP_TO" ] && return 1 ;; esac
+              ;;
+          esac
+        fi
+        return 0
+        ;;
+    esac
   done < "$1/cmdline" 2>/dev/null
   return 1
 }

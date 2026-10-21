@@ -45,6 +45,7 @@ import {
   CHANGES_SCRIPT,
   CHECK_SCRIPT,
   CHECK_STOP_SCRIPT,
+  checkAttemptMark,
   checkTagPrefix,
   CLONE_SCRIPT,
   PATCH_CHUNK_SCRIPT,
@@ -214,8 +215,11 @@ export class CodingRunner implements Runner {
   }
 
   /** Stops the agent runs and checks a task left in its sandbox. Idempotent. */
-  async stopOrphaned(taskId: TaskId, options: { signal?: AbortSignal } = {}): Promise<void> {
-    await this.options.sandbox.stopTask(taskId, options.signal);
+  async stopOrphaned(
+    taskId: TaskId,
+    options: { signal?: AbortSignal; epoch?: number } = {},
+  ): Promise<void> {
+    await this.options.sandbox.stopTask(taskId, options.signal, options.epoch);
   }
 }
 
@@ -464,7 +468,7 @@ class CodingRun implements RunHandle {
       this.limitUsd = this.underTurnLimit(this.workLimit());
 
       this.adoptWorkspace(
-        await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal)),
+        await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal, this.spec.epoch)),
       );
       this.progress(`fetching ${task.repo} at ${task.baseRef}`);
       const baseSha = await this.clone(task, task.baseRef);
@@ -1305,7 +1309,7 @@ class CodingRun implements RunHandle {
    */
   private async runCheck(name: string, command: string): Promise<CheckResult> {
     const { stats } = this.runner;
-    const tag = `${checkTagPrefix(this.spec.taskId)}${++this.checkCount}-${randomBytes(8).toString('hex')}`;
+    const tag = `${checkTagPrefix(this.spec.taskId)}${checkAttemptMark(this.spec.epoch)}${++this.checkCount}-${randomBytes(8).toString('hex')}`;
     const timeoutSeconds = Math.max(1, Math.ceil(this.limits.checkTimeoutMs / 1000));
     stats.checks++;
     try {

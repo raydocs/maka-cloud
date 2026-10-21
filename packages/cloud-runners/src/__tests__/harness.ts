@@ -46,6 +46,8 @@ export interface Harness {
   sessions: MemorySessionStore;
   /** Revocations seen by the model access provider, by task. */
   revoked: string[];
+  /** The `upToAttempt` of each `revokeForTask` call. */
+  revokedUpTo: Array<number | undefined>;
   tmp: string;
   /** The accounts the sudo double was asked to run something as, one entry per run. */
   sudoUsers(): Promise<string[]>;
@@ -104,6 +106,7 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
   });
   const sessions = new MemorySessionStore();
   const revoked: string[] = [];
+  const revokedUpTo: Array<number | undefined> = [];
   const modelAccess: ModelAccessProvider = {
     async issue({ taskId }): Promise<ModelAccess> {
       return {
@@ -112,7 +115,10 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
         revoke: () => void revoked.push(taskId),
       };
     },
-    revokeForTask: (taskId) => void revoked.push(`orphan:${taskId}`),
+    revokeForTask: (taskId, options) => {
+      revoked.push(`orphan:${taskId}`);
+      revokedUpTo.push(options?.upToAttempt);
+    },
   };
   const baseOptions: CloudRunnersOptions = {
     client,
@@ -164,16 +170,23 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
     runners,
     makeRunners: (overrides = {}) => build(overrides),
     async runPid(taskId, run = 't1') {
-      const file = join(root, taskId, `${run}.pid`);
+      // A run is named for the attempt that started it when the spec has one: `e2.t1`.
+      const named = new RegExp(`^(e\\d+\\.)?${run.replaceAll('.', '\\.')}\\.pid$`, 'u');
       for (let i = 0; i < 500; i++) {
-        const text = await fs.readFile(file, 'utf8').catch(() => '');
-        if (text.trim()) return Number(text.trim());
+        const names = (await fs.readdir(join(root, taskId)).catch(() => [] as string[])).filter(
+          (name) => named.test(name),
+        );
+        for (const name of names) {
+          const text = await fs.readFile(join(root, taskId, name), 'utf8').catch(() => '');
+          if (text.trim()) return Number(text.trim());
+        }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       throw new Error(`no pid for ${taskId} ${run}`);
     },
     sessions,
     revoked,
+    revokedUpTo,
     tmp,
     async sudoUsers() {
       const text = await fs.readFile(join(shim, 'sudo-users'), 'utf8').catch(() => '');
