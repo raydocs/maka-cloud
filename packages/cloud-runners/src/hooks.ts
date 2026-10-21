@@ -43,30 +43,266 @@ const SAFE_TOOLS = new Set([
 /**
  * Shell commands that only look, decided by the program and its arguments, not by the program
  * alone: `find . -delete`, `sort -o file` and `git branch -D x` start with a harmless program and
- * are not harmless. Each entry says which argument lists of its program are safe; a program, a
- * subcommand or a form that is not here is `never`.
+ * are not harmless. Each program says which flags it may have, and any flag not named is `never`:
+ * an allowlist, because a list of banned flags is beaten by what the program also accepts (an
+ * abbreviated long option, `git diff --ext-dif`, or a short option with its value attached,
+ * `sort -oout.txt`). A program, a subcommand or a form that is not here is `never`.
  */
-const WITHOUT =
-  (...banned: string[]) =>
-  (args: string[]) =>
-    !args.some((arg) => banned.some((flag) => arg === flag || arg.startsWith(`${flag}=`)));
+interface Flags {
+  /** Single letters that may be given alone or together (`-la`). */
+  short?: string;
+  /** Single letters that take a value, attached (`-A3`) or as the next word. */
+  shortValue?: string;
+  /** Long options exactly as written, with no value (`--all`), or with one (`--color` / `--color=auto`). */
+  long?: readonly string[];
+  /** Long options that take a value, `--name=value` or `--name value`. */
+  longValue?: readonly string[];
+  /** A bare count as the option, `-5`. */
+  count?: boolean;
+  /** Attached forms like `-U3`, `-S<text>`: a letter followed by any value. */
+  attached?: string;
+}
+
+const flagsOnly =
+  (allowed: Flags) =>
+  (args: string[]): boolean => {
+    const short = new Set(allowed.short ?? '');
+    const shortValue = new Set(allowed.shortValue ?? '');
+    const attached = new Set(allowed.attached ?? '');
+    const long = new Set(allowed.long ?? []);
+    const longValue = new Set(allowed.longValue ?? []);
+    let rest = false;
+    for (const arg of args) {
+      if (rest || !arg.startsWith('-') || arg === '-') continue;
+      if (arg === '--') {
+        rest = true;
+        continue;
+      }
+      if (arg.startsWith('--')) {
+        const eq = arg.indexOf('=');
+        const name = eq === -1 ? arg : arg.slice(0, eq);
+        if (
+          eq === -1 ? long.has(name) || longValue.has(name) : longValue.has(name) || long.has(name)
+        ) {
+          continue;
+        }
+        return false;
+      }
+      if (allowed.count === true && /^-\d+$/u.test(arg)) continue;
+      let ok = true;
+      for (let i = 1; i < arg.length && ok; i++) {
+        const letter = arg.charAt(i);
+        if (short.has(letter)) continue;
+        if (shortValue.has(letter) || attached.has(letter)) {
+          // What follows is this option's value, up to the end of the word.
+          if (!/^[\w.,:+@%/=*?^$-]*$/u.test(arg.slice(i + 1))) ok = false;
+          break;
+        }
+        ok = false;
+      }
+      if (!ok) return false;
+    }
+    return true;
+  };
+
 const ANYTHING = () => true;
-const GIT_READ_BANNED = WITHOUT('--output', '--ext-diff', '--open-files-in-pager', '-O');
+const COLOR = ['--color', '--no-color'] as const;
+const GIT_PRETTY = ['--oneline', '--graph', '--decorate', '--no-decorate', '--abbrev-commit'];
+const GIT_DIFF_FLAGS: Flags = {
+  short: 'pRwbMC',
+  attached: 'U',
+  count: false,
+  long: [
+    ...COLOR,
+    '--cached',
+    '--staged',
+    '--stat',
+    '--numstat',
+    '--shortstat',
+    '--name-only',
+    '--name-status',
+    '--summary',
+    '--patch',
+    '--no-patch',
+    '--check',
+    '--minimal',
+    '--patience',
+    '--histogram',
+    '--no-ext-diff',
+    '--ignore-all-space',
+    '--ignore-space-change',
+    '--ignore-blank-lines',
+    '--word-diff',
+    '--raw',
+    '--merge-base',
+    '--full-index',
+    '--binary',
+  ],
+  longValue: ['--unified', '--stat-width', '--word-diff', '--diff-filter', '--relative'],
+};
+const GIT_LOG_FLAGS: Flags = {
+  ...GIT_DIFF_FLAGS,
+  short: 'pRwbMCs',
+  shortValue: 'n',
+  attached: 'USG',
+  count: true,
+  long: [
+    ...(GIT_DIFF_FLAGS.long ?? []),
+    ...GIT_PRETTY,
+    '--all',
+    '--branches',
+    '--tags',
+    '--remotes',
+    '--no-merges',
+    '--merges',
+    '--first-parent',
+    '--follow',
+    '--reverse',
+    '--topo-order',
+    '--date-order',
+    '--no-walk',
+    '--source',
+    '--left-right',
+    '--cherry-pick',
+    '--root',
+    '--patch-with-stat',
+  ],
+  longValue: [
+    ...(GIT_DIFF_FLAGS.longValue ?? []),
+    '--max-count',
+    '--skip',
+    '--since',
+    '--until',
+    '--after',
+    '--before',
+    '--author',
+    '--committer',
+    '--grep',
+    '--format',
+    '--pretty',
+    '--date',
+    '--abbrev',
+    '--decorate',
+  ],
+};
 const GIT_BRANCH_LISTING = new Set(['-a', '-r', '-v', '-vv', '--list', '--show-current', '--all']);
 
 const READ_ONLY_PROGRAMS: Record<string, (args: string[]) => boolean> = {
-  ls: ANYTHING,
-  cat: ANYTHING,
-  head: ANYTHING,
-  tail: ANYTHING,
-  wc: ANYTHING,
-  pwd: ANYTHING,
+  ls: flagsOnly({
+    short: 'aAdFhlLrRStu1ipsnkcgGHUvxX',
+    long: [
+      '--all',
+      '--almost-all',
+      '--directory',
+      '--classify',
+      '--human-readable',
+      '--recursive',
+      '--reverse',
+      '--size',
+      '--inode',
+      '--dereference',
+      ...COLOR,
+    ],
+  }),
+  cat: flagsOnly({
+    short: 'nbsAeEtTv',
+    long: [
+      '--number',
+      '--number-nonblank',
+      '--squeeze-blank',
+      '--show-all',
+      '--show-ends',
+      '--show-tabs',
+    ],
+  }),
+  head: flagsOnly({
+    short: 'qv',
+    shortValue: 'nc',
+    count: true,
+    long: ['--quiet', '--verbose'],
+    longValue: ['--lines', '--bytes'],
+  }),
+  tail: flagsOnly({
+    short: 'qv',
+    shortValue: 'nc',
+    count: true,
+    long: ['--quiet', '--verbose'],
+    longValue: ['--lines', '--bytes'],
+  }),
+  wc: flagsOnly({
+    short: 'lwcmL',
+    long: ['--lines', '--words', '--bytes', '--chars', '--max-line-length'],
+  }),
+  pwd: flagsOnly({ short: 'LP', long: ['--logical', '--physical'] }),
   echo: ANYTHING,
   printf: ANYTHING,
-  grep: ANYTHING,
-  stat: ANYTHING,
-  diff: ANYTHING,
-  which: ANYTHING,
+  grep: flagsOnly({
+    short: 'ivnclLrRHhoqswxEFaI',
+    shortValue: 'ABCmef',
+    long: [
+      ...COLOR,
+      '--recursive',
+      '--dereference-recursive',
+      '--ignore-case',
+      '--no-ignore-case',
+      '--invert-match',
+      '--line-number',
+      '--count',
+      '--files-with-matches',
+      '--files-without-match',
+      '--word-regexp',
+      '--line-regexp',
+      '--extended-regexp',
+      '--fixed-strings',
+      '--basic-regexp',
+      '--no-messages',
+      '--quiet',
+      '--only-matching',
+      '--with-filename',
+      '--no-filename',
+      '--text',
+      '--null',
+    ],
+    longValue: [
+      '--include',
+      '--exclude',
+      '--exclude-dir',
+      '--max-count',
+      '--context',
+      '--after-context',
+      '--before-context',
+      '--binary-files',
+      '--regexp',
+      '--file',
+    ],
+    count: true,
+  }),
+  stat: flagsOnly({
+    short: 'LftZ',
+    shortValue: 'c',
+    long: ['--dereference', '--file-system', '--terse'],
+    longValue: ['--format', '--printf'],
+  }),
+  diff: flagsOnly({
+    short: 'uqrNiwBbydE',
+    attached: 'UC',
+    long: [
+      ...COLOR,
+      '--unified',
+      '--brief',
+      '--recursive',
+      '--ignore-case',
+      '--new-file',
+      '--side-by-side',
+      '--ignore-all-space',
+      '--ignore-space-change',
+      '--ignore-blank-lines',
+      '--text',
+      '--normal',
+    ],
+    longValue: ['--unified', '--context', '--exclude', '--width'],
+  }),
+  which: flagsOnly({ short: 'a', long: ['--all'] }),
   true: ANYTHING,
   false: ANYTHING,
   sleep: ANYTHING,
@@ -74,41 +310,236 @@ const READ_ONLY_PROGRAMS: Record<string, (args: string[]) => boolean> = {
   '[': ANYTHING,
   // Runs a program when given arguments; bare, it prints the environment.
   env: (args) => args.length === 0,
-  rg: WITHOUT('--pre', '--pre-glob', '--hostname-bin'),
-  tree: WITHOUT('-o'),
-  file: WITHOUT('-C', '--compile'),
-  sort: WITHOUT('-o', '--output', '--compress-program'),
+  rg: flagsOnly({
+    short: 'inNvwxlLcoHIsSuUFPzaEh',
+    shortValue: 'tTgABCmefj',
+    long: [
+      ...COLOR,
+      '--files',
+      '--hidden',
+      '--no-ignore',
+      '--no-ignore-vcs',
+      '--ignore-case',
+      '--smart-case',
+      '--case-sensitive',
+      '--line-number',
+      '--no-line-number',
+      '--count',
+      '--files-with-matches',
+      '--files-without-match',
+      '--fixed-strings',
+      '--word-regexp',
+      '--line-regexp',
+      '--only-matching',
+      '--with-filename',
+      '--no-filename',
+      '--no-heading',
+      '--heading',
+      '--follow',
+      '--invert-match',
+      '--multiline',
+      '--text',
+      '--type-list',
+      '--no-messages',
+    ],
+    longValue: [
+      '--glob',
+      '--iglob',
+      '--type',
+      '--type-not',
+      '--context',
+      '--after-context',
+      '--before-context',
+      '--max-count',
+      '--max-depth',
+      '--regexp',
+      '--file',
+      '--sort',
+      '--sortr',
+      '--threads',
+    ],
+  }),
+  tree: flagsOnly({
+    short: 'adfFiqpugDsrCnthxl',
+    shortValue: 'LIP',
+    long: ['--dirsfirst', '--noreport', '--gitignore', '--charset'],
+    longValue: ['--charset'],
+  }),
+  file: flagsOnly({
+    short: 'bisLzN',
+    long: ['--brief', '--mime', '--mime-type', '--mime-encoding', '--dereference'],
+  }),
+  sort: flagsOnly({
+    short: 'bdfghiMnrRuVcCsz',
+    shortValue: 'kt',
+    long: [
+      '--unique',
+      '--reverse',
+      '--numeric-sort',
+      '--ignore-case',
+      '--check',
+      '--stable',
+      '--version-sort',
+      '--human-numeric-sort',
+      '--month-sort',
+      '--general-numeric-sort',
+      '--ignore-leading-blanks',
+      '--dictionary-order',
+      '--zero-terminated',
+      '--random-sort',
+    ],
+    longValue: ['--field-separator', '--key'],
+  }),
   // A second positional argument is the file it writes.
-  uniq: (args) => args.filter((arg) => !arg.startsWith('-')).length <= 1,
+  uniq: (args) =>
+    flagsOnly({ short: 'cdDiuz', long: ['--count', '--repeated', '--unique', '--ignore-case'] })(
+      args,
+    ) && args.filter((arg) => !arg.startsWith('-')).length <= 1,
   // Setting the clock takes a bare argument; only a `+format` or none reads it.
   date: (args) =>
     args.every((arg) => arg.startsWith('+') || ['-u', '--utc', '-I', '-R'].includes(arg)),
-  find: WITHOUT(
-    '-delete',
-    '-exec',
-    '-execdir',
-    '-ok',
-    '-okdir',
-    '-fprint',
-    '-fprint0',
-    '-fprintf',
-    '-fls',
-  ),
+  find: findReads,
   tsc: ANYTHING,
   pytest: ANYTHING,
 };
 
+/** The tests and options of `find` that only look; an action (`-delete`, `-exec`, `-fprint`) is not one. */
+const FIND_WORDS = new Set([
+  '-name',
+  '-iname',
+  '-path',
+  '-ipath',
+  '-wholename',
+  '-type',
+  '-maxdepth',
+  '-mindepth',
+  '-size',
+  '-mtime',
+  '-atime',
+  '-ctime',
+  '-mmin',
+  '-amin',
+  '-cmin',
+  '-newer',
+  '-empty',
+  '-perm',
+  '-user',
+  '-group',
+  '-regex',
+  '-iregex',
+  '-not',
+  '-a',
+  '-o',
+  '-and',
+  '-or',
+  '-print',
+  '-print0',
+  '-prune',
+  '-depth',
+  '-xdev',
+  '-mount',
+  '-L',
+  '-H',
+  '-P',
+  '-readable',
+  '-writable',
+  '-executable',
+  '-true',
+  '-false',
+  '-regextype',
+  '-follow',
+  '!',
+]);
+
+function findReads(args: string[]): boolean {
+  return args.every((arg) => !(arg.startsWith('-') || arg === '!') || FIND_WORDS.has(arg));
+}
+
 /** `<program> <subcommand>` pairs and their argument rules, for programs that do more than look. */
 const READ_ONLY_SUBCOMMANDS: Record<string, Record<string, (args: string[]) => boolean>> = {
   git: {
-    status: GIT_READ_BANNED,
-    diff: GIT_READ_BANNED,
-    log: GIT_READ_BANNED,
-    show: GIT_READ_BANNED,
-    'rev-parse': GIT_READ_BANNED,
-    'ls-files': GIT_READ_BANNED,
-    blame: GIT_READ_BANNED,
-    describe: GIT_READ_BANNED,
+    status: flagsOnly({
+      short: 'sbvu',
+      attached: 'u',
+      long: [
+        ...COLOR,
+        '--short',
+        '--branch',
+        '--porcelain',
+        '--long',
+        '--ignored',
+        '--untracked-files',
+        '--ahead-behind',
+        '--no-ahead-behind',
+        '--renames',
+        '--no-renames',
+      ],
+      longValue: ['--porcelain', '--untracked-files', '--ignored'],
+    }),
+    diff: flagsOnly(GIT_DIFF_FLAGS),
+    log: flagsOnly(GIT_LOG_FLAGS),
+    show: flagsOnly(GIT_LOG_FLAGS),
+    'rev-parse': flagsOnly({
+      long: [
+        '--show-toplevel',
+        '--abbrev-ref',
+        '--short',
+        '--git-dir',
+        '--absolute-git-dir',
+        '--is-inside-work-tree',
+        '--is-bare-repository',
+        '--verify',
+        '--symbolic-full-name',
+        '--show-prefix',
+        '--show-cdup',
+        '--git-common-dir',
+        '--quiet',
+      ],
+      longValue: ['--abbrev-ref', '--short'],
+    }),
+    'ls-files': flagsOnly({
+      short: 'comdsuvtkz',
+      long: [
+        '--cached',
+        '--others',
+        '--modified',
+        '--deleted',
+        '--stage',
+        '--unmerged',
+        '--ignored',
+        '--exclude-standard',
+        '--full-name',
+        '--directory',
+        '--no-empty-directory',
+        '--eol',
+      ],
+    }),
+    blame: flagsOnly({
+      short: 'wepsln',
+      shortValue: 'LMC',
+      long: [
+        '--porcelain',
+        '--line-porcelain',
+        '--show-email',
+        '--show-name',
+        '--show-number',
+        '--root',
+      ],
+      longValue: ['--date'],
+    }),
+    describe: flagsOnly({
+      long: [
+        '--tags',
+        '--always',
+        '--long',
+        '--all',
+        '--contains',
+        '--dirty',
+        '--first-parent',
+        '--exact-match',
+      ],
+      longValue: ['--abbrev', '--match', '--exclude', '--candidates', '--dirty'],
+    }),
     // Listing only: -d, -D, -m, -c and a bare name create, move or delete branches.
     branch: (args) => args.every((arg) => GIT_BRANCH_LISTING.has(arg)),
     remote: (args) => args.length === 1 && args[0] === '-v',
