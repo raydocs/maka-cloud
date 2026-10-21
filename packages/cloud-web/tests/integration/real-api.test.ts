@@ -262,6 +262,34 @@ test('results: files are listed by name and read as text, links come back as lin
   await expect(client.readArtifact(root, 9)).rejects.toMatchObject({ status: 404 });
 });
 
+test('results: a screenshot arrives as a picture, a file that only claims to be one stays text', async () => {
+  const { client, conversationId } = await fresh();
+  const root = await stack.delegate(conversationId, { title: 'Fix the login page' });
+  const run = await stack.run(root);
+  const png = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7);
+  await stack.writeArtifact(root, 'out/proof.png', png);
+  await stack.writeArtifact(root, 'out/fake.png', '<svg onload="alert(1)"/>');
+  await run.complete({ ...MANIFEST, artifacts: ['out/proof.png', 'out/fake.png'] });
+  await until(
+    async () => (await client.listTasks(conversationId)).find((t) => t.state === 'succeeded'),
+    'the task to finish',
+  );
+  const { artifacts } = await client.listArtifacts(root);
+  expect(artifacts).toEqual([
+    { index: 0, name: 'proof.png', kind: 'file', image: true },
+    { index: 1, name: 'fake.png', kind: 'file', image: true },
+  ]);
+  const picture = await client.readArtifact(root, 0);
+  expect(picture.kind).toBe('image');
+  expect(picture.kind === 'image' && picture.blob.type).toBe('image/png');
+  expect(picture.kind === 'image' && picture.blob.size).toBe(png.length);
+  expect(await client.readArtifact(root, 1)).toEqual({
+    kind: 'text',
+    name: 'fake.png',
+    text: '<svg onload="alert(1)"/>',
+  });
+});
+
 test('another invite sees nothing of a conversation: every route and the stream answer 404', async () => {
   const mine = await fresh();
   const task = await stack.delegate(mine.conversationId, { title: 'Private work' });

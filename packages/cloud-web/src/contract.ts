@@ -175,10 +175,35 @@ export interface ArtifactListing {
   name: string;
   kind: 'file' | 'link';
   url?: string;
+  /** The name says it is a picture; the server sends it as one only if its bytes agree. */
+  image?: true;
 }
 export type ArtifactContent =
   | { kind: 'link'; url: string }
-  | { kind: 'text'; name: string; text: string };
+  | { kind: 'text'; name: string; text: string }
+  | { kind: 'image'; name: string; blob: Blob };
+
+/** Why a page is on a sources card; the words are the server's fixed set. */
+export type SourceLabel =
+  | 'source'
+  | 'docs'
+  | 'alternative'
+  | 'pull_request'
+  | 'preview'
+  | 'test_report';
+/** A page the task opened. The browser never contacts it: previews come through the server. */
+export interface SourceListing {
+  index: number;
+  url: string;
+  site: string;
+  label: SourceLabel;
+}
+export interface SourcePreview {
+  site: string;
+  title?: string;
+  /** Whether the image route has bytes. */
+  image: boolean;
+}
 
 /** The body of `POST /v1/push/subscriptions`; `DELETE` takes `{endpoint}` alone. */
 export interface PushRegistration {
@@ -212,6 +237,9 @@ export const routes = {
   inboxAnswer: (item: string) => `/v1/inbox/items/${encodeURIComponent(item)}/answer`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,
+  sources: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/sources`,
+  sourcePreview: (task: string, index: number) => `${routes.sources(task)}/${index}/preview`,
+  sourceImage: (task: string, index: number) => `${routes.sources(task)}/${index}/image`,
   // Web Push answers 404 until the server is configured with its signing key.
   pushKey: '/v1/push/key',
   pushSubscriptions: '/v1/push/subscriptions',

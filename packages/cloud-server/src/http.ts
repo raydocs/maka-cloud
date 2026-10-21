@@ -15,7 +15,13 @@ import { randomUUID } from 'node:crypto';
 import type { ConversationPublisher } from './conductor-feed.js';
 import type { ComputerSource } from './computer.js';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
-import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
+import {
+  type ArtifactSource,
+  displayName,
+  imageTypeOf,
+  linkOf,
+  listArtifact,
+} from './artifacts.js';
 import { type OpenedPages, type PreviewService, PreviewBusy, siteOf } from './previews.js';
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
@@ -744,14 +750,17 @@ export class PublicApi {
         : new HttpError(404, 'not_found');
     }
     const name = displayName(ref.split('/').at(-1) ?? '');
+    // A picture is sent as one only when its name and its own bytes agree; the rest stay text.
+    const picture = imageTypeOf(name, result.bytes);
     res.writeHead(200, {
-      'content-type': name.endsWith('.json')
-        ? 'application/json; charset=utf-8'
-        : 'text/plain; charset=utf-8',
+      'content-type':
+        picture ??
+        (name.endsWith('.json') ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8'),
       'content-length': String(result.bytes.length),
       'content-disposition': `attachment; filename="${name}"`,
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'none'; sandbox",
+      'cross-origin-resource-policy': 'same-origin',
       'cache-control': 'private, no-store',
     });
     res.end(result.bytes);

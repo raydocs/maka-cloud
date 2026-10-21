@@ -105,3 +105,54 @@ test('outside text loses control, direction and invisible characters; a held cal
   expect(JSON.parse(shown)).toEqual(args);
   expect(displayText(shown)).toBe(shown);
 });
+
+const PNG_BYTES = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3);
+
+test('a file the server sends as a picture is a picture; nothing else ever is', async () => {
+  const reply = (type: string, body: BodyInit) =>
+    new CloudClient(
+      'fake',
+      (async () =>
+        new Response(body, {
+          headers: {
+            'content-type': type,
+            'content-disposition': 'attachment; filename="proof.png"',
+          },
+        })) as typeof fetch,
+    );
+  const picture = await reply('image/png', PNG_BYTES).readArtifact('t', 0);
+  expect(picture.kind).toBe('image');
+  expect(picture.kind === 'image' && picture.blob.type).toBe('image/png');
+  expect(picture.kind === 'image' && picture.blob.size).toBe(PNG_BYTES.length);
+  for (const type of [
+    'image/svg+xml',
+    'text/html',
+    'image/x-icon',
+    'application/octet-stream',
+    'text/plain; charset=utf-8',
+  ]) {
+    const read = await reply(type, '<svg onload="alert(1)"/>').readArtifact('t', 0);
+    expect(read, type).toEqual({
+      kind: 'text',
+      name: 'proof.png',
+      text: '<svg onload="alert(1)"/>',
+    });
+  }
+});
+
+test('sources are listed by the server and their images come through it, in the allowed types only', async () => {
+  const paths: string[] = [];
+  const client = new CloudClient('fake', (async (url) => {
+    paths.push(String(url));
+    if (String(url).endsWith('/image')) {
+      return new Response(PNG_BYTES, { headers: { 'content-type': 'image/svg+xml' } });
+    }
+    return Response.json({
+      sources: [{ index: 0, url: 'https://docs.example/a', site: 'docs.example', label: 'docs' }],
+      total: 1,
+    });
+  }) as typeof fetch);
+  expect((await client.listSources('tsk/1')).sources[0]?.site).toBe('docs.example');
+  await expect(client.sourceImage('tsk/1', 0)).rejects.toThrow();
+  expect(paths).toEqual(['/v1/tasks/tsk%2F1/sources', '/v1/tasks/tsk%2F1/sources/0/image']);
+});

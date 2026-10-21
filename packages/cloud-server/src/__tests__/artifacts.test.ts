@@ -103,6 +103,67 @@ test("a research run's exported report is served as both files, never as a page"
   assert.equal(await (await get(h, taskId, '/2')).text(), '{"checked":3}');
 });
 
+const PNG = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.from('IHDR-and-the-rest'),
+]);
+const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('JFIF')]);
+
+test('a picture is sent as a picture only when its name and its own bytes agree', async (t) => {
+  const { h, finished } = await setup(t);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+  const { taskId, dir } = await finished(
+    ['out/proof.png', 'photo.JPG', 'fake.png', 'shot.jpg', 'vector.svg', 'proof.png.txt', 'bare'],
+    {},
+  );
+  const write = async (name: string, bytes: Buffer | string) => {
+    await mkdir(dirname(join(dir, name)), { recursive: true });
+    await writeFile(join(dir, name), bytes);
+  };
+  await write('out/proof.png', PNG);
+  await write('photo.JPG', JPEG);
+  await write('fake.png', '<html><script>alert(1)</script></html>');
+  await write('shot.jpg', PNG);
+  await write('vector.svg', svg);
+  await write('proof.png.txt', PNG);
+  await write('bare', PNG);
+
+  const listing = (await (await get(h, taskId, '')).json()) as {
+    artifacts: Array<{ name: string; image?: boolean }>;
+  };
+  assert.deepEqual(
+    listing.artifacts.map((a) => [a.name, a.image === true]),
+    [
+      ['proof.png', true],
+      ['photo.JPG', true],
+      ['fake.png', true],
+      ['shot.jpg', true],
+      ['vector.svg', false],
+      ['proof.png.txt', false],
+      ['bare', false],
+    ],
+  );
+
+  const png = await get(h, taskId, '/0');
+  assert.equal(png.headers.get('content-type'), 'image/png');
+  assert.equal(png.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(png.headers.get('content-security-policy') ?? '', /sandbox/u);
+  assert.equal(png.headers.get('cross-origin-resource-policy'), 'same-origin');
+  assert.equal(png.headers.get('content-disposition'), 'attachment; filename="proof.png"');
+  assert.deepEqual(Buffer.from(await png.arrayBuffer()), PNG);
+  const jpg = await get(h, taskId, '/1');
+  assert.equal(jpg.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(Buffer.from(await jpg.arrayBuffer()), JPEG);
+
+  // A name that claims a picture over other bytes, and bytes of one under another name or a
+  // different picture type, stay what they always were: plain text, never something to render.
+  for (const index of [2, 3, 4, 5, 6]) {
+    const res = await get(h, taskId, `/${index}`);
+    assert.equal(res.headers.get('content-type'), 'text/plain; charset=utf-8', String(index));
+    assert.match(res.headers.get('content-disposition') ?? '', /^attachment;/u);
+  }
+});
+
 test('every route needs the invite, and unknown tasks, missing manifests and bad indexes are 404', async (t) => {
   const { h, finished } = await setup(t);
   const { taskId } = await finished(['a.md'], { 'a.md': 'a' });

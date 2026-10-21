@@ -268,6 +268,17 @@ function artifactKind(listing: ArtifactListing, url: string | undefined): string
   return 'Result';
 }
 
+/** A picture the server sent as one (its bytes checked); shown from a local object URL, never from a remote address. */
+export function Picture({ name, blob }: { name: string; blob: Blob }) {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    const url = URL.createObjectURL(blob);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [blob]);
+  return src ? <img className="picture" alt={displayText(name)} src={src} /> : null;
+}
+
 interface TaskArtifacts {
   listings: ArtifactListing[];
   failed?: boolean;
@@ -324,6 +335,7 @@ function ArtifactList({
                 }
               />
             )}
+            {loaded?.kind === 'image' && <Picture name={loaded.name} blob={loaded.blob} />}
             {loaded?.kind === 'text' && (
               <pre className={kind === 'Changes' ? 'diff-content' : 'report-content'}>
                 {displayText(loaded.text)}
