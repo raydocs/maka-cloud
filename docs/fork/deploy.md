@@ -517,7 +517,8 @@ command that runs as the sandbox user. The pinned CLI install, which writes the 
 Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
 test commands run as the agent account (the stop that ends them runs as root, since the processes are
 the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
-closed to everyone else, and the brief is written in the task directory and renamed into `handoff/`,
+closed to everyone else and then asks it for its version as the agent account, by absolute path, so
+the sandbox user never runs what the agent's tooling may have shaped, and the brief is written in the task directory and renamed into `handoff/`,
 so a link the agent leaves there is never followed.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
