@@ -56,6 +56,19 @@ export const DEFAULT_SETTINGS: Settings = {
 export const SettingsPatchSchema = SettingsSchema.partial();
 export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
 
+/**
+ * What one owner can choose for their own pushes. The rest of the settings (stall times, the hourly
+ * cap, the digest schedule, the verifier's budget) belong to the operator: an owner never sets them.
+ */
+export const OwnerSettingsPatchSchema = SettingsSchema.pick({
+  quietHours: true,
+  timeZone: true,
+  mutedKinds: true,
+})
+  .partial()
+  .strict();
+export type OwnerSettingsPatch = z.infer<typeof OwnerSettingsPatchSchema>;
+
 interface LocalParts {
   /** `YYYY-MM-DD` in the zone. */
   date: string;

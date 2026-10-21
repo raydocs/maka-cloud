@@ -22,6 +22,8 @@ import {
   dueDigestSlot,
   inQuietHours,
   localParts,
+  type OwnerSettingsPatch,
+  OwnerSettingsPatchSchema,
   type Settings,
   type SettingsPatch,
   SettingsPatchSchema,
@@ -360,6 +362,20 @@ export class Supervisor {
     return this.store.settings(this.options.settings);
   }
 
+  /**
+   * The settings that decide a push for the owner of `conversationId`: the operator's, with that
+   * owner's mutes, quiet hours and time zone laid over them. Conversations nobody owns get the
+   * operator's.
+   */
+  private settingsOfConversation(conversationId: string): Settings {
+    const owner = this.host.ownerOf?.(conversationId);
+    return owner === undefined ? this.settings() : this.settingsOf(owner);
+  }
+
+  private settingsOf(owner: string): Settings {
+    return { ...this.settings(), ...this.store.ownerSettings(owner) };
+  }
+
   private capReached(at: number): boolean {
     return this.store.deliveriesSince(at - HOUR_MS) >= this.settings().maxInterruptsPerHour;
   }
@@ -375,7 +391,7 @@ export class Supervisor {
       const decision = this.store.tx((): 'send' | 'skip' => {
         const item = this.store.item(pending.itemId);
         if (!item || item.pushState !== 'pending' || item.state === 'closed') return 'skip';
-        const settings = this.settings();
+        const settings = this.settingsOfConversation(item.conversationId);
         const at = this.now();
         if (settings.mutedKinds.includes(item.kind)) {
           this.store.setPushState(item.itemId, 'muted');
@@ -399,14 +415,15 @@ export class Supervisor {
     const released = this.store.tx((): ItemRecord[] => {
       const held = this.store.heldPushes();
       if (held.length === 0) return [];
-      const settings = this.settings();
       const at = this.now();
       const send: ItemRecord[] = [];
+      // Each held push is judged by its own owner's mutes and quiet hours; the cap is shared.
       for (const item of held) {
+        const settings = this.settingsOfConversation(item.conversationId);
         if (settings.mutedKinds.includes(item.kind)) this.store.setPushState(item.itemId, 'muted');
-        else send.push(item);
+        else if (!inQuietHours(settings, at)) send.push(item);
       }
-      if (send.length === 0 || inQuietHours(settings, at) || this.capReached(at)) return [];
+      if (send.length === 0 || this.capReached(at)) return [];
       this.store.recordDelivery(at, 'batch', send.length);
       for (const item of send) {
         this.store.setPushState(item.itemId, 'sent');
@@ -712,6 +729,27 @@ export class Supervisor {
     if (!ITEM_KINDS.includes(kind)) throw new Error(`Unknown kind ${kind}`);
     const current = this.settings().mutedKinds.filter((candidate) => candidate !== kind);
     return this.setSettings({ mutedKinds: muted ? [...current, kind] : current });
+  }
+
+  /** The settings as this owner's pushes see them: the operator's, with the owner's own choices over them. */
+  getOwnerSettings(owner: string): Settings {
+    return this.settingsOf(owner);
+  }
+
+  /** Sets what the owner may choose for themselves (mutes, quiet hours, time zone); nothing else, nobody else's. */
+  setOwnerSettings(owner: string, patch: OwnerSettingsPatch): Settings {
+    const parsed = OwnerSettingsPatchSchema.parse(patch);
+    return this.store.tx(() => {
+      this.store.putOwnerSettings(owner, { ...this.store.ownerSettings(owner), ...parsed });
+      return this.settingsOf(owner);
+    });
+  }
+
+  /** Mutes or unmutes a kind's pushes for this owner only. */
+  setOwnerMute(owner: string, kind: ItemKind, muted: boolean): Settings {
+    if (!ITEM_KINDS.includes(kind)) throw new Error(`Unknown kind ${kind}`);
+    const current = this.settingsOf(owner).mutedKinds.filter((candidate) => candidate !== kind);
+    return this.setOwnerSettings(owner, { mutedKinds: muted ? [...current, kind] : current });
   }
 
   // ------------------------------------------------------------ answers

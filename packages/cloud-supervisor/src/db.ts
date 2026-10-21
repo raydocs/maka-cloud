@@ -8,7 +8,7 @@ export class SupervisorDatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const APPEND_ONLY = ['item_events', 'answer_log', 'verifier_spend'];
 
@@ -186,6 +186,14 @@ ALTER TABLE digests ADD COLUMN owner TEXT;
 `;
 
 /**
+ * Added in schema 5: an owner's own settings (mutes, quiet hours, time zone), laid over the
+ * operator's. One row per owner, so one owner's choice never reaches another's pushes.
+ */
+const SCHEMA_V5 = `
+CREATE TABLE owner_settings (owner TEXT PRIMARY KEY, value TEXT NOT NULL);
+`;
+
+/**
  * Opens the supervisor's own database for this process alone. The write paths
  * (answer claims, the hourly cap, digest slots) check and write inside one
  * transaction and assume nobody else writes, so a second opener fails at once.
@@ -228,7 +236,8 @@ function migrate(db: DatabaseSync): void {
     if (row.user_version === 0) db.exec(SCHEMA);
     if (row.user_version < 2) db.exec(SCHEMA_V2);
     if (row.user_version < 3) db.exec(SCHEMA_V3);
-    db.exec(SCHEMA_V4);
+    if (row.user_version < 4) db.exec(SCHEMA_V4);
+    db.exec(SCHEMA_V5);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {
