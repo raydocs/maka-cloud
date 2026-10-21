@@ -113,6 +113,31 @@ describe('applyEgressGuard against the real iptables', () => {
     assert.ok(iptables('iptables', '-S', EGRESS_CHAIN).includes('-d 10.0.0.0/8 -j REJECT'));
   });
 
+  it('takes over from a rebuild that stopped after the old chain went, with a hook all the time', async (t) => {
+    if (!holder) return t.skip('no network namespace to try it in');
+    await run();
+    // Stopped between deleting the old chain and renaming the new one: the only hook points at
+    // the chain that has not been renamed yet.
+    iptables('iptables', '-E', EGRESS_CHAIN, `${EGRESS_CHAIN}_NEW`);
+    assert.equal(
+      iptables('iptables', '-S', 'OUTPUT').split('\n')[1],
+      `-A OUTPUT -j ${EGRESS_CHAIN}_NEW`,
+    );
+    await run();
+    assert.equal(
+      iptables('iptables', '-S', 'OUTPUT').split('\n')[1],
+      `-A OUTPUT -j ${EGRESS_CHAIN}`,
+    );
+    assert.equal(
+      iptables('iptables', '-S', 'OUTPUT')
+        .split('\n')
+        .filter((l) => l.startsWith('-A')).length,
+      1,
+    );
+    assert.ok(!iptables('iptables', '-S').includes(`${EGRESS_CHAIN}_NEW`), 'no scratch chain left');
+    assert.ok(iptables('iptables', '-S', EGRESS_CHAIN).includes('-d 169.254.0.0/16 -j REJECT'));
+  });
+
   it('follows a name server that changed, and removes an exception nobody wrote', async (t) => {
     if (!holder) return t.skip('no network namespace to try it in');
     await run();
