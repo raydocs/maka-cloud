@@ -1267,7 +1267,7 @@ class Run implements RunHandle {
       machine,
       taskId: spec.taskId,
       handoffDir,
-      reserved: [basename(spec.resultPath), basename(spec.briefPath)],
+      reserved: [basename(spec.resultPath), basename(spec.briefPath), ...(spec.reserved ?? [])],
       listed: manifest.artifacts ?? [],
       required: this.requiredArtifacts,
       limits: this.fleet.exportLimits,

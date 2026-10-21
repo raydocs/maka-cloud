@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   implementerFor,
   type ModeId,
@@ -642,6 +642,16 @@ class CodingRun implements RunHandle {
       runner: vendor,
       briefPath: join(this.hostDir, `agent-${n}-brief.md`),
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
+      // The files this runner writes itself: the task's result and the delivery. An agent's
+      // exported artifact must not replace them, or it could forge what the owner is shown.
+      reserved: [
+        basename(this.spec.resultPath),
+        'changes.json',
+        'change.patch',
+        'review.md',
+        'verification.json',
+        'failure_brief.json',
+      ],
       // Each agent run may spend what is left of its phase's limit.
       // The run's own limit is what is left of its phase (work, then review and fix). The whole
       // budget stays `budgetUsd`, so the gateway pool is the whole and not the first phase's share.

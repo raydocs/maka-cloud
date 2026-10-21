@@ -94,6 +94,18 @@ test('the other vendor reviews a change, and the review is part of what is deliv
     [undefined, 'medium'],
   );
 
+  // The files the runner writes in the task directory are not for an agent's artifact to replace.
+  for (const turn of [h.claude.turns[0], h.codex.turns[0]]) {
+    assert.deepEqual([...(turn?.spec.reserved ?? [])].sort(), [
+      'change.patch',
+      'changes.json',
+      'failure_brief.json',
+      'result.json',
+      'review.md',
+      'verification.json',
+    ]);
+  }
+
   const brief = await fs.readFile(h.codex.turns[0]?.spec.briefPath ?? '', 'utf8');
   assert.match(brief, /# Review of a change/);
   assert.match(brief, /add\(\) subtracts; make it add\./);
