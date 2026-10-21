@@ -19,6 +19,7 @@
  *   spendhang     report the same usage, then run until killed
  *   custom        write `$HOME/fake-cli/manifest.json` as result.json (`manifest2.json` when resumed, if there is one)
  *   wait          like ok, but first run until `$HOME/fake-cli/go` exists (`waiting` says it is running)
+ *   waitinit      like wait, but for claude only after it reported its session, so a restart can resume it
  *   leakedge-plain  print the API key right where a 300-character quote would cut it, then exit 1
  *   leakedge-guard  the same, after a MAKA_GUARD: prefix
  *   leakedge-json   the same where a 200-character note or result text would cut it, as events
@@ -63,7 +64,7 @@ if [ "$mode" = "floodfail" ]; then head -c 3000000 /dev/zero | tr '\0' x; exit 1
 if [ "$mode" = "longfail" ]; then head -c 100000 /dev/zero | tr '\0' y; echo; exit 1; fi
 write_result() {
   case "$mode" in
-    ok|leakout|flood|spend|wait|todos) printf '%s' "$good" > "$result" ;;
+    ok|leakout|flood|spend|wait|waitinit|todos) printf '%s' "$good" > "$result" ;;
     badthengood) if [ "$resumed" = 1 ]; then printf '%s' "$good" > "$result"; else printf '%s' '{"summary":""}' > "$result"; fi ;;
     custom) if [ "$resumed" = 1 ] && [ -e "$ctl/manifest2.json" ]; then cp "$ctl/manifest2.json" "$result"; else cp "$ctl/manifest.json" "$result"; fi ;;
     symlink) rm -f "$result"; ln -s "$ctl/secret.txt" "$result" ;;
@@ -80,6 +81,7 @@ for a in "$@"; do [ "$prev" = "--resume" ] && sid="$a"; prev="$a"; done
 echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
 echo 'not json, some stderr-ish noise'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Bash","input":{}}]}}'
+if [ "$mode" = "waitinit" ]; then : > "$ctl/waiting"; while [ ! -e "$ctl/go" ]; do sleep 0.05; done; fi
 case "$mode" in
   todos)
     echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"Read the docs","status":"completed","activeForm":"Reading the docs"},{"content":"Fix the login loop","status":"in_progress","activeForm":"Fixing the login loop"},{"content":"Run the tests","status":"pending","activeForm":"Running the tests"}]}}]}}'
