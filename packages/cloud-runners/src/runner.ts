@@ -16,8 +16,10 @@ import type { Fleet } from './fleet.js';
 import type { RemoteMachine } from './machine.js';
 import { type InputRequest, parseBriefHeader } from './inputs.js';
 import { LineSplitter } from './lines.js';
+import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
+import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
 import { buildRunScript } from './scripts.js';
-import { errorMessage } from './shell.js';
+import { errorMessage, shq } from './shell.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
 import {
   DEFAULT_PRICES,
@@ -132,6 +134,32 @@ export class SandboxCliRunner implements Runner {
 }
 
 type TurnOutcome = { ok: true } | { ok: false; reason: string };
+
+/** How a turn's process came to an end: `exit` is undefined for one that was killed. */
+type Drive = { ended: true; exit: number | undefined } | { ended: false; outcome: TurnOutcome };
+
+/** What the runner makes of one turn's output lines. */
+interface TurnReader {
+  push(bytes: Buffer): void;
+  /** The output has ended: an unfinished last line is a line. */
+  flush(): void;
+  /** Why the turn failed, from how its process ended and what it said; undefined when it succeeded. */
+  failure(exit: number | undefined): string | undefined;
+}
+
+/** How long the SDK's loop may be over before its process is given up on, in milliseconds. */
+const STOP_WAIT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), ms);
+      timer.unref();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 class Run implements RunHandle {
   readonly events = new EventQueue();
@@ -566,39 +594,86 @@ class Run implements RunHandle {
       ? (fleet.options.mcpUrlForSandbox?.(spec.mcp.url) ?? spec.mcp.url)
       : undefined;
     const model = spec.model ?? fleet.options.models?.[vendor.name];
-    const command = vendor.command({
-      prompt,
-      ...(resumeSessionId ? { resumeSessionId } : {}),
-      ...(mcpUrl ? { mcpUrl } : {}),
-      ...(model ? { model } : {}),
-      ...(spec.effort ? { effort: spec.effort } : {}),
-      ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
-    });
-    const launched = await machine.launch({
-      dirName: spec.taskId,
-      run,
-      script: buildRunScript({ preamble: preambleFor(vendor), command }),
-      envs: {
-        ...vendor.env(access, spec.mcp?.token),
-        ...(access.searchUrl
-          ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
-          : {}),
-      },
-      runToken,
-      workdir: `${dir}/workspace`,
-      signal: this.signal,
-    });
-    this.checkCancelled();
-    if (launched === 'cancelled') return { ok: false, reason: 'the start was cancelled' };
+    const envs = {
+      ...vendor.env(access, spec.mcp?.token),
+      ...(access.searchUrl
+        ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
+        : {}),
+    };
+    const launchRun = (script: string, extraEnvs: Record<string, string> = {}) =>
+      machine.launch({
+        dirName: spec.taskId,
+        run,
+        script,
+        envs: { ...extraEnvs, ...envs },
+        runToken,
+        workdir: `${dir}/workspace`,
+        signal: this.signal,
+      });
 
+    const reader = this.openReader();
+    const sdk = vendor.name === 'claude-agent-sdk' ? fleet.options.agentSdk : undefined;
+    let drive: Drive;
+    try {
+      drive = sdk
+        ? await this.driveAgentSdk(sdk, reader, {
+            prompt,
+            run,
+            dir,
+            launchRun,
+            ...(resumeSessionId ? { resumeSessionId } : {}),
+            ...(mcpUrl ? { mcpUrl } : {}),
+            ...(model ? { model } : {}),
+            ...(spec.effort ? { effort: spec.effort } : {}),
+          })
+        : await this.drivePolled(reader, run, () =>
+            launchRun(
+              buildRunScript({
+                preamble: preambleFor(vendor),
+                command: vendor.command({
+                  prompt,
+                  ...(resumeSessionId ? { resumeSessionId } : {}),
+                  ...(mcpUrl ? { mcpUrl } : {}),
+                  ...(model ? { model } : {}),
+                  ...(spec.effort ? { effort: spec.effort } : {}),
+                  ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
+                }),
+              }),
+            ),
+          );
+    } finally {
+      this.stopWatch = undefined;
+      this.spentBefore += this.invocationCost();
+      this.callCosts = new Map();
+      this.reportedTotal = undefined;
+    }
+    if (!drive.ended) return drive.outcome;
+    reader.flush();
+    const failure = reader.failure(drive.exit);
+    if (failure !== undefined) return { ok: false, reason: failure };
+
+    // The turn is over: nothing it started may outlive it, and its raw output goes before the
+    // snapshot. A leftover process could otherwise write the next turn's result.
+    await this.stopProcesses(false).catch((error) =>
+      this.progress(`leftover processes could not be stopped: ${errorMessage(error)}`),
+    );
+    this.checkCancelled();
+    await this.snapshot(machine);
+    return { ok: true };
+  }
+
+  /**
+   * What a turn's output means: one line at a time, as the CLI prints it. The same reader serves
+   * both ways of running the CLI, since the SDK's messages are the CLI's own output lines.
+   */
+  private openReader(): TurnReader {
+    const { vendor } = this;
     const parser = vendor.parser((text) => this.scrub(text));
     this.callCosts = new Map();
     this.reportedTotal = undefined;
     const rawTail: string[] = [];
     let guardReason: string | undefined;
     let verdict: { ok: boolean; text?: string } | undefined;
-    let consumed = 0;
-    const startedAt = fleet.now();
 
     const handleLine = (line: string): void => {
       if (line.startsWith('MAKA_GUARD: ')) {
@@ -614,7 +689,7 @@ class Run implements RunHandle {
         if (event.kind === 'session') void this.rememberSession(event.id).catch(() => undefined);
         else if (event.kind === 'progress') this.progress(event.note);
         else if (event.kind === 'step') this.progress(`${STEP_PREFIX}${event.text}`);
-        else if (event.kind === 'opened') this.opened(spec.taskId, event.url);
+        else if (event.kind === 'opened') this.opened(this.spec.taskId, event.url);
         // A metered access is the source of the run's spend; the CLI's own numbers are not.
         else if ((event.kind === 'usage' || event.kind === 'cost') && this.meteredUsd !== undefined)
           continue;
@@ -633,70 +708,208 @@ class Run implements RunHandle {
       this.progress('an output line over 1 MiB was dropped'),
     );
     const decoder = new StringDecoder('utf8');
+    return {
+      push: (bytes) => lines.push(decoder.write(bytes)),
+      flush: () => {
+        lines.push(decoder.end());
+        lines.end();
+      },
+      failure: (exit) => {
+        const { binary } = vendor;
+        const detail = guardReason ?? verdict?.text ?? rawTail.at(-1);
+        if (exit === undefined) {
+          return `the ${binary} process was killed${detail ? `: ${detail}` : ''}`;
+        }
+        if (exit !== 0) {
+          return `${binary} exited with code ${exit}${detail ? `: ${detail}` : ''}`;
+        }
+        if (verdict && !verdict.ok) {
+          return `${binary} reported an error${detail ? `: ${detail}` : ''}`;
+        }
+        return undefined;
+      },
+    };
+  }
 
+  /** Runs the CLI on its own and follows its output file until it exits. */
+  private async drivePolled(
+    reader: TurnReader,
+    run: string,
+    start: () => Promise<'started' | 'already' | 'cancelled'>,
+  ): Promise<Drive> {
+    const { fleet, vendor, spec } = this;
+    const machine = this.machine as RemoteMachine;
+    const startedAt = fleet.now();
+    const launched = await start();
+    this.checkCancelled();
+    if (launched === 'cancelled') {
+      return { ended: false, outcome: { ok: false, reason: 'the start was cancelled' } };
+    }
+    let consumed = 0;
     const watch = fleet.poller.watch(machine, { dir: spec.taskId, run });
     this.stopWatch = () => watch.stop();
     try {
       for (;;) {
         const update = await watch.next();
         this.checkCancelled();
-        lines.push(decoder.write(update.data));
+        reader.push(update.data);
         consumed += update.data.length;
         // Over budget: stop here; the cleanup that follows stops the CLI.
-        if (this.budgetStop) return { ok: false, reason: this.budgetStop };
+        if (this.budgetStop)
+          return { ended: false, outcome: { ok: false, reason: this.budgetStop } };
 
         const state = update.state;
         if (state === 'starting' || state === 'none') {
           if (fleet.now() - startedAt > (fleet.options.startTimeoutMs ?? 60_000)) {
             return {
-              ok: false,
-              reason: `the ${vendor.binary} process did not start in the sandbox`,
+              ended: false,
+              outcome: {
+                ok: false,
+                reason: `the ${vendor.binary} process did not start in the sandbox`,
+              },
             };
           }
           continue;
         }
         if (state !== 'running' && consumed >= update.size) {
-          lines.push(decoder.end());
-          lines.end();
-          const exit = typeof state === 'object' ? state.exit : undefined;
-          const detail = guardReason ?? verdict?.text ?? rawTail.at(-1);
-          if (exit === undefined) {
-            return {
-              ok: false,
-              reason: `the ${vendor.binary} process was killed${detail ? `: ${detail}` : ''}`,
-            };
-          }
-          if (exit !== 0) {
-            return {
-              ok: false,
-              reason: `${vendor.binary} exited with code ${exit}${detail ? `: ${detail}` : ''}`,
-            };
-          }
-          if (verdict && !verdict.ok) {
-            return {
-              ok: false,
-              reason: `${vendor.binary} reported an error${detail ? `: ${detail}` : ''}`,
-            };
-          }
-          break;
+          return { ended: true, exit: typeof state === 'object' ? state.exit : undefined };
         }
       }
     } finally {
       watch.stop();
-      this.stopWatch = undefined;
-      this.spentBefore += this.invocationCost();
-      this.callCosts = new Map();
-      this.reportedTotal = undefined;
     }
+  }
 
-    // The turn is over: nothing it started may outlive it, and its raw output goes before the
-    // snapshot. A leftover process could otherwise write the next turn's result.
-    await this.stopProcesses(false).catch((error) =>
-      this.progress(`leftover processes could not be stopped: ${errorMessage(error)}`),
-    );
+  /**
+   * Runs the CLI under the Agent SDK. The SDK builds the CLI's arguments and speaks its protocol; the
+   * CLI itself runs on the sandbox as a detached run whose stdin is a file we append to (see
+   * `process-channel.ts`), so a restart of this process leaves it running and its output on disk.
+   */
+  private async driveAgentSdk(
+    sdk: AgentSdk,
+    reader: TurnReader,
+    input: {
+      prompt: string;
+      run: string;
+      dir: string;
+      resumeSessionId?: string;
+      mcpUrl?: string;
+      model?: string;
+      effort?: string;
+      launchRun(
+        script: string,
+        extraEnvs?: Record<string, string>,
+      ): Promise<'started' | 'already' | 'cancelled'>;
+    },
+  ): Promise<Drive> {
+    const { fleet, vendor, spec } = this;
+    const machine = this.machine as RemoteMachine;
+    let proc: ExecProcess | undefined;
+    let stopped: TurnOutcome | undefined;
+    const stopNow = (outcome: TurnOutcome): void => {
+      stopped ??= outcome;
+      proc?.kill('SIGKILL');
+    };
+    const query = startAgentQuery({
+      sdk,
+      prompt: input.prompt,
+      workdir: `${input.dir}/workspace`,
+      ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
+      ...(input.mcpUrl ? { mcpUrl: input.mcpUrl } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.effort ? { effort: input.effort } : {}),
+      ...(spec.steps ? { steps: spec.steps } : {}),
+      redact: (text) => this.scrub(text),
+      onProblem: (message) => this.progress(message),
+      spawn: ({ args, env, signal }) => {
+        const watch = fleet.poller.watch(machine, {
+          dir: spec.taskId,
+          run: input.run,
+          backoff: fleet.options.agentSdkPollMs ?? { minMs: 150, maxMs: 1_000 },
+        });
+        const created = new ExecProcess({
+          machine,
+          dirName: spec.taskId,
+          run: input.run,
+          watch,
+          launch: () =>
+            input.launchRun(
+              buildRunScript({
+                preamble: `${preambleFor(vendor)}\n${FEED_FUNCTION}`,
+                command: fedCommand([vendor.binary, ...args.map(shq)].join(' ')),
+              }),
+              env,
+            ),
+          onOutput: (bytes) => reader.push(bytes),
+          // Over budget, with or without a message to show for it: stop here.
+          onTick: () => {
+            if (this.budgetStop) stopNow({ ok: false, reason: this.budgetStop });
+          },
+          stop: () => this.stopProcesses(false),
+          startTimeoutMs: fleet.options.startTimeoutMs ?? 60_000,
+          now: fleet.now,
+        });
+        signal.addEventListener('abort', () => created.kill('SIGKILL'), { once: true });
+        proc = created;
+        return created;
+      },
+    });
+    this.stopWatch = () => {
+      proc?.dispose();
+      query.close();
+    };
+
+    let sdkError: unknown;
+    try {
+      for await (const _message of query) {
+        this.checkCancelled();
+        if (this.budgetStop) stopNow({ ok: false, reason: this.budgetStop });
+        if (stopped) break;
+      }
+    } catch (error) {
+      if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
+      sdkError = error;
+    }
     this.checkCancelled();
-    await this.snapshot(machine);
-    return { ok: true };
+
+    const process = proc as ExecProcess | undefined;
+    if (process === undefined) {
+      return {
+        ended: false,
+        outcome: {
+          ok: false,
+          reason: `the agent SDK did not start the agent: ${this.scrub(errorMessage(sdkError))}`,
+        },
+      };
+    }
+    // The SDK ends its loop when the CLI's output has ended. When it gave up first (a protocol
+    // error, a stop for the budget) the CLI is stopped here, and nothing is read from it any more.
+    if (stopped || sdkError !== undefined) {
+      query.close();
+      process.kill('SIGKILL');
+      await process.stopped();
+    }
+    const over = await withTimeout(process.exited, STOP_WAIT_MS);
+    if (over === 'timeout') process.dispose();
+    this.checkCancelled();
+    if (stopped) return { ended: false, outcome: stopped };
+    if (process.failure) {
+      return {
+        ended: false,
+        outcome: { ok: false, reason: this.scrub(errorMessage(process.failure)) },
+      };
+    }
+    const exit = process.exitCode ?? undefined;
+    if (sdkError !== undefined && exit === 0) {
+      return {
+        ended: false,
+        outcome: {
+          ok: false,
+          reason: `the agent SDK reported an error: ${this.scrub(errorMessage(sdkError))}`,
+        },
+      };
+    }
+    return { ended: true, exit };
   }
 
   // -- spend ------------------------------------------------------------------------------------

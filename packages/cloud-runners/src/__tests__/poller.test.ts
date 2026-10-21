@@ -78,3 +78,85 @@ test('a run that grows large output is read in capped slices without repeats', a
   watch.stop();
   assert.equal(total, 600_000);
 });
+
+/** A machine whose runs have `content` bytes of output, answering the poll script's way. */
+function scriptedMachine(content: () => string) {
+  return {
+    machineId: 'm_scripted',
+    root: '/r',
+    logRoot: '/l',
+    async execOk(_script: string, options: { stdin?: string }): Promise<string> {
+      const out: string[] = [];
+      for (const line of (options.stdin ?? '').trim().split('\n')) {
+        const [dir, run, off, cap] = line.split(' ');
+        const text = content();
+        const data = Buffer.from(text).subarray(Number(off), Number(off) + Number(cap));
+        out.push(`T ${dir} ${run} running ${text.length} ${data.toString('base64')}`);
+      }
+      return `${out.join('\n')}\n`;
+    },
+  } as unknown as import('../machine.js').RemoteMachine;
+}
+
+test('a run with a backoff is polled fast while output comes and doubles its wait while it is quiet', async () => {
+  const { MachinePoller } = await import('../poller.js');
+  const waits: number[] = [];
+  const poller = new MachinePoller({ intervalMs: 2_000, sleep: async (ms) => void waits.push(ms) });
+  let polls = 0;
+  const machine = scriptedMachine(() => {
+    polls++;
+    // Two polls bring bytes, then nothing new.
+    return polls <= 2 ? 'a'.repeat(5 * polls) : 'a'.repeat(10);
+  });
+  const watch = poller.watch(machine, {
+    dir: 'd',
+    run: 't1',
+    backoff: { minMs: 150, maxMs: 1_000 },
+  });
+  for (let i = 0; i < 6; i++) await watch.next();
+  watch.stop();
+  assert.deepEqual(waits.slice(0, 5), [150, 150, 300, 600, 1_000]);
+  assert.equal(poller.watchCount(), 0);
+});
+
+test('output after a quiet spell brings the fast polling back', async () => {
+  const { MachinePoller } = await import('../poller.js');
+  const waits: number[] = [];
+  const poller = new MachinePoller({ intervalMs: 2_000, sleep: async (ms) => void waits.push(ms) });
+  let polls = 0;
+  const machine = scriptedMachine(() => {
+    polls++;
+    return polls === 5 ? 'a'.repeat(3) : polls < 5 ? '' : 'a'.repeat(3);
+  });
+  const watch = poller.watch(machine, { dir: 'd', run: 't1', backoff: { minMs: 100, maxMs: 800 } });
+  for (let i = 0; i < 6; i++) await watch.next();
+  watch.stop();
+  // Quiet: 200, 400, 800, 800; the bytes of poll 5 reset the wait.
+  assert.deepEqual(waits.slice(0, 5), [200, 400, 800, 800, 100]);
+});
+
+test('a machine polls at the shortest wait any of its runs asks for, and at the usual one when only plain runs are left', async () => {
+  const { MachinePoller } = await import('../poller.js');
+  const waits: number[] = [];
+  const poller = new MachinePoller({ intervalMs: 2_000, sleep: async (ms) => void waits.push(ms) });
+  const machine = scriptedMachine(() => '');
+  const plain = poller.watch(machine, { dir: 'd', run: 't1' });
+  const fast = poller.watch(machine, { dir: 'd', run: 't2', backoff: { minMs: 100, maxMs: 400 } });
+  const both = async (n: number) => {
+    for (let i = 0; i < n; i++) await Promise.all([plain.next(), fast.next()]);
+  };
+  await both(3);
+  fast.stop();
+  const before = waits.length;
+  for (let i = 0; i < 3; i++) await plain.next();
+  plain.stop();
+  // While the fast run was watched, no wait was the usual 2 s; afterwards every wait was.
+  assert.ok(
+    waits.slice(0, 3).every((ms) => ms <= 400),
+    JSON.stringify(waits),
+  );
+  assert.ok(
+    waits.slice(before + 1).every((ms) => ms === 2_000),
+    JSON.stringify(waits),
+  );
+});

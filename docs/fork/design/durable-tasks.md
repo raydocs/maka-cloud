@@ -7,8 +7,8 @@ Status of the pieces (updated by each PR):
 | # | Piece | State |
 |---|---|---|
 | 1 | Step log and epoch fencing | merged (#162), section 1 |
-| 2 | Resume instead of fail | section 2 |
-| 3 | Process channel and Agent SDK runner | not built |
+| 2 | Resume instead of fail | merged (#164), section 2 |
+| 3 | Process channel and Agent SDK runner | section 3 (off until a deployment passes `agentSdk`) |
 | 4 | Transcript mirror and fresh-box resume | not built |
 | 5 | Spend follows the step log, per-task budgets | not built |
 | 6 | Steering, `restart` event, catch-up, stream fence | not built |
@@ -73,3 +73,91 @@ If `recover` throws or its run reports it cannot resume (no recorded session), t
 **When resumed runs start.** `Orchestrator.create` decides in `restore()` but, with `resume: 'manual'`, starts nothing until `startRestored()`. `startCloudServer` uses it and calls `startRestored()` last, after the MCP endpoint listens and the handler's `onReady` ran: a resumed run needs the endpoint (or its executor could not delegate) and the host's tenant lookup (or its sandbox could not be found, and it would fail closed). Until then a resumed task reads `running` with no run; a cancel in that window ends it normally. Standalone callers get `automatic` (started at the end of `create`).
 
 **Fuzzer.** Half of the schedule fuzzer's seeds give the fake runner a `recover`; restarts then resume started tasks, and the restore check requires every unfinished task to be either ended or resumed (never both), resumed tasks to have no terminal event, the active count to equal the resumed count, and old executor tokens to be dead.
+
+## 3. Process channel and Agent SDK runner
+
+With `CloudRunnersOptions.agentSdk` set (`loadAgentSdk()` loads the installed package), the Claude
+runner drives its CLI through the Claude Agent SDK instead of running `claude -p` on its own.
+Without it nothing changes; the host does not pass it yet (piece 4 wires it, together with the
+transcript mirror, in the host's stack). The Codex runner is untouched.
+
+**Why.** The SDK gives the host two things the plain CLI cannot: hooks that call back into the host
+before and after every tool (the step log of section 1 needs exactly that), and, in piece 4, a
+`sessionStore` that mirrors the transcript off the box. The cost is a conversation with the CLI in
+both directions, which `exec` (one request, one answer) cannot carry. Hence the channel.
+
+**The process channel** (`process-channel.ts`). `ExecProcess` is the SDK's `SpawnedProcess` for a
+process on the box:
+
+- The process is a detached run like every other (`launch`: its lock, its pid, its exit file, its
+  raw output in memory-backed storage), so stop, cleanup, restart recovery and the orphan sweep are
+  the ones that already exist. It survives a restart of this server.
+- Its **stdout** is the run's output file, read by the machine poller by offset: one exec per
+  machine per tick for every watched run, the terminal WebSocket stays free for the user's handoff
+  (T14). stderr is merged into it, as on the CLI path; the SDK skips lines that are not messages.
+- Its **stdin** is a file, `<run>.in`, that the run script reads as it grows (`maka_feed`: copy the
+  new bytes, sleep 50 ms, stop when the end marker is there and everything before it has been
+  copied, or when the run script that started it is gone). Each write is one exec that appends at
+  the offset the host believes the file is at: a request whose answer was lost is sent again and
+  lands once; a file that is somewhere else than expected refuses the write (`MISMATCH`), which
+  breaks the process's stdin instead of corrupting the conversation. Writes are cut at 64k
+  characters (never inside a surrogate pair or a multibyte character), and all input of a run is
+  capped (32 MiB). The end of the SDK's input writes the end marker.
+- `kill` runs the same per-run stop the cleanup uses (TERM to the group, grace, KILL, nothing may
+  survive). A sandbox that cannot be reached for 5 polls is an `error` of the process and the end
+  of it; an error with nobody listening is dropped rather than crashing the server.
+- The cost is a round trip per message in each direction (a poll on the way out, one exec and up to
+  50 ms of feeder polling on the box on the way in), and every hook the CLI waits for is two of them
+  (the question, the answer), twice per tool call (before and after). So a run driven by the SDK is
+  polled at 150 ms while output is coming and the wait doubles towards 1 s while it is quiet
+  (`agentSdkPollMs`; the CLI path keeps `pollIntervalMs`, 2 s). The poll loop of a machine runs at the
+  shortest wait any of its watched runs asks for, one exec serving them all. Piece 8 measures the
+  overhead; it has not been measured on a live sandbox.
+
+**What the SDK is and is not trusted with.** `query()` builds the CLI's arguments and speaks its
+protocol; its own `command` (a bundled binary on the host) and its `env` (the host's whole
+environment, 189 variables in a plain shell) are not used. The box runs the `claude` installed
+there, with the run's own environment (`vendor.env`: the gateway key, the task's MCP token, the
+search token) and the SDK's own markers (`CLAUDE_AGENT_SDK_*`, `CLAUDE_CODE_ENTRYPOINT`,
+`CLAUDE_CODE_SDK_*`, nothing that looks like a credential, short single-line values). Arguments are
+quoted into the run script one by one. The flags are those of the CLI path: the Claude Code system
+prompt, `bypassPermissions`, `--setting-sources project,local`, the orchestrator's MCP endpoint
+with its token read from the environment, `--strict-mcp-config`, and the run's model and effort.
+The subscription guard and the unset variables of the CLI path are in the run script's preamble,
+as before.
+
+**Output.** The SDK's messages are the CLI's own output lines, so one reader serves both ways of
+running it (session id, progress, the in-progress todo item, opened pages, spend, the verdict, and
+the guard line). Spend, the budget stop and the failure reasons are the CLI path's. A run that the
+SDK gave up on (a protocol error) or that was stopped for its budget has its process stopped and
+reports that; a process that exited 0 after the SDK reported an error is a failure.
+
+**Hooks** (`hooks.ts`). Before a tool runs the CLI calls `PreToolUse`; the hook writes the step's
+intent (`stepId` = the tool call's id, `kind` = `tool:<name>`, a redacted one-line label) and
+answers only after the append is durable, so the CLI cannot start a step that is not on record. The
+answer to a `completed` or `running` intent is "go on"; to `interrupted` and `refused` it is a
+deny with the reason, which the agent reads. If the log cannot be written, a `never` step is
+denied and a `safe` one runs (a note says so). After the tool, `PostToolUse` or `PostToolUseFailure`
+records the outcome; a failed outcome carries the (redacted, cut) error text, a done one carries
+nothing: the log holds metadata and the transcript holds content.
+
+*Replay class of a tool call.* `safe`: reading and searching tools, notes, edits of the task's
+files (the same edit leaves the same file), subagent tasks (their own tool calls are steps of their
+own), and a shell command that is one plain read-only command (no pipes, redirects, substitution or
+separators; `ls`, `grep`, `git status`, `npm test`, ...). Everything else is `never`: any other
+shell command, any MCP tool, any tool this list does not know. The class decides what the recovery
+note tells the agent about a step that was cut off ("check the real state first" for `never`), so
+an unknown call errs towards the caution.
+
+**Restart.** Unchanged from section 2: `recover` resumes the recorded session with the recovery
+note as its message, in a run of its own (`t<n+1>`, with its own input file). What the SDK adds is
+that the note now lists the tool calls that were cut off, because the hooks logged them.
+
+**Known limits.**
+
+- The conversation of a run lives in the SDK's process on this server and in the CLI on the box;
+  a restart of the server ends the SDK's side and `recover` starts a new one on the recorded session.
+  The turn that was in progress is not continued mid-sentence: the agent is told what the log knows.
+- Input files stay in the task directory (they hold the prompt, like `brief.md`) and are in a
+  snapshot of it; they are removed with the directory.
+- A box lost with no snapshot still cannot be resumed (piece 4).
