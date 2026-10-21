@@ -315,7 +315,7 @@ export function createLiveSmokeDeps(
      * Stops every task of the smoke invite that is still going: what an earlier run left behind.
      * A task counts as stopped only when the server's own answer to a cancel says it ended and that
      * neither its stop nor its tree's is pending: a task that ended a moment ago is asked about
-     * again, not skipped, and a cancel that failed is sent again at the next poll. Returns how many
+     * again, not skipped, and a cancel that failed (whatever the answer) is sent again at the next poll. Returns how many
      * tasks were running when this started. A task not confirmed stopped, or a list that cannot be
      * read, is an error: the run must not start beside work it could not stop.
      */
@@ -354,17 +354,9 @@ export function createLiveSmokeDeps(
             const view = await this.cancelView(task.taskId);
             confirmed = view !== undefined && stopped(view);
           } catch (error) {
-            // Sent again at the next poll; the cause is kept for the message.
+            // Sent again at the next poll; the cause is kept for the message. A refusal is never taken
+            // for a stop: the task list, which cannot show a tree that is still stopping, is not asked.
             lastError = error instanceof Error ? error.message : String(error);
-            // A refusal (not a rate limit) of a task that has ended since is the server saying there
-            // is nothing to cancel: the list, which does know that much, decides.
-            const status = (error as { status?: unknown }).status;
-            if (typeof status === 'number' && status >= 400 && status < 500 && status !== 429) {
-              const now = (await this.tasks(task.conversationId)).find(
-                (other) => other.taskId === task.taskId,
-              );
-              confirmed = now !== undefined && stopped(now);
-            }
           }
         }
         if (!confirmed) stuck.push(task.taskId);

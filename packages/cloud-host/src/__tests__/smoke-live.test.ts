@@ -986,7 +986,7 @@ test('only a stop the server confirms counts: the cancel answer, not the list, s
   assert.doesNotMatch(old.printed, /nothing was started/u, old.printed);
 });
 
-test('a task whose cancel failed but which has ended since does not stop the run from starting', async (t) => {
+test('a refused cancel is not taken for a stop, even when the task list shows the task ended', async (t) => {
   const clock = { now: Date.now() };
   const { dir } = await serverLedger(t, clock);
   const journalPath = join(dir, 'gateway-spend.db');
@@ -1023,12 +1023,10 @@ test('a task whose cancel failed but which has ended since does not stop the run
   }) as typeof fetch;
   const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
   const code = await smokeCommand(env, io);
-  assert.equal(
-    code,
-    1,
-    `the scenarios ran (and failed against a down server): ${printed.join(' | ')}`,
-  );
-  assert.doesNotMatch(printed.join('\n'), /nothing was started/u);
+  // The list cannot show a tree that is still stopping, so only the answer to a cancel counts.
+  assert.equal(code, 2, printed.join(' | '));
+  assert.match(printed.join('\n'), /could not confirm the stop of 1 task\(s\): tsk_x/u);
+  assert.match(printed.join('\n'), /the last error: POST \/v1\/tasks\/tsk_x\/cancel answered 409/u);
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {
