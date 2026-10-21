@@ -1,8 +1,8 @@
 # Sandbox isolation and egress model
 
 This is the threat model for what runs in a sandbox box, the invariants the code is held to, how
-each one is enforced and tested, and the list of places where the code as of `9a5a447` (main,
-2026-10-21 22:43 UTC) does not hold one of them. It exists so that the recheck loop stops finding new P1s one at a time: a
+each one is enforced and tested, and the list of places where the code as of `6af5f15` (main,
+2026-10-21 23:20 UTC) does not hold one of them. It exists so that the recheck loop stops finding new P1s one at a time: a
 finding is either a violation of a numbered invariant below (then it is a fix, listed in section 7
 with the test that proves it) or a gap in the model (then this file changes first).
 
@@ -181,7 +181,12 @@ cap; (b) a file built in a directory the agent cannot write and renamed into pla
 whole operation as the agent account; (d) a write (the restore after a base check: `rm -rf`,
 `mkdir -p`, a file-by-file copy) with every path component verified not a link at write time, while
 no agent process is alive (the run stopped with no survivors, the check namespace confirmed gone),
-so nothing can swap a component between the check and the write. No `>`, `>>`, `cat >`, `cp`,
+so nothing can swap a component between the check and the write. At launch (d) does not hold on
+its own: a sibling task's agent runs as the same account (I12) and is alive during the restore, so
+it can swap a workspace directory for a link to the control user's home between the check and the
+write (recheck A2 on #312). Until I12 holds, a write of kind (d) must be done as the agent account
+or through directory file descriptors (`openat` with `O_NOFOLLOW` per component), not by path. No
+`>`, `>>`, `cat >`, `cp`,
 `mkdir -p`, `rm -rf`, `chgrp` or `chmod` by the control user on a path under `workspace/`,
 `handoff/` or `claude-config/` otherwise. Also: no file the control user opens for writing lives in
 a directory the agent can write (`/tmp` included). Why this is P1 and not a nuisance: every exec is
@@ -219,7 +224,9 @@ IPv6 address after the guard ran is unguarded on IPv6 until the next launch guar
 *Tested*: `cloud-runners egress.test.ts`, `egress-wake.test.ts`, `cloud-instabox egress.test.ts`
 (scripted iptables), `egress.real.test.ts` (real iptables in a network namespace),
 `egress.live.test.ts` (by hand, `MAKA_CLOUD_LIVE=1`).
-*Still violated*: F6 (the lock file is where the agent can put one first).
+*Still violated*: F6 (the lock file is where the agent can put one first), F14 (a verified state
+that outlives the box's rules: a plain task-code `exec` trusts the last check across an external
+restart).
 
 **I7. The policy is exactly section 4**: blocked nets rejected, replies, resolvers on 53, ND and
 loopback-via-lo returned first, loopback refused on any other interface, nothing else special.
@@ -302,12 +309,13 @@ a finding that fits none means this section is incomplete.
 
 | Class | Invariant | Instances so far |
 | --- | --- | --- |
-| Control user runs repo-steerable code | I1 | repo tests as the control user (#289 fixed); CLI `--version` (open, F3); git filters/attributes on `git add -A` (#312, open, `control.git`); fsmonitor and hooks (scrubbed by `GIT_FN`, not enough) |
+| Control user runs repo-steerable code | I1 | repo tests as the control user (#289 fixed); CLI `--version` (open, F3); git filters/attributes on `git add -A` (#312, open, `control.git`); fsmonitor and hooks (scrubbed by `GIT_FN`, not enough); the box pool's scrub runs `git ls-files` as the control user in the agent's repository, which starts `core.fsmonitor` (batch24 A1, pool, off; section 9) |
 | Git child processes in nested repositories | I1 | `git status` inside a populated gitlink with that repository's config (open, F1) |
-| Fail-open probe | I5, I6 | sudo probe by trying commands (#290 fixed with `sudo -l -U`); `getcap` failure and partial cap list (open, F4); optional `flock` (#310 fixed) |
+| Fail-open probe | I5, I6 | sudo probe by trying commands (#290 fixed with `sudo -l -U`); `getcap` failure and partial cap list (#313 fixed); #313's capability line parser cuts the path at the first ` cap_` or ` =`, so a path with a space checks the wrong file and reports none (recheck A1, open, F4); fixed directory list misses other executable mounts and a split `/bin` (recheck A3, open, F4); optional `flock` (#310 fixed) |
+| Verified state that outlives the box | I6 | `exec` with `taskCode` guards only while `unguarded`; a box restarted or restored by the provider without a `machine_not_running` answer keeps its stale "verified" state (batch29 A2, open, F14) |
 | Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
-| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` and the restore (open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10) |
+| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` and the restore, raced by a sibling's agent (#312 checks then re-resolves by path; recheck A2, open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
 | Control user's login files | I3 | `bash -lc` on every exec; not probed (open, F13) |
 | Whole environment handed to the agent | I9 | `--preserve-env` (open, F8) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
@@ -337,13 +345,18 @@ with that reason; the agent is told in the brief that nested repositories are no
 entered. In `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT`, walk each path component with `[ -L ]`
 checks (as `FILE_STAGE_SCRIPT` does) before `rm -rf`, `mkdir -p` and the copy, refuse on a link, and
 assert in `runner.ts` that the agent run was released and the check namespace stopped before either
-script runs. The alternative, running those scripts as the agent (`SandboxWorkspace.execAgent`),
-stays open if #312's design changes.
+script runs. That is not enough while tasks share one account (recheck A2 on #312: a sibling's agent
+swaps a directory for a link after the check, and the copy re-resolves the path as the control
+user): run the revert's writes and the restore as the agent account (`SandboxWorkspace.execAgent`,
+the tree is the agent's), or copy through directory file descriptors. #312 at `be7bdb7` has neither
+the assertion nor the agent-side copy.
 *Test that fails on main (and on #312)*: `control-git.test.ts`: a workspace with `sub/.git` whose
 config sets `filter.p.clean` to `touch "$MAKA_DIR/pwned"` and `sub/.gitattributes` `* filter=p`;
 `SAMPLE_SCRIPT` and `CHANGES_SCRIPT` must refuse with `ERR nested repository` and the marker must not
 exist (today the sample creates it). Revert and restore: a workspace path whose directory component
-is a symlink to the task directory receives no file and the script refuses.
+is a symlink to the task directory receives no file and the script refuses; real-account: a second
+process swaps a directory for a link to `$HOME` after the check and before the copy (a handshake
+file, no sleep), and nothing lands in `$HOME`.
 
 **F2 (P1, I1, A6): files the control user makes in the workspace are readable and writable by the
 agent's group.** After the clone, after every base revert and after every restore: a `0644` file
@@ -381,8 +394,13 @@ reason (sudo refused, `test -x` not runnable) reads as `unchecked`, never as "ca
 the scan covers `/usr/lib`, `/usr/libexec` and `/opt` as well as the six `bin` directories; the
 allowlist pins the full path, not the name, and says why: `cap_net_raw` opens `AF_PACKET` sockets,
 which leave the box below netfilter, so the egress chain does not apply to a non-stock raw-socket
-binary. Add `agent_setuid` from `find / -xdev \( -perm -4000 -o -perm -2000 \) -type f` run as
-root, refused unless every path is on the distribution allowlist (`sudo`, `su`, `passwd`, `chfn`,
+binary. The listing parser must not cut a path at the first ` cap_` or ` =` (recheck A1 on #313:
+`/opt/my cap_helper cap_net_admin=ep` checks `/opt/my`, absent, and reports none): query known
+full paths one at a time with `getcap <path>`, or refuse any line that does not parse unambiguously
+as `unchecked`. The scan covers every executable mount (`findmnt` without `noexec`: `/data`, `/mnt`,
+a split `/bin` and `/sbin` on a system that is not usr-merged), not a fixed list, and any scan error
+is a failure (recheck A3). Add `agent_setuid` from `find / -xdev \( -perm -4000 -o -perm -2000 \)
+-type f` run as root, refused unless every path is on the distribution allowlist (`sudo`, `su`, `passwd`, `chfn`,
 `chsh`, `gpasswd`, `newgrp`, `mount`, `umount`, `fusermount3`, `ssh-keysign`, `unix_chkpwd`,
 `chage`, `expiry`, `wall`, `write`); add rootless container sockets (`/run/user/*/docker.sock`,
 `/run/user/*/podman/podman.sock`).
@@ -401,10 +419,13 @@ name is not truncated. Kept here so the numbering of the hand-off stays.
 for append, so a link there no longer truncates anything). The agent can still create that name
 first: with `fs.protected_regular=1` the control user's open fails and every guard on the box is
 refused (no task starts in it until someone removes the file); with it off, the agent holds the
-flock and every guard times out after 30 s. Either way the agent account turns the box off.
+flock and every guard times out after 30 s. The file the guard makes is `0644` under the default
+umask, so the agent can also open the existing lock read-only and hold the flock (recheck A4 on
+#310). Either way the agent account turns the box off.
 *Change*: lock at `$MAKA_ROOT/.egress.lock` (the work root is 710, the agent cannot create entries);
-`applyEgressGuard` takes the root in `MAKA_LOCK` from the fleet; `fail` if the lock's directory is
-group- or world-writable.
+`applyEgressGuard` takes the root in `MAKA_LOCK` from the fleet; the lock is a `0600` regular file
+owned by the control user, opened with `O_NOFOLLOW` (`[ -L ]` refused, `umask 077` before the open);
+`fail` if the lock's directory is group- or world-writable or the file is not the control user's.
 *Test that fails on main*: unit: the lock path in the exec request is under the work root, not
 `/tmp`; real-account: a file pre-made at the old and new lock paths by the agent account does not
 stop the guard.
@@ -464,6 +485,22 @@ regular file or not at all, is owned by the control user or root, and `as_agent 
 any other answer is a finding. *Test that fails on main*: fixture without the fact is refused; a
 script-level test with a group-writable `.bashrc` in a scratch `HOME` yields `found`.
 
+**F14 (P1, I6, batch29 A2): a task-code exec re-verifies the rules after the box could have lost
+them.** *Where*: `cloud-runners/src/machine.ts` `exec` (`if (options.taskCode && this.unguarded)`).
+*Why*: `launch` guards every time; a plain `exec` with `taskCode` (the repository's checks through
+`execCheck`, the edit-loop sample, the CLI version check) guards only while `unguarded` is true,
+which is set by a `machine_not_running` answer. A box the provider restarts or restores while it
+stays "running" to the API (a host move, a crash and reboot, an operator restore) answers normally,
+keeps the stale verified state in this process, and runs repo code without rules until the next
+`launch`. *Change*: either guard on every `taskCode` exec (the guard is verify-first, so a box with
+the rules in place costs one read-only exec), or bind the verified state to the box's boot: the guard
+prints `/proc/sys/kernel/random/boot_id`, `RemoteMachine` keeps it, and every `taskCode` exec runs
+the guard first unless its script's prologue finds the same boot id (one exec, no extra round trip).
+*Test that fails on main*: `egress-wake.test.ts`: after a passing guard, the fake box drops its rules
+without answering `machine_not_running` (a `resetRules()` on `FakeInstabox`); the next
+`exec(..., { taskCode: true })` must run the guard before the command (today it does not), and a box
+whose boot id changed is guarded again.
+
 **Docs to change with the fixes**: `docs/fork/deploy.md` "The agent account" (the paragraph on the
 CLI version check and on git; add `flock` and `getcap` to the box image requirements; the lock's
 location), `deploy/rehearsal/README.md` (the second account the stand-in needs, F9's container is
@@ -517,8 +554,14 @@ the account only after survivors are confirmed gone.
 
 - **Box pool** (`MAKA_CLOUD_BOXES`, off): a box made by the server for one task and slept or
   deleted after. When it comes on, I13 is enforced by the pool's labels instead of the fixed table,
-  and I6 must hold across sleep/restore (the guard already re-verifies after a wake). The pool's own
-  review items are in `docs/fork/post-launch-backlog.md`.
+  and I6 must hold across sleep/restore (the guard already re-verifies after a wake). Two open
+  violations on that path, listed here so they are not lost: the scrub before a snapshot
+  (`cloud-boxes/src/scrub.ts`, `SCRUB_SCRIPT`) runs `git -C $MAKA_REPO_DIR ls-files` as the control
+  user inside the agent's repository, which starts `core.fsmonitor` from that repository's config
+  (batch24 A1; I1; #312's `control.git` did not touch it), and it writes its file list to
+  `/tmp/maka-scrub-env.$$` by name in a world-writable directory (I4). Both fixes: run the scrub's
+  repository steps as the agent, or against `control.git`, and keep its temporary file in the task
+  directory. The pool's other review items are in `docs/fork/post-launch-backlog.md`.
 - **Snapshots** as anything but a recovery aid: a snapshot holds every task's files on the box; it is
   never a trust boundary. I8 (no raw output on disk) is what keeps secrets out of it.
 - **Proposed cards**, **plan vault**: no sandbox code of their own; the vault would put a user's own
