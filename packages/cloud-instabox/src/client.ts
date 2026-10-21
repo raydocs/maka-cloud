@@ -55,6 +55,31 @@ export interface InstaboxMachine {
   state: InstaboxMachineState;
   operationId?: string | null;
   autoSuspendedAt?: string;
+  /** String labels set at create or by `patchMachine`. Absent from older servers. */
+  metadata?: Record<string, string>;
+  /** The snapshot the sandbox was created from, when it was. */
+  snapshot?: { id: string } | null;
+  /** Increases with each accepted change. */
+  revision?: number;
+}
+
+/** Exactly one of `templateId` and `snapshotId`. */
+export interface InstaboxCreateMachineRequest {
+  /** Unique among the org's live sandboxes, so a create that is repeated finds the first one (409). */
+  name?: string;
+  templateId?: string;
+  snapshotId?: string;
+  /** At most 32 labels, keys of 1-64 `[A-Za-z0-9_.-]`, values up to 512 characters. */
+  metadata?: Record<string, string>;
+  desiredState?: 'running' | 'stopped';
+  vcpus?: number;
+  memMiB?: number;
+}
+
+export interface InstaboxListMachinesOptions {
+  /** Only sandboxes whose metadata has every one of these keys with exactly that value. */
+  metadata?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface InstaboxOperation {
@@ -72,6 +97,8 @@ export interface InstaboxSnapshot {
   /** `pending` while a snapshot of a running sandbox uploads. */
   status: 'pending' | 'ready' | 'failed';
   error?: string;
+  sourceMachineId?: string;
+  createdAt?: string;
 }
 
 export interface InstaboxClientOptions {
@@ -89,9 +116,10 @@ export interface InstaboxClientOptions {
 }
 
 interface RequestSpec {
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
-  query?: Record<string, string>;
+  /** Pairs, so a key may repeat (`metadata=a:b&metadata=c:d`). */
+  query?: readonly (readonly [string, string])[];
   body?: unknown;
   idempotencyKey?: string;
   signal?: AbortSignal;
@@ -156,7 +184,7 @@ export class InstaboxClient {
     return await this.send<InstaboxFiles>({
       method: 'GET',
       path: `/v1/machines/${encodeURIComponent(machine)}/files`,
-      query: { path },
+      query: [['path', path]],
       ...(options.signal ? { signal: options.signal } : {}),
       timeoutMs: API_TIMEOUT_MS,
       retryTransport: true,
@@ -182,6 +210,94 @@ export class InstaboxClient {
     return await this.mutate<InstaboxOperation>(machine, 'start', options);
   }
 
+  /** Pauses a running sandbox, keeping its programs. Pair it with `waitForOperation`. */
+  async suspendMachine(machine: string, options: { signal?: AbortSignal } = {}) {
+    return await this.mutate<InstaboxOperation>(machine, 'suspend', options);
+  }
+
+  /**
+   * Creates a sandbox. The answer is a `create` operation whose `machineId` is the new sandbox.
+   * Pass an `idempotencyKey` you saved before the call (for example one derived from the name and
+   * a counter) so a retry after a crash is the same request; without one a fresh key is made for
+   * this call and shared by its transport retries. A refused limit is `InstaboxApiError` with
+   * code `quota_exceeded` (see `isQuotaExceeded`).
+   */
+  async createMachine(
+    request: InstaboxCreateMachineRequest,
+    options: { idempotencyKey?: string; signal?: AbortSignal } = {},
+  ): Promise<InstaboxOperation> {
+    if ((request.templateId === undefined) === (request.snapshotId === undefined)) {
+      throw new Error('createMachine needs exactly one of templateId and snapshotId.');
+    }
+    return await this.send<InstaboxOperation>({
+      method: 'POST',
+      path: '/v1/machines',
+      body: request,
+      idempotencyKey: options.idempotencyKey ?? `maka-create-${randomUUID()}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  /** Deletes a sandbox, its system files and its storage. Pair it with `waitForOperation`. */
+  async deleteMachine(
+    machine: string,
+    options: { idempotencyKey?: string; signal?: AbortSignal } = {},
+  ): Promise<InstaboxOperation> {
+    return await this.send<InstaboxOperation>({
+      method: 'DELETE',
+      path: `/v1/machines/${encodeURIComponent(machine)}`,
+      idempotencyKey: options.idempotencyKey ?? `maka-delete-${randomUUID()}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  /**
+   * Replaces the sandbox's labels (`{}` clears them). Synchronous, and allowed while an operation
+   * runs. It replaces, so a caller changing one label sends the whole set it read.
+   */
+  async patchMachineMetadata(
+    machine: string,
+    metadata: Record<string, string>,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<InstaboxMachine> {
+    return await this.send<InstaboxMachine>({
+      method: 'PATCH',
+      path: `/v1/machines/${encodeURIComponent(machine)}`,
+      body: { metadata },
+      idempotencyKey: `maka-patch-${randomUUID()}`,
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+  }
+
+  /** Every sandbox of the account's orgs that carries all the given labels, across pages. */
+  async listMachines(options: InstaboxListMachinesOptions = {}): Promise<InstaboxMachine[]> {
+    const terms = Object.entries(options.metadata ?? {}).map(([key, value]) => `${key}:${value}`);
+    const machines: InstaboxMachine[] = [];
+    let cursor: string | undefined;
+    do {
+      const page: { machines: InstaboxMachine[]; nextCursor: string | null } = await this.send({
+        method: 'GET',
+        path: '/v1/machines',
+        query: [
+          ...terms.map((term) => ['metadata', term] as const),
+          ...(cursor ? ([['cursor', cursor]] as const) : []),
+        ],
+        ...(options.signal ? { signal: options.signal } : {}),
+        timeoutMs: API_TIMEOUT_MS,
+        retryTransport: true,
+      });
+      machines.push(...page.machines);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return machines;
+  }
+
   /** Waits (server side, up to 45 s) for an idle suspend and its resume to finish. */
   async wakeMachine(machine: string, options: { signal?: AbortSignal } = {}) {
     return await this.send<InstaboxMachine>({
@@ -197,7 +313,7 @@ export class InstaboxClient {
     return await this.send<InstaboxOperation>({
       method: 'GET',
       path: `/v1/operations/${encodeURIComponent(id)}`,
-      ...(options.wait ? { query: { wait: options.wait } } : {}),
+      ...(options.wait ? { query: [['wait', options.wait]] as const } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       timeoutMs: API_TIMEOUT_MS + 30_000,
       retryTransport: true,
@@ -292,6 +408,18 @@ export class InstaboxClient {
     });
   }
 
+  /** The snapshots of the account's orgs, oldest first. */
+  async listSnapshots(options: { signal?: AbortSignal } = {}): Promise<InstaboxSnapshot[]> {
+    const body = await this.send<{ snapshots: InstaboxSnapshot[] }>({
+      method: 'GET',
+      path: '/v1/snapshots',
+      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: API_TIMEOUT_MS,
+      retryTransport: true,
+    });
+    return body.snapshots;
+  }
+
   async getSnapshot(id: string, options: { signal?: AbortSignal } = {}): Promise<InstaboxSnapshot> {
     return await this.send<InstaboxSnapshot>({
       method: 'GET',
@@ -371,7 +499,7 @@ export class InstaboxClient {
 
   private async mutate<T>(
     machine: string,
-    action: 'resume' | 'start',
+    action: 'resume' | 'start' | 'suspend',
     options: { signal?: AbortSignal },
   ): Promise<T> {
     return await this.send<T>({
@@ -386,7 +514,7 @@ export class InstaboxClient {
 
   private async send<T>(spec: RequestSpec): Promise<T> {
     const url = new URL(this.baseUrl + spec.path);
-    for (const [key, value] of Object.entries(spec.query ?? {})) url.searchParams.set(key, value);
+    for (const [key, value] of spec.query ?? []) url.searchParams.append(key, value);
     const headers: Record<string, string> = {
       'X-API-Key': this.apiKey,
       Accept: 'application/json',
