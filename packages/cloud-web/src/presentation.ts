@@ -1,3 +1,5 @@
+import { TERMINAL, type TaskView } from './contract';
+
 // One presentation boundary for every untrusted string, including URLs and a11y.
 const hiddenNames =
   /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus|instabox/giu;
@@ -69,7 +71,10 @@ export const STEP_PREFIX = 'step: ';
  * from what the agent records anyway; notes without the prefix (the conductor's own) still count
  * when no step was ever recorded.
  */
-export function stepsOf(notes: readonly string[]): { current?: string; steps: string[] } {
+export function stepsOf(notes: readonly string[]): {
+  current?: string;
+  steps: string[];
+} {
   const steps = notes.map((note) =>
     note.startsWith(STEP_PREFIX) ? note.slice(STEP_PREFIX.length) : note,
   );
@@ -100,4 +105,17 @@ export function captionOf(name: string): string {
     .trim();
   const caption = words.length > 60 ? `${words.slice(0, 59).trimEnd()}…` : words;
   return caption === '' ? caption : caption[0]?.toUpperCase() + caption.slice(1);
+}
+
+export function taskLabel(task: TaskView): string {
+  if (task.cancelRequested && !TERMINAL.has(task.state)) return 'Cancelling…';
+  if (task.state === 'running' && task.pauseRequested) return 'Pausing…';
+  return {
+    queued: 'Queued',
+    running: 'In progress',
+    paused: 'Paused',
+    succeeded: 'Finished',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+  }[task.state];
 }

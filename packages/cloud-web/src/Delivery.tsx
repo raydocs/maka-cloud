@@ -130,7 +130,10 @@ function SourceCard({
       </div>
     </>
   );
-  const style = { '--tilt': `${tiltDegrees}deg`, zIndex: onTop ? 2 : 1 } as React.CSSProperties;
+  const style = {
+    '--tilt': `${tiltDegrees}deg`,
+    zIndex: onTop ? 2 : 1,
+  } as React.CSSProperties;
   return href ? (
     <a className="source-card" href={href} target="_blank" rel="noreferrer noopener" style={style}>
       {card}
@@ -171,7 +174,7 @@ export function SourcesStack({
   );
 }
 
-function DiffLines({ text }: { text: string }) {
+export function DiffLines({ text }: { text: string }) {
   return (
     <pre className="diff-content viewer-diff solid">
       {text.split('\n').map((line, i) => (
@@ -207,11 +210,14 @@ export function DeliveryCard({
   task,
   listings,
   sources,
+  onOpenTask,
 }: {
   client: CloudClient;
   task: TaskView;
   listings: readonly ArtifactListing[];
   sources: readonly SourceListing[];
+  /** Opens the task's own page (plan, steps, changes, review, cost). */
+  onOpenTask?: (task: TaskView) => void;
 }) {
   const shot = listings.find((listing) => listing.image);
   const diff = listings.find(isDiff);
@@ -254,7 +260,11 @@ export function DeliveryCard({
     try {
       const content = await client.readArtifact(task.taskId, diff.index);
       if (content.kind === 'text')
-        setOpened({ kind: 'diff', title: caption || 'The changes', text: content.text });
+        setOpened({
+          kind: 'diff',
+          title: caption || 'The changes',
+          text: content.text,
+        });
     } catch {
       setFailed(true);
     }
@@ -265,6 +275,11 @@ export function DeliveryCard({
       <div className="section-heading">
         <span className="status-mark succeeded" />
         Finished
+        {onOpenTask && (
+          <button type="button" className="text-link" onClick={() => onOpenTask(task)}>
+            Details
+          </button>
+        )}
       </div>
       <p className="delivery-outcome">{outcome}</p>
       {shot && proofUrl && (
@@ -272,7 +287,13 @@ export function DeliveryCard({
           type="button"
           className="delivery-visual"
           aria-label={`Open large: ${caption || 'picture'}`}
-          onClick={() => setOpened({ kind: 'image', title: caption || 'Picture', blob: proof })}
+          onClick={() =>
+            setOpened({
+              kind: 'image',
+              title: caption || 'Picture',
+              blob: proof,
+            })
+          }
         >
           <img className="picture" src={proofUrl} alt={displayText(shot.name)} />
         </button>
@@ -334,15 +355,23 @@ export function TaskDelivery({
   client,
   task,
   listings,
+  onOpenTask,
 }: {
   client: CloudClient;
   task: TaskView;
   listings: readonly ArtifactListing[];
+  onOpenTask?: (task: TaskView) => void;
 }) {
   const sources = useSources(client, task.taskId, `${task.state}:${task.progress.length}`);
   return (
     <>
-      <DeliveryCard client={client} task={task} listings={listings} sources={sources} />
+      <DeliveryCard
+        client={client}
+        task={task}
+        listings={listings}
+        sources={sources}
+        onOpenTask={onOpenTask}
+      />
       <SourcesStack client={client} taskId={task.taskId} sources={sources} />
     </>
   );

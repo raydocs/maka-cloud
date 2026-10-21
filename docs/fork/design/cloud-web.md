@@ -1,7 +1,7 @@
 # cloud-web: the look and the shell (T24)
 
 `packages/cloud-web` is the phone-first web app for one invite. This note records the pieces of T24 that
-are in place; Home decisions and Projects follow in later pieces.
+are in place; the Brief follows in a later piece.
 
 ## Look
 
@@ -28,8 +28,7 @@ code 7:1. A palette change that breaks reading fails that test; the code surface
 
 ## Shell
 
-Signed-in screens share a header (brand and a segmented navigation: Home, Chat, Settings; Projects arrives
-with piece 8). The navigation is full width on a phone and 44 px tall on touch screens.
+Signed-in screens share a header (brand and a segmented navigation: Home, Chat, Projects, Settings). The navigation is full width on a phone and 44 px tall on touch screens.
 
 - **Home** (`Home.tsx`), top to bottom: what waits on the person, the start sentence, what was done since they
   were last here, what runs next, the five latest conversations. A first visit lands here; someone with
@@ -75,10 +74,28 @@ result summary, one visual, a caption, and at most two one-tap actions (the pull
 - A running task shows one updating line, the latest `step: ` note the runner recorded from the agent's own
   todo list, that opens to the earlier steps. Terminal output stays inside the collapsed computer viewer.
 
+## Projects and the task page
+
+- **Projects** (`Projects.tsx`): the invite's projects from `GET /v1/projects`, each with its standing duties:
+  the trigger in words ("When CI fails on the default branch", "Every 2 h"), what it may do (reads only, opens
+  pull requests, merges when checks are green), what it may spend ("Up to $2.00 a run, $6.00 a day") and an
+  on/off switch (`PATCH /v1/projects/:id/duties/:id`). The switch never decides anything itself: a refusal
+  (`not_approved`, `duty_limit`) is said in words and the page reads the server again, so it always shows what
+  the server holds. A duty that is not approved has no switch; one the server turned off after repeated
+  failures says so. On a server with no duties engine the page says that plainly. There is no route that lists a
+  project's tasks, so the page lists duties only.
+- **Task page** (`TaskPage.tsx`): a dense opaque page opened from a result card (Details) or a "since you were
+  last here" line on Home, and closed with Back to where it came from. Home and Chat stay mounted underneath, so
+  coming back is not a new visit and the chat keeps its place. It shows the outcome the agent reported (done,
+  not done, known issues, its own confidence), the review (the supervisor's own sentence from the task's inbox
+  item, never worked out here), the steps, the cost and the pull request, then reads each result once: the
+  diff with added and removed lines marked, reports as plain text, pictures (only those the server sniffed),
+  links, and the pages the task opened as the same stack as in Chat.
+
 ## Tests
 
 `tests/shell.test.tsx` (theme storage, navigation, Settings, landing), `tests/home.test.tsx` (decisions, answers once, stale refresh, since last visit, next runs, answer ids), Playwright `tests/e2e/home.spec.ts` (a real supervisor: the card, one answer for a double tap, readable button, another invite's items never shown), `tests/contrast.test.ts`,
-`tests/delivery.test.tsx` (card, viewer, stack, step line, text is text), Playwright `tests/e2e/delivery.spec.ts`
+`tests/projects.test.tsx` (duty wording, switch, refusal, no switch before approval, no duties engine, verdict choice, task page contents), `tests/delivery.test.tsx` (card, viewer, stack, step line, text is text), Playwright `tests/e2e/delivery.spec.ts`
 (a real server with a fake preview network: card, stack, viewer covering the screen, every way back, a diff
 on an opaque surface, another invite's 404, no request to a task's site) and `tests/e2e/look.spec.ts` (desktop and phone width: no sideways scroll on Home, Chat and
 Settings, the cards compute a blur and a translucent fill, a diff computes an opaque fill with no blur, the

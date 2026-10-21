@@ -74,7 +74,7 @@ test('on a phone every navigation target is large enough to tap', async ({
 }, info) => {
   test.skip(info.project.name !== 'phone', 'phone only');
   await signIn(page, request);
-  for (const name of ['Home', 'Chat', 'Settings'] as const) {
+  for (const name of ['Home', 'Chat', 'Projects', 'Settings'] as const) {
     const box = await page
       .getByRole('navigation', { name: 'Sections' })
       .getByRole('button', { name, exact: true })

@@ -20,6 +20,7 @@ export interface DoneEntry {
   outcome: string;
   costUsd: number | undefined;
   finishedAt: number;
+  task: TaskView;
 }
 
 /** What finished since `since`: top-level tasks only (a subtask is part of its parent's story), newest first. */
@@ -46,6 +47,7 @@ export function doneSince(
         outcome,
         costUsd: task.costUsd,
         finishedAt: task.finishedAt,
+        task,
       });
     }
   }
@@ -148,19 +150,25 @@ export function Home({
   conversations,
   onStarted,
   onOpen,
+  onOpenTask,
   now = Date.now,
 }: {
   client: CloudClient;
   conversations: Conversation[];
   onStarted: (conversation: Conversation) => void;
   onOpen: (conversationId: string) => void;
+  /** Opens a finished task's own page; without it a finished line opens its conversation. */
+  onOpenTask?: (task: TaskView) => void;
   now?: () => number;
 }) {
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
   // A retry after a failed post reuses the conversation and the message id.
-  const attempt = useRef<{ conversationId: string; clientMessageId: string } | null>(null);
+  const attempt = useRef<{
+    conversationId: string;
+    clientMessageId: string;
+  } | null>(null);
 
   const [items, setItems] = useState<Record<string, InboxItem>>({});
   const [busy, setBusy] = useState(false);
@@ -333,7 +341,11 @@ export function Home({
                 const { conversationId, clientMessageId } = attempt.current;
                 await client.postMessage(conversationId, draft.trim(), clientMessageId);
                 attempt.current = null;
-                onStarted({ conversationId, title: null, createdAt: Date.now() });
+                onStarted({
+                  conversationId,
+                  title: null,
+                  createdAt: Date.now(),
+                });
               } catch (failure) {
                 setStartError(errorText(failure));
                 setStarting(false);
@@ -388,7 +400,9 @@ export function Home({
                   <button
                     type="button"
                     className="done-line"
-                    onClick={() => onOpen(entry.conversationId)}
+                    onClick={() =>
+                      onOpenTask ? onOpenTask(entry.task) : onOpen(entry.conversationId)
+                    }
                   >
                     <span
                       className={`status-mark ${entry.state === 'succeeded' ? 'succeeded' : 'failed'}`}

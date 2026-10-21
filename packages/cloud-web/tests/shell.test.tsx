@@ -80,7 +80,7 @@ test('the navigation marks the open section and moves between them', () => {
   const names = within(nav)
     .getAllByRole('button')
     .map((button) => button.textContent);
-  expect(names).toEqual(['Home', 'Chat', 'Settings']);
+  expect(names).toEqual(['Home', 'Chat', 'Projects', 'Settings']);
   expect(within(nav).getByRole('button', { name: 'Chat' }).getAttribute('aria-current')).toBe(
     'page',
   );

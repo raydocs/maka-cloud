@@ -62,9 +62,11 @@ test('Home leads with what waits on you, answers it once, and says what was done
   });
   expect(((await items.json()) as { items: unknown[] }).items).toHaveLength(1);
 
-  // Tapping a result opens its conversation.
+  // Tapping a result opens the task's own page, and Back returns to Home.
   await since.getByRole('button', { name: /Weekly report/u }).click();
-  await expect(page.getByRole('region', { name: 'Conversation' })).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Task: Weekly report' })).toBeVisible();
+  await page.getByRole('button', { name: '← Back' }).click();
+  await expect(page.getByRole('region', { name: 'Since you were last here' })).toBeVisible();
 });
 
 test('Home keeps nothing of another invite’s decisions', async ({ page, request }) => {

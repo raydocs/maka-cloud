@@ -240,6 +240,14 @@ export class CloudClient {
     const result = await this.request<{ projects: ProjectView[] }>(routes.projects, {}, 'projects');
     return Array.isArray(result.projects) ? result.projects : [];
   }
+  /** Turns a duty on or off. 409 `not_approved` (the owner has not approved it) and `duty_limit` are refusals. */
+  setDutyState(projectId: string, dutyId: string, state: 'active' | 'off') {
+    return this.request<{ state: string }>(
+      `${routes.projects}/${encodeURIComponent(projectId)}/duties/${encodeURIComponent(dutyId)}`,
+      { method: 'PATCH', body: JSON.stringify({ state }) },
+      'projects',
+    );
+  }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {
     const bytes = new TextEncoder().encode(this.token);

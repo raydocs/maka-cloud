@@ -22,6 +22,8 @@ const ERROR_TEXT: Record<string, string> = {
   stopped: 'The inbox is restarting. Try again in a moment.',
   invalid_endpoint: 'This browser’s notification service is not accepted by this server.',
   invalid_keys: 'This browser’s notification keys were not accepted.',
+  not_approved: 'You have not approved this duty yet. Decide it from Home first.',
+  duty_limit: 'You can have up to 20 duties on at once. Turn one off first.',
   too_many_subscriptions: 'Notifications are already on for as many devices as are allowed.',
 };
 

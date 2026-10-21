@@ -19,7 +19,9 @@ import { inboxAnswerer } from './inboxAnswer';
 import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
-import { displayJson, displayText, dollars, publicLink, stepsOf } from './presentation';
+import { displayJson, displayText, dollars, publicLink, stepsOf, taskLabel } from './presentation';
+import { Projects } from './Projects';
+import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
 import {
   applyEvent,
@@ -108,19 +110,6 @@ export function QuestionCard({
       )}
     </section>
   );
-}
-
-function taskLabel(task: TaskView): string {
-  if (task.cancelRequested && !TERMINAL.has(task.state)) return 'Cancelling…';
-  if (task.state === 'running' && task.pauseRequested) return 'Pausing…';
-  return {
-    queued: 'Queued',
-    running: 'In progress',
-    paused: 'Paused',
-    succeeded: 'Finished',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-  }[task.state];
 }
 
 /** The one updating line of a running task, and the steps behind it when it is opened. */
@@ -312,7 +301,10 @@ function ArtifactList({
                 onClick={() =>
                   void act('artifact', async () => {
                     const result = await client.readArtifact(taskId, listing.index);
-                    setContent((previous) => ({ ...previous, [listing.index]: result }));
+                    setContent((previous) => ({
+                      ...previous,
+                      [listing.index]: result,
+                    }));
                   })
                 }
               />
@@ -349,9 +341,11 @@ export function ConversationView({
   client,
   conversation,
   picker,
+  onOpenTask,
 }: {
   client: CloudClient;
   conversation: Conversation;
+  onOpenTask?: (task: TaskView) => void;
   /** The conversation chooser, shown in the heading (the app owns which conversation is open). */
   picker?: ReactNode;
 }) {
@@ -417,7 +411,10 @@ export function ConversationView({
       client
         .listArtifacts(task.taskId)
         .then(({ artifacts: listings }) =>
-          setArtifacts((previous) => ({ ...previous, [task.taskId]: { listings } })),
+          setArtifacts((previous) => ({
+            ...previous,
+            [task.taskId]: { listings },
+          })),
         )
         .catch(() => {
           setArtifacts((previous) => ({
@@ -506,6 +503,7 @@ export function ConversationView({
               client={client}
               task={task}
               listings={artifacts[task.taskId]?.listings ?? []}
+              onOpenTask={onOpenTask}
             />
           ))}
         {questions.map((question) => (
@@ -524,7 +522,10 @@ export function ConversationView({
                 });
                 setState((previous) => ({
                   ...previous,
-                  answers: { ...previous.answers, [question.questionId]: optionId },
+                  answers: {
+                    ...previous.answers,
+                    [question.questionId]: optionId,
+                  },
                 }));
               })
             }
@@ -765,10 +766,11 @@ export function Settings({
   );
 }
 
-type View = 'home' | 'chat' | 'settings';
+type View = 'home' | 'chat' | 'projects' | 'settings';
 const VIEWS: ReadonlyArray<{ view: View; label: string }> = [
   { view: 'home', label: 'Home' },
   { view: 'chat', label: 'Chat' },
+  { view: 'projects', label: 'Projects' },
   { view: 'settings', label: 'Settings' },
 ];
 
@@ -815,6 +817,8 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   } | null>(null);
   const [chosen, setChosen] = useState('');
   const [view, setView] = useState<View>('home');
+  // The task page opens over whichever section the person came from and goes back to it.
+  const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const connect = async (token: string) => {
@@ -854,55 +858,82 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   };
   const selected = session?.conversations.find((c) => c.conversationId === chosen);
   return session ? (
-    <Shell view={view} onView={setView}>
+    <Shell
+      view={taskPage ? taskPage.from : view}
+      onView={(next) => {
+        setTaskPage(undefined);
+        setView(next);
+      }}
+    >
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
-      {view === 'home' && (
-        <Home
+      {taskPage && (
+        <TaskPage
           client={session.client}
-          conversations={session.conversations}
-          onStarted={(conversation) => {
-            setSession({ ...session, conversations: [...session.conversations, conversation] });
-            setChosen(conversation.conversationId);
-            setView('chat');
-          }}
-          onOpen={(conversationId) => {
-            setChosen(conversationId);
-            setView('chat');
-          }}
+          task={taskPage.task}
+          onBack={() => setTaskPage(undefined)}
         />
       )}
-      {view === 'chat' &&
-        (selected ? (
-          <ConversationView
-            key={chosen}
+      {view === 'home' && (
+        // Kept while a task page is open, so coming back is not a new visit.
+        <div hidden={taskPage !== undefined}>
+          <Home
             client={session.client}
-            conversation={selected}
-            picker={
-              <select
-                aria-label="Select conversation"
-                value={chosen}
-                onChange={(e) => setChosen(e.target.value)}
-              >
-                {session.conversations.map((c) => (
-                  <option key={c.conversationId} value={c.conversationId}>
-                    {displayText(c.title ?? 'Untitled conversation')}
-                  </option>
-                ))}
-              </select>
-            }
+            conversations={session.conversations}
+            onStarted={(conversation) => {
+              setSession({
+                ...session,
+                conversations: [...session.conversations, conversation],
+              });
+              setChosen(conversation.conversationId);
+              setView('chat');
+            }}
+            onOpen={(conversationId) => {
+              setChosen(conversationId);
+              setView('chat');
+            }}
+            onOpenTask={(task) => setTaskPage({ task, from: 'home' })}
           />
-        ) : (
-          <section className="card section-card" aria-label="No conversation">
-            <h2>No conversation open</h2>
-            <p className="muted">Start one from Home.</p>
-            <Button label="Go to Home" variant="secondary" onClick={() => setView('home')} />
-          </section>
-        ))}
-      {view === 'settings' && <Settings client={session.client} onDisconnect={disconnect} />}
+        </div>
+      )}
+      {view === 'chat' && (
+        <div hidden={taskPage !== undefined}>
+          {selected ? (
+            <ConversationView
+              key={chosen}
+              client={session.client}
+              conversation={selected}
+              onOpenTask={(task) => setTaskPage({ task, from: 'chat' })}
+              picker={
+                <select
+                  aria-label="Select conversation"
+                  value={chosen}
+                  onChange={(e) => setChosen(e.target.value)}
+                >
+                  {session.conversations.map((c) => (
+                    <option key={c.conversationId} value={c.conversationId}>
+                      {displayText(c.title ?? 'Untitled conversation')}
+                    </option>
+                  ))}
+                </select>
+              }
+            />
+          ) : (
+            <section className="card section-card" aria-label="No conversation">
+              <h2>No conversation open</h2>
+              <p className="muted">Start one from Home.</p>
+              <Button label="Go to Home" variant="secondary" onClick={() => setView('home')} />
+            </section>
+          )}
+        </div>
+      )}
+      {!taskPage && view === 'projects' && <Projects client={session.client} />}
+      {!taskPage && view === 'settings' && (
+        <Settings client={session.client} onDisconnect={disconnect} />
+      )}
     </Shell>
   ) : (
     <main className="welcome">

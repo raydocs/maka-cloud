@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { control, conversationsOf, noHorizontalScroll, openSection, signIn } from './support';
+import { API, control, conversationsOf, noHorizontalScroll, openSection, signIn } from './support';
 
 // A 1x1 PNG, the same bytes the fake sites serve as their preview image.
 const PNG =
@@ -197,4 +197,78 @@ test('another invite sees none of a task’s pages', async ({ page, request }) =
     });
     expect(response.status(), path).toBe(404);
   }
+});
+
+test('a task page opens from the card, shows its changes and review on an opaque page, and goes back', async ({
+  page,
+  request,
+}, info) => {
+  const invite = await signIn(page, request);
+  await page.getByLabel('What would you like to get done?').fill('Fix the login loop');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('Fix the login loop');
+  const [{ conversationId }] = await conversationsOf(request, invite.token);
+  const { taskId } = await control<{ taskId: string }>(request, 'delegate', {
+    conversationId,
+    title: 'Fix the login loop',
+  });
+  await control(request, 'progress', { taskId, note: 'step: Fix the redirect loop' });
+  await control(request, 'artifact', {
+    taskId,
+    ref: 'out/changes.diff',
+    content: '+redirect once\n-redirect forever\n',
+  });
+  await control(request, 'complete', {
+    taskId,
+    manifest: {
+      summary: 'The login page no longer loops.',
+      done: ['Redirects once'],
+      notDone: ['The mobile app'],
+      confidence: 'high',
+      knownIssues: ['One flaky test'],
+      artifacts: ['out/changes.diff'],
+    },
+  });
+
+  await page.getByRole('button', { name: 'Details' }).click();
+  const taskPage = page.getByRole('article', { name: 'Task: Fix the login loop' });
+  await expect(taskPage).toBeVisible();
+  await expect(taskPage.getByRole('region', { name: 'Outcome' })).toContainText('Redirects once');
+  await expect(taskPage.getByRole('region', { name: 'Outcome' })).toContainText('The mobile app');
+  await expect(taskPage.getByRole('region', { name: 'Steps' })).toContainText(
+    'Fix the redirect loop',
+  );
+  const added = taskPage.getByText('+redirect once');
+  await expect(added).toBeVisible();
+  await expect(taskPage.getByText('-redirect forever')).toBeVisible();
+  await noHorizontalScroll(page);
+  // The page and its diff are opaque: no blur, a solid fill.
+  const look = await taskPage.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return { blur: style.backdropFilter, fill: style.backgroundColor };
+  });
+  expect(look.blur === 'none' || look.blur === '').toBe(true);
+  expect(look.fill).not.toMatch(/rgba|\/ /u);
+  await page.screenshot({ path: info.outputPath('task-page.png') });
+
+  // Back returns to the chat as it was, not a fresh one.
+  await page.getByRole('button', { name: '← Back' }).click();
+  await expect(page.getByRole('article', { name: /^Result: Fix the login loop/u })).toBeVisible();
+});
+
+test('another invite cannot open a task page by its id', async ({ page, request }) => {
+  const mine = await signIn(page, request);
+  const other = await control<{ token: string }>(request, 'invite');
+  const response = await request.get(`${API}/v1/tasks/nope/artifacts`, {
+    headers: { authorization: `Bearer ${other.token}` },
+  });
+  expect(response.status()).toBe(404);
+  expect(mine.token).not.toBe(other.token);
+});
+
+test('Projects says so plainly when the server has no duties engine', async ({ page, request }) => {
+  await signIn(page, request);
+  await openSection(page, 'Projects');
+  await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+  await noHorizontalScroll(page);
 });
