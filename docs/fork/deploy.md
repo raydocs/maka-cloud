@@ -513,6 +513,12 @@ server quotes them and hands the whole command to the agent account itself, so n
 command that runs as the sandbox user. The pinned CLI install, which writes the sandbox user's own
 `~/.maka-cli`, is its own method and the only run that stays the sandbox user.
 
+Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
+test commands run as the agent account (the stop that ends them runs as root, since the processes are
+the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
+closed to everyone else, and the brief is written in the task directory and renamed into `handoff/`,
+so a link the agent leaves there is never followed.
+
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
 itself off; and at most 3 runs in a row are woken by the checks of their own

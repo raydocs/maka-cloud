@@ -75,13 +75,25 @@ group_is_run() {
 }
 `;
 
-/** stdin: the brief, when `MAKA_WRITE_BRIEF` is set. It goes to `handoff/brief.md`. */
+/**
+ * stdin: the brief, when `MAKA_WRITE_BRIEF` is set. It goes to `handoff/brief.md`. This runs as the
+ * sandbox user while the agent can write `handoff/`, so nothing is opened, changed or created
+ * there by a name the agent could have planted a link under: the file is written whole in the task
+ * directory (which only the sandbox user writes), given the agent's group there, and renamed into
+ * place (a rename replaces a link and never follows one).
+ */
 export const PREPARE_SCRIPT = `set -eu
 umask 077
 mkdir -p "$MAKA_DIR/workspace" "$MAKA_DIR/handoff"
 if [ -n "\${MAKA_WRITE_BRIEF:-}" ]; then
-  cat > "$MAKA_DIR/handoff/brief.md.tmp"
-  mv -f "$MAKA_DIR/handoff/brief.md.tmp" "$MAKA_DIR/handoff/brief.md"
+  tmp="$MAKA_DIR/.brief.tmp"
+  rm -rf -- "$tmp"
+  ( set -C; cat > "$tmp" )
+  if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+    chgrp "$MAKA_AGENT_GROUP" "$tmp"
+    chmod 640 "$tmp"
+  fi
+  mv -fT -- "$tmp" "$MAKA_DIR/handoff/brief.md"
 fi
 `;
 
@@ -443,10 +455,21 @@ fi
 
 export const TOOL_ABORT_SCRIPT = `rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`;
 
-/** True (exit 0) when the CLI at the pinned version is installed. */
+/**
+ * True (exit 0) when the CLI at the pinned version is installed. This runs the CLI as the sandbox
+ * user, so it first refuses a CLI that is not wholly the sandbox user's own and closed to everyone
+ * else (nothing under `~/.maka-cli` owned by another user, or writable by a group or the world),
+ * and one that is not under `~/.maka-cli` at all: whatever the agent could have rewritten is never
+ * run as the sandbox user. A refused CLI counts as not installed, and the install replaces it.
+ */
 export function cliCheckScript(binary: string): string {
   return `export PATH="$HOME/.maka-cli/bin:$PATH"
-[ -f "$MAKA_MARKER" ] && command -v ${binary} >/dev/null 2>&1 && ${binary} --version 2>&1 | grep -qF -- "$MAKA_VERSION"`;
+[ -f "$MAKA_MARKER" ] && command -v ${binary} >/dev/null 2>&1 || exit 1
+root=$(readlink -f "$HOME/.maka-cli") || exit 1
+exe=$(readlink -f "$(command -v ${binary})") || exit 1
+case "$exe" in "$root"/*) ;; *) exit 1 ;; esac
+[ -z "$(find "$root" "$HOME/.maka-cli" \\( ! -user "$(id -un)" -o \\( ! -type l -a -perm /022 \\) \\) -print -quit 2>/dev/null)" ] || exit 1
+${binary} --version 2>&1 | grep -qF -- "$MAKA_VERSION"`;
 }
 
 /**

@@ -181,7 +181,7 @@ test('the agent account reads the brief and writes the result in the handoff dir
 }, async (t) => {
   const { machine, h } = await boxes(t);
   const dir = 'tsk_agent_handoff';
-  await machine.prepare(dir, '# the brief\n');
+  await machine.prepare(dir, '# the brief\n', undefined, CHANNEL.group);
   await machine.prepareAgent(dir, CHANNEL.group);
   const taskDir = machine.taskDir(dir);
   const asAgentRun = (script: string) =>
@@ -216,6 +216,35 @@ test('the agent account reads the brief and writes the result in the handoff dir
   });
   await assert.rejects(fs.stat(join(taskDir, 'handoff', 'result.json')));
   assert.ok(h.root);
+});
+
+test('links the agent plants in handoff/ are not followed when the next brief is written', {
+  skip,
+}, async (t) => {
+  const { machine, h } = await boxes(t);
+  const dir = 'tsk_agent_links';
+  await machine.prepare(dir, 'first\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  const taskDir = machine.taskDir(dir);
+  const victim = join(h.tmp, 'victim.txt');
+  await fs.writeFile(victim, "the sandbox user's file\n", { mode: 0o600 });
+  const asAgentRun = (script: string) =>
+    spawnSync('bash', ['-c', asAgent(`sh -c ${JSON.stringify(script)}`, CHANNEL)], {
+      env: { PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+    });
+  // Another account's links, aimed at a file only the sandbox user owns.
+  assert.equal(
+    asAgentRun(
+      `ln -s ${victim} ${taskDir}/handoff/brief.md.tmp && rm -f ${taskDir}/handoff/brief.md && ln -s ${victim} ${taskDir}/handoff/brief.md`,
+    ).status,
+    0,
+  );
+  await machine.prepare(dir, 'second\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  assert.equal(await fs.readFile(victim, 'utf8'), "the sandbox user's file\n");
+  assert.equal((await fs.stat(victim)).mode & 0o777, 0o600);
+  assert.equal(asAgentRun(`cat ${taskDir}/handoff/brief.md`).stdout, 'second\n');
 });
 
 test('a conversation put back by the sandbox user is read and extended by the agent, and read again by the sandbox user', {

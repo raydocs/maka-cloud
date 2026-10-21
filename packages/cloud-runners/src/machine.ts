@@ -230,10 +230,18 @@ export class RemoteMachine {
   }
 
   /** Creates the task directory and, when given, writes the brief into it. */
-  async prepare(dirName: string, brief?: string, signal?: AbortSignal): Promise<void> {
+  async prepare(
+    dirName: string,
+    brief?: string,
+    signal?: AbortSignal,
+    agentGroup?: string,
+  ): Promise<void> {
     await this.execOk(PREPARE_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
+        ...(agentGroup === undefined
+          ? {}
+          : { MAKA_AGENT_GROUP: assertSafeId('group', agentGroup) }),
         ...(brief === undefined ? {} : { MAKA_WRITE_BRIEF: '1' }),
       },
       ...(brief === undefined ? {} : { stdin: brief }),
