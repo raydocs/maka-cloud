@@ -1,8 +1,9 @@
 # The go-live rehearsal (docs/fork/deploy.md, deploy/rehearsal/README.md): builds the images
 # from deploy/Dockerfile and brings the stack up under Compose behind Caddy, with Caddy's own
 # certificate authority on app.localhost, mcp.localhost and models.localhost, against stand-ins for
-# the model and the sandbox. No keys, no real model, no real sandbox, no outbound call but the
-# image builds' package downloads. Runs on every pull request and push to main, and once a day.
+# the model and the sandbox, then runs the whole flow on it (deploy/rehearsal/flow.mjs). No keys, no
+# real model, no real sandbox, no outbound call but the image builds' package downloads. Runs on every pull
+# request and push to main, and once a day.
 name: Fork deploy rehearsal
 
 on:
@@ -35,6 +36,20 @@ jobs:
           export MAKA_REHEARSAL_DIR="$RUNNER_TEMP/rehearsal"
           deploy/rehearsal/up.sh
           echo "MAKA_REHEARSAL_DIR=$MAKA_REHEARSAL_DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # Sign in with the invite, a task and its result card, one approval answered once, a restart
+      # in the middle of a task, a backup and a restore. The flow only speaks HTTP and runs the
+      # one ops script, so the same step can run against a host that is not this one.
+      - name: Run the flow
+        run: |
+          set -a
+          . "$MAKA_REHEARSAL_DIR/env"
+          set +a
+          node deploy/rehearsal/flow.mjs
 
       - name: Show the logs of the stack
         if: failure()

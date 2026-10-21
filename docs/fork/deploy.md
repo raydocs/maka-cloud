@@ -230,6 +230,17 @@ Under Compose, run the commands below as
 deploy/compose.yaml stop maka-cloud` first. Copy the `maka-backups` volume off
 the host as the backup section says.
 
+## Rehearse it first
+
+`deploy/rehearsal/` brings the same images, Compose file and Caddyfile up with stand-ins for the model
+and the sandbox, on `app.localhost`, `mcp.localhost` and `models.localhost` with Caddy's own
+certificate authority, and runs the whole first-user flow on them: sign in with an invite, a task and
+its result card, an approval answered once, a restart in the middle of a task, a backup and a restore.
+CI runs it on every pull request and daily (`.github/workflows/fork-deploy-rehearsal.yml`); to run it
+by hand, see `deploy/rehearsal/README.md`. It costs nothing and uses no key. What it does not cover is
+the real model, the real sandbox, GitHub, a real certificate and a real domain: the first live run
+still needs everything under "First live run: what you provide".
+
 ## The TLS proxy
 
 Three public names, all with certificates: one for the app and API, one for the

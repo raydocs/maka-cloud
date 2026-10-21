@@ -83,6 +83,7 @@ MAKA_REHEARSAL_TOKEN_FILE=$work/token
 MAKA_REHEARSAL_CA=$work/ca.crt
 MAKA_REHEARSAL_RESOLVE=127.0.0.1
 MAKA_REHEARSAL_CONTROL_URL=http://127.0.0.1:9102
+MAKA_REHEARSAL_OPS=$here/ops.sh
 MAKA_REHEARSAL_DIR=$work
 ENV
 echo "the stack is up behind Caddy: https://$app (settings in $work/env)"
