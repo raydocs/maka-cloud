@@ -114,3 +114,55 @@ test('a workspace without the control repository is refused, not read through it
   const out = run(CHANGES_SCRIPT, { MAKA_DIR: dir, MAKA_BASE: base });
   assert.match(out, /^ERR control repository missing$/mu, out);
 });
+
+test('a repository inside the checkout is refused before git runs a child in it', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  const marker = join(tmp, 'ran-in-the-nested-repository');
+  const script = join(tmp, 'monitor.sh');
+  await fs.writeFile(script, `#!/bin/sh\n: > "${marker}"\n`, { mode: 0o755 });
+  // A gitlink in the index makes git look inside the directory, with the agent's own configuration.
+  const nested = join(ws, 'lib', 'sub');
+  await fs.mkdir(nested, { recursive: true });
+  git(nested, 'init', '-q');
+  await fs.writeFile(join(nested, 'f'), 'x\n');
+  git(nested, 'add', '-A');
+  git(nested, 'commit', '-q', '-m', 'inner');
+  await fs.appendFile(join(nested, '.git', 'config'), `[core]\n\tfsmonitor = ${script}\n`);
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+  for (const [name, out] of [
+    ['changes', run(CHANGES_SCRIPT, env)],
+    ['sample', run(SAMPLE_SCRIPT, { MAKA_DIR: dir, MAKA_MAX_FILES: '100' })],
+    ['revert', run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' })],
+  ] as const) {
+    assert.match(out, /^ERR nested repository .*lib\/sub\/\.git$/mu, `${name}: ${out}`);
+  }
+  assert.equal(existsSync(marker), false, 'a program of the nested repository ran');
+});
+
+test('a directory the agent swapped for a symlink is not removed or written through', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  const outside = join(tmp, 'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(join(outside, 'a.txt'), 'not the checkout\n');
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+
+  // Before the check: lib/ is a link to somewhere else, and lib/a.txt would be "put back" through it.
+  await fs.rm(join(ws, 'lib'), { recursive: true });
+  await fs.symlink(outside, join(ws, 'lib'));
+  const refused = run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' });
+  assert.match(refused, /^UNSAFE_PATH lib\/a\.txt$/mu, refused);
+  assert.equal(await fs.readFile(join(outside, 'a.txt'), 'utf8'), 'not the checkout\n');
+  run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir });
+
+  // After the check: the restore finds a link where the backup's directory was.
+  await fs.rm(join(ws, 'lib'));
+  await fs.mkdir(join(ws, 'lib'));
+  await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');
+  const reverted = run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' });
+  assert.match(reverted, /^REVERTED \d+$/mu, reverted);
+  await fs.rm(join(ws, 'lib'), { recursive: true });
+  await fs.symlink(outside, join(ws, 'lib'));
+  const out = run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir });
+  assert.match(out, /^RESTORE_FAILED$/mu, out);
+  assert.equal(await fs.readFile(join(outside, 'a.txt'), 'utf8'), 'not the checkout\n');
+});

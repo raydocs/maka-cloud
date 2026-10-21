@@ -13,7 +13,17 @@
 const GIT_FN = String.raw`
 export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PAGER
-g() { git --git-dir="$MAKA_DIR/control.git" --work-tree="$MAKA_DIR/workspace" -c safe.directory='*' -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null -c core.quotepath=off -c advice.detachedHead=false "$@"; }
+g() { git --git-dir="$MAKA_DIR/control.git" --work-tree="$MAKA_DIR/workspace" -c safe.directory='*' -c diff.ignoreSubmodules=all -c status.submoduleSummary=false -c submodule.recurse=false -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null -c core.quotepath=off -c advice.detachedHead=false "$@"; }
+`;
+
+/**
+ * A repository inside the workspace (a populated submodule, a `git init` in a directory) has a
+ * `.git` the agent owns, and git runs a child git in it for the directories it knows as gitlinks:
+ * that child would read the agent's configuration and attributes. None is allowed while the runner
+ * looks at the tree.
+ */
+const NO_NESTED_REPO = String.raw`nested=$(find "$MAKA_DIR/workspace" -mindepth 2 -name .git -print -quit 2>/dev/null)
+[ -z "$nested" ] || { echo "ERR nested repository $nested"; exit 0; }
 `;
 
 /** What every script that reads the repository first checks: the control repository was made at the clone. */
@@ -56,8 +66,8 @@ GIT_INDEX_FILE="$ccl/index" git --git-dir="$ccl" --work-tree="$tmp" -c core.hook
 # agent's group (when there is one) before the agent exists, so no file is swapped underneath.
 if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
   chgrp -R -h -- "$MAKA_AGENT_GROUP" "$tmp" || { echo CLONE_FAILED; exit 0; }
-  find "$tmp" -type d -exec chmod 2770 {} + || { echo CLONE_FAILED; exit 0; }
   find "$tmp" ! -type d ! -type l -exec chmod g+rwX {} + || { echo CLONE_FAILED; exit 0; }
+  find "$tmp" -type d -exec chmod 2770 {} + || { echo CLONE_FAILED; exit 0; }
 fi
 cd "$MAKA_DIR" || exit 1
 rm -rf -- "$ws" "$cg"
@@ -205,9 +215,9 @@ export const SAMPLE_SCRIPT = `set -u
 ${GIT_FN}
 # Lets git keep the control repository's index fresh, so a sample hashes what changed, not every file.
 export GIT_OPTIONAL_LOCKS=1
-[ -d "$MAKA_DIR/control.git" ] || exit 0
+[ -d "$MAKA_DIR/control.git" ] || { echo "ERR control repository missing"; exit 0; }
 cd "$MAKA_DIR/workspace" 2>/dev/null || exit 0
-g status --porcelain=v1 -z --untracked-files=all --no-renames 2>/dev/null | head -c 500000 \\
+${NO_NESTED_REPO}g status --porcelain=v1 --ignore-submodules=all -z --untracked-files=all --no-renames 2>/dev/null | head -c 500000 \\
   | while IFS= read -r -d '' entry; do
     p="\${entry:3}"
     if [ -L "$p" ]; then echo "L $p"
@@ -217,6 +227,20 @@ g status --porcelain=v1 -z --untracked-files=all --no-renames 2>/dev/null | head
   done | head -n "$MAKA_MAX_FILES"
 `;
 
+/**
+ * `inside <path>` succeeds when the directory holding `<path>` resolves, symlinks followed, to
+ * somewhere in the real workspace (`$wsreal`). The agent can swap a directory for a symlink, and a
+ * script running as the sandbox user must not remove or write through it.
+ */
+const INSIDE_FN = String.raw`
+inside() {
+  local d
+  d=$(realpath -m -- "$(dirname -- "$1")") || return 1
+  case "$d/" in "$wsreal"/*) return 0 ;; esac
+  return 1
+}
+`;
+
 /** Lists, NUL-separated, every path that differs from the base commit (untracked included, ignored not). */
 const CHANGED_PATHS_FN = String.raw`
 changed_paths() {
@@ -224,7 +248,7 @@ changed_paths() {
   rm -f -- "$idx"
   GIT_INDEX_FILE="$idx" g read-tree "$MAKA_BASE" || return 1
   GIT_INDEX_FILE="$idx" g add -A . || return 1
-  GIT_INDEX_FILE="$idx" g diff --cached --no-renames --name-only -z "$MAKA_BASE"
+  GIT_INDEX_FILE="$idx" g diff --cached --ignore-submodules=all --no-renames --name-only -z "$MAKA_BASE"
   local rc=$?
   rm -f -- "$idx"
   return $rc
@@ -237,17 +261,24 @@ changed_paths() {
  * \`BASE_RESTORE_SCRIPT\` can put the change back. A leftover of an interrupted check is
  * restored first. Prints \`REVERTED <count>\`.
  */
-const RESTORE_FN = `
+const RESTORE_FN = `${INSIDE_FN}
 restore() {
   [ -d "$bk" ] || return 0
   if [ -f "$bk/reverted" ]; then
-    while IFS= read -r -d '' p; do rm -rf -- "$ws/$p"; done < "$bk/reverted"
+    local p
+    while IFS= read -r -d '' p; do
+      inside "$ws/$p" || return 1
+      rm -rf -- "$ws/$p"
+    done < "$bk/reverted"
     # One file at a time: a copy of the whole backup tree would put the backup's own directories
     # (private to the sandbox user) over the workspace's, and the agent could not enter them.
     local f rel
     while IFS= read -r -d '' f; do
       rel="\${f#"$bk/files/"}"
-      mkdir -p -- "$(dirname -- "$ws/$rel")" && cp -a -- "$f" "$ws/$rel" || return 1
+      inside "$ws/$rel" || return 1
+      mkdir -p -- "$(dirname -- "$ws/$rel")" && cp -a --remove-destination -- "$f" "$ws/$rel" || return 1
+      # The backup kept the file's own mode; the agent writes the file as it did before the check.
+      [ -L "$ws/$rel" ] || chmod g+rw -- "$ws/$rel" || return 1
     done < <(find "$bk/files" -mindepth 1 ! -type d -print0)
   fi
   rm -rf -- "$bk"
@@ -258,7 +289,8 @@ export const BASE_REVERT_SCRIPT = `set -u
 # What is put back is the agent's to read and write too (the directories hand their group down).
 umask 007
 ${GIT_FN}${CHANGED_PATHS_FN}${RESTORE_FN}
-${NEED_CONTROL}ws="$MAKA_DIR/workspace"
+${NEED_CONTROL}${NO_NESTED_REPO}ws="$MAKA_DIR/workspace"
+wsreal=$(realpath -- "$ws") || exit 1
 bk="$MAKA_DIR/base-check"
 cd "$ws" || exit 1
 restore || { echo RESTORE_FAILED; exit 0; }
@@ -270,6 +302,7 @@ changed_paths > "$bk/paths" || { echo LIST_FAILED; exit 0; }
 count=0
 while IFS= read -r -d '' p; do
   [ -n "\${keep[$p]:-}" ] && continue
+  inside "$ws/$p" || { echo "UNSAFE_PATH $p"; exit 0; }
   if [ -e "$p" ] || [ -L "$p" ]; then
     mkdir -p "$bk/files/$(dirname -- "$p")" && cp -a -- "$p" "$bk/files/$p" || exit 1
   fi
@@ -278,9 +311,12 @@ while IFS= read -r -d '' p; do
 done < "$bk/paths"
 mv "$bk/reverted.tmp" "$bk/reverted"
 while IFS= read -r -d '' p; do
+  # An earlier path of this loop can have put a symlink where a directory of this one was.
+  inside "$ws/$p" || { echo "UNSAFE_PATH $p"; exit 0; }
   rm -rf -- "$p"
   mode=$(g ls-tree "$MAKA_BASE" -- "$p" | cut -d' ' -f1)
-  [ -n "$mode" ] || continue
+  # Only a file or a link has a base version to put back (a directory's files are listed on their own).
+  case "$mode" in 100644|100755|120000) ;; *) continue ;; esac
   mkdir -p "$(dirname -- "$p")"
   if [ "$mode" = 120000 ]; then ln -s "$(g cat-file blob "$MAKA_BASE:$p")" "$p"
   else
@@ -305,7 +341,8 @@ ${RESTORE_FN}
 ws="$MAKA_DIR/workspace"
 bk="$MAKA_DIR/base-check"
 [ -d "$ws" ] || { echo RESTORED; exit 0; }
-restore && echo RESTORED
+wsreal=$(realpath -- "$ws") || exit 1
+restore && echo RESTORED || echo RESTORE_FAILED
 `;
 
 /**
@@ -317,12 +354,12 @@ export const CHANGES_SCRIPT = `set -u
 umask 077
 ${GIT_FN}
 ${NEED_CONTROL}cd "$MAKA_DIR/workspace" || { echo "ERR workspace"; exit 0; }
-idx="$MAKA_DIR/changes.index"
+${NO_NESTED_REPO}idx="$MAKA_DIR/changes.index"
 rm -f -- "$idx"
 export GIT_INDEX_FILE="$idx"
 g read-tree "$MAKA_BASE" 2>/dev/null || { echo "ERR base"; exit 0; }
 g add -A . 2> "$MAKA_DIR/changes.err" || { echo "ERR add $(tail -c 300 "$MAKA_DIR/changes.err" | tr '\\n' ' ')"; exit 0; }
-raw=$(g diff --cached --raw -z --no-renames --abbrev=40 "$MAKA_BASE" | base64 -w0) || { echo "ERR diff"; exit 0; }
+raw=$(g diff --cached --ignore-submodules=all --raw -z --no-renames --abbrev=40 "$MAKA_BASE" | base64 -w0) || { echo "ERR diff"; exit 0; }
 echo "RAW $raw"
 g diff --cached --binary --no-renames --no-ext-diff --no-textconv "$MAKA_BASE" > "$MAKA_DIR/change.patch" || { echo "ERR patch"; exit 0; }
 echo "PATCH $(stat -c %s "$MAKA_DIR/change.patch")"

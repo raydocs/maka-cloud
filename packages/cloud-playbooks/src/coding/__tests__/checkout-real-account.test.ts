@@ -97,8 +97,9 @@ test('the agent account reads and writes the nested files of a checkout, and of 
   };
   assert.equal(await asAgent('cat lib/deep/a.txt'), 'one');
   assert.equal(await asAgent('lib/run.sh'), 'ran');
+  // A file made with a narrow umask is the agent's alone to write: it must stay so after a restore.
   await asAgent(
-    'echo two > lib/deep/a.txt && rm lib/deep/gone.txt && mkdir -p lib/new && echo n > lib/new/f',
+    'umask 022 && echo two > lib/deep/a.txt && rm lib/deep/gone.txt && mkdir -p lib/new && echo n > lib/new/f',
   );
 
   // The base check puts the base's files back: the agent reads and writes them, and the change returns.
@@ -127,4 +128,5 @@ test('the agent account reads and writes the nested files of a checkout, and of 
   assert.match(restored.stdout, /RESTORED/u, restored.stdout + restored.stderr);
   assert.equal(await asAgent('cat lib/deep/a.txt'), 'two');
   assert.equal(await asAgent('cat lib/new/f'), 'n');
+  assert.equal(await asAgent('echo more >> lib/new/f && echo written'), 'written');
 });
