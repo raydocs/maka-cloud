@@ -41,8 +41,13 @@ export function displayJson(value: unknown): string {
   );
 }
 
+// The address must read as `https://host…` with no user name, backslash or space in the host part.
+// This is checked on the text itself, because React Native's `URL` is a regular expression, not the
+// WHATWG parser: it does not normalise, and it finds no user name in `https:host@evil.example/`.
+const PLAIN_HTTPS = /^https:\/\/[^/?#@\\\s]+(?:[/?#]|$)/u;
+
 export function publicLink(value: string | undefined): string | undefined {
-  if (!value) return;
+  if (!value || !PLAIN_HTTPS.test(value)) return;
   try {
     const url = new URL(value);
     // Never expose a forbidden name via status bar, href, tooltip or a popup.

@@ -213,3 +213,42 @@ test('a secret that cannot be deleted is blanked, so signing out still removes a
   expect(api.session.status).toBe('out');
   expect(secure().get('maka.account')).toBe('');
 });
+
+test('a wrong token typed at the sign-in screen does not delete the account saved before', async () => {
+  const saved = JSON.stringify({ server: 'https://maka.example.com', token: 'good' });
+  secure().set('maka.account', saved);
+  // The saved account cannot be reached at first (offline), so the sign-in screen is shown.
+  fetchMock().mockImplementation(async () => {
+    throw new Error('offline');
+  });
+  await render(
+    <SessionProvider>
+      <Probe />
+    </SessionProvider>,
+  );
+  await screen.findByText('out');
+  expect(api.session.status === 'out' && api.session.saved).toBe(true);
+  // A mistyped token is refused by the server.
+  fetchMock().mockImplementation(async () => new Response('{}', { status: 401 }));
+  await act(async () => {
+    await expect(api.signIn('maka.example.com', 'typo')).rejects.toThrow();
+  });
+  expect(secure().get('maka.account')).toBe(saved);
+  // Connection is back: the saved account signs in without anyone typing a token.
+  fetchMock().mockImplementation(async () => conversations('a'));
+  await act(async () => {
+    api.retry();
+  });
+  await screen.findByText('in');
+});
+
+test('the token key of an earlier build is removed so no secret is left behind', async () => {
+  secure().set('maka.token', 'old-secret');
+  await render(
+    <SessionProvider>
+      <Probe />
+    </SessionProvider>,
+  );
+  await screen.findByText('out');
+  await waitFor(() => expect(secure().has('maka.token')).toBe(false));
+});

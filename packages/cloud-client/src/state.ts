@@ -63,12 +63,12 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
         },
       ];
       break;
-    case 'conductor.notice':
-      next.messages = [
-        ...state.messages,
-        { id: frame.data.noticeId ?? String(frame.id), role: 'notice', text: frame.data.text },
-      ];
+    case 'conductor.notice': {
+      const id = frame.data.noticeId ?? String(frame.id);
+      if (state.messages.some((m) => m.id === id)) return state;
+      next.messages = [...state.messages, { id, role: 'notice', text: frame.data.text }];
       break;
+    }
     case 'conductor.question':
       next.questions = { ...state.questions, [frame.data.questionId]: frame.data };
       break;

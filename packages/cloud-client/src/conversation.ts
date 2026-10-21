@@ -77,15 +77,20 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     );
   }
 
-  /** Opens the stream; the stream replays the conversation from the start. Safe to call again after `stop`. */
+  private lastEventId = 0;
+
+  /** Opens the stream; the first time it replays the conversation from the start. Safe to call again after `stop`: it resumes after the last event it applied. */
   start(): void {
     if (this.controller) return;
     const controller = new AbortController();
     this.controller = controller;
+    this.patch({ status: 'Connecting…' });
     this.client
       .subscribe(
         this.conversationId,
         (event) => {
+          // A restart after `stop` resumes here instead of replaying what is already folded in.
+          this.lastEventId = Math.max(this.lastEventId, event.id);
           if (event.data.conversationId !== this.conversationId) return;
           this.setState((previous) => applyEvent(previous, event));
           if (event.kind === 'task.event' && REFRESH_AFTER.has(event.data.event.type))
@@ -93,6 +98,7 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
         },
         (status) => this.patch({ status }),
         controller.signal,
+        this.lastEventId,
       )
       .catch(() => {
         if (!controller.signal.aborted)

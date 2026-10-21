@@ -41,9 +41,27 @@ function ImageResult({ name, blob }: { name: string; blob: Blob }) {
       source={{ uri }}
       accessibilityLabel={displayText(name)}
       resizeMode="contain"
+      resizeMethod="resize"
       style={{ width: '100%', aspectRatio: 16 / 10, borderRadius: radius.small }}
     />
   ) : null;
+}
+
+const REPORT_CHARS = 20_000;
+
+/** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
+function Report({ text }: { text: string }) {
+  const t = useTheme();
+  const [all, setAll] = useState(false);
+  const shown = all ? text : text.slice(0, REPORT_CHARS);
+  return (
+    <Solid>
+      <T kind="body" selectable style={{ color: t.solidInk }}>
+        {displayText(shown)}
+      </T>
+      {shown.length < text.length && <PillButton label="Show all" onPress={() => setAll(true)} />}
+    </Solid>
+  );
 }
 
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;
@@ -159,13 +177,7 @@ export function TaskDetails({
               <View key={i} style={{ gap: 6 }}>
                 <T kind="small">{displayText(result.name)}</T>
                 {result.kind === 'diff' && <DiffLines text={result.text} />}
-                {result.kind === 'report' && (
-                  <Solid>
-                    <T kind="body" selectable style={{ color: t.solidInk }}>
-                      {displayText(result.text)}
-                    </T>
-                  </Solid>
-                )}
+                {result.kind === 'report' && <Report text={result.text} />}
                 {result.kind === 'image' && <ImageResult name={result.name} blob={result.blob} />}
                 {result.kind === 'link' && (
                   <PillButton label={`${result.url} ↗`} onPress={() => openLink(result.url)} />

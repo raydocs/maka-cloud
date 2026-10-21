@@ -15,20 +15,25 @@ import {
 import { useEffect, useState } from 'react';
 import { Image, Linking, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useBlobUri } from '@/lib/picture';
+import { useBlobUri, usePicture } from '@/lib/picture';
 import { mono, radius, useTheme } from '@/lib/theme';
 import { Card, PillButton, Solid, StatusMark, T } from './ui';
 
 const MONO = Platform.OS === 'ios' ? mono.fontFamily : 'monospace';
 
-/** A diff, line by line, on an opaque page: added lines green, removed lines red. */
+const DIFF_LINES_SHOWN = 400;
+
+/** A diff, line by line, on an opaque page: added lines green, removed lines red. A very long one is cut short. */
 export function DiffLines({ text }: { text: string }) {
   const t = useTheme();
+  const [all, setAll] = useState(false);
+  const lines = text.split('\n');
+  const shown = all ? lines : lines.slice(0, DIFF_LINES_SHOWN);
   return (
     <Solid>
       <ScrollView horizontal showsHorizontalScrollIndicator>
         <View>
-          {text.split('\n').map((line, i) => (
+          {shown.map((line, i) => (
             <Text
               // The text never reorders, so the line number is its identity.
               key={i}
@@ -44,6 +49,9 @@ export function DiffLines({ text }: { text: string }) {
           ))}
         </View>
       </ScrollView>
+      {lines.length > shown.length && (
+        <PillButton label={`Show all ${lines.length} lines`} onPress={() => setAll(true)} />
+      )}
     </Solid>
   );
 }
@@ -89,6 +97,7 @@ function ViewerPicture({ blob, title }: { blob: Blob; title: string }) {
       source={{ uri }}
       accessibilityLabel={title}
       resizeMode="contain"
+      resizeMethod="resize"
       style={{ width: '100%', aspectRatio: 1, borderRadius: radius.small }}
     />
   ) : null;
@@ -119,7 +128,7 @@ export function DeliveryCard({
   const t = useTheme();
   const { shot, diff, outcome, caption, actions } = model;
   const [proof, setProof] = useState<Blob | undefined>();
-  const proofUri = useBlobUri(proof);
+  const { uri: proofUri, failed: proofFailed } = usePicture(proof);
   const [opened, setOpened] = useState<Opened | undefined>();
   const [failed, setFailed] = useState(false);
   const shotIndex = shot?.index;
@@ -179,6 +188,7 @@ export function DeliveryCard({
             source={{ uri: proofUri }}
             accessibilityLabel={displayText(shot.name)}
             resizeMode="cover"
+            resizeMethod="resize"
             style={{
               width: '100%',
               aspectRatio: 16 / 10,
@@ -191,7 +201,9 @@ export function DeliveryCard({
         diff && <PillButton label="View the changes" onPress={() => void openDiff()} />
       )}
       {caption ? <T kind="muted">{caption}</T> : null}
-      {failed && <T kind="muted">The picture could not be loaded.</T>}
+      {(failed || proofFailed) && (
+        <T kind="muted">The picture is too large or could not be loaded.</T>
+      )}
       {actions.map((action, i) => (
         <PillButton
           key={action.label}

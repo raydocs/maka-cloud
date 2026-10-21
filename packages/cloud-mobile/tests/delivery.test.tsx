@@ -62,3 +62,12 @@ test('diff text is shown inert: a line that looks like markup stays text', async
   await render(wrap(<DiffLines text={'+<b>bold</b>\n context'} />));
   expect(screen.getByText('+<b>bold</b>')).toBeTruthy();
 });
+
+test('a very long diff shows its first lines and the rest only when asked for', async () => {
+  const text = Array.from({ length: 1000 }, (_, i) => `+line ${i}`).join('\n');
+  await render(wrap(<DiffLines text={text} />));
+  expect(screen.getByText('+line 399')).toBeTruthy();
+  expect(screen.queryByText('+line 400')).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Show all 1000 lines' }));
+  expect(screen.getByText('+line 999')).toBeTruthy();
+});

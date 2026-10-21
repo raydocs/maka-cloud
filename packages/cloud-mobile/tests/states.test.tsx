@@ -19,6 +19,10 @@ test('where decisions would be, Home says loading, could not be read, or nothing
   expect(retried).toBe(1);
   await rerender(wrap(<InboxStatus loaded failed={false} onRetry={() => {}} />));
   expect(screen.getByText('Nothing needs you. Start something below.')).toBeTruthy();
+  // An empty list that could not be refreshed is not "all clear".
+  await rerender(wrap(<InboxStatus loaded failed onRetry={() => {}} />));
+  expect(screen.queryByText('Nothing needs you. Start something below.')).toBeNull();
+  expect(screen.getByText('Decisions could not be loaded.')).toBeTruthy();
 });
 
 test('the send button is plainly at rest when empty and filled when there is something to send', async () => {

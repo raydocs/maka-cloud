@@ -332,3 +332,26 @@ test('the timeline is read from the task’s timeline route', async () => {
   expect((await client.timeline('tsk_1')).timeline.taskId).toBe('tsk_1');
   expect(calls[0]?.url).toBe('/v1/tasks/tsk_1/timeline');
 });
+
+test('a feed that is stopped and started again resumes after the last event instead of replaying it', async () => {
+  const seen: (string | null)[] = [];
+  const notice = (id: number) =>
+    `id: ${id}\nevent: conductor.notice\ndata: {"conversationId":"c1","noticeId":"n${id}","text":"note ${id}","at":${id}}\n\n`;
+  const { client } = served({
+    '/v1/events': (_url, init) => {
+      const last = new Headers(init.headers).get('Last-Event-ID');
+      seen.push(last);
+      return last === null ? sse(posted(1, 'hello'), notice(2)) : sse(posted(3, 'back'));
+    },
+  });
+  const feed = new ConversationFeed(client, 'c1');
+  feed.start();
+  await until(() => feed.getSnapshot().state.messages.length === 2, 'the first run');
+  feed.stop();
+  feed.start();
+  await until(() => feed.getSnapshot().state.messages.length === 3, 'the second run');
+  expect(seen[0]).toBeNull();
+  expect(seen[1]).toBe('2');
+  expect(feed.getSnapshot().state.messages.map((m) => m.text)).toEqual(['hello', 'note 2', 'back']);
+  feed.stop();
+});

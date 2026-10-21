@@ -5,13 +5,13 @@ import { Card, Field, PillButton, Screen, T } from '@/components/ui';
 import { useSession } from '@/lib/session';
 
 export default function SignIn() {
-  const { session, signIn } = useSession();
+  const { session, signIn, retry } = useSession();
   const remembered = session.status === 'out' ? session.server : '';
   const [server, setServer] = useState(remembered);
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  const shown = problem || (session.status === 'out' ? session.error : '');
+  const shown = problem || (session.status === 'out' && !session.saved ? session.error : '');
   return (
     <Screen>
       <KeyboardAvoidingView
@@ -27,6 +27,12 @@ export default function SignIn() {
             <T kind="title">Your next big thing, one conversation away.</T>
             <T kind="muted">A place to plan, follow the work, and bring it home.</T>
           </View>
+          {session.status === 'out' && session.saved && (
+            <Card label="Saved access">
+              <T kind="muted">You are still signed in on this device. {session.error}</T>
+              <PillButton label="Try again" primary onPress={retry} />
+            </Card>
+          )}
           <Card label="Sign in">
             <Field
               label="Server address"

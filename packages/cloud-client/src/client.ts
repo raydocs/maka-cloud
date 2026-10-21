@@ -353,8 +353,10 @@ export class CloudClient {
     receive: (event: FeedEvent) => void,
     status: (value: string) => void,
     signal: AbortSignal,
+    /** Resume after this event id, as a reconnect does; 0 replays the conversation from the start. */
+    after = 0,
   ) {
-    let lastId = 0;
+    let lastId = after;
     let delay = 500;
     while (!signal.aborted) {
       try {

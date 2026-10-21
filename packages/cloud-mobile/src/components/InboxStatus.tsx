@@ -2,7 +2,7 @@ import { Card, PillButton, SkeletonLine, T } from './ui';
 
 /**
  * What stands where the decisions would be when there are none: bars while they are being read, a
- * retry when they could not be, and a calm line when nothing waits. Never an empty space.
+ * retry when they could not be (even if an earlier read was empty), and a calm line when nothing waits. Never an empty space.
  */
 export function InboxStatus({
   loaded,
@@ -13,17 +13,17 @@ export function InboxStatus({
   failed: boolean;
   onRetry: () => void;
 }) {
-  if (loaded)
-    return (
-      <Card label="Nothing needs you">
-        <T kind="muted">Nothing needs you. Start something below.</T>
-      </Card>
-    );
   if (failed)
     return (
       <Card label="Decisions could not be loaded">
         <T kind="muted">Decisions could not be loaded.</T>
         <PillButton label="Try again" onPress={onRetry} />
+      </Card>
+    );
+  if (loaded)
+    return (
+      <Card label="Nothing needs you">
+        <T kind="muted">Nothing needs you. Start something below.</T>
       </Card>
     );
   return (

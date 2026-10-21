@@ -73,7 +73,7 @@ export function finishedParts(
 ): { title: string; check: string; outcome: string } | undefined {
   if (item.kind !== 'finished') return undefined;
   const match =
-    /^[“"](.{1,200})[”"] finished \(((?:not )?independently checked)\): [“"](.*)[”"]$/su.exec(
+    /^[“"]([^”"]{1,200})[”"] finished \(((?:not )?independently checked)\): [“"](.*)[”"]$/su.exec(
       displayText(item.ask).trim(),
     );
   if (!match) return undefined;

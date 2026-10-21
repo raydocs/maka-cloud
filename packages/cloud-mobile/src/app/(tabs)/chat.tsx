@@ -10,13 +10,15 @@ import {
   totalCost,
 } from '@maka-cloud/client';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
   AppState,
   FlatList,
   KeyboardAvoidingView,
   Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   View,
@@ -74,9 +76,22 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const scroll = useRef<FlatList<Message> | null>(null);
   /** The newest messages stay in view only while the person is already reading them. */
   const atEnd = useRef(true);
+  // Only the person's own scrolling decides this; a scroll the list makes while measuring does not.
+  const trackEnd = ({ nativeEvent }: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = nativeEvent;
+    atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
+  };
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
   const inbox = Object.values(state.inbox);
   const waiting = inbox.filter((item) => item.state !== 'closed');
+  // Something that waits on the person is always brought into view.
+  const needsYou = openQuestions.size + waiting.length;
+  useEffect(() => {
+    if (needsYou > 0) {
+      atEnd.current = true;
+      scroll.current?.scrollToEnd({ animated: true });
+    }
+  }, [needsYou]);
   // The employee is at work while a task runs, or while the person's last message has no reply yet;
   // a question or decision waiting on them is not work.
   const working =
@@ -129,11 +144,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         onContentSizeChange={() =>
           atEnd.current && scroll.current?.scrollToEnd({ animated: false })
         }
-        onScroll={({ nativeEvent }) => {
-          const { contentOffset, layoutMeasurement, contentSize } = nativeEvent;
-          atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
-        }}
-        scrollEventThrottle={100}
+        onScrollEndDrag={trackEnd}
+        onMomentumScrollEnd={trackEnd}
         contentContainerStyle={{ padding: 16, gap: 14 }}
         keyboardShouldPersistTaps="handled"
         accessibilityLabel="Messages"
@@ -250,7 +262,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           label={busy === 'message' ? 'Sending…' : 'Send message'}
           glyph="↑"
           disabled={Boolean(busy) || !draft.trim()}
-          onPress={() => void feed.send(draft).then((sent) => sent && setDraft(''))}
+          onPress={() => {
+            const sending = draft;
+            // Words typed while it was sending stay in the box.
+            void feed
+              .send(sending)
+              .then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
+          }}
         />
       </View>
       {detail && (
