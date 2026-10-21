@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { FakeRun } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
-import type { Conductor } from '../conductor.js';
+import type { Conductor, ConductorOptions } from '../conductor.js';
 import type { ConductorToolSpec } from '../tools.js';
 import {
   calls,
@@ -757,4 +757,113 @@ test('a cancel that fails after a user stop is retried on a timer, without any f
   await assertNoTasks(h);
   assert.deepEqual(h.conductor.state.unsettledDelegations(), []);
   assertReleased(h.conductor);
+});
+
+// -- tasks the orchestrator keeps across a restart ---------------------------------------------------
+
+/** A run with a task running and its model call held, as a restart finds it. */
+async function runningTaskTurn(h: Harness) {
+  const started = onRunStart(h);
+  const held = heldStep();
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree(), held.step);
+  await h.send('cnv_1', 'Go.');
+  const run = await started;
+  await held.started;
+  return { run, held };
+}
+
+const keepTasks = (h: () => Harness): Partial<ConductorOptions> => ({
+  tasksSurviveRestart: true,
+  orchestratorAccess: (conversationId) => h().access(conversationId),
+  limits: { stopCheckMs: 1 },
+});
+
+test('with tasks that survive a restart, a restart neither cancels a running task nor settles it, and it is settled once it ends', async (t) => {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: keepTasks(() => h),
+  });
+  const { run, held } = await runningTaskTurn(h);
+  const [before] = h.conductor.state.unsettledDelegations();
+  assert.ok(before?.taskId, 'the delegation is bound to its task');
+
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart();
+  await reopened.idle();
+  assert.equal(h.orchestrator.stats().activeTasks, 1, 'the task is still running');
+  const [owed] = reopened.state.unsettledDelegations();
+  assert.equal(owed?.key, before.key);
+  assert.equal(owed?.cancelPending, false, 'no cancel is owed for it');
+  assert.equal(owed?.reservedUsd, before.reservedUsd, 'its reservation is kept');
+  assert.equal(h.warnings.length, 0, JSON.stringify(h.warnings));
+
+  // It ends; the conductor finds out by asking, and settles it.
+  await run.complete();
+  await h.orchestrator.settled();
+  for (let pass = 0; reopened.state.unsettledDelegations().length > 0; pass++) {
+    assert.ok(pass < 500, 'the delegation was never settled');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(reopened.state.delegation(before.key)?.state, 'settled');
+  await reopened.idle();
+  assert.equal(reopened.stats().stopChecks, 0);
+});
+
+test('the same restart without that setting cancels the task, as before', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  const { held } = await runningTaskTurn(h);
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  assert.equal(h.orchestrator.stats().activeTasks, 0, 'the shutdown cancelled it');
+  await h.restart({ orchestratorAccess: (conversationId) => h.access(conversationId) });
+  await assertNoTasks(h);
+});
+
+test('a task the conductor never learned of is still cancelled by its key at a restart that keeps tasks', async (t) => {
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { tasksSurviveRestart: true },
+  });
+  const created = gate();
+  const respond = gate();
+  const delegate = h.orchestrator.delegate.bind(h.orchestrator);
+  h.orchestrator.delegate = async (...args) => {
+    const view = await delegate(...args);
+    created.open();
+    await respond.promise;
+    return view;
+  };
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script('conductor', ...delegateFree());
+  await h.send('cnv_1', 'Go.');
+  await created.promise;
+  const reopened = await h.restart({
+    tasksSurviveRestart: true,
+    orchestratorAccess: (conversationId) => h.access(conversationId),
+  });
+  respond.open();
+  await reopened.idle();
+  await h.orchestrator.settled();
+  await assertNoTasks(h);
+});
+
+test('the operator’s pause still cancels a task that was kept across a restart', async (t) => {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: keepTasks(() => h),
+  });
+  const { held } = await runningTaskTurn(h);
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart({ limits: { stopCheckMs: 60_000 } });
+  await reopened.idle();
+  assert.equal(h.orchestrator.stats().activeTasks, 1);
+  assert.equal(await reopened.stopAll('paused', 'Spending is paused.'), 0, 'no run is open');
+  await reopened.idle();
+  await assertNoTasks(h);
 });
