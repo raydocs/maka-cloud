@@ -82,6 +82,12 @@ interface Box {
   /** The last time a person looked at the box (a terminal or desktop view), if ever. */
   userSeenAt: number | undefined;
   sleepPhase: 'checkpoint' | 'suspend' | undefined;
+  /**
+   * Counts every change of who has the box (a claim, a sleep that starts). A sleep remembers the
+   * count it began with and stops acting on the box when the count has moved, even if the state
+   * reads the same again (a task took the box and gave it back).
+   */
+  generation: number;
   /** When the box was marked lost. */
   lostAt: number | undefined;
   /** No sleep attempt before this time, after one that failed or was turned back. */
@@ -456,6 +462,7 @@ export class BoxPool implements SandboxProvider {
     box.state =
       box.machineId === undefined ? 'creating' : box.state === 'suspended' ? 'waking' : 'claimed';
     box.sleepPhase = undefined;
+    box.generation++;
     box.taskId = taskId;
     const holder = Symbol('lease');
     box.holder = holder;
@@ -739,6 +746,7 @@ export class BoxPool implements SandboxProvider {
       idleSince: this.now(),
       userSeenAt: undefined,
       sleepPhase: undefined,
+      generation: 0,
       lostAt: undefined,
       sleepAfter: 0,
       labels: Promise.resolve(),
@@ -859,17 +867,23 @@ export class BoxPool implements SandboxProvider {
         ) {
           box.state = 'suspending';
           box.sleepPhase = 'checkpoint';
+          box.generation++;
           sleepers.push(box);
         }
       }
     }
-    const slept = await Promise.all(sleepers.map((box) => this.sleep(box)));
+    const slept = await Promise.all(
+      sleepers.map((box) => {
+        const generation = box.generation;
+        return this.sleep(box, generation);
+      }),
+    );
     return slept.filter((id): id is string => id !== undefined);
   }
 
-  /** Whether a task took the box while it was being put to sleep. */
-  private turnedBack(box: Box): boolean {
-    return box.state !== 'suspending';
+  /** Whether anyone took the box, or marked it otherwise, since this sleep began. */
+  private turnedBack(box: Box, generation: number): boolean {
+    return box.state !== 'suspending' || box.generation !== generation;
   }
 
   private revert(box: Box, retryAfterMs: number): void {
@@ -879,11 +893,11 @@ export class BoxPool implements SandboxProvider {
     box.sleepAfter = this.now() + retryAfterMs;
   }
 
-  private async sleep(box: Box): Promise<string | undefined> {
+  private async sleep(box: Box, generation: number): Promise<string | undefined> {
     const machineId = box.machineId as string;
     try {
       const machine = await this.api.getMachine(machineId);
-      if (this.turnedBack(box)) return undefined;
+      if (this.turnedBack(box, generation)) return undefined;
       if (machine.state !== 'running') {
         // Instabox paused it for idleness first; the next task wakes it through the wake path.
         if (
@@ -900,11 +914,11 @@ export class BoxPool implements SandboxProvider {
         return undefined;
       }
       await this.api.exec(machineId, { cmd: 'sync', timeoutSeconds: CHECKPOINT_TIMEOUT_SECONDS });
-      if (this.turnedBack(box)) return undefined;
+      if (this.turnedBack(box, generation)) return undefined;
       const written = (await this.options.recentWrite?.(machineId)) ?? false;
       const looked = this.now() - (box.userSeenAt ?? Number.NEGATIVE_INFINITY) < this.userIdleMs;
       // The last look at the holds, with nothing awaited between it and the point of no return.
-      if (this.turnedBack(box)) return undefined;
+      if (this.turnedBack(box, generation)) return undefined;
       if (written || looked) {
         this.revert(box, 0);
         return undefined;
@@ -912,22 +926,25 @@ export class BoxPool implements SandboxProvider {
       box.sleepPhase = 'suspend';
       const operation = await this.api.suspendMachine(machineId);
       await this.api.waitForOperation(operation.id);
+      if (this.turnedBack(box, generation)) return undefined;
       box.state = 'suspended';
       box.sleepPhase = undefined;
       this.pump(box.tenantId);
       return machineId;
     } catch (error) {
       this.options.onWarning?.(`could not put box ${machineId} to sleep`, error);
-      await this.settleAfterFailedSleep(box);
+      await this.settleAfterFailedSleep(box, generation);
       return undefined;
     }
   }
 
   /** A sleep failed half way: ask instabox what the box is now, and make the registry say the same. */
-  private async settleAfterFailedSleep(box: Box): Promise<void> {
-    if (this.turnedBack(box)) return;
+  private async settleAfterFailedSleep(box: Box, generation: number): Promise<void> {
+    if (this.turnedBack(box, generation)) return;
     try {
       const machine = await this.api.getMachine(box.machineId as string);
+      // The answer is about the box as it was; a task may have taken it while we asked.
+      if (this.turnedBack(box, generation)) return;
       if (machine.state === 'running') this.revert(box, SLEEP_RETRY_MS);
       else if (machine.state === 'suspended') {
         box.state = 'suspended';
@@ -935,6 +952,7 @@ export class BoxPool implements SandboxProvider {
         this.pump(box.tenantId);
       } else this.markLost(box, `it is ${machine.state} after a failed sleep`);
     } catch (error) {
+      if (this.turnedBack(box, generation)) return;
       this.markLost(box, `its state is unknown after a failed sleep: ${errorText(error)}`);
     }
   }

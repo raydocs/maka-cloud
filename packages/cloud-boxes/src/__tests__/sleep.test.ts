@@ -109,6 +109,55 @@ describe('putting boxes to sleep', () => {
     assert.equal(t.fleet.callsTo('suspendMachine').length, 1);
   });
 
+  describe('a sleep that fails while a task takes the box', () => {
+    /** The checkpoint fails, and the follow-up look at the box is held until the test lets it answer. */
+    async function failedSleepWithLateLookup(answer: 'unreachable' | 'paused') {
+      const t = await idleBox(30 * MIN);
+      t.fleet.failNextExec = true;
+      const real = t.fleet.getMachine.bind(t.fleet);
+      let looks = 0;
+      let reached!: () => void;
+      const lookReached = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      let open!: () => void;
+      const lookMayAnswer = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      t.fleet.getMachine = async (id: string) => {
+        looks++;
+        if (looks !== 2) return await real(id);
+        reached();
+        await lookMayAnswer;
+        if (answer === 'unreachable') throw new Error('instabox unreachable');
+        const machine = await real(id);
+        return { ...machine, state: 'suspended' as const };
+      };
+      const sweep = t.pool.sweepIdle();
+      await lookReached;
+      assert.equal(t.pool.state()[0]?.state, 'suspending');
+      const lease = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+      assert.equal(lease.machineId, t.machineId);
+      open();
+      await sweep;
+      return { ...t, lease };
+    }
+
+    it('does not wipe the new task’s claim when the late lookup fails', async () => {
+      const t = await failedSleepWithLateLookup('unreachable');
+      assert.equal(t.pool.state()[0]?.state, 'claimed');
+      assert.equal(t.pool.state()[0]?.taskId, 't2');
+      await t.lease.release();
+      assert.equal(t.pool.state()[0]?.state, 'ready', 'the task’s own lease still frees the box');
+    });
+
+    it('does not mark a box the new task holds as suspended when the late lookup says it is paused', async () => {
+      const t = await failedSleepWithLateLookup('paused');
+      assert.equal(t.pool.state()[0]?.state, 'claimed');
+      assert.equal(t.pool.state()[0]?.taskId, 't2');
+    });
+  });
+
   it('asks instabox again when a suspend fails: running is ready again, paused is suspended, broken is lost', async () => {
     const t = await idleBox(30 * MIN);
     t.fleet.failNextSuspend = true;
