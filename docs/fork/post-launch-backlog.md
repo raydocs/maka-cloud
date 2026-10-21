@@ -86,14 +86,18 @@ Still missing before it can merge:
    filtered) and a scripted CLI. The first live run is the first time those run.
 2. With a task running, the server logs `server.closing` and then does not exit: the run's poller
    keeps polling the sandbox. Compose kills it after the 60 second grace period, so a restart with a
-   running task takes about a minute. A clean detach on close would make it immediate.
+   running task takes about a minute. A clean detach on close would make it immediate. T28 is fixing
+   this; keep the entry until that merges.
 3. Running the flow against the owner's host after every merge and daily (needs a stand-in instance
    there and an ops script for systemd).
 4. The smoke test's 30 second window to confirm a stop (`smoke-live.ts`) is a guess; a slower real
    stop makes a run refuse, which is safe but should be tuned after the first live run.
+5. Smoke cleanup cost grows with the invite's history, because it asks the live state of every task
+   of the invite (#317, P3 in its review). Fix by honouring retry-after on a 429, or by pruning old
+   smoke conversations after a good run.
 
 ## Reviews merged without an outside review
 
-Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. Pull requests merged
-since then without any outside review are rechecked once Codex is back; the list is kept in the
-project chat.
+Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
+requests merged since then, with the outside review each one had, is in
+`docs/fork/unreviewed-prs.md`. Recheck them once Codex is back.
