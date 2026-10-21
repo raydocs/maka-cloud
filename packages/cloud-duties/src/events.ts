@@ -300,6 +300,14 @@ function classifyReviewComment(
   };
 }
 
+/** A review's state in fixed words: the summary line is ours, so no payload text goes into it. */
+const REVIEW_STATES: ReadonlyMap<string, string> = new Map([
+  ['approved', 'approved'],
+  ['changes_requested', 'changes requested'],
+  ['commented', 'commented'],
+  ['dismissed', 'dismissed'],
+]);
+
 function classifyReview(data: z.infer<typeof Review>, project: ProjectView): Classified {
   if (data.action !== 'submitted') return { kind: 'ignored', reason: 'action' };
   if (!isSelf(data.pull_request.user.login, project)) {
@@ -315,7 +323,7 @@ function classifyReview(data: z.infer<typeof Review>, project: ProjectView): Cla
     trigger: 'review_comment_own_pr',
     key: `review:${project.repo}:${data.review.id}`,
     facts: {
-      summary: `A review (${data.review.state.toLowerCase()}) was submitted on your pull request #${data.pull_request.number}.`,
+      summary: `A review (${REVIEW_STATES.get(data.review.state.toLowerCase()) ?? 'other'}) was submitted on your pull request #${data.pull_request.number}.`,
       ...(data.review.html_url === undefined ? {} : { url: data.review.html_url }),
       fields: [
         ['reviewer', data.sender.login],
