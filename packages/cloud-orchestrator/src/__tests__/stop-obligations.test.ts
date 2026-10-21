@@ -451,5 +451,4 @@ test('the stop retried for an owed stop carries the attempt that owes it, never 
   t.after(() => second.orchestrator.close());
   await eventually(() => store.stopPendingTaskIds().length === 0, 'the stop confirmed');
   assert.deepEqual(asked, [2, 2, 2, 2], 'the restart and every retry are attempt 2 asking');
-  assert.ok(taskId);
 });

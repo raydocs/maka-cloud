@@ -150,12 +150,16 @@ async function stopChecks(
   channel: AgentChannel | undefined,
   upToAttempt?: number,
 ): Promise<void> {
+  // A bound that is not a whole attempt number would make the script stop everything.
+  if (upToAttempt !== undefined && !Number.isSafeInteger(upToAttempt)) {
+    throw new Error(`not an attempt number: ${upToAttempt}`);
+  }
   const out = await machine.exec(
     channel === undefined ? CHECK_STOP_SCRIPT : asRootScript(CHECK_STOP_SCRIPT, CHECK_STOP_ENV),
     {
       envs: {
         MAKA_CHECK_TAG: checkTagPrefix(taskId),
-        ...(upToAttempt === undefined ? {} : { MAKA_CHECK_UP_TO: String(Math.trunc(upToAttempt)) }),
+        ...(upToAttempt === undefined ? {} : { MAKA_CHECK_UP_TO: String(upToAttempt) }),
       },
       timeoutSeconds: 30,
       ...(signal ? { signal } : {}),

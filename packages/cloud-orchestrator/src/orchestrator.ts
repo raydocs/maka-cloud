@@ -947,7 +947,7 @@ export class Orchestrator {
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(
-      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId))),
+      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch)),
     );
     const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
