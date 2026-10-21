@@ -118,6 +118,19 @@ Not here: `.agents/resume` after a wake (with the setup snapshots).
   A builder found at start belongs to a dead process and is deleted, if its name and labels are exactly
   those of a builder; anything else with the pool label is only refused.
 
+## Pinned CLI installs
+
+`cliInstallCommands()` (in `cli-install.ts`) is the fleet's `installCommands`. For each CLI it downloads
+the wrapper tarball and the one for the box's CPU with `npm pack`, compares the sha512 of each with the
+number pinned in `CLI_PINS`, and only then installs those files from disk with `--offline`, so npm cannot
+fetch anything unchecked. A mismatch, a failed download, another system or CPU, or a binary that does
+not report the pinned version fails the install (the fleet then fails the task); a CLI installed before is
+left as it was when the check fails. A test fails when the runners' default version is bumped without new
+checksums. The wiring passes `pinnedVersions()` as the fleet's `versions`, so the fleet and the install agree.
+Known limits: only Linux x64 and arm64 (glibc for Claude); the packages have no other dependencies, so
+nothing else is fetched. The checksums were read from the registry (`npm view <spec> dist.integrity`) and
+the script was run once against the real packages.
+
 ## Restoring
 
 `restoreFromSnapshot` drops the task's old box from the registry (a broken one that still exists
