@@ -324,6 +324,27 @@ test('a response over the cap is refused whole, declared or not, and the connect
   assert.equal(ok.ok && ok.body.length, 1024);
 });
 
+test('a caller that wants only the start of a page gets exactly the first bytes, and the connection is released', async () => {
+  const body = [
+    Buffer.from('a'.repeat(600)),
+    Buffer.from('b'.repeat(600)),
+    Buffer.from('c'.repeat(600)),
+  ];
+  const h = harness(() =>
+    reply(200, { 'content-type': 'text/html', 'content-length': '1800' }, body),
+  );
+  const result = await h.fetch('https://pages.example/', { ...PAGE, startOnly: true });
+  assert.equal(result.ok && result.body.length, 1024);
+  assert.equal(result.ok && result.body.toString().slice(595, 605), 'aaaaabbbbb');
+  assert.ok(released(h.responses));
+  // Without the flag the same response is refused whole.
+  const whole = harness(() => reply(200, { 'content-type': 'text/html' }, body));
+  assert.deepEqual(await whole.fetch('https://pages.example/', PAGE), {
+    ok: false,
+    reason: 'too_large',
+  });
+});
+
 test('a request that never answers ends at the deadline and is released', async () => {
   const h = harness(() => new Promise<TransportResponse>(() => undefined));
   assert.deepEqual(await h.fetch('https://pages.example/', { ...PAGE, timeoutMs: 5 }), {

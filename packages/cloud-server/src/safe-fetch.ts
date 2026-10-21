@@ -15,7 +15,8 @@ import { isPublicAddress } from './public-address.js';
  * - a redirect is followed by hand, at most `maxRedirects` times, and each hop is checked like the
  *   first request (a redirect to http, to a literal or to a private name is refused);
  * - the whole request (lookup, connect, headers, body) ends at one deadline and at the caller's
- *   signal, and the body is read to at most `maxBytes`; a response over it is refused, never cut;
+ *   signal, and the body is read to at most `maxBytes`; a response over it is refused whole, unless
+ *   the caller says it wants only the start of a page (`startOnly`), and then it is cut there;
  * - nothing of ours is sent: no cookie, no authorization, no referer, no compression;
  * - only the content types the caller listed are read, and only a plain 200.
  * A refusal is a reason code and never carries the URL, an address or the network's error text.
@@ -41,6 +42,8 @@ export interface SafeFetchRequest {
   /** The content types (without parameters, lower case) that may be read; a prefix ending in `/` matches a family. */
   accept: readonly string[];
   maxBytes: number;
+  /** For a page whose head is all that is wanted: a body over `maxBytes` is cut there instead of refused. */
+  startOnly?: boolean;
   timeoutMs: number;
   maxRedirects?: number;
   signal?: AbortSignal;
@@ -192,7 +195,8 @@ export function createSafeFetch(deps: SafeFetchDeps = {}) {
         if (
           declared !== undefined &&
           /^\d+$/u.test(declared) &&
-          Number(declared) > options.maxBytes
+          Number(declared) > options.maxBytes &&
+          !options.startOnly
         ) {
           return refuse('too_large');
         }
@@ -204,7 +208,13 @@ export function createSafeFetch(deps: SafeFetchDeps = {}) {
             const next: IteratorResult<Uint8Array> = await raceAbort(reader.next(), signal);
             if (next.done) break;
             size += next.value.length;
-            if (size > options.maxBytes) return refuse('too_large');
+            if (size > options.maxBytes) {
+              if (!options.startOnly) return refuse('too_large');
+              chunks.push(
+                Buffer.from(next.value).subarray(0, options.maxBytes - (size - next.value.length)),
+              );
+              break;
+            }
             chunks.push(Buffer.from(next.value));
           }
         } finally {
