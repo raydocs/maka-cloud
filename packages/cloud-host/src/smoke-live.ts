@@ -285,25 +285,35 @@ export function createLiveSmokeDeps(
     /**
      * Cancels every task of the smoke invite that is still going: what an earlier run left behind
      * when this run took its budget over. Their credentials book nothing already; this stops the
-     * sandboxes too. Returns how many were cancelled; a task that cannot be is skipped.
+     * sandboxes too. Returns how many were cancelled. A task that cannot be cancelled and is still
+     * going afterwards, or a list that cannot be read, is an error: the run must not start beside
+     * work it could not stop.
      */
     async cancelLeftovers() {
       const listed = await request('GET', '/v1/conversations');
       const conversations =
         isRecord(listed) && Array.isArray(listed.conversations) ? listed.conversations : [];
+      const going = (task: SmokeTask): boolean =>
+        !['succeeded', 'failed', 'cancelled'].includes(task.state);
       let cancelled = 0;
+      const stuck: string[] = [];
       for (const conversation of conversations) {
         const id = isRecord(conversation) ? conversation.conversationId : undefined;
         if (typeof id !== 'string') continue;
         for (const task of await this.tasks(id)) {
-          if (['succeeded', 'failed', 'cancelled'].includes(task.state)) continue;
+          if (!going(task)) continue;
           try {
             await this.cancel(task.taskId);
             cancelled += 1;
           } catch {
-            // It may have ended in the meantime.
+            // It may have ended in the meantime; if it is still going, it is not stopped.
+            const now = (await this.tasks(id)).find((other) => other.taskId === task.taskId);
+            if (!now || going(now)) stuck.push(task.taskId);
           }
         }
+      }
+      if (stuck.length > 0) {
+        throw new Error(`could not cancel ${stuck.length} task(s): ${stuck.join(', ')}`);
       }
       return cancelled;
     },
@@ -551,8 +561,13 @@ export async function smokeCommand(
       try {
         const cancelled = await deps.cancelLeftovers();
         if (cancelled > 0) print(`cancelled ${cancelled} task(s) the earlier run left running`);
-      } catch {
-        print('could not list the earlier run’s tasks to cancel them; they can book nothing');
+      } catch (error) {
+        // Their credentials book nothing, but they still hold sandboxes and may change the
+        // repository the run is about to use: nothing starts beside them.
+        print(
+          `could not stop what the earlier run left running (${error instanceof Error ? error.message : 'unknown error'}), so nothing was started: cancel those tasks, then run again`,
+        );
+        return 2;
       }
     }
     const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });

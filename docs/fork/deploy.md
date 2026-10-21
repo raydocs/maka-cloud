@@ -91,7 +91,8 @@ refuses any model request of the smoke invite that would take what the invite
 has booked since then (held and settled, every scenario together) above
 `MAKA_CLOUD_SMOKE_MAX_USD`, across UTC midnight and across the restart scenario.
 The cap is kept in the gateway journal file itself, so it binds every process
-that books into it, even a server still running an older version, and the
+that books into it, even a server still running an older version (one that stamps
+no run generation books nothing on an invite that has had a run), and the
 command refuses to start if the file does not carry it. The budget is
 also the amount at which the run stops starting new scenarios. The run refuses
 without `MAKA_CLOUD_LIVE=1`, so nothing happens by accident. If a model key is
@@ -617,10 +618,13 @@ Preparation:
    the next smoke run takes it over. A takeover first fences the killed run:
    every model key and conductor session issued under it books nothing from then
    on (the invite's generation in the journal moves up), the new run cancels the
-   tasks it left running, and only then does the new run get a budget of its
+   tasks it left running (if it cannot cancel one, or cannot list them, it
+   starts nothing and exits 2: cancel them by hand and run again), and only then does the new run get a budget of its
    own, starting empty. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
-   sequence, books nothing until the next run reopens it.
+   sequence, books nothing until the next run reopens it. A server on code from
+   before run generations can no longer book on the smoke invite once that invite
+   has had a run (update every server before the first live run).
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 

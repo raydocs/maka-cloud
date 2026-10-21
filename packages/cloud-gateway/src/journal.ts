@@ -180,10 +180,10 @@ const IN_RUN_WINDOW =
   '(booked_at >= run.since_ms OR (run.since_seq IS NOT NULL AND account_spend.rowid > run.since_seq))';
 
 const TRIGGER_GUARD = 'run_budget_guard_v3';
-const TRIGGER_FENCE = 'run_generation_fence_v1';
+const TRIGGER_FENCE = 'run_generation_fence_v2';
 const TRIGGER_STAMP = 'run_budget_stamp_v1';
 /** Earlier guards. A file may still carry them; the current one covers what they did. */
-const OLDER_GUARDS = ['run_budget_guard_v1', 'run_budget_guard_v2'];
+const OLDER_GUARDS = ['run_budget_guard_v1', 'run_budget_guard_v2', 'run_generation_fence_v1'];
 
 /**
  * A run budget is enforced by the journal file itself, so it binds every process that books into
@@ -193,9 +193,11 @@ const OLDER_GUARDS = ['run_budget_guard_v1', 'run_budget_guard_v2'];
  * `run_budget_guard_v3` aborts an insert that would take what the account booked since the budget
  * began above its limit, and any insert while the budget is one an earlier version left without a
  * row sequence (`since_seq` NULL), which cannot be trusted to count every booking until a run
- * reopens it. `run_generation_fence_v1` aborts an insert that carries a generation other than the
- * account's current one: a credential issued under an earlier run (see `setRunBudget`) books
- * nothing. `run_budget_stamp_v1` gives a row inserted without a time (by a process that does not
+ * reopens it. `run_generation_fence_v2` aborts an insert that carries a generation other than the
+ * account's current one, and an insert that carries none for an account that has a generation at
+ * all: a credential issued under an earlier run (see `setRunBudget`) books nothing, and neither
+ * does a server on code that does not stamp the generation (it would otherwise book past the
+ * budget of a run it knows nothing about). `run_budget_stamp_v1` gives a row inserted without a time (by a process that does not
  * know the column) the time of its insert, so its spend counts from then on. All are in the file
  * once any process on this code has opened it, and a connection that is open already sees them at
  * its next statement.
@@ -217,12 +219,18 @@ const RUN_BUDGET_TRIGGERS = `
     SELECT RAISE(ABORT, 'the run budget of this account is used up');
   END;
   CREATE TRIGGER IF NOT EXISTS ${TRIGGER_FENCE} BEFORE INSERT ON account_spend
-  WHEN NEW.generation IS NOT NULL
-    AND NEW.generation <> COALESCE(
-      (SELECT generation FROM run_generation WHERE account = NEW.account), 0
+  WHEN (
+      NEW.generation IS NULL
+      AND EXISTS (SELECT 1 FROM run_generation WHERE account = NEW.account)
+    )
+    OR (
+      NEW.generation IS NOT NULL
+      AND NEW.generation <> COALESCE(
+        (SELECT generation FROM run_generation WHERE account = NEW.account), 0
+      )
     )
   BEGIN
-    SELECT RAISE(ABORT, 'the credential belongs to an earlier run of this account');
+    SELECT RAISE(ABORT, 'the credential belongs to an earlier run of this account, or carries no run generation');
   END;
   CREATE TRIGGER IF NOT EXISTS ${TRIGGER_STAMP} AFTER INSERT ON account_spend
   WHEN NEW.booked_at = 0
@@ -682,6 +690,8 @@ export class SqliteSpendJournal implements SpendJournal {
           .prepare(`SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE ${where}`)
           .get(...args) as { usd: number }
       ).usd;
+    const hasGeneration = (name: string): boolean =>
+      this.db.prepare('SELECT 1 FROM run_generation WHERE account = ?').get(name) !== undefined;
     const generationOf = (name: string): number => {
       const row = this.db
         .prepare('SELECT generation FROM run_generation WHERE account = ?')
@@ -722,9 +732,17 @@ export class SqliteSpendJournal implements SpendJournal {
           const refusal = ((): ReserveResult | undefined => {
             if (inviteId !== undefined && limits) {
               // A credential issued under an earlier run books nothing, run budget or not.
-              if (account !== 'server' && account.generation !== undefined) {
-                const current = generationOf(name);
-                if (account.generation !== current) {
+              if (account !== 'server') {
+                if (account.generation === undefined) {
+                  // Once an invite has had a run, a credential must say which one it was issued
+                  // under; one that does not is from code that cannot be fenced.
+                  if (hasGeneration(name)) {
+                    return {
+                      ok: false,
+                      reason: 'this credential carries no run generation, so it cannot be fenced',
+                    };
+                  }
+                } else if (account.generation !== generationOf(name)) {
                   return {
                     ok: false,
                     reason: 'this credential belongs to an earlier run of the invite',
