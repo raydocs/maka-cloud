@@ -1,58 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { boxName, LABEL } from '../labels.js';
-import { BoxPool } from '../pool.js';
-import { BoxRefusedError, NoFreeBoxError, type BoxPoolOptions } from '../types.js';
-import { FakeFleet } from './fake-fleet.js';
+import { BoxRefusedError, NoFreeBoxError } from '../types.js';
+import { flush, labelsOf, setup } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
 const B = 'inv_bbbbbbbbbbbb';
-
-/** Timers a test fires by hand, so a wait runs out when the test says and never by the clock. */
-class ManualTimers {
-  private next = 1;
-  readonly pending = new Map<number, () => void>();
-  setTimeout = (callback: () => void): number => {
-    const handle = this.next++;
-    this.pending.set(handle, callback);
-    return handle;
-  };
-  clearTimeout = (handle: unknown): void => {
-    this.pending.delete(handle as number);
-  };
-  fireAll(): void {
-    const callbacks = [...this.pending.values()];
-    this.pending.clear();
-    for (const callback of callbacks) callback();
-  }
-}
-
-/** Lets every promise that can run, run: the fakes do no I/O, so nothing is left after this. */
-const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-
-function setup(overrides: Partial<BoxPoolOptions> = {}) {
-  const fleet = new FakeFleet();
-  const live = new Set<string>();
-  const timers = new ManualTimers();
-  const warnings: string[] = [];
-  const guarded: { machineId: string; reason: string }[] = [];
-  const clock = { now: 1_000_000 };
-  const pool = new BoxPool({
-    api: fleet,
-    source: () => ({ templateId: 't_node' }),
-    isTaskLive: (taskId) => live.has(taskId),
-    onWarning: (message) => warnings.push(message),
-    beforeUse: async (machineId, reason) => {
-      guarded.push({ machineId, reason });
-    },
-    timers,
-    now: () => clock.now,
-    ...overrides,
-  });
-  return { fleet, live, timers, warnings, guarded, clock, pool };
-}
-
-const labelsOf = (fleet: FakeFleet, machineId: string) => fleet.machines.get(machineId)?.metadata;
 
 describe('BoxPool', () => {
   it('makes a box when a task needs one, named and labelled for its invite and slot, and guards it first', async () => {

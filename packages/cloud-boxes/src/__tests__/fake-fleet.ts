@@ -10,7 +10,10 @@ type Method =
   | 'patchMachineMetadata'
   | 'getMachine'
   | 'deleteMachine'
-  | 'listMachines';
+  | 'listMachines'
+  | 'exec'
+  | 'suspendMachine'
+  | 'ensureRunning';
 
 export interface FakeBox extends InstaboxMachine {
   metadata: Record<string, string>;
@@ -30,6 +33,14 @@ export class FakeFleet implements BoxApi {
   /** Machine states a created sandbox goes through; the fake finishes at once. */
   failNextCreate: { status: number; code: string; message?: string } | undefined;
   failNextOperation = false;
+  /** What each `ensureRunning` call does, in order; `ok` when the script runs out. */
+  wakeScript: ('ok' | 'hang' | 'fail' | 'gone')[] = [];
+  /** The suspend is accepted but the operation fails, once. */
+  failNextSuspend = false;
+  /** Every command run on a box. */
+  readonly execLog: { machineId: string; cmd: string }[] = [];
+  /** Makes `exec` fail, once. */
+  failNextExec = false;
   /** Alters a created machine's labels, to look like a box that is not what was asked for. */
   tamper: ((machine: FakeBox) => void) | undefined;
   private counter = 0;
@@ -174,6 +185,60 @@ export class FakeFleet implements BoxApi {
     }
     machine.metadata = { ...metadata };
     return structuredClone(machine);
+  }
+
+  async exec(
+    machineId: string,
+    request: { cmd: string },
+  ): Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    timedOut: boolean;
+    truncated: boolean;
+  }> {
+    await this.pass('exec', [machineId, request]);
+    this.execLog.push({ machineId, cmd: request.cmd });
+    if (this.failNextExec) {
+      this.failNextExec = false;
+      throw new Error('exec failed: connection reset');
+    }
+    return { stdout: '', stderr: '', exitCode: 0, timedOut: false, truncated: false };
+  }
+
+  async suspendMachine(machineId: string): Promise<InstaboxOperation> {
+    await this.pass('suspendMachine', [machineId]);
+    const machine = this.machines.get(machineId);
+    if (this.failNextSuspend) {
+      this.failNextSuspend = false;
+      this.failedOperations.add(`op_suspend_${machineId}`);
+    } else if (machine) machine.state = 'suspended';
+    return {
+      id: `op_suspend_${machineId}`,
+      machineId,
+      type: 'suspend',
+      state: 'queued',
+      error: null,
+    };
+  }
+
+  async ensureRunning(machineId: string, options: { signal?: AbortSignal } = {}): Promise<void> {
+    await this.pass('ensureRunning', [machineId]);
+    const machine = this.machines.get(machineId);
+    const step = this.wakeScript.shift() ?? 'ok';
+    if (step === 'gone' || !machine || machine.state === 'deleted') {
+      throw new InstaboxApiError(404, { code: 'not_found', message: 'no such sandbox' });
+    }
+    if (step === 'fail') throw new Error('instabox sandbox did not reach running.');
+    if (step === 'hang') {
+      await new Promise<never>((_, reject) => {
+        const signal = options.signal;
+        if (!signal) return;
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    }
+    machine.state = 'running';
   }
 
   async deleteMachine(id: string): Promise<InstaboxOperation> {

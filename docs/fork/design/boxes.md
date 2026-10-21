@@ -51,6 +51,36 @@ recorded machine without calling `acquire`, and asking again returns that box). 
 that is not live is cleared. `reconcile()` later frees adopted claims whose task has ended; a
 claim held by a lease of this process is never touched there.
 
+## Sleep and wake
+
+Instabox pauses an idle box after 30 minutes whatever we ask, so the pool puts boxes to sleep
+itself, sooner: **the agent idle 5 minutes and nobody has looked for 20** (Amp's rule;
+`idle.agentMs` and `idle.userMs`). `sweepIdle()` is meant to be called every minute or so (the
+timer is added when the pool is wired into the stack); one sweep runs at a time.
+
+Per box, in Rakazo's order:
+
+1. Compare-and-set `ready -> suspending` in one synchronous step. A box with a claim, or idle for
+   too short a time, or looked at lately (`noteUserActivity(machineId)`, for T14's terminal and
+   desktop views) is skipped.
+2. Ask instabox what the box is. One that is not running (instabox paused it first) is simply
+   recorded as `suspended`: running a command on it would wake it.
+3. Checkpoint: `sync` in the box.
+4. Re-check every hold: a task that took the box (taking a `suspending` box in this phase cancels the
+   sleep and the task keeps it), a look since the sweep began, and `recentWrite(machineId)` (a write
+   in the last minute; a check that cannot tell counts as a write). Any hold turns the sleep back.
+5. Only then suspend and wait for the operation. A failure is followed by a read of the real state:
+   running is `ready` again (no new try for 5 minutes), paused is `suspended`, anything else is `lost`.
+
+A task that takes a `suspended` box wakes it (`ensureRunning`) with a limit of 60 s. A wake that
+fails or times out is tried once more with 180 s; a box that is gone (404) is not retried. Only a
+second failure counts the box as `lost` ("slow, not dead", durable-harness `wake.ts`). After a wake
+the guard (`beforeUse(machineId, 'wake')`, the egress guard) runs and a box that fails it is not used.
+In both cases the task goes on to another box. Awake boxes are preferred to sleeping ones, and a
+sleeping box is woken before a new one is made. A box found asleep after a restart is `suspended`.
+
+Not here: `.agents/resume` after a wake (with the setup snapshots), deleting `lost` boxes (the cleanup piece).
+
 ## Restoring
 
 `restoreFromSnapshot` drops the task's old box from the registry (a broken one that still exists
