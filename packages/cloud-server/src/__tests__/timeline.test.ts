@@ -84,6 +84,19 @@ test('with content on the owner’s timeline says what each step did', async (t)
   );
 });
 
+test('with content on a secret in a step label is scrubbed on the way out', async (t) => {
+  const { h, taskId, steps } = await setup(t, { timelineContent: true });
+  await steps.intent({
+    stepId: 'toolu_1',
+    kind: 'tool:Bash',
+    replay: 'never',
+    label: 'Bash: curl -H "Authorization: Bearer abcdef0123456789abcdef" https://x.test',
+  });
+  const text = await (await timelineOf(h, taskId)).text();
+  assert.ok(!text.includes('abcdef0123456789'), text);
+  assert.match(text, /\[secret\]/u);
+});
+
 test('a timeline is owner-only: a wrong token is 401, another owner’s task is 404', async (t) => {
   const { h, taskId, steps } = await setup(t);
   await steps.intent({ stepId: 'toolu_1', kind: 'tool:Read', replay: 'safe', label: 'Read: a' });

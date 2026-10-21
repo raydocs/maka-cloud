@@ -32,6 +32,7 @@ import type { InboxRoutes } from './inbox.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import type { PushApi } from './push.js';
 import { toPublicView } from './public-view.js';
+import { scrubSecretFields } from './secret-shapes.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
 
@@ -879,7 +880,7 @@ export class PublicApi {
       now: Date.now(),
     });
     if (!timeline) throw new HttpError(404, 'not_found');
-    respond(res, 200, { timeline });
+    respond(res, 200, { timeline: scrubSecretFields(timeline) });
   }
 
   /** The owner as the orchestrator checks them, in its write chain, so a revoke in between stops it. */
