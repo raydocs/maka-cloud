@@ -76,14 +76,18 @@ knownGap('T27', 'the Codex runner takes no messages for a running task', async (
   assert.equal(h.runners.codex.steerable, true);
 });
 
-knownGap('T28 follow-up', 'a runner reports the tokens of a run, not only its dollars', async (t) => {
-  const h = await sdkSetup(t);
-  await h.setMode('spend');
-  const events = await collect(await h.runners.claude.start(await h.spec('tsk_gap_tokens')));
-  const usage = events.filter((event) => event.type === 'usage');
-  assert.ok(usage.length > 0, 'the run reported no usage at all');
-  assert.ok(
-    usage.every((event) => 'inputTokens' in event && 'outputTokens' in event),
-    'a usage report carries dollars only',
-  );
-});
+knownGap(
+  'T28 follow-up',
+  'a runner reports the tokens of a run, not only its dollars',
+  async (t) => {
+    const h = await sdkSetup(t);
+    await h.setMode('spend');
+    const events = await collect(await h.runners.claude.start(await h.spec('tsk_gap_tokens')));
+    const usage = events.filter((event) => event.type === 'usage');
+    assert.ok(usage.length > 0, 'the run reported no usage at all');
+    assert.ok(
+      usage.every((event) => 'inputTokens' in event && 'outputTokens' in event),
+      'a usage report carries dollars only',
+    );
+  },
+);
