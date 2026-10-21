@@ -363,7 +363,7 @@ test('a change nobody reviewed is never opened as a pull request', async (t) => 
   }
 });
 
-test('a change kept for the owner to look at opens only as a draft that says so, and the approval card says it too', async (t) => {
+test('a change kept for the owner to look at is never pushed unless they ask for it unreviewed, and then only as a draft that says so', async (t) => {
   const kept = {
     ...VERIFICATION,
     review: { ...VERIFICATION.review, status: 'unavailable' as const, reason: 'x' },
@@ -377,13 +377,23 @@ test('a change kept for the owner to look at opens only as a draft that says so,
     ownsTask: () => true,
   });
 
-  const card = await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' });
-  assert.match(
-    card ?? '',
-    /Opens as a draft, kept for you to look at: .*the reviewer could not start/,
+  // Without the owner's explicit ask nothing reaches GitHub, and the card says so.
+  const plain = await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' });
+  assert.match(plain ?? '', /This cannot be opened: .*the reviewer could not start/);
+  await assert.rejects(
+    tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context()),
+    /kept for the owner to look at .*nothing was pushed/,
   );
+  assert.equal(fake.pulls.length, 0, 'no branch was pushed and no pull request opened');
 
-  await tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
+  const card = await tool.approvalDetails?.({
+    taskId: 'tsk_1',
+    title: 'Fix add',
+    publishUnreviewed: true,
+  });
+  assert.match(card ?? '', /NOT REVIEWED\. Opens as a draft .*the reviewer could not start/);
+
+  await tool.impl({ taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true }, context());
   const pull = fake.pulls[0];
   assert.equal(pull?.draft, true, 'a kept change is never opened ready for review');
   assert.equal(pull?.title, '[Kept for your review] Fix add');

@@ -20,11 +20,38 @@ each is off unless its setting is present, so the launch environment file simply
   `sandbox machines:    N (one per invite)`.
 - Nothing about the plan vault is set; there is nothing to set. Tasks use the model gateway with the
   owner's keys, as in the runbook.
-- The go-live rehearsal (`deploy/rehearsal/`, the `rehearsal` CI job) runs with the same three off,
-  so its green run is the launch path.
+- `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` are set, and every sandbox machine has that
+  account (see "The agent account" in `docs/fork/deploy.md`). Without them no CLI starts and every
+  task fails at once, so a launch host without them serves nobody.
+- The go-live rehearsal (`deploy/rehearsal/`, the `rehearsal` CI job) runs with the same three off.
+  Read its green run for what it covers (below), not as proof of the launch path.
+
+## What the rehearsal does not verify yet
+
+The rehearsal's sandbox is a single-user stand-in with no second OS account, so every step that
+runs a task fails by design and is listed as an expected failure in
+`.github/workflows/fork-deploy-rehearsal.yml` (`MAKA_REHEARSAL_XFAIL`). A green run therefore proves
+the image build, the Compose and Caddy stack, TLS, the health check and sign-in, and nothing about
+tasks:
+
+| Step | Status in the rehearsal | Unverified until |
+| --- | --- | --- |
+| `health`, `sign-in` | runs and passes | (covered) |
+| `task` (a task and its result card) | expected failure | the stand-in has the agent account |
+| `approval` (an approval answered once) | expected failure | the same |
+| `restart` (a restart in the middle of a task) | expected failure | the same |
+| `restart-reply` | expected failure (may pass when `restart` does) | the same |
+| `backup-restore` (backup, restore, a task still runs) | expected failure | the same |
+
+What takes them off the list is written in `deploy/rehearsal/README.md`, "The agent account": a real
+second account in the stub container, a shared group, passwordless `sudo -n` for the sandbox user
+and stand-ins for the firewall tools the box check tries, and the scripted `claude` speaking the
+Agent SDK's stream-json protocol. Until that is done, the first run on a real host is the first time
+a task runs end to end with the agent account, and it needs the owner's keys and budget.
 
 ## Why these three
 
 Each adds a second way to reach a sandbox, a credential or a GitHub repository, and the open review
 items on them are not on the path a first user takes. Leaving them off cuts scope without leaving a
 gap in what a first user does: sign in, give a goal, see the result card, approve, restart safely.
+That path is built and unit-tested; the rehearsal does not yet run it end to end (see above).

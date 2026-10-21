@@ -250,7 +250,9 @@ export class Fleet {
       vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
     const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
+    // The check runs the CLI itself (`--version`), so the box is guarded first like for any task code.
     const check = await machine.exec(cliCheckScript(vendor.binary), {
+      taskCode: true,
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
     });
     if (check.exitCode === 0) return;
