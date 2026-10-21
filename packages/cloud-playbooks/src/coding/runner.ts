@@ -25,6 +25,8 @@ import {
   parseReviewFile,
   plain,
   type ReviewRecord,
+  fixBrief,
+  MAX_FIX_FINDINGS,
   reviewBrief,
   reviewLine,
   reviewMarkdown,
@@ -328,6 +330,8 @@ class CodingRun implements RunHandle {
   private lastReportedUsd: number | undefined;
   /** Set once the task has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
+  /** What the review, the fix and the second review may spend in all (the task's total, not theirs alone). */
+  private reviewCap: number | undefined;
   /** The mode the brief names; the work and the review follow its roles and its budget split. */
   private mode: ModeId = 'standard';
   /**
@@ -423,8 +427,8 @@ class CodingRun implements RunHandle {
             path: file.path,
             status: file.status,
           }));
-          const review = await this.review(task, baseSha, brief, vendor, outcome);
-          await this.deliver(task, verification, outcome, review);
+          const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
+          await this.deliver(task, verification, reviewed.outcome, reviewed.review);
           return this.setTerminal({ type: 'finished' });
         }
         attempt.end = outcome.reason;
@@ -829,10 +833,12 @@ class CodingRun implements RunHandle {
     });
     const budget = this.spec.budgetUsd;
     if (budget !== undefined) {
-      const reviewLimit = Math.min(
+      // One limit for the review, the fix and the second review together: it is set when the first
+      // review starts and never grows, and it is below the task's budget.
+      const reviewLimit = (this.reviewCap ??= Math.min(
         budget,
         this.spentBefore + splitBudget(modes, this.mode, budget).reviewUsd,
-      );
+      ));
       if (reviewLimit - this.spentBefore < MIN_REVIEW_USD) {
         return unavailable(
           `the budget leaves $${Math.max(0, reviewLimit - this.spentBefore).toFixed(2)} for a review, too little to start one`,
@@ -891,6 +897,107 @@ class CodingRun implements RunHandle {
       return unavailable(errorMessage(error));
     } finally {
       // The review's own limit ends the review, not the task: the work finished before it began.
+      this.budgetStop = undefined;
+    }
+  }
+
+  /**
+   * The review, and, when it found P1 problems, the one fix. The implementer's vendor gets the P1
+   * findings once, in a fresh run (the task's session record is the reviewer's by now); the runner
+   * checks the result as it checked the first change, and the other vendor reviews it again. If any
+   * part of that fails, the first verified change is the one delivered, with its P1 findings. There
+   * is no loop: this method runs `fix` at most once, and nothing calls it again.
+   */
+  private async reviewAndFix(
+    task: CodingTask,
+    baseSha: string,
+    conductorBrief: string,
+    implementer: Vendor,
+    outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+  ): Promise<{
+    outcome: { repro: Repro; manifest: ResultManifest; collected: Collected };
+    review: ReviewRecord;
+  }> {
+    const first = await this.review(task, baseSha, conductorBrief, implementer, outcome);
+    if (first.status !== 'reviewed') return { outcome, review: first };
+    const p1 = first.findings.filter((finding) => finding.severity === 'P1');
+    if (p1.length === 0) return { outcome, review: first };
+    const sent = Math.min(p1.length, MAX_FIX_FINDINGS);
+    const notApplied = (reason: string): ReviewRecord => ({
+      ...first,
+      fix: { sent, result: 'not_applied', reason: plain(reason, 300) },
+    });
+    const budget = this.spec.budgetUsd;
+    if (budget !== undefined && this.reviewCap !== undefined) {
+      const left = this.reviewCap - this.spentBefore;
+      if (left < 2 * MIN_REVIEW_USD) {
+        return {
+          outcome,
+          review: notApplied(
+            `the review's budget has $${Math.max(0, left).toFixed(2)} left, too little for a fix and a second review`,
+          ),
+        };
+      }
+    }
+    try {
+      this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
+      const turn = await this.agentTurn(
+        implementer,
+        new LoopDetector(this.runner.loopLimits),
+        undefined,
+        () =>
+          fixBrief({
+            repo: task.repo,
+            baseSha,
+            dir: this.ws.dir,
+            goal: task.goal,
+            testCommand: task.testCommand,
+            findings: p1,
+            conductorBrief,
+          }),
+        { phase: 'review', ...this.settingsOf(implementerFor, implementer) },
+      );
+      if ('loop' in turn) return { outcome, review: notApplied(`the fix stopped: ${turn.loop}`) };
+      if (!turn.ok) {
+        return {
+          outcome,
+          review: notApplied(
+            this.budgetStop
+              ? `the fix ran out of the review's budget (${this.budgetStop})`
+              : `the fix run failed: ${turn.reason}`,
+          ),
+        };
+      }
+      const checks: CheckResult[] = [];
+      const checked = await this.check(task, baseSha, checks);
+      if (!checked.ok) {
+        return {
+          outcome,
+          review: notApplied(`the fixed change failed the checks: ${checked.problem}`),
+        };
+      }
+      const collected = await this.collect(task, baseSha);
+      if ('reason' in collected) {
+        return {
+          outcome,
+          review: notApplied(`the fixed change could not be read (${collected.reason})`),
+        };
+      }
+      const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
+      // The fix's own spend may have used the cap: the second review then cannot start, and says so.
+      this.budgetStop = undefined;
+      const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
+      if (second.status !== 'reviewed') {
+        return {
+          outcome,
+          review: notApplied(`the fixed change could not be reviewed again (${second.reason})`),
+        };
+      }
+      return { outcome: fixed, review: { ...second, fix: { sent, result: 'applied' } } };
+    } catch (error) {
+      if (this.cancelled || error instanceof CancelledError) throw error;
+      return { outcome, review: notApplied(errorMessage(error)) };
+    } finally {
       this.budgetStop = undefined;
     }
   }
