@@ -19,7 +19,12 @@ export interface TranscriptStore {
   /** Where a task's main transcript of a session is kept, and how many lines it has. */
   locate(taskId: TaskId, sessionId: string): Promise<TranscriptInfo | undefined>;
   /** A page of a main transcript: lines after `cursor` (the `next` of the page before), up to ~`maxBytes`. */
-  read(taskId: TaskId, sessionId: string, cursor?: number, maxBytes?: number): Promise<TranscriptPage>;
+  read(
+    taskId: TaskId,
+    sessionId: string,
+    cursor?: number,
+    maxBytes?: number,
+  ): Promise<TranscriptPage>;
   /** Removes everything kept for a task. */
   deleteTask(taskId: TaskId): Promise<void>;
 }
@@ -100,7 +105,9 @@ export function checkAppend(
   for (const line of lines) {
     const size = Buffer.byteLength(line.json);
     if (size > limits.maxLineBytes) {
-      throw new TranscriptFull(`a transcript line of ${size} bytes is over the ${limits.maxLineBytes} cap`);
+      throw new TranscriptFull(
+        `a transcript line of ${size} bytes is over the ${limits.maxLineBytes} cap`,
+      );
     }
     bytes += size;
   }
@@ -128,11 +135,17 @@ export class MemoryTranscriptStore implements TranscriptStore {
     this.limits = { ...DEFAULT_TRANSCRIPT_LIMITS, ...limits };
   }
 
-  async append(taskId: TaskId, key: TranscriptKey, lines: readonly TranscriptLine[]): Promise<void> {
+  async append(
+    taskId: TaskId,
+    key: TranscriptKey,
+    lines: readonly TranscriptLine[],
+  ): Promise<void> {
     checkAppend(key, lines, this.limits);
     let task = this.tasks.get(taskId);
     if (task && task.projectKey !== key.projectKey) {
-      throw new Error('transcript refused: the task keeps its transcripts under another project key');
+      throw new Error(
+        'transcript refused: the task keeps its transcripts under another project key',
+      );
     }
     const name = `${key.sessionId}/${key.subpath ?? ''}`;
     const known = task?.transcripts.get(name);
@@ -142,7 +155,9 @@ export class MemoryTranscriptStore implements TranscriptStore {
     const fresh = lines.filter((line) => line.uuid === undefined || !known?.uuids.has(line.uuid));
     const added = fresh.reduce((sum, line) => sum + Buffer.byteLength(line.json), 0);
     if ((task?.bytes ?? 0) + added > this.limits.maxTaskBytes) {
-      throw new TranscriptFull(`the task's transcripts are over the ${this.limits.maxTaskBytes} byte cap`);
+      throw new TranscriptFull(
+        `the task's transcripts are over the ${this.limits.maxTaskBytes} byte cap`,
+      );
     }
     if (!task) {
       task = { projectKey: key.projectKey, bytes: 0, transcripts: new Map() };

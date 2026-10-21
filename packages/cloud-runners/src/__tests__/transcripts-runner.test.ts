@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { CloudRunnersOptions } from '../fleet.js';
 import { FixedMachineProvider } from '../providers.js';
-import { loadAgentSdk } from '../sdk-turn.js';
 import {
   MemoryTranscriptStore,
   type TranscriptKey,
@@ -12,7 +11,9 @@ import {
   type TranscriptStore,
 } from '../transcripts.js';
 import type { SandboxLease } from '../types.js';
+import { loadAgentSdk } from '../sdk-turn.js';
 import { SDK_CLI } from './fake-sdk-cli.js';
+import { sdkCloudOptions, sdkSetup } from './sdk-harness.js';
 import { API_KEY, collect, type Harness, MCP_TOKEN, notes, setup, terminal } from './harness.js';
 
 /** What the stand-in CLI calls its session when it keeps a transcript. */
@@ -36,17 +37,11 @@ async function rig(
   } = {},
 ): Promise<Rig> {
   const store = new MemoryTranscriptStore();
-  const h = await setup({
-    cloud: {
-      agentSdk: await loadAgentSdk(),
-      agentSdkPollMs: { minMs: 5, maxMs: 20 },
-      transcripts: extra.store ?? store,
-      ...(extra.sandboxes ? { sandboxes: extra.sandboxes } : {}),
-      ...extra.cloud,
-    },
+  const h = await sdkSetup(t, {
+    transcripts: extra.store ?? store,
+    ...(extra.sandboxes ? { sandboxes: extra.sandboxes } : {}),
+    ...extra.cloud,
   });
-  t.after(() => h.cleanup());
-  await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
   return {
     h,
     store,
@@ -99,9 +94,7 @@ test('every line the CLI writes is kept in the store, scrubbed of the run’s se
 });
 
 test('without a transcript store the CLI is not asked to mirror anything and keeps its own configuration directory', async (t) => {
-  const h = await setup({ cloud: { agentSdk: await loadAgentSdk(), agentSdkPollMs: { minMs: 5, maxMs: 20 } } });
-  t.after(() => h.cleanup());
-  await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
+  const h = await sdkSetup(t);
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_tr_off')));
   assert.equal(terminal(events)?.type, 'finished');
   const { argv, env } = await h.cliCall('claude', 1);
@@ -124,7 +117,10 @@ test('a resumed turn on the same sandbox reads the conversation it left there, a
   assert.ok(argv.includes(`--resume=${SESSION}`));
   assert.equal(await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'), before);
   assert.equal((await r.stored('tsk_tr_same')).length, 6);
-  assert.ok(!notes(events).some((note) => /put back on the sandbox/.test(note)), 'nothing to put back');
+  assert.ok(
+    !notes(events).some((note) => /put back on the sandbox/.test(note)),
+    'nothing to put back',
+  );
 });
 
 test('a sandbox that lost the conversation gets it back from the store before the CLI resumes', async (t) => {
@@ -140,7 +136,10 @@ test('a sandbox that lost the conversation gets it back from the store before th
   );
   assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
   assert.ok(notes(events).some((note) => /\(3 lines\) was put back on the sandbox/.test(note)));
-  assert.equal(await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'), `${stored}\n`);
+  assert.equal(
+    await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'),
+    `${stored}\n`,
+  );
 });
 
 /** A provider whose new sandboxes are empty: the task directory of the one machine is wiped. */
@@ -181,11 +180,19 @@ test('with the sandbox gone and no snapshot, the task goes on in a new sandbox f
     await r.h.runners.claude.resume('tsk_tr_fresh', { prompt: 'Carry on.', spec }),
   );
   assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
-  assert.ok(notes(events).some((note) => /goes on in a new one from its stored conversation/.test(note)));
+  assert.ok(
+    notes(events).some((note) => /goes on in a new one from its stored conversation/.test(note)),
+  );
 
   // The CLI resumed the stored conversation, and the new sandbox has the brief but nothing else.
-  assert.equal(await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'), `${stored}\n`);
-  assert.match(await fs.readFile(join(r.h.root, 'tsk_tr_fresh', 'brief.md'), 'utf8'), /Brief for tsk_tr_fresh/);
+  assert.equal(
+    await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'),
+    `${stored}\n`,
+  );
+  assert.match(
+    await fs.readFile(join(r.h.root, 'tsk_tr_fresh', 'brief.md'), 'utf8'),
+    /Brief for tsk_tr_fresh/,
+  );
   const sent = (await prompts(r.h)).at(-1) ?? '';
   assert.ok(sent.startsWith('Carry on.'));
   assert.match(sent, /sandbox you were working in is gone and this is a new one/);
@@ -206,7 +213,9 @@ test('the same loss without a stored conversation still fails without a guess', 
   await r.h.sessions.put({ ...(first as NonNullable<typeof first>), snapshotIds: [] });
   await r.store.deleteTask('tsk_tr_nokept');
 
-  const events = await collect(await r.h.runners.claude.resume('tsk_tr_nokept', { prompt: 'x', spec }));
+  const events = await collect(
+    await r.h.runners.claude.resume('tsk_tr_nokept', { prompt: 'x', spec }),
+  );
   const last = terminal(events);
   assert.equal(last?.type, 'failed');
   assert.match(last?.type === 'failed' ? last.reason : '', /cannot resume: the sandbox is gone/);
@@ -216,17 +225,21 @@ test('the same loss without a stored conversation still fails without a guess', 
 
 test('a conversation that began before transcripts were kept goes on as it is, unsaved', async (t) => {
   // The first turn runs without a store (a deployment that turned it on later).
-  const h = await setup({ cloud: { agentSdk: await loadAgentSdk(), agentSdkPollMs: { minMs: 5, maxMs: 20 } } });
-  t.after(() => h.cleanup());
-  await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
+  const h = await sdkSetup(t);
   const spec = await h.spec('tsk_tr_legacy');
   assert.equal(terminal(await collect(await h.runners.claude.start(spec)))?.type, 'finished');
 
   const store = new MemoryTranscriptStore();
-  const later = h.makeRunners({ transcripts: store, agentSdk: await loadAgentSdk(), agentSdkPollMs: { minMs: 5, maxMs: 20 } });
-  const events = await collect(await later.claude.resume('tsk_tr_legacy', { prompt: 'Go on.', spec }));
+  const later = h.makeRunners({ ...(await sdkCloudOptions()), transcripts: store });
+  later.fleet.ensureAgentIsolation = async () => undefined;
+  const events = await collect(
+    await later.claude.resume('tsk_tr_legacy', { prompt: 'Go on.', spec }),
+  );
   assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
-  assert.ok(notes(events).some((note) => /began before that was on; this turn is not saved/.test(note)));
+  assert.ok(
+    notes(events).some((note) => /began before that was on\); this turn is not saved/.test(note)),
+    JSON.stringify(notes(events)),
+  );
   const { argv } = await h.cliCall('claude', 2);
   assert.ok(!argv.includes('--session-mirror'));
   assert.equal(await store.locate('tsk_tr_legacy', 'sess-1'), undefined);
@@ -241,7 +254,9 @@ test('a store that refuses lines is reported, and the task still finishes', asyn
   const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_down')));
   assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
   assert.ok(
-    notes(events).some((note) => /a transcript batch was not kept: the transcript database is full/.test(note)),
+    notes(events).some((note) =>
+      /a transcript batch was not kept: the transcript database is full/.test(note),
+    ),
     JSON.stringify(notes(events)),
   );
 });
@@ -254,7 +269,9 @@ test('a conversation that cannot be put on the sandbox fails the turn before the
   r.store.read = async () => {
     throw new Error('the transcript database is down');
   };
-  const events = await collect(await r.h.runners.claude.resume('tsk_tr_readfail', { prompt: 'x', spec }));
+  const events = await collect(
+    await r.h.runners.claude.resume('tsk_tr_readfail', { prompt: 'x', spec }),
+  );
   const last = terminal(events);
   assert.equal(last?.type, 'failed');
   assert.match(

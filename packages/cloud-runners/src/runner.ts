@@ -466,7 +466,9 @@ class Run implements RunHandle {
       // No sandbox and no snapshot: with the conversation kept off the sandbox, the task goes on
       // in a new one, without its files.
       if (await this.conversationKept(existing)) {
-        this.adoptLease(await fleet.sandboxes.acquire({ tenantId: existing.tenantId, taskId: spec.taskId }));
+        this.adoptLease(
+          await fleet.sandboxes.acquire({ tenantId: existing.tenantId, taskId: spec.taskId }),
+        );
         this.checkCancelled();
         const machineId = (this.lease as SandboxLease).machineId;
         const record = await fleet.updateRecord(spec.taskId, (current) => ({

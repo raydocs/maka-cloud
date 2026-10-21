@@ -493,9 +493,12 @@ export class RemoteMachine {
       throw error;
     }
   }
-
 }
 
-function transcriptEnvs(dir: string, projectKey: string, sessionId: string): Record<string, string> {
+function transcriptEnvs(
+  dir: string,
+  projectKey: string,
+  sessionId: string,
+): Record<string, string> {
   return { MAKA_DIR: dir, MAKA_KEY: projectKey, MAKA_SESSION: sessionId };
 }

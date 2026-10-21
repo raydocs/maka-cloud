@@ -56,6 +56,11 @@ root=$(dirname "$MAKA_DIR")
 chgrp "$MAKA_AGENT_GROUP" "$root" . workspace
 chmod 710 "$root" .
 chmod 2770 workspace
+# The CLI's configuration directory (its transcripts): the agent writes it, the sandbox user puts a
+# kept conversation back into it.
+mkdir -p claude-config
+chgrp "$MAKA_AGENT_GROUP" claude-config
+chmod 2770 claude-config
 `;
 
 /**

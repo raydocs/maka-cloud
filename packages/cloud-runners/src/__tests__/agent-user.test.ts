@@ -158,6 +158,33 @@ test('what the agent runs cannot write, replace or remove the channel, but works
   await fs.rm(join(taskDir, 'workspace', 'note.txt'));
 });
 
+test('a conversation put back by the sandbox user is read and extended by the agent, and read again by the sandbox user', {
+  skip,
+}, async (t) => {
+  const { machine } = await boxes(t);
+  const dir = 'tsk_agent_cfg';
+  await machine.prepare(dir);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  const session = '11111111-2222-4333-8444-555555555555';
+  await machine.installTranscript({
+    dirName: dir,
+    projectKey: '-work-x',
+    sessionId: session,
+    bytes: (async function* () {
+      yield Buffer.from('{"n":1}\n');
+    })(),
+  });
+  const file = join(machine.configDir(dir), 'projects', '-work-x', `${session}.jsonl`);
+  const asAgentRun = (script: string) =>
+    spawnSync('bash', ['-c', asAgent(`sh -c ${JSON.stringify(script)}`, CHANNEL)], {
+      env: { PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+    });
+  assert.equal(asAgentRun(`cat ${file}`).stdout, '{"n":1}\n');
+  assert.equal(asAgentRun(`echo '{"n":2}' >> ${file} && mkdir -p ${dirname(file)}/sub`).status, 0);
+  assert.equal(await machine.transcriptLines(dir, '-work-x', session), 2);
+});
+
 test('a run of the agent account is stopped like any other, with its processes', {
   skip,
 }, async (t) => {

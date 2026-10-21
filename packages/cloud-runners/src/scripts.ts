@@ -469,7 +469,8 @@ if [ -f "$file" ]; then wc -l < "$file" | tr -d ' '; else echo 0; fi
  * lost answer is recognized by the file's size and not written twice.
  */
 export const TRANSCRIPT_CHUNK_SCRIPT = `set -eu
-umask 077
+# The agent's account reads and appends to this file through the shared group (see agent-user.ts).
+umask 007
 ${TRANSCRIPT_DIRS}
 tmp="$dir/.restore-$MAKA_SESSION.tmp"
 if [ "$MAKA_OFFSET" = 0 ]; then
@@ -478,7 +479,10 @@ if [ "$MAKA_OFFSET" = 0 ]; then
   done
   mkdir -p "$dir"
   rm -f -- "$tmp"
+  # Created or refused: a link planted at the name after the rm is not written through.
+  set -C
   : > "$tmp"
+  set +C
 fi
 size=$(stat -c %s "$tmp" 2>/dev/null || echo -1)
 if [ "$size" -eq "$MAKA_OFFSET" ]; then
