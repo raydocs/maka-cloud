@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { scrubSecretShapes } from '@maka-cloud/orchestrator';
+import { scrubSecretShapes, scrubValues } from '@maka-cloud/orchestrator';
 import {
   type BoundLimits,
   type Bounded,
@@ -168,9 +168,6 @@ const NOT_SENT = new Set([
   'ENETUNREACH',
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
-
-/** Shorter upstream keys are not replaced by value: they would eat ordinary words. */
-const MIN_UPSTREAM_KEY_CHARS = 8;
 
 const PASSED_HEADERS = ['content-type', 'request-id', 'x-request-id', 'retry-after'];
 
@@ -708,12 +705,12 @@ export class Gateway {
    */
   private passedBody(response: Response, body: ArrayBuffer): ArrayBuffer {
     if (response.ok) return body;
-    let text = new TextDecoder().decode(body);
-    for (const upstream of Object.values(this.options.upstreams)) {
-      const key = upstream?.apiKey;
-      if (key !== undefined && key.length >= MIN_UPSTREAM_KEY_CHARS)
-        text = text.split(key).join('[secret]');
-    }
+    // The gateway's own keys go by value, whatever their length and however the vendor echoed them
+    // (as they are, percent-encoded in a URL, escaped inside a JSON string).
+    const keys = Object.values(this.options.upstreams).flatMap((upstream) =>
+      upstream?.apiKey ? [upstream.apiKey] : [],
+    );
+    const text = scrubValues(new TextDecoder().decode(body), keys);
     const scrubbed = new TextEncoder().encode(scrubSecretShapes(text));
     return scrubbed.buffer.slice(
       scrubbed.byteOffset,
