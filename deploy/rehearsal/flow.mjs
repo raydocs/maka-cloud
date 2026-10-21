@@ -19,7 +19,7 @@
 //   MAKA_REHEARSAL_RESOLVE       an address to connect to whatever the name is (127.0.0.1)
 //   MAKA_REHEARSAL_CONTROL_URL   http://127.0.0.1:9102              the stand-ins' control API
 //   MAKA_REHEARSAL_OPS           a script: stop | start | restart | backup | backups | restore NAME
-//   MAKA_REHEARSAL_XFAIL         steps that are expected to fail (default: restart-reply)
+//   MAKA_REHEARSAL_XFAIL         steps that are expected to fail (default: none)
 //
 // A step in MAKA_REHEARSAL_XFAIL that fails is reported as an expected failure and does not fail the
 // run; the same step passing fails the run, so the mark is taken off when the fix lands.
@@ -45,7 +45,7 @@ const ops = env.MAKA_REHEARSAL_OPS;
 const resolveTo = env.MAKA_REHEARSAL_RESOLVE;
 const ca = env.MAKA_REHEARSAL_CA ? readFileSync(env.MAKA_REHEARSAL_CA) : undefined;
 const xfail = new Set(
-  (env.MAKA_REHEARSAL_XFAIL ?? 'restart-reply')
+  (env.MAKA_REHEARSAL_XFAIL ?? '')
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean),
@@ -457,8 +457,8 @@ const steps = [
     },
   ],
   [
-    // The conductor's own turn was cut by the restart. T28 makes it follow the resumed task and
-    // finish its turn; until that lands, no closing message arrives.
+    // The conductor's own turn was cut by the restart. It follows the resumed task and, when that
+    // ends, tells the user (no model call: the task's own summary in fixed wording).
     'restart-reply',
     async () => {
       assert(memory.restartConversation, 'the restart step did not run');

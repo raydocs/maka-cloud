@@ -865,6 +865,39 @@ test('with tasks that survive a restart, a restart neither cancels a running tas
   assert.equal(reopened.stats().stopChecks, 0);
 });
 
+test('a task followed across a restart ends with one closing message to the user, and none when it is settled again', async (t) => {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: keepTasks(() => h),
+  });
+  const { run, held } = await runningTaskTurn(h);
+  const [before] = h.conductor.state.unsettledDelegations();
+  assert.ok(before, 'the task is delegated');
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart();
+  await reopened.idle();
+  assert.equal(h.outbox.messages.length, 0, 'nothing is said while the task runs');
+
+  await run.complete();
+  await h.orchestrator.settled();
+  for (let pass = 0; reopened.state.unsettledDelegations().length > 0; pass++) {
+    assert.ok(pass < 500, 'the delegation was never settled');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await reopened.idle();
+  assert.equal(h.outbox.messages.length, 1, JSON.stringify(h.outbox.messages));
+  const [message] = h.outbox.messages;
+  assert.equal(message?.conversationId, 'cnv_1');
+  assert.match(message?.text ?? '', /^The server restarted while this ran\. The task .*succeeded/u);
+
+  // A later look at the same task says nothing more.
+  assert.equal(reopened.state.settleDelegation(before.key, 0, 'again').settled, false);
+  await reopened.idle();
+  assert.equal(h.outbox.messages.length, 1);
+});
+
 test('the same restart without that setting cancels the task, as before', async (t) => {
   const h = await makeHarness(t, { autoComplete: false });
   const { held } = await runningTaskTurn(h);

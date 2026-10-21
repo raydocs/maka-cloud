@@ -1067,7 +1067,11 @@ export class Conductor {
    * found no task settles at 0. An ended task whose run may still be going
    * keeps its reservation, and is asked about again until its stop is confirmed.
    */
-  private settleView(delegation: DelegationRow, view: Record<string, unknown> | undefined): void {
+  private settleView(
+    delegation: DelegationRow,
+    view: Record<string, unknown> | undefined,
+    closing?: string,
+  ): void {
     if (!view) return;
     if (view.created === false) {
       this.state.settleDelegation(delegation.key, 0);
@@ -1084,7 +1088,35 @@ export class Conductor {
       return;
     }
     const actual = typeof view.costUsd === 'number' ? view.costUsd : delegation.reservedUsd;
-    this.state.settleDelegation(delegation.key, actual);
+    this.state.settleDelegation(delegation.key, actual, closing);
+  }
+
+  /**
+   * What the user is told when a task ends that the conductor followed across a restart: the run
+   * that started it was cut off, so no turn is left to say it. Fixed wording around the task's own
+   * words, with no model call. Absent when the run did not end for a restart or a shutdown.
+   */
+  private closingOfFollowed(
+    delegation: DelegationRow,
+    view: Record<string, unknown> | undefined,
+  ): string | undefined {
+    const run = this.state.run(delegation.runId);
+    if (run?.state !== 'interrupted' || !['restart', 'shutdown'].includes(run.endReason ?? '')) {
+      return undefined;
+    }
+    const ended = String(view?.state);
+    if (!['succeeded', 'failed', 'cancelled'].includes(ended)) return undefined;
+    const manifest = view?.manifest as { summary?: unknown } | undefined;
+    const detail =
+      typeof manifest?.summary === 'string' && manifest.summary
+        ? manifest.summary
+        : typeof view?.failureReason === 'string'
+          ? view.failureReason
+          : '';
+    const title =
+      typeof view?.title === 'string' && view.title ? ` "${view.title.slice(0, 120)}"` : '';
+    const text = `The server restarted while this ran. The task${title} ${ended}${detail ? `: ${detail}` : '.'}`;
+    return text.length > 800 ? `${text.slice(0, 799)}…` : text;
   }
 
   /**
@@ -1109,7 +1141,13 @@ export class Conductor {
           }
           // A turn may have settled it while this waited.
           const current = this.state.delegation(delegation.key);
-          if (current && current.state !== 'settled') this.settleView(current, result.structured);
+          if (current && current.state !== 'settled') {
+            this.settleView(
+              current,
+              result.structured,
+              this.closingOfFollowed(current, result.structured),
+            );
+          }
         } catch (error) {
           this.warn(`Asking about delegation ${delegation.key} failed`, error);
         }
@@ -1117,6 +1155,7 @@ export class Conductor {
     } finally {
       await link.close().catch(() => undefined);
     }
+    this.sendOutbox(lane.conversationId);
     if (!this.closing.signal.aborted) {
       this.hooks.followed?.(lane.conversationId);
       if (this.state.hasFollowedTasks(lane.conversationId)) this.followLater(lane.conversationId);
