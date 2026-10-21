@@ -20,6 +20,10 @@ export const MAX_CONSECUTIVE_FAILURES = 10;
 /** One duty's output (a branch of its own) may wake a duty at most this many times in a row before a person is needed. */
 export const MAX_CHAIN_DEPTH = 3;
 export const MAX_SCHEDULE_MINUTES = 10_080;
+/** A run that failed on a transient model error is run again once, this long after. */
+export const TRANSIENT_RETRY_DELAY_MINUTES = 2;
+/** No retry when the duty's schedule fires again within this long: the next run is the retry. */
+export const TRANSIENT_RETRY_SKIP_WITHIN_MINUTES = 30;
 
 /** The branch prefix `open_pull_request` gives the employee's own pull requests. */
 export const OWN_BRANCH_PREFIX = 'maka/';

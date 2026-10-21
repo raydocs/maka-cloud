@@ -155,6 +155,34 @@ test('a request is settled at what its run spent, on every way a run can end', a
   engine.close();
 });
 
+test('a run the conductor ended as model_transient is retried once; every other failed reason counts as a failure', async () => {
+  const clock = { t: DAY0 };
+  const { engine, dutyId, requests } = await started(clock, 3);
+  const reasons = ['model_transient', 'model_error', 'budget_limit'];
+  const runs = new Map<string, DutyRunView[]>(
+    requests.map((_, index) => [
+      `cnv_${index + 1}`,
+      [run(index === 2 ? 'cancelled' : 'failed', 0.1, 'dty', reasons[index] ?? null)],
+    ]),
+  );
+  const settler = new RunSettler({
+    engine,
+    runsOf: (id) => runs.get(id) ?? [],
+    now: () => clock.t,
+  });
+  assert.equal(settler.settle(), 3);
+  assert.deepEqual(
+    requests.map((request) => engine.request(request.requestId)?.reason),
+    ['transient', 'failed', 'failed'],
+  );
+  const retries = engine
+    .requestsOf(dutyId)
+    .filter((q) => !requests.some((request) => request.requestId === q.requestId));
+  assert.equal(retries.length, 1, 'only the transient one has a retry waiting');
+  assert.equal(retries[0]?.state, 'pending');
+  engine.close();
+});
+
 test('runs the conductor stopped on its own count as failures, and ten in a row turn the duty off', async () => {
   const clock = { t: DAY0 };
   const { engine, projectId, dutyId, requests } = await started(clock, 10);
