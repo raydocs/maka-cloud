@@ -228,6 +228,22 @@ CREATE TABLE system_starts (
 );
 `;
 
+/**
+ * v9 (T24): the pages a task actually opened, written only by trusted in-process code. The preview
+ * proxy fetches nothing that is not a row here. `label` is one of a fixed set of words.
+ */
+const SCHEMA_V9 = `
+CREATE TABLE opened_pages (
+  task_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  label TEXT NOT NULL,
+  opened_at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, seq),
+  UNIQUE (task_id, url)
+);
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -237,6 +253,7 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V6,
   SCHEMA_V7,
   SCHEMA_V8,
+  SCHEMA_V9,
 ];
 
 /**

@@ -12,6 +12,8 @@ import {
 import { type ArtifactRead, type ArtifactSource, FileArtifactSource } from './artifacts.js';
 import { ConductorFeed, type ConversationPublisher } from './conductor-feed.js';
 import type { ComputerSource } from './computer.js';
+import { OpenedPages, PreviewService, type PreviewOptions, type SourceLabel } from './previews.js';
+import { createSafeFetch } from './safe-fetch.js';
 import {
   ConversationStore,
   MAX_MESSAGE_BYTES,
@@ -197,6 +199,11 @@ export interface CloudServerOptions {
   artifacts?: ArtifactSource;
   /** Computer routes are absent without a trusted desktop/terminal adapter. */
   computer?: ComputerSource;
+  /** The preview proxy for pages a task opened. Tests give it a fetcher that touches no network. */
+  previews?: Pick<
+    PreviewOptions,
+    'fetch' | 'ttlMs' | 'failureTtlMs' | 'maxEntries' | 'maxImageBytes' | 'maxInFlight'
+  >;
   sweepOrphans?: SweepOrphans;
   /** Web Push settings (see `pushConfigFromEnv`). Without them the push routes answer 404. */
   push?: PushConfig & Pick<PushOptions, 'transport' | 'retryDelayMs' | 'maxAttempts' | 'timeoutMs'>;
@@ -251,6 +258,12 @@ export interface CloudServer {
   invites: InviteStore;
   /** Where conductor output enters the conversation feed. */
   publisher: ConversationPublisher;
+  /**
+   * Records pages a task opened, for its sources card. Only trusted in-process code may call this
+   * (a tool result in the transcript, a pull request the employee opened); the pages are the only
+   * URLs the preview proxy will fetch. Returns how many were new; an unknown task keeps none.
+   */
+  recordOpenedPages(taskId: string, pages: readonly { url: string; label?: SourceLabel }[]): number;
   /** Event streams currently open. */
   openStreams(): number;
   /** Where handing user messages to the handler stands; undefined without a handler. */
@@ -403,6 +416,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const ownHandler = handler;
     const limits = { ...DEFAULT_HTTP_LIMITS, ...options.http };
     const artifacts = options.artifacts ?? new FileArtifactSource(options.handoffRoot);
+    const openedPages = new OpenedPages(db);
+    const previewService = new PreviewService({
+      ...options.previews,
+      fetch: options.previews?.fetch ?? createSafeFetch(),
+    });
     // Without a handler, messages stay pending until a server with one starts.
     const ownDeliveries = ownHandler
       ? new MessageDeliveries(
@@ -523,6 +541,9 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       computer: options.computer,
       publisher,
       artifactLimiter: new RateLimiter(limits.artifactsPerMinute),
+      opened: openedPages,
+      previews: previewService,
+      previewLimiter: new RateLimiter(limits.previewsPerMinute),
       limits,
       onMessage: deliverMessage,
       ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
@@ -597,6 +618,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       deliveryStats: () => ownDeliveries?.stats(),
       pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(true),
       conversationsOf: (inviteId) => conversations.idsOf(inviteId),
+      recordOpenedPages: (taskId, pages) =>
+        orchestrator.rootSessionOfTask(taskId) === undefined
+          ? 0
+          : openedPages.record(taskId, pages),
       createConversation: (input) => {
         if (!/^[A-Za-z0-9_:.-]{1,128}$/u.test(input.key)) return { ok: false, reason: 'invalid' };
         if (!ownInviteStore.active(input.owner)) return { ok: false, reason: 'owner_inactive' };

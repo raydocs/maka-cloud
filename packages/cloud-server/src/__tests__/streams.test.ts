@@ -1,3 +1,4 @@
+import { OpenedPages, PreviewService } from '../previews.js';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer, type Server, ServerResponse } from 'node:http';
@@ -47,6 +48,11 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
     },
     artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
     artifactLimiter: new RateLimiter(1_000_000),
+    opened: new OpenedPages(db),
+    previews: new PreviewService({
+      fetch: () => Promise.resolve({ ok: false, reason: 'network' }),
+    }),
+    previewLimiter: new RateLimiter(1_000_000),
     limits: {
       ...DEFAULT_HTTP_LIMITS,
       heartbeatMs: HEARTBEAT_MS,

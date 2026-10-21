@@ -109,6 +109,9 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
 | `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`. |
 | `GET /v1/tasks/:taskId/artifacts/:index` | A file's bytes as an attachment, or `{url}` for a link. 404 for anything that is not readable (one answer for every reason), 413 over 2 MiB, 429 over the download limit. |
+| `GET /v1/tasks/:taskId/sources` | `{sources: [{index, url, site, label}], total}`: the pages the task opened (first 20), from the server's own log. Nothing is fetched to answer. `label` is one of `source`, `docs`, `alternative`, `pull_request`, `preview`, `test_report`. |
+| `GET /v1/tasks/:taskId/sources/:index/preview` | `{site, title?, image}` for one page of that list, fetched by the server. `image` says whether the next route has bytes. 404 for an index not in the list; 429 over the preview limit (60 a minute per invite) or when the server is already fetching as much as it allows (`retry-after: 2`). |
+| `GET /v1/tasks/:taskId/sources/:index/image` | The page's own preview image (png, jpeg, webp or gif by its first bytes, at most 1 MiB), with `nosniff`, a sandboxing CSP and `private, no-store`. 404 when the page has none. |
 | `GET /v1/push/key` | `{publicKey}`, the VAPID public key. 404 when push is not configured (so are the next two). |
 | `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
 | `DELETE /v1/push/subscriptions` | `{endpoint}` -> 204. Only the invite that registered it can remove it; otherwise 404. |
@@ -143,6 +146,27 @@ Bytes are sent as `text/plain` (`application/json` for `.json`) with
 `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and a
 sandboxing CSP, so a browser never renders them. At most 8 reads run at once
 (429 beyond), and each invite gets 60 downloads a minute.
+
+### Sources and the preview proxy (T24)
+
+The browser never contacts a site a task read. `CloudServer.recordOpenedPages(taskId, pages)`
+is how trusted in-process code (a tool result in the transcript, a pull request the employee
+opened) puts a page on a task's list; only plain public https URLs are kept, once each, at most
+20 a task, with one of a fixed set of labels. That list (`opened_pages`, schema v9) is the only
+thing the proxy fetches: not a link in a manifest, not a URL in model text, not a markdown image,
+and the path carries an index into the list, never a URL. Nothing records pages yet; T28's
+transcript mirror will, so until then the list is empty.
+
+The fetch goes through `createSafeFetch` (`safe-fetch.ts`, `public-address.ts`): https on port 443
+only, every address a name resolves to must be public, the socket connects to the address that was
+checked, redirects are followed by hand (3 at most) and re-checked each hop, one deadline and a byte
+cap cover the whole request, and nothing of ours is sent. The page is read to 512 KiB (its start
+only), its title and `og:image` are read with bounded patterns, the title is cut to one printable
+line without vendor names, and the image address goes through the same fetcher (1 MiB). An image
+is kept only if its first bytes say png, jpeg, webp or gif and agree with the type the site
+declared (never SVG). Results are cached for an hour (failures for 5 minutes) in a cache bounded by
+256 entries and 24 MiB of image bytes; one fetch per page at a time; at most 4 page fetches run at
+once. Images are not checked for pixel dimensions.
 
 ### Web Push
 

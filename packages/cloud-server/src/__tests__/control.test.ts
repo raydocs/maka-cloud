@@ -1,3 +1,4 @@
+import { OpenedPages, PreviewService } from '../previews.js';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -334,6 +335,11 @@ for (const change of [
       },
       artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
       artifactLimiter: new RateLimiter(1_000_000),
+      opened: new OpenedPages(db),
+      previews: new PreviewService({
+        fetch: () => Promise.resolve({ ok: false, reason: 'network' }),
+      }),
+      previewLimiter: new RateLimiter(1_000_000),
       limits: DEFAULT_HTTP_LIMITS,
       onMessage: () => undefined,
     });
