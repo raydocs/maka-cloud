@@ -105,6 +105,7 @@ export function openPullRequestTool(
         try {
           const loaded = await loadChange(delivery);
           lines.push(
+            `${BASE_LABEL} ${shownValue(delivery.baseRef)}`,
             `${CHANGE_LABEL} ${loaded.changesSha256}`,
             `${RECORD_LABEL} ${loaded.recordSha256}`,
           );
@@ -142,10 +143,17 @@ export function openPullRequestTool(
       }
       if (delivery.publishedPr) return { ...delivery.publishedPr, alreadyOpen: true };
       // One read of the change and its record: what the card was checked against is what is opened.
-      const loaded = await loadChange(delivery);
+      const loaded = await loadChange(delivery).catch((error: unknown) => {
+        if (error instanceof ToolRefusal) throw error;
+        throw new ToolRefusal(
+          'change_modified',
+          `The verified change of ${args.taskId} cannot be read; nothing was opened.`,
+        );
+      });
       const approved = approvedHashes(context.approved);
       if (
         !approved ||
+        !cardNamesBase(context.approved, delivery.baseRef) ||
         approved.changes !== loaded.changesSha256 ||
         approved.record !== loaded.recordSha256
       ) {
@@ -181,17 +189,30 @@ export function openPullRequestTool(
 }
 
 /** The reason a task's change is kept for the owner, read from the runner's record; undefined if it is not kept. */
+const BASE_LABEL = 'Base branch:';
 const CHANGE_LABEL = 'Change (sha256):';
 const RECORD_LABEL = 'Record (sha256):';
 
 /** The hashes an approved card names, or nothing when it names none. */
 function approvedHashes(card: string | undefined): { changes: string; record: string } | undefined {
   if (card === undefined) return undefined;
-  const find = (label: string) =>
-    new RegExp(`^${label.replace(/[()]/g, '\\$&')} ([0-9a-f]{64})$`, 'm').exec(card)?.[1];
+  // Each label must appear on exactly one line: a second one is text that is not the tool's own.
+  const find = (label: string) => {
+    const found = [
+      ...card.matchAll(new RegExp(`^${label.replace(/[()]/g, '\\$&')} ([0-9a-f]{64})$`, 'gm')),
+    ];
+    return found.length === 1 ? found[0]?.[1] : undefined;
+  };
   const changes = find(CHANGE_LABEL);
   const record = find(RECORD_LABEL);
   return changes && record ? { changes, record } : undefined;
+}
+
+/** Whether the approved card names the branch this change opens against, once. */
+function cardNamesBase(card: string | undefined, baseRef: string): boolean {
+  if (card === undefined) return false;
+  const line = `${BASE_LABEL} ${shownValue(baseRef)}`;
+  return card.split('\n').filter((candidate) => candidate === line).length === 1;
 }
 
 interface LoadedChange {
