@@ -40,7 +40,23 @@ describe('verifyResearchManifest', () => {
     const deep = verifyResearchManifest(unjudged, { mode: 'deep' });
     assert.equal(deep.ok, false);
     assert.match(deep.problems.join('\n'), /deep task needs a reviewer from the other runner/);
-    assert.equal(verifyResearchManifest(manifest(), { mode: 'deep' }).ok, true);
+    assert.equal(
+      verifyResearchManifest(manifest(), { mode: 'deep', otherRunnerInput: true }).ok,
+      true,
+    );
+  });
+
+  test('a deep task’s judged count is believed only when it built on files from the other runner', () => {
+    for (const context of [
+      { mode: 'deep' as const },
+      { mode: 'deep' as const, otherRunnerInput: false },
+    ]) {
+      const verdict = verifyResearchManifest(manifest(), context);
+      assert.equal(verdict.ok, false, JSON.stringify(context));
+      assert.match(verdict.problems.join('\n'), /must come from a task run by the other runner/);
+    }
+    // Other modes do not need a reviewer, so the count is not examined.
+    assert.equal(verifyResearchManifest(manifest(), { mode: 'standard' }).ok, true);
   });
 
   test('a complete manifest passes, and is labelled runner-reported', () => {

@@ -106,6 +106,18 @@ export function verifyResearchManifest(
       'a deep task needs a reviewer from the other runner to judge whether the quotes support the claims, and none did',
     );
   }
+  // The count comes from the runner's own line. In a deep task it is believed only when the task
+  // built on files of a task that ran on the other runner: one runner cannot judge its own draft.
+  if (
+    context.mode === 'deep' &&
+    checked &&
+    checked.judged > 0 &&
+    context.otherRunnerInput !== true
+  ) {
+    problems.push(
+      'the judgments of a deep task must come from a task run by the other runner, and this task took no files from one',
+    );
+  }
   const unjudged =
     checked && checked.judged === 0
       ? ' No reviewer judged whether the quotes support the claims: claims are quote-checked only.'

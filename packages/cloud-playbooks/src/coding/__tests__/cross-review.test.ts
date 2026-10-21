@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODES, type ModesConfig } from '@maka-cloud/modes';
 import type { RunnerEvent, RunSpec } from '@maka-cloud/orchestrator';
+import { verifyCodingManifest } from '../playbook.js';
 import { pullRequestBody } from '../pull-request.js';
 import { READ_SMALL_SCRIPT } from '../scripts.js';
 import {
@@ -36,16 +37,30 @@ function reviews(findings: unknown[] = FINDINGS, summary = 'Looks right.'): Agen
   };
 }
 
-/** The task failed because nobody could review the change, and delivered nothing. */
+/**
+ * Nobody could review the change: it is kept for the owner to look at. The task did not fail and
+ * the change was not delivered as a verified one; its record, review and reason are kept.
+ */
 async function notDelivered(h: Harness, id: string, events: RunnerEvent[], reason: RegExp) {
-  const end = terminal(events);
-  assert.equal(end?.type, 'failed', 'an unreviewed change does not take the success path');
-  const why = end?.type === 'failed' ? end.reason : '';
-  assert.match(why, /could not be independently reviewed/);
-  assert.match(why, /so it was not delivered/);
-  assert.match(why, reason);
-  assert.equal(await h.deliveries.get(id), undefined, 'no verified change is recorded');
-  await assert.rejects(fs.readFile(join(h.handoff, id, 'review.md')), /ENOENT/);
+  assert.deepEqual(terminal(events), { type: 'finished' }, 'a kept change is not a failed task');
+  const dir = join(h.handoff, id);
+  const manifest = await readJson(join(dir, 'result.json'));
+  assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
+  assert.equal(manifest.confidence, 'low');
+  assert.equal(manifest.done.filter((line: string) => line.startsWith('kept:')).length, 1);
+  const verdict = verifyCodingManifest(manifest);
+  assert.equal(verdict.ok, false, 'the conductor does not take it for a delivery');
+  assert.ok(
+    verdict.problems.some((problem) => /^kept for you to look at, not delivered: /.test(problem)),
+  );
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.equal(record.result, 'verified', 'it passed the repository’s checks');
+  assert.match(record.kept?.reason ?? '', /could not be independently reviewed/);
+  assert.match(record.kept?.reason ?? '', reason);
+  const delivery = await h.deliveries.get(id);
+  assert.ok(delivery, 'the change is kept, so a draft pull request can be opened for it');
+  assert.equal(delivery.publishedPr, undefined, 'nothing is published by the runner');
+  assert.ok(await fs.readFile(join(dir, 'review.md'), 'utf8'), 'the review words are kept');
 }
 
 async function finished(h: Harness, id: string, extra: Record<string, unknown> = {}) {
@@ -251,7 +266,7 @@ const NOT_REVIEWED: [string, AgentScript, RegExp][] = [
 ];
 
 for (const [label, script, reason] of NOT_REVIEWED) {
-  test(`a reviewer that ${label}: the task fails and delivers nothing`, async (t) => {
+  test(`a reviewer that ${label}: the change is kept for the owner and not delivered`, async (t) => {
     const h = await setup(t, { modes: MODES });
     h.claude.script = fixes;
     h.codex.script = script;
@@ -263,7 +278,7 @@ for (const [label, script, reason] of NOT_REVIEWED) {
   });
 }
 
-test('a reviewer that cannot start fails the task without delivering the change', async (t) => {
+test('a reviewer that cannot start keeps the change for the owner without delivering it', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = fixes;
   h.codex.start = async () => {
@@ -439,7 +454,7 @@ test('an implementer that spends its share fails the task before any review is s
   zeroStats(h.runner);
 });
 
-test('a budget with too little left for a review fails the task rather than delivering the change unreviewed', async (t) => {
+test('a budget with too little left for a review keeps the change for the owner rather than delivering it unreviewed', async (t) => {
   // The shipped minimums leave a review at least $0.10; a config with a small quick mode does not.
   const small = structuredClone(MODES);
   small.modes.quick.budget = { ...small.modes.quick.budget, minRunUsd: 0.1, reviewShare: 0.05 };

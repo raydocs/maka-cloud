@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODES, type ModesConfig } from '@maka-cloud/modes';
 import type { RunnerEvent } from '@maka-cloud/orchestrator';
+import { verifyCodingManifest } from '../playbook.js';
 import { pullRequestBody } from '../pull-request.js';
 import { fixBrief, MAX_FIX_FINDINGS } from '../review.js';
 import {
@@ -61,16 +62,20 @@ async function deliveredAddSh(h: Harness, id: string): Promise<string> {
   ).toString();
 }
 
-/** A task that ends failed, with nothing delivered, because the review still found a P1. */
+/** The review still found a P1 after the one fix: the change is kept for the owner, not delivered. */
 async function failedWithP1(h: Harness, id: string, events: RunnerEvent[], why = /./) {
-  const end = terminal(events);
-  assert.equal(end?.type, 'failed', 'a P1 left after the one fix does not end finished');
-  const reason = end?.type === 'failed' ? end.reason : '';
+  assert.deepEqual(terminal(events), { type: 'finished' }, 'a kept change is not a failed task');
+  const dir = join(h.handoff, id);
+  const manifest = await readJson(join(dir, 'result.json'));
+  assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
+  const record = await readJson(join(dir, 'verification.json'));
+  const reason: string = record.kept?.reason ?? '';
   assert.match(reason, /still found \d+ serious problem\(s\) after the one fix it allows/);
-  assert.match(reason, /so the change was not delivered/);
   assert.match(reason, why);
-  assert.equal(await h.deliveries.get(id), undefined, 'the change is not recorded for delivery');
-  await assert.rejects(fs.readFile(join(h.handoff, id, 'review.md')), /ENOENT/);
+  assert.equal(verifyCodingManifest(manifest).ok, false);
+  const delivery = await h.deliveries.get(id);
+  assert.ok(delivery, 'the first verified change is kept');
+  assert.equal(delivery.publishedPr, undefined);
 }
 
 const reviewLineOf = (manifest: { done: string[] }): string =>
@@ -153,7 +158,7 @@ test('after a fix, verification.json and the pull request describe the delivered
   zeroStats(h.runner);
 });
 
-test('a reviewer that always answers P1 gets exactly one fix and two reviews, and the task then fails instead of finishing', async (t) => {
+test('a reviewer that always answers P1 gets exactly one fix and two reviews, and the change is then kept for the owner instead of being delivered', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = reviewsInRounds([[P1]]);
@@ -194,7 +199,7 @@ const NOT_APPLIED: [string, AgentScript, RegExp][] = [
 ];
 
 for (const [name, fix, reason] of NOT_APPLIED) {
-  test(`when ${name}, the first change still has its P1, so the task fails and delivers nothing`, async (t) => {
+  test(`when ${name}, the first change still has its P1, so the change is kept for the owner and not delivered`, async (t) => {
     const h = await setup(t, { modes: MODES });
     h.claude.script = implements_(fix);
     h.codex.script = reviewsInRounds([[P1]]);
@@ -206,7 +211,7 @@ for (const [name, fix, reason] of NOT_APPLIED) {
   });
 }
 
-test('a fixed change that cannot be reviewed again is not delivered, and the first change still has its P1 so the task fails', async (t) => {
+test('a fixed change that cannot be reviewed again is not delivered, and the first change still has its P1 so it is kept for the owner', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -218,7 +223,7 @@ test('a fixed change that cannot be reviewed again is not delivered, and the fir
   zeroStats(h.runner);
 });
 
-test('a fixed change on which the reviewer touched the repository is not delivered, and the task fails with the first change’s P1', async (t) => {
+test('a fixed change on which the reviewer touched the repository is not delivered, and the first change is kept with its P1', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -284,7 +289,7 @@ function spentBefore(turn: AgentTurn | undefined, h: Harness): number {
   return sum;
 }
 
-test('a review that leaves too little for a fix and a second review fails the task with the P1 it found', async (t) => {
+test('a review that leaves too little for a fix and a second review keeps the change with the P1 it found', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -298,7 +303,7 @@ test('a review that leaves too little for a fix and a second review fails the ta
   zeroStats(h.runner);
 });
 
-test('a fix that spends the review’s limit ends the fix, and the task fails with the first change’s P1', async (t) => {
+test('a fix that spends the review’s limit ends the fix, and the first change is kept with its P1', async (t) => {
   const h = await setup(t, { modes: MODES });
   const spent = gate();
   h.claude.script = async (turn) => {
@@ -366,7 +371,7 @@ test('cancel while the fixed change is reviewed again: nothing is delivered and 
   zeroStats(h.runner);
 });
 
-test('a fix that cannot start is a fix that was not used: the task fails with the P1 and releases what it held', async (t) => {
+test('a fix that cannot start is a fix that was not used: the change is kept with the P1 and everything it held is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = reviewsInRounds([[P1]]);
