@@ -18,6 +18,11 @@ appId: cloud.maka.app
 - takeScreenshot: delivery-viewer
 - tapOn:
     id: "button-Close"
+# The card's top is above the picture the list was scrolled to.
+- scrollUntilVisible:
+    element:
+      id: "button-Details"
+    direction: UP
 - tapOn:
     id: "button-Details"
 - assertVisible: "Outcome"
