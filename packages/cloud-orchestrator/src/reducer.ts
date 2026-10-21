@@ -62,7 +62,8 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       task.runSince = at;
       return;
     case 'task_progress':
-      task.progress.push(event.note);
+    case 'task_restarted':
+      task.progress.push(event.type === 'task_progress' ? event.note : event.text);
       if (task.progress.length > MAX_PROGRESS_NOTES) task.progress.shift();
       return;
     case 'task_succeeded':

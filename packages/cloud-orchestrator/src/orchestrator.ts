@@ -51,6 +51,13 @@ const MAX_KEY_LENGTH = 200;
 const MAX_TOMBSTONES = 10_000;
 /** Tasks this process was fenced out of, remembered so it writes nothing more for them. */
 const MAX_FENCED = 10_000;
+/**
+ * What a viewer shows in place of the turn a restart cut off. Fixed text: the viewer replaces what
+ * it had with it, and the agent's own words are not repeated.
+ */
+export const RESTART_TEXT =
+  'The server restarted. The task goes on from its last finished step; the cut-off turn is not repeated here.';
+
 /** A message to a running task: its key, its text, and how many may wait unread at once. */
 const MAX_STEER_ID_LENGTH = 64;
 export const MAX_STEER_CHARS = 4_000;
@@ -1351,7 +1358,7 @@ export class Orchestrator {
           // the run exists: when another process took it over while the run was starting, the
           // write is refused and fencing out cancels the late run, which has written nothing yet.
           const back = await this.record(
-            { type: 'task_progress', taskId, note: 'the run is back' },
+            { type: 'task_restarted', taskId, epoch: fence.epoch, text: RESTART_TEXT },
             () => {
               if (
                 this.isStopping(taskId) ||

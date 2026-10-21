@@ -32,6 +32,7 @@ const TaskEventSchema = z.discriminatedUnion('type', [
     .passthrough(),
   z.object({ type: z.literal('task_started'), taskId: z.string() }).passthrough(),
   z.object({ type: z.literal('task_progress'), taskId: z.string() }).passthrough(),
+  z.object({ type: z.literal('task_restarted'), taskId: z.string() }).passthrough(),
   z.object({ type: z.literal('task_cost'), taskId: z.string() }).passthrough(),
   z.object({ type: z.literal('task_pause_requested'), taskId: z.string() }).passthrough(),
   z.object({ type: z.literal('task_paused'), taskId: z.string() }).passthrough(),

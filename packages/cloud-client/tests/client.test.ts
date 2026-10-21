@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import { CloudClient, readEvents } from '../src/client';
 import { displayJson, displayText, publicLink } from '../src/presentation';
 import type { FeedEvent } from '../src/contract';
+import { applyEvent, emptyState } from '../src/state';
 
 test('SSE parses split UTF-8, CRLF, comments and multiline data, discarding an unfinished frame', async () => {
   const text =
@@ -155,4 +156,20 @@ test('sources are listed by the server and their images come through it, in the 
   expect((await client.listSources('tsk/1')).sources[0]?.site).toBe('docs.example');
   await expect(client.sourceImage('tsk/1', 0)).rejects.toThrow();
   expect(paths).toEqual(['/v1/tasks/tsk%2F1/sources', '/v1/tasks/tsk%2F1/sources/0/image']);
+});
+
+test('a restarted task shows the restart text as its latest note, once, and keeps running', () => {
+  const frame = (id: number, event: unknown, at = id): FeedEvent =>
+    ({ id, kind: 'task.event', data: { conversationId: 'c', seq: id, at, event } }) as FeedEvent;
+  let state = emptyState();
+  state = applyEvent(state, frame(1, { type: 'task_created', taskId: 't', sessionId: 's', mode: 'async' }));
+  state = applyEvent(state, frame(2, { type: 'task_started', taskId: 't' }));
+  state = applyEvent(state, frame(3, { type: 'task_progress', taskId: 't', note: 'reading the repo' }));
+  state = applyEvent(
+    state,
+    frame(4, { type: 'task_restarted', taskId: 't', epoch: 2, text: 'The server restarted.' }),
+  );
+  const task = state.tasks.t;
+  expect(task?.state).toBe('running');
+  expect(task?.progress).toEqual(['reading the repo', 'The server restarted.']);
 });

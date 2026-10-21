@@ -213,11 +213,8 @@ test('after a restart, a message waits until the resumed turn has finished a ste
   await eventually(() => second.fake.runs.length === 1, 'the resumed run');
   const resumed = second.fake.runFor(taskId);
   await eventually(
-    () =>
-      store
-        .readTask(taskId)
-        .some(({ event }) => event.type === 'task_progress' && event.note === 'the run is back'),
-    'the run is back',
+    () => store.readTask(taskId).some(({ event }) => event.type === 'task_restarted'),
+    'the restart event',
   );
   assert.equal(resumed.offers.length, 0, 'nothing is offered while the resumed turn replays');
 

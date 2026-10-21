@@ -11,7 +11,7 @@ Status of the pieces (updated by each PR):
 | 3 | Process channel and Agent SDK runner | merged (#166), section 3 (off until a deployment passes `agentSdk`) |
 | 4 | Transcript mirror and fresh-box resume | merged (#200), section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
 | 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
-| 6 | Steering, `restart` event, catch-up, stream fence | steering in review, section 6; `restart`, catch-up and fence not built |
+| 6 | Steering, `restart` event, catch-up, stream fence | steering merged (#208); `restart`, catch-up and fence in review, section 6 |
 | 7 | Run timeline | not built |
 | 8 | Drills, known gaps, bench | not built |
 
@@ -291,3 +291,9 @@ A new attempt (`task_attempt`) sets `steersHeld` on the task; the first `step_ou
 ### Not verified
 
 No real CLI: the hook answer is checked against the stand-in CLI that speaks the SDK's protocol, not against a real `claude` honouring `additionalContext`.
+
+### The restart event, catch-up and the fence
+
+- **Restart event.** When a restart resumes a task, the attempt that proves it still owns the task writes `task_restarted {epoch, text}` where the run comes back (it replaces the former "the run is back" note). `text` is fixed ("The server restarted. The task goes on from its last finished step; the cut-off turn is not repeated here."): a viewer shows it in place of what it had of the cut-off turn, so the same answer is not shown twice. Today's clients keep only the notes of a task, so the client appends it as the latest note; a client that streams partial replies replaces them with it. The reducer also keeps it as the latest progress note. `task_attempt` and the steps stay out of the feed.
+- **Catch-up.** The feed cursor was already exact: `Last-Event-ID` or `?after=` returns what was missed, once, in order, and a row is written in the transaction that appends the event, announced only after it committed. A test now covers a viewer that was connected across a server restart: with its cursor it gets the claim note, the restart event once and the end, with strictly increasing ids and no driver-only event.
+- **Fence.** The stream serves only events already in the log, and a write by a driver that lost the task is refused inside the append transaction, so it has no log row, no feed row, no gap in `seq` (`epoch.test.ts`) and, new, wakes no open stream.

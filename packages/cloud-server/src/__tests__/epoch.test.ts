@@ -9,7 +9,7 @@ import { MIGRATIONS, openDatabase } from '../db.js';
 import { FeedHub, readFeed } from '../feed.js';
 import { SqliteTaskStore } from '../sqlite-task-store.js';
 
-async function open(t: TestContext) {
+async function open(t: TestContext, hub = new FeedHub()) {
   const root = await mkdtemp(join(tmpdir(), 'epoch-test-'));
   const path = join(root, 'db.sqlite');
   const db = openDatabase(path);
@@ -21,7 +21,7 @@ async function open(t: TestContext) {
     }
     await rm(root, { recursive: true, force: true });
   });
-  return { db, store: new SqliteTaskStore(db, new FeedHub()), path, root };
+  return { db, store: new SqliteTaskStore(db, hub), path, root };
 }
 
 const created: TaskEvent = {
@@ -68,6 +68,22 @@ test('a stale write is refused in the append transaction: no log row, no feed ro
   assert.deepEqual([rows(), feed()], [logBefore, feedBefore]);
   const next = await store.append(progress, 4, { taskId: 'a', epoch: 2 });
   assert.equal(next.seq, logBefore + 1);
+});
+
+test('a driver that lost the task wakes no open stream: nothing of its write is announced, and the new driver’s is', async (t) => {
+  const hub = new FeedHub();
+  const { store } = await open(t, hub);
+  let wakes = 0;
+  hub.subscribe(() => {
+    wakes += 1;
+  });
+  await store.append(created, 1);
+  await store.append(attempt(2), 2);
+  const before = wakes;
+  await assert.rejects(store.append(progress, 3, { taskId: 'a', epoch: 1 }), StaleEpochError);
+  assert.equal(wakes, before, 'a refused write announces nothing');
+  await store.append(progress, 4, { taskId: 'a', epoch: 2 });
+  assert.equal(wakes, before + 1);
 });
 
 test('attempts and steps are in the log and never in a client feed', async (t) => {

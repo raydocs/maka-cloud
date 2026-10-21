@@ -540,6 +540,7 @@ function applyTask(
       settle(event.taskId);
       return;
     case 'task_progress':
+    case 'task_restarted':
     case 'task_cost':
     case 'task_pause_requested':
     case 'task_pause_failed':
