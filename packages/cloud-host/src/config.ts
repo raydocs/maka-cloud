@@ -34,9 +34,10 @@ export interface StackConfig {
   /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
   transcriptsDbPath: string;
   /**
-   * The account the Claude CLI runs as inside a sandbox, and its group. With it Claude tasks are
-   * driven through the Agent SDK (step log, durable resume, stored conversation); without it they
-   * run the CLI directly, as before. See `agent-user.ts` in the runners for what the box must have.
+   * The account the CLIs run as inside a sandbox, and its group. Every CLI (Claude and Codex) runs
+   * as it, never as the sandbox user; without it no CLI is started. With it Claude tasks are also
+   * driven through the Agent SDK (step log, durable resume, stored conversation). See
+   * `agent-user.ts` in the runners for what the box must have.
    */
   agentChannel?: { user: string; group: string };
   /** Where the server writes its daily backups. Unset: it writes none. */
@@ -331,7 +332,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_AGENT_USER',
-    'the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly',
+    'the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started',
   ],
   [
     'MAKA_CLOUD_AGENT_GROUP',
@@ -830,7 +831,7 @@ export function describeConfig(config: StackConfig): string[] {
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
-    `Claude runs:         ${config.agentChannel ? `through the Agent SDK as ${config.agentChannel.user} (group ${config.agentChannel.group}), conversation kept in ${config.transcriptsDbPath}` : 'directly (set MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP for the Agent SDK)'}`,
+    `CLIs run as:         ${config.agentChannel ? `${config.agentChannel.user} (group ${config.agentChannel.group}); Claude through the Agent SDK, conversation kept in ${config.transcriptsDbPath}` : 'nothing: no CLI starts until MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP are set'}`,
     `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,

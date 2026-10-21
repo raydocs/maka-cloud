@@ -22,7 +22,9 @@
 //   MAKA_REHEARSAL_XFAIL         steps that are expected to fail (default: none)
 //
 // A step in MAKA_REHEARSAL_XFAIL that fails is reported as an expected failure and does not fail the
-// run; the same step passing fails the run, so the mark is taken off when the fix lands.
+// run; the same step passing fails the run, so the mark is taken off when the fix lands. A name
+// followed by `?` (`restart-reply?`) is a step that depends on an expected failure before it: it
+// is reported as an expected failure when it fails and as a pass when it does not.
 //
 // Exit code 0: every step passed or failed as expected. 1: a step failed, or an expected failure
 // passed. 2: the flow was not given what it needs.
@@ -44,11 +46,13 @@ const controlUrl = env.MAKA_REHEARSAL_CONTROL_URL;
 const ops = env.MAKA_REHEARSAL_OPS;
 const resolveTo = env.MAKA_REHEARSAL_RESOLVE;
 const ca = env.MAKA_REHEARSAL_CA ? readFileSync(env.MAKA_REHEARSAL_CA) : undefined;
-const xfail = new Set(
-  (env.MAKA_REHEARSAL_XFAIL ?? '')
-    .split(',')
-    .map((name) => name.trim())
-    .filter(Boolean),
+const marked = (env.MAKA_REHEARSAL_XFAIL ?? '')
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean);
+const xfail = new Set(marked.map((name) => name.replace(/\?$/u, '')));
+const mayPass = new Set(
+  marked.filter((name) => name.endsWith('?')).map((name) => name.slice(0, -1)),
 );
 
 if (!base || !token || !controlUrl || !ops) {
@@ -534,7 +538,7 @@ for (const [name, body] of steps) {
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   let line;
-  if (outcome === 'pass' && xfail.has(name)) {
+  if (outcome === 'pass' && xfail.has(name) && !mayPass.has(name)) {
     failed += 1;
     line = `UNEXPECTED PASS ${name} (${seconds}s): it was expected to fail; take it off MAKA_REHEARSAL_XFAIL`;
   } else if (outcome === 'pass') {

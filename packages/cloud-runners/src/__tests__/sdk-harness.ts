@@ -5,24 +5,7 @@ import { join } from 'node:path';
 import type { CloudRunnersOptions } from '../fleet.js';
 import { loadAgentSdk } from '../sdk-turn.js';
 import { SDK_CLI } from './fake-sdk-cli.js';
-import { type Harness, setup } from './harness.js';
-
-/**
- * A `sudo` that runs the command as the current user. The fake sandbox has one user, so the agent's
- * separate account is only a name here; `agent-user.test.ts` checks the real thing where a second
- * account exists.
- */
-const SUDO_DOUBLE = `#!/bin/bash
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -n|--preserve-env|-H) shift ;;
-    -u) shift 2 ;;
-    --) shift; break ;;
-    *) break ;;
-  esac
-done
-exec "$@"
-`;
+import { type Harness, SUDO_DOUBLE, setup } from './harness.js';
 
 /** The real Agent SDK, driving a scripted stand-in for `claude` that runs in the fake sandbox. */
 /** The options that turn a harness's runners to the SDK, with an agent account the box check is skipped for. */

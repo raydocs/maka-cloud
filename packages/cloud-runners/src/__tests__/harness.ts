@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -14,6 +15,23 @@ import { CLAUDE_CLI, CODEX_CLI } from './fake-cli.js';
 export const API_KEY = 'sk-test-api-key-1234567890';
 export const MCP_TOKEN = 'mko_test_token_abcdefghijkl';
 
+/**
+ * A `sudo` that runs the command as the current user. The fake sandbox has one user, so the agent's
+ * separate account is only a name here; `agent-user.test.ts` checks the real thing where a second
+ * account exists. The `calls` file (next to it) records each `-u` account the double was asked for.
+ */
+export const SUDO_DOUBLE = `#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--preserve-env|-H) shift ;;
+    -u) echo "$2" >> "$(dirname "$0")/sudo-users"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+`;
+
 export interface Harness {
   fake: FakeInstabox;
   client: InstaboxClient;
@@ -26,6 +44,8 @@ export interface Harness {
   /** Revocations seen by the model access provider, by task. */
   revoked: string[];
   tmp: string;
+  /** The accounts the sudo double was asked to run something as, one entry per run. */
+  sudoUsers(): Promise<string[]>;
   home: string;
   /** The sandbox's work root. */
   root: string;
@@ -46,6 +66,8 @@ export interface SetupOptions {
   cloud?: Partial<CloudRunnersOptions>;
   /** Install the fake CLIs and their setup markers. Default true. */
   installClis?: boolean;
+  /** A box with no agent account configured at all (the default harness has one). */
+  noAgentChannel?: boolean;
 }
 
 export async function setup(options: SetupOptions = {}): Promise<Harness> {
@@ -56,7 +78,21 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
   const handoff = join(tmp, 'handoff');
   await fs.mkdir(home, { recursive: true });
   await fs.mkdir(handoff, { recursive: true });
-  const fake = await new FakeInstabox({ home, ...options.fake }).start();
+  // Every CLI runs as the agent's account, so a box without one runs nothing: unless a test brings
+  // its own account, the fake sandbox gets a `sudo` that only records the account it is asked for.
+  const shim = join(tmp, 'sudo-double');
+  const ownChannel = options.cloud?.agentChannel !== undefined || options.noAgentChannel === true;
+  if (!ownChannel) {
+    await fs.mkdir(shim, { recursive: true });
+    await fs.writeFile(join(shim, 'sudo'), SUDO_DOUBLE, { mode: 0o755 });
+  }
+  const fake = await new FakeInstabox({
+    home,
+    ...options.fake,
+    ...(ownChannel
+      ? {}
+      : { execPath: `${shim}:${options.fake?.execPath ?? process.env.PATH ?? ''}` }),
+  }).start();
   const client = new InstaboxClient({
     apiKey: fake.apiKey,
     baseUrl: fake.url,
@@ -86,9 +122,23 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
     pollIntervalMs: 5,
     stopGraceMs: 200,
     mcpUrlForSandbox: (url) => url.replace('127.0.0.1', 'orchestrator.internal'),
+    ...(ownChannel
+      ? {}
+      : {
+          agentChannel: {
+            user: 'maka-agent',
+            group: execFileSync('id', ['-gn']).toString().trim(),
+          },
+        }),
     ...options.cloud,
   };
-  const runners = createCloudRunners(baseOptions);
+  // The box check needs a second account; it has its own tests.
+  const build = (overrides: Partial<CloudRunnersOptions>): CloudRunners => {
+    const made = createCloudRunners({ ...baseOptions, ...overrides });
+    if (!ownChannel) made.fleet.ensureAgentIsolation = async () => undefined;
+    return made;
+  };
+  const runners = build({});
 
   if (options.installClis !== false) {
     const bin = join(home, '.maka-cli', 'bin');
@@ -109,7 +159,7 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
     fake,
     client,
     runners,
-    makeRunners: (overrides = {}) => createCloudRunners({ ...baseOptions, ...overrides }),
+    makeRunners: (overrides = {}) => build(overrides),
     async runPid(taskId, run = 't1') {
       const file = join(root, taskId, `${run}.pid`);
       for (let i = 0; i < 500; i++) {
@@ -122,6 +172,10 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
     sessions,
     revoked,
     tmp,
+    async sudoUsers() {
+      const text = await fs.readFile(join(shim, 'sudo-users'), 'utf8').catch(() => '');
+      return text.split('\n').filter(Boolean);
+    },
     home,
     root,
     logRoot,

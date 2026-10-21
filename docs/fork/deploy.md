@@ -378,7 +378,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_TASK_TURN_USD` | the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit |
 | `MAKA_CLOUD_TASK_RUN_HOURS` | how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168) |
 | `MAKA_CLOUD_TIMELINE_CONTENT` | set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing |
-| `MAKA_CLOUD_AGENT_USER` | the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly |
+| `MAKA_CLOUD_AGENT_USER` | the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started |
 | `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
 | `MAKA_CLOUD_SPEND_ALERT_USD` | send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push |
 | `MAKA_CLOUD_OWNER_INVITE` | the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app |
@@ -481,14 +481,17 @@ outside the owner, so the conversation is marked as such. A run has the duty's
 authority level for its whole life and a budget it cannot raise. The duties
 database is `duties.db` in the data directory and is part of the daily backup.
 
-### Claude through the Agent SDK
+### The agent account, and Claude through the Agent SDK
 
-Set `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` to run Claude tasks through the Agent SDK:
+Every CLI runs as an account that is not the sandbox user: the sandbox user holds the channel the
+SDK trusts, the task's files and the egress rules, and the agent's code must not be able to touch
+them. A host without `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` starts no CLI (Claude or
+Codex): the run fails at once and says so. Those two also run Claude tasks through the Agent SDK:
 the step log, resume after a restart and the stored conversation (`transcripts.db` in the data
 directory, part of the daily backup) need it. The box image must have that account (no sudo, not the
 sandbox user), a group the sandbox user shares with it, a `claude` binary it can read, and
 passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
-that fails the check refuses the turn with the reason. Unset, Claude runs the CLI directly as before.
+that fails the check refuses the turn with the reason.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
