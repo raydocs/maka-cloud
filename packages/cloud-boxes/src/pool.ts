@@ -82,6 +82,12 @@ interface Box {
   /** The last time a person looked at the box (a terminal or desktop view), if ever. */
   userSeenAt: number | undefined;
   sleepPhase: 'checkpoint' | 'suspend' | undefined;
+  /**
+   * Counts every change of who has the box (a claim, a sleep that starts). A sleep remembers the
+   * count it began with and stops acting on the box when the count has moved, even if the state
+   * reads the same again (a task took the box and gave it back).
+   */
+  generation: number;
   /** When the box was marked lost. */
   lostAt: number | undefined;
   /** No sleep attempt before this time, after one that failed or was turned back. */
@@ -94,7 +100,7 @@ interface Waiter {
   tenantId: string;
   taskId: TaskId;
   choice: SetupChoice | undefined;
-  settle: (finish: () => Promise<Box>) => void;
+  settle: (finish: () => Promise<Held>) => void;
   fail: (error: Error) => void;
   timer: unknown;
 }
@@ -107,9 +113,22 @@ interface Want {
   choice?: SetupChoice;
 }
 
+/** A box taken by one `acquire`, with the claim token only that call's lease may release. */
+interface Held {
+  box: Box;
+  holder: symbol;
+}
+
 type Plan =
-  | { kind: 'have'; box: Box; choice?: SetupChoice }
-  | { kind: 'create'; box: Box; why: BoxUseReason; snapshotId?: string; choice?: SetupChoice }
+  | { kind: 'have'; box: Box; holder: symbol; choice?: SetupChoice }
+  | {
+      kind: 'create';
+      box: Box;
+      holder: symbol;
+      why: BoxUseReason;
+      snapshotId?: string;
+      choice?: SetupChoice;
+    }
   | { kind: 'none' };
 
 /**
@@ -369,7 +388,7 @@ export class BoxPool implements SandboxProvider {
 
   // -- taking a box ------------------------------------------------------------------------------
 
-  private async take(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Box> {
+  private async take(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Held> {
     const plan = this.plan(tenantId, taskId, choice === undefined ? {} : { choice });
     return plan.kind === 'none'
       ? await this.wait(tenantId, taskId, choice)
@@ -385,9 +404,11 @@ export class BoxPool implements SandboxProvider {
     const boxes = this.boxesOf(tenantId);
     for (const box of boxes.values()) {
       if (box.taskId === taskId && box.state !== 'lost') {
-        // The same task again (a resume, a repeated call): the same box, with a newer lease.
-        box.holder = Symbol('lease');
-        return { kind: 'have', box, ...(choice === undefined ? {} : { choice }) };
+        // The same task again (a resume, a repeated call): the same box, with a newer lease. The
+        // older call's lease no longer matches the claim, so releasing it frees nothing.
+        const holder = Symbol('lease');
+        box.holder = holder;
+        return { kind: 'have', box, holder, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (snapshotId === undefined) {
@@ -413,8 +434,8 @@ export class BoxPool implements SandboxProvider {
             a.slot - b.slot,
         )[0];
       if (free) {
-        this.claim(free, taskId);
-        return { kind: 'have', box: free, ...(choice === undefined ? {} : { choice }) };
+        const holder = this.claim(free, taskId);
+        return { kind: 'have', box: free, holder, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (this.atAccountLimit()) return { kind: 'none' };
@@ -422,11 +443,12 @@ export class BoxPool implements SandboxProvider {
       if (boxes.has(slot)) continue;
       const box = this.newBox(tenantId, slot);
       boxes.set(slot, box);
-      this.claim(box, taskId);
+      const holder = this.claim(box, taskId);
       box.state = 'creating';
       return {
         kind: 'create',
         box,
+        holder,
         why: snapshotId === undefined ? 'create' : 'restore',
         ...(snapshotId === undefined ? {} : { snapshotId }),
         ...(choice === undefined || snapshotId !== undefined ? {} : { choice }),
@@ -435,21 +457,23 @@ export class BoxPool implements SandboxProvider {
     return { kind: 'none' };
   }
 
-  private claim(box: Box, taskId: TaskId): void {
+  private claim(box: Box, taskId: TaskId): symbol {
     // Taking a box that is going to sleep turns the sleep back; taking a sleeping one wakes it.
     box.state =
       box.machineId === undefined ? 'creating' : box.state === 'suspended' ? 'waking' : 'claimed';
     box.sleepPhase = undefined;
+    box.generation++;
     box.taskId = taskId;
-    box.holder = Symbol('lease');
+    const holder = Symbol('lease');
+    box.holder = holder;
     const conversationId = this.options.conversationOf?.(taskId);
     if (conversationId !== undefined) box.conversationId = conversationId;
+    return holder;
   }
 
   /** The async tail of a decision: write the label, or make the box. A failure gives the box back. */
-  private async finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Box> {
-    const { box } = plan;
-    const holder = box.holder;
+  private async finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Held> {
+    const { box, holder } = plan;
     const taskId = box.taskId as TaskId;
     try {
       if (plan.kind === 'create') {
@@ -464,7 +488,7 @@ export class BoxPool implements SandboxProvider {
         }
         await this.writeLabels(box);
       }
-      return box;
+      return { box, holder };
     } catch (error) {
       if (plan.kind === 'create') this.forget(box);
       else if (box.holder === holder) this.free(box);
@@ -607,8 +631,8 @@ export class BoxPool implements SandboxProvider {
 
   // -- waiting -----------------------------------------------------------------------------------
 
-  private wait(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Box> {
-    return new Promise<Box>((resolve, reject) => {
+  private wait(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Held> {
+    return new Promise<Held>((resolve, reject) => {
       const waiter: Waiter = {
         tenantId,
         taskId,
@@ -658,12 +682,11 @@ export class BoxPool implements SandboxProvider {
 
   // -- leases ------------------------------------------------------------------------------------
 
-  private lease(box: Box): SandboxLease {
-    const holder = box.holder;
+  private lease({ box, holder }: Held): SandboxLease {
     return {
       machineId: box.machineId as string,
       release: async () => {
-        if (box.holder !== holder || holder === undefined) return;
+        if (box.holder !== holder) return;
         this.free(box);
         await box.labels;
       },
@@ -723,6 +746,7 @@ export class BoxPool implements SandboxProvider {
       idleSince: this.now(),
       userSeenAt: undefined,
       sleepPhase: undefined,
+      generation: 0,
       lostAt: undefined,
       sleepAfter: 0,
       labels: Promise.resolve(),
@@ -843,17 +867,23 @@ export class BoxPool implements SandboxProvider {
         ) {
           box.state = 'suspending';
           box.sleepPhase = 'checkpoint';
+          box.generation++;
           sleepers.push(box);
         }
       }
     }
-    const slept = await Promise.all(sleepers.map((box) => this.sleep(box)));
+    const slept = await Promise.all(
+      sleepers.map((box) => {
+        const generation = box.generation;
+        return this.sleep(box, generation);
+      }),
+    );
     return slept.filter((id): id is string => id !== undefined);
   }
 
-  /** Whether a task took the box while it was being put to sleep. */
-  private turnedBack(box: Box): boolean {
-    return box.state !== 'suspending';
+  /** Whether anyone took the box, or marked it otherwise, since this sleep began. */
+  private turnedBack(box: Box, generation: number): boolean {
+    return box.state !== 'suspending' || box.generation !== generation;
   }
 
   private revert(box: Box, retryAfterMs: number): void {
@@ -863,11 +893,11 @@ export class BoxPool implements SandboxProvider {
     box.sleepAfter = this.now() + retryAfterMs;
   }
 
-  private async sleep(box: Box): Promise<string | undefined> {
+  private async sleep(box: Box, generation: number): Promise<string | undefined> {
     const machineId = box.machineId as string;
     try {
       const machine = await this.api.getMachine(machineId);
-      if (this.turnedBack(box)) return undefined;
+      if (this.turnedBack(box, generation)) return undefined;
       if (machine.state !== 'running') {
         // Instabox paused it for idleness first; the next task wakes it through the wake path.
         if (
@@ -884,11 +914,11 @@ export class BoxPool implements SandboxProvider {
         return undefined;
       }
       await this.api.exec(machineId, { cmd: 'sync', timeoutSeconds: CHECKPOINT_TIMEOUT_SECONDS });
-      if (this.turnedBack(box)) return undefined;
+      if (this.turnedBack(box, generation)) return undefined;
       const written = (await this.options.recentWrite?.(machineId)) ?? false;
       const looked = this.now() - (box.userSeenAt ?? Number.NEGATIVE_INFINITY) < this.userIdleMs;
       // The last look at the holds, with nothing awaited between it and the point of no return.
-      if (this.turnedBack(box)) return undefined;
+      if (this.turnedBack(box, generation)) return undefined;
       if (written || looked) {
         this.revert(box, 0);
         return undefined;
@@ -896,22 +926,25 @@ export class BoxPool implements SandboxProvider {
       box.sleepPhase = 'suspend';
       const operation = await this.api.suspendMachine(machineId);
       await this.api.waitForOperation(operation.id);
+      if (this.turnedBack(box, generation)) return undefined;
       box.state = 'suspended';
       box.sleepPhase = undefined;
       this.pump(box.tenantId);
       return machineId;
     } catch (error) {
       this.options.onWarning?.(`could not put box ${machineId} to sleep`, error);
-      await this.settleAfterFailedSleep(box);
+      await this.settleAfterFailedSleep(box, generation);
       return undefined;
     }
   }
 
   /** A sleep failed half way: ask instabox what the box is now, and make the registry say the same. */
-  private async settleAfterFailedSleep(box: Box): Promise<void> {
-    if (this.turnedBack(box)) return;
+  private async settleAfterFailedSleep(box: Box, generation: number): Promise<void> {
+    if (this.turnedBack(box, generation)) return;
     try {
       const machine = await this.api.getMachine(box.machineId as string);
+      // The answer is about the box as it was; a task may have taken it while we asked.
+      if (this.turnedBack(box, generation)) return;
       if (machine.state === 'running') this.revert(box, SLEEP_RETRY_MS);
       else if (machine.state === 'suspended') {
         box.state = 'suspended';
@@ -919,6 +952,7 @@ export class BoxPool implements SandboxProvider {
         this.pump(box.tenantId);
       } else this.markLost(box, `it is ${machine.state} after a failed sleep`);
     } catch (error) {
+      if (this.turnedBack(box, generation)) return;
       this.markLost(box, `its state is unknown after a failed sleep: ${errorText(error)}`);
     }
   }
@@ -962,8 +996,9 @@ export class BoxPool implements SandboxProvider {
         this.markLost(box, `it failed its guard after waking: ${errorText(error)}`);
         return false;
       }
-      box.state = 'claimed';
+      // The box stays `waking` through its resume, so every ask for it waits on this same wake.
       await this.resume(box);
+      if (box.state === 'waking') box.state = 'claimed';
       return true;
     } finally {
       box.waking = undefined;

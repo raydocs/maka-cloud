@@ -218,7 +218,12 @@ export interface MirrorOptions {
   redact(text: string): string;
   /** A batch that was refused or could not be kept. The SDK also reports it in its message stream. */
   onProblem?(message: string): void;
+  /** Called with a batch once the store holds it, never before. */
+  onKept?(lines: readonly TranscriptLine[]): void;
 }
+
+/** The SDK's store for a task, with a way to wait until everything it was given is kept or has failed. */
+export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
 
 /**
  * The SDK's `SessionStore` for one task. The SDK hands it every line the CLI writes to its
@@ -231,14 +236,18 @@ export interface MirrorOptions {
  * files; `load` answers "nothing", so the SDK does not unpack a copy on the host and does not
  * rewrite the CLI's environment.
  */
-export function transcriptSessionStore(options: MirrorOptions): SessionStore {
+export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror {
   const { taskId, store, redact } = options;
   let chain: Promise<unknown> = Promise.resolve();
   return {
+    drain: async () => {
+      await chain;
+    },
     append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
       const run = async (): Promise<void> => {
         const lines = entries.map((entry) => scrubbed(entry, redact));
         await store.append(taskId, key, lines);
+        options.onKept?.(lines);
       };
       const next = chain.then(run, run);
       chain = next.catch(() => undefined);

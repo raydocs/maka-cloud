@@ -99,6 +99,14 @@ Not here: `.agents/resume` after a wake (with the setup snapshots).
 - Not decided: deleting an idle box of one invite to make room for another when the account is at its
   limit. It would lose that box's files, so it is not done.
 
+## Leases and claims
+
+Every `acquire` gets its own claim token. A task that asks again (a repeat, a resume) gets a new token and
+the older call's lease stops matching, so releasing it frees nothing; only the lease whose token is the
+box's current claim frees the box. A woken box stays `waking` until its `.agents/resume` has finished, and
+every ask for it in that time waits on the same wake, so a second ask cannot return (and release) a box
+that is still being set up.
+
 ## Setup snapshots and `.agents/resume`
 
 - A task can name the setup snapshot of its repository (`setupOf(tenantId, taskId)`). A free box that

@@ -21,7 +21,13 @@ import { LineSplitter } from './lines.js';
 import { type AgentChannel, asAgent } from './agent-user.js';
 import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
 import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
-import { restoreTranscript, transcriptSessionStore } from './transcripts.js';
+import { steerKeysIn } from './hooks.js';
+import {
+  restoreTranscript,
+  type TranscriptLine,
+  type TranscriptMirror,
+  transcriptSessionStore,
+} from './transcripts.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage, shq } from './shell.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
@@ -198,6 +204,13 @@ class Run implements RunHandle {
   /** Messages for the agent not yet read, and the keys of those it has (an offer repeated is ignored). */
   private readonly waitingSteers: Array<{ steerId: string; text: string }> = [];
   private readonly readSteers = new Set<string>();
+  /** Messages given to the agent in a hook's answer, not yet shown in the kept transcript. */
+  private readonly handedSteers = new Set<string>();
+  /** Whether this run keeps the conversation's transcript off the sandbox (the proof a message was read). */
+  private mirror: TranscriptMirror | undefined;
+  /** On a run that continues an earlier one: the keys the kept transcript shows were given already. */
+  private steerScan: Promise<void> | undefined;
+  private steersToVet: Array<{ steerId: string; text: string }> = [];
   /** Paths the brief says the task must hand back. */
   private requiredArtifacts: string[] = [];
   private machine: RemoteMachine | undefined;
@@ -262,7 +275,67 @@ class Run implements RunHandle {
   steer(message: { steerId: string; text: string }): void {
     if (this.ended || this.cancelled || this.readSteers.has(message.steerId)) return;
     if (this.waitingSteers.some((waiting) => waiting.steerId === message.steerId)) return;
+    if (this.steersToVet.some((waiting) => waiting.steerId === message.steerId)) return;
+    // A run that continues an earlier one may be offered a message the earlier run gave the agent
+    // before it died, whose report was lost: the kept transcript says which.
+    if (this.spec.recovery !== undefined && this.fleet.options.transcripts) {
+      this.steersToVet.push(message);
+      this.steerScan ??= this.vetSteers();
+      return;
+    }
     this.waitingSteers.push(message);
+  }
+
+  /**
+   * Reads the kept transcript once for the keys of messages it shows the agent was given, and
+   * sorts the messages offered meanwhile: those it shows are reported as read and never given
+   * again, the others wait for the next step. A transcript that cannot be read gives nothing
+   * away, and the messages go on as new ones (one the agent saw may then be read twice, which is
+   * better than one it never saw being lost).
+   */
+  private async vetSteers(): Promise<void> {
+    const shown = new Set<string>();
+    try {
+      const sessionId =
+        this.record?.sessionId ?? (await this.fleet.sessions.get(this.spec.taskId))?.sessionId;
+      const transcripts = this.fleet.options.transcripts;
+      if (sessionId !== undefined && transcripts) {
+        let cursor: number | undefined;
+        do {
+          const page = await transcripts.read(this.spec.taskId, sessionId, cursor);
+          for (const line of page.lines) for (const key of steerKeysIn(line)) shown.add(key);
+          cursor = page.next;
+        } while (cursor !== undefined);
+      }
+    } catch (error) {
+      this.progress(
+        `the kept conversation could not be read for messages already given: ${errorMessage(error)}`,
+      );
+    }
+    for (const message of this.steersToVet.splice(0)) {
+      if (this.ended || this.cancelled) continue;
+      if (shown.has(message.steerId)) {
+        this.readSteers.add(message.steerId);
+        this.events.push({ type: 'steered', steerId: message.steerId });
+      } else if (!this.readSteers.has(message.steerId)) {
+        this.waitingSteers.push(message);
+      }
+    }
+    this.steerScan = undefined;
+  }
+
+  /**
+   * The kept transcript holds these lines: a message they show the agent was given is now read, as
+   * far as anyone can prove, and only now is it reported.
+   */
+  private mirrorKept(lines: readonly TranscriptLine[]): void {
+    if (this.handedSteers.size === 0) return;
+    for (const line of lines) {
+      for (const key of steerKeysIn(line.json)) {
+        if (!this.handedSteers.delete(key)) continue;
+        this.events.push({ type: 'steered', steerId: key });
+      }
+    }
   }
 
   /** Drops a message the agent has not been given. False when it has been (or never was here). */
@@ -287,7 +360,10 @@ class Run implements RunHandle {
       chars += next.text.length;
       taken.push(next);
       this.readSteers.add(next.steerId);
-      this.events.push({ type: 'steered', steerId: next.steerId });
+      // With the conversation kept off the sandbox, it is read once the kept transcript shows it
+      // (`mirrorKept`); without, there is nothing to show it by, and handing it over is the proof.
+      if (this.mirror) this.handedSteers.add(next.steerId);
+      else this.events.push({ type: 'steered', steerId: next.steerId });
     }
     return taken;
   }
@@ -600,13 +676,16 @@ class Run implements RunHandle {
         this.progress(`the conversation (${restored.lines} lines) was put back on the sandbox`);
       }
     }
+    const kept = transcriptSessionStore({
+      taskId: spec.taskId,
+      store: transcripts,
+      redact: (text) => this.scrub(text),
+      onProblem: (message) => this.progress(message),
+      onKept: (lines) => this.mirrorKept(lines),
+    });
+    this.mirror = kept;
     return {
-      store: transcriptSessionStore({
-        taskId: spec.taskId,
-        store: transcripts,
-        redact: (text) => this.scrub(text),
-        onProblem: (message) => this.progress(message),
-      }),
+      store: kept,
       configDir: machine.configDir(spec.taskId),
     };
   }
@@ -1037,6 +1116,9 @@ class Run implements RunHandle {
       sdkError = error;
     }
     this.checkCancelled();
+    // What the CLI wrote last is kept (or has failed to be) before the run ends, so a message
+    // given to the agent in its last step is reported while the run can still report it.
+    await this.mirror?.drain().catch(() => undefined);
 
     const process = proc as ExecProcess | undefined;
     if (process === undefined) {

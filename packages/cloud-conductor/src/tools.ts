@@ -73,6 +73,8 @@ export interface ToolHost {
   decidedOnTaint(turn: ActiveTurn): boolean;
   /** Whether who approved a held call may still have it run (their invite is active and owns the conversation). */
   approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
+  /** Whether a text carries a key or token (see `ConductorOptions.carriesSecret`). */
+  carriesSecret(text: string): boolean;
 }
 
 /**
@@ -540,6 +542,13 @@ export function conductorTools(
             action = ownerCall(held);
             const spec = extra.find((tool) => tool.name === held.tool);
             question = await approvalCard(spec, held.tool, held.args);
+            // The card is shown and bound as it is, so a card with a key in it is not asked at all.
+            if (host.carriesSecret(question) || host.carriesSecret(JSON.stringify(held.args))) {
+              throw new ToolRefusal(
+                'secret_in_call',
+                'The held call carries what looks like a key or token, and the approval card must show a call word for word, so it cannot be asked. Do not ask; tell the user the action was dropped and why. Keep secrets out of the call: name where the credential is kept instead.',
+              );
+            }
             note = args.question;
           }
           check = () => {

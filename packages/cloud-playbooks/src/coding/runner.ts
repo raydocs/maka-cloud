@@ -422,7 +422,7 @@ class CodingRun implements RunHandle {
           ? budgetProblem(modes, this.mode, this.spec.budgetUsd)
           : undefined;
       if (tooSmall) return this.setTerminal({ type: 'failed', reason: tooSmall });
-      this.limitUsd = this.workLimit();
+      this.limitUsd = this.underTurnLimit(this.workLimit());
 
       this.adoptWorkspace(
         await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal)),
@@ -451,22 +451,18 @@ class CodingRun implements RunHandle {
         const outcome = await this.attempt(task, baseSha, brief, vendor, attempt, failureBrief);
         if (outcome.ok) {
           verification.result = 'verified';
-          verification.repro = outcome.repro;
-          verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-            path: file.path,
-            status: file.status,
-          }));
           const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
-          // With a reviewer configured, a change nobody could review is not delivered and the task
-          // does not succeed: "verified" here means checked by the runner and by the other vendor.
-          if (this.options.modes && reviewed.review.status !== 'reviewed') {
+          // A change nobody could review is not delivered and the task does not succeed, whether the
+          // reviewer was unavailable or none is configured at all: "verified" here means checked by
+          // the runner and by the other vendor.
+          if (reviewed.review.status !== 'reviewed') {
             throw new Error(
               `The change passed the repository's checks but could not be independently reviewed (${reviewed.review.reason}), so it was not delivered.`,
             );
           }
           // A serious problem the review still finds after the one fix is not delivered either: the
           // task fails with the reason, instead of finishing with a change known to be wrong.
-          const left = this.options.modes ? p1Of(reviewed.review) : 0;
+          const left = p1Of(reviewed.review);
           if (left > 0) {
             const fix = reviewed.review.status === 'reviewed' ? reviewed.review.fix : undefined;
             const unused =
@@ -838,6 +834,17 @@ class CodingRun implements RunHandle {
 
   // -- the review ----------------------------------------------------------------------------------
 
+  /**
+   * One run of this task is one turn of the orchestrator, and that turn has its own limit. The
+   * implementer, the review, the fix and every retry of this run spend from that one allowance, so
+   * no phase's limit may be above it.
+   */
+  private underTurnLimit(limit: number | undefined): number | undefined {
+    const turn = this.spec.turnBudgetUsd;
+    if (turn === undefined || limit === undefined) return limit;
+    return Math.min(limit, turn);
+  }
+
   /** What the work may spend in all: the budget less the share the review keeps. */
   private workLimit(): number | undefined {
     const budget = this.spec.budgetUsd;
@@ -900,7 +907,7 @@ class CodingRun implements RunHandle {
           `the budget leaves $${Math.max(0, reviewLimit - this.spentBefore).toFixed(2)} for a review, too little to start one`,
         );
       }
-      this.limitUsd = reviewLimit;
+      this.limitUsd = this.underTurnLimit(reviewLimit);
     }
     try {
       this.progress('a second agent reviews the change');
@@ -985,7 +992,8 @@ class CodingRun implements RunHandle {
     });
     const budget = this.spec.budgetUsd;
     if (budget !== undefined && this.reviewCap !== undefined) {
-      const left = this.reviewCap - this.spentBefore;
+      // The review's limit, below the turn's allowance when that is the smaller.
+      const left = (this.limitUsd ?? this.reviewCap) - this.spentBefore;
       if (left < 2 * MIN_REVIEW_USD) {
         return {
           outcome,
@@ -1398,6 +1406,13 @@ class CodingRun implements RunHandle {
     const reviewText = reviewMarkdown(review);
     await this.guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
+    // What was checked and what is delivered are the same change: after a fix that is the fixed one,
+    // not the first attempt the review looked at.
+    verification.repro = outcome.repro;
+    verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
+      path: file.path,
+      status: file.status,
+    }));
     await this.guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
     await this.guard(
       this.options.deliveries.record({

@@ -7,7 +7,8 @@ health check that never goes green.
 
 | Part | What it is |
 | --- | --- |
-| `compose.yaml` | adds the `stubs` service to `deploy/compose.yaml` |
+| `compose.yaml` | adds the `stubs` service to `deploy/compose.yaml`, and gives the rehearsal its own project name (`maka-rehearsal`) and image tags |
+| `lib.sh` | the one place that runs Compose (`-p maka-rehearsal`), and `guard_rehearsal`, which every script calls before it changes the stack |
 | `compose.env` | the three names (`app`, `mcp`, `models` on `.localhost`) and Caddy's own certificate authority (`local_certs`) |
 | `server.env` | the server's settings: fake keys, the stand-ins as the model and sandbox APIs |
 | `stubs.mjs` | the model API and the sandbox API, and a control API for the scripted `claude` |
@@ -22,6 +23,20 @@ set -a; . "$MAKA_REHEARSAL_DIR/env"; set +a
 node deploy/rehearsal/flow.mjs            # Node 22 or later
 deploy/rehearsal/down.sh
 ```
+
+## Never the deployment's project
+
+`down.sh` deletes volumes, and `ops.sh` stops, restores and backs up, so the rehearsal must not be able
+to reach a real deployment on the same host (project `maka-cloud`, volumes `maka-cloud_maka-data`,
+`maka-cloud_maka-backups` and Caddy's state, images `maka-cloud:local` and `maka-cloud-proxy:local`).
+It has its own project, `maka-rehearsal` (the override names it, and every call passes `-p`), its own
+volumes, networks and containers, and builds its own images (`maka-rehearsal:local`,
+`maka-rehearsal-proxy:local`) instead of retagging the deployment's. Before any step that changes the
+stack, `guard_rehearsal` reads the resolved Compose configuration and refuses unless the project, every
+volume and every image are the rehearsal's. `MAKA_REHEARSAL_PROJECT` may rename the project, but only to
+`maka-rehearsal` or a name that starts with `maka-rehearsal-`. The rehearsal publishes ports 80 and 443,
+so it cannot start next to a running deployment on the same ports either (set `MAKA_CLOUD_HTTP_PORT` and
+`MAKA_CLOUD_HTTPS_PORT` in `compose.env` to run both).
 
 `up.sh` leaves, in `$MAKA_REHEARSAL_DIR`, the server's settings (`server.env`), the invite's token
 (`token`), the root certificate of Caddy's authority (`ca.crt`) and the settings the flow reads (`env`).

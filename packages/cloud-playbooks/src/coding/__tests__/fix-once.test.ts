@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODES, type ModesConfig } from '@maka-cloud/modes';
 import type { RunnerEvent } from '@maka-cloud/orchestrator';
+import { pullRequestBody } from '../pull-request.js';
 import { fixBrief, MAX_FIX_FINDINGS } from '../review.js';
 import {
   type AgentScript,
@@ -108,6 +109,47 @@ test('P1 findings go back to the implementer once, and the fixed change is revie
     await fs.readFile(join(dir, 'review.md'), 'utf8'),
     /sent back to the implementer once/,
   );
+  zeroStats(h.runner);
+});
+
+test('after a fix, verification.json and the pull request describe the delivered change, not the first attempt', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  // The fix guards the code, adds a test file of its own and widens the reproduction test.
+  h.claude.script = implements_(async (turn) => {
+    await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), GUARDED);
+    await fs.writeFile(
+      join(turn.workspace, 'tests', 'test_neg.sh'),
+      'source lib/add.sh\n[ "$(add -1 3)" = 2 ]\n',
+    );
+    await fs.writeFile(
+      join(turn.dir, 'repro.json'),
+      JSON.stringify({
+        command: 'bash tests/test_add.sh && bash tests/test_neg.sh',
+        files: ['tests/test_add.sh', 'tests/test_neg.sh'],
+      }),
+    );
+    return 'ok';
+  });
+  h.codex.script = reviewsInRounds([[P1], []]);
+  const { events, dir } = await run(h, 'tsk_fixrec');
+  assert.deepEqual(terminal(events), { type: 'finished' });
+
+  const delivery = await h.deliveries.get('tsk_fixrec');
+  assert.ok(delivery);
+  const changes = await readJson(delivery.changesPath);
+  const delivered = changes.files.map((f: { path: string }) => f.path).sort();
+  assert.ok(delivered.includes('tests/test_neg.sh'), 'the fix added a file');
+
+  const verification = await readJson(join(dir, 'verification.json'));
+  assert.deepEqual(
+    verification.changedFiles.map((f: { path: string }) => f.path).sort(),
+    delivered,
+    'the record lists the files that are delivered',
+  );
+  assert.equal(verification.repro.command, 'bash tests/test_add.sh && bash tests/test_neg.sh');
+  assert.deepEqual(verification.repro.files, ['tests/test_add.sh', 'tests/test_neg.sh']);
+  const body = pullRequestBody(verification);
+  assert.match(body, /tests\/test_neg\.sh/);
   zeroStats(h.runner);
 });
 

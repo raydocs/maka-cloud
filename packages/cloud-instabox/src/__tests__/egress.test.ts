@@ -30,7 +30,17 @@ describe('applyEgressGuard', () => {
     applyEgressGuard(h.client, h.fake.machineId, { resolvConf: resolv, ifInet6 });
   const v4 = () => h.fake.firewall.rules('iptables', EGRESS_CHAIN);
   const v6 = () => h.fake.firewall.rules('ip6tables', EGRESS_CHAIN);
-  const replies = `-A ${EGRESS_CHAIN} -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN`;
+  // The rules as `iptables -S` prints them, which is not the order or the form they were given in.
+  const replies = `-A ${EGRESS_CHAIN} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN`;
+  const reject4 = (net: string) =>
+    `-A ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp-port-unreachable`;
+  const reject6 = (net: string) =>
+    `-A ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp6-port-unreachable`;
+  const ICMPV6_TYPE = {
+    'neighbour-solicitation': 135,
+    'neighbour-advertisement': 136,
+    'router-solicitation': 133,
+  } as const;
 
   beforeEach(async () => {
     state = await fs.mkdtemp(join(tmpdir(), 'egress-test-'));
@@ -49,12 +59,12 @@ describe('applyEgressGuard', () => {
     await run();
     assert.deepEqual(v4(), [
       replies,
-      `-A ${EGRESS_CHAIN} -d 127.0.0.53 -p udp --dport 53 -j RETURN`,
-      `-A ${EGRESS_CHAIN} -d 127.0.0.53 -p tcp --dport 53 -j RETURN`,
-      ...EGRESS_BLOCKED_V4.map((net) => `-A ${EGRESS_CHAIN} -d ${net} -j REJECT`),
+      `-A ${EGRESS_CHAIN} -d 127.0.0.53/32 -p udp -m udp --dport 53 -j RETURN`,
+      `-A ${EGRESS_CHAIN} -d 127.0.0.53/32 -p tcp -m tcp --dport 53 -j RETURN`,
+      ...EGRESS_BLOCKED_V4.map(reject4),
     ]);
     for (const net of ['169.254.0.0/16', '127.0.0.0/8', '10.0.0.0/8']) {
-      assert.ok(v4().includes(`-A ${EGRESS_CHAIN} -d ${net} -j REJECT`), net);
+      assert.ok(v4().includes(reject4(net)), net);
     }
     assert.equal(
       h.fake.firewall.rules('iptables', 'OUTPUT').join('\n'),
@@ -67,15 +77,16 @@ describe('applyEgressGuard', () => {
     await run();
     assert.deepEqual(v6(), [
       replies,
-      `-A ${EGRESS_CHAIN} -d fd00::53 -p udp --dport 53 -j RETURN`,
-      `-A ${EGRESS_CHAIN} -d fd00::53 -p tcp --dport 53 -j RETURN`,
+      `-A ${EGRESS_CHAIN} -d fd00::53/128 -p udp -m udp --dport 53 -j RETURN`,
+      `-A ${EGRESS_CHAIN} -d fd00::53/128 -p tcp -m tcp --dport 53 -j RETURN`,
       ...EGRESS_ICMPV6_ALLOWED.map(
-        (kind) => `-A ${EGRESS_CHAIN} -p ipv6-icmp --icmpv6-type ${kind} -j RETURN`,
+        (kind) =>
+          `-A ${EGRESS_CHAIN} -p ipv6-icmp -m icmp6 --icmpv6-type ${ICMPV6_TYPE[kind]} -j RETURN`,
       ),
-      ...EGRESS_BLOCKED_V6.map((net) => `-A ${EGRESS_CHAIN} -d ${net} -j REJECT`),
+      ...EGRESS_BLOCKED_V6.map(reject6),
     ]);
     for (const net of ['::1/128', 'fe80::/10', 'fc00::/7']) {
-      assert.ok(v6().includes(`-A ${EGRESS_CHAIN} -d ${net} -j REJECT`), net);
+      assert.ok(v6().includes(reject6(net)), net);
     }
   });
 
@@ -86,7 +97,7 @@ describe('applyEgressGuard', () => {
     assert.ok((await fs.readFile(PROCFS_WITH_CONTENT, 'utf8')).length > 0);
     await make();
     await run(PROCFS_WITH_CONTENT);
-    assert.ok(v6().includes(`-A ${EGRESS_CHAIN} -d fc00::/7 -j REJECT`));
+    assert.ok(v6().includes(reject6('fc00::/7')));
   });
 
   it('leaves one copy of every rule when it runs twice', async () => {

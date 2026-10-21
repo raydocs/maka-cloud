@@ -335,6 +335,51 @@ test('what a reviewer writes cannot pose as something else in the manifest, the 
 
 // -- budget --------------------------------------------------------------------------------------
 
+test("the orchestrator's limit for this turn is one allowance for the implementer, the review and the fix", async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = async (turn) => {
+    turn.usage(1);
+    return fixes(turn);
+  };
+  h.codex.script = reviews([]);
+  const spec = {
+    ...(await h.spec('tsk_turn')),
+    budgetUsd: 10,
+    budgetRootId: 'tsk_root',
+    turnBudgetUsd: 2.5,
+  };
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  // The task has $10, but this turn may spend $2.5: the work's $8 and the review's $3 are both
+  // above it, so each run gets what is left of the $2.5, not of its phase.
+  assert.equal(h.claude.turns[0]?.spec.turnBudgetUsd, 2.5);
+  assert.equal(h.codex.turns[0]?.spec.turnBudgetUsd, 1.5);
+  assert.equal(h.codex.turns[0]?.spec.budgetUsd, 10, 'the pool is still the whole budget');
+  zeroStats(h.runner);
+});
+
+test("a turn's allowance that the implementer spends leaves nothing to deliver", async (t) => {
+  const h = await setup(t, { modes: MODES });
+  const spent = gate();
+  h.claude.script = async (turn) => {
+    turn.usage(3);
+    spent.open();
+    await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
+    return 'ok';
+  };
+  const spec = { ...(await h.spec('tsk_turn2')), budgetUsd: 10, turnBudgetUsd: 2.5 };
+  const events = await collect(await h.runner.start(spec));
+  await spent.promise;
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed');
+  assert.match(
+    end?.type === 'failed' ? end.reason : '',
+    /budget of \$2\.50 reached \(\$3\.00 spent\)/,
+  );
+  assert.equal(h.codex.turns.length, 0, 'no review is started on an allowance that is gone');
+  assert.equal(await h.deliveries.get('tsk_turn2'), undefined);
+  zeroStats(h.runner);
+});
+
 test('the implementer may spend the work share, the review has a limit of its own below the budget', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = async (turn) => {
@@ -415,18 +460,14 @@ test('a budget with too little left for a review fails the task rather than deli
   zeroStats(h.runner);
 });
 
-test('without modes there is no reviewer, and the manifest says so', async (t) => {
-  const h = await setup(t);
+test('without modes there is no reviewer, so a change that passes its checks is not delivered', async (t) => {
+  const h = await setup(t, { modes: undefined });
   h.claude.script = fixes;
-  const { events, spec, dir } = await finished(h, 'tsk_nomodes');
-  assert.deepEqual(terminal(events), { type: 'finished' });
+  const { events } = await finished(h, 'tsk_nomodes');
+  await notDelivered(h, 'tsk_nomodes', events, /no reviewer is configured/);
   assert.equal(h.codex.turns.length, 0);
-  const line = (await readJson(spec.resultPath)).done.find((l: string) => l.startsWith('review:'));
-  assert.equal(
-    line,
-    "review: not done (no reviewer is configured); this change was checked by the runner's tests only",
-  );
-  assert.equal((await readJson(join(dir, 'verification.json'))).review.status, 'not_configured');
+  zeroStats(h.runner);
+  assert.deepEqual(h.leases, { acquired: 1, released: 1 });
 });
 
 // -- every exit ----------------------------------------------------------------------------------
