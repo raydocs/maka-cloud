@@ -52,6 +52,13 @@ cp -a "$tmp/.git/objects/." "$ccl/objects/" || { echo CLONE_FAILED; exit 0; }
 [ ! -f "$tmp/.git/shallow" ] || cp "$tmp/.git/shallow" "$ccl/shallow" || { echo CLONE_FAILED; exit 0; }
 printf '%s\\n' "$sha" > "$ccl/HEAD"
 GIT_INDEX_FILE="$ccl/index" git --git-dir="$ccl" --work-tree="$tmp" -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null read-tree "$sha" || { echo CLONE_FAILED; exit 0; }
+# The checkout is made with the umask above, so only the sandbox user could read it: hand it to the
+# agent's group (when there is one) before the agent exists, so no file is swapped underneath.
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  chgrp -R -h -- "$MAKA_AGENT_GROUP" "$tmp" || { echo CLONE_FAILED; exit 0; }
+  find "$tmp" -type d -exec chmod 2770 {} + || { echo CLONE_FAILED; exit 0; }
+  find "$tmp" ! -type d ! -type l -exec chmod g+rwX {} + || { echo CLONE_FAILED; exit 0; }
+fi
 cd "$MAKA_DIR" || exit 1
 rm -rf -- "$ws" "$cg"
 mv "$tmp" "$ws"
@@ -209,19 +216,26 @@ changed_paths() {
  * \`BASE_RESTORE_SCRIPT\` can put the change back. A leftover of an interrupted check is
  * restored first. Prints \`REVERTED <count>\`.
  */
-const RESTORE_FN = String.raw`
+const RESTORE_FN = `
 restore() {
   [ -d "$bk" ] || return 0
   if [ -f "$bk/reverted" ]; then
     while IFS= read -r -d '' p; do rm -rf -- "$ws/$p"; done < "$bk/reverted"
-    cp -a "$bk/files/." "$ws/" || return 1
+    # One file at a time: a copy of the whole backup tree would put the backup's own directories
+    # (private to the sandbox user) over the workspace's, and the agent could not enter them.
+    local f rel
+    while IFS= read -r -d '' f; do
+      rel="\${f#"$bk/files/"}"
+      mkdir -p -- "$(dirname -- "$ws/$rel")" && cp -a -- "$f" "$ws/$rel" || return 1
+    done < <(find "$bk/files" -mindepth 1 ! -type d -print0)
   fi
   rm -rf -- "$bk"
 }
 `;
 
 export const BASE_REVERT_SCRIPT = `set -u
-umask 077
+# What is put back is the agent's to read and write too (the directories hand their group down).
+umask 007
 ${GIT_FN}${CHANGED_PATHS_FN}${RESTORE_FN}
 ${NEED_CONTROL}ws="$MAKA_DIR/workspace"
 bk="$MAKA_DIR/base-check"
@@ -253,11 +267,18 @@ while IFS= read -r -d '' p; do
     [ "$mode" = 100755 ] && chmod +x "$p"
   fi
 done < "$bk/reverted"
+# A test that cannot read a file of the checkout fails with an ordinary exit status, which would be
+# taken for "the test fails on the base": refuse the base check when the agent cannot read all of it.
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  bad=$(find "$ws" -xdev ! -type l \\( ! -group "$MAKA_AGENT_GROUP" -o ! -perm -g+rw \\) -print -quit)
+  [ -z "$bad" ] || { echo "UNREADABLE_FOR_AGENT $bad"; exit 0; }
+fi
 echo "REVERTED $count"
 `;
 
 /** Puts the change back after a base check. Idempotent. Prints RESTORED. */
 export const BASE_RESTORE_SCRIPT = `set -u
+umask 007
 ${RESTORE_FN}
 ws="$MAKA_DIR/workspace"
 bk="$MAKA_DIR/base-check"

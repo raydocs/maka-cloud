@@ -71,9 +71,17 @@ export class FleetCodingSandbox implements CodingSandbox {
     }
     const machine: RemoteMachine = fleet.machine(lease.machineId);
     let released = false;
+    const channel = fleet.options.agentChannel;
     const run = async (script: string, options: ExecOptions): Promise<ExecResult> => {
       // Whatever runs in the workspace is the task's code: the egress guard is checked before it.
-      const result = await machine.exec(script, { ...options, taskCode: true });
+      // The agent's group goes to every script, for the ones that hand files to the agent.
+      const envs =
+        channel === undefined ? options.envs : { ...options.envs, MAKA_AGENT_GROUP: channel.group };
+      const result = await machine.exec(script, {
+        ...options,
+        ...(envs === undefined ? {} : { envs }),
+        taskCode: true,
+      });
       return {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -82,7 +90,6 @@ export class FleetCodingSandbox implements CodingSandbox {
         timedOut: result.timedOut,
       };
     };
-    const channel = fleet.options.agentChannel;
     return {
       dir: machine.taskDir(taskId),
       exec: (script, options = {}) => run(script, options),
