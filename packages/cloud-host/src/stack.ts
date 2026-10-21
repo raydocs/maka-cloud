@@ -41,6 +41,7 @@ import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 import { PauseSwitch, PauseWatcher } from './pause.js';
+import { withModes } from './moded-runner.js';
 import { SpendAlertWatcher } from './spend-alert.js';
 import { BackupScheduler } from './backup-schedule.js';
 import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
@@ -292,7 +293,10 @@ export async function startStack(
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
       handoffRoot: config.handoffRoot,
-      runners: new RunnerRegistry([...runners.runners, coding]),
+      runners: new RunnerRegistry([
+        ...runners.runners.map((runner) => withModes(runner, config.modes)),
+        coding,
+      ]),
       host: config.host,
       port: config.port,
       mcp: { host: config.mcp.host, port: config.mcp.port },
