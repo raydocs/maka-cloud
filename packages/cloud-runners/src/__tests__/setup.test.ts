@@ -74,6 +74,26 @@ test('a failed install fails the task with its output, and the next task tries a
   assert.equal(terminal(retried)?.type, 'finished');
 });
 
+test('an install that prints a token fails the task without it', async (t) => {
+  const h = await setup({
+    installClis: false,
+    cloud: {
+      installCommands: {
+        'claude-agent-sdk':
+          'echo "npm ERR! 401 Authorization: Bearer npm_abcdef0123456789abcdef"; exit 4',
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  const failed = terminal(
+    await collect(await h.runners.claude.start(await h.spec('tsk_inst_tok'))),
+  );
+  assert.equal(failed?.type, 'failed');
+  const reason = failed?.type === 'failed' ? failed.reason : '';
+  assert.match(reason, /npm ERR! 401/);
+  assert.ok(!reason.includes('abcdef0123456789'), reason);
+});
+
 test('a different pinned version is installed over an older one', async (t) => {
   const h = await setup({
     cloud: {

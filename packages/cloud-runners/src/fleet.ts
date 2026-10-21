@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { applyEgressGuard, type InstaboxClient } from '@maka-cloud/instabox';
-import type { TaskId } from '@maka-cloud/orchestrator';
+import { scrubSecretShapes, type TaskId } from '@maka-cloud/orchestrator';
 import { DEFAULT_EXPORT_LIMITS, type ExportLimits } from './export.js';
 import type { InputPolicy } from './inputs.js';
 import {
@@ -286,15 +286,15 @@ mkdir -p "$(dirname ${shq(marker)})"
       for (;;) {
         if (this.now() > deadline) throw new Error('timed out');
         const update = await watch.next();
-        output = (output + update.data.toString('utf8')).slice(-1_500);
+        output = (output + update.data.toString('utf8')).slice(-INSTALL_OUTPUT_WINDOW);
         consumed += update.data.length;
         const state = update.state;
         if (typeof state === 'object' && consumed >= update.size) {
           if (state.exit === 0) return;
-          throw new Error(`exit ${state.exit}: ${output.trim()}`);
+          throw new Error(`exit ${state.exit}: ${installOutputTail(output)}`);
         }
         if (state === 'dead' && consumed >= update.size)
-          throw new Error(`the install was killed: ${output.trim()}`);
+          throw new Error(`the install was killed: ${installOutputTail(output)}`);
       }
     } catch (error) {
       // Drop the lock so the next task tries again instead of waiting on a finished failure.
@@ -581,4 +581,20 @@ function prepareTools(tools: readonly SandboxTool[]): PreparedTool[] {
 export interface SweepResult {
   stopped: TaskId[];
   failed: { machineId: string; taskId?: TaskId; error: string }[];
+}
+
+/** How much of an install's output is kept, before it is scrubbed and cut to its tail. */
+const INSTALL_OUTPUT_WINDOW = 4_000;
+const INSTALL_OUTPUT_TAIL = 1_500;
+
+/**
+ * What an install printed last, for the error that names it. The window starts in the middle of
+ * a line when it is full, so that first part line goes: a piece of a key at its edge would be too
+ * short for the scrubber to know. Scrubbed first, cut after.
+ */
+function installOutputTail(window: string): string {
+  const whole = window.length < INSTALL_OUTPUT_WINDOW;
+  const from = whole ? 0 : window.indexOf('\n') + 1;
+  const kept = from === 0 && !whole ? '' : window.slice(from);
+  return scrubSecretShapes(kept).trim().slice(-INSTALL_OUTPUT_TAIL);
 }

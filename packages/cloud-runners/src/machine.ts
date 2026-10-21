@@ -4,6 +4,7 @@ import {
   type InstaboxClient,
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import { PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
@@ -66,6 +67,15 @@ interface ExecOptions {
   stdin?: string;
   timeoutSeconds?: number;
   signal?: AbortSignal;
+}
+
+/**
+ * The end of what a failed command printed, for the error that names it. Scrubbed before it is
+ * cut, so a key is never cut into a piece the scrubber no longer knows.
+ */
+function commandOutputTail(result: { stderr: string; stdout: string }): string {
+  const text = scrubSecretShapes(result.stderr).trim() || scrubSecretShapes(result.stdout).trim();
+  return text.slice(-300);
 }
 
 /** The scripts of this package run against one sandbox. No state beyond ids. */
@@ -170,7 +180,7 @@ export class RemoteMachine {
     const result = await this.exec(script, options);
     if (result.exitCode !== 0) {
       throw new Error(
-        `sandbox command failed (exit ${result.exitCode}): ${result.stderr.trim().slice(-300) || result.stdout.trim().slice(-300)}`,
+        `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
     return result.stdout;
@@ -286,7 +296,7 @@ export class RemoteMachine {
     }
     if (result.exitCode !== 0) {
       throw new Error(
-        `sandbox command failed (exit ${result.exitCode}): ${result.stderr.trim().slice(-300) || result.stdout.trim().slice(-300)}`,
+        `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
     return lines

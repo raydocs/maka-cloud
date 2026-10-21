@@ -10,6 +10,7 @@
  *   symlink       make result.json a symlink to $HOME/fake-cli/secret.txt
  *   big           write a result.json larger than 1 MiB
  *   leakfail      print the API key it was given, then exit 1
+ *   leakshape     print a vendor key and a Bearer header that are none of this run's secrets, then exit 1
  *   leakout       print the API key and MCP token to stdout and stderr, then behave like ok
  *   flood         print 3 MB without a newline first, then behave like ok
  *   floodfail     print 3 MB without a newline, then exit 1
@@ -46,6 +47,7 @@ cost=""
 [ "$mode" = "spend" ] && cost=',"total_cost_usd":0.5'
 good='{"summary":"fake run complete","done":["the brief"],"notDone":[],"confidence":"high","knownIssues":[]}'
 if [ "$mode" = "leakfail" ]; then echo "key is $ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
+if [ "$mode" = "leakshape" ]; then echo "401 sent Authorization: Bearer ghp_AAAABBBBCCCCDDDDEEEE1234 and key sk-live-ZZZZYYYYXXXX9999"; exit 1; fi
 pad=$(head -c 285 /dev/zero | tr '\0' x)
 jpad=$(head -c 190 /dev/zero | tr '\0' x)
 if [ "$mode" = "leakedge-plain" ]; then echo "$pad$ANTHROPIC_API_KEY$OPENAI_API_KEY"; exit 1; fi
