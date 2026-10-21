@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  readFileSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -22,14 +23,27 @@ function boxWith(t: TestContext) {
   mkdirSync(bin, { recursive: true });
   const ran = join(home, 'ran');
   const cli = join(bin, 'claude');
-  writeFileSync(cli, `#!/bin/sh\necho ran >> ${ran}\necho 9.9.9\n`, { mode: 0o755 });
+  // The CLI says who it ran as: only through the sudo double below is it the agent's account.
+  writeFileSync(
+    cli,
+    `#!/bin/sh\necho "\${MAKA_TEST_VIA_SUDO:-control user}" >> ${ran}\necho 9.9.9\n`,
+    { mode: 0o755 },
+  );
+  // A `sudo` that only marks the run as the agent's, as the fake sandbox of the other tests does.
+  const shim = join(home, 'shim');
+  mkdirSync(shim);
+  writeFileSync(
+    join(shim, 'sudo'),
+    '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|--preserve-env) shift ;; -u) shift 2 ;; --) shift; break ;; *) break ;; esac; done\nMAKA_TEST_VIA_SUDO=agent exec "$@"\n',
+    { mode: 0o755 },
+  );
   const marker = join(home, 'marker.ok');
   writeFileSync(marker, '');
   const check = (): number => {
     try {
-      execFileSync('sh', ['-c', cliCheckScript('claude')], {
+      execFileSync('sh', ['-c', cliCheckScript('claude', 'maka-agent')], {
         env: {
-          PATH: process.env.PATH ?? '',
+          PATH: `${shim}:${process.env.PATH ?? ''}`,
           HOME: home,
           MAKA_MARKER: marker,
           MAKA_VERSION: '9.9.9',
@@ -41,13 +55,32 @@ function boxWith(t: TestContext) {
       return (error as { status?: number }).status ?? 1;
     }
   };
-  return { home, bin, cli, ran, check };
+  return { home, bin, cli, ran, check, shim };
 }
 
 test("a CLI that is the sandbox user's own and closed to everyone else passes the check", (t) => {
   const box = boxWith(t);
   assert.equal(box.check(), 0);
-  assert.equal(existsSync(box.ran), true);
+  // And it was asked as the agent's account, never as the sandbox user.
+  assert.equal(readFileSync(box.ran, 'utf8').trim(), 'agent');
+});
+
+test('nothing in ~/.maka-cli stands in for a tool the check itself runs, and the CLI is never run by the sandbox user', (t) => {
+  const box = boxWith(t);
+  const hijacked = join(box.home, 'hijacked');
+  // Whatever is on a PATH that has ~/.maka-cli/bin first would run as the sandbox user.
+  for (const tool of ['id', 'readlink', 'find', 'grep']) {
+    writeFileSync(
+      join(box.bin, tool),
+      `#!/bin/sh\necho ${tool} >> ${hijacked}\nexec /usr/bin/${tool} "$@"\n`,
+      {
+        mode: 0o755,
+      },
+    );
+  }
+  box.check();
+  assert.equal(existsSync(hijacked), false, 'a planted tool ran as the sandbox user');
+  assert.deepEqual(readFileSync(box.ran, 'utf8').trim().split('\n'), ['agent']);
 });
 
 test('a CLI the agent could have rewritten is not run as the sandbox user', (t) => {

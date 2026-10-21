@@ -251,7 +251,9 @@ export class Fleet {
     const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
     // The check runs the CLI itself (`--version`), so the box is guarded first like for any task code.
-    const check = await machine.exec(cliCheckScript(vendor.binary), {
+    const account = this.options.agentChannel;
+    if (account === undefined) throw new Error('no agent account is configured');
+    const check = await machine.exec(cliCheckScript(vendor.binary, account.user), {
       taskCode: true,
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
     });
