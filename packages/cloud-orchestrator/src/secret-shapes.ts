@@ -28,7 +28,7 @@ const SECRET_PARAM = new RegExp(
 );
 
 /** The start of a JSON (or JS object) field with a secret name: `"Authorization":`, also inside an escaped string. */
-const SECRET_JSON_FIELD = new RegExp(`(\\\\?)(["'])(?:${SECRET_FIELD})\\1\\2\\s*:\\s*`, 'giu');
+const SECRET_JSON_FIELD = new RegExp(`(\\\\*)(["'])(?:${SECRET_FIELD})\\1\\2\\s*:\\s*`, 'giu');
 
 /**
  * Header and credential pairs written as data rather than as `name: value`:
@@ -38,40 +38,68 @@ const SECRET_JSON_FIELD = new RegExp(`(\\\\?)(["'])(?:${SECRET_FIELD})\\1\\2\\s*
  */
 const SCHEMES = 'Bearer|Basic|Digest|Token|ApiKey';
 const CREDENTIAL_KEYS = 'value|credentials?|token|param|parameter';
-const SECRET_PAIRS: readonly [RegExp, string][] = ['', '\\', '\\\\\\'].flatMap((slashes) => {
-  // `q` is one quote as it is written at this depth of escaping. A value ends at the next one.
-  const q = `${slashes.replaceAll('\\', '\\\\')}"`;
-  const value = slashes === '' ? '(?:[^"\\\\]|\\\\.)*' : `(?:(?!${q})[\\s\\S])*?`;
-  const literal = `${slashes}"`;
+const PAIR_HEADERS = 'authorization|proxy-authorization|x-api-key|cookie';
+
+/** How many times a JSON text can have been put inside another JSON string and still be read. */
+const MAX_ESCAPE_DEPTH = 4;
+
+/**
+ * The pieces of a JSON string as it is written after `depth` rounds of being put inside another
+ * string. A quote is then `\"`, `\\\"`, ... (2^depth - 1 backslashes), a backslash 2^depth of them. A
+ * value ends at its own closing quote, never at an escaped quote of the text inside it.
+ */
+function escapedParts(depth: number) {
+  const slashes = 2 ** depth;
+  const bs = '\\\\'.repeat(slashes); // regex source for 2^depth backslashes
+  const quote = `${'\\\\'.repeat(slashes - 1)}"`;
+  const value =
+    depth === 0 ? '(?:[^"\\\\]|\\\\.)*' : `(?:[^"\\\\]|${bs}(?:${bs}|${quote}|[^"\\\\]))*?`;
+  return { quote, value };
+}
+
+const SECRET_PAIRS: readonly [RegExp, string][] = Array.from(
+  { length: MAX_ESCAPE_DEPTH + 1 },
+  (_, depth) => depth,
+).flatMap((depth) => {
+  const { quote: q, value } = escapedParts(depth);
+  const literal = q.replaceAll('\\\\', '\\');
+  // Any other field may sit between the two that give the pair away, before or after.
+  const between = '[^{}]*?';
   return [
+    // {"scheme":"Basic", ..., "value":"..."}
     [
       new RegExp(
-        `(${q}(?:scheme|type)${q}\\s*:\\s*${q}(?:${SCHEMES})${q}[^{}]*?${q}(?:${CREDENTIAL_KEYS})${q}\\s*:\\s*)${q}${value}${q}`,
+        `(${q}(?:scheme|type)${q}\\s*:\\s*${q}(?:${SCHEMES})${q}${between}${q}(?:${CREDENTIAL_KEYS})${q}\\s*:\\s*)${q}${value}${q}`,
         'giu',
       ),
       literal,
     ],
+    // {"value":"...", ..., "scheme":"Basic"}
     [
       new RegExp(
-        `(${q}(?:${CREDENTIAL_KEYS})${q}\\s*:\\s*)${q}${value}${q}(?=[^{}]*?${q}(?:scheme|type)${q}\\s*:\\s*${q}(?:${SCHEMES})${q})`,
+        `(${q}(?:${CREDENTIAL_KEYS})${q}\\s*:\\s*)${q}${value}${q}(?=${between}${q}(?:scheme|type)${q}\\s*:\\s*${q}(?:${SCHEMES})${q})`,
         'giu',
       ),
       literal,
     ],
+    // {"name":"Authorization", ..., "value":"..."}
     [
       new RegExp(
-        `(${q}(?:name|key|header)${q}\\s*:\\s*${q}(?:authorization|proxy-authorization|x-api-key|cookie)${q}[^{}]*?${q}value${q}\\s*:\\s*)${q}${value}${q}`,
+        `(${q}(?:name|key|header)${q}\\s*:\\s*${q}(?:${PAIR_HEADERS})${q}${between}${q}value${q}\\s*:\\s*)${q}${value}${q}`,
         'giu',
       ),
       literal,
     ],
+    // {"value":"...", ..., "name":"Authorization"}
     [
       new RegExp(
-        `(\\[\\s*${q}(?:authorization|proxy-authorization|x-api-key|cookie)${q}\\s*,\\s*)${q}${value}${q}`,
+        `(${q}value${q}\\s*:\\s*)${q}${value}${q}(?=${between}${q}(?:name|key|header)${q}\\s*:\\s*${q}(?:${PAIR_HEADERS})${q})`,
         'giu',
       ),
       literal,
     ],
+    // ["Authorization","..."]
+    [new RegExp(`(\\[\\s*${q}(?:${PAIR_HEADERS})${q}\\s*,\\s*)${q}${value}${q}`, 'giu'), literal],
   ] as [RegExp, string][];
 });
 
@@ -96,27 +124,58 @@ export function setKnownSecrets(values: readonly string[]): void {
   knownSecrets = formsPattern(forms);
 }
 
+/** How many times the encodings below can be stacked (percent-encoding a JSON-escaped key, and so on). */
+const MAX_ENCODING_LAYERS = 3;
+
+const percent = (text: string): string => encodeURIComponent(text);
+const jsonEscape = (text: string): string => JSON.stringify(text).slice(1, -1);
+
 /**
- * The ways a secret can show up in text that was built from it: as it is, percent-encoded (in
- * either case of hex, and as a URL's userinfo encodes it), escaped for JSON, and as the base64 of
- * a Basic credential that has it in it.
+ * The ways a secret can show up in text that was built from it: as it is, percent-encoded, escaped
+ * for JSON (also with `/` escaped), each of those put through the others up to three layers deep
+ * (a key in a URL in a JSON body in a log line), as a URL's userinfo encodes it, and as the base64
+ * of a Basic credential that has it in it. Percent-escapes are written in upper case here; the
+ * pattern built from the forms (`formsPattern`) takes either case of every one of them.
  */
 export function secretForms(secret: string): string[] {
   const forms = new Set<string>([secret]);
-  const encoded = encodeURIComponent(secret);
-  forms.add(encoded);
-  forms.add(encoded.replace(/%[0-9A-F]{2}/gu, (hex) => hex.toLowerCase()));
+  let frontier = [secret];
+  for (let layer = 0; layer < MAX_ENCODING_LAYERS; layer++) {
+    const next: string[] = [];
+    for (const form of frontier) {
+      for (const encoded of [
+        percent(form),
+        jsonEscape(form),
+        jsonEscape(form).replaceAll('/', '\\/'),
+      ]) {
+        if (!forms.has(encoded)) {
+          forms.add(encoded);
+          next.push(encoded);
+        }
+      }
+    }
+    frontier = next;
+  }
   try {
     const url = new URL('https://x.invalid');
     url.password = secret;
     forms.add(url.password);
   } catch {}
-  const escaped = JSON.stringify(secret).slice(1, -1);
-  forms.add(escaped);
-  forms.add(escaped.replaceAll('/', '\\/'));
   forms.add(Buffer.from(secret).toString('base64').replace(/=+$/u, ''));
   forms.delete('');
   return [...forms];
+}
+
+/** A form as a regex source: percent-escapes (also the escaped escapes: `%25 2F`) match in either case of hex. */
+function formSource(form: string): string {
+  return form
+    .split(/(%(?:25)*[0-9A-Fa-f]{2})/u)
+    .map((part, index) =>
+      index % 2 === 0
+        ? escapeRegExp(part)
+        : part.replace(/[A-Fa-f]/gu, (hex) => `[${hex.toLowerCase()}${hex.toUpperCase()}]`),
+    )
+    .join('');
 }
 
 function formsPattern(forms: ReadonlySet<string>): RegExp | undefined {
@@ -125,7 +184,7 @@ function formsPattern(forms: ReadonlySet<string>): RegExp | undefined {
     : new RegExp(
         [...forms]
           .sort((a, b) => b.length - a.length)
-          .map(escapeRegExp)
+          .map(formSource)
           .join('|'),
         'gu',
       );
@@ -161,15 +220,26 @@ export function scrubValues(text: string, values: readonly string[]): string {
   return replace(out);
 }
 
-/** The index just after the value that starts at `start`: a string, an array or object (balanced), or a bare word. */
-function endOfValue(text: string, start: number, escaped: boolean): number {
+/**
+ * The index just after the value that starts at `start`: a string, an array or object (balanced),
+ * or a bare word. `slashes` is how many backslashes the quotes of this text carry (0 for plain
+ * JSON, 1 for JSON inside a string, 3 inside that, ...): a quote with more backslashes in front
+ * belongs to text inside the value, and does not end it.
+ */
+function endOfValue(text: string, start: number, slashes: number): number {
   const first = text[start];
-  if (first === '"' || first === "'" || (escaped && first === '\\')) {
-    const quote = escaped ? '\\"' : first;
-    let i = start + quote.length;
+  const quoteChar = slashes === 0 ? first : text[start + slashes];
+  if (
+    (slashes === 0 && (first === '"' || first === "'")) ||
+    (slashes > 0 && first === '\\' && quoteChar === '"')
+  ) {
+    const quote = slashes === 0 ? (first as string) : '"';
+    let i = start + slashes + 1;
     while (i < text.length) {
-      if (text.startsWith(quote, i)) return i + quote.length;
-      i += !escaped && text[i] === '\\' ? 2 : 1;
+      let run = 0;
+      while (text[i + run] === '\\') run++;
+      if (text[i + run] === quote && run === slashes) return i + run + 1;
+      i += run === 0 ? 1 : run + 1;
     }
     return text.length;
   }
@@ -202,9 +272,9 @@ function scrubJsonFields(text: string): string {
   const field = new RegExp(SECRET_JSON_FIELD.source, 'giu');
   for (let match = field.exec(text); match; match = field.exec(text)) {
     const start = match.index + match[0].length;
-    const escaped = match[1] === '\\';
-    const end = endOfValue(text, start, escaped);
-    const quote = escaped ? '\\"' : (match[2] ?? '"');
+    const slashes = (match[1] ?? '').length;
+    const end = endOfValue(text, start, slashes);
+    const quote = `${match[1] ?? ''}${match[2] ?? '"'}`;
     out += `${text.slice(at, start)}${quote}[secret]${quote}`;
     at = end;
     field.lastIndex = end;
@@ -212,9 +282,29 @@ function scrubJsonFields(text: string): string {
   return out + text.slice(at);
 }
 
+/**
+ * A text that is JSON, read as JSON: a field with a secret name, or one that is a credential
+ * because of another field beside it (in whatever order the fields come), loses its value, and a
+ * string that is JSON again is read the same way. Undefined when the text is not JSON or holds
+ * nothing to remove, so that text is left as it was written.
+ */
+function scrubParsed(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  const cleaned = JSON.stringify(scrubSecretFields(parsed));
+  return cleaned === JSON.stringify(parsed) ? undefined : cleaned;
+}
+
 /** `text` with every secret-shaped run replaced by `[secret]`. */
 export function scrubSecretShapes(text: string): string {
   let out = knownSecrets ? text.replace(knownSecrets, '[secret]') : text;
+  out = scrubParsed(out) ?? out;
   out = scrubJsonFields(out);
   for (const [pair, quote] of SECRET_PAIRS) out = out.replace(pair, `$1${quote}[secret]${quote}`);
   out = out.replace(SECRET_PARAM, '$1[secret]');

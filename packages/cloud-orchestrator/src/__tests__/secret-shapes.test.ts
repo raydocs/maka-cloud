@@ -136,3 +136,86 @@ test('an object keeps the link between a scheme or header name and its value', (
   assert.ok(!JSON.stringify(out).includes(basic), JSON.stringify(out));
   assert.match(JSON.stringify(out), /"value":"x"/u);
 });
+
+// -- recheck17 item 5, recheck18 item 1 ---------------------------------------------------------
+
+const layers = (text: string, times: number): string => {
+  let out = text;
+  for (let i = 0; i < times; i++) out = JSON.stringify(out).slice(1, -1);
+  return out;
+};
+
+test('a key with awkward characters is found through several layers of percent-encoding and JSON escaping, in any case of hex', () => {
+  const key = 'p@ss/w?"q\\x';
+  const once = encodeURIComponent(key);
+  const twice = encodeURIComponent(once);
+  const forms = [
+    once,
+    once.toLowerCase().replace(/%([0-9a-f]{2})/gu, (_, hex: string) => `%${hex}`),
+    // Mixed case, escape by escape: the first lower, the second upper.
+    once.replace(/%2F/u, '%2f'),
+    twice,
+    twice.replace(/%252F/u, '%252f'),
+    layers(key, 1),
+    layers(key, 2),
+    layers(key, 3),
+    layers(encodeURIComponent(key), 2),
+    encodeURIComponent(layers(key, 2)),
+  ];
+  for (const form of forms) {
+    assert.ok(
+      !scrubValues(`Authorization failed for ${form} (401)`, [key]).includes(form),
+      `leaked: ${form}`,
+    );
+  }
+  setKnownSecrets([key]);
+  try {
+    for (const form of forms) {
+      assert.ok(!scrubSecretShapes(`failed for ${form}`).includes(form), `leaked: ${form}`);
+    }
+  } finally {
+    setKnownSecrets([]);
+  }
+  // Ordinary text that merely looks similar stays.
+  assert.equal(scrubValues('p@ss and %40 and w?', [key]), 'p@ss and %40 and w?');
+});
+
+test('a credential serialised again and again is scrubbed whatever the order of its fields', () => {
+  const secret = 'dXNlcjpwYXNzd29yZC12ZXJ5LXNlY3JldA==';
+  const digest = 'username="u", realm="r", nonce="n", response="abcdef0123456789"';
+  const values: unknown[] = [
+    { name: 'Authorization', value: `Basic ${secret}` },
+    { value: `Basic ${secret}`, name: 'Authorization' },
+    { value: secret, scheme: 'Basic' },
+    { scheme: 'Digest', value: digest },
+    { value: digest, extra: { deeper: 1 }, scheme: 'Digest' },
+    ['Authorization', `Basic ${secret}`],
+  ];
+  for (const value of values) {
+    for (let times = 0; times <= 4; times++) {
+      let text = JSON.stringify(value);
+      for (let i = 0; i < times; i++) text = JSON.stringify({ body: text });
+      const out = scrubSecretShapes(text);
+      assert.ok(!out.includes(secret), `${times} layers, secret kept: ${out}`);
+      assert.ok(!out.includes('abcdef0123456789'), `${times} layers, digest kept: ${out}`);
+      assert.ok(!out.includes('nonce'), `${times} layers, digest half kept: ${out}`);
+    }
+    // Written inside a string field that is itself JSON, as a tool result that quotes a response.
+    const inner = scrubSecretShapes(JSON.stringify({ result: JSON.stringify(value) }));
+    assert.ok(!inner.includes(secret) && !inner.includes('abcdef0123456789'), inner);
+  }
+});
+
+test('a text that is cut off in the middle of nested JSON still loses its credential', () => {
+  const secret = 'dXNlcjpwYXNzd29yZC12ZXJ5LXNlY3JldA==';
+  const text = JSON.stringify({
+    body: JSON.stringify({ value: `Basic ${secret}`, name: 'Authorization' }),
+  });
+  for (const cut of [text.length, text.length - 3, text.length - 12]) {
+    assert.ok(!scrubSecretShapes(text.slice(0, cut)).includes(secret), String(cut));
+  }
+  assert.equal(
+    scrubSecretShapes('{"title":"fix the nonce","n":[1,2]}'),
+    '{"title":"fix the nonce","n":[1,2]}',
+  );
+});
