@@ -9,6 +9,7 @@ import {
   publicLink,
   stepsOf,
   taskLabel,
+  verdictOf,
   type TaskView,
   Unsupported,
 } from '@maka-cloud/client';
@@ -24,16 +25,6 @@ type Loaded =
   | { kind: 'image'; name: string; blob: Blob }
   | { kind: 'link'; name: string; url: string }
   | { kind: 'failed'; name: string };
-
-/** The reviewer's sentence for a task: the supervisor's own text, label included, never worked out here. */
-export function verdictOf(items: readonly InboxItem[], taskId: string): InboxItem | undefined {
-  return items
-    .filter(
-      (item) =>
-        item.taskId === taskId && (item.kind === 'finished' || item.kind === 'verification_failed'),
-    )
-    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-}
 
 function ImageResult({ name, blob }: { name: string; blob: Blob }) {
   const [src, setSrc] = useState('');

@@ -7,8 +7,8 @@ import {
   type ProjectView,
   type TaskView,
 } from '@maka-cloud/client';
-import { Projects, budgetWords, triggerWords } from '../src/Projects';
-import { TaskPage, verdictOf } from '../src/TaskPage';
+import { Projects } from '../src/Projects';
+import { TaskPage } from '../src/TaskPage';
 
 beforeEach(() => {
   let n = 0;
@@ -43,15 +43,6 @@ const project = (duties: DutyView[]): ProjectView => ({
   repo: 'example/repo',
   defaultBranch: 'main',
   duties,
-});
-
-test('triggers, authority and budget are said in words', () => {
-  expect(triggerWords({ kind: 'schedule', everyMinutes: 15 })).toBe('Every 15 min');
-  expect(triggerWords({ kind: 'schedule', everyMinutes: 120 })).toBe('Every 2 h');
-  expect(triggerWords({ kind: 'schedule', everyMinutes: 1440 })).toBe('Every 1 day');
-  expect(triggerWords({ kind: 'issue_opened' })).toBe('When an issue is opened');
-  expect(triggerWords({ kind: 'something_new' })).toBe('When something happens');
-  expect(budgetWords(duty())).toBe('Up to $2.00 a run, $6.00 a day');
 });
 
 function serveProjects(
@@ -185,17 +176,6 @@ const inboxItem = (over: Partial<InboxItem>): InboxItem => ({
   createdAt: 1,
   updatedAt: 1,
   ...over,
-});
-
-test('the review verdict is the supervisor’s own sentence for that task, the newest one', () => {
-  const items = [
-    inboxItem({ itemId: 'old', ask: 'old', updatedAt: 1 }),
-    inboxItem({ itemId: 'new', ask: 'new', updatedAt: 5 }),
-    inboxItem({ itemId: 'other', ask: 'other', taskId: 't2', updatedAt: 9 }),
-    inboxItem({ itemId: 'dec', kind: 'decision', ask: 'decision', updatedAt: 10 }),
-  ];
-  expect(verdictOf(items, 't1')?.ask).toBe('new');
-  expect(verdictOf(items, 't3')).toBeUndefined();
 });
 
 function serveTask(inbox: InboxItem[] | 404 = []) {
