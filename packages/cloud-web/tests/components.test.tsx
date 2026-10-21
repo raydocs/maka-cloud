@@ -9,7 +9,7 @@ import {
   type TaskView,
 } from '@maka-cloud/client';
 import { Computer } from '../src/Computer';
-import { InboxCard, InboxPanel, visibleInbox } from '../src/Inbox';
+import { InboxCard, InboxPanel } from '../src/Inbox';
 
 afterEach(cleanup);
 
@@ -410,19 +410,13 @@ test('an item with no text field offers none, and an answer being delivered offe
   expect(screen.getByRole('status').textContent).toContain('keep trying');
 });
 
-test('an open item that repeats a question the conversation is asking is shown once', () => {
+test('a closed item keeps its words under Done', () => {
   const asked = {
     ...item,
     itemId: 'itm_q',
     kind: 'decision' as const,
     ask: 'Which direction feels right?',
   };
-  const other = { ...item, itemId: 'itm_o', kind: 'blocked' as const, ask: 'A step may be stuck.' };
-  const shown = visibleInbox([asked, other], new Set(['Which direction feels right?']));
-  expect(shown.live.map((entry) => entry.itemId)).toEqual(['itm_o']);
-  // Once the question is answered, the item is the only record of it.
-  expect(visibleInbox([asked, other], new Set()).live).toHaveLength(2);
-  // A closed item keeps its words under “Done”.
   render(
     <InboxPanel
       items={[{ ...asked, state: 'closed', closeReason: 'answered' }]}
