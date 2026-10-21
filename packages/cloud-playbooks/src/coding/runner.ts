@@ -1260,7 +1260,7 @@ class CodingRun implements RunHandle {
       const startedAt = Date.now();
       let out: Awaited<ReturnType<SandboxWorkspace['exec']>>;
       try {
-        out = await this.exec(
+        out = await this.execCheck(
           CHECK_SCRIPT,
           {
             MAKA_CHECK_TAG: tag,
@@ -1292,7 +1292,9 @@ class CodingRun implements RunHandle {
 
   /** Stops one check's namespace, whatever its exec did. */
   private async stopCheck(tag: string): Promise<void> {
-    const out = (await this.exec(CHECK_STOP_SCRIPT, { MAKA_CHECK_TAG: tag })).stdout.trim();
+    const out = (
+      await this.execCheckStop(CHECK_STOP_SCRIPT, { MAKA_CHECK_TAG: tag })
+    ).stdout.trim();
     if (out !== 'NONE' && out !== 'STOPPED') {
       throw new Error(`a check's processes could not be stopped (${clipText(out, 200)})`);
     }
@@ -1588,6 +1590,27 @@ class CodingRun implements RunHandle {
   private exec(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
     return this.guard(
       this.ws.exec(script, {
+        envs: { MAKA_DIR: this.ws.dir, ...envs },
+        timeoutSeconds,
+        signal: this.signal,
+      }),
+    );
+  }
+
+  /** As `exec`, but for a check: it runs as the agent's account (see `SandboxWorkspace.execCheck`). */
+  private execCheck(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    return this.guard(
+      this.ws.execCheck(script, {
+        envs: { MAKA_DIR: this.ws.dir, ...envs },
+        timeoutSeconds,
+        signal: this.signal,
+      }),
+    );
+  }
+
+  private execCheckStop(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    return this.guard(
+      this.ws.execCheckStop(script, {
         envs: { MAKA_DIR: this.ws.dir, ...envs },
         timeoutSeconds,
         signal: this.signal,
