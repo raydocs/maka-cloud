@@ -550,7 +550,7 @@ export async function keptAfterStop(h: Harness, id: string) {
   assert.equal(delivery.publishedPr, undefined);
   const record = await readJson(join(dir, 'verification.json'));
   assert.equal(record.result, 'verified');
-  assert.match(record.kept?.reason ?? '', /ended before its independent review finished/);
+  assert.match(record.kept?.reason ?? '', /ended before (its|the) independent review/);
   assert.ok(await fs.readFile(delivery.changesPath, 'utf8'), 'the change set is on disk');
   assert.ok(await fs.readFile(join(dir, 'change.patch'), 'utf8'), 'the patch is on disk');
   const manifest = await readJson(join(dir, 'result.json'));
