@@ -175,7 +175,7 @@ class GatedTranscripts extends MemoryTranscriptStore {
     taskId: string,
     key: TranscriptKey,
     lines: readonly TranscriptLine[],
-  ): Promise<void> {
+  ): Promise<TranscriptLine[]> {
     if (lines.some((line) => line.json.includes('<user_message id='))) {
       this.reached.resolve();
       await this.release.promise;
@@ -183,6 +183,36 @@ class GatedTranscripts extends MemoryTranscriptStore {
     return super.append(taskId, key, lines);
   }
 }
+
+/** A store that skips the lines carrying a message to the agent, as it does for a uuid it holds already. */
+class SkipsMessageLines extends MemoryTranscriptStore {
+  override async append(
+    taskId: string,
+    key: TranscriptKey,
+    lines: readonly TranscriptLine[],
+  ): Promise<TranscriptLine[]> {
+    return super.append(
+      taskId,
+      key,
+      lines.filter((line) => !line.json.includes('<user_message id=')),
+    );
+  }
+}
+
+test('a message whose transcript line the store skipped as already stored is not reported read', async (t) => {
+  const h = await sdkSetup(t, { transcripts: new SkipsMessageLines() });
+  const { steps, gate } = gatedSteps();
+  const { handle, events, done } = await started(h, steps, [
+    { id: 'toolu_1', name: 'Read', input: { file_path: '/work/a.txt' } },
+  ]);
+  handle.steer?.({ steerId: 'm1', text: 'Use the v2 API.' });
+  gate.resolve();
+  assert.equal(terminal(await done)?.type, 'finished');
+  // The hook gave it, but nothing kept shows it: it is not claimed.
+  const post = (await hookAnswers(h)).find((entry) => entry.event === 'PostToolUse');
+  assert.match(contextOf(post?.answer) ?? '', /Use the v2 API\./u);
+  assert.deepEqual(reads(events), []);
+});
 
 test('a message is reported read only once the kept transcript shows the agent has it', async (t) => {
   const transcripts = new GatedTranscripts();
