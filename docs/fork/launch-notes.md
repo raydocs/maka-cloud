@@ -24,34 +24,36 @@ each is off unless its setting is present, so the launch environment file simply
   account (see "The agent account" in `docs/fork/deploy.md`). Without them no CLI starts and every
   task fails at once, so a launch host without them serves nobody.
 - The go-live rehearsal (`deploy/rehearsal/`, the `rehearsal` CI job) runs with the same three off.
-  Read its green run for what it covers (below), not as proof of the launch path.
+  Read its green run for what it covers (below), not as proof of the launch path on a real host.
 
-## What the rehearsal does not verify yet
+## What the rehearsal verifies, and what it does not
 
-The rehearsal's sandbox is a single-user stand-in with no second OS account, so every step that
-runs a task fails by design and is listed as an expected failure in
-`.github/workflows/fork-deploy-rehearsal.yml` (`MAKA_REHEARSAL_XFAIL`). A green run therefore proves
-the image build, the Compose and Caddy stack, TLS, the health check and sign-in, and nothing about
-tasks:
+The rehearsal's sandbox stand-in has a real second OS account (`maka-agent`), a group it shares with
+the sandbox user and passwordless `sudo` for the sandbox user, and the scripted `claude` speaks the
+Agent SDK's stream-json protocol. So every step of the flow runs with the agent account, and none is
+an expected failure any more. The CI run on the pull request that added it (Docker, Compose, Caddy)
+passed all seven steps:
 
-| Step | Status in the rehearsal | Unverified until |
-| --- | --- | --- |
-| `health`, `sign-in` | runs and passes | (covered) |
-| `task` (a task and its result card) | expected failure | the stand-in has the agent account |
-| `approval` (an approval answered once) | expected failure | the same |
-| `restart` (a restart in the middle of a task) | expected failure | the same |
-| `restart-reply` | expected failure (may pass when `restart` does) | the same |
-| `backup-restore` (backup, restore, a task still runs) | expected failure | the same |
+| Step | Status in the rehearsal |
+| --- | --- |
+| `health`, `sign-in` | passes |
+| `task` (a task and its result card) | passes |
+| `approval` (an approval answered once) | passes |
+| `restart` (a restart in the middle of a task) | passes (about a minute: Compose waits out its 60 s grace period) |
+| `restart-reply` | passes |
+| `backup-restore` (backup, restore, a task still runs) | passes |
 
-What takes them off the list is written in `deploy/rehearsal/README.md`, "The agent account": a real
-second account in the stub container, a shared group, passwordless `sudo -n` for the sandbox user
-and stand-ins for the firewall tools the box check tries, and the scripted `claude` speaking the
-Agent SDK's stream-json protocol. Until that is done, the first run on a real host is the first time
-a task runs end to end with the agent account, and it needs the owner's keys and budget.
+Still not verified by the rehearsal, so the first run on a real host is the first time they run:
+
+- The firewall is a stand-in that keeps its rules in files: the egress guard's rules are checked as
+  text, no packet is filtered.
+- The CLI is scripted: the real `claude`'s flags, its own files and its network use are not exercised.
+- The sandbox user may run any command as root in the stand-in; a real box need not allow that.
+- Any model, GitHub, certificate or domain, and the owner's keys and budget.
 
 ## Why these three
 
 Each adds a second way to reach a sandbox, a credential or a GitHub repository, and the open review
 items on them are not on the path a first user takes. Leaving them off cuts scope without leaving a
 gap in what a first user does: sign in, give a goal, see the result card, approve, restart safely.
-That path is built and unit-tested; the rehearsal does not yet run it end to end (see above).
+That path is built, unit-tested and run end to end by the rehearsal on stand-ins (see above).
