@@ -57,21 +57,74 @@ export function setKnownSecrets(values: readonly string[]): void {
   for (const value of values) {
     const secret = value.trim();
     if (secret.length < MIN_KNOWN_SECRET_LENGTH) continue;
-    forms.add(secret);
-    forms.add(encodeURIComponent(secret));
-    forms.add(JSON.stringify(secret).slice(1, -1));
-    forms.add(Buffer.from(secret).toString('base64').replace(/=+$/u, ''));
+    for (const form of secretForms(secret)) forms.add(form);
   }
-  knownSecrets =
-    forms.size === 0
-      ? undefined
-      : new RegExp(
-          [...forms]
-            .sort((a, b) => b.length - a.length)
-            .map(escapeRegExp)
-            .join('|'),
-          'gu',
-        );
+  knownSecrets = formsPattern(forms);
+}
+
+/**
+ * The ways a secret can show up in text that was built from it: as it is, percent-encoded (in
+ * either case of hex, and as a URL's userinfo encodes it), escaped for JSON, and as the base64 of
+ * a Basic credential that has it in it.
+ */
+export function secretForms(secret: string): string[] {
+  const forms = new Set<string>([secret]);
+  const encoded = encodeURIComponent(secret);
+  forms.add(encoded);
+  forms.add(encoded.replace(/%[0-9A-F]{2}/gu, (hex) => hex.toLowerCase()));
+  try {
+    const url = new URL('https://x.invalid');
+    url.password = secret;
+    forms.add(url.password);
+  } catch {}
+  const escaped = JSON.stringify(secret).slice(1, -1);
+  forms.add(escaped);
+  forms.add(escaped.replaceAll('/', '\\/'));
+  forms.add(Buffer.from(secret).toString('base64').replace(/=+$/u, ''));
+  forms.delete('');
+  return [...forms];
+}
+
+function formsPattern(forms: ReadonlySet<string>): RegExp | undefined {
+  return forms.size === 0
+    ? undefined
+    : new RegExp(
+        [...forms]
+          .sort((a, b) => b.length - a.length)
+          .map(escapeRegExp)
+          .join('|'),
+        'gu',
+      );
+}
+
+/**
+ * `text` with each of these values, in every form `secretForms` lists, replaced by `[secret]`. A
+ * value of any length counts: the caller says these are secrets, so there is no minimum. A text
+ * that is JSON is read first and the replacement made inside each string (a key is escaped by the
+ * sender however it likes, `\u0041` included), then the written-out text is checked again.
+ */
+export function scrubValues(text: string, values: readonly string[]): string {
+  const forms = new Set<string>();
+  for (const value of values) for (const form of secretForms(value)) forms.add(form);
+  const pattern = formsPattern(forms);
+  if (!pattern) return text;
+  const replace = (value: string) => value.replace(pattern, '[secret]');
+  let out = text;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === 'object' && parsed !== null) {
+      const walk = (value: unknown): unknown => {
+        if (typeof value === 'string') return replace(value);
+        if (Array.isArray(value)) return value.map(walk);
+        if (typeof value === 'object' && value !== null) {
+          return Object.fromEntries(Object.entries(value).map(([k, v]) => [replace(k), walk(v)]));
+        }
+        return value;
+      };
+      out = JSON.stringify(walk(parsed));
+    }
+  } catch {}
+  return replace(out);
 }
 
 /** The index just after the value that starts at `start`: a string, an array or object (balanced), or a bare word. */
