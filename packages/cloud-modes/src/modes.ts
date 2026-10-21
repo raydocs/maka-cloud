@@ -264,18 +264,22 @@ export function budgetProblem(
     : undefined;
 }
 
-function roundUsd(value: number): number {
-  return Math.round(value * 1e6) / 1e6;
-}
+const MICRO = 1e6;
 
-/** A task's budget as the implementer may spend it and as review and fix may. The two never add up to more than the budget. */
+/**
+ * A task's budget as the implementer may spend it and as review and fix may. Works in whole
+ * micro-dollars: the budget is rounded down to one first, the review's share is rounded down, and
+ * the work gets the rest, so the two parts always add up to no more than the budget.
+ */
 export function splitBudget(
   config: ModesConfig,
   mode: ModeId,
   budgetUsd: number,
 ): { workUsd: number; reviewUsd: number } {
-  const reviewUsd = roundUsd(budgetUsd * config.modes[mode].budget.reviewShare);
-  return { workUsd: roundUsd(Math.max(0, budgetUsd - reviewUsd)), reviewUsd };
+  // The small addend keeps 0.3 from becoming 299999 micro-dollars through float noise.
+  const total = Math.max(0, Math.floor(budgetUsd * MICRO + 1e-6));
+  const review = Math.min(total, Math.floor(total * config.modes[mode].budget.reviewShare));
+  return { workUsd: (total - review) / MICRO, reviewUsd: review / MICRO };
 }
 
 export interface NamedModel {

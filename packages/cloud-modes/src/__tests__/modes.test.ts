@@ -183,6 +183,34 @@ test('the budget split never adds up to more than the budget', () => {
   }
 });
 
+test('the split is in whole micro-dollars rounded down, so the parts never add up to more than the budget', () => {
+  const micros = (usd: number) => Math.round(usd * 1e6);
+  // 0.9999999 split by rounding each part on its own came to 0.8 + 0.2 = 1.
+  const { workUsd, reviewUsd } = splitBudget(DEFAULT_MODES, 'standard', 0.9999999);
+  assert.deepEqual([workUsd, reviewUsd], [0.8, 0.199999]);
+  assert.ok(micros(workUsd) + micros(reviewUsd) <= Math.floor(0.9999999 * 1e6));
+  assert.deepEqual(splitBudget(DEFAULT_MODES, 'standard', 0.3), { workUsd: 0.24, reviewUsd: 0.06 });
+  assert.deepEqual(splitBudget(DEFAULT_MODES, 'quick', 0), { workUsd: 0, reviewUsd: 0 });
+  assert.deepEqual(splitBudget(DEFAULT_MODES, 'quick', -1), { workUsd: 0, reviewUsd: 0 });
+  // Many budgets with awkward decimals, in every mode.
+  let seed = 12345;
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  for (const id of MODE_IDS) {
+    for (let i = 0; i < 2000; i++) {
+      const budget = next() * 50 + (i % 7 === 0 ? 0.0000001 : 0);
+      const split = splitBudget(DEFAULT_MODES, id, budget);
+      assert.ok(
+        micros(split.workUsd) + micros(split.reviewUsd) <= Math.floor(budget * 1e6 + 1e-6),
+        `${id} ${budget}`,
+      );
+      assert.ok(
+        Math.abs(split.workUsd * 1e6 - micros(split.workUsd)) < 1e-4,
+        'whole micro-dollars',
+      );
+    }
+  }
+});
+
 test('the models a config names are listed once each, with the vendor that serves them', () => {
   const models = modelsOf(DEFAULT_MODES);
   assert.deepEqual(models.map((m) => `${m.vendor}:${m.model}`).sort(), [
