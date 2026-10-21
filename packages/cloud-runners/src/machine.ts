@@ -5,7 +5,7 @@ import {
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
 import { scrubSecretShapes } from '@maka-cloud/orchestrator';
-import { agentPrefix, PREPARE_AGENT_SCRIPT } from './agent-user.js';
+import { asAgentUser, PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
   FILE_CLEAN_SCRIPT,
@@ -26,15 +26,21 @@ import {
   TOOL_ABORT_SCRIPT,
   TOOL_CHECK_SCRIPT,
   TOOL_CHUNK_SCRIPT,
-  commandOfRunScript,
+  buildRunScript,
 } from './scripts.js';
-import { assertSafeId } from './shell.js';
+import { FEED_FUNCTION, fedCommand } from './process-channel.js';
+import { assertSafeId, shq } from './shell.js';
 
 /**
  * Closes the box's network to its host's own addresses and says so only when the rules read back
  * right. It rejects when it cannot, and the box is not used.
  */
 export type EgressGuard = (signal?: AbortSignal) => Promise<void>;
+
+/** Installs run in a hidden `.setup-` directory of their own, never in a task's. */
+function assertInstallDir(dirName: string): void {
+  if (!dirName.startsWith('.setup-')) throw new Error(`not an install directory: ${dirName}`);
+}
 
 export const MAX_RESULT_BYTES = 1024 * 1024;
 export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
@@ -252,39 +258,81 @@ export class RemoteMachine {
   }
 
   /**
-   * Starts a run at most once. After an answer that may or may not have reached the sandbox
-   * (transport failure), the lock file decides: locked means it started, free means it did not.
+   * Starts the program of a run, as the agent's account, at most once. The program and its
+   * arguments come as they are and are quoted here; nothing the caller passes is shell, so no
+   * argument can add a command that would run as the sandbox user, who may change the egress rules
+   * (the guard does, through sudo). Only `preamble` is shell: lines of the host's own (dropping
+   * login selectors, refusing a subscription login) that run before the program. A machine with no
+   * agent account starts nothing.
+   *
+   * After an answer that may or may not have reached the sandbox (transport failure), the lock
+   * file decides: locked means it started, free means it did not.
    */
   async launch(input: {
     dirName: string;
     run: string;
-    script: string;
+    /** Host shell run as the sandbox user before the program. Never built from task content. */
+    preamble: string;
+    program: string;
+    args: readonly string[];
+    /** The program's stdin is the run's input file (see `FEED_FUNCTION`). */
+    fed?: boolean;
     envs: Record<string, string>;
     runToken: string;
     workdir: string;
     /** Keep the raw output in the memory-backed log directory (default), or next to the run. */
     rawLogs?: boolean;
-    /**
-     * Set only by the pinned CLI install, which runs as the sandbox user because it writes
-     * the sandbox user's own `~/.maka-cli`, which the agent's account cannot. Everything else is
-     * task code, and task code must not be able to change the firewall.
-     */
-    runsAs?: 'sandbox-user';
     signal?: AbortSignal;
   }): Promise<'started' | 'already' | 'cancelled'> {
-    // The sandbox user may change the egress rules (the guard does, through sudo); the agent's
-    // account may not. So no task code starts as the sandbox user: the script must hand its command
-    // to the agent's account, and a machine that has none starts nothing.
-    if (input.runsAs !== 'sandbox-user') {
-      if (this.agentUser === undefined) {
-        throw new Error('this sandbox has no agent account, so no task code starts in it');
-      }
-      if (!commandOfRunScript(input.script)?.startsWith(agentPrefix(this.agentUser))) {
-        throw new Error(
-          `the run ${input.run} would start as the sandbox user, who can change the firewall; task code runs as ${this.agentUser}`,
-        );
-      }
+    if (this.agentUser === undefined) {
+      throw new Error('this sandbox has no agent account, so no task code starts in it');
     }
+    const line = asAgentUser(
+      [input.program, ...input.args].map((word) => shq(word)).join(' '),
+      this.agentUser,
+    );
+    return await this.start(
+      buildRunScript({
+        preamble: input.fed ? `${input.preamble}\n${FEED_FUNCTION}` : input.preamble,
+        command: input.fed ? fedCommand(line) : line,
+      }),
+      input,
+    );
+  }
+
+  /**
+   * Runs the pinned install of a CLI, as the sandbox user: it writes the sandbox user's own
+   * `~/.maka-cli`, which the agent's account cannot. `install` is the operator's or the pinned
+   * command, never task content; nothing of an agent runs in it.
+   */
+  async launchInstall(input: {
+    dirName: string;
+    run: string;
+    install: string;
+    runToken: string;
+    signal?: AbortSignal;
+  }): Promise<'started' | 'already' | 'cancelled'> {
+    assertInstallDir(input.dirName);
+    return await this.start(buildRunScript({ preamble: '', command: input.install }), {
+      ...input,
+      envs: {},
+      workdir: this.taskDir(input.dirName),
+      rawLogs: false,
+    });
+  }
+
+  private async start(
+    script: string,
+    input: {
+      dirName: string;
+      run: string;
+      envs: Record<string, string>;
+      runToken: string;
+      workdir: string;
+      rawLogs?: boolean;
+      signal?: AbortSignal;
+    },
+  ): Promise<'started' | 'already' | 'cancelled'> {
     const envs = {
       ...input.envs,
       MAKA_DIR: this.taskDir(input.dirName),
@@ -300,7 +348,7 @@ export class RemoteMachine {
     await this.guardEgress(input.signal);
     for (let attempt = 0; ; attempt++) {
       try {
-        const out = await this.startOnce(options, input.script, input.signal);
+        const out = await this.startOnce(options, script, input.signal);
         if (out.includes('CANCELLED')) return 'cancelled';
         return out.includes('ALREADY') ? 'already' : 'started';
       } catch (error) {

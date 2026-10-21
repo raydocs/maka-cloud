@@ -92,6 +92,21 @@ class EventQueue implements AsyncIterable<RunnerEvent> {
   }
 }
 
+/** What a run starts: host shell before it, then the program, which always runs as the agent account. */
+interface RunProgram {
+  preamble: string;
+  program: string;
+  args: readonly string[];
+  fed?: boolean;
+}
+
+/** The program and arguments of an argv. */
+function splitProgram(argv: string[]): { program: string; args: string[] } {
+  const [program, ...args] = argv;
+  if (program === undefined) throw new Error('a run needs a program');
+  return { program, args };
+}
+
 function manifestShape(): string {
   return [
     'a JSON object with exactly these fields:',
@@ -832,11 +847,11 @@ class Run implements RunHandle {
         ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
         : {}),
     };
-    const launchRun = (script: string, extraEnvs: Record<string, string> = {}) =>
+    const launchRun = (task: RunProgram, extraEnvs: Record<string, string> = {}) =>
       machine.launch({
         dirName: spec.taskId,
         run,
-        script,
+        ...task,
         envs: { ...extraEnvs, ...envs },
         runToken,
         workdir: `${dir}/workspace`,
@@ -875,22 +890,19 @@ class Run implements RunHandle {
             ...(spec.effort ? { effort: spec.effort } : {}),
           })
         : await this.drivePolled(reader, run, () =>
-            launchRun(
-              buildRunScript({
-                preamble: preambleFor(vendor),
-                command: asAgent(
-                  vendor.command({
-                    prompt,
-                    ...(resumeSessionId ? { resumeSessionId } : {}),
-                    ...(mcpUrl ? { mcpUrl } : {}),
-                    ...(model ? { model } : {}),
-                    ...(spec.effort ? { effort: spec.effort } : {}),
-                    ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
-                  }),
-                  channel,
-                ),
-              }),
-            ),
+            launchRun({
+              preamble: preambleFor(vendor),
+              ...splitProgram(
+                vendor.argv({
+                  prompt,
+                  ...(resumeSessionId ? { resumeSessionId } : {}),
+                  ...(mcpUrl ? { mcpUrl } : {}),
+                  ...(model ? { model } : {}),
+                  ...(spec.effort ? { effort: spec.effort } : {}),
+                  ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
+                }),
+              ),
+            }),
           );
     } finally {
       this.stopWatch = undefined;
@@ -1050,7 +1062,7 @@ class Run implements RunHandle {
       effort?: string;
       mirror?: { store: SessionStore; configDir: string };
       launchRun(
-        script: string,
+        task: RunProgram,
         extraEnvs?: Record<string, string>,
       ): Promise<'started' | 'already' | 'cancelled'>;
     },
@@ -1089,10 +1101,12 @@ class Run implements RunHandle {
           watch,
           launch: () =>
             input.launchRun(
-              buildRunScript({
-                preamble: `${preambleFor(vendor)}\n${FEED_FUNCTION}`,
-                command: fedCommand(asAgent([vendor.binary, ...args.map(shq)].join(' '), channel)),
-              }),
+              {
+                preamble: preambleFor(vendor),
+                program: vendor.binary,
+                args,
+                fed: true,
+              },
               env,
             ),
           onOutput: (bytes) => reader.push(bytes),
