@@ -274,6 +274,42 @@ describe('applyEgressGuard', () => {
     });
   });
 
+  it('refuses when there is no flock, because two guards could then interleave', async () => {
+    // A PATH with every tool of /usr/bin and /bin except flock.
+    const bin = join(tmpdir(), `no-flock-${process.pid}-${Date.now()}`);
+    await fs.mkdir(bin, { recursive: true });
+    try {
+      for (const dir of ['/usr/bin', '/bin']) {
+        for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
+          if (name === 'flock') continue;
+          await fs.symlink(join(dir, name), join(bin, name)).catch(() => undefined);
+        }
+      }
+      await make({ execPath: bin });
+      await assert.rejects(run(), (error: unknown) => {
+        assert.ok(error instanceof EgressGuardError);
+        assert.match(error.message, /flock is not installed/u);
+        return true;
+      });
+      assert.deepEqual(v4(), [], 'no rules were changed by a guard that could not lock');
+    } finally {
+      await fs.rm(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when the lock cannot be taken', async () => {
+    const bin = join(tmpdir(), `stuck-flock-${process.pid}-${Date.now()}`);
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(join(bin, 'flock'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    try {
+      await make({ execPath: `${bin}:${process.env.PATH ?? ''}` });
+      await assert.rejects(run(), /cannot take/u);
+      assert.deepEqual(v4(), []);
+    } finally {
+      await fs.rm(bin, { recursive: true, force: true });
+    }
+  });
+
   it('refuses when a rule cannot be added, and says which', async () => {
     await make({ env: { SHIM_FAIL: '169\\.254\\.0\\.0/16' } });
     await assert.rejects(run(), /cannot block 169\.254\.0\.0\/16/u);

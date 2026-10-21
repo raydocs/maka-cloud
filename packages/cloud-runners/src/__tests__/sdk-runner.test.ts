@@ -411,3 +411,14 @@ test('the real SDK loads and exposes query', async () => {
   const sdk = await loadAgentSdk();
   assert.equal(typeof sdk.query, 'function');
 });
+
+test('waitinit reports the session, waits for the go file, then finishes', async (t) => {
+  const h = await sdkSetup(t);
+  await h.setMode('waitinit');
+  const handle = await h.runners.claude.start(await h.spec('tsk_sdk_waitinit'));
+  const done = collect(handle);
+  await until(() => exists(fakeFile(h, 'waiting')));
+  assert.equal(await settles(done, 300), 'stuck', 'it finished before it was released');
+  await fs.writeFile(fakeFile(h, 'go'), '');
+  assert.equal(terminal(await done)?.type, 'finished');
+});
