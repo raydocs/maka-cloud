@@ -25,7 +25,13 @@ import { type DeliveryOptions, type DeliveryStats, MessageDeliveries } from './d
 import { type DutyService, DutyRoutes } from './duties.js';
 import { ExtensionFeed, type ExtensionEvent } from './extension-feed.js';
 import { type FeedEntry, FeedHub, readFeed } from './feed.js';
-import { type AnswerOutcome, DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from './http.js';
+import {
+  type AnswerOutcome,
+  DEFAULT_HTTP_LIMITS,
+  type HttpLimits,
+  PublicApi,
+  type TimelineLimits,
+} from './http.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { InviteStore } from './invites.js';
 import { type PushConfig, type PushOptions, PushService } from './push.js';
@@ -204,6 +210,8 @@ export interface CloudServerOptions {
    * false: a timeline is metadata.
    */
   timelineContent?: boolean;
+  /** Bounds on one timeline response (log entries folded, bytes answered). Tests lower them. */
+  timelineLimits?: Partial<TimelineLimits>;
   /** Computer routes are absent without a trusted desktop/terminal adapter. */
   computer?: ComputerSource;
   /** The preview proxy for pages a task opened. Tests give it a fetcher that touches no network. */
@@ -567,6 +575,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       previewLimiter: new RateLimiter(limits.previewsPerMinute),
       limits,
       ...(options.timelineContent === true ? { timelineContent: true } : {}),
+      ...(options.timelineLimits ? { timelineLimits: options.timelineLimits } : {}),
       onMessage: deliverMessage,
       ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
       ...(options.duties

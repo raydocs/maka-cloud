@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { reduce } from '../reducer.js';
-import { buildTimeline } from '../timeline.js';
+import {
+  buildTimeline,
+  MAX_COST_POINTS,
+  MAX_TURNS,
+  STEPS_PAGE_DEFAULT,
+  STEPS_PAGE_MAX,
+} from '../timeline.js';
 import type { StoredEvent, TaskEvent } from '../types.js';
 
 const T = 'tsk_t';
@@ -225,4 +231,91 @@ test('an attempt the log should not hold (a skipped epoch) is not a turn, and ev
     buildTimeline(odd)?.turns.map((turn) => turn.epoch),
     [1, 2],
   );
+});
+
+/** A task whose log holds `reports` usage reports and `steps` steps, as a long run leaves it. */
+function longLog(reports: number, steps: number): StoredEvent[] {
+  let at = 0;
+  const out: StoredEvent[] = [];
+  const add = (event: TaskEvent): void => {
+    out.push({ seq: out.length + 1, at: (at += 10), event } as StoredEvent);
+  };
+  add({ type: 'task_created', taskId: T, sessionId: 's', runner: 'fake', mode: 'async' });
+  add({ type: 'task_started', taskId: T });
+  for (let i = 0; i < steps; i += 1) {
+    add({
+      type: 'step_intent',
+      taskId: T,
+      epoch: 1,
+      stepId: `s${i}`,
+      kind: 'tool:Read',
+      replay: 'safe',
+      label: `Read: ${i}`,
+    });
+    add({ type: 'step_outcome', taskId: T, epoch: 1, stepId: `s${i}`, status: 'done' });
+  }
+  for (let i = 1; i <= reports; i += 1) {
+    add({ type: 'task_cost', taskId: T, fromTaskId: T, epoch: 1, costUsd: i / 1000 });
+  }
+  return out;
+}
+
+test('a long log gives a bounded cost series that keeps the first and last point and the count', () => {
+  const timeline = buildTimeline(longLog(5000, 0));
+  assert.ok(timeline);
+  assert.ok(timeline.cost.length <= 2 * MAX_COST_POINTS + 1, `${timeline.cost.length} points`);
+  assert.equal(timeline.costReports, 5000);
+  assert.equal(timeline.cost.at(0)?.totalUsd, 0.001);
+  assert.equal(timeline.cost.at(-1)?.totalUsd, 5);
+  // Still a series in time and in total.
+  for (const [i, point] of timeline.cost.entries()) {
+    const before: { at: number; totalUsd: number } | undefined = timeline.cost[i - 1];
+    if (before) assert.ok(point.at > before.at && point.totalUsd >= before.totalUsd);
+  }
+});
+
+test('steps come in pages that follow each other, with the total and where the next page starts', () => {
+  const events = longLog(0, 250);
+  const first = buildTimeline(events);
+  assert.ok(first);
+  assert.equal(first.stepsTotal, 250);
+  assert.equal(first.steps.length, STEPS_PAGE_DEFAULT);
+  assert.equal(first.stepsNext, STEPS_PAGE_DEFAULT);
+  const seen: string[] = [];
+  let after: number | undefined = 0;
+  while (after !== undefined) {
+    const page = buildTimeline(events, { after, limit: 60 });
+    assert.ok(page);
+    seen.push(...page.steps.map((step) => step.stepId));
+    after = page.stepsNext;
+  }
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 250 }, (_, i) => `s${i}`),
+  );
+  // A request cannot ask for more than the cap, or for nothing past the end.
+  assert.equal(
+    buildTimeline(longLog(0, STEPS_PAGE_MAX + 100), { limit: 100_000 })?.steps.length,
+    STEPS_PAGE_MAX,
+  );
+  const past = buildTimeline(events, { after: 9999 });
+  assert.deepEqual(past?.steps, []);
+  assert.equal(past?.stepsNext, undefined);
+});
+
+test('a task with many turns lists the latest ones and counts them all', () => {
+  const events = longLog(0, 0);
+  for (let epoch = 2; epoch <= 150; epoch += 1) {
+    events.push({
+      seq: events.length + 1,
+      at: epoch * 100,
+      event: { type: 'task_attempt', taskId: T, epoch, cause: 'restart' },
+    } as StoredEvent);
+  }
+  const timeline = buildTimeline(events);
+  assert.ok(timeline);
+  assert.equal(timeline.turnsTotal, 150);
+  assert.equal(timeline.turns.length, MAX_TURNS);
+  assert.equal(timeline.turns.at(-1)?.epoch, 150);
+  assert.equal(timeline.turns.at(0)?.epoch, 51);
 });

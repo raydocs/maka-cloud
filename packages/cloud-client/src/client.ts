@@ -288,8 +288,12 @@ export class CloudClient {
     return { kind: 'text', name, text: await response.text() };
   }
   /** The run of a task from its log: turns, steps, cost over time. */
-  timeline(task: string) {
-    return this.request<{ timeline: RunTimeline }>(routes.timeline(task));
+  timeline(task: string, page: { after?: number; limit?: number } = {}) {
+    const query = new URLSearchParams();
+    if (page.after !== undefined) query.set('after', String(page.after));
+    if (page.limit !== undefined) query.set('limit', String(page.limit));
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return this.request<{ timeline: RunTimeline }>(`${routes.timeline(task)}${suffix}`);
   }
   /**
    * Tells the agent working on a task something. It reads it after the step it is in. The same

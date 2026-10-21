@@ -18,6 +18,7 @@ const TERMINAL: Partial<Record<TaskEvent['type'], string>> = {
 };
 
 const ID_PAGE = 1000;
+const LOG_PAGE = 500;
 
 /**
  * Events that belong to the driver and the orchestrator, not to the people watching: a client's feed
@@ -120,6 +121,22 @@ export class SqliteTaskStore implements TaskStore {
       .prepare('SELECT seq, at, event FROM task_log WHERE task_id = ? ORDER BY seq')
       .all(taskId) as unknown as LogRow[];
     return rows.map(toStored);
+  }
+
+  /** One task's log, `LOG_PAGE` rows at a time, so a long log is never read whole. */
+  *iterateTask(taskId: TaskId): Iterable<StoredEvent> {
+    let after = 0;
+    for (;;) {
+      const rows = this.db
+        .prepare(
+          'SELECT seq, at, event FROM task_log WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?',
+        )
+        .all(taskId, after, LOG_PAGE) as unknown as LogRow[];
+      for (const row of rows) yield toStored(row);
+      const last = rows.at(-1);
+      if (!last || rows.length < LOG_PAGE) return;
+      after = last.seq;
+    }
   }
 
   childrenOf(taskId: TaskId): TaskId[] {

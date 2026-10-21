@@ -130,3 +130,68 @@ test('a finished task keeps its timeline, with its end and its cost', async (t) 
   assert.equal(timeline.turns[0]?.endedAt, timeline.finishedAt);
   assert.equal(timeline.cost.at(-1)?.totalUsd, 0.5);
 });
+
+type Page = {
+  timeline: {
+    steps: Array<{ stepId: string }>;
+    stepsTotal: number;
+    stepsNext?: number;
+    truncated?: boolean;
+  };
+};
+
+async function addSteps(steps: StepLog, count: number): Promise<void> {
+  for (let i = 0; i < count; i += 1) {
+    const stepId = `toolu_${i}`;
+    await steps.intent({ stepId, kind: 'tool:Read', replay: 'safe', label: `Read: ${i}` });
+    await steps.outcome(stepId, { status: 'done' });
+  }
+}
+
+test('the timeline answers a page of steps, with the total and where the next page starts', async (t) => {
+  const { h, taskId, steps } = await setup(t);
+  await addSteps(steps, 25);
+  const ids: string[] = [];
+  let after = 0;
+  for (;;) {
+    const res = await h.api(`/v1/tasks/${taskId}/timeline?after=${after}&limit=10`);
+    assert.equal(res.status, 200);
+    const { timeline } = (await res.json()) as Page;
+    assert.equal(timeline.stepsTotal, 25);
+    ids.push(...timeline.steps.map((step) => step.stepId));
+    if (timeline.stepsNext === undefined) break;
+    after = timeline.stepsNext;
+  }
+  assert.deepEqual(
+    ids,
+    Array.from({ length: 25 }, (_, i) => `toolu_${i}`),
+  );
+  // A limit over the cap is clamped, not honoured; a malformed one is refused.
+  const clamped = (await (await h.api(`/v1/tasks/${taskId}/timeline?limit=999999`)).json()) as Page;
+  assert.equal(clamped.timeline.steps.length, 25);
+  assert.equal((await h.api(`/v1/tasks/${taskId}/timeline?limit=-1`)).status, 400);
+  assert.equal((await h.api(`/v1/tasks/${taskId}/timeline?after=x`)).status, 400);
+});
+
+test('an answer past the byte limit has fewer steps and says it was cut short', async (t) => {
+  const { h, taskId, steps } = await setup(t, { timelineLimits: { maxBytes: 4_000 } });
+  await addSteps(steps, 40);
+  const res = await timelineOf(h, taskId);
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.ok(text.length <= 4_000, `${text.length} bytes`);
+  const { timeline } = JSON.parse(text) as Page;
+  assert.equal(timeline.truncated, true);
+  assert.ok(timeline.steps.length > 0 && timeline.steps.length < 40);
+  assert.equal(timeline.stepsTotal, 40);
+  // The cut page still says where to go on.
+  assert.equal(timeline.stepsNext, timeline.steps.length);
+});
+
+test('a log longer than the server folds for one request is refused, not answered in part', async (t) => {
+  const { h, taskId, steps } = await setup(t, { timelineLimits: { maxEvents: 20 } });
+  await addSteps(steps, 30);
+  const res = await timelineOf(h, taskId);
+  assert.equal(res.status, 413);
+  assert.equal(((await res.json()) as { error: string }).error, 'task_log_too_large');
+});

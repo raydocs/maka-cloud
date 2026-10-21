@@ -5,7 +5,7 @@ import { AGENT_CHECK_SCRIPT, agentProblems, asRepoUser } from './agent.js';
 import { SCRUB_SCRIPT } from './scrub.js';
 
 /** Bump when the way a snapshot is built changes, so old snapshots are no longer reused. */
-const RECIPE_VERSION = 1;
+const RECIPE_VERSION = 2;
 
 /** Where the checkout of a repository lives in a box that was made from its setup snapshot. */
 export const REPOS_ROOT = '/data/maka/repos';

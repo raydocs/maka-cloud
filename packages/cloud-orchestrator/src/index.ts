@@ -88,7 +88,13 @@ export {
 export * from './types.js';
 export {
   buildTimeline,
+  MAX_COST_POINTS,
+  MAX_TURNS,
+  STEPS_PAGE_DEFAULT,
+  STEPS_PAGE_MAX,
   type RunTimeline,
+  TimelineBuilder,
+  type TimelineOptions,
   type TimelineCost,
   type TimelineStep,
   type TimelineTurn,
