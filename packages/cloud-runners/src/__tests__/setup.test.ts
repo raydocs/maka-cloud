@@ -94,6 +94,35 @@ test('an install that prints a token fails the task without it', async (t) => {
   assert.ok(!reason.includes('abcdef0123456789'), reason);
 });
 
+test('an install that prints a long private key fails the task without any of its body, however much follows it', async (t) => {
+  // The key starts more than 4000 characters from the end, so a cut of the output made before it is
+  // scrubbed leaves a body that no longer shows what it is.
+  const body = Array.from(
+    { length: 50 },
+    (_, i) => `MIIEvQIBADANBgkqhkiG9w0BAQEFAAS${String(i).padStart(2, '0')}${'x'.repeat(33)}`,
+  );
+  const script = [
+    'echo "npm ERR! while reading the deploy key"',
+    'echo "-----BEGIN PRIVATE KEY-----"',
+    ...body.map((line) => `echo "${line}"`),
+    'echo "-----END PRIVATE KEY-----"',
+    'for i in $(seq 1 10); do echo "npm ERR! retrying with the registry mirror number $i, still nothing"; done',
+    'exit 5',
+  ].join('\n');
+  const h = await setup({
+    installClis: false,
+    cloud: { installCommands: { 'claude-agent-sdk': script } },
+  });
+  t.after(() => h.cleanup());
+  const failed = terminal(
+    await collect(await h.runners.claude.start(await h.spec('tsk_inst_pem'))),
+  );
+  assert.equal(failed?.type, 'failed');
+  const reason = failed?.type === 'failed' ? failed.reason : '';
+  assert.match(reason, /retrying with the registry mirror/);
+  assert.ok(!reason.includes('MIIEvQIBADANBgkqhkiG9w0BAQEFAAS'), reason);
+});
+
 test('a different pinned version is installed over an older one', async (t) => {
   const h = await setup({
     cloud: {
