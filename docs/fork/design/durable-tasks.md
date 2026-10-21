@@ -12,7 +12,7 @@ Status of the pieces (updated by each PR):
 | 4 | Transcript mirror and fresh-box resume | merged (#200), section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
 | 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
 | 6 | Steering, `restart` event, catch-up, stream fence | merged (#208, #209), section 6 |
-| 7 | Run timeline | in review, section 7 |
+| 7 | Run timeline | merged (#222), section 7 |
 | 8 | Drills, known gaps, bench | in review, section 8 |
 
 ## 1. Step log and epoch fencing
@@ -310,7 +310,7 @@ One view of what a task did, drawn from the step log and nothing else.
 
 ### Not built
 
-- **Tokens** (cached input too). The log holds dollars only; the gateway's journal does too. Tokens would need the runner to report them with its usage; they are listed as a known gap for piece 8.
+- **Tokens** (cached input too). The log holds dollars only; the gateway's journal does too. Tokens would need the runner to report them with its usage; they are listed as a known gap in section 8.
 - **A web or phone view.** The data and the client call exist; drawing them is the apps' lane.
 
 ## 8. Drills, known gaps and the bench
@@ -339,6 +339,7 @@ Each is a test in `known-gaps.test.ts` that states what should hold and is expec
 | A child that left the run's process group (its own `setsid`) outlives the stop of its task, and its late write lands in the workspace. The step log fences the log, not the files; workspace files are not transactional. | T27 (stopping or replacing the whole box) |
 | A turn that makes no tool call never reads a message sent to it. The owner is told it was not seen (`task_steer_unseen`). | T28, agent side |
 | The Codex runner takes no messages for a running task. | T27 |
+| A runner's usage report carries dollars only: no input, output or cached tokens, so neither the log nor the timeline can show them. | T28 follow-up |
 
 ### The bench
 
