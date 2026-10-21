@@ -103,3 +103,36 @@ test('scrubValues replaces a value of any length, in the forms a vendor echoes i
   assert.equal(scrubValues('abc', []), 'abc');
   assert.equal(scrubValues('abc', ['']), 'abc');
 });
+
+test('credential pairs are scrubbed when the JSON was serialised again inside a string, once or twice', () => {
+  const basic = 'dXNlcjpwYXNzd29yZDEyMw==';
+  const pairs = [
+    { scheme: 'Basic', value: basic },
+    { value: basic, type: 'Bearer' },
+    { name: 'Authorization', value: basic },
+  ];
+  for (const pair of pairs) {
+    const once = JSON.stringify(pair);
+    for (const text of [once, JSON.stringify(once), JSON.stringify(JSON.stringify(once))]) {
+      const out = scrubSecretShapes(`request failed: ${text}`);
+      assert.ok(!out.includes(basic), `${text} -> ${out}`);
+    }
+  }
+  const header = JSON.stringify(JSON.stringify(['Authorization', basic]));
+  assert.ok(!scrubSecretShapes(header).includes(basic), scrubSecretShapes(header));
+  // What is around them stays.
+  assert.match(
+    scrubSecretShapes(JSON.stringify(JSON.stringify({ scheme: 'Basic', value: basic, ok: 1 }))),
+    /"ok\\":1|ok\\":1/u,
+  );
+});
+
+test('an object keeps the link between a scheme or header name and its value', () => {
+  const basic = 'dXNlcjpwYXNzd29yZDEyMw==';
+  const out = scrubSecretFields({
+    a: { scheme: 'Basic', value: basic },
+    b: [{ name: 'X-Api-Key', value: basic }, ['Cookie', basic], { name: 'Accept', value: 'x' }],
+  });
+  assert.ok(!JSON.stringify(out).includes(basic), JSON.stringify(out));
+  assert.match(JSON.stringify(out), /"value":"x"/u);
+});
