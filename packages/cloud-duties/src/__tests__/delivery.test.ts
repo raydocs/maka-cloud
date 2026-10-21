@@ -91,6 +91,44 @@ test('a CI failure that arrives after a later success of the same workflow is st
   r.cleanup();
 });
 
+test('a re-run that passed makes the failed attempt before it stale, and a later failing attempt is not', async () => {
+  const r = await rig();
+  const [duty] = await r.activate(CI_DEFAULT);
+  // Run 50 passed on its second attempt; the failure of its first attempt arrives late.
+  r.deliver('workflow_run', workflowRun({ id: 50, number: 50, attempt: 2, conclusion: 'success' }));
+  const late = r.deliver(
+    'workflow_run',
+    workflowRun({ id: 50, number: 50, attempt: 1, conclusion: 'failure' }),
+  );
+  assert.equal(late.body.ignored, 'stale');
+  assert.equal(r.engine.requestsOf(duty as string).length, 0);
+  assert.deepEqual(r.engine.dayUsage(duty as string), { reservedUsd: 0, spentUsd: 0 });
+  // A third attempt that fails is newer than the pass: it is not stale.
+  assert.equal(
+    r.deliver(
+      'workflow_run',
+      workflowRun({ id: 50, number: 50, attempt: 3, conclusion: 'failure' }),
+    ).body.started,
+    1,
+  );
+  // And the other way round: a pass of the second attempt cancels the first attempt's waiting run.
+  const r2 = await rig();
+  const [duty2] = await r2.activate(CI_DEFAULT);
+  r2.deliver(
+    'workflow_run',
+    workflowRun({ id: 60, number: 60, attempt: 1, conclusion: 'failure' }),
+  );
+  assert.equal(r2.engine.dayUsage(duty2 as string).reservedUsd, 2);
+  const passed = r2.deliver(
+    'workflow_run',
+    workflowRun({ id: 60, number: 60, attempt: 2, conclusion: 'success' }),
+  );
+  assert.equal(passed.body.cancelled, 1);
+  assert.deepEqual(r2.engine.dayUsage(duty2 as string), { reservedUsd: 0, spentUsd: 0 });
+  r.cleanup();
+  r2.cleanup();
+});
+
 test("a success that arrives after a failure cancels the failure's run if it has not started, and releases its reservation", async () => {
   const r = await rig();
   const [duty] = await r.activate(CI_DEFAULT);
