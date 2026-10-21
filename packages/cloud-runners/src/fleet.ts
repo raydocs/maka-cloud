@@ -9,7 +9,8 @@ import {
   RemoteMachine,
   type StageLimits,
 } from './machine.js';
-import { MachinePoller } from './poller.js';
+import { MachinePoller, type PollBackoff } from './poller.js';
+import type { AgentSdk } from './sdk-turn.js';
 import { DEFAULT_TENANT, noModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
 import { MemorySessionStore, referencedSnapshotIds } from './session-store.js';
@@ -79,6 +80,18 @@ export interface CloudRunnersOptions {
    */
   prices?: Partial<Record<RunnerName, TokenPrices>>;
   pollIntervalMs?: number;
+  /**
+   * The Claude Agent SDK. With it the Claude runner drives its CLI through the SDK (hooks write the
+   * task's step log, and the SDK owns the conversation); without it, it runs the CLI directly.
+   * `loadAgentSdk()` loads the installed one.
+   */
+  agentSdk?: AgentSdk;
+  /**
+   * How often a run driven by the SDK is polled: every hook the CLI waits for costs a poll, so
+   * these runs are polled much faster than `pollIntervalMs` while output is coming, and back off
+   * (doubling) towards `maxMs` while it is quiet. Default 150 ms and 1 s.
+   */
+  agentSdkPollMs?: PollBackoff;
   /** Consecutive failed polls before a run fails with "sandbox unreachable". */
   pollMaxFailures?: number;
   leaseTtlSeconds?: number;

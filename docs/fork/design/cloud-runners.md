@@ -229,6 +229,14 @@ ended as orphaned. `sweepOrphans(knownTaskIds)` (called by the server
 after `restore()`) stops live runs whose task the log does not know, and returns
 `{ stopped, failed: [{ machineId, taskId?, error }] }`; an unreachable sandbox is reported, not thrown.
 
+## Agent SDK mode (T28)
+
+With the `agentSdk` option the Claude runner drives its CLI through the Claude Agent SDK instead of
+`claude -p`: hooks write the task's step log, and the conversation goes through the process channel
+(`process-channel.ts`: a detached run whose stdin is a file the host appends to, with its output
+polled as before). Everything else of a run (access, lease, stop, cleanup, snapshot, result) is the
+same code. See `durable-tasks.md`, section 3.
+
 ## Backlog (known, not fixed)
 
 - **Activity-lease renewal race.** The renewal is a fire-and-forget PUT. A renewal that hangs makes

@@ -19,6 +19,7 @@
     "test:dist": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.306",
     "@maka-cloud/instabox": "0.1.0",
     "@maka-cloud/orchestrator": "0.1.0"
   }

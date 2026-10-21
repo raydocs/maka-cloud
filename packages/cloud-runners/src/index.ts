@@ -28,7 +28,10 @@ export {
   noModelAccess,
   TenantMachineProvider,
 } from './providers.js';
+export { type PollBackoff } from './poller.js';
+export { ExecProcess, type ExecProcessOptions } from './process-channel.js';
 export { type ResumeInput, SandboxCliRunner } from './runner.js';
+export { type AgentSdk, loadAgentSdk } from './sdk-turn.js';
 export {
   JsonFileSessionStore,
   MemorySessionStore,

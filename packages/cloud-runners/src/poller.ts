@@ -18,10 +18,21 @@ export interface Watch {
   stop(): void;
 }
 
+/** A run that someone answers while it waits polls often when it is busy and less often when it is quiet. */
+export interface PollBackoff {
+  /** Milliseconds between polls while output is coming. */
+  minMs: number;
+  /** The most the wait grows to while a poll finds nothing new: it doubles after each empty one. */
+  maxMs: number;
+}
+
 interface WatchInternal {
   dir: string;
   run: string;
   offset: number;
+  backoff: PollBackoff | undefined;
+  /** The wait this watch asks for before the next poll. */
+  interval: number;
   waiter: { resolve(update: PollUpdate): void; reject(error: Error): void } | undefined;
   pending: PollUpdate | Error | undefined;
   stopped: boolean;
@@ -63,7 +74,15 @@ export class MachinePoller {
     this.maxFailures = options.maxFailures ?? 5;
   }
 
-  watch(machine: RemoteMachine, target: { dir: string; run: string; offset?: number }): Watch {
+  /**
+   * Watches a run's output. With `backoff` the run is polled faster than the machine's usual
+   * interval while it is busy (the poll loop of the machine runs at the shortest wait any of its
+   * watches asks for; every watch is served by each poll).
+   */
+  watch(
+    machine: RemoteMachine,
+    target: { dir: string; run: string; offset?: number; backoff?: PollBackoff },
+  ): Watch {
     let entry = this.machines.get(machine.machineId);
     if (!entry) {
       entry = { machine, watches: new Set(), running: false };
@@ -73,6 +92,8 @@ export class MachinePoller {
       dir: target.dir,
       run: target.run,
       offset: target.offset ?? 0,
+      backoff: target.backoff,
+      interval: target.backoff?.minMs ?? this.options.intervalMs,
       waiter: undefined,
       pending: undefined,
       stopped: false,
@@ -123,12 +144,18 @@ export class MachinePoller {
             }
           }
         }
-        await this.sleep(this.options.intervalMs);
+        await this.sleep(this.waitFor(entry.watches));
       }
     } finally {
       entry.running = false;
       if (entry.watches.size === 0) this.machines.delete(machineId);
     }
+  }
+
+  private waitFor(watches: Iterable<WatchInternal>): number {
+    let wait = this.options.intervalMs;
+    for (const w of watches) if (w.backoff && w.interval < wait) wait = w.interval;
+    return wait;
   }
 
   private async tick(machine: RemoteMachine, active: WatchInternal[]): Promise<void> {
@@ -150,6 +177,12 @@ export class MachinePoller {
       const bytes = Buffer.from(data, 'base64');
       // The read position moves when the bytes are handed over, so the next tick never repeats them.
       watch.offset += bytes.length;
+      if (watch.backoff) {
+        watch.interval =
+          bytes.length > 0
+            ? watch.backoff.minMs
+            : Math.min(watch.backoff.maxMs, watch.interval * 2);
+      }
       this.deliver(watch, { state: parseState(state), size: Number(size), data: bytes });
     }
   }
