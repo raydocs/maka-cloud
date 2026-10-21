@@ -15,6 +15,7 @@ import {
   type MemoryProfile,
   type Mode,
   type ProjectView,
+  type SuggestionsView,
   type RunTimeline,
   type SourceListing,
   type SourcePreview,
@@ -250,6 +251,23 @@ export class CloudClient {
       `${routes.projects}/${encodeURIComponent(projectId)}/duties/${encodeURIComponent(dutyId)}`,
       { method: 'PATCH', body: JSON.stringify({ state }) },
       'projects',
+    );
+  }
+  /** The project's suggestion switches; `Unsupported` where cards are off or the project is not the invite's. */
+  async listSuggestions(projectId: string): Promise<SuggestionsView> {
+    const result = await this.request<{ suggestions: SuggestionsView }>(
+      `${routes.projects}/${encodeURIComponent(projectId)}/suggestions`,
+      {},
+      'suggestions',
+    );
+    return { kinds: Array.isArray(result.suggestions?.kinds) ? result.suggestions.kinds : [] };
+  }
+  /** Turns one kind of suggestion on or off for a project. */
+  setSuggestionKind(projectId: string, kind: string, enabled: boolean) {
+    return this.request<{ kind: string; enabled: boolean }>(
+      `${routes.projects}/${encodeURIComponent(projectId)}/suggestions`,
+      { method: 'PATCH', body: JSON.stringify({ kind, enabled }) },
+      'suggestions',
     );
   }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */

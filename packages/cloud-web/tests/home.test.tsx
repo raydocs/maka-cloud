@@ -387,3 +387,96 @@ test('starting something sends no mode unless one is picked, and a pick is sent 
   await waitFor(() => expect(picked.posted).toHaveLength(1));
   expect(picked.posted[0]).toMatchObject({ text: 'Fix the login loop', mode: 'deep' });
 });
+
+const suggestion = (over: Partial<InboxItem> = {}): InboxItem =>
+  item({
+    itemId: 'itm_s1',
+    kind: 'suggestion',
+    taskId: null,
+    ask: 'Fix the failing test on main',
+    options: [
+      { id: 'do', label: 'Do it', recommended: true },
+      { id: 'later', label: 'Not now', recommended: false },
+    ],
+    preconditionHash: 'hs1',
+    suggestion: {
+      kind: 'fix_main_ci',
+      mode: 'standard',
+      estimateUsd: 3,
+      typical: true,
+      repo: 'acme/widgets',
+      detail: 'CI has failed on main since this morning.',
+      external: false,
+    },
+    ...over,
+  });
+
+test('a suggestion is a card of its own with its cost in words, and does not count as waiting on you', async () => {
+  const { answers } = renderHome({
+    inbox: [suggestion()],
+    answer: () =>
+      Response.json({ duplicate: false, item: suggestion({ state: 'closed', version: 2 }) }),
+  });
+  const region = await screen.findByRole('region', { name: 'Suggestions' });
+  expect(within(region).getByText('Noticed for you (1)')).toBeTruthy();
+  expect(within(region).getByRole('heading', { level: 3 }).textContent).toBe(
+    'Fix the failing test on main',
+  );
+  expect(within(region).getByText('Standard · about $3.00 (typical) · acme/widgets')).toBeTruthy();
+  expect(within(region).getByText('CI has failed on main since this morning.')).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Decisions waiting' })).toBeNull();
+  expect(screen.queryByText(/Part of this was written by someone else/u)).toBeNull();
+  const buttons = within(region).getAllByRole('button');
+  expect(buttons.map((b) => b.textContent)).toEqual(['Do it', 'Not now']);
+  fireEvent.click(buttons[0] as HTMLElement);
+  fireEvent.click(buttons[0] as HTMLElement);
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Suggestions' })).toBeNull());
+  expect(answers).toHaveLength(1);
+  expect(answers[0]).toMatchObject({ optionId: 'do', preconditionHash: 'hs1' });
+});
+
+test('a suggestion that moved is replaced by the new one and nothing is started', async () => {
+  const fresh = suggestion({
+    ask: 'Fix the 2 failing tests on main',
+    preconditionHash: 'hs2',
+    version: 2,
+  });
+  const { answers } = renderHome({
+    inbox: [suggestion()],
+    answer: () => Response.json({ error: 'stale', item: fresh }, { status: 409 }),
+  });
+  const region = await screen.findByRole('region', { name: 'Suggestions' });
+  fireEvent.click(within(region).getByRole('button', { name: 'Do it' }));
+  await screen.findByText('Fix the 2 failing tests on main');
+  expect(screen.getByRole('alert').textContent).toContain('changed while you were looking');
+  expect(answers).toHaveLength(1);
+  answers.length = 0;
+  fireEvent.click(screen.getByRole('button', { name: 'Do it' }));
+  await waitFor(() => expect(answers).toHaveLength(1));
+  expect(answers[0]?.preconditionHash).toBe('hs2');
+});
+
+test('a suggestion with text from outside says so, and the offer to turn a kind off is a plain card', async () => {
+  renderHome({
+    inbox: [
+      suggestion({
+        suggestion: { ...(suggestion().suggestion as object), external: true } as never,
+      }),
+      suggestion({
+        itemId: 'itm_o1',
+        ask: '3 suggestions in a row to update vulnerable dependencies on acme/widgets went unanswered. Stop suggesting them?',
+        suggestion: undefined,
+        options: [
+          { id: 'turn-off', label: 'Turn off', recommended: true },
+          { id: 'keep', label: 'Keep', recommended: false },
+        ],
+        updatedAt: 0,
+      }),
+    ],
+  });
+  const region = await screen.findByRole('region', { name: 'Suggestions' });
+  expect(within(region).getByText(/Part of this was written by someone else/u)).toBeTruthy();
+  expect(within(region).getByRole('button', { name: 'Turn off' })).toBeTruthy();
+  expect(within(region).getByRole('button', { name: 'Keep' })).toBeTruthy();
+  expect(within(region).getByText('Noticed for you (2)')).toBeTruthy();
+});

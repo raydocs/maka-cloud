@@ -12,12 +12,14 @@ import {
   nextRuns,
   recentConversations,
   relativeTime,
+  splitSuggestions,
   type TaskView,
   verbOf,
   type VisitStore,
 } from '@maka-cloud/client';
 import { InboxCard } from './Inbox';
 import { ModePicker } from './ModePicker';
+import { SuggestionCard } from './Suggestion';
 
 /** What the browser remembers about when this invite last looked at Home. Never the token. */
 function visitKey(fingerprint: string) {
@@ -107,9 +109,11 @@ export function Home({
     feed.conversationsChanged(conversations);
   }, [feed, conversations]);
 
-  const open = Object.values(items)
+  const live = Object.values(items)
     .filter((item) => item.state !== 'closed')
     .sort((a, b) => b.updatedAt - a.updatedAt);
+  // What the employee only suggests is not something that "needs you".
+  const { waiting: open, suggested } = splitSuggestions(live);
   const finished = since === undefined || done === undefined ? [] : doneSince(done, since);
   const spent = finished.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
   const anySpend = finished.some((entry) => entry.costUsd !== undefined);
@@ -144,6 +148,27 @@ export function Home({
             </div>
           ))}
           {answerError && (
+            <p role="alert" className="error">
+              {answerError}
+            </p>
+          )}
+        </section>
+      )}
+
+      {suggested.length > 0 && (
+        <section className="card section-card" aria-label="Suggestions">
+          <h2>Noticed for you ({suggested.length})</h2>
+          <p className="muted">Nothing starts until you tap Do it.</p>
+          {suggested.map((item) => (
+            <div key={item.itemId} className="decision">
+              <SuggestionCard
+                item={item}
+                disabled={busy}
+                onAnswer={(optionId) => void feed.answer(item, optionId)}
+              />
+            </div>
+          ))}
+          {open.length === 0 && answerError && (
             <p role="alert" className="error">
               {answerError}
             </p>
