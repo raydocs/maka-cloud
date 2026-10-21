@@ -167,6 +167,7 @@ test('a batch that fails halfway keeps none of it', () => {
   db.exec('DROP TABLE opened_pages');
   assert.throws(() => log.record('tsk_1', [{ url: 'https://a.example/' }]));
   // The transaction was rolled back, so the connection is usable again.
+  // The step that makes the table, not whichever step is last: later steps add other things.
   db.exec(MIGRATIONS.find((step) => step.includes('CREATE TABLE opened_pages')) ?? '');
   assert.equal(log.record('tsk_1', [{ url: 'https://a.example/' }]), 1);
 });

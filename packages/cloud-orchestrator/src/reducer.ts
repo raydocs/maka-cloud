@@ -30,6 +30,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       progress: [],
       epoch: 1,
       steps: new Map(),
+      steers: new Map(),
     });
     return;
   }
@@ -112,7 +113,12 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       return;
     case 'task_attempt':
       // The store lets only the next epoch in; a log that somehow holds another is not followed.
-      if (event.epoch === task.epoch + 1) task.epoch = event.epoch;
+      if (event.epoch === task.epoch + 1) {
+        task.epoch = event.epoch;
+        // What the agent was told in the attempt before is in its conversation; what it is told
+        // now waits until the resumed turn has done one thing, so it is not read among the replay.
+        task.steersHeld = true;
+      }
       return;
     case 'step_intent': {
       if (event.epoch !== task.epoch) return;
@@ -135,6 +141,29 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       // An outcome applies only to a step still running, from the epoch that started it.
       if (step?.state !== 'running' || step.epoch !== event.epoch) return;
       step.state = event.status;
+      delete task.steersHeld;
+      return;
+    }
+    case 'task_steer':
+      if (!task.steers.has(event.steerId)) {
+        task.steers.set(event.steerId, {
+          steerId: event.steerId,
+          text: event.text,
+          state: 'pending',
+        });
+      }
+      return;
+    case 'task_steer_delivered':
+    case 'task_steer_withdrawn':
+    case 'task_steer_unseen': {
+      const steer = task.steers.get(event.steerId);
+      if (steer?.state !== 'pending') return;
+      steer.state =
+        event.type === 'task_steer_delivered'
+          ? 'delivered'
+          : event.type === 'task_steer_withdrawn'
+            ? 'withdrawn'
+            : 'unseen';
       return;
     }
     case 'step_interrupted': {

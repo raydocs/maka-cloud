@@ -1,5 +1,5 @@
 import type { CloudClient } from './client';
-import type { Conversation } from './contract';
+import type { Conversation, Mode } from './contract';
 import { randomId } from './ids';
 
 /**
@@ -14,13 +14,13 @@ export class ConversationStarter {
     private readonly now: () => number = Date.now,
   ) {}
 
-  async start(text: string): Promise<Conversation> {
+  async start(text: string, mode?: Mode): Promise<Conversation> {
     this.attempt ??= {
       conversationId: (await this.client.createConversation()).conversationId,
       clientMessageId: randomId(),
     };
     const { conversationId, clientMessageId } = this.attempt;
-    await this.client.postMessage(conversationId, text.trim(), clientMessageId);
+    await this.client.postMessage(conversationId, text.trim(), clientMessageId, mode);
     this.attempt = null;
     return { conversationId, title: null, createdAt: this.now() };
   }

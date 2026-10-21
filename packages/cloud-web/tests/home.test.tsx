@@ -88,6 +88,7 @@ interface Server {
 function serve(config: Server) {
   const calls: string[] = [];
   const answers: { answerId: string; optionId: string; preconditionHash: string }[] = [];
+  const posted: Record<string, unknown>[] = [];
   const fetcher: typeof fetch = async (input, init) => {
     const path = String(input);
     calls.push(`${init?.method ?? 'GET'} ${path}`);
@@ -104,6 +105,13 @@ function serve(config: Server) {
         Response.json({ duplicate: false, item: item({ state: 'closed', version: 2 }) })
       );
     }
+    if (path === '/v1/conversations' && init?.method === 'POST') {
+      return Response.json({ conversationId: 'cnv_new' });
+    }
+    if (path === '/v1/conversations/cnv_new/messages' && init?.method === 'POST') {
+      posted.push(JSON.parse(String(init.body)));
+      return Response.json({ messageId: 'msg_1' }, { status: 202 });
+    }
     if (path === '/v1/projects') {
       if (config.projects === 404) return Response.json({}, { status: 404 });
       return Response.json({ projects: config.projects ?? [] });
@@ -112,7 +120,7 @@ function serve(config: Server) {
     if (tasks) return Response.json({ tasks: config.tasks?.[tasks[1] ?? ''] ?? [] });
     return Response.json({}, { status: 404 });
   };
-  return { client: new CloudClient('fake', fetcher), calls, answers };
+  return { client: new CloudClient('fake', fetcher), calls, answers, posted };
 }
 
 function renderHome(
@@ -348,4 +356,34 @@ test('a retried answer reuses its id, so the server counts it once; a different 
   await expect(answer(item(), 'wait')).rejects.toThrow();
   await expect(answer(item({ preconditionHash: 'h9' }), 'wait')).rejects.toThrow();
   expect(new Set(seen.slice(3).map((s) => s.answerId)).size).toBe(2);
+});
+
+test('starting something sends no mode unless one is picked, and a pick is sent with the message', async () => {
+  const plain = renderHome({ inbox: [], projects: [] });
+  const picker = await screen.findByRole('group', { name: 'How much care this needs' });
+  const radios = within(picker).getAllByRole('radio') as HTMLInputElement[];
+  expect(radios.map((r) => r.labels?.[0]?.textContent)).toEqual([
+    'Let it decide',
+    'Quick',
+    'Standard',
+    'Deep',
+  ]);
+  expect(radios.map((r) => r.checked)).toEqual([true, false, false, false]);
+  fireEvent.change(screen.getByLabelText('What would you like to get done?'), {
+    target: { value: 'Fix the login loop' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+  await waitFor(() => expect(plain.posted).toHaveLength(1));
+  expect(Object.keys(plain.posted[0] ?? {}).sort()).toEqual(['clientMessageId', 'text']);
+  cleanup();
+
+  const picked = renderHome({ inbox: [], projects: [] });
+  fireEvent.click(await screen.findByLabelText('Deep'));
+  expect((screen.getByLabelText('Deep') as HTMLInputElement).checked).toBe(true);
+  fireEvent.change(screen.getByLabelText('What would you like to get done?'), {
+    target: { value: 'Fix the login loop' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Start' }));
+  await waitFor(() => expect(picked.posted).toHaveLength(1));
+  expect(picked.posted[0]).toMatchObject({ text: 'Fix the login loop', mode: 'deep' });
 });

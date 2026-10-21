@@ -10,6 +10,8 @@ export interface PendingMessage {
   external?: boolean;
   /** The limits of the run this message starts, when a standing duty sent it. */
   run?: NonNullable<MessageMeta['run']>;
+  /** The mode the user picked for it (T25). */
+  mode?: NonNullable<MessageMeta['mode']>;
 }
 
 export interface DeliveryOptions {
@@ -35,6 +37,7 @@ interface PendingRow {
   session_id: string;
   external: number | null;
   run: string | null;
+  mode: string | null;
 }
 
 /**
@@ -105,7 +108,7 @@ export class MessageDeliveries {
     if (this.stopped || this.inFlight.has(messageId)) return;
     const row = this.db
       .prepare(
-        `SELECT d.message_id, d.conversation_id, d.attempts, m.text, c.session_id, mm.external, mm.run
+        `SELECT d.message_id, d.conversation_id, d.attempts, m.text, c.session_id, mm.external, mm.run, mm.mode
          FROM message_deliveries d
          JOIN messages m ON m.message_id = d.message_id
          JOIN conversations c ON c.conversation_id = d.conversation_id
@@ -200,12 +203,17 @@ export class MessageDeliveries {
  * What the message carries besides its text. A row that cannot be read throws, so the delivery is
  * retried and noisy: handing the message over without its limits would start an unlimited run.
  */
-function metaOf(row: PendingRow): Pick<PendingMessage, 'external' | 'run'> {
+function metaOf(row: PendingRow): Pick<PendingMessage, 'external' | 'run' | 'mode'> {
   if (row.external === null) return {};
   const run = row.run === null ? undefined : (JSON.parse(row.run) as unknown);
   const parsed = MessageMetaSchema.parse({
     external: row.external === 1,
     ...(run === undefined ? {} : { run }),
+    ...(row.mode === null ? {} : { mode: row.mode }),
   });
-  return { external: parsed.external, ...(parsed.run === undefined ? {} : { run: parsed.run }) };
+  return {
+    external: parsed.external,
+    ...(parsed.run === undefined ? {} : { run: parsed.run }),
+    ...(parsed.mode === undefined ? {} : { mode: parsed.mode }),
+  };
 }

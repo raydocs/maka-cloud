@@ -25,6 +25,8 @@ import {
   isTerminal,
   OrchestratorError,
   type SessionId,
+  type SteerId,
+  type SteerState,
   type StepId,
   type StopPendingCause,
   type StoredEvent,
@@ -49,6 +51,10 @@ const MAX_KEY_LENGTH = 200;
 const MAX_TOMBSTONES = 10_000;
 /** Tasks this process was fenced out of, remembered so it writes nothing more for them. */
 const MAX_FENCED = 10_000;
+/** A message to a running task: its key, its text, and how many may wait unread at once. */
+const MAX_STEER_ID_LENGTH = 64;
+export const MAX_STEER_CHARS = 4_000;
+export const MAX_PENDING_STEERS = 20;
 export const DEFAULT_ARCHIVE_CACHE: CacheLimits = { maxEntries: 512, maxBytes: 4 * 1024 * 1024 };
 
 export interface OrchestratorOptions {
@@ -236,6 +242,8 @@ export class Orchestrator {
   private readonly limits: TaskLimits;
   /** The timer of each running task that ends it when its run time is used up. */
   private readonly runClocks = new Map<TaskId, NodeJS.Timeout>();
+  /** The messages each run was handed, so a run is offered one once and a new run gets them all. */
+  private readonly offered = new WeakMap<RunHandle, Set<SteerId>>();
 
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
@@ -606,6 +614,142 @@ export class Orchestrator {
       this.visibleToRoot(access.sessionId, taskId);
     });
     return this.view(taskId);
+  }
+
+  /**
+   * Sends the user's message to the agent of a running task, for the public API (the operator is
+   * checked in the write chain, like a pause). It is recorded first, once per `steerId`: a
+   * resend returns the message as it stands and changes nothing. The run is handed it at once when
+   * it can take one, and the agent reads it at the next safe point (after the tool call under way).
+   * A new attempt of the task holds its messages back until its first step has finished. A turn
+   * that makes no more calls never reads them; the task says so when it ends.
+   */
+  async steerAs(
+    access: OperatorAccess,
+    taskId: TaskId,
+    input: { steerId: SteerId; text: string },
+  ): Promise<{ steerId: SteerId; state: SteerState }> {
+    const text = input.text.trim();
+    if (!/^[A-Za-z0-9_.:-]+$/u.test(input.steerId) || input.steerId.length > MAX_STEER_ID_LENGTH) {
+      throw new OrchestratorError('invalid_request', 'The message key is not valid');
+    }
+    if (text === '' || text.length > MAX_STEER_CHARS) {
+      throw new OrchestratorError(
+        'invalid_request',
+        `A message is 1 to ${MAX_STEER_CHARS} characters`,
+      );
+    }
+    this.visibleToRoot(access.sessionId, taskId);
+    await this.record(
+      { type: 'task_steer', taskId, steerId: input.steerId, text, by: access.sessionId },
+      () => {
+        access.authorize();
+        const task = this.visibleToRoot(access.sessionId, taskId);
+        this.assertControllable(task);
+        const known = task.steers.get(input.steerId);
+        if (known) {
+          if (known.text !== text) {
+            throw new OrchestratorError(
+              'invalid_request',
+              'That message key was used for other text',
+            );
+          }
+          throw new Superseded();
+        }
+        if (!this.runners.get(task.runner)?.steerable) {
+          throw new OrchestratorError('unsupported', 'This task cannot be sent messages');
+        }
+        let waiting = 0;
+        for (const steer of task.steers.values()) if (steer.state === 'pending') waiting++;
+        if (waiting >= MAX_PENDING_STEERS) {
+          throw new OrchestratorError('quota_exceeded', 'The agent has too many unread messages');
+        }
+      },
+    );
+    this.deliverSteers(taskId);
+    const steer = this.lookup(taskId)?.steers.get(input.steerId);
+    return { steerId: input.steerId, state: steer?.state ?? 'unseen' };
+  }
+
+  /**
+   * Takes a message back. Only one the agent has not read can be: the run is asked to drop it in
+   * the write chain, and refuses when it has handed it over already.
+   */
+  async withdrawSteerAs(
+    access: OperatorAccess,
+    taskId: TaskId,
+    steerId: SteerId,
+  ): Promise<{ steerId: SteerId; state: SteerState }> {
+    this.visibleToRoot(access.sessionId, taskId);
+    await this.record({ type: 'task_steer_withdrawn', taskId, steerId }, () => {
+      access.authorize();
+      const task = this.visibleToRoot(access.sessionId, taskId);
+      const steer = task.steers.get(steerId);
+      if (!steer) throw new OrchestratorError('not_found', 'No such message');
+      if (steer.state === 'withdrawn') throw new Superseded();
+      if (steer.state !== 'pending') throw invalidState('The agent has already read this message');
+      const handle = this.handles.get(taskId);
+      if (handle && this.offered.get(handle)?.has(steerId) && !handle.unsteer?.(steerId)) {
+        throw invalidState('The agent has already read this message');
+      }
+    });
+    return { steerId, state: this.lookup(taskId)?.steers.get(steerId)?.state ?? 'withdrawn' };
+  }
+
+  /**
+   * Hands the run every message it has not been offered, unless the task is paused, ending, or a
+   * new attempt still holds them back. Offering is not delivery: the run reports `steered` when
+   * the agent has the message, and until then it stays pending (and can be withdrawn).
+   */
+  private deliverSteers(taskId: TaskId): void {
+    const task = this.tasks.get(taskId);
+    const handle = this.handles.get(taskId);
+    if (!task || !handle?.steer || task.state !== 'running' || task.steersHeld) return;
+    if (this.isStopping(taskId) || this.ancestorStopped(taskId)) return;
+    let offered = this.offered.get(handle);
+    if (!offered) this.offered.set(handle, (offered = new Set()));
+    for (const steer of task.steers.values()) {
+      if (steer.state !== 'pending' || offered.has(steer.steerId)) continue;
+      offered.add(steer.steerId);
+      try {
+        handle.steer({ steerId: steer.steerId, text: steer.text });
+      } catch {
+        // The run could not take it now; it stays pending, and a later event offers it again.
+        offered.delete(steer.steerId);
+      }
+    }
+  }
+
+  /**
+   * The run is ending and the agent never read these: they are marked so, and the task says how
+   * many, so whoever sent them knows to send them again. Runs before the end is recorded.
+   */
+  private async markUnseen(taskId: TaskId, fence: Fence): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    const unread = [...task.steers.values()].filter((steer) => steer.state === 'pending');
+    for (const steer of unread) {
+      await this.record(
+        { type: 'task_steer_unseen', taskId, steerId: steer.steerId },
+        undefined,
+        fence,
+      );
+    }
+    if (unread.length === 0) return;
+    await this.record(
+      {
+        type: 'task_progress',
+        taskId,
+        note:
+          unread.length === 1
+            ? 'a message sent to the agent came too late to be read: it ended without another step'
+            : `${unread.length} messages sent to the agent came too late to be read: it ended without another step`,
+      },
+      () => {
+        if (this.isStopping(taskId)) throw new Superseded();
+      },
+      fence,
+    );
   }
 
   /**
@@ -1237,6 +1381,7 @@ export class Orchestrator {
           // the reader still records the spend the run reports until then.
           recorded = started !== undefined;
         }
+        if (recorded) this.deliverSteers(taskId);
       } catch (error) {
         // The start could not be written, so nothing the run reports can be. It is stopped, unless
         // a stop already holds it, and the reader records its spend until the stream ends.
@@ -1419,13 +1564,20 @@ export class Orchestrator {
         // The outcome of a stopping task no longer counts, but its stream is read to the end:
         // the run reports what settled while it stopped.
         if (this.isStopping(taskId)) continue;
-        if (event.type === 'progress') {
+        if (event.type === 'steered') {
+          await this.record(
+            { type: 'task_steer_delivered', taskId, steerId: event.steerId, epoch: fence.epoch },
+            undefined,
+            fence,
+          );
+        } else if (event.type === 'progress') {
           await this.recordRunnerOutcome(
             { type: 'task_progress', taskId, note: event.note },
             fence,
           );
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
+          await this.markUnseen(taskId, fence);
           await this.recordRunnerOutcome(
             { type: 'task_failed', taskId, reason: event.reason },
             fence,
@@ -1433,6 +1585,7 @@ export class Orchestrator {
           return;
         } else {
           this.runnerOver(taskId, handle);
+          await this.markUnseen(taskId, fence);
           const result = await this.handoff.readManifest(taskId);
           await this.recordRunnerOutcome(
             result.ok
@@ -1712,6 +1865,10 @@ export class Orchestrator {
       this.armRunClock(task.taskId);
     } else if (event.type === 'task_paused') {
       this.disarmRunClock(task.taskId);
+    }
+    // A task running again, or past its attempt's first step, may take the messages held for it.
+    if (event.type === 'task_resumed' || event.type === 'step_outcome') {
+      this.deliverSteers(task.taskId);
     }
     if (!isTerminal(task.state)) return;
     this.disarmRunClock(task.taskId);
