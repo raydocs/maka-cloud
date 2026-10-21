@@ -255,10 +255,20 @@ export interface RunTimeline {
     endedAt?: number;
     steps: number;
   }>;
+  /** The latest turns the run has had (at most 100); `turnsTotal` counts them all. */
+  turnsTotal: number;
+  /** One page of the steps; `stepsTotal` counts them all and `stepsNext` is `after` of the next page. */
   steps: TimelineStep[];
+  stepsTotal: number;
+  stepsNext?: number;
+  /** Thinned to a bounded series that keeps the first and the last point. */
   cost: Array<{ at: number; totalUsd: number }>;
+  /** How many cost reports the log holds, those thinned away included. */
+  costReports: number;
   messages: { sent: number; read: number; unseen: number; withdrawn: number };
   content: boolean;
+  /** The server shortened the page of steps to keep the answer within its size limit. */
+  truncated?: boolean;
 }
 export interface SourcePreview {
   site: string;

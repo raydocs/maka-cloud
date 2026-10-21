@@ -231,3 +231,30 @@ test('the feed gets one row per appended event, in order, and the hub hears of e
     ],
   );
 });
+
+test('iterateTask reads one task’s entries in order, a page at a time, past what one page holds', async (t) => {
+  const { store } = await openStore(t);
+  await store.append(created('a', 's1'), 1);
+  await store.append(created('b', 's2'), 2);
+  const total = 1300;
+  for (let i = 0; i < total; i += 1) {
+    await store.append({ type: 'task_progress', taskId: 'a', note: `n${i}` } as TaskEvent, 10 + i);
+    if (i % 100 === 0) {
+      await store.append(
+        { type: 'task_progress', taskId: 'b', note: 'other' } as TaskEvent,
+        10 + i,
+      );
+    }
+  }
+  const seen = [...store.iterateTask('a')];
+  assert.equal(seen.length, total + 1);
+  assert.deepEqual(
+    seen.map((entry) => entry.seq),
+    store.readTask('a').map((entry) => entry.seq),
+  );
+  assert.ok(seen.every((entry) => (entry.event as { taskId: string }).taskId === 'a'));
+  // The caller may stop early.
+  const [firstOnly] = store.iterateTask('a');
+  assert.equal(firstOnly?.event.type, 'task_created');
+  assert.deepEqual([...store.iterateTask('nope')], []);
+});
