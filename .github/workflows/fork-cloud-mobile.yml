@@ -198,6 +198,14 @@ jobs:
           npm --workspace @maka-cloud/playbooks run build
           npm --workspace @maka-cloud/supervisor run build
 
+      # Expo SDK 58 needs Swift tools 6.2 (Xcode 26); the runner's default Xcode is older.
+      - name: Select the newest Xcode
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
+          echo "Using $xcode"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
       # A release build for the simulator carries its own JavaScript. Nothing is signed or uploaded.
       - name: Build the app for the simulator
         working-directory: packages/cloud-mobile
