@@ -5,14 +5,17 @@ export type BoxApi = Pick<
   InstaboxClient,
   | 'createMachine'
   | 'deleteMachine'
+  | 'ensureRunning'
+  | 'exec'
   | 'getMachine'
   | 'listMachines'
   | 'patchMachineMetadata'
+  | 'suspendMachine'
   | 'waitForOperation'
 >;
 
-/** Why the pool is about to hand a box to a task for the first time since it was made. */
-export type BoxUseReason = 'create' | 'restore';
+/** Why the pool runs `beforeUse` on a box: it was just made, made from a snapshot, or woken. */
+export type BoxUseReason = 'create' | 'restore' | 'wake';
 
 export interface BoxPoolOptions {
   api: BoxApi;
@@ -40,6 +43,15 @@ export interface BoxPoolOptions {
    * it throws the box is deleted and the task gets the error: a box is never used unguarded.
    */
   beforeUse?: (machineId: string, reason: BoxUseReason) => Promise<void>;
+  /** When a box goes to sleep: the agent idle this long and nobody looking. Default 5 and 20 minutes. */
+  idle?: { agentMs?: number; userMs?: number };
+  /** Limits for waking a box, in ms; a failure of one is tried again with the next. Default 60 s then 180 s. */
+  wakeTimeoutsMs?: readonly number[];
+  /**
+   * Whether anything wrote to the box in the last minute, asked right before a box is suspended. A
+   * failure to tell counts as "yes": the box stays awake.
+   */
+  recentWrite?: (machineId: string) => Promise<boolean>;
   onWarning?: (message: string, detail?: unknown) => void;
   /** Test seams. */
   now?: () => number;

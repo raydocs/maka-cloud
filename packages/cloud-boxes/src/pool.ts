@@ -14,8 +14,20 @@ import {
 const DEFAULT_MAX_PER_INVITE = 3;
 const DEFAULT_WAIT_MS = 120_000;
 const DEFAULT_LIMIT_RECHECK_MS = 600_000;
+/** Amp's rule: sleep when the agent has done nothing for 5 minutes and nobody has looked for 20. */
+const DEFAULT_AGENT_IDLE_MS = 5 * 60_000;
+const DEFAULT_USER_IDLE_MS = 20 * 60_000;
+/** A wake that times out is tried once more with a longer limit before the box counts as lost. */
+const DEFAULT_WAKE_TIMEOUTS_MS = [60_000, 180_000] as const;
+const SLEEP_RETRY_MS = 5 * 60_000;
+const CHECKPOINT_TIMEOUT_SECONDS = 30;
 
-type BoxState = 'creating' | 'ready' | 'claimed' | 'lost';
+/**
+ * `suspending` is a box being put to sleep: while it is still in its `checkpoint` phase a task may
+ * take it (that cancels the sleep); once the suspend is issued it is not available until it is
+ * `suspended`. A `suspended` box is taken by waking it (`waking`).
+ */
+type BoxState = 'creating' | 'ready' | 'claimed' | 'suspending' | 'suspended' | 'waking' | 'lost';
 
 /** `adopted` marks a claim found in the labels after a restart: no lease object will ever release it. */
 type Holder = symbol | 'adopted';
@@ -33,6 +45,15 @@ interface Box {
   setup: string | undefined;
   /** While the box is being made: a second ask by the same task waits on it. */
   creation: Promise<void> | undefined;
+  /** While the box is being woken: a second ask by the same task waits on it. True when it woke. */
+  waking: Promise<boolean> | undefined;
+  /** When the box last had no task (the agent's idleness is counted from here). */
+  idleSince: number;
+  /** The last time a person looked at the box (a terminal or desktop view), if ever. */
+  userSeenAt: number | undefined;
+  sleepPhase: 'checkpoint' | 'suspend' | undefined;
+  /** No sleep attempt before this time, after one that failed or was turned back. */
+  sleepAfter: number;
   /** Label writes of this box run one after another; each sends what the box is by then. */
   labels: Promise<void>;
 }
@@ -67,6 +88,10 @@ export class BoxPool implements SandboxProvider {
   private readonly maxPerInvite: number;
   private readonly waitMs: number;
   private readonly limitRecheckMs: number;
+  private readonly agentIdleMs: number;
+  private readonly userIdleMs: number;
+  private readonly wakeTimeoutsMs: readonly number[];
+  private sweeping: Promise<string[]> | undefined;
   private readonly now: () => number;
   private readonly timers: NonNullable<BoxPoolOptions['timers']>;
   private readonly tenants = new Map<string, Map<number, Box>>();
@@ -85,6 +110,10 @@ export class BoxPool implements SandboxProvider {
     }
     this.waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     this.limitRecheckMs = options.limitRecheckMs ?? DEFAULT_LIMIT_RECHECK_MS;
+    this.agentIdleMs = options.idle?.agentMs ?? DEFAULT_AGENT_IDLE_MS;
+    this.userIdleMs = options.idle?.userMs ?? DEFAULT_USER_IDLE_MS;
+    this.wakeTimeoutsMs = options.wakeTimeoutsMs ?? DEFAULT_WAKE_TIMEOUTS_MS;
+    if (this.wakeTimeoutsMs.length === 0) throw new Error('BoxPool: wakeTimeoutsMs is empty');
     this.now = options.now ?? Date.now;
     this.timers = options.timers ?? {
       setTimeout: (callback, ms) => {
@@ -210,18 +239,27 @@ export class BoxPool implements SandboxProvider {
       if (box.taskId === taskId && box.state !== 'lost') {
         // The same task again (a resume, a repeated call): the same box, with a newer lease.
         box.holder = Symbol('lease');
-        box.state = box.machineId === undefined ? 'creating' : 'claimed';
         return { kind: 'have', box };
       }
     }
     if (snapshotId === undefined) {
       const conversationId = this.options.conversationOf?.(taskId);
+      // A box that is awake first, then one still being put to sleep, then a sleeping one (waking
+      // it is cheaper than making a box); within those, the conversation's own, then the lowest slot.
+      const rank = (box: Box): number =>
+        box.state === 'ready' ? 0 : box.state === 'suspended' ? 2 : 1;
       const free = [...boxes.values()]
-        .filter((box) => box.state === 'ready')
+        .filter(
+          (box) =>
+            box.state === 'ready' ||
+            box.state === 'suspended' ||
+            (box.state === 'suspending' && box.sleepPhase === 'checkpoint'),
+        )
         .sort(
           (a, b) =>
             Number(conversationId !== undefined && b.conversationId === conversationId) -
               Number(conversationId !== undefined && a.conversationId === conversationId) ||
+            rank(a) - rank(b) ||
             a.slot - b.slot,
         )[0];
       if (free) {
@@ -247,7 +285,10 @@ export class BoxPool implements SandboxProvider {
   }
 
   private claim(box: Box, taskId: TaskId): void {
-    box.state = box.machineId === undefined ? 'creating' : 'claimed';
+    // Taking a box that is going to sleep turns the sleep back; taking a sleeping one wakes it.
+    box.state =
+      box.machineId === undefined ? 'creating' : box.state === 'suspended' ? 'waking' : 'claimed';
+    box.sleepPhase = undefined;
     box.taskId = taskId;
     box.holder = Symbol('lease');
     const conversationId = this.options.conversationOf?.(taskId);
@@ -266,6 +307,10 @@ export class BoxPool implements SandboxProvider {
       } else {
         // A task that asks again while its box is still being made waits for the same creation.
         await box.creation;
+        if (box.state === 'waking') {
+          box.waking ??= this.wake(box);
+          if (!(await box.waking)) return await this.take(box.tenantId, taskId);
+        }
         await this.writeLabels(box);
       }
       return box;
@@ -424,6 +469,7 @@ export class BoxPool implements SandboxProvider {
     box.state = 'ready';
     box.taskId = undefined;
     box.holder = undefined;
+    box.idleSince = this.now();
     void this.writeLabels(box).catch((error) =>
       this.options.onWarning?.(
         `could not clear the task label of box ${box.machineId ?? ''}`,
@@ -463,6 +509,11 @@ export class BoxPool implements SandboxProvider {
       conversationId: undefined,
       setup: undefined,
       creation: undefined,
+      waking: undefined,
+      idleSince: this.now(),
+      userSeenAt: undefined,
+      sleepPhase: undefined,
+      sleepAfter: 0,
       labels: Promise.resolve(),
     };
   }
@@ -539,6 +590,183 @@ export class BoxPool implements SandboxProvider {
     }
   }
 
+  // -- sleep and wake ----------------------------------------------------------------------------
+
+  /** Records that a person looked at the box just now (a terminal or desktop view), so it stays awake. */
+  noteUserActivity(machineId: string): void {
+    for (const boxes of this.tenants.values()) {
+      for (const box of boxes.values()) {
+        if (box.machineId === machineId) box.userSeenAt = this.now();
+      }
+    }
+  }
+
+  /**
+   * Puts to sleep the boxes whose agent has done nothing for `idle.agentMs` and which nobody has
+   * looked at for `idle.userMs`. Returns the machine ids that went to sleep. One sweep at a time.
+   *
+   * Per box, Rakazo's order: compare-and-set `ready -> suspending` (a synchronous step), checkpoint
+   * (`sync`), re-check every hold (a task that took the box, a person who looked, a write in the last
+   * minute), and only then suspend. Any hold that shows up turns the sleep back and nothing is
+   * suspended; a task that takes the box before the suspend is issued wins.
+   */
+  sweepIdle(): Promise<string[]> {
+    this.sweeping ??= this.sweep().finally(() => {
+      this.sweeping = undefined;
+    });
+    return this.sweeping;
+  }
+
+  private async sweep(): Promise<string[]> {
+    await this.discovered();
+    const now = this.now();
+    const sleepers: Box[] = [];
+    for (const boxes of this.tenants.values()) {
+      for (const box of boxes.values()) {
+        if (
+          box.state === 'ready' &&
+          box.machineId !== undefined &&
+          now >= box.sleepAfter &&
+          now - box.idleSince >= this.agentIdleMs &&
+          now - (box.userSeenAt ?? Number.NEGATIVE_INFINITY) >= this.userIdleMs
+        ) {
+          box.state = 'suspending';
+          box.sleepPhase = 'checkpoint';
+          sleepers.push(box);
+        }
+      }
+    }
+    const slept = await Promise.all(sleepers.map((box) => this.sleep(box)));
+    return slept.filter((id): id is string => id !== undefined);
+  }
+
+  /** Whether a task took the box while it was being put to sleep. */
+  private turnedBack(box: Box): boolean {
+    return box.state !== 'suspending';
+  }
+
+  private revert(box: Box, retryAfterMs: number): void {
+    if (box.state !== 'suspending') return;
+    box.state = 'ready';
+    box.sleepPhase = undefined;
+    box.sleepAfter = this.now() + retryAfterMs;
+  }
+
+  private async sleep(box: Box): Promise<string | undefined> {
+    const machineId = box.machineId as string;
+    try {
+      const machine = await this.api.getMachine(machineId);
+      if (this.turnedBack(box)) return undefined;
+      if (machine.state !== 'running') {
+        // Instabox paused it for idleness first; the next task wakes it through the wake path.
+        if (
+          machine.state === 'error' ||
+          machine.state === 'deleted' ||
+          machine.state === 'deleting'
+        ) {
+          this.markLost(box, `it is ${machine.state}`);
+        } else {
+          box.state = 'suspended';
+          box.sleepPhase = undefined;
+          this.pump(box.tenantId);
+        }
+        return undefined;
+      }
+      await this.api.exec(machineId, { cmd: 'sync', timeoutSeconds: CHECKPOINT_TIMEOUT_SECONDS });
+      if (this.turnedBack(box)) return undefined;
+      const written = (await this.options.recentWrite?.(machineId)) ?? false;
+      const looked = this.now() - (box.userSeenAt ?? Number.NEGATIVE_INFINITY) < this.userIdleMs;
+      // The last look at the holds, with nothing awaited between it and the point of no return.
+      if (this.turnedBack(box)) return undefined;
+      if (written || looked) {
+        this.revert(box, 0);
+        return undefined;
+      }
+      box.sleepPhase = 'suspend';
+      const operation = await this.api.suspendMachine(machineId);
+      await this.api.waitForOperation(operation.id);
+      box.state = 'suspended';
+      box.sleepPhase = undefined;
+      this.pump(box.tenantId);
+      return machineId;
+    } catch (error) {
+      this.options.onWarning?.(`could not put box ${machineId} to sleep`, error);
+      await this.settleAfterFailedSleep(box);
+      return undefined;
+    }
+  }
+
+  /** A sleep failed half way: ask instabox what the box is now, and make the registry say the same. */
+  private async settleAfterFailedSleep(box: Box): Promise<void> {
+    if (this.turnedBack(box)) return;
+    try {
+      const machine = await this.api.getMachine(box.machineId as string);
+      if (machine.state === 'running') this.revert(box, SLEEP_RETRY_MS);
+      else if (machine.state === 'suspended') {
+        box.state = 'suspended';
+        box.sleepPhase = undefined;
+        this.pump(box.tenantId);
+      } else this.markLost(box, `it is ${machine.state} after a failed sleep`);
+    } catch (error) {
+      this.markLost(box, `its state is unknown after a failed sleep: ${errorText(error)}`);
+    }
+  }
+
+  /**
+   * Wakes the box a task has just taken. A wake that fails or times out is tried once more with a
+   * longer limit ("slow, not dead"); only then, or at once if the box is gone, does it count as
+   * lost. The egress guard runs after every wake, and a box that fails it is not used.
+   */
+  private async wake(box: Box): Promise<boolean> {
+    const machineId = box.machineId as string;
+    try {
+      let lastError: unknown;
+      for (const limitMs of this.wakeTimeoutsMs) {
+        const controller = new AbortController();
+        const timer = this.timers.setTimeout(
+          () =>
+            controller.abort(
+              new Error(`waking box ${machineId} took longer than ${Math.round(limitMs / 1000)} s`),
+            ),
+          limitMs,
+        );
+        try {
+          await this.api.ensureRunning(machineId, { signal: controller.signal });
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          if ((error as { status?: number }).status === 404) break;
+        } finally {
+          this.timers.clearTimeout(timer);
+        }
+      }
+      if (lastError !== undefined) {
+        this.markLost(box, `it could not be woken: ${errorText(lastError)}`);
+        return false;
+      }
+      try {
+        await this.options.beforeUse?.(machineId, 'wake');
+      } catch (error) {
+        this.markLost(box, `it failed its guard after waking: ${errorText(error)}`);
+        return false;
+      }
+      box.state = 'claimed';
+      return true;
+    } finally {
+      box.waking = undefined;
+    }
+  }
+
+  /** The box is not used again by this process; the task that held it (if any) must find another. */
+  private markLost(box: Box, why: string): void {
+    this.options.onWarning?.(`box ${box.machineId ?? ''} is lost: ${why}`);
+    box.state = 'lost';
+    box.sleepPhase = undefined;
+    box.holder = undefined;
+    box.taskId = undefined;
+  }
+
   // -- finding what is already there -------------------------------------------------------------
 
   private discovered(): Promise<void> {
@@ -577,10 +805,11 @@ export class BoxPool implements SandboxProvider {
       box.state = 'lost';
       return;
     }
-    box.state = 'ready';
+    // Anything that is not running (paused by us or by instabox, stopped, between states) is taken by waking it.
+    box.state = machine.state === 'running' ? 'ready' : 'suspended';
     if (checked.taskId === undefined) return;
     if (this.options.isTaskLive(checked.taskId)) {
-      box.state = 'claimed';
+      box.state = machine.state === 'running' ? 'claimed' : 'waking';
       box.taskId = checked.taskId;
       box.holder = 'adopted';
     } else {
@@ -588,6 +817,10 @@ export class BoxPool implements SandboxProvider {
       this.free(box);
     }
   }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** A create was refused for the account's limit while the invite has boxes: wait for one instead. */
