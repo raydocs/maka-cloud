@@ -1143,6 +1143,7 @@ export class FuzzWorld {
       ['cancelling', o.cancelling.size],
       ['starting', o.starting.size],
       ['stopRetries', stats.stopRetries],
+      ['runClocks', stats.runClocks],
       ['background', o.background.size],
     ];
     for (const [name, value] of leftovers) {

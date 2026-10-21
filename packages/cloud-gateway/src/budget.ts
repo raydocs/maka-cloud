@@ -38,7 +38,11 @@ export class Allowance {
   spentUsd = 0;
   private readonly held = new Map<string, number>();
 
-  constructor(readonly limitUsd: number) {}
+  constructor(
+    readonly limitUsd: number,
+    /** What a refusal calls this limit. */
+    readonly label = "the task's model budget",
+  ) {}
 
   get heldUsd(): number {
     let sum = 0;
@@ -80,7 +84,7 @@ export class LimitPort implements BudgetPort {
       return {
         ok: false,
         budget: true,
-        reason: `the task's model budget has ${money(short.remainingUsd)} left, and this request could cost up to ${money(usd)}`,
+        reason: `${short.label} has ${money(short.remainingUsd)} left, and this request could cost up to ${money(usd)}`,
       };
     }
     for (const allowance of this.allowances) allowance.hold(key, usd);

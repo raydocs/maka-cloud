@@ -90,6 +90,52 @@ test('spend an earlier process wrote down stands in for the figure its run repor
   await recorded(store, taskId, 4);
 });
 
+test('calls a restart cut off are charged in full and the task log says so, once, under the attempt that resumes it', async (t) => {
+  const { store, first, taskId } = await capped(t);
+  first.fake.runFor(taskId).usage(1);
+  await recorded(store, taskId, 1);
+  let handed = false;
+  const journal = {
+    unrecorded: () => (handed ? [] : [{ taskId, usd: 1.75, cutOffCalls: 2, cutOffUsd: 0.75 }]),
+    recorded: () => {
+      handed = true;
+    },
+  };
+  await makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: journal },
+  });
+  assert.equal(
+    costOf(store, taskId),
+    1.75,
+    'the open calls are in the spend at their reserved amount',
+  );
+  const notes = store
+    .readTask(taskId)
+    .flatMap(({ event }) => (event.type === 'task_progress' ? [event.note] : []))
+    .filter((note) => /cut off by the restart/u.test(note));
+  assert.deepEqual(notes, [
+    '2 calls to the model gateway cut off by the restart were charged in full ($0.75) because the vendor may have billed them',
+  ]);
+
+  // A restart with nothing cut off writes no such note.
+  const quiet = await capped(t);
+  await makeHarness(t, {
+    store: quiet.store,
+    dir: quiet.first.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: { unrecorded: () => [], recorded: () => undefined } },
+  });
+  assert.equal(
+    quiet.store
+      .readTask(quiet.taskId)
+      .filter(({ event }) => event.type === 'task_progress' && /cut off/u.test(event.note)).length,
+    0,
+  );
+});
+
 test('events written before attempts were keyed still add up as one run', async (t) => {
   const store = new MemoryTaskStore();
   await store.append(

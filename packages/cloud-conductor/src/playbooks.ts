@@ -1,3 +1,5 @@
+import type { ModeId } from '@maka-cloud/modes';
+
 /** What a finished child task hands back (the T2 result manifest). */
 export interface Manifest {
   summary: string;
@@ -13,6 +15,12 @@ export interface Verdict {
   problems: string[];
 }
 
+/** What a check may know about the task besides its manifest. */
+export interface VerifyContext {
+  /** The mode the task was sent in; absent when no modes are configured. */
+  mode?: ModeId;
+}
+
 export interface Playbook {
   id: string;
   /** One line for the conductor's system prompt: when to pick this playbook. */
@@ -24,7 +32,7 @@ export interface Playbook {
   /** The steps the conductor follows after planning, returned with the plan. */
   steps: readonly string[];
   /** Checks a finished child task's manifest before the conductor relies on it. */
-  verify(manifest: Manifest): Verdict;
+  verify(manifest: Manifest, context?: VerifyContext): Verdict;
 }
 
 export const RUNNERS = ['claude-agent-sdk', 'codex'] as const;

@@ -20,6 +20,10 @@ export interface SpendJournal {
 export interface UnrecordedSpend {
   taskId: string;
   usd: number;
+  /** Reservations the earlier process left open: model calls it died in, at their reserved amount. */
+  cutOffCalls?: number;
+  /** What those reservations add up to; already part of `usd`. */
+  cutOffUsd?: number;
 }
 
 /**
@@ -583,14 +587,19 @@ export class SqliteSpendJournal implements SpendJournal {
   unrecorded(): UnrecordedSpend[] {
     const rows = this.db
       .prepare(
-        `SELECT task_id AS taskId, SUM(usd) AS usd FROM (
-           SELECT task_id, usd FROM holds WHERE epoch != ?
+        `SELECT task_id AS taskId, SUM(usd) AS usd, SUM(open) AS cutOffCalls, SUM(open_usd) AS cutOffUsd FROM (
+           SELECT task_id, usd, 1 AS open, usd AS open_usd FROM holds WHERE epoch != ?
            UNION ALL
-           SELECT task_id, usd FROM spent WHERE epoch != ?
+           SELECT task_id, usd, 0 AS open, 0 AS open_usd FROM spent WHERE epoch != ?
          ) GROUP BY task_id ORDER BY task_id`,
       )
-      .all(this.epoch, this.epoch) as Array<{ taskId: string; usd: number }>;
-    return rows.map((row) => ({ taskId: row.taskId, usd: row.usd }));
+      .all(this.epoch, this.epoch) as unknown as UnrecordedSpend[];
+    return rows.map((row) => ({
+      taskId: row.taskId,
+      usd: row.usd,
+      cutOffCalls: row.cutOffCalls,
+      cutOffUsd: row.cutOffUsd,
+    }));
   }
 
   /** Forgets what `unrecorded` returned, once the task log holds it. */

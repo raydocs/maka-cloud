@@ -260,7 +260,7 @@ export function budgetProblem(
 ): string | undefined {
   const { minRunUsd } = config.modes[mode].budget;
   return budgetUsd < minRunUsd
-    ? `a ${mode} run needs a budget of at least $${minRunUsd}, this one has $${budgetUsd}`
+    ? `a ${mode} run needs a budget of at least $${minRunUsd.toFixed(2)}, this one has $${budgetUsd.toFixed(2)}`
     : undefined;
 }
 

@@ -1,8 +1,17 @@
 import { spawn } from 'node:child_process';
-import { existsSync, promises as fs } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  promises as fs,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { constants as osConstants } from 'node:os';
+import { constants as osConstants, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * A fake instabox API. `exec` really runs the command with bash on this machine, so the
@@ -33,12 +42,61 @@ export interface FakeInstaboxOptions {
   port?: number;
   apiKey?: string;
   machineId?: string;
-  /** Replaces PATH for exec'd commands. */
+  /** Replaces PATH for exec'd commands (the firewall stand-ins, when on, stay in front of it). */
   execPath?: string;
   /** HOME for exec'd commands. Defaults to /tmp. */
   home?: string;
   /** Extra environment for exec'd commands, before the request's own `envs`. */
   env?: Record<string, string>;
+  /**
+   * `iptables`, `ip6tables` and `sudo` stand-ins that keep their rules in files instead of
+   * touching this machine's firewall. Default `shim`: a test must never change the real one.
+   * `none` leaves the real tools (or none) in reach, for a test of a box without a firewall tool.
+   */
+  firewall?: 'shim' | 'none';
+}
+
+/**
+ * A stand-in for iptables and ip6tables that keeps the rules in files under SHIM_STATE and
+ * understands the few forms the egress guard uses. `SHIM_FAIL` is a pattern: a call whose
+ * arguments match it fails. `SHIM_LIE` makes `-S` print nothing, as if the rules had not stuck.
+ */
+const FIREWALL_SHIM = `#!/bin/bash
+tool=$(basename "$0")
+echo "$tool $*" >> "$SHIM_STATE/log"
+if [ -n "\${SHIM_FAIL:-}" ] && [[ "$*" =~ $SHIM_FAIL ]]; then exit 3; fi
+[ "$1" = -w ] && shift
+op="$1"; shift
+rules() { echo "$SHIM_STATE/$tool.$1"; }
+case "$op" in
+  -N) [ -e "$(rules "$1")" ] && exit 1; : > "$(rules "$1")" ;;
+  -F) : > "$(rules "$1")" ;;
+  -A) chain="$1"; shift; echo "-A $chain $*" >> "$(rules "$chain")" ;;
+  -I) chain="$1"; shift 2; { echo "-A $chain $*"; cat "$(rules "$chain")" 2>/dev/null; true; } > "$SHIM_STATE/tmp" \\
+        && mv "$SHIM_STATE/tmp" "$(rules "$chain")" ;;
+  -C) chain="$1"; shift; grep -Fxq -- "-A $chain $*" "$(rules "$chain")" 2>/dev/null ;;
+  -S) [ -n "\${SHIM_LIE:-}" ] && exit 0; echo "-P $1 ACCEPT"; cat "$(rules "$1")" 2>/dev/null ;;
+  *) exit 2 ;;
+esac
+`;
+
+/**
+ * `sudo -n tool ...` runs the tool as this user. `sudo -u account ...` (the agent's account, which
+ * the runners switch to) is a real change of user, so it goes to the real `sudo`, found behind the
+ * stand-ins' own directory, which is first on PATH.
+ */
+const SUDO_SHIM = `#!/bin/bash
+for arg in "$@"; do [ "$arg" = -u ] && PATH="\${PATH#*:}" exec sudo "$@"; done
+[ "$1" = -n ] && shift
+exec "$@"
+`;
+
+/** What the firewall stand-ins did, for a test to read. */
+export interface FakeFirewall {
+  /** The rules of a chain, one `-A chain ...` line each. */
+  rules(tool: 'iptables' | 'ip6tables', chain: string): string[];
+  /** Every call, as `tool args`. */
+  calls(): string[];
 }
 
 export interface FakeSnapshot {
@@ -107,6 +165,8 @@ export class FakeInstabox {
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
   private readonly listenOn: { host: string; port: number };
+  private readonly firewallDir: string | undefined;
+  readonly firewall: FakeFirewall;
   private snapshotCount = 0;
   private readonly snapshotKeys = new Map<string, string>();
   url = '';
@@ -118,6 +178,23 @@ export class FakeInstabox {
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
     this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
+    if ((options.firewall ?? 'shim') === 'shim') {
+      this.firewallDir = mkdtempSync(join(tmpdir(), 'fake-instabox-fw-'));
+      const bin = join(this.firewallDir, 'bin');
+      mkdirSync(bin);
+      mkdirSync(join(this.firewallDir, 'state'));
+      for (const tool of ['iptables', 'ip6tables']) {
+        writeFileSync(join(bin, tool), FIREWALL_SHIM, { mode: 0o755 });
+      }
+      writeFileSync(join(bin, 'sudo'), SUDO_SHIM, { mode: 0o755 });
+    }
+    const state = this.firewallDir ? join(this.firewallDir, 'state') : undefined;
+    const read = (name: string): string =>
+      state && existsSync(join(state, name)) ? readFileSync(join(state, name), 'utf8') : '';
+    this.firewall = {
+      rules: (tool, chain) => read(`${tool}.${chain}`).split('\n').filter(Boolean),
+      calls: () => read('log').split('\n').filter(Boolean),
+    };
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
         if (!res.headersSent) this.json(res, 500, this.envelope('internal', String(error), false));
@@ -137,6 +214,7 @@ export class FakeInstabox {
   async close(): Promise<void> {
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    if (this.firewallDir) rmSync(this.firewallDir, { recursive: true, force: true });
   }
 
   requestsTo(method: string, pathPattern: RegExp): RecordedRequest[] {
@@ -452,7 +530,13 @@ export class FakeInstabox {
       const child = spawn(BASH, ['-c', body.cmd], {
         cwd: body.cwd ?? '/',
         env: {
-          PATH: this.execPath ?? process.env.PATH ?? '',
+          PATH: [
+            this.firewallDir && join(this.firewallDir, 'bin'),
+            this.execPath ?? process.env.PATH,
+          ]
+            .filter(Boolean)
+            .join(':'),
+          ...(this.firewallDir ? { SHIM_STATE: join(this.firewallDir, 'state') } : {}),
           HOME: this.home,
           ...this.baseEnv,
           ...body.envs,

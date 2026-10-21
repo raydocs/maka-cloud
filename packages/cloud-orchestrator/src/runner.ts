@@ -20,6 +20,11 @@ export interface RunSpec {
    * model gateway can hold them to it together.
    */
   budgetRootId?: TaskId;
+  /**
+   * What this run alone may spend, when that is less than `budgetUsd` (the orchestrator's turn
+   * limit). A run is one start or one resume after a restart. The smaller of the two binds.
+   */
+  turnBudgetUsd?: number;
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
   /**

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  budgetProblem,
   chooseMode,
   looksLikeModeLine,
   MODE_IDS,
@@ -21,6 +22,7 @@ import {
 } from './guard.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook } from './playbooks.js';
+import { reviewLinksOf } from './reviewer.js';
 import { printable, shownValue } from './shown.js';
 import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
 
@@ -142,11 +144,19 @@ function chooseWorkMode(
     );
   }
   const picked = host.state.run(turn.runId)?.mode;
+  // What the task is given decides what it can afford, not what the whole run has.
   const choice = chooseMode(modes, {
     ...(picked ? { requested: picked } : {}),
     ...(args.workMode ? { suggested: args.workMode } : {}),
-    budgetUsd: host.state.budget(turn.runId).budgetUsd,
+    budgetUsd: args.budgetUsd,
   });
+  const problem = budgetProblem(modes, choice.mode, args.budgetUsd);
+  if (problem) {
+    throw new ToolRefusal(
+      'delegation_under_mode_minimum',
+      `${problem}. Give it more, or ask for a quicker mode.`,
+    );
+  }
   const cap = modes.modes[choice.mode].budget.maxDelegationUsd;
   if (args.budgetUsd > cap) {
     throw new ToolRefusal(
@@ -183,7 +193,39 @@ export function conductorTools(
     const manifest = asManifest(view);
     if (!manifest) return view;
     const playbook = playbookOf(host.state.run(turn.runId)?.playbook ?? null);
-    return playbook ? { ...view, verification: playbook.verify(manifest) } : view;
+    if (!playbook) return view;
+    const taskId = typeof view?.taskId === 'string' ? view.taskId : undefined;
+    const mode = taskId === undefined ? undefined : host.state.delegationOfTask(taskId)?.mode;
+    return { ...view, verification: playbook.verify(manifest, mode ? { mode } : {}) };
+  };
+
+  /**
+   * A reviewer must not be the runner that drafted what it reviews, and the runner that uses
+   * judgments must not be the one that wrote them. The tasks are the ones the brief's
+   * `maka-inputs:` lines name; their runner is read from the orchestrator, and a draft
+   * whose runner cannot be read refuses the delegation instead of letting it through.
+   */
+  const requireOtherRunner = async (
+    turn: ActiveTurn,
+    ctx: MakaToolContext,
+    args: { runner: string; brief: string },
+  ): Promise<void> => {
+    for (const source of reviewLinksOf(args.brief).others) {
+      const result = await turn.link.call('task_status', { taskId: source }, signalOf(turn, ctx));
+      const runner = result.isError ? undefined : result.structured?.runner;
+      if (typeof runner !== 'string') {
+        throw new ToolRefusal(
+          'reviewer_unverifiable',
+          `The runner of ${source} could not be read, so the review cannot be checked.`,
+        );
+      }
+      if (runner === args.runner) {
+        throw new ToolRefusal(
+          'reviewer_same_runner',
+          `${source} ran on ${runner}. The review must be done by, and used by, the other runner: delegate it there.`,
+        );
+      }
+    }
   };
 
   const forward = async (
@@ -274,11 +316,12 @@ export function conductorTools(
         );
       }
       const chosen = chooseWorkMode(host, turn, args);
+      await requireOtherRunner(turn, ctx, args);
       // Check, reserve and store the delegation in one synchronous transaction,
       // before any await. From here on a stop finds the task by this key, even
       // if the response that names it never arrives.
       const key = `dlg_${randomUUID().replaceAll('-', '')}`;
-      const reserved = host.state.reserveDelegation(turn.runId, args.budgetUsd, key);
+      const reserved = host.state.reserveDelegation(turn.runId, args.budgetUsd, key, chosen?.mode);
       if (!reserved.ok) {
         if (reserved.reason === 'question_open') {
           throw new ToolRefusal(

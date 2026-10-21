@@ -327,6 +327,56 @@ test('grants in one tree pool share its limit', async () => {
   await text(first);
 });
 
+test('a grant with a limit for its turn is held to it inside a pool that holds the whole task’s budget', async () => {
+  const { gateway, upstream } = rig();
+  const value = body();
+  const request = worst(value);
+  // The turn fits one request in flight; the pool (what the task has left) fits many.
+  const turn = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'turn',
+    budget: { limitUsd: request * 1.5, poolId: 'task-1', poolLimitUsd: request * 10 },
+  });
+  const sibling = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'sibling',
+    budget: { limitUsd: request * 5, poolId: 'task-1', poolLimitUsd: request * 10 },
+  });
+  let held: ControlledBody | undefined;
+  upstream.next((seen) => {
+    held = new ControlledBody(seen.signal);
+    return new Response(held.stream, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const first = await post(turn, value);
+  upstream.next(() => json({ input_tokens: 50 }));
+  const second = await post(turn, value);
+  assert.equal(second.status, 402, 'the turn is used up although the pool has room');
+  assert.match(await text(second), /this turn's model budget/u);
+  // The pool, not the turn, is what the sibling is held to, and the turn's request counts in it.
+  upstream.next(() => anthropicStream(5, 5));
+  const other = await post(sibling, value);
+  assert.equal(other.status, 200);
+  await text(other);
+  held?.end();
+  await text(first);
+  assert.ok(turn.spend().spentUsd > 0);
+});
+
+test('a pool limit that is not a positive number is refused', () => {
+  const { gateway } = rig();
+  for (const poolLimitUsd of [0, -1, Number.NaN]) {
+    assert.throws(
+      () =>
+        gateway.inProcess({
+          vendor: 'anthropic',
+          subject: 'x',
+          budget: { limitUsd: 1, poolId: 'p', poolLimitUsd },
+        }),
+      /positive budget/u,
+    );
+  }
+});
+
 test('revoking cuts an open stream mid-way and refuses the token from then on', async () => {
   const { gateway, upstream } = rig();
   const grant = gateway.issue({
