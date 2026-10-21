@@ -190,7 +190,7 @@ test('with the sandbox gone and no snapshot, the task goes on in a new sandbox f
     `${stored}\n`,
   );
   assert.match(
-    await fs.readFile(join(r.h.root, 'tsk_tr_fresh', 'brief.md'), 'utf8'),
+    await fs.readFile(join(r.h.root, 'tsk_tr_fresh', 'handoff', 'brief.md'), 'utf8'),
     /Brief for tsk_tr_fresh/,
   );
   const sent = (await prompts(r.h)).at(-1) ?? '';

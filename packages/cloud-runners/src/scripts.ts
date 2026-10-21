@@ -3,8 +3,9 @@
  * `GET /files`). Values come in as environment variables, so nothing is spliced into
  * the script text except the fixed fragments below.
  *
- * Layout per task: `$MAKA_ROOT/<taskId>/` holds `brief.md`, `result.json`, a `workspace/`
- * directory, and for each CLI invocation ("run", `t1`, `t2`, ...) `<run>.lock`, `.sh`,
+ * Layout per task: `$MAKA_ROOT/<taskId>/` holds `handoff/` (the brief going down, `brief.md`, and
+ * the result coming back, `result.json`: the only files the agent account reads and writes there
+ * besides its workspace), a `workspace/` directory, and for each CLI invocation ("run", `t1`, `t2`, ...) `<run>.lock`, `.sh`,
  * `.token`, `.pid`, `.cancel` (a stop request) and `.exit` (written last). The raw stdout and
  * stderr of a run (`<run>.out`) can hold secrets the CLI printed, so it is kept in
  * `$MAKA_LOG_ROOT/<taskId>/`, on memory-backed storage that a snapshot of the sandbox's files
@@ -74,13 +75,13 @@ group_is_run() {
 }
 `;
 
-/** stdin: the brief, when `MAKA_WRITE_BRIEF` is set. */
+/** stdin: the brief, when `MAKA_WRITE_BRIEF` is set. It goes to `handoff/brief.md`. */
 export const PREPARE_SCRIPT = `set -eu
 umask 077
-mkdir -p "$MAKA_DIR/workspace"
+mkdir -p "$MAKA_DIR/workspace" "$MAKA_DIR/handoff"
 if [ -n "\${MAKA_WRITE_BRIEF:-}" ]; then
-  cat > "$MAKA_DIR/brief.md.tmp"
-  mv -f "$MAKA_DIR/brief.md.tmp" "$MAKA_DIR/brief.md"
+  cat > "$MAKA_DIR/handoff/brief.md.tmp"
+  mv -f "$MAKA_DIR/handoff/brief.md.tmp" "$MAKA_DIR/handoff/brief.md"
 fi
 `;
 
@@ -98,7 +99,7 @@ mkdir -p "$MAKA_DIR"
 cd "$MAKA_DIR"
 if ! ( set -C; : > "$MAKA_RUN.lock" ) 2>/dev/null; then echo ALREADY; exit 0; fi
 if [ -e "$MAKA_RUN.cancel" ]; then echo CANCELLED; exit 0; fi
-rm -rf -- result.json result.read
+rm -rf -- handoff/result.json result.read
 cat > "$MAKA_RUN.sh"
 printf '%s' "$MAKA_RUN_TOKEN" > "$MAKA_RUN.token"
 setsid nohup bash "$MAKA_RUN.sh" > /dev/null 2>&1 < /dev/null &
@@ -270,14 +271,16 @@ echo DONE
 `;
 
 /**
- * Copies result.json into a private file, capped at 1 MiB + 1, refusing symlinks and anything
+ * Copies handoff/result.json into a private file, capped at 1 MiB + 1, refusing symlinks and anything
  * that is not a regular file. The open uses O_NOFOLLOW (dd iflag=nofollow), so a symlink swapped
  * in after the check still fails. Prints one of MISSING, SYMLINK, NOTFILE, UNREADABLE, or
  * `OK <bytes>`.
  */
 export const RESULT_STAGE_SCRIPT = `set -u
 cd "$MAKA_DIR" 2>/dev/null || { echo MISSING; exit 0; }
-f=result.json
+f=handoff/result.json
+# The agent writes inside handoff, not above it: the directory itself is the sandbox user's to trust.
+if [ -L handoff ] || [ ! -d handoff ]; then echo MISSING; exit 0; fi
 if [ -L "$f" ]; then echo SYMLINK; exit 0; fi
 if [ ! -e "$f" ]; then echo MISSING; exit 0; fi
 if [ ! -f "$f" ]; then echo NOTFILE; exit 0; fi

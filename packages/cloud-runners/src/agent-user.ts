@@ -46,16 +46,23 @@ export function asAgent(commandLine: string, channel: AgentChannel): string {
 }
 
 /**
- * Hands a task's directory to the agent's group: the workspace is shared (setgid, group-writable),
- * the task directory and the root can be entered by the group but not listed, and `chan` (made by
- * the channel scripts) stays private to the sandbox user. stdin-free; values come in as variables.
+ * Hands a task's directory to the agent's group: the workspace and `handoff` (the brief it reads,
+ * the result it writes) are shared (setgid, group-writable), the task directory and the root can
+ * be entered by the group but not listed, and `chan` (made by the channel scripts) stays private to
+ * the sandbox user. The agent reaches `handoff` by its path, and nothing else in the task directory.
+ * stdin-free; values come in as variables.
  */
 export const PREPARE_AGENT_SCRIPT = `set -eu
 cd "$MAKA_DIR"
 root=$(dirname "$MAKA_DIR")
-chgrp "$MAKA_AGENT_GROUP" "$root" . workspace
+mkdir -p handoff
+chgrp "$MAKA_AGENT_GROUP" "$root" . workspace handoff
 chmod 710 "$root" .
-chmod 2770 workspace
+chmod 2770 workspace handoff
+if [ -f handoff/brief.md ]; then
+  chgrp "$MAKA_AGENT_GROUP" handoff/brief.md
+  chmod 640 handoff/brief.md
+fi
 # The CLI's configuration directory (its transcripts): the agent writes it, the sandbox user puts a
 # kept conversation back into it.
 mkdir -p claude-config
@@ -65,8 +72,9 @@ chmod 2770 claude-config
 
 /**
  * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
- * sandbox user, cannot become root, cannot list, enter, read or write the channel directory, and
- * can write the workspace in a way the sandbox user can clean up. Prints `FACT <name>=<yes|no|...>`.
+ * sandbox user, cannot become root, cannot list, enter, read or write the channel directory or add
+ * files to the task directory, can read the brief and write the result in `handoff`, and can write
+ * the workspace, in ways the sandbox user can clean up. Prints `FACT <name>=<yes|no|...>`.
  */
 export const AGENT_PROBE_SCRIPT = `set -u
 umask 077
@@ -75,10 +83,12 @@ scratch=$(mktemp -d "$MAKA_ROOT/.probe.XXXXXX") || { echo "FACT scratch=no"; exi
 trap 'rm -rf "$scratch"' EXIT
 mkdir -m 700 "$scratch/chan"
 : > "$scratch/chan/probe.in"
-mkdir "$scratch/workspace"
-chgrp "$MAKA_AGENT_GROUP" "$MAKA_ROOT" "$scratch" "$scratch/workspace" 2>/dev/null || echo "FACT group=no"
+mkdir "$scratch/workspace" "$scratch/handoff"
+: > "$scratch/handoff/brief.md"
+chgrp "$MAKA_AGENT_GROUP" "$MAKA_ROOT" "$scratch" "$scratch/workspace" "$scratch/handoff" "$scratch/handoff/brief.md" 2>/dev/null || echo "FACT group=no"
 chmod 710 "$MAKA_ROOT" "$scratch"
-chmod 2770 "$scratch/workspace"
+chmod 2770 "$scratch/workspace" "$scratch/handoff"
+chmod 640 "$scratch/handoff/brief.md"
 as_agent() { sudo -n -u "$MAKA_AGENT_USER" --preserve-env -- "$@"; }
 yes_no() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 echo "FACT dev_uid=$(id -u)"
@@ -90,6 +100,10 @@ echo "FACT chan_read=$(yes_no as_agent cat "$scratch/chan/probe.in")"
 echo "FACT chan_write=$(yes_no as_agent sh -c ': >> "$1/probe.in"' sh "$scratch/chan")"
 echo "FACT chan_create=$(yes_no as_agent sh -c ': > "$1/forged"' sh "$scratch/chan")"
 echo "FACT task_list=$(yes_no as_agent ls "$scratch")"
+echo "FACT brief_read=$(yes_no as_agent cat "$scratch/handoff/brief.md")"
+echo "FACT result_write=$(yes_no as_agent sh -c 'umask 002; : > "$1/result.json"' sh "$scratch/handoff")"
+echo "FACT result_cleanup=$(yes_no rm "$scratch/handoff/result.json")"
+echo "FACT task_file_write=$(yes_no as_agent sh -c ': > "$1/brief.md.forged"' sh "$scratch")"
 echo "FACT workspace_write=$(yes_no as_agent sh -c 'umask 002; : > "$1/f"' sh "$scratch/workspace")"
 echo "FACT workspace_cleanup=$(yes_no rm "$scratch/workspace/f")"
 `;
@@ -121,6 +135,10 @@ export function agentIsolationProblems(output: string): string[] {
   mustBe('chan_write', 'no', 'the agent account can write the channel');
   mustBe('chan_create', 'no', 'the agent account can create files in the channel directory');
   mustBe('task_list', 'no', 'the agent account can list a task directory');
+  mustBe('brief_read', 'yes', 'the agent account cannot read the brief');
+  mustBe('result_write', 'yes', 'the agent account cannot write the result');
+  mustBe('result_cleanup', 'yes', 'the sandbox user cannot remove the result the agent wrote');
+  mustBe('task_file_write', 'no', 'the agent account can create files in the task directory');
   mustBe('workspace_write', 'yes', 'the agent account cannot write a workspace');
   mustBe('workspace_cleanup', 'yes', 'the sandbox user cannot remove what the agent wrote');
   return problems;
