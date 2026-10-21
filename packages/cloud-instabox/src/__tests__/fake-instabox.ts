@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   promises as fs,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -37,6 +38,9 @@ export type ExecAction =
   | { hold: Promise<void> };
 
 export interface FakeInstaboxOptions {
+  /** Where it listens. Default: 127.0.0.1 on a free port; the deploy rehearsal sets both. */
+  host?: string;
+  port?: number;
   apiKey?: string;
   machineId?: string;
   /** Replaces PATH for exec'd commands (the firewall stand-ins, when on, stay in front of it). */
@@ -94,6 +98,8 @@ export interface FakeFirewall {
   rules(tool: 'iptables' | 'ip6tables', chain: string): string[];
   /** Every call, as `tool args`. */
   calls(): string[];
+  /** Forgets every rule, as a box restored from a snapshot or resumed after a restart may have. */
+  reset(): void;
 }
 
 export interface FakeSnapshot {
@@ -134,6 +140,9 @@ export class FakeInstabox {
   readonly requests: RecordedRequest[] = [];
   readonly operations = new Map<string, Operation>();
   readonly spawnedPids: number[] = [];
+  /** Commands in flight, by pid, until their process has closed. */
+  private readonly running = new Map<number, Promise<void>>();
+  private closed = false;
   machineState = 'running';
   autoSuspendedAt: string | undefined;
   /** Polls an operation stays `running` before reaching its final state. */
@@ -161,6 +170,7 @@ export class FakeInstabox {
   private readonly execPath: string | undefined;
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
+  private readonly listenOn: { host: string; port: number };
   private readonly firewallDir: string | undefined;
   readonly firewall: FakeFirewall;
   private snapshotCount = 0;
@@ -173,6 +183,7 @@ export class FakeInstabox {
     this.execPath = options.execPath;
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
+    this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
     if ((options.firewall ?? 'shim') === 'shim') {
       this.firewallDir = mkdtempSync(join(tmpdir(), 'fake-instabox-fw-'));
       const bin = join(this.firewallDir, 'bin');
@@ -189,6 +200,10 @@ export class FakeInstabox {
     this.firewall = {
       rules: (tool, chain) => read(`${tool}.${chain}`).split('\n').filter(Boolean),
       calls: () => read('log').split('\n').filter(Boolean),
+      reset: () => {
+        if (!state) return;
+        for (const name of readdirSync(state)) if (name !== 'log') rmSync(join(state, name));
+      },
     };
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
@@ -199,14 +214,25 @@ export class FakeInstabox {
   }
 
   async start(): Promise<this> {
-    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) =>
+      this.server.listen(this.listenOn.port, this.listenOn.host, resolve),
+    );
     this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
     return this;
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    // A command still running would find its stand-in tools gone and reach the real ones on this
+    // machine's PATH, the real firewall among them: stop them all before the directory goes.
+    for (const pid of this.running.keys()) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {}
+    }
+    await Promise.all(this.running.values());
     if (this.firewallDir) rmSync(this.firewallDir, { recursive: true, force: true });
   }
 
@@ -519,25 +545,42 @@ export class FakeInstabox {
     timedOut: boolean;
     truncated: boolean;
   }> {
+    const env: Record<string, string | undefined> = {
+      PATH: this.execPath ?? process.env.PATH,
+      HOME: this.home,
+      ...this.baseEnv,
+      ...body.envs,
+    };
+    if (this.firewallDir) {
+      // In front of whatever PATH a test or a command sets, so no command here can reach the real
+      // firewall of the machine running the tests.
+      env.PATH = [join(this.firewallDir, 'bin'), env.PATH].filter(Boolean).join(':');
+      env.SHIM_STATE = join(this.firewallDir, 'state');
+    }
     return new Promise((resolve) => {
+      if (this.closed) {
+        resolve({ stdout: '', stderr: 'closed', exitCode: 1, timedOut: false, truncated: false });
+        return;
+      }
       const child = spawn(BASH, ['-c', body.cmd], {
         cwd: body.cwd ?? '/',
-        env: {
-          PATH: [
-            this.firewallDir && join(this.firewallDir, 'bin'),
-            this.execPath ?? process.env.PATH,
-          ]
-            .filter(Boolean)
-            .join(':'),
-          ...(this.firewallDir ? { SHIM_STATE: join(this.firewallDir, 'state') } : {}),
-          HOME: this.home,
-          ...this.baseEnv,
-          ...body.envs,
-        },
+        env,
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      if (child.pid) this.spawnedPids.push(child.pid);
+      if (child.pid) {
+        this.spawnedPids.push(child.pid);
+        const pid = child.pid;
+        this.running.set(
+          pid,
+          new Promise<void>((done) =>
+            child.once('close', () => {
+              this.running.delete(pid);
+              done();
+            }),
+          ),
+        );
+      }
       let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       let truncated = false;

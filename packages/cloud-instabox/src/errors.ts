@@ -53,3 +53,10 @@ export function isInstaboxEnvelope(value: unknown): value is { error: InstaboxEr
     typeof (error as { message?: unknown }).message === 'string'
   );
 }
+
+/** The account's sandbox limit (or credit) refused a create: `429 quota_exceeded`. */
+export function isQuotaExceeded(error: unknown): boolean {
+  return (
+    error instanceof InstaboxApiError && error.status === 429 && error.code === 'quota_exceeded'
+  );
+}

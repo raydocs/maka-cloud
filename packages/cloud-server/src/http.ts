@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import { MemoryError, type MemoryStore } from '@maka-cloud/memory';
+import { MODE_IDS } from '@maka-cloud/modes';
 import {
   KeyedCounter,
   MAX_STEER_CHARS,
@@ -173,6 +174,8 @@ const postMessage = z
   .object({
     text: z.string().min(1),
     clientMessageId: z.string().min(1).max(128).optional(),
+    /** The mode the user picked for this message (T25). */
+    mode: z.enum(MODE_IDS).optional(),
   })
   .strict();
 const taskMessage = z
@@ -562,6 +565,8 @@ export class PublicApi {
       conversationId,
       body.data.text,
       body.data.clientMessageId,
+      // Only the mode: `external` and `run` are for in-process callers and cannot come from here.
+      body.data.mode === undefined ? undefined : { external: false, mode: body.data.mode },
     );
     if (!result.found) throw new HttpError(404, 'not_found');
     respond(res, 202, { messageId: result.messageId });

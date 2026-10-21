@@ -113,7 +113,14 @@ export function lastUserText(request: ModelRequest): string {
   return last.content.map((block) => (typeof block.text === 'string' ? block.text : '')).join('\n');
 }
 
-export async function startFakeModel(): Promise<FakeModel> {
+export interface FakeModelListen {
+  /** Default 127.0.0.1; the deploy rehearsal listens on every interface. */
+  host?: string;
+  /** Default: a free port. */
+  port?: number;
+}
+
+export async function startFakeModel(listen: FakeModelListen = {}): Promise<FakeModel> {
   const requests: ModelRequest[] = [];
   const emittedThinking: EmittedThinking[] = [];
   const failures: unknown[] = [];
@@ -171,7 +178,9 @@ export async function startFakeModel(): Promise<FakeModel> {
       response.destroy(error instanceof Error ? error : new Error(String(error)));
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) =>
+    server.listen(listen.port ?? 0, listen.host ?? '127.0.0.1', resolve),
+  );
   const address = server.address();
   if (!address || typeof address !== 'object') throw new Error('fake model has no address');
   return {

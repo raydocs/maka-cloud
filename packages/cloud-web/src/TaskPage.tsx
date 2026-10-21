@@ -121,6 +121,10 @@ export function TaskPage({
   }, [client, task.taskId]);
 
   const manifest = task.manifest;
+  // The runner's own `review:` line says whether a second agent reviewed the change; it is shown
+  // on its own, in the runner's words, and left out of the plain list of what was done.
+  const reviewLine = manifest?.done.find((line) => line.startsWith('review: '));
+  const done = manifest?.done.filter((line) => line !== reviewLine) ?? [];
   const { steps } = stepsOf(task.progress);
   const pull = results?.find(
     (result): result is Extract<Loaded, { kind: 'link' }> =>
@@ -154,9 +158,15 @@ export function TaskPage({
           <h2>Outcome</h2>
           <p>{displayText(manifest.summary)}</p>
           <p className="muted">Confidence the agent reported: {manifest.confidence}</p>
-          <List title="Done" items={manifest.done} />
+          <List title="Done" items={done} />
           <List title="Not done" items={manifest.notDone} />
           <List title="Known issues" items={manifest.knownIssues} />
+        </section>
+      )}
+      {reviewLine !== undefined && (
+        <section aria-label="Independent review">
+          <h2>Independent review</h2>
+          <p>{displayText(reviewLine.slice('review: '.length))}</p>
         </section>
       )}
       {verdict && (

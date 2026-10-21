@@ -1,0 +1,50 @@
+# The go-live rehearsal (docs/fork/deploy.md, deploy/rehearsal/README.md): builds the images
+# from deploy/Dockerfile and brings the stack up under Compose behind Caddy, with Caddy's own
+# certificate authority on app.localhost, mcp.localhost and models.localhost, against stand-ins for
+# the model and the sandbox. No keys, no real model, no real sandbox, no outbound call but the
+# image builds' package downloads. Runs on every pull request and push to main, and once a day.
+name: Fork deploy rehearsal
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: fork-deploy-rehearsal-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the images and bring the stack up behind Caddy
+        run: |
+          export MAKA_REHEARSAL_DIR="$RUNNER_TEMP/rehearsal"
+          deploy/rehearsal/up.sh
+          echo "MAKA_REHEARSAL_DIR=$MAKA_REHEARSAL_DIR" >> "$GITHUB_ENV"
+
+      - name: Show the logs of the stack
+        if: failure()
+        run: |
+          export MAKA_CLOUD_ENV_FILE="${MAKA_REHEARSAL_DIR:-$RUNNER_TEMP/rehearsal}/server.env"
+          docker compose -f deploy/compose.yaml -f deploy/rehearsal/compose.yaml \
+            --env-file deploy/rehearsal/compose.env ps --all || true
+          docker compose -f deploy/compose.yaml -f deploy/rehearsal/compose.yaml \
+            --env-file deploy/rehearsal/compose.env logs --no-color --tail=200 || true
+
+      - name: Take the stack down
+        if: always()
+        run: deploy/rehearsal/down.sh || true

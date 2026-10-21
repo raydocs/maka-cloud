@@ -11,7 +11,7 @@ import {
   EGRESS_ICMPV6_ALLOWED,
   EgressGuardError,
 } from '../egress.js';
-import type { FakeInstaboxOptions } from './fake-instabox.js';
+import { type FakeInstaboxOptions, isAlive } from './fake-instabox.js';
 import { setup, type Harness } from './harness.js';
 
 /** procfs reports every file with size 0 and has content: what /proc/net/if_inet6 looks like. */
@@ -104,6 +104,32 @@ describe('applyEgressGuard', () => {
     await run();
     assert.deepEqual(v6(), []);
     assert.doesNotMatch(h.fake.firewall.calls().join('\n'), /ip6tables/u);
+  });
+
+  it('lets several callers guard one box at once, each reading back what it needs', async () => {
+    await make();
+    for (let round = 0; round < 5; round++) {
+      h.fake.firewall.reset();
+      await Promise.all([run(), run(), run(), run()]);
+      assert.equal(v4().filter((rule) => rule === replies).length, 1);
+    }
+  });
+
+  it('stops a command still running when the fake closes, before its stand-ins are removed', async () => {
+    await make();
+    const pending = h.client.exec(h.fake.machineId, { cmd: 'sleep 30' }).catch(() => undefined);
+    while (h.fake.spawnedPids.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const pid = h.fake.spawnedPids[0] as number;
+    assert.ok(isAlive(pid));
+    await h.fake.close();
+    assert.equal(isAlive(pid), false, 'a late command would reach the real firewall');
+    await pending;
+  });
+
+  it('keeps the stand-ins in front when a test sets its own PATH', async () => {
+    await make({ env: { PATH: '/usr/sbin:/usr/bin:/bin' } });
+    await run();
+    assert.ok(v4().length > 0, 'the rules went to the stand-in, not to the real firewall');
   });
 
   it('refuses when there is no firewall tool', async () => {

@@ -78,6 +78,7 @@ const textSourceExtensions = new Set([
   '.css',
   '.csv',
   '.diff',
+  '.env',
   '.html',
   '.js',
   '.json',

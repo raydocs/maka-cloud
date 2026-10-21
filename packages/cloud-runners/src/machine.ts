@@ -28,6 +28,12 @@ import {
 } from './scripts.js';
 import { assertSafeId } from './shell.js';
 
+/**
+ * Closes the box's network to its host's own addresses and says so only when the rules read back
+ * right. It rejects when it cannot, and the box is not used.
+ */
+export type EgressGuard = (signal?: AbortSignal) => Promise<void>;
+
 export const MAX_RESULT_BYTES = 1024 * 1024;
 export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
 const RESULT_CHUNK_BYTES = 256 * 1024;
@@ -73,7 +79,48 @@ export class RemoteMachine {
     readonly logRoot: string = DEFAULT_LOG_ROOT,
     /** The account the CLI runs as when it is not the sandbox user; its processes are stopped through sudo. */
     readonly agentUser?: string,
+    /** Run before any task code starts in the box; see `launch`. */
+    private readonly egress?: EgressGuard,
   ) {}
+
+  private guarding: Promise<void> | undefined;
+
+  /**
+   * The egress guard, checked right now. One check at a time: callers that arrive while it runs
+   * share it, and a later caller checks again, because a box that was restarted, restored or
+   * resumed may have lost its rules without anything telling us. A box that fails is refused.
+   */
+  private guardEgress(signal?: AbortSignal): Promise<void> {
+    if (!this.egress) {
+      return Promise.reject(new Error('this sandbox has no egress guard, so no task starts in it'));
+    }
+    const egress = this.egress;
+    this.guarding ??= (async () => {
+      try {
+        // No caller's signal: the check is shared and one caller giving up must not fail the rest.
+        try {
+          await egress();
+        } catch (error) {
+          if (!(error instanceof InstaboxApiError) || error.code !== 'machine_not_running') {
+            throw error;
+          }
+          // Asleep: wake it, and look again, because its rules may be gone.
+          await this.client.ensureRunning(this.machineId);
+          await egress();
+        }
+      } finally {
+        this.guarding = undefined;
+      }
+    })();
+    return signal
+      ? Promise.race([
+          this.guarding,
+          new Promise<never>((_, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+        ])
+      : this.guarding;
+  }
 
   /** Where the raw output of a task's runs lives while they run. */
   logDir(dirName: string): string {
@@ -173,6 +220,10 @@ export class RemoteMachine {
       MAKA_WORKDIR: input.workdir,
     };
     const options = { envs, ...(input.signal ? { signal: input.signal } : {}) };
+    // Every run, install and resume starts here, so this is where a box is refused: nothing the
+    // CLI or a package script does starts before the box's egress is closed and read back.
+    input.signal?.throwIfAborted();
+    await this.guardEgress(input.signal);
     for (let attempt = 0; ; attempt++) {
       try {
         const out = await this.execOk(LAUNCH_SCRIPT, { ...options, stdin: input.script });
