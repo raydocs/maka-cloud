@@ -1128,10 +1128,24 @@ test('a data directory whose server never wrote its caps down is not booked to',
 });
 
 const WEBHOOK_SECRET = 'a-webhook-secret-of-sufficient-length';
-const DUTY_ENV = {
-  MAKA_GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
-  MAKA_CLOUD_DUTY_REPOS: 'acme/widgets',
-};
+const DUTY_ENV = { MAKA_GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET };
+
+/**
+ * Makes the invite that owns acme/widgets (installation 7) before the stack starts, as the
+ * operator does, and ties the repository to it.
+ */
+function dutyOwner() {
+  const made: { token: string; inviteId: string } = { token: '', inviteId: '' };
+  const prepare = (dir: string) => {
+    const store = new InviteStore(join(dir, 'invites.db'));
+    const invite = store.create('owner');
+    store.close();
+    made.token = invite.token;
+    made.inviteId = invite.inviteId;
+    return { MAKA_CLOUD_DUTY_REPOS: `acme/widgets@7=${invite.inviteId}` };
+  };
+  return { made, prepare };
+}
 
 const signed = (event: string, payload: unknown, id: string, secret = WEBHOOK_SECRET) => {
   const body = JSON.stringify(payload);
@@ -1185,18 +1199,26 @@ test('without a webhook secret the stack has no duties, no webhook route and no 
 });
 
 test('a project is set up from a proposal the owner decides, and only then does a signed event start a tainted, limited run', async (t) => {
-  const { stack, dataDir } = await start(t, undefined, DUTY_ENV, true, {
-    dutyTickMs: 50,
-    dutyInspector: {
-      inspect: async () => ({
-        defaultBranch: 'main',
-        workflows: ['CI'],
-        openIssues: 4,
-        failedRunsLast30Days: 3,
-      }),
+  const own = dutyOwner();
+  const { stack, dataDir } = await start(
+    t,
+    undefined,
+    DUTY_ENV,
+    true,
+    {
+      dutyTickMs: 50,
+      dutyInspector: {
+        inspect: async () => ({
+          defaultBranch: 'main',
+          workflows: ['CI'],
+          openIssues: 4,
+          failedRunsLast30Days: 3,
+        }),
+      },
     },
-  });
-  const owner = stack.cloud.server.invites.create('owner');
+    own.prepare,
+  );
+  const owner = { token: own.made.token };
   const api = (path: string, init: RequestInit = {}) =>
     fetch(`${stack.cloud.server.url}${path}`, {
       ...init,
@@ -1231,6 +1253,22 @@ test('a project is set up from a proposal the owner decides, and only then does 
     }),
   });
   assert.equal(refused.status, 403);
+  // Nor can another invite claim the one the operator did name, or the owner under another
+  // installation.
+  const squatter = stack.cloud.server.invites.create('squatter');
+  const claim = (token: string, installationId: number) =>
+    fetch(`${stack.cloud.server.url}/v1/projects`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repo: 'acme/widgets',
+        installationId,
+        defaultBranch: 'main',
+        selfLogins: ['maka-bot'],
+      }),
+    });
+  assert.equal((await claim(squatter.token, 7)).status, 403);
+  assert.equal((await claim(owner.token, 8)).status, 403);
   const added = await api('/v1/projects', {
     method: 'POST',
     body: JSON.stringify({
@@ -1351,11 +1389,16 @@ test('a project is set up from a proposal the owner decides, and only then does 
 test('the backup of a stack with duties holds the projects and never the webhook secret', async (t) => {
   const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
   t.after(() => rm(backupDir, { recursive: true, force: true }));
-  const { stack, dataDir } = await start(t, undefined, {
-    ...DUTY_ENV,
-    MAKA_CLOUD_BACKUP_DIR: backupDir,
-  });
-  const invite = stack.cloud.server.invites.create('duties');
+  const own = dutyOwner();
+  const { stack, dataDir } = await start(
+    t,
+    undefined,
+    { ...DUTY_ENV, MAKA_CLOUD_BACKUP_DIR: backupDir },
+    true,
+    {},
+    own.prepare,
+  );
+  const invite = { token: own.made.token };
   const added = await fetch(`${stack.cloud.server.url}/v1/projects`, {
     method: 'POST',
     headers: { authorization: `Bearer ${invite.token}`, 'content-type': 'application/json' },

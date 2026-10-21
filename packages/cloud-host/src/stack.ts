@@ -205,7 +205,7 @@ export async function startStack(
         : createDuties({
             dbPath: config.dutiesDbPath,
             webhookSecret,
-            repos: config.dutyRepos,
+            links: config.dutyLinks,
             ...(dependencies.dutyInspector === undefined
               ? {}
               : { inspector: dependencies.dutyInspector }),
