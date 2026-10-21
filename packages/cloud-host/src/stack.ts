@@ -223,6 +223,11 @@ export async function startStack(
         return conversationId === undefined ? { inviteId } : { inviteId, conversationId };
       }),
       sessions: new JsonFileSessionStore(config.runnerSessionsPath),
+      // A page the agent fetched and got an answer for goes on its task's sources card. The server
+      // keeps only public https URLs, 20 a task, and only for a task that exists.
+      onOpenedPage: (taskId, url) => {
+        cloud?.server.recordOpenedPages(taskId, [{ url }]);
+      },
       sandboxTools: [
         await citeCheckSandboxTool(),
         ...(gateway.gateway.canSearch ? [await webSearchSandboxTool()] : []),

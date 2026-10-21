@@ -36,6 +36,10 @@ const MAX_QUOTED_CHARS = 300;
 /** Longest failure reason, and progress note, sent to the orchestrator. */
 const MAX_REASON_CHARS = 2_000;
 const MAX_NOTE_CHARS = 500;
+/** Pages one run may report as opened; the server keeps 20 a task anyway. */
+const MAX_OPENED_PER_RUN = 40;
+/** Progress notes that start with this are what the agent says it is doing (its in-progress todo item). */
+const STEP_PREFIX = 'step: ';
 
 class CancelledError extends Error {}
 
@@ -126,6 +130,7 @@ class Run implements RunHandle {
   /** How the run ended, reported once its model access has settled. */
   private terminal: RunnerEvent | undefined;
   private notes = 0;
+  private openedPages = 0;
   private lastNote = '';
   /** Dollars spent by the CLI invocations of this run that have ended. */
   private spentBefore = 0;
@@ -593,6 +598,8 @@ class Run implements RunHandle {
       for (const event of events) {
         if (event.kind === 'session') void this.rememberSession(event.id).catch(() => undefined);
         else if (event.kind === 'progress') this.progress(event.note);
+        else if (event.kind === 'step') this.progress(`${STEP_PREFIX}${event.text}`);
+        else if (event.kind === 'opened') this.opened(spec.taskId, event.url);
         // A metered access is the source of the run's spend; the CLI's own numbers are not.
         else if ((event.kind === 'usage' || event.kind === 'cost') && this.meteredUsd !== undefined)
           continue;
@@ -975,6 +982,16 @@ class Run implements RunHandle {
 
   private fail(reason: string): void {
     this.terminal ??= { type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) };
+  }
+
+  private opened(taskId: TaskId, url: string): void {
+    if (this.openedPages >= MAX_OPENED_PER_RUN) return;
+    this.openedPages += 1;
+    try {
+      this.fleet.options.onOpenedPage?.(taskId, url);
+    } catch {
+      // A page that cannot be recorded is a card that is not shown; the run goes on.
+    }
   }
 
   private progress(note: string): void {

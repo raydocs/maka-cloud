@@ -1422,3 +1422,23 @@ test('the backup of a stack with duties holds the projects and never the webhook
   assert.equal(copy.prepare('SELECT count(*) AS n FROM projects').get()?.n, 1);
   copy.close();
 });
+
+test('a page the agent fetched goes to the server’s sources of that task, and an early or failing call is harmless', async (t) => {
+  const { stack, options } = await start(t);
+  const recorded: Array<[string, readonly { url: string }[]]> = [];
+  const server = stack.cloud.server;
+  const original = server.recordOpenedPages;
+  server.recordOpenedPages = (taskId, pages) => {
+    recorded.push([taskId, pages]);
+    return pages.length;
+  };
+  t.after(() => {
+    server.recordOpenedPages = original;
+  });
+  assert.ok(options.onOpenedPage);
+  options.onOpenedPage('tsk_a', 'https://docs.example/a');
+  assert.deepEqual(recorded, [['tsk_a', [{ url: 'https://docs.example/a' }]]]);
+  // A task the server does not know keeps nothing, and says so by recording zero.
+  server.recordOpenedPages = original;
+  assert.doesNotThrow(() => options.onOpenedPage?.('tsk_unknown', 'https://docs.example/b'));
+});

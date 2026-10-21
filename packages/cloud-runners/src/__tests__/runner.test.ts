@@ -171,3 +171,42 @@ test('login selectors set in the sandbox profile are removed before the CLI runs
   assert.ok(!env.includes('ANTHROPIC_AUTH_TOKEN'));
   assert.match(env, /^ANTHROPIC_API_KEY=/m);
 });
+
+for (const vendor of ['claude', 'codex'] as const) {
+  test(`${vendor} runner: the todo in progress becomes the step line and no model is asked`, async (t) => {
+    const opened: Array<[string, string]> = [];
+    const h = await setup({ cloud: { onOpenedPage: (taskId, url) => opened.push([taskId, url]) } });
+    t.after(() => h.cleanup());
+    await h.setMode('todos');
+    const events = await collect(
+      await h.runners[vendor].start(await h.spec(`tsk_${vendor}_todos`)),
+    );
+    assert.equal(terminal(events)?.type, 'finished');
+    const steps = notes(events).filter((note) => note.startsWith('step: '));
+    assert.deepEqual(
+      steps,
+      vendor === 'claude'
+        ? ['step: Fixing the login loop']
+        : ['step: Fix the login loop', 'step: Run the tests'],
+    );
+    // Only the page whose fetch was answered is reported; the failed and the unanswered are not.
+    assert.deepEqual(
+      opened,
+      vendor === 'claude' ? [[`tsk_${vendor}_todos`, 'https://docs.example/login']] : [],
+    );
+  });
+}
+
+test('a callback that throws does not stop the run', async (t) => {
+  const h = await setup({
+    cloud: {
+      onOpenedPage: () => {
+        throw new Error('the server is shutting down');
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  await h.setMode('todos');
+  const events = await collect(await h.runners.claude.start(await h.spec('tsk_throwing')));
+  assert.equal(terminal(events)?.type, 'finished');
+});

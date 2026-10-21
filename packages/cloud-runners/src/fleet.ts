@@ -96,6 +96,11 @@ export interface CloudRunnersOptions {
   cleanupTimeoutMs?: number;
   /** How long a stopped run's processes get to exit on TERM before they are killed. Default 3 s. */
   stopGraceMs?: number;
+  /**
+   * A page the agent fetched and got an answer for (T24 sources card). Only pages the CLI's own
+   * tool reported as fetched come here, never a URL in the agent's text. A throw is ignored.
+   */
+  onOpenedPage?(taskId: TaskId, url: string): void;
   /** A cleanup step that failed or timed out. Cleanup goes on; this is how it is seen. */
   onCleanupError?(failure: { taskId: TaskId; step: string; error: unknown }): void;
   now?: () => number;
