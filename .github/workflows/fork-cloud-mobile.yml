@@ -13,6 +13,7 @@ on:
     paths:
       - 'packages/cloud-mobile/**'
       - 'packages/cloud-client/**'
+      - 'packages/cloud-design/**'
       - '.github/workflows/fork-cloud-mobile.yml'
   push:
     branches: [main]
