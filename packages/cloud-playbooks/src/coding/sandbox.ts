@@ -56,7 +56,7 @@ export class FleetCodingSandbox implements CodingSandbox {
     return {
       dir: machine.taskDir(taskId),
       exec: async (script, options = {}) => {
-        const result = await machine.exec(script, options);
+        const result = await machine.exec(script, { ...options, taskCode: true });
         return {
           stdout: result.stdout,
           stderr: result.stderr,
