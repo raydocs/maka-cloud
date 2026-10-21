@@ -416,3 +416,29 @@ test('startedConversation finds the conversation a key made for its owner, and n
   );
   assert.equal(h.server.startedConversation({ owner: h.inviteId, key: 'run_10' }), undefined);
 });
+
+test('a conversation made for a key but never posted to is not a started one, until its first message is stored', async (t) => {
+  const h = await startHarness(t, { handler: { onUserMessage: () => undefined } });
+  const meta = {
+    external: false,
+    run: { dutyId: 'dty_1', authority: 'read-only' as const, budgetUsd: 1 },
+  };
+  // A start is two commits: the conversation, then its first message. A crash between them
+  // leaves the first alone, which is what an empty conversation under the key looks like.
+  const made = h.server.createConversation({ owner: h.inviteId, key: 'run_7', title: 'a run' });
+  assert.ok(made.ok);
+  assert.equal(h.server.startedConversation({ owner: h.inviteId, key: 'run_7' }), undefined);
+
+  // The retry finds that conversation, posts the message once, and now the start is real.
+  const started = h.server.startConversation({
+    owner: h.inviteId,
+    key: 'run_7',
+    text: 'go',
+    meta,
+  });
+  assert.ok(started.ok);
+  assert.equal(started.ok && started.conversationId, made.ok && made.conversationId);
+  assert.deepEqual(h.server.startedConversation({ owner: h.inviteId, key: 'run_7' }), {
+    conversationId: made.ok ? made.conversationId : '',
+  });
+});
