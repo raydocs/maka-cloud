@@ -86,8 +86,9 @@ If `recover` throws or its run reports it cannot resume (no recorded session), t
 
 With `CloudRunnersOptions.agentSdk` set (`loadAgentSdk()` loads the installed package), the Claude
 runner drives its CLI through the Claude Agent SDK instead of running `claude -p` on its own.
-Without it nothing changes; the host passes it (with the agent account and the transcript store)
-only when `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` are set. The Codex runner is untouched.
+Without it the Claude runner runs `claude -p` on its own; the host passes it (with the transcript store)
+only when `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` are set. Every CLI, the Codex one
+included, runs as that account; with none configured no CLI is started.
 
 **Why.** The SDK gives the host two things the plain CLI cannot: hooks that call back into the host
 before and after every tool (the step log of section 1 needs exactly that), and, in piece 4, a

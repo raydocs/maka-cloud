@@ -541,7 +541,7 @@ test('"modes" prints the modes in force as JSON that MAKA_CLOUD_MODES accepts', 
   );
 });
 
-test('Claude runs through the Agent SDK only when its account and group are both set, and as plain names', () => {
+test('the CLIs run as an agent account, and Claude through the Agent SDK, only when its account and group are both set, and as plain names', () => {
   assert.equal(readStackConfig(ENV).agentChannel, undefined);
   assert.deepEqual(
     readStackConfig({ ...ENV, MAKA_CLOUD_AGENT_USER: 'maka-agent', MAKA_CLOUD_AGENT_GROUP: 'maka' })
@@ -562,7 +562,7 @@ test('Claude runs through the Agent SDK only when its account and group are both
     );
   }
   assert.ok(ENV_VARIABLES.some(([name]) => name === 'MAKA_CLOUD_AGENT_USER'));
-  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /Claude runs: +directly/u);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /CLIs run as: +nothing/u);
 });
 
 test('the limits of one task default to no turn limit and 4 hours, and take only plain positive numbers', () => {

@@ -90,8 +90,19 @@ server's real sandbox and model code runs against them:
 Nothing in the rehearsal calls a real model, sandbox, GitHub or push service, and nothing in it is a
 secret: the keys are fake and the token belongs to a database that `down.sh` deletes.
 
-## When the server runs the real Agent SDK path
+## The agent account
 
-The server starts `claude -p` today. When `createCloudRunnersFromEnv` wires the Agent SDK channel, the
-scripted `claude` has to speak its stream-json protocol (`SDK_CLI` in the runners' tests does); the
-rehearsal then fails at its first task until `stubs.mjs` installs that one. That is what it is for.
+Every CLI runs as an account that is not the sandbox user (`MAKA_CLOUD_AGENT_USER`, `_GROUP`), and
+the server checks the box for that account before its first run. The stand-in sandbox is one
+container with one user, so it has no such account: a task fails at once with "needs an agent
+channel", and the steps that run a task (`task`, `approval`, `restart`, `restart-reply`,
+`backup-restore`) are marked as expected failures in the workflow (`MAKA_REHEARSAL_XFAIL`;
+`restart-reply?` depends on `restart` and may pass).
+
+What takes them off the list, all of it in this directory:
+
+- the stubs container gets a real second account without sudo, a group shared with the sandbox user
+  and passwordless `sudo -n` for the sandbox user (the box image's job on a real host);
+- `server.env` sets `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP`, which also turns the
+  Agent SDK path on, so the scripted `claude` has to speak its stream-json protocol (`SDK_CLI` in
+  the runners' tests does) and the control API's `waitinit` and `release` have to work with it.
