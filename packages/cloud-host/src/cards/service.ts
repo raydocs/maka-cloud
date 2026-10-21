@@ -8,11 +8,13 @@ import {
   type ScanResult,
 } from '@maka-cloud/duties';
 import type { CloudServer } from '@maka-cloud/server';
-import type {
-  SuggestionCard,
-  SuggestionChoice,
-  SuggestionCheck,
-  SuggestionOutcome,
+import {
+  offerRef,
+  type SuggestionCard,
+  type SuggestionChoice,
+  type SuggestionCheck,
+  type SuggestionOfferChoice,
+  type SuggestionOutcome,
 } from '@maka-cloud/supervisor';
 
 /** The most a task started from a card may spend unless the operator sets another cap, in dollars. */
@@ -34,6 +36,8 @@ export interface CardsParts {
   server: Pick<CloudServer, 'startConversation' | 'createConversation'>;
   /** The supervisor's way to show a card. False when it cannot be shown. */
   raiseSuggestion(choice: SuggestionChoice): boolean;
+  /** The supervisor's way to offer turning a kind off. False when it cannot be shown. */
+  raiseOffer(offer: SuggestionOfferChoice): boolean;
   /** Takes down the item of a suggestion that ended without an answer. */
   closeSuggestion(lineage: string): boolean;
 }
@@ -81,7 +85,11 @@ export class CardsService {
       signal: AbortSignal,
     ): Promise<SuggestionCheck> => this.verify(request, signal),
     decide: (
-      decision: { cardId: string; action: 'accept' | 'dismiss'; caller?: string },
+      decision: {
+        cardId: string;
+        action: 'accept' | 'dismiss' | 'turn_off' | 'keep';
+        caller?: string;
+      },
       _signal: AbortSignal,
     ): Promise<SuggestionOutcome> => this.decide(decision),
   };
@@ -111,12 +119,15 @@ export class CardsService {
 
   async decide(decision: {
     cardId: string;
-    action: 'accept' | 'dismiss';
+    action: 'accept' | 'dismiss' | 'turn_off' | 'keep';
     caller?: string;
   }): Promise<SuggestionOutcome> {
     const { caller } = decision;
     if (caller === undefined) return { accepted: false, reason: 'forbidden' };
     const cards = this.options.engine.cards;
+    if (decision.action === 'turn_off' || decision.action === 'keep') {
+      return this.answerOffer(caller, decision.cardId, decision.action);
+    }
     if (decision.action === 'dismiss') {
       const dismissed = cards.dismiss(caller, decision.cardId);
       return dismissed.ok
@@ -131,6 +142,23 @@ export class CardsService {
     const started = this.startTask(accepted.card);
     if (started === 'forbidden') return { accepted: false, reason: 'forbidden' };
     return { accepted: true, duplicate: accepted.duplicate };
+  }
+
+  /** The answer to the offer to turn a kind off. The reference names a project and a kind, never a card. */
+  private answerOffer(caller: string, ref: string, action: 'turn_off' | 'keep'): SuggestionOutcome {
+    const match = /^offer:([^:]+):([a-z_]+)$/u.exec(ref);
+    if (!match || ref !== offerRef(match[1] as string, match[2] as string)) {
+      return { accepted: false, reason: 'not_found' };
+    }
+    const answered = this.options.engine.cards.answerOffer(
+      caller,
+      match[1] as string,
+      match[2],
+      action === 'turn_off' ? 'off' : 'keep',
+    );
+    return answered.ok
+      ? { accepted: true, duplicate: answered.duplicate }
+      : { accepted: false, reason: answered.reason };
   }
 
   /**
@@ -213,6 +241,7 @@ export class CardsService {
       }
       return result;
     }
+    this.raiseOffers(owner, projectId, project.repo, place.conversationId, parts);
     for (const card of this.options.engine.cards.list(owner, projectId, ['open'])) {
       const shown = parts.raiseSuggestion({
         ...this.suggestionOf(owner, card),
@@ -221,6 +250,34 @@ export class CardsService {
       if (!shown) this.options.onWarning?.('A suggestion could not be shown');
     }
     return result;
+  }
+
+  /**
+   * Offers to turn off each kind whose cards went unanswered several times in a row. A kind is
+   * taken once, and every kind still waiting for an answer is raised again each scan (the item is
+   * one per project and kind), so an offer the supervisor could not take is not lost.
+   */
+  private raiseOffers(
+    owner: string,
+    projectId: string,
+    repo: string,
+    conversationId: string,
+    parts: CardsParts,
+  ): void {
+    const cards = this.options.engine.cards;
+    cards.takeOffers(owner, projectId);
+    for (const stat of cards.stats(owner, projectId)) {
+      if (stat.offer !== 'offered' || !stat.enabled) continue;
+      const shown = parts.raiseOffer({
+        conversationId,
+        projectId,
+        kind: stat.kind,
+        label: KIND_SPECS[stat.kind].label,
+        repo,
+        ignored: stat.ignoredInARow,
+      });
+      if (!shown) this.options.onWarning?.('An offer to turn a suggestion off could not be shown');
+    }
   }
 
   private suggestionOf(owner: string, card: Card): SuggestionCard {

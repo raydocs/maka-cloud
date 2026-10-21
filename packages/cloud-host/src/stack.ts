@@ -152,6 +152,7 @@ export async function startStack(
         backupTo(destination: string): Promise<void>;
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
         raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
+        raiseSuggestionOffer(input: Parameters<Supervisor['raiseSuggestionOffer']>[0]): boolean;
         closeSuggestion(lineage: string): boolean;
       }
     | undefined;
@@ -241,6 +242,7 @@ export async function startStack(
             dbPath: config.dutiesDbPath,
             webhookSecret,
             links: config.dutyLinks,
+            cards: config.cardsSet,
             ...(dependencies.dutyInspector === undefined
               ? {}
               : { inspector: dependencies.dutyInspector }),
@@ -408,6 +410,7 @@ export async function startStack(
       server: cloud.server,
       runsOf,
       raiseSuggestion: (input) => supervisorRef?.raiseSuggestion(input) ?? false,
+      raiseOffer: (input) => supervisorRef?.raiseSuggestionOffer(input) ?? false,
       closeSuggestion: (lineage) => supervisorRef?.closeSuggestion(lineage) ?? false,
     });
   } catch (error) {

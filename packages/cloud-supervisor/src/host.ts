@@ -129,7 +129,12 @@ export interface SupervisorHost {
       signal: AbortSignal,
     ): Promise<SuggestionCheck>;
     decide(
-      decision: { cardId: string; action: 'accept' | 'dismiss'; caller?: string },
+      decision: {
+        /** A card's id, or `offerRef` for the answer to an offer to turn a kind off. */
+        cardId: string;
+        action: 'accept' | 'dismiss' | 'turn_off' | 'keep';
+        caller?: string;
+      },
       signal: AbortSignal,
     ): Promise<SuggestionOutcome>;
   };
