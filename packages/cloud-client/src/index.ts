@@ -12,6 +12,7 @@ export * from './inbox';
 export * from './presentation';
 export * from './sources';
 export * from './suggestions';
+export * from './brand';
 export * from './starter';
 export * from './state';
 export * from './store';

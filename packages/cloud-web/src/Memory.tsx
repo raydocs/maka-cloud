@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
-import { type CloudClient, displayText, type MemoryProfile } from '@maka-cloud/client';
+import { BRAND, type CloudClient, displayText, type MemoryProfile } from '@maka-cloud/client';
 
 /** The invite's profile, not the selected conversation's. Unmounted on disconnect. */
 export function MemoryPanel({
@@ -44,7 +44,7 @@ export function MemoryPanel({
     >
       <summary>
         <span>Memory</span>
-        <span className="muted">What Maka remembers about you</span>
+        <span className="muted">What {BRAND.name} remembers about you</span>
       </summary>
       <section aria-label="Your memory" className="memory-content">
         <h2>Your saved facts</h2>

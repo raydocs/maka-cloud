@@ -1,4 +1,5 @@
 import {
+  BRAND,
   ConversationFeed,
   type TaskView,
   conversationSummary,
@@ -170,7 +171,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             ]}
           >
             <T kind="small">
-              {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : 'Maka'}
+              {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}
             </T>
             <T kind="body" selectable>
               {displayText(message.text)}

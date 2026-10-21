@@ -6,6 +6,7 @@ import {
   ApiError,
   type ArtifactContent,
   type ArtifactListing,
+  BRAND,
   CloudClient,
   type Conversation,
   ConversationFeed,
@@ -379,7 +380,7 @@ export function ConversationView({
           {state.messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
               <span className="message-author">
-                {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : 'Maka'}
+                {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}
               </span>
               <p>{displayText(message.text)}</p>
             </article>
@@ -668,7 +669,7 @@ export function Shell({
     <div className="shell">
       <header className="shell-top">
         <a className="brand" href="/">
-          maka
+          {BRAND.wordmark}
         </a>
         <nav className="seg" aria-label="Sections">
           {VIEWS.map((item) => (
@@ -814,7 +815,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     </Shell>
   ) : (
     <main className="welcome">
-      <span className="brand">maka</span>
+      <span className="brand">{BRAND.wordmark}</span>
       <h1>
         Your next big thing,
         <br />
