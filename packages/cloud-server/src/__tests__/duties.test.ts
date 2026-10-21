@@ -264,6 +264,42 @@ test('starting a conversation for a duty carries the taint and the run limits to
   assert.equal(list.conversations.length, 1);
 });
 
+test('a run started by the system carries the mode its limits name, and a mode that is not one is refused', async (t) => {
+  const seen: Array<{ run?: unknown; mode?: unknown }> = [];
+  const handler: ConversationHandler = {
+    onUserMessage: (message) => {
+      seen.push(message);
+    },
+  };
+  const h = await startHarness(t, { handler });
+  const run = {
+    dutyId: 'card:card_1',
+    authority: 'open-pr' as const,
+    budgetUsd: 2,
+    mode: 'quick' as const,
+  };
+  assert.ok(
+    h.server.startConversation({
+      owner: h.inviteId,
+      key: 'card_1',
+      text: 'Rebase',
+      meta: { external: true, run },
+    }).ok,
+  );
+  await eventually(() => seen.length === 1, 'delivery');
+  assert.deepEqual(seen[0]?.run, run);
+  assert.equal(seen[0]?.mode, undefined, 'the user’s pick is a separate field');
+  assert.deepEqual(
+    h.server.startConversation({
+      owner: h.inviteId,
+      key: 'card_2',
+      text: 'x',
+      meta: { external: true, run: { ...run, mode: 'turbo' as never } },
+    }),
+    { ok: false, reason: 'invalid' },
+  );
+});
+
 test('a public post cannot carry meta, and an ordinary post carries none', async (t) => {
   const seen: Array<Record<string, unknown>> = [];
   const handler: ConversationHandler = {

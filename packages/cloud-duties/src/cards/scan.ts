@@ -1,7 +1,7 @@
 import type { DutyEngine } from '../engine.js';
-import { buildCandidates, capPerKind, type OwnResult } from './candidates.js';
+import { buildCandidates, type Candidate, capPerKind, type OwnResult } from './candidates.js';
 import { type CardKind, defaultEnabledKinds } from './kinds.js';
-import type { SignalReader } from './signals.js';
+import type { RepoSignals, SignalReader } from './signals.js';
 import type { Card } from './store.js';
 
 /**
@@ -61,6 +61,13 @@ export interface ScanOutcome {
   ranked: 'model' | 'fixed';
 }
 
+/** Whether a card still describes its project, read fresh. */
+export type VerifyResult =
+  | { ok: true; state: 'fresh'; card: Card }
+  | { ok: true; state: 'refreshed'; card: Card }
+  | { ok: true; state: 'gone'; card: Card }
+  | { ok: false; reason: 'not_found' | 'closed' | 'read_failed' | 'aborted' };
+
 export type ScanResult =
   | { ok: true; outcome: ScanOutcome }
   | { ok: false; reason: 'not_found' | 'read_failed' | 'aborted' };
@@ -96,6 +103,131 @@ export class CardScanner {
     return this.inFlight.size;
   }
 
+  /**
+   * Reads the project again and says whether a card still describes it, for the moment a tap is
+   * about to act on it. A card whose state moved is replaced by a fresh one (the old one ends
+   * `stale`); one whose work is gone is taken down. A replaced card answers with the card that
+   * replaced it. Nothing is started and nothing is written to GitHub.
+   */
+  async verify(owner: string, cardId: string, outer?: AbortSignal): Promise<VerifyResult> {
+    const cards = this.engine.cards;
+    const card = cards.get(owner, cardId);
+    if (!card) return { ok: false, reason: 'not_found' };
+    const project = this.engine.project(owner, card.projectId);
+    if (!project) return { ok: false, reason: 'not_found' };
+    if (card.state === 'accepted' || card.state === 'dismissed') {
+      return { ok: false, reason: 'closed' };
+    }
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), this.options.timeoutMs ?? 120_000);
+    const onOuter = () => abort.abort();
+    if (outer?.aborted) abort.abort();
+    outer?.addEventListener('abort', onOuter, { once: true });
+    try {
+      const signals = await untilAborted(
+        this.options.reader.read(
+          {
+            repo: project.repo,
+            defaultBranch: project.defaultBranch,
+            selfLogins: project.selfLogins,
+          },
+          abort.signal,
+        ),
+        abort.signal,
+      ).catch((error: unknown) => {
+        if (!abort.signal.aborted) {
+          this.options.onWarning?.('A card could not be checked against the project', error);
+        }
+        return undefined;
+      });
+      if (abort.signal.aborted) return { ok: false, reason: 'aborted' };
+      if (!signals) return { ok: false, reason: 'read_failed' };
+      const all = this.candidatesFor(owner, project, signals);
+      // The card as the store has it now: another check may have replaced it while this one read.
+      const now = cards.get(owner, cardId);
+      if (!now) return { ok: false, reason: 'not_found' };
+      const open =
+        now.state === 'open'
+          ? now
+          : now.state === 'stale'
+            ? cards
+                .list(owner, card.projectId, ['open'])
+                .find((c) => c.kind === now.kind && c.subjectKey === now.subjectKey)
+            : undefined;
+      if (!open) {
+        return now.state === 'stale'
+          ? { ok: true, state: 'gone', card: now }
+          : { ok: false, reason: 'closed' };
+      }
+      const verdict = this.reconcile(owner, open, all);
+      if (verdict.state === 'refreshed') {
+        return { ok: true, state: 'refreshed', card: verdict.card };
+      }
+      if (verdict.state === 'gone') return { ok: true, state: 'gone', card: verdict.card };
+      // Kept as it is; or replaced by someone else's check an instant ago, which is the card to use.
+      if (open.cardId !== cardId) return { ok: true, state: 'refreshed', card: open };
+      return { ok: true, state: 'fresh', card: open };
+    } finally {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', onOuter);
+    }
+  }
+
+  /** The candidates of a project for these signals, under the owner's switches. */
+  private candidatesFor(
+    owner: string,
+    project: NonNullable<ReturnType<DutyEngine['project']>>,
+    signals: RepoSignals,
+  ): Candidate[] {
+    let ownResults: readonly OwnResult[] = [];
+    try {
+      ownResults = this.options.ownResults?.(project.projectId) ?? [];
+    } catch (error) {
+      this.options.onWarning?.('A scan could not read the finished tasks', error);
+    }
+    const switchedOff = new Set(
+      this.engine.cards
+        .stats(owner, project.projectId)
+        .filter((kind) => !kind.enabled)
+        .map((kind) => kind.kind),
+    );
+    const enabled = new Set<CardKind>(
+      [...defaultEnabledKinds()].filter((kind) => !switchedOff.has(kind)),
+    );
+    return buildCandidates({
+      repo: project.repo,
+      defaultBranch: project.defaultBranch,
+      signals,
+      ownResults,
+      issueDutyActive: project.duties.some(
+        (duty) => duty.state === 'active' && duty.trigger.kind === 'issue_opened',
+      ),
+      enabled,
+    });
+  }
+
+  /** Keeps an open card, replaces it with a fresh one, or takes it down, by what the candidates say now. */
+  private reconcile(
+    owner: string,
+    open: Card,
+    all: readonly Candidate[],
+  ):
+    | { state: 'kept' }
+    | { state: 'refreshed'; card: Card }
+    | { state: 'gone'; card: Card; retired: boolean } {
+    const cards = this.engine.cards;
+    const now = all.find((c) => c.card.kind === open.kind && c.card.subjectKey === open.subjectKey);
+    if (!now) {
+      const retired = cards.retire(owner, open.cardId);
+      return retired.ok
+        ? { state: 'gone', card: retired.card, retired: !retired.duplicate }
+        : { state: 'gone', card: open, retired: false };
+    }
+    if (now.card.preconditionHash === open.preconditionHash) return { state: 'kept' };
+    const fresh = cards.refresh(owner, open.cardId, now.card);
+    return fresh.ok ? { state: 'refreshed', card: fresh.card } : { state: 'kept' };
+  }
+
   private async run(owner: string, projectId: string, outer?: AbortSignal): Promise<ScanResult> {
     const project = this.engine.project(owner, projectId);
     if (!project) return { ok: false, reason: 'not_found' };
@@ -124,31 +256,7 @@ export class CardScanner {
       if (abort.signal.aborted) return { ok: false, reason: 'aborted' };
       if (!signals) return { ok: false, reason: 'read_failed' };
 
-      let ownResults: readonly OwnResult[] = [];
-      try {
-        ownResults = this.options.ownResults?.(projectId) ?? [];
-      } catch (error) {
-        this.options.onWarning?.('A scan could not read the finished tasks', error);
-      }
-      const switchedOff = new Set(
-        cards
-          .stats(owner, projectId)
-          .filter((kind) => !kind.enabled)
-          .map((kind) => kind.kind),
-      );
-      const enabled = new Set<CardKind>(
-        [...defaultEnabledKinds()].filter((kind) => !switchedOff.has(kind)),
-      );
-      const all = buildCandidates({
-        repo: project.repo,
-        defaultBranch: project.defaultBranch,
-        signals,
-        ownResults,
-        issueDutyActive: project.duties.some(
-          (duty) => duty.state === 'active' && duty.trigger.kind === 'issue_opened',
-        ),
-        enabled,
-      });
+      const all = this.candidatesFor(owner, project, signals);
 
       const outcome: ScanOutcome = {
         created: [],
@@ -161,16 +269,11 @@ export class CardScanner {
 
       // Cards already open: keep, bring up to date, or take down. The whole candidate list is the
       // truth here, not the capped one, so a card is not taken down only because newer work came.
-      const byKey = new Map(all.map((c) => [`${c.card.kind}\u0000${c.card.subjectKey}`, c]));
       for (const open of cards.list(owner, projectId, ['open'])) {
-        const now = byKey.get(`${open.kind}\u0000${open.subjectKey}`);
-        if (!now) {
-          const retired = cards.retire(owner, open.cardId);
-          if (retired.ok && !retired.duplicate) outcome.retired.push(retired.card);
-        } else if (now.card.preconditionHash !== open.preconditionHash) {
-          const fresh = cards.refresh(owner, open.cardId, now.card);
-          if (fresh.ok) outcome.refreshed.push({ old: open, card: fresh.card });
-        }
+        const verdict = this.reconcile(owner, open, all);
+        if (verdict.state === 'refreshed')
+          outcome.refreshed.push({ old: open, card: verdict.card });
+        if (verdict.state === 'gone' && verdict.retired) outcome.retired.push(verdict.card);
       }
 
       // New cards, in ranked order, until the store says the day is full.
