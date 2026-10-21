@@ -293,6 +293,7 @@ export async function startStack(
           gateway: conductorGateway(gateway.gateway, ownerOfSession),
         },
         playbooks: STACK_PLAYBOOKS,
+        modes: config.modes,
         tools: [pullRequests],
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.

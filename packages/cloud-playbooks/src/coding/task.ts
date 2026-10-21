@@ -1,4 +1,3 @@
-import { MODE_IDS } from '@maka-cloud/modes';
 import { z } from 'zod';
 
 export const VENDORS = ['claude-agent-sdk', 'codex'] as const;
@@ -24,8 +23,6 @@ export const CodingTaskSchema = z
     goal: z.string().trim().min(1).max(4_000),
     /** The vendor that tries first; the other one gets the task once if it fails. */
     runner: z.enum(VENDORS).optional(),
-    /** The mode the task runs in; absent: `standard`. Set by code from the run's mode, never by the model alone. */
-    mode: z.enum(MODE_IDS).optional(),
   })
   .strict();
 

@@ -219,7 +219,8 @@ export interface Harness {
   leases: { acquired: number; released: number };
   /** Resolves after the next workspace sample finishes. */
   nextSample(): Promise<void>;
-  spec(taskId: string, block?: Record<string, unknown> | string): Promise<RunSpec>;
+  /** `lead` is written before the brief, as the conductor's code writes the `maka-mode:` line. */
+  spec(taskId: string, block?: Record<string, unknown> | string, lead?: string): Promise<RunSpec>;
   makeRunner(overrides?: Partial<CodingRunnerOptions>): CodingRunner;
 }
 
@@ -352,7 +353,7 @@ export async function setup(
       ...overrides,
     });
   h.runner = h.makeRunner();
-  h.spec = async (taskId, block) => {
+  h.spec = async (taskId, block, lead = '') => {
     const dir = join(handoff, taskId);
     await fs.mkdir(dir, { recursive: true });
     const json =
@@ -367,7 +368,7 @@ export async function setup(
           });
     await fs.writeFile(
       join(dir, 'brief.md'),
-      `# Fix add\n\nPlan: write a failing test, fix lib/add.sh.\n\n\`\`\`coding-task\n${json}\n\`\`\`\n`,
+      `${lead}# Fix add\n\nPlan: write a failing test, fix lib/add.sh.\n\n\`\`\`coding-task\n${json}\n\`\`\`\n`,
     );
     return {
       taskId,

@@ -463,6 +463,18 @@ CLI's own default model, which the gateway cannot price, so a Codex run (and wit
 it the review of a Claude change) is refused: `maka-cloud check` says how many
 roles are in that state.
 
+How a mode is chosen: a mode the user picks for a message that starts a run is that
+run's mode, and the run starts with that mode's default budget; the conductor cannot
+choose another. Without a pick, the conductor may name a mode for each delegation
+(`workMode`), and the run's budget decides whether it is affordable (never `deep`
+by itself). The mode's own cap on one delegation holds either way. The mode reaches
+the runner as one `maka-mode:` line the conductor's code adds to the brief, right
+after any `maka-inputs:` and `maka-artifacts:` lines; a brief the model wrote with
+such a line in it is refused. The conductor keeps one model for a conversation, so
+a mode sets how hard it thinks, not which model it is; its own thinking effort is
+fixed when the conversation's first run opens its session, and its planner's effort
+follows each run's mode.
+
 ## Standing duties and the GitHub webhook
 
 Standing duties are off until `MAKA_GITHUB_WEBHOOK_SECRET` is set. With it, the

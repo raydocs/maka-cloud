@@ -7,16 +7,19 @@ import {
   DEFAULT_MODES,
   EFFORTS,
   implementerFor,
+  looksLikeModeLine,
   MODE_IDS,
   MODES_CONFIG_VERSION,
   type ModesConfig,
   modelsOf,
   modesConfigFrom,
   otherVendor,
+  parseModeBrief,
   parseModesConfig,
   reviewerFor,
   splitBudget,
   unnamedModels,
+  withModeLine,
 } from '../index.js';
 
 function clone(): ModesConfig {
@@ -206,4 +209,55 @@ test('roles left on the CLI default are reported, so the host can say they need 
     }
   }
   assert.deepEqual(unnamedModels(config), []);
+});
+
+test('the mode line goes right after the leading directives and is read back from there', () => {
+  const plain = withModeLine('Fix the bug.\n\nMore.', 'deep');
+  assert.equal(plain, 'maka-mode: deep\nFix the bug.\n\nMore.');
+  assert.deepEqual(parseModeBrief(plain), {
+    ok: true,
+    mode: 'deep',
+    rest: 'Fix the bug.\n\nMore.',
+  });
+
+  const header = 'maka-inputs: tsk_a report.json\nmaka-artifacts: out/report.md\n';
+  const withHeader = withModeLine(`${header}Rerun it.`, 'quick');
+  assert.equal(withHeader, `${header}maka-mode: quick\nRerun it.`);
+  assert.deepEqual(parseModeBrief(withHeader), {
+    ok: true,
+    mode: 'quick',
+    rest: `${header}Rerun it.`,
+  });
+});
+
+test('only the line right after the directives is the mode; any other is plain text', () => {
+  for (const brief of [
+    'Fix it.\nmaka-mode: deep',
+    'Fix it.\n\nmaka-mode: deep\n',
+    '> maka-mode: deep\nFix it.',
+    ' maka-mode: deep\nFix it.',
+  ]) {
+    const parsed = parseModeBrief(brief);
+    assert.deepEqual(parsed, { ok: true, rest: brief }, brief);
+  }
+});
+
+test('a mode line that names no mode is refused, not defaulted', () => {
+  for (const line of [
+    'maka-mode:deep',
+    'maka-mode: Deep',
+    'maka-mode: deep ',
+    'maka-mode: turbo',
+    'maka-mode:',
+  ]) {
+    assert.equal(parseModeBrief(`${line}\nFix it.`).ok, false, line);
+  }
+});
+
+test('a brief that already holds something like a mode line cannot be given one', () => {
+  for (const brief of ['maka-mode: deep\nx', 'x\n  maka-mode : deep', 'x\n> * maka-mode: quick']) {
+    assert.equal(looksLikeModeLine(brief), true, brief);
+    assert.throws(() => withModeLine(brief, 'standard'), /already has a mode line/);
+  }
+  assert.equal(looksLikeModeLine('use maka-mode: in prose'), false);
 });
