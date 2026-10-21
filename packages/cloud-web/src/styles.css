@@ -493,6 +493,10 @@ textarea {
 .quiet-action:hover:not(:disabled) {
   color: var(--ink);
 }
+.question > .quiet-action {
+  justify-self: start;
+  padding-left: 0;
+}
 .suggestion-detail {
   font-size: 13px;
   overflow-wrap: anywhere;
@@ -711,7 +715,15 @@ textarea {
   font-weight: var(--w-medium);
   min-height: 44px;
   display: flex;
-  align-items: center;
+  align-items: baseline;
+  gap: 10px;
+}
+.memory-panel summary .muted {
+  font-weight: var(--w-regular);
+}
+/* A card's own action is the size of its label, at the start, never a full-width bar. */
+.section-card > .astryx-button {
+  justify-self: start;
 }
 .memory-content {
   display: grid;

@@ -412,6 +412,9 @@ test('an inbox card puts the recommended answer first, takes context only when a
       onAnswer={(optionId, text) => answers.push({ optionId, text })}
     />,
   );
+  // The note is one tap away instead of an empty box on every card.
+  expect(screen.queryByLabelText('Additional context (optional)')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Add a note' }));
   const buttons = screen.getAllByRole('button').map((button) => button.textContent);
   expect(buttons).toEqual(['Ask the agent to redo it', 'Accept it as is']);
   fireEvent.change(screen.getByLabelText('Additional context (optional)'), {

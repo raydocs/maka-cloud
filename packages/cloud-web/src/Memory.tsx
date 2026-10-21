@@ -42,7 +42,10 @@ export function MemoryPanel({
         if (event.currentTarget.open) void act(async () => {});
       }}
     >
-      <summary>Memory</summary>
+      <summary>
+        <span>Memory</span>
+        <span className="muted">What Maka remembers about you</span>
+      </summary>
       <section aria-label="Your memory" className="memory-content">
         <h2>Your saved facts</h2>
         <p className="muted">

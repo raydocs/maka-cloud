@@ -122,7 +122,7 @@ test('a duty that is not approved has no switch, and one turned off by failures 
 test('a server without duties says so instead of failing', async () => {
   const api = serveProjects({ projects: 404 });
   render(<Projects client={api.client} />);
-  expect(await screen.findByText(/not available on this server/u)).toBeTruthy();
+  expect(await screen.findByText(/aren’t turned on for this workspace/u)).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
