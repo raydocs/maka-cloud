@@ -108,45 +108,92 @@ chmod 2770 claude-config
 `;
 
 /**
- * Whether any program the agent can run carries a file capability. `getcap -r` is asked for every
- * directory a program can live in that exists (not `/`, which would walk `/proc`), and its exit
- * status counts: a listing that failed is `unchecked`, never `none`. Every capability on a program
+ * Whether any program the agent can run carries a file capability, or is setuid or setgid to
+ * anyone but the agent itself. Every directory under `/` is scanned (mounts under them included,
+ * so `/data`, `/mnt` and a separate `/bin` are too), except the kernel's own (`/proc`, `/sys`,
+ * `/dev`), symlinks (reached through their targets) and the task root: only the agent and the
+ * sandbox user write there, and the agent can neither give a file a capability nor make it setuid
+ * to anyone else. The scan runs as root, so an unreadable directory is read, and any failure of it
+ * is `unchecked`, never `none`.
+ *
+ * `getcap` is handed the executable files one by one (never asked to list a tree and have its
+ * output split back into a path), and a line it prints counts only when its path is one word; a
+ * line that is not is `found`, so no file name can hide a capability. Every capability on a program
  * the agent can execute is `found`, except the few that the stock tools of a distribution carry
  * under their own paths and that cannot reach the firewall or the control user (raw sockets for
- * ping, the id-mapping helpers). Whether the agent can execute a file is asked of the agent
+ * ping, the id-mapping helpers); likewise for the stock setuid and setgid tools (whose rules, like
+ * sudo's, are checked on their own). Whether the agent can execute a file is asked of the agent
  * account and must be answered: a refusal of the account itself is `unchecked`, not "no".
- * `as_agent` and `tool_bin` are defined by the probe around it.
+ * `as_agent`, `root` and `tool_bin` are defined by the probe around it; `MAKA_SCAN_ROOTS` (one
+ * directory per line) replaces the directories under `/` for a test.
  */
-export const FILE_CAPS_PROBE = `getcap_bin=$(tool_bin getcap)
-if [ -n "$getcap_bin" ]; then
-  capdirs=""
-  for dir in /usr /opt /etc /var /srv /home /snap; do
-    if [ -d "$dir" ]; then capdirs="$capdirs $dir"; fi
+export const FILE_CAPS_PROBE = `scan_roots() {
+  if [ -n "\${MAKA_SCAN_ROOTS:-}" ]; then printf '%s\\n' "$MAKA_SCAN_ROOTS"; return; fi
+  for dir in /*; do
+    case "$dir" in /proc|/sys|/dev) continue ;; esac
+    if [ -d "$dir" ] && [ ! -L "$dir" ]; then printf '%s\\n' "$dir"; fi
   done
+}
+# Lists into $2 (NUL-separated) the files under every scan root that match the find test in $1...
+scan_files() {
+  out=$1; shift
+  : > "$out"
+  scan_roots | while IFS= read -r dir; do
+    root find "$dir" -ignore_readdir_race -path "$MAKA_ROOT" -prune -o -type f "$@" -print0 >> "$out" || echo failed
+  done
+}
+# Prints yes for a path the agent can execute, nothing when it cannot, unchecked without an answer.
+agent_runs() {
+  can=$(as_agent sh -c '[ -x "$1" ] && echo x || echo -' sh "$1" 2>/dev/null) || can=""
+  case "$can" in
+    x) echo yes ;;
+    -) ;;
+    *) echo unchecked ;;
+  esac
+}
+verdict() {
+  if printf '%s\\n' "$2" | grep -q unchecked; then echo "FACT $1=unchecked"
+  elif [ -n "$2" ]; then echo "FACT $1=found"
+  else echo "FACT $1=none"; fi
+}
+files=$(mktemp) || files=""
+getcap_bin=$(tool_bin getcap)
+if [ -z "$files" ] || [ -z "$getcap_bin" ]; then
+  echo "FACT agent_filecaps=unchecked"
+elif [ -n "$(scan_files "$files" -perm /111)" ]; then
+  echo "FACT agent_filecaps=unchecked"
+else
   rc=0
-  listing=$("$getcap_bin" -r $capdirs 2>/dev/null) || rc=$?
+  listing=$(root xargs -0 -r "$getcap_bin" < "$files" 2>/dev/null) || rc=$?
   if [ "$rc" != 0 ]; then
     echo "FACT agent_filecaps=unchecked"
   else
-    found=$(printf '%s\n' "$listing" | while IFS= read -r line; do
+    found=$(printf '%s\\n' "$listing" | while IFS= read -r line; do
       [ -n "$line" ] || continue
-      if printf '%s\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
-      if printf '%s\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
-      path=$(printf '%s\n' "$line" | sed -E 's/ (cap_|=).*$//')
-      can=$(as_agent sh -c '[ -x "$1" ] && echo x || echo -' sh "$path" 2>/dev/null) || can=""
-      case "$can" in
-        x) echo yes ;;
-        -) ;;
-        *) echo unchecked ;;
-      esac
+      if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
+      if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
+      if printf '%s\\n' "$line" | grep -Eq '^/[^[:space:]]+ (= )?[^[:space:]]+$'; then
+        agent_runs "\${line%% *}"
+      else
+        echo yes
+      fi
     done)
-    if printf '%s\n' "$found" | grep -q unchecked; then echo "FACT agent_filecaps=unchecked"
-    elif [ -n "$found" ]; then echo "FACT agent_filecaps=found"
-    else echo "FACT agent_filecaps=none"; fi
+    verdict agent_filecaps "$found"
   fi
+fi
+if [ -z "$files" ]; then
+  echo "FACT agent_setid=unchecked"
+elif [ -n "$(scan_files "$files" '(' -perm -4000 -o -perm -2000 ')' ! -user "$MAKA_AGENT_USER")" ]; then
+  echo "FACT agent_setid=unchecked"
 else
-  echo "FACT agent_filecaps=unchecked"
-fi`;
+  found=$(while IFS= read -r -d '' path; do
+    if printf '%s\\n' "$path" | grep -Eq '^/(usr/)?s?bin/(su|sudo|passwd|chsh|chfn|gpasswd|newgrp|mount|umount|fusermount3?|chage|expiry|crontab|wall|write|ssh-agent|unix_chkpwd|pam_extrausers_chkpwd)$'; then continue; fi
+    if printf '%s\\n' "$path" | grep -Eq '^/usr/(lib|libexec)/(openssh/ssh-keysign|dbus-1\\.0/dbus-daemon-launch-helper)$'; then continue; fi
+    agent_runs "$path"
+  done < "$files")
+  verdict agent_setid "$found"
+fi
+[ -z "$files" ] || rm -f "$files"`;
 
 /**
  * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
@@ -300,6 +347,11 @@ export function agentIsolationProblems(output: string): string[] {
     'agent_filecaps',
     'none',
     'a program carries a capability the agent could use (or file capabilities could not be listed)',
+  );
+  mustBe(
+    'agent_setid',
+    'none',
+    'a program is setuid or setgid to another account and the agent could run it (or they could not be listed)',
   );
   mustBe('agent_sockets', 'none', 'the agent account can reach a container or VM socket');
   mustBe(
