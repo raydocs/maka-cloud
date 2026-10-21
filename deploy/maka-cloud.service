@@ -1,0 +1,23 @@
+# Install as /etc/systemd/system/maka-cloud.service, see docs/fork/deploy.md.
+[Unit]
+Description=maka-cloud
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=maka-cloud
+Group=maka-cloud
+WorkingDirectory=/opt/maka-cloud
+EnvironmentFile=/etc/maka-cloud.env
+Environment=MAKA_CLOUD_DATA_DIR=/var/lib/maka-cloud
+Environment=MAKA_CLOUD_BACKUP_DIR=/var/backups/maka-cloud
+ExecStart=/usr/bin/node /opt/maka-cloud/packages/cloud-host/dist/cli.js start
+Restart=on-failure
+RestartSec=5
+# SIGTERM closes the stack in order; give it time to stop running work.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
