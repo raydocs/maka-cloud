@@ -85,7 +85,17 @@ export const AGENT_PROBE_SCRIPT = `set -u
 umask 077
 mkdir -p "$MAKA_ROOT"
 scratch=$(mktemp -d "$MAKA_ROOT/.probe.XXXXXX") || { echo "FACT scratch=no"; exit 0; }
-trap 'rm -rf "$scratch"' EXIT
+made=""
+tool_bin() { PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" command -v "$1" 2>/dev/null || true; }
+# Whatever the probe made is taken away again on every way out, a failed probe included.
+cleanup() {
+  rm -rf "$scratch"
+  for entry in $made; do
+    bin=\${entry%%:*}; name=\${entry#*:}
+    "$bin" -w -X "$name" >/dev/null 2>&1 || sudo -n "$bin" -w -X "$name" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT
 mkdir -m 700 "$scratch/chan"
 : > "$scratch/chan/probe.in"
 mkdir "$scratch/workspace" "$scratch/handoff"
@@ -101,14 +111,52 @@ echo "FACT agent_uid=$(as_agent id -u 2>/dev/null || echo none)"
 echo "FACT agent_sudo=$(yes_no as_agent sudo -n true)"
 # A sudo rule for one command (iptables) still lets \`sudo -n true\` fail; \`-l\` says whether the account may run anything.
 echo "FACT agent_sudo_list=$(yes_no as_agent sudo -n -l)"
-# The firewall: can this account change network policy at all (a capability, a setuid tool)? A scratch
-# chain is made and taken away again, so a box that fails the probe is left as it was.
+# The sudo policy, asked from the trusted side: what the rules say the account may run, not what a
+# few commands it tries happen to do (a rule for one binary, or listpw=always, fails \`sudo -n true\`
+# and \`sudo -n -l\` alike). Only the sudo answer "not allowed" is a pass; a query that fails is not.
+root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
+rc=0
+policy=$(root sudo -l -U "$MAKA_AGENT_USER" 2>&1) || rc=$?
+if printf '%s' "$policy" | grep -Eq 'is not allowed to run sudo'; then
+  echo "FACT agent_sudo_policy=none"
+elif [ "$rc" = 0 ]; then
+  echo "FACT agent_sudo_policy=granted"
+else
+  echo "FACT agent_sudo_policy=unknown"
+fi
+# Privileges the process itself holds, and the files that could hand it some.
+caps=$(as_agent sh -c 'grep -E "^Cap(Prm|Eff|Amb):" /proc/self/status' 2>/dev/null || true)
+if [ -z "$caps" ]; then echo "FACT agent_caps=unknown"
+elif printf '%s\n' "$caps" | awk '{ if ($2 !~ /^0+$/) bad = 1 } END { exit bad ? 0 : 1 }'; then echo "FACT agent_caps=held"
+else echo "FACT agent_caps=none"; fi
+if command -v getcap >/dev/null 2>&1; then
+  filecaps=$(getcap -r /usr/sbin /usr/bin /sbin /bin /usr/local/bin /usr/local/sbin 2>/dev/null | grep -Ei 'cap_(net_admin|sys_admin|setuid|setgid|dac_override|dac_read_search|sys_ptrace|sys_module)' || true)
+  if [ -z "$filecaps" ]; then echo "FACT agent_filecaps=none"; else echo "FACT agent_filecaps=found"; fi
+else
+  echo "FACT agent_filecaps=unchecked"
+fi
+# Groups that are root by another name, and the sockets that run containers for whoever may write them.
+groups=$(as_agent id -Gn 2>/dev/null || true)
+if [ -z "$groups" ]; then echo "FACT agent_groups=unknown"; else echo "FACT agent_groups=$groups"; fi
+open_sockets=""
+for sock in /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock /run/podman/podman.sock /var/lib/lxd/unix.socket /var/snap/lxd/common/lxd/unix.socket /run/libvirt/libvirt-sock; do
+  if [ -S "$sock" ] && as_agent test -w "$sock" >/dev/null 2>&1; then open_sockets="$open_sockets $sock"; fi
+done
+if [ -z "$open_sockets" ]; then echo "FACT agent_sockets=none"; else echo "FACT agent_sockets=$open_sockets"; fi
+# What the control user runs or keeps its tools in must not be writable by the agent.
+writable=""
+for path in "$HOME" "$HOME/.maka-cli" "$HOME/.maka-cli/bin" "$MAKA_ROOT" "$(dirname "$MAKA_ROOT")"; do
+  if [ -e "$path" ] && as_agent test -w "$path" >/dev/null 2>&1; then writable="$writable $path"; fi
+done
+if [ -z "$writable" ]; then echo "FACT agent_control_write=none"; else echo "FACT agent_control_write=$writable"; fi
+# The firewall itself: can this account change network policy (a capability, a setuid tool)? A
+# scratch chain is made and taken away again (also on the way out, if this stops half way).
 chain="MAKA_PROBE_$$"
 for tool in iptables ip6tables; do
-  bin=$(PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" command -v "$tool" 2>/dev/null || true)
+  bin=$(tool_bin "$tool")
   if [ -n "$bin" ]; then
     if as_agent "$bin" -w -N "$chain" >/dev/null 2>&1; then
-      "$bin" -w -X "$chain" >/dev/null 2>&1 || sudo -n "$bin" -w -X "$chain" >/dev/null 2>&1 || true
+      made="$made $bin:$chain"
       echo "FACT agent_$tool=yes"
     else
       echo "FACT agent_$tool=no"
@@ -131,6 +179,23 @@ echo "FACT workspace_write=$(yes_no as_agent sh -c 'umask 002; : > "$1/f"' sh "$
 echo "FACT workspace_cleanup=$(yes_no rm "$scratch/workspace/f")"
 `;
 
+const POWERFUL_GROUPS = new Set([
+  'root',
+  'sudo',
+  'wheel',
+  'admin',
+  'docker',
+  'lxd',
+  'lxc',
+  'libvirt',
+  'kvm',
+  'disk',
+  'shadow',
+  'adm',
+  'systemd-journal',
+  'podman',
+]);
+
 /** What the probe found, and what is wrong with it; empty when the box keeps the channel private. */
 export function agentIsolationProblems(output: string): string[] {
   const facts = new Map<string, string>();
@@ -148,11 +213,38 @@ export function agentIsolationProblems(output: string): string[] {
   } else if (agentUid === devUid) {
     problems.push('the agent account is the sandbox user');
   }
-  const mustBe = (fact: string, expected: 'yes' | 'no', problem: string): void => {
+  const mustBe = (fact: string, expected: string, problem: string): void => {
     if (facts.get(fact) !== expected) problems.push(problem);
   };
   mustBe('agent_sudo', 'no', 'the agent account can use sudo');
   mustBe('agent_sudo_list', 'no', 'the agent account may run commands through sudo');
+  mustBe(
+    'agent_sudo_policy',
+    'none',
+    'the sudo rules give the agent account commands to run (or could not be read)',
+  );
+  mustBe(
+    'agent_caps',
+    'none',
+    'the agent account holds Linux capabilities (or they could not be read)',
+  );
+  mustBe(
+    'agent_filecaps',
+    'none',
+    'a program carries a capability the agent could use (or file capabilities could not be listed)',
+  );
+  mustBe('agent_sockets', 'none', 'the agent account can reach a container or VM socket');
+  mustBe(
+    'agent_control_write',
+    'none',
+    'the agent account can write where the control user keeps its tools or the tasks',
+  );
+  const groups = facts.get('agent_groups');
+  if (groups === undefined || groups === 'unknown') {
+    problems.push('the groups of the agent account could not be read');
+  } else if (groups.split(/\s+/u).some((name) => POWERFUL_GROUPS.has(name))) {
+    problems.push('the agent account is in a group that is as good as root');
+  }
   // Absent is fine (no such tool, no such rules); an answer that is missing or "yes" is not.
   for (const tool of ['iptables', 'ip6tables']) {
     if (facts.get(`agent_${tool}`) !== 'no' && facts.get(`agent_${tool}`) !== 'absent') {
