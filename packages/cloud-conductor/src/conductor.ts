@@ -60,6 +60,12 @@ export interface ConductorOptions {
    * cancel as before. Default false: every task not known to have ended is cancelled.
    */
   tasksSurviveRestart?: boolean;
+  /**
+   * Cleans a task's own words (its title, summary or failure reason) before the conductor puts
+   * them in a message of its own, as when it tells the user a task ended that a restart left
+   * without a turn. Without it those messages carry no task words at all.
+   */
+  scrubTaskText?: (text: string) => string;
   playbooks?: readonly Playbook[];
   /**
    * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
@@ -250,6 +256,7 @@ export class Conductor {
   private readonly stopChecks = new Map<string, NodeJS.Timeout>();
   private readonly followTimers = new Map<string, NodeJS.Timeout>();
   private readonly tasksSurviveRestart: boolean;
+  private readonly scrubTaskText: ((text: string) => string) | undefined;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -269,6 +276,7 @@ export class Conductor {
     this.turnContext = options.turnContext;
     this.orchestratorAccess = options.orchestratorAccess;
     this.tasksSurviveRestart = options.tasksSurviveRestart === true;
+    this.scrubTaskText = options.scrubTaskText;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
@@ -1107,15 +1115,11 @@ export class Conductor {
     const ended = String(view?.state);
     if (!['succeeded', 'failed', 'cancelled'].includes(ended)) return undefined;
     const manifest = view?.manifest as { summary?: unknown } | undefined;
-    const detail =
-      typeof manifest?.summary === 'string' && manifest.summary
-        ? manifest.summary
-        : typeof view?.failureReason === 'string'
-          ? view.failureReason
-          : '';
-    const title =
-      typeof view?.title === 'string' && view.title ? ` "${view.title.slice(0, 120)}"` : '';
-    const text = `The server restarted while this ran. The task${title} ${ended}${detail ? `: ${detail}` : '.'}`;
+    const words = (value: unknown): string =>
+      typeof value === 'string' && this.scrubTaskText ? this.scrubTaskText(value).trim() : '';
+    const detail = words(manifest?.summary) || words(view?.failureReason);
+    const name = words(view?.title).slice(0, 120);
+    const text = `The server restarted while this ran. The task${name ? ` "${name}"` : ''} ${ended}${detail ? `: ${detail}` : '.'}`;
     return text.length > 800 ? `${text.slice(0, 799)}…` : text;
   }
 
