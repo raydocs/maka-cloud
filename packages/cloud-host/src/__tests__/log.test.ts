@@ -380,3 +380,18 @@ test('a short setting that holds a secret is scrubbed, and AUTH_PROVIDER=google 
     'abcd',
   ]);
 });
+
+test('a number or a switch in a setting whose name smells of a secret is not registered', () => {
+  assert.deepEqual(
+    secretValuesOf({
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: '32000',
+      MAX_THINKING_TOKENS: '8000',
+      TOKENIZERS_PARALLELISM: 'false',
+      SECRET_ROTATION_DAYS: '30',
+      API_KEY_VERSION: '1.0.0',
+      DB_PASSWORD: 'hunter',
+      DB_PASSPHRASE: '48151623420000',
+    }),
+    ['48151623420000', 'hunter'],
+  );
+});
