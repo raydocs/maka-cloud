@@ -379,3 +379,16 @@ test('createConversation makes one empty conversation per key and owner, and del
   });
   assert.equal(delivered, 0);
 });
+
+test('a proposal the engine cannot offer answers 503, and a failed inspection 502', async (t) => {
+  const h = await startHarness(t, {
+    duties: fakeDuties({
+      propose: async (_owner, projectId) =>
+        projectId === 'prj_down'
+          ? { ok: false, reason: 'unavailable' }
+          : { ok: false, reason: 'inspect_failed' },
+    }).service,
+  });
+  assert.equal((await h.api('/v1/projects/prj_down/proposal', { method: 'POST' })).status, 503);
+  assert.equal((await h.api('/v1/projects/prj_x/proposal', { method: 'POST' })).status, 502);
+});

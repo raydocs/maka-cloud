@@ -21,6 +21,8 @@ export interface StackConfig {
   supervisorDbPath: string;
   /** The model gateway's journal of what tasks spent, read back after a restart. */
   gatewaySpendPath: string;
+  /** The standing duties' database: projects, duties, webhook deliveries and the run ledger. */
+  dutiesDbPath: string;
   /** Where the server writes its daily backups. Unset: it writes none. */
   backupDir?: string;
   /**
@@ -77,6 +79,13 @@ export interface StackConfig {
   searchKeySet: boolean;
   /** All three VAPID settings are set: the Web Push routes are on. The key itself is read from the environment by the stack. */
   pushSet: boolean;
+  /**
+   * Standing duties are on: the GitHub webhook secret is set, so signed deliveries are accepted at
+   * `/github/webhook`. The secret itself is read from the environment by the stack.
+   */
+  dutiesSet: boolean;
+  /** The repositories (`owner/name`) a project may be registered for. Empty: none, whatever the invites ask. */
+  dutyRepos: string[];
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
 }
@@ -107,6 +116,7 @@ export function dataPathsOf(
   | 'codingDeliveriesPath'
   | 'supervisorDbPath'
   | 'gatewaySpendPath'
+  | 'dutiesDbPath'
 > {
   return {
     dbPath: join(dataDir, 'cloud.db'),
@@ -117,6 +127,7 @@ export function dataPathsOf(
     codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
     supervisorDbPath: join(dataDir, 'supervisor.db'),
     gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
+    dutiesDbPath: join(dataDir, 'duties.db'),
   };
 }
 
@@ -131,6 +142,7 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       rel(paths.invitesPath),
       rel(paths.supervisorDbPath),
       rel(paths.gatewaySpendPath),
+      rel(paths.dutiesDbPath),
     ],
     files: [rel(paths.runnerSessionsPath), rel(paths.codingDeliveriesPath)],
     trees: [rel(paths.conductorRoot), rel(paths.handoffRoot)],
@@ -164,6 +176,9 @@ export const DEFAULT_SPEND_CAPS: SpendCaps = {
   inviteMonthlyUsd: 50,
   serverDailyUsd: 25,
 };
+
+/** The shortest webhook secret accepted: the duties engine refuses a shorter one. */
+const MIN_WEBHOOK_SECRET_LENGTH = 16;
 
 export class ConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
@@ -254,6 +269,14 @@ export const ENV_VARIABLES = [
   [
     'MAKA_GITHUB_TOKEN',
     'fine-grained GitHub token for opening pull requests, read when one is opened',
+  ],
+  [
+    'MAKA_GITHUB_WEBHOOK_SECRET',
+    'the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties',
+  ],
+  [
+    'MAKA_CLOUD_DUTY_REPOS',
+    'comma separated owner/name repositories a project may be registered for; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
   ],
 ] as const;
 
@@ -369,12 +392,36 @@ export function readStackConfig(
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
+    dutiesSet: false,
+    dutyRepos: [],
   };
   try {
     config.pushSet = pushConfigFromEnv(env) !== undefined;
   } catch (error) {
     // The message names the missing variables and never a value.
     problems.push(error instanceof Error ? error.message : 'the Web Push settings are not valid');
+  }
+  const webhookSecret = value('MAKA_GITHUB_WEBHOOK_SECRET');
+  if (webhookSecret !== undefined) {
+    // The message never carries the value.
+    if (webhookSecret.length < MIN_WEBHOOK_SECRET_LENGTH) {
+      problems.push(
+        `MAKA_GITHUB_WEBHOOK_SECRET must be at least ${MIN_WEBHOOK_SECRET_LENGTH} characters`,
+      );
+    } else {
+      config.dutiesSet = true;
+    }
+  }
+  const dutyRepos = value('MAKA_CLOUD_DUTY_REPOS');
+  if (dutyRepos !== undefined) {
+    const repos = dutyRepos.split(',').map((repo) => repo.trim());
+    if (!repos.every((repo) => /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u.test(repo))) {
+      problems.push('MAKA_CLOUD_DUTY_REPOS must be comma separated owner/name repositories');
+    } else if (webhookSecret === undefined) {
+      problems.push('MAKA_CLOUD_DUTY_REPOS needs MAKA_GITHUB_WEBHOOK_SECRET');
+    } else {
+      config.dutyRepos = [...new Set(repos)];
+    }
   }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
@@ -539,6 +586,7 @@ export function describeConfig(config: StackConfig): string[] {
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
+    `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyRepos.length === 0 ? 'no repository yet' : config.dutyRepos.join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
     `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,

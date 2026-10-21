@@ -127,6 +127,9 @@ export function fingerprint(store: Store, context: ItemContext): unknown {
     // A spending limit that stopped work stays true until the human acknowledges it.
     case 'cap':
       return { subject: 'cap', key: context.detail ?? null };
+    // A proposal stays true until it is decided; deciding closes the item.
+    case 'proposal':
+      return { subject: 'proposal', id: context.detail ?? null };
     case 'verification': {
       const verification = store.verification(context.taskId ?? '');
       return {
@@ -225,6 +228,42 @@ export function capSpec(
     dedupeKey: `cap:${input.key}`,
     ask: clip(input.ask, MAX_ASK),
     options: FINISHED_OPTIONS,
+    allowText: false,
+    evidence: [],
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
+
+/** What a proposed set of duties is shown as: the engine's own words, quoted by the caller's host. */
+export interface ProposalChoice {
+  id: string;
+  label: string;
+  recommended: boolean;
+}
+
+/** A decision item for a project's proposed standing duties: one option per set, the recommended first. */
+export function proposalSpec(
+  store: Store,
+  input: { conversationId: string; proposalId: string; ask: string; sets: ProposalChoice[] },
+): ItemSpec {
+  const context: ItemContext = { subject: 'proposal', detail: input.proposalId };
+  const options: ItemOption[] = input.sets
+    .map((set) => ({
+      id: `set-${set.id}`.slice(0, 60),
+      label: clip(set.label, 120),
+      recommended: set.recommended,
+      effect: 'proposal' as const,
+      proposalSetId: set.id,
+    }))
+    .sort((a, b) => Number(b.recommended) - Number(a.recommended));
+  return {
+    kind: 'decision',
+    conversationId: input.conversationId,
+    taskId: null,
+    dedupeKey: `proposal:${input.proposalId}`,
+    ask: clip(input.ask, MAX_ASK),
+    options,
     allowText: false,
     evidence: [],
     context,
@@ -640,6 +679,7 @@ export function reassess(store: Store, item: ItemRecord, at: number): Reassessme
     }
     case 'result':
     case 'cap':
+    case 'proposal':
       return { action: 'keep' };
     case 'verification':
       // Checked again, or settled differently, since the human looked.

@@ -114,6 +114,10 @@ test('an invite has at most 20 enabled duties: a proposal that would pass it cha
     'open',
     'and it can still be decided',
   );
+  const told = m.engine.pendingNotices();
+  assert.equal(told.length, 1, 'the owner is told, because the choice closed its inbox item');
+  assert.equal(told[0]?.owner, OWNER);
+  assert.match(told[0]?.text ?? '', /acme\/repo7 were not set up.*20 enabled duties/u);
 
   // One freed is room for one, not for two.
   const [first] = m.engine.project(OWNER, fives[0]?.projectId ?? '')?.duties ?? [];

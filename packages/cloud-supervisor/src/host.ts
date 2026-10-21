@@ -30,6 +30,13 @@ export type QuestionOutcome =
       reason: 'not_found' | 'not_open' | 'unknown_option' | 'conflict' | 'closed' | 'text_too_long';
     };
 
+export type ProposalOutcome =
+  | { accepted: true; duplicate: boolean }
+  | {
+      accepted: false;
+      reason: 'not_found' | 'forbidden' | 'unknown_set' | 'conflict' | 'duty_limit';
+    };
+
 /** What an interrupt carries. The channel decides how to show it. */
 export interface Interrupt {
   /** One item, or a batch of items that were held back and are now released together. */
@@ -73,6 +80,17 @@ export interface SupervisorHost {
       message: { conversationId: string; text: string; clientMessageId: string; caller?: string },
       signal: AbortSignal,
     ): Promise<{ messageId: string } | { refused: string }>;
+  };
+  /**
+   * The duties engine's decision route, for `proposal` options. Idempotent per proposal: the same
+   * set again is a duplicate, another set is a conflict. Absent when no duties engine runs; a
+   * proposal item is then never raised.
+   */
+  proposals?: {
+    decide(
+      decision: { proposalId: string; setId: string; caller?: string },
+      signal: AbortSignal,
+    ): Promise<ProposalOutcome>;
   };
   /**
    * The owner of a conversation (an invite), or undefined when nobody owns it. With it the

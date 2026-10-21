@@ -22,8 +22,10 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
+import type { Supervisor } from '@maka-cloud/supervisor';
 import { InviteStore, type PushTransport, pushConfigFromEnv } from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
+import { createDuties, type DutiesRuntime } from './duties/runtime.js';
 import {
   conductorGateway,
   gatewayModelAccess,
@@ -60,6 +62,10 @@ export interface StackDependencies {
    * invite gets no model access.
    */
   ownerOfTask?: (taskId: string) => string | undefined;
+  /** Replaces the GitHub reader that proposals inspect repositories with, for tests. */
+  dutyInspector?: import('@maka-cloud/duties').RepoInspector;
+  /** How often schedules are looked at and finished duty runs settled, in milliseconds. Default 60000. */
+  dutyTickMs?: number;
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
   pausePollMs?: number;
   /** Timing of the daily backup, for tests. */
@@ -85,6 +91,8 @@ export interface Stack {
   gateway: StackGateway;
   /** The operator's kill switch, as the stack reads it. */
   pause: PauseSwitch;
+  /** The standing duties; absent while `MAKA_GITHUB_WEBHOOK_SECRET` is not set. */
+  duties?: DutiesRuntime;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -121,7 +129,12 @@ export async function startStack(
   let ownerOfConversation: ((conversationId: string) => string | undefined) | undefined;
   let conversationOfTask: ((taskId: string) => string | undefined) | undefined;
   // Set when the supervisor starts: a spending limit that stops work raises an item in its inbox.
-  let supervisorRef: { backupTo(destination: string): Promise<void> } | undefined;
+  let supervisorRef:
+    | {
+        backupTo(destination: string): Promise<void>;
+        raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
+      }
+    | undefined;
   let raiseCapHit:
     | ((input: { conversationId: string; taskId?: string; key: string; ask: string }) => void)
     | undefined;
@@ -181,7 +194,24 @@ export async function startStack(
   let runners: CloudRunners;
   let coding: CodingRunner;
   let cloud: Cloud;
+  // The webhook secret is read here and goes to the duties engine only. Without it the stack
+  // has no duties: there is no webhook route and no project route.
+  const webhookSecret = config.dutiesSet ? env.MAKA_GITHUB_WEBHOOK_SECRET?.trim() : undefined;
+  let duties: DutiesRuntime | undefined;
   try {
+    duties =
+      webhookSecret === undefined
+        ? undefined
+        : createDuties({
+            dbPath: config.dutiesDbPath,
+            webhookSecret,
+            repos: config.dutyRepos,
+            ...(dependencies.dutyInspector === undefined
+              ? {}
+              : { inspector: dependencies.dutyInspector }),
+            ...(dependencies.dutyTickMs === undefined ? {} : { tickMs: dependencies.dutyTickMs }),
+            onWarning: warn,
+          });
     const publicUrl = config.mcp.publicUrl;
     const runnerOptions: Partial<CloudRunnersOptions> = {
       modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) => {
@@ -230,6 +260,7 @@ export async function startStack(
           };
     cloud = await startCloud({
       ...(push === undefined ? {} : { push }),
+      ...(duties === undefined ? {} : { duties: duties.service }),
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
       handoffRoot: config.handoffRoot,
@@ -264,6 +295,7 @@ export async function startStack(
               const inviteId = ownerOfConversation?.(conversationId);
               return inviteId === undefined ? undefined : { inviteId };
             },
+            ...(duties === undefined ? {} : { proposals: duties.proposals }),
             onStarted: (supervisor) => {
               supervisorRef = supervisor;
               raiseCapHit = (input) => supervisor.raiseCapHit(input);
@@ -285,7 +317,23 @@ export async function startStack(
     // They are written only once this process holds the server's database, which keeps a second
     // server out: a start that fails on the way never changes what the running server published.
     journal.setSpendPolicy(config.spend);
+    duties?.start({
+      server: cloud.server,
+      runsOf: (conversationId) => {
+        const conductorState = cloud.conductor.state;
+        return conductorState.runsOfConversation(conversationId).map((run) => ({
+          runId: run.runId,
+          dutyId: run.dutyId,
+          state: run.state,
+          spentUsd: conductorState.budget(run.runId).spentUsd,
+        }));
+      },
+      postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
+      raiseProposal: (input) => supervisorRef?.raiseProposal(input) ?? false,
+    });
   } catch (error) {
+    await duties?.stop();
+    duties?.close();
     await gateway.close();
     invites.close();
     journal.close();
@@ -317,6 +365,9 @@ export async function startStack(
           supervisorRef
             ? supervisorRef.backupTo(to)
             : Promise.reject(new Error('The inbox is not running')),
+        ...(duties === undefined
+          ? {}
+          : { [relative(config.dataDir, config.dutiesDbPath)]: (to) => duties.backupTo(to) }),
       },
     });
   };
@@ -364,6 +415,7 @@ export async function startStack(
     coding,
     gateway,
     pause,
+    ...(duties === undefined ? {} : { duties }),
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
@@ -376,8 +428,12 @@ export async function startStack(
           await watcher.close();
         } finally {
           try {
+            // The timer and the launches stop first; the database closes once the server no
+            // longer answers webhook requests.
+            await duties?.stop();
             await cloud.close();
           } finally {
+            duties?.close();
             await gateway.close();
             invites?.close();
             journal.close();
