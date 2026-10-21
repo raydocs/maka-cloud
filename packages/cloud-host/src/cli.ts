@@ -164,7 +164,7 @@ async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
   // process past the container's grace period: the next process recovers what was in flight.
   setTimeout(() => {
     log.warn('server.exit_forced', { afterMs: FORCED_EXIT_MS });
-    process.exit(0);
+    process.exit(1);
   }, FORCED_EXIT_MS).unref();
   await stack.close();
   return 0;

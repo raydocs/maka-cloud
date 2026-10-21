@@ -42,7 +42,7 @@ passed all seven steps:
 | `health`, `sign-in` | passes |
 | `task` (a task and its result card) | passes |
 | `approval` (an approval answered once) | passes |
-| `restart` (a restart in the middle of a task) | passes (about a minute: Compose waits out its 60 s grace period) |
+| `restart` (a restart in the middle of a task) | passes (a close lets go of the runs, so it takes seconds; before that, a minute: Compose waited out its 60 s grace period) |
 | `restart-reply` | passes |
 | `backup-restore` (backup, restore, a task still runs) | passes |
 
@@ -72,3 +72,10 @@ Each adds a second way to reach a sandbox, a credential or a GitHub repository, 
 items on them are not on the path a first user takes. Leaving them off cuts scope without leaving a
 gap in what a first user does: sign in, give a goal, see the result card, approve, restart safely.
 That path is built, unit-tested and run end to end by the rehearsal on stand-ins (see above).
+
+A close lets go of the runs without stopping them, and lease renewals stop with it, so a task's
+sandbox lease runs out five minutes (the default `leaseTtlSeconds`) after the last renewal. A
+restart that takes longer than that lets the sandbox go to sleep under its running agent; the next
+process stops what is left and runs the task again from a fresh clone, as it does after a crash.
+A forced exit (the process was still closing after ten seconds) exits with code 1 and logs
+`server.exit_forced`.
