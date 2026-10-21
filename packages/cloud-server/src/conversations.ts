@@ -98,15 +98,20 @@ export class ConversationStore {
     return { conversationId, title: title ?? null, createdAt };
   }
 
-  /** The conversation `owner` started with `startKey`, if any. Reads only. */
+  /**
+   * The conversation `owner` started with `startKey`, once its first message (posted under the
+   * same key, with its run meta) is stored. A conversation made but never posted to, as after a
+   * crash between the two commits of a start, is not a started one. Reads only.
+   */
   startedBy(owner: string, startKey: string): string | undefined {
     const row = this.db
       .prepare(
         `SELECT s.conversation_id FROM system_starts s
          JOIN conversations c ON c.conversation_id = s.conversation_id
+         JOIN messages m ON m.conversation_id = c.conversation_id AND m.client_message_id = ?
          WHERE s.start_key = ? AND c.owner = ?`,
       )
-      .get(`${owner}\u0000${startKey}`, owner) as { conversation_id: string } | undefined;
+      .get(startKey, `${owner}\u0000${startKey}`, owner) as { conversation_id: string } | undefined;
     return row?.conversation_id;
   }
 

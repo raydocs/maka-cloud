@@ -227,6 +227,30 @@ test('a server that does not know run budgets cannot book past one, and its book
   book('after', 50);
 });
 
+test('a booking right after the budget is set counts, even when its timestamp falls before the start of the window', async (t) => {
+  const path = join(await dir(t), 'spend.db');
+  const journal = new SqliteSpendJournal(path);
+  t.after(() => journal.close());
+  // The window starts a minute ahead of the clock, as a truncated stamp or a clock that stepped
+  // back leaves it: nothing booked from here carries a time inside the window.
+  setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: Date.now() + 60_000 }, RUN);
+
+  const ledger = ledgerOn(journal, Date.now);
+  assert.deepEqual(ledger.reserve(INVITE, 'first', 4), { ok: true });
+  assert.equal(refused(ledger.reserve(INVITE, 'second', 4)), 'invite_run', 'the ledger counts it');
+
+  // A server that does not know run budgets stamps its rows with the time of the insert.
+  const olderServer = new DatabaseSync(path);
+  t.after(() => olderServer.close());
+  const book = (key: string, usd: number): void => {
+    olderServer
+      .prepare('INSERT INTO account_spend (key, account, day, month, usd) VALUES (?, ?, ?, ?, ?)')
+      .run(key, INVITE.inviteId, '2026-10-20', '2026-10', usd);
+  };
+  assert.throws(() => book('older', 2), /run budget/u, 'and so does the guard');
+  book('small', 1);
+});
+
 test('the guard is the journal’s own: a process that only opened the file and failed to start changes nothing about who is bound', async (t) => {
   const path = join(await dir(t), 'spend.db');
   const journal = new SqliteSpendJournal(path);

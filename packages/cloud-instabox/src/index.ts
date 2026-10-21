@@ -24,6 +24,13 @@ export {
   InstaboxWorkspaceExecutor,
   type InstaboxWorkspaceExecutorOptions,
 } from './executor.js';
+export {
+  applyEgressGuard,
+  EGRESS_BLOCKED_V4,
+  EGRESS_BLOCKED_V6,
+  EgressGuardError,
+  type EgressGuardOptions,
+} from './egress.js';
 export { INSTABOX_WORKSPACE_EXECUTOR_FACTS } from './facts.js';
 
 /** Reads `INSTABOX_API_KEY`, `INSTABOX_MACHINE_ID` and optionally `INSTABOX_API_URL`. */
