@@ -222,7 +222,10 @@ can remove the resumed run's lease until its next renewal (at most a third of th
 
 The orchestrator's `restore()` calls `Runner.stopOrphaned(taskId, { signal })` for every
 unfinished task, concurrently, each bounded by `orphanStopTimeoutMs` (10 s). A failure becomes a
-progress note before the task is ended as failed. `sweepOrphans(knownTaskIds)` (called by the server
+progress note before the task is ended as failed. A confirmed stop is followed by
+`Runner.recover(spec)` (T28, `durable-tasks.md`): `SandboxCliRunner.recover` is `resume` with the
+recovery note as the prompt, so the task continues in its recorded vendor session instead of being
+ended as orphaned. `sweepOrphans(knownTaskIds)` (called by the server
 after `restore()`) stops live runs whose task the log does not know, and returns
 `{ stopped, failed: [{ machineId, taskId?, error }] }`; an unreachable sandbox is reported, not thrown.
 

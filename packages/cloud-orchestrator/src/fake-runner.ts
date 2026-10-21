@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { RunHandle, Runner, RunnerEvent, RunSpec } from './runner.js';
+import type { Recovery, RunHandle, Runner, RunnerEvent, RunSpec } from './runner.js';
 import type { ResultManifest } from './types.js';
 
 export const DEFAULT_FAKE_MANIFEST: ResultManifest = {
@@ -163,6 +163,11 @@ export interface FakeRunnerOptions {
   pausable?: boolean;
   /** Gives the runner a `stopOrphaned` that calls this. Without it the runner has none. */
   stopOrphaned?: (taskId: string, options: { signal?: AbortSignal }) => Promise<void>;
+  /**
+   * Gives the runner a `recover`, so a restart resumes its tasks instead of ending them: it
+   * returns a new run, after `onStart`. `error` makes it reject.
+   */
+  recover?: boolean | { error?: Error };
 }
 
 /** A runner for tests: records every run and does nothing until a test drives it. */
@@ -172,6 +177,10 @@ export class FakeRunner implements Runner {
   /** Task ids `stopOrphaned` was called for. Only filled when the runner has the method. */
   readonly orphanStops: string[] = [];
   stopOrphaned?: (taskId: string, options?: { signal?: AbortSignal }) => Promise<void>;
+  /** Present only when the runner was built with the `recover` option. */
+  recover?: (spec: RunSpec & { recovery: Recovery }) => Promise<RunHandle>;
+  /** The specs `recover` was called with. */
+  readonly recoveries: Array<RunSpec & { recovery: Recovery }> = [];
 
   constructor(private readonly options: FakeRunnerOptions = {}) {
     this.name = options.name ?? 'fake';
@@ -180,6 +189,17 @@ export class FakeRunner implements Runner {
       this.stopOrphaned = async (taskId, callOptions = {}) => {
         this.orphanStops.push(taskId);
         await stop(taskId, callOptions);
+      };
+    }
+    const recover = options.recover;
+    if (recover) {
+      this.recover = async (spec) => {
+        this.recoveries.push(spec);
+        if (typeof recover === 'object' && recover.error) throw recover.error;
+        const run = new FakeRun(spec, this.options.pausable ?? true);
+        this.runs.push(run);
+        await this.options.onStart?.(run);
+        return run;
       };
     }
   }

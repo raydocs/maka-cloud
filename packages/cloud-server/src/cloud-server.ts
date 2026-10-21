@@ -325,6 +325,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       sessions: new SqliteSessionStore(db, options.orchestrator?.now),
       runners: options.runners,
       handoffRoot: options.handoffRoot,
+      // Tasks a restart resumes start at the end of this function, once the MCP endpoint, the
+      // handler and the supervisor are up: a resumed run needs the endpoint, and the host's
+      // tenant lookup (set in `createHandler`'s `onReady`) to find its sandbox.
+      resume: 'manual',
     });
     if (options.sweepOrphans) {
       try {
@@ -616,6 +620,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         db.close();
       }
     };
+    orchestrator.startRestored();
     return {
       url: `http://${options.host ?? '127.0.0.1'}:${port}`,
       mcpUrl,

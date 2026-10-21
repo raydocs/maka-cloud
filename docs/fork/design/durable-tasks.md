@@ -6,8 +6,8 @@ Status of the pieces (updated by each PR):
 
 | # | Piece | State |
 |---|---|---|
-| 1 | Step log and epoch fencing | this document, section 1 |
-| 2 | Resume instead of fail | not built |
+| 1 | Step log and epoch fencing | merged (#162), section 1 |
+| 2 | Resume instead of fail | section 2 |
 | 3 | Process channel and Agent SDK runner | not built |
 | 4 | Transcript mirror and fresh-box resume | not built |
 | 5 | Spend follows the step log, per-task budgets | not built |
@@ -52,4 +52,24 @@ The reducer keeps per step only `{stepId, kind, replay, label, state, epoch}`; o
 
 ### Not covered here
 
-Nothing calls `steps` yet; the Agent SDK runner (piece 3) is the first caller. `restore()` still ends the tasks it takes over (piece 2 resumes them instead).
+Nothing calls `steps` yet; the Agent SDK runner (piece 3) is the first caller.
+
+## 2. Resume instead of fail
+
+`Runner.recover?(spec)` is optional. With it, `restore()` drives an unfinished task again instead of ending it as orphaned; without it nothing changes.
+
+At restart, per unfinished task: take it over (new epoch, open steps marked interrupted), stop what the earlier attempt left (`stopOrphaned`), then decide:
+
+- **Resume** when the runner has `recover`, nobody is cancelling or pausing the task, no ancestor ended, its tree still has budget, and the leftover run was confirmed stopped (or the runner cannot leave one). A task that had started is told a `task_progress` note ("resuming after a restart (resume N in a row)") and handed to `recover` with `spec.recovery = {epoch, resumes, note}`. It stays `running` in the log: no second `task_started`. A task that never started is started by `start` as usual. The executor's MCP token is issued again; the old ones were revoked.
+- **Give up** after `MAX_RESUMES_IN_A_ROW` = 3: the fourth restart in a row that got nowhere ends the task `failed` with a reason starting `needs you:`. Getting somewhere means a step that finished (`step_outcome` done) or spend recorded for the task since the previous attempt (a run that logs no steps counts only by spend). Spend is the safe measure: a crash loop that never reaches a model call stops after three tries and costs nothing.
+- **End as before** otherwise: cancelled if a cancel was pending, `orphaned` if the runner has no `recover`, the task is paused, an ancestor ended, or the leftover run could not be stopped (then the stop stays owed and is retried).
+
+If `recover` throws or its run reports it cannot resume (no recorded session), the task fails with `orphaned: could not resume after a restart: <reason>`, which the supervisor already treats as a restart's doing and not the step's fault.
+
+**The recovery note** (`recoveryNote`) is the first thing the resumed agent reads: what finished (not to be done again), which `never` steps were cut off and may or may not have taken effect (check the real state, do not repeat blindly), which `safe` steps will run again, and that workspace files are not transactional. Each step is one line, `- kind: "label"` with the label as a JSON string, so a label an agent wrote cannot pass for a line of the note; lists show the latest 8 and count the rest; the closing advice survives the 5,000-character cap. A runner that logs no steps still gets the closing advice (check before you push or send).
+
+**`SandboxCliRunner.recover`** is its existing `resume` with the note as the prompt: it continues the recorded vendor session (`--resume <id>`) on the task's machine, or on one restored from the last snapshot when the machine is gone. A task with no recorded session id fails with "nothing to resume". The transcript still lives only on the box (piece 4 mirrors it), so a box that is lost with no snapshot cannot be resumed yet.
+
+**When resumed runs start.** `Orchestrator.create` decides in `restore()` but, with `resume: 'manual'`, starts nothing until `startRestored()`. `startCloudServer` uses it and calls `startRestored()` last, after the MCP endpoint listens and the handler's `onReady` ran: a resumed run needs the endpoint (or its executor could not delegate) and the host's tenant lookup (or its sandbox could not be found, and it would fail closed). Until then a resumed task reads `running` with no run; a cancel in that window ends it normally. Standalone callers get `automatic` (started at the end of `create`).
+
+**Fuzzer.** Half of the schedule fuzzer's seeds give the fake runner a `recover`; restarts then resume started tasks, and the restore check requires every unfinished task to be either ended or resumed (never both), resumed tasks to have no terminal event, the active count to equal the resumed count, and old executor tokens to be dead.

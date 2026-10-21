@@ -34,6 +34,21 @@ export interface RunSpec {
   model?: string;
   /** How hard the model thinks (`low`, `medium`, `high` or `xhigh`); absent: the CLI's default. */
   effort?: string;
+  /** Set when the run continues a task an earlier attempt was driving; see `Runner.recover`. */
+  recovery?: Recovery;
+}
+
+/** Why and how a task is being driven again after its previous attempt ended without an outcome. */
+export interface Recovery {
+  /** The epoch of this attempt (the task's creation is 1). */
+  epoch: number;
+  /** Resumes in a row without a step finished or spend recorded, this one included. */
+  resumes: number;
+  /**
+   * What to tell the agent before anything else: the steps that finished, the `never` steps that
+   * were cut off and may or may not have taken effect, and the `safe` ones that will run again.
+   */
+  note: string;
 }
 
 export type RunnerEvent =
@@ -68,6 +83,13 @@ export interface Runner {
    * for an unknown task. `signal` aborts when the orchestrator stops waiting.
    */
   stopOrphaned?(taskId: TaskId, options?: { signal?: AbortSignal }): Promise<void>;
+  /**
+   * Continues a task after a restart instead of starting it again: the same session where the
+   * runner kept one, told `spec.recovery.note` first. A runner without it has its unfinished
+   * tasks ended as orphaned at restart. Called after `stopOrphaned` confirmed nothing of the
+   * earlier attempt is left running. Throwing fails the task with the reason.
+   */
+  recover?(spec: RunSpec & { recovery: Recovery }): Promise<RunHandle>;
 }
 
 export class RunnerRegistry {

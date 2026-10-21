@@ -79,14 +79,19 @@ test('cancelling the task stops the CLI in the sandbox', async (t) => {
   assert.equal(await isRunning(pid), false);
 });
 
-test('a restart finds the task left running and has the runner stop its CLI by task id', async (t) => {
-  const h = await setup();
-  t.after(() => h.cleanup());
+/** The same runners without `recover`: a restart ends their unfinished tasks as orphaned. */
+function withoutRecover<T extends object>(runners: T[]): T[] {
+  return runners.map((runner) => Object.assign(Object.create(runner), { recover: undefined }));
+}
+
+/** A log that says a task is running, whose CLI runs in the sandbox; the process that wrote it is gone. */
+async function leftRunning(
+  h: Awaited<ReturnType<typeof setup>>,
+  t: Parameters<typeof handoffDir>[0],
+) {
   await h.setMode('hang');
   const store = new MemoryTaskStore();
   const handoffRoot = await handoffDir(t);
-
-  // Before the crash: the log says a task is running, and its CLI runs in the sandbox.
   const crashing = new FakeRunner({ name: 'claude-agent-sdk' });
   const before = await Orchestrator.create({
     store,
@@ -102,18 +107,70 @@ test('a restart finds the task left running and has the runner stop its CLI by t
   await events.until((e) => e.type === 'progress' && e.note === 'working on it');
   const pid = await h.runPid(task);
   assert.equal(await isRunning(pid), true);
+  return { store, handoffRoot, info, task, pid, events };
+}
+
+test('a restart finds the task left running and has the runner stop its CLI by task id; without a recover the task is orphaned', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const { store, handoffRoot, info, task, pid, events } = await leftRunning(h, t);
 
   // After the restart: new orchestrator, new runner objects, same log and same sandbox.
   const restarted = h.makeRunners();
   const after = await Orchestrator.create({
     store,
-    runners: new RunnerRegistry(restarted.runners),
+    runners: new RunnerRegistry(withoutRecover(restarted.runners)),
     handoffRoot,
   });
   assert.equal(await isRunning(pid), false);
   const view = after.status(info, task);
   assert.equal(view.state, 'failed');
   assert.deepEqual(after.orphanedTaskIds, [task]);
+  await events.rest();
+});
+
+test('a restart stops the old CLI by task id and resumes the task in its recorded session', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const { store, handoffRoot, info, task, pid, events } = await leftRunning(h, t);
+
+  const restarted = h.makeRunners();
+  const after = await Orchestrator.create({
+    store,
+    runners: new RunnerRegistry(restarted.runners),
+    handoffRoot,
+  });
+  t.after(() => after.close());
+  assert.equal(await isRunning(pid), false, 'the old CLI was stopped');
+  assert.deepEqual(after.resumedTaskIds, [task]);
+  assert.deepEqual(after.orphanedTaskIds, []);
+  assert.equal(after.status(info, task).state, 'running');
+
+  // The resumed turn is a new run of the same session, told what happened.
+  let resumedPid = 0;
+  for (let i = 0; i < 200 && resumedPid === 0; i += 1) {
+    resumedPid = await h.runPid(task, 't2').catch(() => 0);
+    if (resumedPid === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.notEqual(resumedPid, 0, 'the recovered run started');
+  assert.equal(await isRunning(resumedPid), true);
+  let call: Awaited<ReturnType<typeof h.cliCall>> | undefined;
+  for (let i = 0; i < 200 && call === undefined; i += 1) {
+    call = await h.cliCall('claude', 2).catch(() => undefined);
+    if (call === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(call, 'the recovered CLI was called');
+  const { argv } = call;
+  assert.equal(argv[argv.indexOf('--resume') + 1], 'sess-1');
+  assert.match(argv[argv.indexOf('-p') + 1] ?? '', /^The server running this task restarted/u);
+
+  // The conductor's token died with the old process; the public API acts for the conversation.
+  const cancelled = await after.cancelAs(
+    { sessionId: info.sessionId, authorize: () => undefined },
+    task,
+  );
+  assert.equal(cancelled.state, 'cancelled');
+  assert.equal(await isRunning(resumedPid), false);
   await events.rest();
 });
 

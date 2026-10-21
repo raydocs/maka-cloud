@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import {
+  type Recovery,
   type RunHandle,
   type Runner,
   type RunnerEvent,
@@ -113,6 +114,15 @@ export class SandboxCliRunner implements Runner {
   async resume(taskId: TaskId, input: ResumeInput): Promise<RunHandle> {
     if (input.spec.taskId !== taskId) throw new Error('resume: spec.taskId does not match');
     return new Run(this.fleet, this.vendor, input.spec, input.prompt).begin();
+  }
+
+  /**
+   * Called by the orchestrator after a restart, once `stopOrphaned` confirmed nothing of the earlier
+   * attempt is left: continues the task's vendor session, telling the agent first what the step log
+   * knows. A task with no recorded session fails with "nothing to resume", as `resume` does.
+   */
+  async recover(spec: RunSpec & { recovery: Recovery }): Promise<RunHandle> {
+    return this.resume(spec.taskId, { prompt: spec.recovery.note, spec });
   }
 
   /** Called by the orchestrator on restart for a task that was running. Idempotent. */
