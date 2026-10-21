@@ -103,7 +103,6 @@ const SECRET_PAIRS: readonly [RegExp, string][] = Array.from(
   ] as [RegExp, string][];
 });
 
-const MIN_KNOWN_SECRET_LENGTH = 8;
 let knownSecrets: RegExp | undefined;
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
@@ -111,14 +110,15 @@ const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/
 /**
  * The secret values this process holds (the keys it was given), replaced wherever they appear in
  * text that leaves it: as they are, URL-encoded, escaped for JSON, or as the base64 of a Basic
- * credential that has them in it. Replaces the earlier list; values shorter than eight characters
- * are ignored because they would eat ordinary words.
+ * credential that has them in it. Replaces the earlier list. A value of any length counts: what is
+ * registered is the caller's word that it is a secret (the host leaves out values shorter than six
+ * characters from its environment), so a short key is not left in the text for being short.
  */
 export function setKnownSecrets(values: readonly string[]): void {
   const forms = new Set<string>();
   for (const value of values) {
     const secret = value.trim();
-    if (secret.length < MIN_KNOWN_SECRET_LENGTH) continue;
+    if (secret === '') continue;
     for (const form of secretForms(secret)) forms.add(form);
   }
   knownSecrets = formsPattern(forms);

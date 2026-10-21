@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
+  containsSecret,
   scrubSecretFields,
   scrubSecretShapes,
   scrubValues,
@@ -48,15 +49,24 @@ test('JSON that was written into a string is read through its escapes', () => {
 
 test('the values this process holds are removed however they are written, and ordinary text stays', () => {
   const key = 'gw-live-Zk39/Qp+Lm20x';
-  setKnownSecrets([key, 'short']);
+  setKnownSecrets([key]);
   gone(`the gateway said no to ${key}`, key);
   gone(`GET /v1?x=${encodeURIComponent(key)}`, encodeURIComponent(key));
   gone(`{"detail":"${JSON.stringify(key).slice(1, -1)}"}`, key);
   gone(`Authorization: Basic ${Buffer.from(`user:${key}`).toString('base64')}`, 'dXNlcjpnd');
-  // Too short to be told from a word.
-  assert.equal(scrubSecretShapes('a short word'), 'a short word');
   setKnownSecrets([]);
   assert.equal(scrubSecretShapes(`still ${key}`), `still ${key}`);
+});
+
+test('a short registered key is removed too, in every form, and a blank one is not a key', () => {
+  const short = 'p@ss/w?';
+  setKnownSecrets([short, '  ', '']);
+  gone(`the gateway said no to ${short}`, short);
+  gone(`GET /v1?x=${encodeURIComponent(short)}`, encodeURIComponent(short));
+  gone(`{"detail":"${JSON.stringify(short).slice(1, -1)}"}`, short);
+  assert.equal(containsSecret({ ask: `use ${short}` }), true);
+  assert.equal(scrubSecretShapes('a short word'), 'a short word');
+  setKnownSecrets([]);
 });
 
 test('ordinary text and data pass through', () => {
