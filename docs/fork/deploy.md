@@ -427,6 +427,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_GATEWAY_PORT` | model gateway port (default 8082) |
 | `MAKA_CLOUD_GATEWAY_PUBLIC_URL` | the model gateway as the sandbox reaches it (https, or http on a loopback host) |
 | `MAKA_CLOUD_GATEWAY_MODELS` | JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one |
+| `MAKA_CLOUD_MODES` | JSON: the modes (quick, standard, deep) as "maka-cloud modes" prints them: per mode the conductor, implementer, reviewer and helper models and effort, and the budgets; every model named needs a gateway price. Unset: the built-in modes |
 | `MAKA_CLOUD_VERIFIER_MODELS` | JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run |
 | `MAKA_CLOUD_VERIFIER_DAILY_CAP_USD` | daily cap on model checks, default 5; changeable in the inbox settings |
 | `MAKA_CLOUD_SUMMARY_MODEL` | model that writes the digest summary (default claude-haiku-5-5) |
@@ -444,6 +445,23 @@ the build. Run `maka-cloud` with no arguments for the same list.
 
 `INSTABOX_MACHINE_ID` is not used any more and is refused: one machine for every
 invite would let invites read each other.
+
+## Modes
+
+A task runs in one of three modes, `quick`, `standard` or `deep`: the user may pick
+one, otherwise the conductor does, from the size of the work and the budget. A mode
+sets which model and how much effort the conductor, the implementer, the reviewer
+and the helpers use, and the budget of a run. Whatever vendor implemented a coding
+change, the other vendor reviews it; no setting can change that.
+
+`maka-cloud modes` prints the modes in force as JSON. To change them, save that
+output, edit it and set `MAKA_CLOUD_MODES` to it (the whole config, version 1; a
+config of another version is refused). Every model it names needs a price in the
+gateway: the Claude models are priced already, a Codex model needs an entry in
+`MAKA_CLOUD_GATEWAY_MODELS`. Until you name one, the Codex roles run on the Codex
+CLI's own default model, which the gateway cannot price, so a Codex run (and with
+it the review of a Claude change) is refused: `maka-cloud check` says how many
+roles are in that state.
 
 ## Standing duties and the GitHub webhook
 
