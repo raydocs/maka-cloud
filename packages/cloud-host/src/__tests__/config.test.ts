@@ -587,3 +587,48 @@ test('the limits of one task default to no turn limit and 4 hours, and take only
     /task limits: +no limit per turn, 4 h of run time/u,
   );
 });
+
+const POOL_ENV = (() => {
+  const { MAKA_CLOUD_SANDBOXES: _fixed, ...rest } = ENV;
+  return { ...rest, MAKA_CLOUD_BOXES: '1', MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' };
+})();
+
+test('MAKA_CLOUD_BOXES=1 with a template asks for the pool, three boxes per invite by default', () => {
+  const config = readStackConfig(POOL_ENV);
+  assert.deepEqual(config.boxes, { templateId: 'tpl_node', maxPerInvite: 3 });
+  assert.deepEqual(config.sandboxes, {});
+  assert.deepEqual(readStackConfig({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: '5' }).boxes, {
+    templateId: 'tpl_node',
+    maxPerInvite: 5,
+  });
+  assert.equal(readStackConfig(ENV).boxes, undefined, 'the fixed machines stay the default');
+  assert.ok(describeConfig(config).some((line) => line.includes('up to 3 per invite')));
+});
+
+test('the pool needs its template, refuses a bad size, and is not mixed with fixed machines', () => {
+  const { MAKA_CLOUD_BOX_TEMPLATE: _template, ...noTemplate } = POOL_ENV;
+  assert.deepEqual(problemsOf(noTemplate), ['MAKA_CLOUD_BOX_TEMPLATE is not set']);
+  assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOX_TEMPLATE: 'a b' }), [
+    'MAKA_CLOUD_BOX_TEMPLATE is not a template id',
+  ]);
+  for (const bad of ['0', '6', '2.5', 'many', '-1']) {
+    assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: bad }), [
+      'MAKA_CLOUD_BOX_MAX must be a whole number from 1 to 5',
+    ]);
+  }
+  assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOXES: 'yes' }), [
+    'MAKA_CLOUD_BOXES must be 1, or unset',
+  ]);
+  assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_SANDBOXES: ENV.MAKA_CLOUD_SANDBOXES }), [
+    'MAKA_CLOUD_BOXES=1 and MAKA_CLOUD_SANDBOXES are both set: use one of them',
+  ]);
+});
+
+test('settings of the pool without the switch are an error, not ignored', () => {
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' }), [
+    'MAKA_CLOUD_BOX_TEMPLATE and MAKA_CLOUD_BOX_MAX need MAKA_CLOUD_BOXES=1',
+  ]);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_BOX_MAX: '2' }), [
+    'MAKA_CLOUD_BOX_TEMPLATE and MAKA_CLOUD_BOX_MAX need MAKA_CLOUD_BOXES=1',
+  ]);
+});
