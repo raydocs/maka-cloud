@@ -53,8 +53,12 @@ so it cannot start next to a running deployment on the same ports either (set `M
    small repository (`rehearsal/sample`; the sandbox's git is told that this GitHub name is a local
    repository, so nothing leaves the container), then the scripted `claude` does what the task's
    brief asks of an agent, as the agent account: it reads the brief, appends a line to `README.md` in
-   the checkout and writes the `repro.json` the brief names. It records what each write did, and the
-   step fails if any was refused. It does not look at whether the task's own checks pass.
+   the checkout, runs `git status` there and writes the `repro.json` the brief names. It records what
+   each did, and the step fails if any was refused, or if the runner never gets as far as running the
+   reproduction test (which it does after reading `repro.json`, in the check namespace; the stand-in
+   container runs without Docker's default seccomp and AppArmor profiles for that). The task itself
+   ends at the review, which needs a second vendor the stand-in does not have, so it is never
+   delivered and the step does not look at how it ends.
 5. `approval`: two tasks in one conversation; the second is held for the user. Each approval card is
    answered, the first one twice (the second answer must be a duplicate), and exactly that many
    answers are recorded and tasks run.

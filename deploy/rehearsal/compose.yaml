@@ -24,6 +24,11 @@ services:
       target: rehearsal-sandbox
     image: maka-rehearsal-sandbox:local
     entrypoint: ["node", "deploy/rehearsal/stubs.mjs"]
+    # A coding task's checks run in a new user and PID namespace (unshare), which Docker's default
+    # seccomp and AppArmor profiles refuse. A real box must allow it too; this container holds no keys.
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     volumes:
       # The image carries no rehearsal code (the build context is an allowlist), so the script is mounted.
       - ./rehearsal/stubs.mjs:/app/deploy/rehearsal/stubs.mjs:ro

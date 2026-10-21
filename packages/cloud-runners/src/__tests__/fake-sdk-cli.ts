@@ -23,7 +23,7 @@
  *   waitinit like wait, but only after it reported its session, so a restart can resume it
  *   code     do what a coding brief asks of an agent, as whatever account runs it: read the brief the
  *            prompt names, append a line to README.md in the workspace the prompt names, write the
- *            repro.json the brief names, and record what each of those did (`ok` or the error code)
+ *            repro.json the brief names, run `git status` in the checkout, and record what each of those did (`ok` or the error code)
  *            in `$HOME/fake-cli/code-result.json`; then like ok
  *   leak     like ok, but its transcript also holds the run's API key and MCP token
  *   shape    like ok, but its transcript also holds a key the run was never given
@@ -147,6 +147,8 @@ async function run(prompt) {
     attempt('brief', () => { brief = fs.readFileSync(briefPath, 'utf8'); });
     const reproPath = (brief.match(/\`([^\`\\n]*repro\\.json)\`/) || [])[1];
     attempt('edit', () => fs.appendFileSync(path.join(workspace, 'README.md'), 'rehearsal-fixed\\n'));
+    // A real agent runs git in the checkout it was given.
+    attempt('git', () => require('node:child_process').execFileSync('git', ['status', '--porcelain'], { cwd: workspace, stdio: 'pipe' }));
     attempt('repro', () => fs.writeFileSync(reproPath, JSON.stringify({ command: 'sh check.sh', files: ['check.sh'] })));
     fs.writeFileSync(path.join(ctl, 'code-result.json'), JSON.stringify(seen));
   }

@@ -413,6 +413,7 @@ const steps = [
       await control('POST', '/mode?mode=code');
       const id = await startConversation('rehearsal: code a change');
       let ended = '';
+      let notes = [];
       try {
         const events = await settle(
           id,
@@ -423,15 +424,26 @@ const steps = [
           240_000,
         );
         ended = summary(events);
+        // What the runner said on the way and what it found wrong, for whoever reads a failure.
+        notes = taskEvents(events, 'task_progress').map((e) => e.data.event.note);
+        const problems = itemsOf(events, 'verification_failed').map((e) => e.data.ask);
+        console.log(`  the coding task's progress: ${notes.join(' | ').slice(0, 1500)}`);
+        console.log(`  not verified: ${problems.join(' | ').slice(0, 1500) || 'nothing'}`);
       } catch (error) {
         ended = String(error.message);
       }
       const { code } = await control('GET', '/state');
       assert(code, `the scripted claude never ran as a coding agent: ${ended}`);
-      const wrong = ['brief', 'edit', 'repro'].filter((what) => code[what] !== 'ok');
+      const wrong = ['brief', 'edit', 'git', 'repro'].filter((what) => code[what] !== 'ok');
       assert(
         wrong.length === 0,
         `the agent account could not ${wrong.map((what) => `${what} (${code[what]})`).join(', ')}: ${ended}`,
+      );
+      // The host read the repro.json the agent wrote (it says so before it runs the reproduction
+      // test), and the check namespace worked: the task went on past the agent's own run.
+      assert(
+        notes.some((note) => /running the reproduction test/u.test(note)),
+        `the runner never got as far as running the reproduction test: ${notes.join(' | ').slice(0, 600)}`,
       );
       console.log(`  the coding task: ${ended.slice(0, 300)}`);
     },
