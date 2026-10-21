@@ -133,6 +133,12 @@ type ClaimResult = 'created' | 'duplicate' | 'daily_cap';
 /** The trigger key of a request's one retry. A key that already ends with it is not retried again. */
 const RETRY_KEY_SUFFIX = ':retry';
 
+/**
+ * Why a retry can end without running through no act of the person's: the day's cap, the
+ * operator's policy, the launcher's refusal. The failure it was retrying then still counts.
+ */
+const RETRY_UNRUN_REASONS = new Set(['daily_cap', 'project_not_allowed', 'launch_refused']);
+
 const DELIVERY_RETENTION_MS = 30 * 24 * 3_600_000;
 const MINUTE_MS = 60_000;
 export const MAX_LAUNCH_ATTEMPTS = 5;
@@ -214,12 +220,20 @@ export class DutyEngine {
         .all() as unknown as ProjectRow[];
       for (const project of projects) {
         if (this.permitted(project)) continue;
+        const retries = this.db
+          .prepare(
+            `SELECT request_id FROM run_requests
+             WHERE project_id = ? AND state IN ('pending', 'launching') AND attempts = 0
+               AND trigger_key LIKE ?`,
+          )
+          .all(project.project_id, `%${RETRY_KEY_SUFFIX}`) as Array<{ request_id: string }>;
         this.cancelWhere(
           "project_id = ? AND state IN ('pending', 'launching') AND attempts = 0",
           [project.project_id],
           'project_not_allowed',
           at,
         );
+        for (const retry of retries) this.countOutcome(retry.request_id, 'failed');
         this.notice(
           project,
           '',
@@ -1170,7 +1184,20 @@ export class DutyEngine {
         "UPDATE run_requests SET state = 'cancelled', reason = ?, spent_micro = ?, finished_at = ? WHERE request_id = ? AND state IN ('pending', 'launching')",
       )
       .run(reason, spentMicro, this.now(), requestId);
-    return Number(changed.changes) > 0;
+    if (Number(changed.changes) === 0) return false;
+    // A retry stands in for the failure that queued it, which was held back from the duty's count
+    // for it. Ending without running, the retry settles that failure here.
+    if (RETRY_UNRUN_REASONS.has(reason) && this.isRetry(requestId)) {
+      this.countOutcome(requestId, 'failed');
+    }
+    return true;
+  }
+
+  private isRetry(requestId: string): boolean {
+    const row = this.db
+      .prepare('SELECT trigger_key FROM run_requests WHERE request_id = ?')
+      .get(requestId) as { trigger_key: string } | undefined;
+    return row?.trigger_key.endsWith(RETRY_KEY_SUFFIX) ?? false;
   }
 
   private cancelWhere(
