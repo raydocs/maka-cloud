@@ -105,11 +105,12 @@ test('verify accepts only a manifest the coding runner wrote', () => {
     }).problems.join(),
     /more than one review line/,
   );
-  assert.equal(
-    verifyCodingManifest({ ...manifest, done: [verified, 'review: not done (no budget)'] }).ok,
-    true,
-    'a change that was not reviewed says so and is still a verified change',
-  );
+  const unreviewed = verifyCodingManifest({
+    ...manifest,
+    done: [verified, 'review: not done (no budget)'],
+  });
+  assert.equal(unreviewed.ok, false, 'a change nobody reviewed is not a verified one');
+  assert.match(unreviewed.problems.join(), /not independently reviewed: not done \(no budget\)/);
   assert.match(
     verifyCodingManifest({ ...manifest, artifacts: ['change.patch'] }).problems.join(),
     /artifacts do not list: changes.json, verification.json, review.md/,
