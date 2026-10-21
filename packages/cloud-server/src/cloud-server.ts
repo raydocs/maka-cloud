@@ -287,8 +287,9 @@ export interface CloudServer {
    */
   startConversation(input: StartConversationInput): StartConversationResult;
   /**
-   * The conversation `startConversation` made for `owner` and `key`, if one exists. Reads only:
-   * a launch that must know whether an earlier attempt got as far as making the run asks here.
+   * The conversation `startConversation` made for `owner` and `key`, once its first message is
+   * stored; a conversation that exists without it is not a started one. Reads only: a launch
+   * that must know whether an earlier attempt got as far as making the run asks here.
    */
   startedConversation(input: {
     owner: string;
