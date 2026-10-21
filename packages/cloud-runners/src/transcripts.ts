@@ -14,8 +14,13 @@ export interface TranscriptStore {
    * Adds lines to the end of a transcript. A line that carries a `uuid` already stored for the
    * same transcript is skipped, so a batch sent again lands once. Rejects with `TranscriptFull`
    * past the task's cap, and for a project key other than the one the task's transcripts use.
+   * Resolves with the lines it committed: those skipped as already stored are not in it.
    */
-  append(taskId: TaskId, key: TranscriptKey, lines: readonly TranscriptLine[]): Promise<void>;
+  append(
+    taskId: TaskId,
+    key: TranscriptKey,
+    lines: readonly TranscriptLine[],
+  ): Promise<TranscriptLine[]>;
   /** Where a task's main transcript of a session is kept, and how many lines it has. */
   locate(taskId: TaskId, sessionId: string): Promise<TranscriptInfo | undefined>;
   /** A page of a main transcript: lines after `cursor` (the `next` of the page before), up to ~`maxBytes`. */
@@ -139,7 +144,7 @@ export class MemoryTranscriptStore implements TranscriptStore {
     taskId: TaskId,
     key: TranscriptKey,
     lines: readonly TranscriptLine[],
-  ): Promise<void> {
+  ): Promise<TranscriptLine[]> {
     checkAppend(key, lines, this.limits);
     let task = this.tasks.get(taskId);
     if (task && task.projectKey !== key.projectKey) {
@@ -171,6 +176,7 @@ export class MemoryTranscriptStore implements TranscriptStore {
     };
     task.transcripts.set(name, transcript);
     const seen = new Set<string>();
+    const committed: TranscriptLine[] = [];
     for (const line of lines) {
       if (line.uuid !== undefined) {
         if (transcript.uuids.has(line.uuid) || seen.has(line.uuid)) continue;
@@ -179,7 +185,9 @@ export class MemoryTranscriptStore implements TranscriptStore {
       }
       transcript.lines.push(line.json);
       task.bytes += Buffer.byteLength(line.json);
+      committed.push(line);
     }
+    return committed;
   }
 
   async locate(taskId: TaskId, sessionId: string): Promise<TranscriptInfo | undefined> {
@@ -218,7 +226,7 @@ export interface MirrorOptions {
   redact(text: string): string;
   /** A batch that was refused or could not be kept. The SDK also reports it in its message stream. */
   onProblem?(message: string): void;
-  /** Called with a batch once the store holds it, never before. */
+  /** Called with the lines of a batch the store committed (not those it skipped as stored already), never before. */
   onKept?(lines: readonly TranscriptLine[]): void;
 }
 
@@ -246,8 +254,8 @@ export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror
     append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
       const run = async (): Promise<void> => {
         const lines = entries.map((entry) => scrubbed(entry, redact));
-        await store.append(taskId, key, lines);
-        options.onKept?.(lines);
+        const committed = await store.append(taskId, key, lines);
+        options.onKept?.(committed);
       };
       const next = chain.then(run, run);
       chain = next.catch(() => undefined);
