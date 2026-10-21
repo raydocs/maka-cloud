@@ -16,18 +16,21 @@ name: maka-rehearsal
 
 services:
   stubs:
-    # The server's own image (the stand-ins use the workspaces' test doubles, which it carries).
+    # The server's own image plus a second account for the CLIs, a shared group and sudo (the stand-ins
+    # use the workspaces' test doubles, which it carries). The server's image is built by maka-cloud below.
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: server
-    image: maka-rehearsal:local
+      target: rehearsal-sandbox
+    image: maka-rehearsal-sandbox:local
     entrypoint: ["node", "deploy/rehearsal/stubs.mjs"]
     volumes:
       # The image carries no rehearsal code (the build context is an allowlist), so the script is mounted.
       - ./rehearsal/stubs.mjs:/app/deploy/rehearsal/stubs.mjs:ro
     environment:
       INSTABOX_API_KEY: ibk_rehearsal
+      # The group of the sandbox user (node) and the agent account (maka-agent), as the server is told.
+      REHEARSAL_AGENT_GROUP: maka-box
     healthcheck:
       test:
         - CMD
