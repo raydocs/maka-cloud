@@ -227,6 +227,96 @@ test("a direction override in an approval card is shown as an escape, and the mo
   assert.equal(question.note, 'Post a yrammus comment?\nRecommended.');
 });
 
+test('an approval covers only the card the owner saw: when the card would now read differently, the approved call does not run (T15)', async (t) => {
+  let repo = 'acme/widgets';
+  const target = fixture(
+    'post_comment',
+    ['sends'],
+    { target: 'issue#1', body: 'Thanks for the report.' },
+    { approvalDetails: () => `Repository: ${repo}` },
+  );
+  const h = await makeHarness(t, { autoComplete: false, conductor: { tools: [target.spec] } });
+  h.model.script('planner', text('1. Fetch the notes. 2. Summarise them.'));
+  let actionRef: string | undefined;
+  h.model.script(
+    'conductor',
+    ...readInjectedPage(h, calls(tool('post_comment', target.args))),
+    (request) => {
+      actionRef = actionRefOf(request);
+      assert.ok(actionRef);
+      return calls(
+        tool('ask_user', {
+          reason: 'irreversible',
+          question: 'Post it?',
+          actionRef,
+          recommended: 'approve',
+        }),
+      );
+    },
+  );
+  await h.send('cnv_1', 'Summarise the v2.0 release notes.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0];
+  assert.ok(question);
+  assert.match(question.question, /\n\nRepository: acme\/widgets$/);
+
+  // What the card shows changes after the owner saw it: the approval does not cover the new card.
+  repo = 'acme/private';
+  h.model.script(
+    'conductor',
+    () => calls(tool('post_comment', { ...target.args, actionRef })),
+    (request) => {
+      assert.match(refusal(toolResults(request)[0]), /^not_approved:/);
+      return text('Not posted.');
+    },
+  );
+  await h.answer('cnv_1', question.questionId, 'approve');
+  await h.conductor.idle();
+  assert.deepEqual(target.ran, []);
+});
+
+test('an approval runs the call whose card reads as the owner saw it, once (T15)', async (t) => {
+  const target = fixture(
+    'post_comment',
+    ['sends'],
+    { target: 'issue#1', body: 'Thanks \u202Efor the report.' },
+    { approvalDetails: () => 'Repository: acme/widgets' },
+  );
+  const h = await makeHarness(t, { autoComplete: false, conductor: { tools: [target.spec] } });
+  h.model.script('planner', text('1. Fetch the notes. 2. Summarise them.'));
+  let actionRef: string | undefined;
+  h.model.script(
+    'conductor',
+    ...readInjectedPage(h, calls(tool('post_comment', target.args))),
+    (request) => {
+      actionRef = actionRefOf(request);
+      return calls(
+        tool('ask_user', {
+          reason: 'irreversible',
+          question: 'Post it?',
+          actionRef,
+          recommended: 'approve',
+        }),
+      );
+    },
+  );
+  await h.send('cnv_1', 'Summarise the v2.0 release notes.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0];
+  assert.ok(question);
+  h.model.script(
+    'conductor',
+    () => calls(tool('post_comment', { ...target.args, actionRef })),
+    (request) => {
+      assert.equal(toolResults(request)[0]?.isError, false, toolResults(request)[0]?.text);
+      return text('Posted.');
+    },
+  );
+  await h.answer('cnv_1', question.questionId, 'approve');
+  await h.conductor.idle();
+  assert.deepEqual(target.ran, [target.args]);
+});
+
 test('the clean path: with no outside content read, guarded tools that can be undone run with no approval', async (t) => {
   const fixtures = guardedFixtures().slice(0, 3);
   const h = await makeHarness(t, { conductor: { tools: fixtures.map((f) => f.spec) } });
@@ -564,4 +654,35 @@ test('the migration taints every conversation that existed before taint was trac
   t.after(() => state.close());
   assert.deepEqual(state.taintOf('cnv_old'), { source: 'migration', at: 1 });
   assert.equal(state.taintOf('cnv_new'), undefined);
+});
+
+test('an approval given before approvals stored the card the owner saw is never used (T15)', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'conductor-shown-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'conductor.db');
+  const db = new DatabaseSync(path);
+  db.exec(CONDUCTOR_MIGRATIONS[0] as string);
+  (CONDUCTOR_MIGRATIONS[1] as (db: DatabaseSync) => void)(db);
+  db.exec(CONDUCTOR_MIGRATIONS[2] as string);
+  db.exec(CONDUCTOR_MIGRATIONS[3] as string);
+  db.exec('PRAGMA user_version = 4');
+  db.prepare(
+    `INSERT INTO held_actions (action_id, run_id, tool, args, state, created_at, approved_by)
+     VALUES ('act_old', 'run_old', 'post_comment', '{"body":"x"}', 'approved', 1, 'inv_owner')`,
+  ).run();
+  db.close();
+  const state = new ConductorState(path);
+  t.after(() => state.close());
+  assert.equal(
+    state.consumeApproval(
+      'run_old',
+      'post_comment',
+      'act_old',
+      { body: 'x' },
+      'Allow post_comment?',
+    ),
+    false,
+  );
 });
