@@ -5,7 +5,7 @@
  * titles alone; the host's logger adds broader ones of its own.
  */
 const SECRET_SHAPES: readonly RegExp[] = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gu,
+  /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/gu,
   /\b(?:Bearer|Basic)\s+[\w.~+/=-]+/giu,
   /\b(?:sk|pk|rk)-[\w-]{8,}/gu,
   /\bgh[pousr]_\w{16,}/gu,
