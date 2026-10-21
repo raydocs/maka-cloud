@@ -364,7 +364,11 @@ test('totals read the journal in the data directory for the smoke invite and the
   assert.deepEqual(seen, [['/srv/maka/gateway-spend.db', 1_700_000_000_000]]);
 });
 
-function fakeInvites(initial: { dailyUsd: number | null; monthlyUsd: number | null } | undefined) {
+function fakeInvites(
+  initial: { dailyUsd: number | null; monthlyUsd: number | null } | undefined,
+  /** The invite the smoke token resolves to; `null` is a token no active invite owns. */
+  tokenOwner: string | null = INVITE,
+) {
   let limits = initial;
   const calls: string[] = [];
   let opened = 0;
@@ -379,6 +383,12 @@ function fakeInvites(initial: { dailyUsd: number | null; monthlyUsd: number | nu
       calls.push(`open ${path}`);
       return {
         limits: () => limits,
+        resolve: (token: string) => {
+          calls.push(`resolve ${token === TOKEN ? 'the smoke token' : 'another token'}`);
+          return tokenOwner === null || token !== TOKEN
+            ? undefined
+            : { inviteId: tokenOwner, label: 'smoke', createdAt: 0, revokedAt: null };
+        },
         setLimits: (inviteId: string, set: { dailyUsd?: number; monthlyUsd?: number }) => {
           calls.push(`set ${inviteId} ${JSON.stringify(set)}`);
           if (limits && set.dailyUsd !== undefined) limits = { ...limits, dailyUsd: set.dailyUsd };
@@ -494,6 +504,37 @@ test('the budget is a hard cap only with a daily cap of the invite’s own at mo
       `${name}: nothing is changed`,
     );
   }
+});
+
+test('the caps are those of the invite the token belongs to: a token of another invite, or of none, is refused before any request', async () => {
+  // Another invite with a far higher cap would spend while the smoke invite's own cap is checked.
+  const cases: Array<[string, string | null, RegExp]> = [
+    ['a token of another invite', 'inv_ba9876543210', /belongs to another invite/u],
+    ['a token no active invite owns', null, /not the token of an active invite/u],
+  ];
+  for (const [name, owner, expected] of cases) {
+    const { io, touched, printed } = untouchable();
+    const invites = fakeInvites({ dailyUsd: 5, monthlyUsd: 50 }, owner);
+    io.openInvites = invites.open_ as never;
+    assert.equal(await smokeCommand(LIVE_ENV, io), 2, name);
+    assert.deepEqual(touched, [], `${name}: no request, journal read or restart`);
+    assert.match(printed.join('\n'), expected, name);
+    assert.equal(printed.join('\n').includes(TOKEN), false);
+    assert.equal(invites.open, 0, `${name}: the invites file is closed`);
+    assert.deepEqual(
+      invites.calls.filter((call) => call.startsWith('set')),
+      [],
+      `${name}: nothing is changed`,
+    );
+  }
+  const own = fakeInvites({ dailyUsd: 5, monthlyUsd: 50 });
+  assert.equal(
+    smokeCapProblem(settingsFor('http://127.0.0.1:1', { dataDir: '/srv/maka' }), {
+      openInvites: own.open_ as never,
+    }),
+    undefined,
+  );
+  assert.ok(own.calls.includes('resolve the smoke token'), 'the token is what is resolved');
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {

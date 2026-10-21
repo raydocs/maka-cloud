@@ -31,7 +31,7 @@ const RESTART_TIMEOUT_MS = 60_000;
 export interface LiveSmokeIo {
   fetch?: typeof fetch;
   readTotals?: (path: string, at: number) => JournalTotals;
-  openInvites?: (path: string) => Pick<InviteStore, 'limits' | 'setLimits' | 'close'>;
+  openInvites?: (path: string) => Pick<InviteStore, 'limits' | 'setLimits' | 'resolve' | 'close'>;
   run?: (command: readonly string[]) => Promise<void>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -365,22 +365,33 @@ function toQuestion(data: Record<string, unknown>): SmokeQuestion | undefined {
 }
 
 /**
- * Why the run may not start: the budget is a hard cap only when the smoke invite has a daily cap
- * of its own that is at most the budget, because the gateway refuses requests past that cap while
- * `MAKA_CLOUD_SMOKE_MAX_USD` only keeps a scenario from starting once the server has spent it.
+ * Why the run may not start. The caps that count are those of the invite the token belongs to,
+ * because that is who the requests are booked to, so the token is resolved first and must be the
+ * smoke invite's own: otherwise the caps checked here would be another invite's than the one that
+ * spends. The budget is a hard cap only when that invite has a daily cap of its own that is at most
+ * the budget, because the gateway refuses requests past that cap while `MAKA_CLOUD_SMOKE_MAX_USD`
+ * only keeps a scenario from starting once the server has spent it.
  */
 export function smokeCapProblem(settings: SmokeSettings, io: LiveSmokeIo): string | undefined {
   const openInvites = io.openInvites ?? ((path: string) => new InviteStore(path));
+  let owner: string | undefined;
   let limits: ReturnType<Pick<InviteStore, 'limits'>['limits']>;
   try {
     const invites = openInvites(join(settings.dataDir, 'invites.db'));
     try {
+      owner = invites.resolve(settings.token)?.inviteId;
       limits = invites.limits(settings.inviteId);
     } finally {
       invites.close();
     }
   } catch {
     return 'the invites file in MAKA_CLOUD_DATA_DIR could not be read';
+  }
+  if (owner === undefined) {
+    return 'MAKA_CLOUD_SMOKE_TOKEN is not the token of an active invite in MAKA_CLOUD_DATA_DIR';
+  }
+  if (owner !== settings.inviteId) {
+    return 'MAKA_CLOUD_SMOKE_TOKEN belongs to another invite than MAKA_CLOUD_SMOKE_INVITE_ID, so the caps checked would not be the ones that spend';
   }
   if (limits === undefined) {
     return 'MAKA_CLOUD_SMOKE_INVITE_ID names no invite in MAKA_CLOUD_DATA_DIR, or it was revoked';

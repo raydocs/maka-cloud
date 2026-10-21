@@ -557,8 +557,9 @@ Preparation:
    (`invite limits ... --daily`). That limit is the hard cap: the gateway refuses
    every model request past it, whereas the budget alone only keeps another
    scenario from starting once the server has spent it. The command refuses
-   (exit 2, before any request) when the invite has no limit of its own or one
-   above the budget. The budget-stop step lowers that limit for a few minutes and
+   (exit 2, before any request) when `MAKA_CLOUD_SMOKE_TOKEN` is not that
+   invite's own token, or when the invite has no limit of its own or one above
+   the budget. The budget-stop step lowers that limit for a few minutes and
    puts it back. If the run is killed in that window, set the limit back by
    hand: the line printed at the start of the step says what it was.
 3. A command that restarts the server, as a JSON array (no shell is used). The
