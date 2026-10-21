@@ -30,8 +30,8 @@ export interface Candidate {
   score: number;
 }
 
-/** At most this many candidates of one kind: a repository with fifty open issues does not flood the ranking. */
-const PER_KIND_LIMIT = 3;
+/** At most this many cards of one kind are proposed in one scan: a repository with fifty open issues does not flood the ranking. */
+export const PER_KIND_LIMIT = 3;
 const SEVERITY_WEIGHT: Record<string, number> = { critical: 20, high: 10, medium: 4, low: 1 };
 const KNOWN_SEVERITIES = ['critical', 'high', 'medium', 'low'];
 const PACKAGE_NAME = /^[@A-Za-z0-9._/-]{1,100}$/u;
@@ -194,7 +194,7 @@ export function buildCandidates(input: CandidateInput): Candidate[] {
   }
 
   if (!input.issueDutyActive) {
-    signals.newIssues.slice(0, PER_KIND_LIMIT).forEach((issue, index) => {
+    signals.newIssues.forEach((issue, index) => {
       made.push({
         kind: 'triage_issue',
         subjectKey: `issue:${issue.number}`,
@@ -254,16 +254,20 @@ export function buildCandidates(input: CandidateInput): Candidate[] {
     });
   }
 
-  const perKind = new Map<CardKind, number>();
   return made
     .filter((m) => enabled.has(m.kind))
     .sort((a, b) => b.score - a.score || (a.subjectKey < b.subjectKey ? -1 : 1))
-    .filter((m) => {
-      const seen = perKind.get(m.kind) ?? 0;
-      perKind.set(m.kind, seen + 1);
-      return seen < PER_KIND_LIMIT;
-    })
     .map((m) => ({ card: toCard(input.repo, m), score: m.score }));
+}
+
+/** The first `PER_KIND_LIMIT` of each kind, in the order given. */
+export function capPerKind(candidates: readonly Candidate[]): Candidate[] {
+  const seen = new Map<CardKind, number>();
+  return candidates.filter((candidate) => {
+    const n = seen.get(candidate.card.kind) ?? 0;
+    seen.set(candidate.card.kind, n + 1);
+    return n < PER_KIND_LIMIT;
+  });
 }
 
 function toCard(repo: string, made: Made): NewCard {
