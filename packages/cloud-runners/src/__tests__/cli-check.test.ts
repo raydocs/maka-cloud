@@ -118,3 +118,33 @@ test('a CLI found outside ~/.maka-cli is not run', (t) => {
   assert.notEqual(box.check(), 0);
   assert.equal(existsSync(box.ran), false);
 });
+
+test('the version must be the pinned one, not one that merely contains it', (t) => {
+  const box = boxWith(t);
+  const say = (version: string) =>
+    writeFileSync(box.cli, `#!/bin/sh\necho "claude ${version} (Claude Code)"\n`, { mode: 0o755 });
+  const check = (pinned: string): number => {
+    try {
+      execFileSync('sh', ['-c', cliCheckScript('claude', 'maka-agent')], {
+        env: {
+          PATH: `${box.shim}:${process.env.PATH ?? ''}`,
+          HOME: box.home,
+          MAKA_MARKER: join(box.home, 'marker.ok'),
+          MAKA_VERSION: pinned,
+        },
+        stdio: 'ignore',
+      });
+      return 0;
+    } catch (error) {
+      return (error as { status?: number }).status ?? 1;
+    }
+  };
+  say('2.0.10');
+  assert.equal(check('2.0.1'), 1);
+  say('12.0.1');
+  assert.equal(check('2.0.1'), 1);
+  say('2.0.1');
+  assert.equal(check('2.0.1'), 0);
+  // A dot in the pin is a dot, not any character.
+  assert.equal(check('2x0x1'), 1);
+});

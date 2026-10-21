@@ -494,7 +494,9 @@ export const TOOL_ABORT_SCRIPT = `rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`
  * stand in for `readlink`, `find` or `id`. It must also be wholly the sandbox user's own and closed
  * to everyone else (nothing under `~/.maka-cli` owned by another user, or writable by a group or the
  * world), and be under `~/.maka-cli`; a refused CLI counts as not installed and the install
- * replaces it.
+ * replaces it. The marker (the sandbox user's own file) is what pins the version; the run of the CLI
+ * is a liveness check that it can be run as the agent account, and must print the pinned version as
+ * a whole word. It assumes `sudo` keeps the sandbox user's HOME (no `always_set_home`).
  */
 export function cliCheckScript(binary: string, agentUser: string): string {
   return `cli="$HOME/.maka-cli/bin/${binary}"
@@ -503,7 +505,8 @@ root=$(readlink -f "$HOME/.maka-cli") || exit 1
 exe=$(readlink -f "$cli") || exit 1
 case "$exe" in "$root"/*) ;; *) exit 1 ;; esac
 [ -z "$(find "$root" "$HOME/.maka-cli" \\( ! -user "$(id -un)" -o \\( ! -type l -a -perm /022 \\) \\) -print -quit 2>/dev/null)" ] || exit 1
-${asAgentUser('"$cli" --version', agentUser)} 2>&1 | grep -qF -- "$MAKA_VERSION"`;
+ver=$(printf '%s' "$MAKA_VERSION" | sed 's/[.+]/\\\\&/g')
+${asAgentUser('"$cli" --version', agentUser)} 2>&1 | grep -qE -- "(^|[^0-9A-Za-z.])$ver([^0-9A-Za-z.]|$)"`;
 }
 
 /**
