@@ -237,7 +237,14 @@ export function createLiveSmokeDeps(
     async tasks(conversationId) {
       const found: SmokeTask[] = [];
       let after = 0;
-      for (let page = 0; page < MAX_TASK_PAGES; page += 1) {
+      // A list that is not read to its end is an error, not a shorter list: a task that was not
+      // seen is a task that was not stopped.
+      for (let page = 0; ; page += 1) {
+        if (page >= MAX_TASK_PAGES) {
+          throw new Error(
+            `the task list of ${conversationId} is longer than ${MAX_TASK_PAGES} pages`,
+          );
+        }
         const body = await request(
           'GET',
           `/v1/conversations/${encodeURIComponent(conversationId)}/tasks?after=${after}`,
@@ -247,12 +254,15 @@ export function createLiveSmokeDeps(
         }
         for (const raw of body.tasks) {
           const task = toTask(raw);
-          if (task) found.push(task);
+          if (!task) throw new Error('the task list holds an entry of an unexpected shape');
+          found.push(task);
         }
-        if (typeof body.next !== 'number') break;
+        if (body.next === undefined || body.next === null) return found;
+        if (typeof body.next !== 'number' || !Number.isInteger(body.next) || body.next <= after) {
+          throw new Error('the task list has a next cursor that does not move forward');
+        }
         after = body.next;
       }
-      return found;
     },
 
     async openQuestions(conversationId) {
@@ -316,8 +326,10 @@ export function createLiveSmokeDeps(
      */
     async cancelLeftovers() {
       const listed = await request('GET', '/v1/conversations');
-      const conversations =
-        isRecord(listed) && Array.isArray(listed.conversations) ? listed.conversations : [];
+      if (!isRecord(listed) || !Array.isArray(listed.conversations)) {
+        throw new Error('the conversation list has an unexpected shape');
+      }
+      const conversations: unknown[] = listed.conversations;
       const sleep = io.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
       const stopped = (task: SmokeTask): boolean =>
         ENDED_STATES.includes(task.state) &&
@@ -326,7 +338,9 @@ export function createLiveSmokeDeps(
       const open: Array<SmokeTask & { conversationId: string }> = [];
       for (const conversation of conversations) {
         const id = isRecord(conversation) ? conversation.conversationId : undefined;
-        if (typeof id !== 'string') continue;
+        if (typeof id !== 'string') {
+          throw new Error('the conversation list holds an entry of an unexpected shape');
+        }
         for (const task of await this.tasks(id)) {
           // Every task is asked, however long ago it ended: the list cannot show a tree that is still
           // stopping, and the server's flag has no age limit.
