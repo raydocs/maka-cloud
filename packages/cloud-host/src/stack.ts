@@ -63,7 +63,7 @@ export interface StackDependencies {
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
   pausePollMs?: number;
   /** Timing of the daily backup, for tests. */
-  spendAlertTiming?: { pollMs?: number };
+  spendAlertTiming?: { pollMs?: number; now?: () => number };
   /** Replaces the Web Push transport, for tests; the product sends over HTTPS. */
   pushTransport?: PushTransport;
   backupTiming?: {
@@ -352,6 +352,20 @@ export async function startStack(
             clear: (inviteId, key) => journal.clearPendingAlert(inviteId, key),
           },
           alert: (inviteId, key) => cloud.server.pushAlert(inviteId, key),
+          // An alert that never reached a device must not hide a cap breach: it becomes a budget
+          // item in the owner's inbox (in the owner's oldest conversation, as the inbox is
+          // per owner). An owner with no conversation has nowhere to see one, so only the log says.
+          onDropped: (alert) => {
+            const conversationId = cloud.server.conversationsOf(alert.inviteId)[0];
+            if (conversationId === undefined) return;
+            if (raiseCapHit === undefined) throw new Error('The inbox is not running');
+            const day = alert.key.slice('spend:'.length);
+            raiseCapHit({
+              conversationId,
+              key: `spend_alert:${day}`,
+              ask: `The alert that the server's spend reached its limit on ${day} was never delivered to your devices, so you may not have been told. Check the day's spend.`,
+            });
+          },
           onAlert: (day) => dependencies.onInfo?.('spend.alerted', { day }),
           onWarning: warn,
           ...dependencies.spendAlertTiming,

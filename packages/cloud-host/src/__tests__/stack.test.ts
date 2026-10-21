@@ -877,6 +877,68 @@ test('the owner’s devices are told once when the day’s spend reaches the ale
   assert.equal(calls.length, 1, 'asking again the same day sends nothing');
 });
 
+test('an alert that was never delivered in a day becomes a budget item in the owner’s inbox, and no one else’s', async (t) => {
+  const vapid = vapidKeys();
+  let owner: { inviteId: string; token: string } | undefined;
+  const started = await start(
+    t,
+    undefined,
+    {
+      CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+      CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+      CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+      MAKA_CLOUD_SPEND_ALERT_USD: '1',
+    },
+    true,
+    { spendAlertTiming: { pollMs: 3_600_000 } },
+    (dir) => {
+      const store = new InviteStore(join(dir, 'invites.db'));
+      owner = store.create('owner');
+      store.close();
+      return { MAKA_CLOUD_OWNER_INVITE: owner.inviteId };
+    },
+  );
+  assert.ok(owner);
+  const other = started.stack.cloud.server.invites.create('someone else');
+  const api = (token: string, path: string, body?: unknown): Promise<Response> =>
+    fetch(`${started.stack.cloud.server.url}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const made = await api(owner.token, '/v1/conversations', {});
+  const { conversationId } = (await made.json()) as { conversationId: string };
+  await api(other.token, '/v1/conversations', {});
+
+  // An alert asked for a day and an hour ago and never delivered, as a push outage leaves it,
+  // while today's spend is nowhere near the amount.
+  const journal = new SqliteSpendJournal(join(started.dataDir, 'gateway-spend.db'));
+  t.after(() => journal.close());
+  journal.savePendingAlert({
+    inviteId: owner.inviteId,
+    key: 'spend:2026-10-19',
+    firstAt: Date.now() - 25 * 3_600_000,
+    failures: 9,
+    retryAt: 0,
+  });
+  await started.stack.checkSpendAlert();
+
+  const items = async (token: string) =>
+    (await (await api(token, '/v1/inbox/items')).json()) as {
+      items: Array<{ kind: string; conversationId: string; ask: string }>;
+    };
+  const mine = (await items(owner.token)).items;
+  assert.equal(mine.length, 1, 'the owner has the item');
+  assert.equal(mine[0]?.kind, 'budget');
+  assert.equal(mine[0]?.conversationId, conversationId);
+  assert.match(mine[0]?.ask ?? '', /2026-10-19/u);
+  assert.deepEqual((await items(other.token)).items, [], 'nobody else sees it');
+  assert.deepEqual(journal.pendingAlerts(), [], 'and it is no longer owed');
+  assert.ok(started.warnings.some((message) => /2026-10-19.*giving up/u.test(message)));
+  await started.stack.checkSpendAlert();
+  assert.equal((await items(owner.token)).items.length, 1, 'asking again adds nothing');
+});
+
 test('without a spend alert set the check does nothing', async (t) => {
   const started = await start(t);
   await started.stack.checkSpendAlert();

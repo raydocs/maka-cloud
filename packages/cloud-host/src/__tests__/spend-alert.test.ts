@@ -371,3 +371,63 @@ test('what is owed waits out its backoff after a restart, as before it', async (
   await w.made.tick(true);
   assert.equal(w.asked.length, 1, 'inside the wait nothing is asked');
 });
+
+test('an alert dropped unsent after a day is told: a warning naming its day, and onDropped once', async () => {
+  const spent = { usd: 20 };
+  const dropped: string[] = [];
+  const { w } = flaky(spent, { onDropped: (alert) => void dropped.push(alert.key) });
+  await w.made.tick(true);
+  spent.usd = 0;
+  w.advance(DAY - MINUTE);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, [], 'still being tried just under a day on');
+  w.advance(2 * MINUTE);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, ['spend:2026-10-20']);
+  assert.ok(
+    w.warnings.some((message) => message.includes('2026-10-20') && /giving up/u.test(message)),
+    'the warning names the day',
+  );
+  const asked = w.asked.length;
+  w.advance(30 * MINUTE);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, ['spend:2026-10-20'], 'told once');
+  assert.equal(w.asked.length, asked, 'and not asked for again');
+});
+
+test('an alert that was delivered is never reported as dropped', async () => {
+  const dropped: string[] = [];
+  const { w, push } = flaky({ usd: 20 }, { onDropped: (alert) => void dropped.push(alert.key) });
+  await w.made.tick(true);
+  push.up = true;
+  w.advance(2 * MINUTE);
+  await w.made.tick(true);
+  w.advance(2 * DAY);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, []);
+});
+
+test('a drop that cannot be told stays owed, and is told at a later tick', async () => {
+  const spent = { usd: 20 };
+  const dropped: string[] = [];
+  let inboxUp = false;
+  const { w } = flaky(spent, {
+    onDropped: (alert) => {
+      if (!inboxUp) throw new Error('The inbox is not running');
+      dropped.push(alert.key);
+    },
+  });
+  await w.made.tick(true);
+  spent.usd = 0;
+  w.advance(DAY + MINUTE);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, []);
+  assert.ok(w.warnings.some((message) => /could not be raised/u.test(message)));
+  inboxUp = true;
+  w.advance(MINUTE);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, ['spend:2026-10-20'], 'told once the inbox is back');
+  w.advance(MINUTE);
+  await w.made.tick(true);
+  assert.deepEqual(dropped, ['spend:2026-10-20']);
+});

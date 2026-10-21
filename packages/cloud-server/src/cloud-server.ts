@@ -266,6 +266,8 @@ export interface CloudServer {
    * because the push service kept failing (ask again later); without Web Push it resolves `true`.
    */
   pushAlert(inviteId: string, key: string): Promise<boolean>;
+  /** The ids of the conversations `inviteId` owns, oldest first. */
+  conversationsOf(inviteId: string): string[];
   /**
    * Starts a conversation owned by `owner` with a first message that carries `meta`, for a
    * standing duty. Idempotent on `key`. The message is delivered at least once with its meta.
@@ -594,6 +596,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
       pushAlert: (inviteId, key) => ownPush?.alert(inviteId, key) ?? Promise.resolve(true),
+      conversationsOf: (inviteId) => conversations.idsOf(inviteId),
       createConversation: (input) => {
         if (!/^[A-Za-z0-9_:.-]{1,128}$/u.test(input.key)) return { ok: false, reason: 'invalid' };
         if (!ownInviteStore.active(input.owner)) return { ok: false, reason: 'owner_inactive' };

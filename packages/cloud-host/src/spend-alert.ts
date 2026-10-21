@@ -57,6 +57,11 @@ export interface SpendAlertWatcherOptions {
   pollMs?: number;
   /** Longest `close` waits for a tick in flight. */
   closeWaitMs?: number;
+  /**
+   * Called when an alert is dropped unsent because it is a day old, so its loss is not silent.
+   * If it throws, the alert stays owed and this is called again at the next tick.
+   */
+  onDropped?(alert: OwedAlert): void | Promise<void>;
   /** Called once per UTC day, when the threshold is first seen to be reached. */
   onAlert?: (day: string) => void;
   onWarning?: (message: string, detail?: unknown) => void;
@@ -116,10 +121,7 @@ export class SpendAlertWatcher {
       for (const alert of owed) {
         asked.add(`${alert.inviteId}\n${alert.key}`);
         if (now() - alert.firstAt >= GIVE_UP_AFTER_MS) {
-          this.settle(
-            alert,
-            'The spend alert for a day that is over was never delivered; giving up',
-          );
+          await this.giveUp(alert);
           continue;
         }
         if (scheduled && now() < alert.retryAt) continue;
@@ -183,13 +185,29 @@ export class SpendAlertWatcher {
     }
   }
 
-  private settle(alert: OwedAlert, warning?: string): void {
+  /** An alert a day old is dropped, and the loss is told: a warning, and `onDropped` (the inbox). */
+  private async giveUp(alert: OwedAlert): Promise<void> {
+    const day = alert.key.slice('spend:'.length);
+    try {
+      await this.options.onDropped?.(alert);
+    } catch (error) {
+      // Still owed: the loss has not been told yet, so the next tick tries to tell it again.
+      this.options.onWarning?.(
+        `The spend alert for ${day} was dropped but could not be raised`,
+        error,
+      );
+      return;
+    }
+    this.settle(alert);
+    this.options.onWarning?.(`The spend alert for ${day} was not delivered in 24 hours; giving up`);
+  }
+
+  private settle(alert: OwedAlert): void {
     try {
       this.owed.clear(alert.inviteId, alert.key);
     } catch (error) {
       this.options.onWarning?.('The spend alert failed; trying again', error);
     }
-    if (warning !== undefined) this.options.onWarning?.(warning);
   }
 
   async close(): Promise<void> {
