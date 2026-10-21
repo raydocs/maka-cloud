@@ -1,0 +1,25 @@
+# A finished task arrives as one result card: its outcome, its picture (opened large), its pull request,
+# and a details page behind it. The pages it opened are listed under it.
+appId: cloud.maka.app
+---
+- runFlow: subflows/sign-in.yaml
+- assertVisible:
+    id: "field-Keep the conversation going"
+- scrollUntilVisible:
+    element:
+      id: "delivery-picture"
+- assertVisible: "The login page no longer loops."
+- assertVisible: "Open pull request ↗"
+- takeScreenshot: delivery-card
+- tapOn:
+    id: "delivery-picture"
+- assertVisible:
+    id: "button-Close"
+- takeScreenshot: delivery-viewer
+- tapOn:
+    id: "button-Close"
+- tapOn:
+    id: "button-Details"
+- assertVisible: "Outcome"
+- assertVisible: "Redirects once after sign-in"
+- takeScreenshot: delivery-details

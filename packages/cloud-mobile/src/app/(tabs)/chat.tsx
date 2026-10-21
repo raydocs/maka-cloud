@@ -1,5 +1,6 @@
 import {
   ConversationFeed,
+  type TaskView,
   conversationSummary,
   displayText,
   dollars,
@@ -9,6 +10,8 @@ import {
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, View } from 'react-native';
 import { DecisionCard, QuestionBlock } from '@/components/Decision';
+import { TaskDelivery } from '@/components/Delivery';
+import { TaskDetails } from '@/components/TaskDetails';
 import { TaskRow } from '@/components/TaskRow';
 import { Card, Field, PillButton, RoundButton, Screen, T } from '@/components/ui';
 import { useWorkspace } from '@/lib/session';
@@ -54,6 +57,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const total = totalCost(tasks);
   const [draft, setDraft] = useState('');
   const [picking, setPicking] = useState(false);
+  const [detail, setDetail] = useState<TaskView | undefined>();
   const scroll = useRef<{ scrollToEnd(options?: { animated?: boolean }): void } | null>(null);
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
   const inbox = Object.values(state.inbox);
@@ -146,6 +150,15 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             ))}
           </Card>
         )}
+        {roots.map((task) => (
+          <TaskDelivery
+            key={task.taskId}
+            client={client}
+            task={task}
+            listings={snapshot.artifacts[task.taskId]?.listings ?? []}
+            onOpenTask={setDetail}
+          />
+        ))}
         {questions.map((question) => (
           <Card key={question.questionId} label="Your decision">
             <QuestionBlock
@@ -190,6 +203,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           onPress={() => void feed.send(draft).then((sent) => sent && setDraft(''))}
         />
       </View>
+      {detail && (
+        <TaskDetails
+          client={client}
+          task={state.tasks[detail.taskId] ?? detail}
+          onClose={() => setDetail(undefined)}
+        />
+      )}
       <Modal
         visible={picking}
         transparent
