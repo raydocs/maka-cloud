@@ -346,6 +346,7 @@ export class InstaboxClient {
         throw new InstaboxOperationError(
           id,
           `instabox operation ${id} (${operation.type}) still ${operation.state} after the wait deadline.`,
+          'unknown',
         );
       }
     }

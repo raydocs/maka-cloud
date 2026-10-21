@@ -124,7 +124,9 @@ describe('InstaboxClient', () => {
     await assert.rejects(
       h.client.waitForOperation(accepted.id),
       (error: unknown) =>
-        error instanceof InstaboxOperationError && /host rejected the resume/.test(error.message),
+        error instanceof InstaboxOperationError &&
+        error.outcome === 'failed' &&
+        /host rejected the resume/.test(error.message),
     );
   });
 
@@ -137,7 +139,10 @@ describe('InstaboxClient', () => {
       baseUrl: h.fake.url,
       now: () => (clock += 10 * 60_000),
     });
-    await assert.rejects(slow.waitForOperation(accepted.id), InstaboxOperationError);
+    await assert.rejects(
+      slow.waitForOperation(accepted.id),
+      (error: unknown) => error instanceof InstaboxOperationError && error.outcome === 'unknown',
+    );
   });
 
   it('ensureRunning resumes a paused sandbox and starts a stopped one', async () => {

@@ -25,7 +25,8 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
    sandbox.
 3. A vendor agent (T6 `SandboxCliRunner`, Claude first unless the brief says otherwise) writes a reproduction test,
    records it in `repro.json`, and makes the change.
-4. The runner checks the work itself, as the sandbox user, with detached processes it polls:
+4. The runner checks the work itself, as the agent's account (never the sandbox user: a repository's test command is
+   the agent's code, and a box with no agent account runs no check), with detached processes it polls:
    the reproduction test passes; `testCommand` passes; the reproduction test **fails** with every change outside its
    files reverted to the base commit (then the change is put back). A test that passes without the change does not
    reproduce anything and is rejected, and so does one that times out, is killed by a signal, or cannot run its
@@ -54,7 +55,8 @@ samples of one vendor's attempt, is a loop: the run is cancelled and the task ha
 run what is left of the task's `budgetUsd`. When the total reaches the budget, it stops the agent run and fails the
 task with the reason. A spent budget is not a vendor failure, so the task is not handed over.
 
-**Checks.** A check is one sandbox `exec` that runs the command to its end, and its exit status is the exec's own,
+**Checks.** A check is one sandbox `exec`, run as the agent's account (`SandboxWorkspace.execCheck`: the same account check and
+`sudo -u` as the CLI), that runs the command to its end, and its exit status is the exec's own,
 which the instabox API returns to the host. Nothing the check writes (files, output) is read as its result. The command
 runs in a new user and PID namespace (`unshare --user --map-current-user --pid --fork --kill-child`) whose first
 process is the runner's: when the command ends, that process exits and the kernel kills everything left in the

@@ -107,6 +107,10 @@ export interface ResumeInput {
   spec: RunSpec;
 }
 
+function noAgentChannelReason(vendor: VendorAdapter): string {
+  return `the ${vendor.binary} CLI needs an agent channel (a separate account for the agent) and none is configured`;
+}
+
 /** Runs one vendor's CLI inside a sandbox for each task, as the orchestrator's `Runner`. */
 export class SandboxCliRunner implements Runner {
   constructor(
@@ -385,6 +389,10 @@ class Run implements RunHandle {
       let record = (this.record = acquired.record);
       this.startActivityLease(machine);
 
+      // No account, or a box that does not keep it out, means nothing of the CLI runs: not its
+      // version check, not its install, not the tools it is handed.
+      const refused = await this.requireAgentAccount(fleet, machine, vendor);
+      if (refused !== undefined) return this.fail(refused);
       await this.guard(fleet.ensureCli(machine, vendor));
       await this.guard(fleet.ensureTools(machine));
       this.checkCancelled();
@@ -398,9 +406,14 @@ class Run implements RunHandle {
       this.requiredArtifacts = header.artifacts;
       if (resumed) {
         // A new sandbox has no brief: the conversation refers to it.
-        await machine.prepare(spec.taskId, this.freshBox ? brief : undefined, this.signal);
+        await machine.prepare(
+          spec.taskId,
+          this.freshBox ? brief : undefined,
+          this.signal,
+          fleet.options.agentChannel?.group,
+        );
       } else {
-        await machine.prepare(spec.taskId, brief, this.signal);
+        await machine.prepare(spec.taskId, brief, this.signal, fleet.options.agentChannel?.group);
         if (header.requests.length > 0) {
           const copied = await this.guard(this.stageInputs(machine, header.requests));
           if (!copied.ok) return this.fail(copied.reason);
@@ -834,10 +847,7 @@ class Run implements RunHandle {
     // without that account, or one that does not keep it out, runs nothing.
     const channel = fleet.options.agentChannel;
     if (channel === undefined) {
-      return {
-        ok: false,
-        reason: `the ${vendor.binary} CLI needs an agent channel (a separate account for the agent) and none is configured`,
-      };
+      return { ok: false, reason: noAgentChannelReason(vendor) };
     }
     try {
       await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
@@ -1467,6 +1477,22 @@ class Run implements RunHandle {
 
   private checkCancelled(): void {
     if (this.cancelled) throw new CancelledError();
+  }
+
+  /** Why this run may not start the CLI, or undefined when its account is set and the box keeps it out. */
+  private async requireAgentAccount(
+    fleet: Fleet,
+    machine: RemoteMachine,
+    vendor: VendorAdapter,
+  ): Promise<string | undefined> {
+    if (fleet.options.agentChannel === undefined) return noAgentChannelReason(vendor);
+    try {
+      await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
+    } catch (error) {
+      if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
+      return this.scrubForReader(errorMessage(error));
+    }
+    return undefined;
   }
 
   private fail(reason: string): void {

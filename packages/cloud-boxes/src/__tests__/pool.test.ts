@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { boxName, LABEL } from '../labels.js';
+import { InstaboxOperationError } from '@maka-cloud/instabox';
 import { BoxRefusedError, NoFreeBoxError } from '../types.js';
 import { flush, labelsOf, setup } from './support.js';
 
@@ -72,6 +73,36 @@ describe('BoxPool', () => {
     const cleaned = await t.pool.cleanup();
     assert.deepEqual(cleaned.recovered, [kept?.machineId]);
     assert.equal(t.pool.state().find((row) => row.machineId === kept?.machineId)?.state, 'ready');
+  });
+
+  it('keeps a box whose create is still running when the wait runs out, as lost, but forgets one whose create failed', async () => {
+    const t = setup();
+    const wait = t.fleet.waitForOperation.bind(t.fleet);
+    let timeouts = 1;
+    t.fleet.waitForOperation = async (id: string) => {
+      if (timeouts-- > 0) {
+        throw new InstaboxOperationError(
+          id,
+          `instabox operation ${id} (create) still running after the wait deadline.`,
+          'unknown',
+        );
+      }
+      return await wait(id);
+    };
+    await assert.rejects(t.pool.acquire({ tenantId: A, taskId: 't1' }), /still running/);
+    const [kept] = t.pool.state();
+    assert.equal(kept?.state, 'lost', 'the machine may exist, so the slot keeps it');
+    assert.ok(kept?.machineId);
+    assert.ok(t.fleet.machines.has(kept?.machineId as string));
+    // A later task is not told the box "already belongs to" the first one.
+    const second = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.notEqual(second.machineId, kept?.machineId);
+
+    // An operation instabox reports as failed left no machine: the slot is free again.
+    const failing = setup();
+    failing.fleet.failNextOperation = true;
+    await assert.rejects(failing.pool.acquire({ tenantId: A, taskId: 't1' }), /failed/);
+    assert.deepEqual(failing.pool.state(), []);
   });
 
   it('gives each task its own box, makes the next slot only when none is free, and queues the rest first come first served', async () => {
