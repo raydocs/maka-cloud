@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -115,6 +116,84 @@ test('an append lands once however often its request is sent, and a file out of 
   await send({ MAKA_EOF: '1' }, '');
   assert.equal(await fs.readFile(file, 'utf8'), 'abc\nde\n');
   assert.ok(await fs.stat(`${file}.eof`));
+});
+
+/** Runs the append script as a sandbox would, stdin held open until the test writes it. */
+function appendProcess(r: Rig, extra: Record<string, string>) {
+  const child = spawn('bash', ['-c', INPUT_APPEND_SCRIPT], {
+    env: {
+      PATH: process.env.PATH ?? '',
+      MAKA_DIR: r.machine.taskDir(r.dir),
+      MAKA_RUN: r.run,
+      ...extra,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let answer = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    answer += chunk.toString('utf8');
+  });
+  const done = new Promise<string>((resolve) => child.on('close', () => resolve(answer.trim())));
+  /** True once the script waits on its input: a `cat` of its own is reading stdin. */
+  const reading = async () => {
+    const children = await fs
+      .readFile(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8')
+      .catch(() => '');
+    for (const pid of children.split(/\s+/u).filter((entry) => entry !== '')) {
+      const name = await fs.readFile(`/proc/${pid}/comm`, 'utf8').catch(() => '');
+      if (name.trim() === 'cat') return true;
+    }
+    return false;
+  };
+  return { child, done, reading };
+}
+
+test('two requests for the same bytes racing each other write them once', async (t) => {
+  const r = await rig(t, 'tsk_pc_race');
+  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  const request = { MAKA_OFFSET: '0', MAKA_LEN: '5' };
+  const original = appendProcess(r, request);
+  const retry = appendProcess(r, request);
+  // Both are in the script and neither has had its input yet: the state a slow original and its
+  // retry are in.
+  await until(async () => (await original.reading()) && (await retry.reading()));
+  original.child.stdin.end('abcd\n');
+  retry.child.stdin.end('abcd\n');
+
+  assert.deepEqual(await Promise.all([original.done, retry.done]), ['OK', 'OK']);
+  assert.equal(await fs.readFile(file, 'utf8'), 'abcd\n');
+});
+
+test('a request cut off part way is completed by its retry instead of leaving the file out of step', async (t) => {
+  const r = await rig(t, 'tsk_pc_partial');
+  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  // The first try appended two bytes of five before it was killed.
+  await fs.writeFile(file, 'ab');
+  const retry = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '5' });
+  retry.child.stdin.end('abcd\n');
+  assert.equal(await retry.done, 'OK');
+  assert.equal(await fs.readFile(file, 'utf8'), 'abcd\n');
+
+  // What is already there must be a prefix of the request, or the files disagree.
+  await fs.writeFile(file, 'zz');
+  const other = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '5' });
+  other.child.stdin.end('abcd\n');
+  assert.match(await other.done, /^MISMATCH 2/u);
+  assert.equal(await fs.readFile(file, 'utf8'), 'zz');
+});
+
+test('a request whose input did not arrive whole writes nothing', async (t) => {
+  const r = await rig(t, 'tsk_pc_short');
+  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  const short = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '5' });
+  short.child.stdin.end('ab');
+  assert.match(await short.done, /^SHORT 2/u);
+  await assert.rejects(fs.stat(file));
+  // Nothing was left behind next to it either.
+  const left = (await fs.readdir(r.machine.taskDir(r.dir))).filter((name) =>
+    name.startsWith('t1.in'),
+  );
+  assert.deepEqual(left, []);
 });
 
 test('what the host writes to stdin reaches the process, its output comes back, and the end of input ends it', async (t) => {

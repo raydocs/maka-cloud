@@ -31,11 +31,15 @@ const APPEND_TIMEOUT_SECONDS = 30;
 
 /**
  * Appends stdin to `<run>.in`, at most once for a given offset. `MAKA_OFFSET` is where the file must
- * end before the append; `MAKA_LEN` is the length of the payload in bytes. A file that already ends
- * at `offset + len` took an earlier try of this very request, so nothing is written again. Any
- * other size means the host and the file disagree, and nothing is written. With `MAKA_EOF` it ends
- * the input instead: the feeder stops once it has passed on everything written before the marker.
- * Prints `OK` or `MISMATCH <size>`.
+ * end before the append; `MAKA_LEN` is the length of the payload in bytes. The payload is read
+ * whole into a private file first (`SHORT <n>` and nothing written when it did not all arrive),
+ * and the check of the file's size and the append are one step under a lock, so a slow original
+ * and its retry cannot both append. What the file already holds from `MAKA_OFFSET` on must be a
+ * prefix of the payload: all of it means an earlier try finished (nothing is written again), part
+ * of it means an earlier try was cut off and the rest is appended; anything else means the host
+ * and the file disagree, and nothing is written. With `MAKA_EOF` it ends the input instead: the
+ * feeder stops once it has passed on everything written before the marker. Prints `OK`,
+ * `MISMATCH <size>`, `SHORT <n>` or `BUSY`.
  */
 export const INPUT_APPEND_SCRIPT = `set -eu
 umask 077
@@ -47,15 +51,30 @@ if [ -n "\${MAKA_EOF:-}" ]; then
   echo OK
   exit 0
 fi
+part=$(mktemp "$f.part.XXXXXX")
+trap 'rm -f "$part" "$part.head"' EXIT
+cat > "$part"
+got=$(stat -c %s "$part")
+if [ "$got" -ne "$MAKA_LEN" ]; then
+  echo "SHORT $got"
+  exit 0
+fi
+exec 9> "$f.lock"
+if ! flock -w 20 9; then
+  echo BUSY
+  exit 0
+fi
 size=$(stat -c %s "$f" 2>/dev/null || echo 0)
-if [ "$size" -eq "$MAKA_OFFSET" ]; then
-  cat >> "$f"
-  echo OK
-elif [ "$size" -eq $((MAKA_OFFSET + MAKA_LEN)) ]; then
-  cat > /dev/null
+if [ "$size" -lt "$MAKA_OFFSET" ] || [ "$size" -gt $((MAKA_OFFSET + MAKA_LEN)) ]; then
+  echo "MISMATCH $size"
+  exit 0
+fi
+have=$((size - MAKA_OFFSET))
+head -c "$have" "$part" > "$part.head"
+if tail -c +$((MAKA_OFFSET + 1)) "$f" | head -c "$have" | cmp -s - "$part.head"; then
+  tail -c +$((have + 1)) "$part" >> "$f"
   echo OK
 else
-  cat > /dev/null
   echo "MISMATCH $size"
 fi
 `;
