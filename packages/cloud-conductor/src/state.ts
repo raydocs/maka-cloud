@@ -358,6 +358,14 @@ CREATE TRIGGER runs_limits_fixed BEFORE UPDATE OF duty_id, authority, hard_budge
   BEGIN SELECT RAISE(ABORT, 'a run''s authority and budget limits are fixed'); END;
 `;
 
+/**
+ * T15: an approval stores the exact card text the owner answered, and approves only a call whose
+ * card reads the same when it runs. An approval from before this step has none and is never used.
+ */
+const SCHEMA_V5 = `
+ALTER TABLE held_actions ADD COLUMN shown TEXT;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -366,6 +374,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   schemaV2,
   SCHEMA_V3,
   SCHEMA_V4,
+  SCHEMA_V5,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -1241,11 +1250,13 @@ export class ConductorState {
       if (question.reason === 'irreversible' && question.actionRef) {
         this.db
           .prepare(
-            "UPDATE held_actions SET state = ?, approved_by = ? WHERE action_id = ? AND state = 'held'",
+            "UPDATE held_actions SET state = ?, approved_by = ?, shown = ? WHERE action_id = ? AND state = 'held'",
           )
           .run(
             optionId === 'approve' ? 'approved' : 'rejected',
             caller ?? null,
+            // The card the owner answered, exactly: the approval covers a call that shows the same.
+            question.question,
             question.actionRef,
           );
       }
@@ -1329,7 +1340,8 @@ export class ConductorState {
 
   /**
    * Uses an approval exactly once, for the tool, run and arguments it was given
-   * for. `approverOk` is asked about who approved, in the same transaction as
+   * for, and only while the call's card reads `shown`, the text the owner
+   * answered (T15). `approverOk` is asked about who approved, in the same transaction as
    * the use: an approver it refuses (a revoked invite) expires the approval.
    */
   consumeApproval(
@@ -1337,14 +1349,15 @@ export class ConductorState {
     tool: string,
     actionId: string,
     args: unknown,
+    shown: string,
     approverOk: (approvedBy: string | null) => boolean = () => true,
   ): boolean {
     return this.transaction(() => {
       const row = this.db
         .prepare(
-          "SELECT approved_by FROM held_actions WHERE action_id = ? AND run_id = ? AND tool = ? AND args = ? AND state = 'approved'",
+          "SELECT approved_by FROM held_actions WHERE action_id = ? AND run_id = ? AND tool = ? AND args = ? AND shown = ? AND state = 'approved'",
         )
-        .get(actionId, runId, tool, canonicalJson(args)) as Row | undefined;
+        .get(actionId, runId, tool, canonicalJson(args), shown) as Row | undefined;
       if (!row) return false;
       if (!approverOk(row.approved_by === null ? null : String(row.approved_by))) {
         this.db

@@ -443,18 +443,7 @@ export function conductorTools(
           if (held && held.runId === turn.runId) {
             action = { tool: held.tool, args: held.args };
             const spec = extra.find((tool) => tool.name === held.tool);
-            const details = spec?.approvalDetails
-              ? await spec.approvalDetails(held.args as never)
-              : held.tool === 'delegate_task'
-                ? DELEGATION_DETAILS
-                : undefined;
-            // A built-in is held only for taint; a playbook tool also when it is irreversible.
-            const builtin = BUILTIN_TOOL_POLICY[held.tool] !== undefined;
-            const cause: HoldCause =
-              builtin || (spec && !alwaysHeld(spec)) ? 'tainted' : 'irreversible';
-            question = details
-              ? `${approvalQuestion(action, cause)}\n\n${details}`
-              : approvalQuestion(action, cause);
+            question = await approvalCard(spec, held.tool, held.args);
             note = args.question;
           }
           check = () => {
@@ -552,7 +541,11 @@ function withBuiltinPolicy(host: ToolHost, tool: MakaTool): MakaTool {
         gate(host, turn);
         requireAuthority(host, turn, tool.name, policy, true);
         const { actionRef, ...rest } = raw as Record<string, unknown> & { actionRef?: string };
-        holdUnlessApproved(host, turn, tool.name, rest, actionRef, false);
+        const shown =
+          actionRef === undefined ? undefined : await approvalCard(undefined, tool.name, rest);
+        // Checked again after the card is built: a stop that landed meanwhile wins.
+        if (actionRef !== undefined) gate(host, turn);
+        holdUnlessApproved(host, turn, tool.name, rest, actionRef, false, shown);
         args = rest;
       }
       if (policy.externalResult && !policy.ownTaint) {
@@ -610,10 +603,12 @@ function holdUnlessApproved(
   args: Record<string, unknown>,
   actionRef: string | undefined,
   always: boolean,
+  shown: string | undefined,
 ): void {
   if (actionRef !== undefined) {
     if (
-      !host.state.consumeApproval(turn.runId, tool, actionRef, args, (approvedBy) =>
+      shown === undefined ||
+      !host.state.consumeApproval(turn.runId, tool, actionRef, args, shown, (approvedBy) =>
         host.approverAuthorized(approvedBy, turn.conversationId),
       )
     ) {
@@ -640,6 +635,28 @@ function holdUnlessApproved(
 /** Under a held delegation: what the brief can do once it runs. */
 const DELEGATION_DETAILS =
   'The runner works with full permissions and internet access, so it can send anything the brief asks for. Approve only a brief you would send yourself.';
+
+/**
+ * The card for a held call, as the owner is shown it: the call (`approvalQuestion`) and what the
+ * tool adds about it. Built again from the call when it runs: the approval covers it only if the
+ * two read the same (T15), so a card that would now show another repository does not run.
+ */
+async function approvalCard(
+  spec: ConductorToolSpec | undefined,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const details = spec?.approvalDetails
+    ? await spec.approvalDetails(args as never)
+    : tool === 'delegate_task'
+      ? DELEGATION_DETAILS
+      : undefined;
+  // A built-in is held only for taint; a playbook tool also when it is irreversible.
+  const builtin = BUILTIN_TOOL_POLICY[tool] !== undefined;
+  const cause: HoldCause = builtin || (spec && !alwaysHeld(spec)) ? 'tainted' : 'irreversible';
+  const call = approvalQuestion({ tool, args }, cause);
+  return printable(details ? `${call}\n\n${details}` : call);
+}
 
 const MAX_ARG_CHARS = 200;
 const MAX_CALL_CHARS = 1500;
@@ -697,7 +714,13 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
       gate(host, turn);
       requireAuthority(host, turn, spec.name, policy, guarded);
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
-      if (guarded) holdUnlessApproved(host, turn, spec.name, args, actionRef, always);
+      if (guarded) {
+        // An approval covers the call only while its card reads as the owner saw it (T15).
+        const shown =
+          actionRef === undefined ? undefined : await approvalCard(spec, spec.name, args);
+        if (actionRef !== undefined) gate(host, turn);
+        holdUnlessApproved(host, turn, spec.name, args, actionRef, always, shown);
+      }
       if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
       return spec.impl(args as never, {
         runId: turn.runId,
