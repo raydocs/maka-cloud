@@ -202,10 +202,16 @@ jobs:
       - name: Build the app for the simulator
         working-directory: packages/cloud-mobile
         run: |
+          set -o pipefail
           npx expo prebuild --platform ios
+          # The whole log is kept; the console shows only what failed and how it ended.
           xcodebuild -workspace ios/Maka.xcworkspace -scheme Maka -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/ios-build" CODE_SIGNING_ALLOWED=NO build | tail -n 40
+            -derivedDataPath "$RUNNER_TEMP/ios-build" CODE_SIGNING_ALLOWED=NO build \
+            > "$RUNNER_TEMP/xcodebuild.log" 2>&1 \
+            || { grep -E "error:|\*\* BUILD" "$RUNNER_TEMP/xcodebuild.log" | head -n 40; exit 1; }
+          tail -n 3 "$RUNNER_TEMP/xcodebuild.log"
+          test -f "$RUNNER_TEMP/ios-build/Build/Products/Release-iphonesimulator/Maka.app/Info.plist"
         env:
           CI: '1'
           MAKA_E2E: '1'
@@ -248,4 +254,5 @@ jobs:
           path: |
             packages/cloud-mobile/e2e-output
             ${{ runner.temp }}/stack.log
+            ${{ runner.temp }}/xcodebuild.log
           retention-days: 7
