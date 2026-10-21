@@ -43,9 +43,13 @@ describe('applyEgressGuard', () => {
     const bin = join(state, 'bin');
     await fs.mkdir(bin, { recursive: true });
     for (const tool of tools) {
-      await fs.writeFile(join(bin, tool), tool === 'sudo' ? '#!/bin/bash\nexec "$@"\n' : SHIM, {
-        mode: 0o755,
-      });
+      await fs.writeFile(
+        join(bin, tool),
+        tool === 'sudo' ? '#!/bin/bash\n[ "$1" = -n ] && shift\nexec "$@"\n' : SHIM,
+        {
+          mode: 0o755,
+        },
+      );
     }
     h = await setup({
       execPath: `${bin}:/usr/bin:/bin`,
