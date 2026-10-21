@@ -412,6 +412,29 @@ describe('BoxPool', () => {
       assert.equal(pool.state()[0]?.state, 'lost');
     });
 
+    it('dates the broken box it leaves behind, so cleanup deletes it and the slot comes back', async () => {
+      const { pool, fleet, clock } = setup({ maxPerInvite: 1 });
+      const old = await pool.acquire({ tenantId: A, taskId: 't1' });
+      const broken = fleet.machines.get(old.machineId);
+      if (broken) broken.state = 'error';
+      await assert.rejects(
+        pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' }),
+        NoFreeBoxError,
+      );
+      // Repeated restores do not use up more slots, and the broken one is not forgotten.
+      assert.equal(pool.state().length, 1);
+      clock.now += 24 * 60 * 60_000;
+      const result = await pool.cleanup();
+      assert.deepEqual(result.deleted, [old.machineId]);
+      assert.equal(pool.state().length, 0, 'the slot is free again');
+      const lease = await pool.restoreFromSnapshot({
+        tenantId: A,
+        taskId: 't1',
+        snapshotId: 'sn_9',
+      });
+      assert.notEqual(lease.machineId, old.machineId);
+    });
+
     it('does not wait for a slot: another task holding the only box fails the restore at once', async () => {
       const { pool, fleet } = setup({ maxPerInvite: 1 });
       await pool.acquire({ tenantId: A, taskId: 't2' });
