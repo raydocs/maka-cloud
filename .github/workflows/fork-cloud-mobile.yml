@@ -57,7 +57,8 @@ jobs:
       # Metro resolves the shared package and every screen, once per platform: a bad import fails here, in
       # a minute, rather than in a native build.
       - name: Bundle for iOS and Android
-        run: npm --prefix packages/cloud-mobile exec -- expo export --platform ios --platform android --output-dir "$RUNNER_TEMP/export"
+        working-directory: packages/cloud-mobile
+        run: npx expo export --platform ios --platform android --output-dir "$RUNNER_TEMP/export"
         env:
           CI: '1'
 
