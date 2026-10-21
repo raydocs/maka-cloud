@@ -129,3 +129,17 @@ test('a typical cost is capped at what a card may estimate and shown as typical'
   assert.equal(plain.card.typical, false);
   r.cleanup();
 });
+
+test('the last scan of a project is remembered, and only the projects not removed are walked', async () => {
+  const r = await rig();
+  assert.equal(r.engine.cards.lastScan(r.projectId), undefined);
+  r.engine.cards.markScanned(r.projectId);
+  assert.equal(r.engine.cards.lastScan(r.projectId), r.clock.now());
+  r.clock.advance(DAY);
+  r.engine.cards.markScanned(r.projectId);
+  assert.equal(r.engine.cards.lastScan(r.projectId), r.clock.now(), 'it moves forward');
+  assert.deepEqual(r.engine.activeProjects(), [{ owner: OWNER, projectId: r.projectId }]);
+  assert.ok(r.engine.removeProject(OWNER, r.projectId));
+  assert.deepEqual(r.engine.activeProjects(), []);
+  r.cleanup();
+});
