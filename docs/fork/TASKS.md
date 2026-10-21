@@ -57,7 +57,7 @@ code also needs its NOTICE). Say in the PR what was taken and from where.
 | CopilotKit/openmuse | MIT | rich thread cards (`docs/RICH-THREADS.md`) and the browser "Take control" flow; the headless mobile client for later | T24, T14b, T18 |
 | CopilotKit/OpenDots | MIT | approval cards ("Approve & run" for write tools), interrupted scheduled-run recovery | T20, T23 |
 | trycua/cua (libraries, not the Spaces app) | MIT | `cua-driver` on the box: open what the agent built, click through it, take the screenshot that the delivery card shows and the reviewer checks | T24, T25, T14b |
-| reason-machines/reason-network | Apache-2.0 | `src/files.rs` rules for files an agent sends out (no hidden files, no `~/.ssh`, `~/.aws` and similar, size caps), the loop guard | T15, T23 |
+| reason-machines/reason-network | MIT or Apache-2.0 | `src/files.rs` rules for files an agent sends out (no hidden files, no `~/.ssh`, `~/.aws` and similar, size caps), the loop guard; `src/doing.rs` (what a session is doing, from its own title and todo list); `src/render.rs` `defang` and `util::printable` (outside text cannot open or close a frame, and loses control, direction and look-alike characters); `src/hook.rs` (messages shown to a running agent at its next step through its hooks); the install rule that never puts an unverified build over a verified one | T15, T20, T23, T24, T27, T28 |
 
 Rules for all tasks:
 
@@ -405,7 +405,11 @@ proposals and T20 items).
   dimmed Chat: close at top left, collapse at bottom right, a small status
   pill with the result beside it, and a swipe or Escape to go back. A diff
   opens the same way. Running tasks show a live thumbnail of the box's screen
-  when it has one (T14b) and fall back to the step line.
+  when it has one (T14b) and fall back to the step line. The step line is
+  read from what the agent records anyway, as Reason Network's `doing.rs`
+  does: the session's own title and the item in progress on its todo list
+  (Claude Code's tasks or TodoWrite, Codex's `update_plan`), from the
+  mirrored transcript (T28). Agents never spend tokens reporting progress.
 - Sources and links, as Hark shows a search answer: a short answer first
   (the pick, then one alternative per need, ending in one plain-text offer
   such as "Want me to set one up?"), then the sources as a small fanned stack
@@ -524,7 +528,10 @@ Vercel Sandbox. Keep our SQLite stores, our gateway and instabox.
 - Steering: a message the user sends while a task runs goes into the running
   session at the next safe point instead of waiting or restarting (Claude
   Code stream-json input; Codex app-server, which T27 moves to). A withdrawn
-  message that was not yet delivered is dropped.
+  message that was not yet delivered is dropped. Until a runner moves to
+  those, its hooks carry the message instead (Reason Network's `hook.rs`):
+  the hook after each tool call prints waiting messages so the agent sees
+  them at its next step, and a broken hook never breaks the agent.
 - Catch-up: the task stream has a cursor; a page that reconnects (or a phone
   that wakes) resumes from its last cursor and sees what it missed, which T24
   needs for "close it and come back, the work kept going".
@@ -641,6 +648,9 @@ for, and we pay only for boxes.
   maximum (default 3), one task per box, boxes from T26 that sleep when idle.
   Boxes of different invites never share a machine, a credential or a
   checkout. Box time is counted by T21 per invite.
+- The CLIs installed on a box are pinned and checked against a known
+  checksum; a box never replaces a checked build with an unchecked one or an
+  older one (Reason Network's install rule).
 - Set up once, like Amp's project snapshot: per repository, run its setup
   (install the CLIs and the dependencies) once, save an instabox snapshot
   keyed by the setup's hash, and start new pool boxes from it; a changed
@@ -772,6 +782,16 @@ written by other people.
 - While tainted, tools that write outside the sandbox, send anything, spend
   money or are irreversible require a user approval card. Enforce this in the
   tool gate in code, never by prompt.
+- Outside text cannot pass itself off as ours (Reason Network's `defang`):
+  wherever issue, comment, web or memory text reaches the model next to our
+  own framing, it cannot open or close a frame of ours, even split across
+  fields printed side by side (`repo` then `branch`) or written with
+  look-alike brackets. Text from outside shown to the owner (approval cards,
+  inbox items, Home cards) loses control, direction-override and invisible
+  characters first, so a card cannot show something other than what it is;
+  the approval stores the exact text the owner saw, and approves only that.
+  Tests: a frame-closing string in an issue body, split across two fields,
+  and with a direction override in an approval card.
 - Tests: injection fixtures (hidden instructions in a fetched page) that try
   to trigger each guarded tool, and the clean path that needs no approval.
 
