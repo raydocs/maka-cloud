@@ -596,6 +596,7 @@ class Run implements RunHandle {
       ...(spec.budgetUsd === undefined ? {} : { budgetUsd: spec.budgetUsd }),
       ...(spec.budgetRootId === undefined ? {} : { budgetRootId: spec.budgetRootId }),
       ...(spec.turnBudgetUsd === undefined ? {} : { turnBudgetUsd: spec.turnBudgetUsd }),
+      ...(spec.epoch === undefined ? {} : { attempt: spec.epoch }),
     });
     this.adoptAccess(access);
     this.checkCancelled();
