@@ -6,6 +6,7 @@ import {
   repoDir,
   SetupFailedError,
   type SetupRecipe,
+  SnapshotOwnerError,
   SetupSnapshots,
   setupHash,
   snapshotName,
@@ -151,6 +152,41 @@ describe('SetupSnapshots', () => {
       t.log.leased.map((l) => l.tenantId),
       [A, A, B],
     );
+  });
+
+  it('invites whose ids share the first 8 hex digits of their digest still get their own snapshots', async () => {
+    // Found by search: the old 32-bit prefix of sha256(invite) is the same for these two.
+    const sha8 = (id: string) => createHash('sha256').update(id).digest('hex').slice(0, 8);
+    const C = 'inv_00000000dc0a';
+    const D = 'inv_000000021089';
+    assert.equal(sha8(C), sha8(D), 'the premise: the short prefixes collide');
+    const t = setup({ keep: 1 });
+    const hash = setupHash(recipe());
+    assert.notEqual(snapshotName(C, REPO, hash), snapshotName(D, REPO, hash));
+    const first = await t.snapshots.ensure(recipe({ tenantId: C }));
+    const second = await t.snapshots.ensure(recipe({ tenantId: D }));
+    assert.notEqual(
+      second.snapshotId,
+      first.snapshotId,
+      'D builds its own, it does not boot from C’s disk',
+    );
+    assert.equal(second.built, true);
+    assert.equal(second.tenantId, D);
+    // D's expiry never deletes C's snapshot, even with keep = 1 and the same repository.
+    await t.snapshots.ensure(recipe({ tenantId: D, setupScript: `${SCRIPT}# v2\n` }));
+    assert.ok(t.fleet.snapshots.has(first.snapshotId), 'C’s snapshot is untouched');
+  });
+
+  it('refuses a snapshot of this name whose description says it belongs to something else, and deletes nothing', async () => {
+    const t = setup();
+    const built = await t.snapshots.ensure(recipe());
+    const stored = t.fleet.snapshots.get(built.snapshotId);
+    assert.ok(stored);
+    stored.description = 'maka-setup v1 invite=someone-else repo=x setup=y';
+    await assert.rejects(t.snapshots.ensure(recipe()), SnapshotOwnerError);
+    assert.ok(t.fleet.snapshots.has(built.snapshotId));
+    assert.equal(t.fleet.callsTo('deleteSnapshot').length, 0);
+    assert.equal(t.log.leased.length, 1, 'nothing was built over it');
   });
 
   it('two callers in one process for the same setup share one build', async () => {

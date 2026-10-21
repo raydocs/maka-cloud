@@ -17,6 +17,7 @@ export {
   repoKey,
   SetupFailedError,
   SetupSnapshots,
+  SnapshotOwnerError,
   setupHash,
   snapshotName,
   type BuilderBoxes,

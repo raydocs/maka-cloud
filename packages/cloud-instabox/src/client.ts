@@ -97,6 +97,8 @@ export interface InstaboxSnapshot {
   /** `pending` while a snapshot of a running sandbox uploads. */
   status: 'pending' | 'ready' | 'failed';
   error?: string;
+  /** What the creator wrote, when the API returns it. */
+  description?: string;
   sourceMachineId?: string;
   createdAt?: string;
 }

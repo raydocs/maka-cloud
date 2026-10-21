@@ -457,16 +457,17 @@ class CodingRun implements RunHandle {
             status: file.status,
           }));
           const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
-          // With a reviewer configured, a change nobody could review is not delivered and the task
-          // does not succeed: "verified" here means checked by the runner and by the other vendor.
-          if (this.options.modes && reviewed.review.status !== 'reviewed') {
+          // A change nobody could review is not delivered and the task does not succeed, whether the
+          // reviewer was unavailable or none is configured at all: "verified" here means checked by
+          // the runner and by the other vendor.
+          if (reviewed.review.status !== 'reviewed') {
             throw new Error(
               `The change passed the repository's checks but could not be independently reviewed (${reviewed.review.reason}), so it was not delivered.`,
             );
           }
           // A serious problem the review still finds after the one fix is not delivered either: the
           // task fails with the reason, instead of finishing with a change known to be wrong.
-          const left = this.options.modes ? p1Of(reviewed.review) : 0;
+          const left = p1Of(reviewed.review);
           if (left > 0) {
             const fix = reviewed.review.status === 'reviewed' ? reviewed.review.fix : undefined;
             const unused =

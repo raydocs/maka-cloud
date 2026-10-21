@@ -58,8 +58,11 @@ verify() {
   [ "$first" = "-A OUTPUT -j $MAKA_CHAIN" ] || { WHY="$MAKA_CHAIN is not the first OUTPUT rule"; return 1; }
   listed=$(as_root "$tool" -w -S "$MAKA_CHAIN" 2>/dev/null) || { WHY="cannot read $MAKA_CHAIN back"; return 1; }
   opener=$(printf '%s\\n' "$listed" | awk '$1 == "-A" { print $0; exit }')
-  [ "$opener" = "-A $MAKA_CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" ] \\
-    || { WHY="$MAKA_CHAIN does not open with the reply rule"; return 1; }
+  # iptables prints the states in its own order (RELATED,ESTABLISHED), whatever order they were given in.
+  case "$opener" in
+    "-A $MAKA_CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" | "-A $MAKA_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN") ;;
+    *) WHY="$MAKA_CHAIN does not open with the reply rule"; return 1 ;;
+  esac
   for net in "$@"; do
     printf '%s\\n' "$listed" | grep -Fq -- "-d $net -j REJECT" || { WHY="$net is not blocked"; return 1; }
   done

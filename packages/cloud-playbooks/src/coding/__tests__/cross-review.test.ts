@@ -457,18 +457,14 @@ test('a budget with too little left for a review fails the task rather than deli
   zeroStats(h.runner);
 });
 
-test('without modes there is no reviewer, and the manifest says so', async (t) => {
-  const h = await setup(t);
+test('without modes there is no reviewer, so a change that passes its checks is not delivered', async (t) => {
+  const h = await setup(t, { modes: undefined });
   h.claude.script = fixes;
-  const { events, spec, dir } = await finished(h, 'tsk_nomodes');
-  assert.deepEqual(terminal(events), { type: 'finished' });
+  const { events } = await finished(h, 'tsk_nomodes');
+  await notDelivered(h, 'tsk_nomodes', events, /no reviewer is configured/);
   assert.equal(h.codex.turns.length, 0);
-  const line = (await readJson(spec.resultPath)).done.find((l: string) => l.startsWith('review:'));
-  assert.equal(
-    line,
-    "review: not done (no reviewer is configured); this change was checked by the runner's tests only",
-  );
-  assert.equal((await readJson(join(dir, 'verification.json'))).review.status, 'not_configured');
+  zeroStats(h.runner);
+  assert.deepEqual(h.leases, { acquired: 1, released: 1 });
 });
 
 // -- every exit ----------------------------------------------------------------------------------

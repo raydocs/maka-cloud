@@ -237,6 +237,7 @@ export class FakeFleet implements BoxApi {
     const snapshot = {
       id: `sn_${++this.counter}`,
       name: request.name,
+      ...(request.description === undefined ? {} : { description: request.description }),
       status: 'pending' as const,
       sourceMachineId: machineId,
       createdAt: new Date(Date.UTC(2026, 9, 21, 0, 0, this.counter)).toISOString(),
