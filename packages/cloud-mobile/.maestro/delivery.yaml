@@ -26,5 +26,5 @@ appId: cloud.maka.app
 - tapOn:
     id: "button-Details"
 - assertVisible: "Outcome"
-- assertVisible: "Redirects once after sign-in"
+- assertVisible: ".*Redirects once after sign-in"
 - takeScreenshot: delivery-details

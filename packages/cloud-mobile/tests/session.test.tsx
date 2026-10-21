@@ -107,7 +107,9 @@ test('the server and token are saved as one record, and a failed save is a faile
   };
   try {
     await act(async () => {
-      await expect(api.signIn('maka.example.com', 'tok')).rejects.toThrow(/Keychain/u);
+      await expect(api.signIn('maka.example.com', 'tok')).rejects.toThrow(
+        /could not save your sign-in/u,
+      );
     });
   } finally {
     secureStore.setItemAsync = original;

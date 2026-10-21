@@ -1,13 +1,20 @@
+import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 
 /**
  * The Keychain (iOS) and Keystore (Android). The session token lives here and nowhere else: never
  * in plain storage, a URL or a log. Where there is no secure store (the web preview used for
- * screenshots) values are kept in memory only, so nothing is ever written in the clear.
+ * screenshots, and the unsigned CI builds) values are kept in memory only, so nothing is ever
+ * written in the clear.
  */
 const memory = new Map<string, string>();
 let available: Promise<boolean> | undefined;
-const hasStore = () => (available ??= SecureStore.isAvailableAsync().catch(() => false));
+/** Set only by the CI builds that run the device flows (app.config.ts): they are unsigned, so have no Keychain. */
+const memoryOnly = (Constants.expoConfig?.extra as { e2e?: boolean } | undefined)?.e2e === true;
+const hasStore = () =>
+  (available ??= memoryOnly
+    ? Promise.resolve(false)
+    : SecureStore.isAvailableAsync().catch(() => false));
 
 export async function readSecure(key: string): Promise<string | null> {
   if (!(await hasStore())) return memory.get(key) || null;

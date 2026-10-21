@@ -138,8 +138,9 @@ export function TaskDetails({
           <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
             <StatusMark tone={TONE[task.state as keyof typeof TONE] ?? 'attention'} />
             <T kind="muted" style={{ flex: 1 }}>
-              {taskLabel(task)} · Cost {dollars(task.costUsd)}
-              {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+              {taskLabel(task)}
+              {task.costUsd !== undefined &&
+                ` · Cost ${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
             </T>
           </View>
           {pull && (

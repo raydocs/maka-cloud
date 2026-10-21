@@ -184,7 +184,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           const next = await connect(server, secret, mine);
           if (generation.current !== mine) return;
           // The session is published only once it is saved, so a failed save is a failed sign-in.
-          await writeSecure(ACCOUNT_KEY, JSON.stringify({ server, token: secret }));
+          try {
+            await writeSecure(ACCOUNT_KEY, JSON.stringify({ server, token: secret }));
+          } catch {
+            throw new Error(
+              'This device could not save your sign-in, so you are not signed in. Unlock the device and try again.',
+            );
+          }
           await writeSecure(SERVER_KEY, server).catch(() => {});
           if (generation.current !== mine) return;
           published.current.add(mine);
