@@ -100,7 +100,7 @@ such a box, from the `rehearsal-sandbox` target of `deploy/Dockerfile` (the serv
 
 - a second account, `maka-agent`, with no sudo rights, and a group, `maka-box`, that it and the
   sandbox user (`node`) share;
-- passwordless `sudo` for `node` (a real `sudo` package), and `/data` that can be entered by the
+- passwordless `sudo` for `node` (a real `sudo` package) and `getcap` (`libcap2-bin`; the box check refuses a box that cannot list file capabilities), and `/data` that can be entered by the
   group, so the task directories under `/data/work` can be reached by the agent but not listed;
 - the sandbox API's `rootSudo` option (`REHEARSAL_AGENT_GROUP` turns it on): the firewall tools
   stay the stand-ins that keep their rules in files, and every other `sudo -n` (ending the agent's

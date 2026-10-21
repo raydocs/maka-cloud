@@ -181,7 +181,12 @@ const summary = (events) =>
   events
     .map(
       (e) =>
-        `${e.event}${e.data?.event?.type ? `:${e.data.event.type}` : ''}${e.data?.kind ? `:${e.data.kind}` : ''}`,
+        `${e.event}${e.data?.event?.type ? `:${e.data.event.type}` : ''}${e.data?.kind ? `:${e.data.kind}` : ''}${
+          // Why a task failed is the first thing anyone reading a red run needs.
+          e.data?.event?.type === 'task_failed'
+            ? ` (${String(e.data.event.reason).slice(0, 400)})`
+            : ''
+        }`,
     )
     .join(', ');
 
