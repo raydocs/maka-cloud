@@ -1,7 +1,9 @@
 import {
   InstaboxApiError,
+  type InstaboxExecResult,
   type InstaboxMachine,
   type InstaboxOperation,
+  type InstaboxSnapshot,
 } from '@maka-cloud/instabox';
 import type { BoxApi } from '../types.js';
 
@@ -13,7 +15,11 @@ type Method =
   | 'listMachines'
   | 'exec'
   | 'suspendMachine'
-  | 'ensureRunning';
+  | 'ensureRunning'
+  | 'createSnapshot'
+  | 'listSnapshots'
+  | 'deleteSnapshot'
+  | 'waitForSnapshot';
 
 export interface FakeBox extends InstaboxMachine {
   metadata: Record<string, string>;
@@ -41,6 +47,18 @@ export class FakeFleet implements BoxApi {
   readonly execLog: { machineId: string; cmd: string }[] = [];
   /** Makes `exec` fail, once. */
   failNextExec = false;
+  /** Decides the result of a command; the default is exit 0 with no output. */
+  execHandler:
+    | ((
+        machineId: string,
+        request: { cmd: string; envs?: Record<string, string> },
+      ) => Partial<InstaboxExecResult>)
+    | undefined;
+  readonly snapshots = new Map<string, InstaboxSnapshot & { createdAt: string }>();
+  /** The next snapshot ends up `failed`. */
+  failNextSnapshot = false;
+  /** Full requests of every exec, for the environment they carried. */
+  readonly execRequests: { machineId: string; cmd: string; envs: Record<string, string> }[] = [];
   /** Alters a created machine's labels, to look like a box that is not what was asked for. */
   tamper: ((machine: FakeBox) => void) | undefined;
   private counter = 0;
@@ -189,21 +207,65 @@ export class FakeFleet implements BoxApi {
 
   async exec(
     machineId: string,
-    request: { cmd: string },
-  ): Promise<{
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-    timedOut: boolean;
-    truncated: boolean;
-  }> {
+    request: { cmd: string; envs?: Record<string, string>; timeoutSeconds?: number },
+  ): Promise<InstaboxExecResult> {
     await this.pass('exec', [machineId, request]);
     this.execLog.push({ machineId, cmd: request.cmd });
+    this.execRequests.push({ machineId, cmd: request.cmd, envs: { ...(request.envs ?? {}) } });
     if (this.failNextExec) {
       this.failNextExec = false;
       throw new Error('exec failed: connection reset');
     }
-    return { stdout: '', stderr: '', exitCode: 0, timedOut: false, truncated: false };
+    return {
+      stdout: '',
+      stderr: '',
+      exitCode: 0,
+      timedOut: false,
+      truncated: false,
+      ...(this.execHandler?.(machineId, request) ?? {}),
+    };
+  }
+
+  async createSnapshot(
+    machineId: string,
+    request: { name: string; description?: string },
+  ): Promise<InstaboxSnapshot> {
+    await this.pass('createSnapshot', [machineId, request]);
+    if ([...this.snapshots.values()].some((snapshot) => snapshot.name === request.name)) {
+      throw new InstaboxApiError(409, { code: 'conflict', message: 'snapshot name in use' });
+    }
+    const snapshot = {
+      id: `sn_${++this.counter}`,
+      name: request.name,
+      status: 'pending' as const,
+      sourceMachineId: machineId,
+      createdAt: new Date(Date.UTC(2026, 9, 21, 0, 0, this.counter)).toISOString(),
+    };
+    this.snapshots.set(snapshot.id, snapshot);
+    return { ...snapshot };
+  }
+
+  async listSnapshots(): Promise<InstaboxSnapshot[]> {
+    await this.pass('listSnapshots', []);
+    return [...this.snapshots.values()].map((snapshot) => ({ ...snapshot }));
+  }
+
+  async deleteSnapshot(id: string): Promise<void> {
+    await this.pass('deleteSnapshot', [id]);
+    this.snapshots.delete(id);
+  }
+
+  async waitForSnapshot(id: string): Promise<InstaboxSnapshot> {
+    await this.pass('waitForSnapshot', [id]);
+    const snapshot = this.snapshots.get(id);
+    if (!snapshot) throw new Error(`no snapshot ${id}`);
+    if (snapshot.status === 'pending') {
+      snapshot.status = this.failNextSnapshot ? 'failed' : 'ready';
+      this.failNextSnapshot = false;
+    }
+    if (snapshot.status === 'failed')
+      throw new Error(`instabox snapshot ${id} failed: upload failed`);
+    return { ...snapshot };
   }
 
   async suspendMachine(machineId: string): Promise<InstaboxOperation> {
