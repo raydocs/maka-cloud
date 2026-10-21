@@ -15,6 +15,7 @@
  *   exit3    exit 3 without a result
  *   noise    print lines that are not messages around the messages, then like ok
  *   hang     report progress, then run until killed
+ *   wait     like ok, but first run until `$HOME/fake-cli/go` exists (`waiting` says it is running)
  *   slowexit like ok, but leave 600 ms after its input ended
  *
  * The hook answers it received are appended to `$HOME/fake-cli/hooks.log` as JSON lines.
@@ -92,6 +93,10 @@ async function run(prompt) {
   send({ type: 'assistant', message: { id: 'm0', content: [{ type: 'text', text: 'working on it' }] } });
   if (mode === 'hang') { setInterval(() => {}, 1000); return; }
   if (mode === 'exit3') process.exit(3);
+  if (mode === 'wait') {
+    fs.writeFileSync(path.join(ctl, 'waiting'), '');
+    while (!fs.existsSync(path.join(ctl, 'go'))) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   if (mode === 'fail') {
     send({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'model said no', session_id: sid });
     process.exit(1);

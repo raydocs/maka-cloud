@@ -28,6 +28,9 @@ export type ExecAction =
   | { hold: Promise<void> };
 
 export interface FakeInstaboxOptions {
+  /** Where it listens. Default: 127.0.0.1 on a free port; the deploy rehearsal sets both. */
+  host?: string;
+  port?: number;
   apiKey?: string;
   machineId?: string;
   /** Replaces PATH for exec'd commands. */
@@ -103,6 +106,7 @@ export class FakeInstabox {
   private readonly execPath: string | undefined;
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
+  private readonly listenOn: { host: string; port: number };
   private snapshotCount = 0;
   private readonly snapshotKeys = new Map<string, string>();
   url = '';
@@ -113,6 +117,7 @@ export class FakeInstabox {
     this.execPath = options.execPath;
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
+    this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
         if (!res.headersSent) this.json(res, 500, this.envelope('internal', String(error), false));
@@ -122,7 +127,9 @@ export class FakeInstabox {
   }
 
   async start(): Promise<this> {
-    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) =>
+      this.server.listen(this.listenOn.port, this.listenOn.host, resolve),
+    );
     this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
     return this;
   }
