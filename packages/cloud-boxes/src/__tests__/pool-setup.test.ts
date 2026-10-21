@@ -34,7 +34,8 @@ describe('boxes and setup snapshots', () => {
     t.fleet.failNextCreate = { status: 404, code: 'not_found' };
     const lease = await t.pool.acquire({ tenantId: A, taskId: 't1' });
     const [, second] = t.fleet.callsTo('createMachine') as [{ templateId?: string }][][];
-    assert.equal((second?.[0] as { templateId?: string }).templateId, 't_node');
+    const retry = second?.[0] as { templateId?: string } | undefined;
+    assert.equal(retry?.templateId, 't_node');
     assert.equal(labelsOf(t.fleet, lease.machineId)?.[LABEL.setup], undefined);
     assert.equal(labelsOf(t.fleet, lease.machineId)?.[LABEL.repo], undefined);
     assert.ok(t.warnings.some((w) => w.includes('sn_setup')));
