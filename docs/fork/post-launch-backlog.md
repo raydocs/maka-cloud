@@ -104,3 +104,17 @@ Still missing before it can merge:
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
 requests merged since then, with the outside review each one had, is in
 `docs/fork/unreviewed-prs.md`. Recheck them once Codex is back.
+
+## LayerFS workspaces (phase 2, C6)
+
+From the owner's review of LayerFS (2026-10-21). The proposal and its gates are in
+`docs/fork/design/layerfs.md`.
+
+1. Gate 1, isolation: a LayerFS FUSE workspace on instabox, run by the unprivileged agent account,
+   breaks no invariant of `docs/fork/isolation-model.md`. Test: every invariant check passes with a
+   LayerFS mount in place.
+2. Gate 2, measured gain: mounting beats clone plus install by at least 3x to the first test run on
+   two real repositories. Test: the benchmark harness records both.
+3. Only then: a `WorkspaceStore` interface (clone stays the default), kept-change checkpoints as
+   immutable commits (closes the P2-2 class), parallel tasks on one repository, and blame lines in
+   the PR evidence block.
