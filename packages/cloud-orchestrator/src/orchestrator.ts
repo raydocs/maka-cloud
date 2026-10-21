@@ -711,11 +711,15 @@ export class Orchestrator {
     // Take every unfinished task over before anything else: from here a process that still
     // drives one of them (a restart that raced its predecessor) is refused at its next write. A
     // task another process took first is let go of, and is not ended below.
+    const begun = new Map<TaskId, number>();
     for (const taskId of [...this.tasks.keys()]) {
       const epoch = await this.beginAttempt(taskId, 'restart');
-      if (epoch !== undefined) await this.interruptOpenSteps({ taskId, epoch });
+      if (epoch !== undefined) {
+        begun.set(taskId, epoch);
+        await this.interruptOpenSteps({ taskId, epoch });
+      }
     }
-    await this.recordRecoveredSpend();
+    await this.recordRecoveredSpend(begun);
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
@@ -812,22 +816,30 @@ export class Orchestrator {
   }
 
   /**
-   * Records what runs of an earlier process spent, before any task here ends or settles. A run's
-   * spend is recorded as its total (`task_cost` keeps the highest per task), so recording again
-   * after a crash in between changes nothing. Its tree is not cancelled for it here: every task
-   * still running is ended just below.
+   * Records what runs of an earlier process spent, before any task here ends or settles. It is
+   * recorded as the total of the attempt that process drove (`task_cost` keeps the highest per
+   * task and attempt, and attempts add up), so it replaces the figure the run reported live rather
+   * than adding to it. A crash after the records and before `recorded()` hands the same rows to
+   * the next process, which counts them once more under the attempt before its own: spend is
+   * never lost, and in that one window it is counted twice (the safe side of a cap). The tree is
+   * not cancelled for it here: every task still running is ended just below.
    */
-  private async recordRecoveredSpend(): Promise<void> {
+  private async recordRecoveredSpend(begun: ReadonlyMap<TaskId, number>): Promise<void> {
     const recovered = this.recoveredSpend?.unrecorded() ?? [];
     for (const { taskId, usd } of recovered) {
       if (!Number.isFinite(usd) || usd <= 0) continue;
       const root = this.treeRoot(taskId);
       if (!root) continue;
+      // The earlier process drove the attempt before the one this process just began.
+      const epoch = begun.has(taskId)
+        ? (begun.get(taskId) as number) - 1
+        : (this.lookup(taskId)?.epoch ?? 0);
       await this.record({
         type: 'task_cost',
         taskId: root.taskId,
         fromTaskId: taskId,
         costUsd: usd,
+        epoch,
       });
     }
     if (recovered.length > 0) this.recoveredSpend?.recorded();
@@ -1423,6 +1435,8 @@ export class Orchestrator {
         taskId: root.taskId,
         fromTaskId: taskId,
         costUsd,
+        // The run's figure is its own attempt's: a resumed run counts from zero again.
+        epoch: fence?.epoch ?? this.lookup(taskId)?.epoch ?? 0,
       },
       undefined,
       fence,
