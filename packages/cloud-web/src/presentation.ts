@@ -2,11 +2,34 @@
 const hiddenNames =
   /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus|instabox/giu;
 
+// Control (but newline and tab), direction, zero-width and other format characters, and
+// invisible letters and marks: a string from outside cannot show something other than what it is.
+const hidden =
+  /[\p{Cf}\p{Co}\p{Cn}\u0000-\u0008\u000B-\u001F\u007F-\u009F\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+
 export function displayText(value: string): string {
   return value
     .normalize('NFKC')
-    .replace(/[\p{Cf}]/gu, '')
+    .replace(hidden, '')
+    .replace(/[\u2028\u2029]/gu, '\n')
     .replace(hiddenNames, 'assistant');
+}
+
+// What a value keeps only as a visible escape when it is shown to be approved.
+const escaped =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}\u02BA\u02DD\u02EE\u05F4\u1CD3\u201C-\u201F\u2033\u2036\u275D\u275E\u2760\u3003\u301D-\u301F\uFF02]/gu;
+
+// A held call's arguments as JSON with every hidden character as a `\uXXXX` escape, so the owner
+// sees the value that will be used, not one with characters dropped.
+export function displayJson(value: unknown): string {
+  return (JSON.stringify(value) ?? '').replace(escaped, (char) =>
+    char === ' '
+      ? char
+      : Array.from(
+          { length: char.length },
+          (_, i) => `\\u${char.charCodeAt(i).toString(16).padStart(4, '0')}`,
+        ).join(''),
+  );
 }
 
 export function publicLink(value: string | undefined): string | undefined {

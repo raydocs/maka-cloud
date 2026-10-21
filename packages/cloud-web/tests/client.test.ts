@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { CloudClient, readEvents } from '../src/client';
-import { displayText, publicLink } from '../src/presentation';
+import { displayJson, displayText, publicLink } from '../src/presentation';
 import type { FeedEvent } from '../src/contract';
 
 test('SSE parses split UTF-8, CRLF, comments and multiline data, discarding an unfinished frame', async () => {
@@ -93,4 +93,15 @@ test('links cannot execute code, expose blocked names or smuggle credentials', (
   expect(publicLink('https://github.com/example/project/pull/17')).toBe(
     'https://github.com/example/project/pull/17',
   );
+});
+
+test('outside text loses control, direction and invisible characters; a held call shows them as escapes', () => {
+  expect(displayText('Open the \u202Ekcol\u202C pull\u0007 request?\u2028\u3164It is safe.')).toBe(
+    'Open the kcol pull request?\nIt is safe.',
+  );
+  const args = { title: 'Fix \u202Etxt.terces\u2066\u200B' };
+  const shown = displayJson(args);
+  expect(shown).toBe('{"title":"Fix \\u202etxt.terces\\u2066\\u200b"}');
+  expect(JSON.parse(shown)).toEqual(args);
+  expect(displayText(shown)).toBe(shown);
 });
