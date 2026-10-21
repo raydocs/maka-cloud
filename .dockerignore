@@ -1,6 +1,52 @@
-.git
+# The build context is an allowlist: only what is named here reaches the Docker build, so nothing a
+# developer or a CI job left in the checkout (an .env, an .npmrc with a token, a key) can end up in
+# an image layer. The images are built from the root manifests, the packages, the one script
+# @maka/core's build runs (deploy/Dockerfile) and deploy/Caddyfile (the proxy stage).
+*
+!package.json
+!package-lock.json
+!tsconfig.base.json
+!tsconfig.lib.json
+!packages
+# @maka/core's prebuild (npm run sync:model-metadata) reads these.
+!scripts/sync-model-metadata.mjs
+!scripts/model-metadata
+!deploy/Caddyfile
+
+# Inside what is allowed, build output stays out (it is rebuilt) ...
 **/node_modules
 **/dist
 **/*.tsbuildinfo
 packages/cloud-web/playwright-report
 packages/cloud-web/test-results
+
+# ... and so do settings and credentials, wherever they sit: environment files, package manager and
+# netrc credentials, private keys and certificates, key stores, cloud and SSH directories.
+**/.env
+**/.env.*
+**/*.env
+**/.npmrc
+**/.yarnrc
+**/.yarnrc.yml
+**/.pnpmrc
+**/.netrc
+**/.pypirc
+**/.git-credentials
+**/.aws
+**/.ssh
+**/.gnupg
+**/.docker
+**/.kube
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/*.kdbx
+**/id_rsa*
+**/id_dsa*
+**/id_ecdsa*
+**/id_ed25519*
+**/service-account*.json
+**/credentials.json

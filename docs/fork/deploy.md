@@ -241,6 +241,14 @@ by hand, see `deploy/rehearsal/README.md`. It costs nothing and uses no key. Wha
 the real model, the real sandbox, GitHub, a real certificate and a real domain: the first live run
 still needs everything under "First live run: what you provide".
 
+## What goes into an image
+
+The Docker build context is an allowlist (`.dockerignore`): the root manifests, `packages/`, the one
+script the core package's build runs and `deploy/Caddyfile`. The Dockerfile copies those paths by
+name, never the whole context. An `.env`, an `.npmrc` with a registry token or a key left in the
+checkout is not sent to the build and is in no layer. `packages/cloud-host/src/__tests__/docker-context.test.ts`
+checks the context against the tracked files and a list of secret-shaped names.
+
 ## The TLS proxy
 
 Three public names, all with certificates: one for the app and API, one for the
