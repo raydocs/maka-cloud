@@ -2,7 +2,12 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, relative } from 'node:path';
 import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
-import { type Orchestrator, RunnerRegistry, type TaskId } from '@maka-cloud/orchestrator';
+import {
+  type Orchestrator,
+  RunnerRegistry,
+  scrubSecretShapes,
+  type TaskId,
+} from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
 import {
   type CodingRunner,
@@ -325,6 +330,7 @@ export async function startStack(
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
         scrubTaskText: scrubErrorText,
+        carriesSecret: (text) => scrubSecretShapes(text) !== text,
       },
       supervisor: (context) =>
         startInbox(

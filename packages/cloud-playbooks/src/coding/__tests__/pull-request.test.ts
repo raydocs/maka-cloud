@@ -360,3 +360,16 @@ test('a change nobody reviewed is never opened as a pull request', async (t) => 
     assert.equal(publisher.calls, 0, 'nothing reached GitHub');
   }
 });
+
+test('the description built from the runner record carries no key, since it is posted on GitHub', () => {
+  const leak = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const body = pullRequestBody({
+    ...VERIFICATION,
+    testCommand: `GITHUB_TOKEN=${leak} bash tests/run.sh`,
+    repro: { command: `curl -H "Authorization: Bearer ${leak}" x`, files: [`tests/${leak}.sh`] },
+    changedFiles: [{ path: `lib/${leak}.txt`, status: 'added' }],
+  });
+  assert.ok(!body.includes(leak.slice(4, 30)), body);
+  assert.match(body, /\[secret\]/u);
+  assert.match(body, /bash tests\/run\.sh/u);
+});
