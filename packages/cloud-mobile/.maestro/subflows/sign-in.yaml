@@ -1,0 +1,28 @@
+# Signs in with the server address and invite token passed as -e SERVER=... -e TOKEN=...
+appId: cloud.maka.app
+---
+- launchApp:
+    clearState: true
+# A slow hosted emulator sometimes shows the launcher's "isn't responding" box over the app.
+- runFlow:
+    when:
+      visible: "Pixel Launcher isn't responding"
+    commands:
+      - tapOn: "Wait"
+- assertVisible: "Enter your workspace"
+- tapOn:
+    id: "field-Server address"
+- inputText: ${SERVER}
+- tapOn:
+    id: "field-Invite token"
+- inputText: ${TOKEN}
+- hideKeyboard
+- takeScreenshot: sign-in
+# On iOS the keyboard's own dismissal can already have submitted the form.
+- runFlow:
+    when:
+      visible:
+        id: "button-Enter your workspace"
+    commands:
+      - tapOn:
+          id: "button-Enter your workspace"
