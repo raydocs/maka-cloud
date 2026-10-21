@@ -230,7 +230,7 @@ test('a step the log refuses does not run, and the task goes on', async (t) => {
   );
 });
 
-test('a step log that fails stops a step that cannot be repeated and lets a safe one run', async (t) => {
+test('a step log that fails stops every step, repeatable or not', async (t) => {
   const h = await sdkSetup(t);
   const steps = recorder();
   steps.answer.set('toolu_1', async () => {
@@ -248,7 +248,7 @@ test('a step log that fails stops a step that cannot be repeated and lets a safe
   );
 
   assert.equal(terminal(events)?.type, 'finished');
-  assert.deepEqual(await lines(fakeFile(h, 'ran.log')), ['toolu_2']);
+  assert.deepEqual(await lines(fakeFile(h, 'ran.log')), []);
   assert.ok(
     notes(events).some((note) => /a step could not be recorded: database is locked/.test(note)),
   );
