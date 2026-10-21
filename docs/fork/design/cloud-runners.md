@@ -40,7 +40,10 @@ means all output is on disk.
   Codex's `todo_list` item, which is its `update_plan`) becomes a progress note that starts with
   `step: `, as one printable line of at most 120 characters with secrets redacted; the web app
   shows the latest one as the task's step line. The session's own title is in the transcript file,
-  not in this stream, so it waits for T28's mirror. A `WebFetch` call whose result came back
+  not in this stream, so it only arrives when T28's mirror feeds the transcript lines to the same
+  parser: a Claude `ai-title` (or older `summary`) line is the step until a todo item is in
+  progress, then the todo wins. That line's shape is taken from Claude Code's transcript format
+  and is only unit-tested on fixtures here; no title line was seen in a real transcript. A `WebFetch` call whose result came back
   without an error is a page the task opened: `onOpenedPage(taskId, url)` is called once per page
   (at most 40 per run; a throw is ignored) and the host passes it to
   `CloudServer.recordOpenedPages`. A URL in the agent's own text, a fetch that failed or never

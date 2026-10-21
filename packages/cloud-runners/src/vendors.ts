@@ -161,13 +161,19 @@ function guardLine(message: string): string {
 function claudeParser(redact: Redact = keep): LineParser {
   // WebFetch calls waiting for their answer, by tool call id; a page is opened once it answered.
   const fetches = new Map<string, string>();
+  // The session's own title stands in until the agent's todo list has an item in progress.
+  let stepSeen = false;
   return {
     feed(line) {
       const event = parseJson(line);
       if (!event) return [];
       const out: ParsedEvent[] = [];
       const type = str(event.type);
-      if (type === 'system' && event.subtype === 'init') {
+      if (type === 'ai-title' || type === 'summary') {
+        // The title the CLI gives its own session, as a transcript line (fed by the T28 mirror).
+        const title = stepLine(str(event.aiTitle) ?? str(event.summary) ?? '', redact);
+        if (title !== undefined && !stepSeen) out.push({ kind: 'step', text: title });
+      } else if (type === 'system' && event.subtype === 'init') {
         const id = str(event.session_id);
         if (id) out.push({ kind: 'session', id });
       } else if (type === 'assistant') {
@@ -199,10 +205,16 @@ function claudeParser(redact: Redact = keep): LineParser {
               if (b.name === 'TodoWrite') {
                 const text = inProgress(input?.todos, (todo) => todo.status === 'in_progress');
                 const step = text === undefined ? undefined : stepLine(text, redact);
-                if (step !== undefined) out.push({ kind: 'step', text: step });
+                if (step !== undefined) {
+                  stepSeen = true;
+                  out.push({ kind: 'step', text: step });
+                }
               } else if (b.name === 'TaskUpdate' && input?.status === 'in_progress') {
                 const step = stepLine(str(input.activeForm) ?? str(input.subject) ?? '', redact);
-                if (step !== undefined) out.push({ kind: 'step', text: step });
+                if (step !== undefined) {
+                  stepSeen = true;
+                  out.push({ kind: 'step', text: step });
+                }
               } else if (b.name === 'WebFetch' && str(b.id) && str(input?.url)) {
                 if (fetches.size >= MAX_PENDING_FETCHES) fetches.clear();
                 fetches.set(b.id as string, input?.url as string);

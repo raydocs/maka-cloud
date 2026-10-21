@@ -213,6 +213,30 @@ test('the step is one short printable line without secrets or look-alike control
   assert.equal(stepLine('\u202E\u200B \n'), undefined);
 });
 
+test('claude: the session’s own title is the step until a todo is in progress, then the todo wins', () => {
+  const steps = (lines: unknown[]) =>
+    feed(claudeAdapter, lines).filter((event) => event.kind === 'step');
+  assert.deepEqual(steps([{ type: 'ai-title', aiTitle: 'Fix the login redirect loop' }]), [
+    { kind: 'step', text: 'Fix the login redirect loop' },
+  ]);
+  assert.deepEqual(steps([{ type: 'summary', summary: 'Login loop' }]), [
+    { kind: 'step', text: 'Login loop' },
+  ]);
+  // Once the agent's todo list has an item in progress, a later title does not replace it.
+  assert.deepEqual(
+    steps([
+      todoWrite([{ content: 'Fix it', status: 'in_progress' }]),
+      { type: 'ai-title', aiTitle: 'A newer title' },
+    ]),
+    [{ kind: 'step', text: 'Fix it' }],
+  );
+  // A title is defanged and capped like any step, and an empty or missing one says nothing.
+  assert.deepEqual(steps([{ type: 'ai-title', aiTitle: '\u202E\u200B' }]), []);
+  assert.deepEqual(steps([{ type: 'ai-title' }]), []);
+  const long = steps([{ type: 'ai-title', aiTitle: 'x'.repeat(500) }]);
+  assert.equal(long[0]?.kind === 'step' ? long[0].text.length <= 120 : false, true);
+});
+
 test('codex: the first todo that is not done is the step', () => {
   const todo = (items: unknown, type = 'item.updated') => ({
     type,
