@@ -58,12 +58,12 @@ test('Home, Chat and Settings fit the screen, cards are frosted and code is not'
   // Settings: light and dark are one tap, kept after a reload.
   await openSettings(page);
   await noHorizontalScroll(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.getByRole('button', { name: 'Dark', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await page.getByRole('button', { name: 'Light', exact: true }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await page.screenshot({ path: info.outputPath('settings-light.png') });
+  await page.screenshot({ path: info.outputPath('settings-dark.png') });
   await page.reload();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   // The invite is not kept: a reload is a sign-out, and the chosen scheme is still there.
   await expect(page.getByLabel('Invite token')).toBeVisible();
 });
