@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { claudeAdapter } from '../vendors.js';
 import { setup } from './harness.js';
 
 // The rules of a box that was restored or resumed: nothing, and the guard cannot put them back.
@@ -105,4 +106,35 @@ test('host scripts still wake a sleeping box without being held up by the guard'
   // Stopping a task must work on a box that cannot be closed.
   const out = await machine.exec('echo stopping');
   assert.equal(out.exitCode, 0);
+});
+
+test('a machine nobody has checked is not trusted: task code and the CLI check wait for a passing guard', async (t) => {
+  let refuse = true;
+  const h = await setup({
+    cloud: {
+      egressGuard: async () => {
+        if (refuse) throw REFUSED;
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  const reached: string[] = [];
+  h.fake.onExec = (request) => {
+    if (typeof request.body?.cmd === 'string' && /--version|fresh-marker/u.test(request.body.cmd)) {
+      reached.push('code');
+    }
+    return undefined;
+  };
+  // Never woken here and never checked: the box is awake, which proves nothing about its rules.
+  const machine = h.runners.fleet.machine(h.fake.machineId);
+  await assert.rejects(
+    machine.exec('echo fresh-marker', { taskCode: true }),
+    /rules cannot be built/u,
+  );
+  await assert.rejects(h.runners.fleet.ensureCli(machine, claudeAdapter), /rules cannot be built/u);
+  assert.deepEqual(reached, [], 'code ran in a box whose guard was never verified');
+  refuse = false;
+  const ok = await machine.exec('echo fresh-marker', { taskCode: true });
+  assert.equal(ok.exitCode, 0);
+  assert.deepEqual(reached, ['code']);
 });
