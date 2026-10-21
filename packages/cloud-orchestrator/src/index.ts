@@ -70,10 +70,15 @@ export {
   type StepLog,
 } from './steps.js';
 export {
+  containsSecret,
   linkedSecretKeys,
   linkedSecretPair,
   scrubSecretFields,
   scrubSecretShapes,
+  scrubReading,
+  scrubSecretText,
+  withoutHidden,
+  withoutInvisible,
   scrubValues,
   secretForms,
   setKnownSecrets,

@@ -2,6 +2,7 @@ import {
   linkedSecretKeys,
   linkedSecretPair,
   scrubErrorText,
+  scrubReading,
   scrubSecretShapes,
   setKnownSecrets,
 } from '@maka-cloud/server';
@@ -51,17 +52,17 @@ export function secretValuesOf(env: NodeJS.ProcessEnv): string[] {
 export function createScrubber(env: NodeJS.ProcessEnv = process.env): (text: string) => string {
   const values = secretValuesOf(env);
   const exact = values.length === 0 ? undefined : new RegExp(values.map(escape).join('|'), 'gu');
-  return (text) => {
-    let out = text.normalize('NFKC').replace(/\p{Cf}/gu, '');
-    if (exact) out = out.replace(exact, '[secret]');
+  const scrub = (text: string): string => {
+    let out = exact ? text.replace(exact, '[secret]') : text;
     out = scrubSecretShapes(out);
     for (const shape of LOG_ONLY_SHAPES) {
       out = out.replace(shape, (match, name: unknown) =>
         typeof name === 'string' ? `${name}[secret]` : '[secret]',
       );
     }
-    return scrubErrorText(out);
+    return out;
   };
+  return (text) => scrubErrorText(scrubReading(text, scrub));
 }
 
 /** The only keys of an error or a detail object that print, and only as scalars. Never a message body, header or endpoint. */

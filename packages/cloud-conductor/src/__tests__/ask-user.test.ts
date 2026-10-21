@@ -492,7 +492,7 @@ test('an approval whose call carries a key is not asked: the card is shown as it
   const h = await makeHarness(t, {
     conductor: {
       tools: [publish],
-      carriesSecret: (text) => text.includes('ghp_'),
+      carriesSecret: (value) => JSON.stringify(value).includes('ghp_'),
     },
   });
   let seen = '';
@@ -521,4 +521,54 @@ test('an approval whose call carries a key is not asked: the card is shown as it
   assert.ok(!seen.includes(key));
   assert.deepEqual(h.outbox.questions, [], 'no approval was posted');
   assert.deepEqual(published, []);
+});
+
+test('an approval stored before the conductor refused keys in calls does not run the call when it is approved', async (t) => {
+  published.length = 0;
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  let asked = false;
+  const h = await makeHarness(t, {
+    conductor: {
+      tools: [publish],
+      // The key is only found once the call is about to run: the card was asked when this policy was off.
+      carriesSecret: (value) => asked && JSON.stringify(value).includes('ghp_'),
+    },
+  });
+  let seen = '';
+  let actionRef = '';
+  h.model.script(
+    'conductor',
+    calls(tool('publish_page', { title: `Deploy with ${key}` })),
+    (request) => {
+      actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1] ?? '';
+      return calls(
+        tool('ask_user', {
+          reason: 'irreversible',
+          question: 'Publish?',
+          actionRef,
+          recommended: 'reject',
+        }),
+      );
+    },
+  );
+  await h.send('cnv_1', 'Publish my page.');
+  await h.conductor.idle();
+  asked = true;
+  const question = h.outbox.questions[0];
+  assert.ok(question, 'the card was asked while the policy was off');
+  h.model.script(
+    'conductor',
+    (request) => {
+      void request;
+      return calls(tool('publish_page', { title: `Deploy with ${key}`, actionRef }));
+    },
+    (request) => {
+      seen = refusal(toolResults(request)[0]);
+      return text('Dropped.');
+    },
+  );
+  await h.answer('cnv_1', question.questionId, 'approve');
+  await h.conductor.idle();
+  assert.match(seen, /^secret_in_call:/);
+  assert.deepEqual(published, [], 'the approved call did not run');
 });
