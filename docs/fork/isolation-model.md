@@ -1,8 +1,8 @@
 # Sandbox isolation and egress model
 
 This is the threat model for what runs in a sandbox box, the invariants the code is held to, how
-each one is enforced and tested, and the list of places where the code as of `da8705f` does not
-hold one of them. It exists so that the recheck loop stops finding new P1s one at a time: a
+each one is enforced and tested, and the list of places where the code as of `9a5a447` (main,
+2026-10-21 22:43 UTC) does not hold one of them. It exists so that the recheck loop stops finding new P1s one at a time: a
 finding is either a violation of a numbered invariant below (then it is a fix, listed in section 7
 with the test that proves it) or a gap in the model (then this file changes first).
 
@@ -134,8 +134,9 @@ primary control and this chain the second.
 
 Each: the statement, how the code enforces it today, how it is tested today, and the fixes in
 section 7 that it still needs. "Real-account test" means a test that only runs as root on a machine
-with a second account (`canSeparate()` in `check-real-account.test.ts`, `agent-user.test.ts`); CI
-does not run those today (section 7, F9).
+with a second account (`canSeparate()` in `check-real-account.test.ts`, `agent-user.test.ts`). The
+rehearsal job runs the whole task flow with a real second account since #301, but the unit suites'
+real-account tests still skip on hosted runners (section 7, F9).
 
 **I1. Task-steerable code runs only as the agent account.** The control user never executes a
 file the agent can write, and never runs a program whose behaviour is configured by a file the
@@ -193,12 +194,12 @@ account: a box where the agent could become the sandbox user is refused).
 **I6. The egress rules are verified in place before task code runs, after every wake, and the box is
 never left without a hook while they change; two guards on one box serialise.** A guard that cannot
 take its lock, cannot read the rules back, or finds them wrong refuses the box.
-*Enforced*: `egress.ts` (verify-first, hook-first swap, `sane`, `flock`), `machine.ts`
-(`guardEgress`, `unguarded`, `refusals`, wake handling).
+*Enforced*: `egress.ts` (verify-first, hook-first swap, `sane`, `flock` required since #310),
+`machine.ts` (`guardEgress`, `unguarded`, `refusals`, wake handling).
 *Tested*: `cloud-runners egress.test.ts`, `egress-wake.test.ts`, `cloud-instabox egress.test.ts`
 (scripted iptables), `egress.real.test.ts` (real iptables in a network namespace),
 `egress.live.test.ts` (by hand, `MAKA_CLOUD_LIVE=1`).
-*Still violated*: F5 (the lock is optional), F6 (the lock file is where the agent can put one first).
+*Still violated*: F6 (the lock file is where the agent can put one first).
 
 **I7. The policy is exactly section 4**: blocked nets rejected, replies, resolvers on 53, ND and
 loopback-via-lo returned first, loopback refused on any other interface, nothing else special.
@@ -282,10 +283,10 @@ a finding that fits none means this section is incomplete.
 | Class | Invariant | Instances so far |
 | --- | --- | --- |
 | Control user runs repo-steerable code | I1 | repo tests as the control user (#289 fixed); CLI `--version` (open, F3); git filters/attributes on `git add -A` (open, F1); fsmonitor and hooks (scrubbed by `GIT_FN`, not enough) |
-| Fail-open probe | I5, I6 | sudo probe by trying commands (#290 fixed with `sudo -l -U`); `getcap` failure and partial cap list (open, F4); optional `flock` (open, F5) |
+| Fail-open probe | I5, I6 | sudo probe by trying commands (#290 fixed with `sudo -l -U`); `getcap` failure and partial cap list (open, F4); optional `flock` (#310 fixed) |
 | Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
-| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` (open, F1); egress lock in `/tmp` (open, F6); transcript append (open, F10) |
+| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` (open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10) |
 | Whole environment handed to the agent | I9 | `--preserve-env` (open, F8) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
 
@@ -362,22 +363,17 @@ missing `agent_setuid` are refused; a script-level test (`agent-user.test.ts` st
 with a `getcap` stand-in that exits 2 must produce `agent_filecaps=unknown`, and one that prints
 `/usr/bin/x cap_chown=ep` must produce `found`.
 
-**F5 (P1, I6, A4): the guard refuses to run without its lock.**
-*Where*: `cloud-instabox/src/egress.ts` `EGRESS_GUARD_SCRIPT` (`if command -v flock`).
-*Why*: without `flock`, two guards interleave and one's `-F` empties the chain the other just hooked:
-hooked but empty, which `sane` of the first caller does not see.
-*Change*: `command -v flock >/dev/null 2>&1 || fail "flock is not installed (util-linux)"`; the
-`exec 9>` and `flock -w 30 9` lines each `|| fail`.
-*Test that fails on main*: `cloud-instabox egress.test.ts`: with a PATH that has no `flock`, the guard
-is refused with that reason; the scripted-iptables test runs two guards at once and the chain reads
-back complete after both.
+**F5 (closed by #310, I6, A4): the guard refuses to run without its lock.** `flock` is required, the
+open and the `flock -w 30` each fail the guard, and the lock is opened for append so a link at its
+name is not truncated. Kept here so the numbering of the hand-off stays.
 
 **F6 (P1, I4 + I6): the egress lock lives where the agent cannot create it.**
 *Where*: `egress.ts` (`EGRESS_LOCK = '/tmp/.maka-egress.lock'`), `applyEgressGuard` envs, `fleet.ts`.
-*Why*: the control user opens `/tmp/.maka-egress.lock` for writing in a world-writable directory. The
-agent can create that name first: with `fs.protected_regular=1` the control user's open fails and
-every guard on the box fails (no task starts); with it off, the agent holds the flock and every
-guard times out; a symlink there is followed where `protected_symlinks` is off.
+*Why*: the control user opens `/tmp/.maka-egress.lock` in a world-writable directory (#310 opens it
+for append, so a link there no longer truncates anything). The agent can still create that name
+first: with `fs.protected_regular=1` the control user's open fails and every guard on the box is
+refused (no task starts in it until someone removes the file); with it off, the agent holds the
+flock and every guard times out after 30 s. Either way the agent account turns the box off.
 *Change*: lock at `$MAKA_ROOT/.egress.lock` (the work root is 710, the agent cannot create entries);
 `applyEgressGuard` takes the root in `MAKA_LOCK` from the fleet; `fail` if the lock's directory is
 group- or world-writable.
@@ -405,10 +401,12 @@ environment; the dump must not contain it (today it does).
 *Why*: every test guarded by `canSeparate()` needs root and a second account; hosted runners are not
 root, so I3, I4, I10, I11 and I16 have no CI coverage with two accounts. The rechecks keep finding
 what those tests would.
-*Change*: one job that runs the `cloud-runners` and `cloud-playbooks` test suites inside a container
-as root with a `maka-agent` user and group, `sudo -n` for root, `iptables`/`ip6tables` stand-ins on
-PATH (the fake's), and asserts that the real-account tests were run, not skipped (count the `skip`
-reasons in the reporter output and fail on `needs root`).
+*Change*: one job that runs the `cloud-runners` and `cloud-playbooks` test suites inside the
+`rehearsal-sandbox` image target of `deploy/Dockerfile` (#301: `maka-agent`, group `maka-box`, real
+`sudo`, `getcap`) as root, with `iptables`/`ip6tables` stand-ins on PATH (the fake's), and asserts
+that the real-account tests were run, not skipped (count the `skip` reasons in the reporter output
+and fail on `needs root`). The tests' `CHANNEL` constant (`nobody`/`nogroup`) becomes an environment
+variable so the job can name `maka-agent`.
 *Test that fails on main*: the job itself; today the count of skipped real-account tests is above
 zero everywhere.
 
@@ -468,8 +466,8 @@ and bounded to one owner's own tasks harming each other.
 `docs/fork/launch-notes.md` as an accepted risk, and make F11 the first post-launch isolation
 change.** Reasons: the patch (`/mnt/project-files/security/r19-4-agent-pool.patch`) is built but
 needs a real-account peer test, host config tests, docs and the `taskOver` lease release, and a
-box image with N accounts; none of that is a small PR, and F1 to F6 close root-in-the-box, which is
-the class that matters more. The alternative, one task at a time per box, would serialise the
+box image with N accounts; none of that is a small PR, and F1 to F4 and F6 close root-in-the-box,
+which is the class that matters more. The alternative, one task at a time per box, would serialise the
 research review and the coding cross-review and is not recommended.
 
 If the owner wants the gap closed before launch instead, the order is: F9 first (the peer test needs
