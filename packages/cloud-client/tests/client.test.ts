@@ -179,3 +179,25 @@ test('a restarted task shows the restart text as its latest note, once, and keep
   expect(task?.state).toBe('running');
   expect(task?.progress).toEqual(['reading the repo', 'The server restarted.']);
 });
+
+test('suggestion switches are read and set on the project, and a server without them is unsupported for that feature only', async () => {
+  const seen: Array<{ url: string; method: string; body?: string }> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    seen.push({ url: String(input), method: init?.method ?? 'GET', body: init?.body as string });
+    if (String(input).includes('/nope/')) return Response.json({}, { status: 404 });
+    if (init?.method === 'PATCH') return Response.json({ kind: 'fix_main_ci', enabled: false });
+    return Response.json({ suggestions: { kinds: [{ kind: 'fix_main_ci', enabled: true }] } });
+  };
+  const client = new CloudClient('t', fetcher);
+  expect((await client.listSuggestions('p 1')).kinds).toHaveLength(1);
+  await client.setSuggestionKind('p 1', 'fix_main_ci', false);
+  expect(seen[0]?.url).toBe('/v1/projects/p%201/suggestions');
+  expect(seen[1]).toMatchObject({
+    url: '/v1/projects/p%201/suggestions',
+    method: 'PATCH',
+    body: JSON.stringify({ kind: 'fix_main_ci', enabled: false }),
+  });
+  await expect(client.listSuggestions('nope')).rejects.toThrow();
+  expect(client.unsupported.has('suggestions')).toBe(true);
+  expect(client.unsupported.has('projects')).toBe(false);
+});

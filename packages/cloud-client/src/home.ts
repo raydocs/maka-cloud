@@ -100,5 +100,6 @@ const VERB: Record<string, string> = {
   blocked: 'Unblock',
   verification_failed: 'Review',
   finished: 'Review',
+  suggestion: 'Suggested',
 };
 export const verbOf = (kind: string) => VERB[kind] ?? 'Decide';

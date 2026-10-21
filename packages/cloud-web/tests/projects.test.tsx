@@ -312,3 +312,74 @@ test('a task with no review line shows no independent review section', async () 
   await screen.findByText('12 passed');
   expect(screen.queryByRole('region', { name: 'Independent review' })).toBeNull();
 });
+
+function serveSuggestions(kinds: Array<Record<string, unknown>> | 404) {
+  const patches: { kind: string; enabled: boolean }[] = [];
+  const base = serveProjects({ projects: [project([duty()])] });
+  const fetcher: typeof fetch = async (input, init) => {
+    const path = String(input);
+    if (path === '/v1/projects/p1/suggestions') {
+      if (kinds === 404) return Response.json({}, { status: 404 });
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as { kind: string; enabled: boolean };
+        patches.push(body);
+        const row = kinds.find((k) => k.kind === body.kind);
+        if (row) row.enabled = body.enabled;
+        return Response.json(body);
+      }
+      return Response.json({ suggestions: { kinds, cards: [] } });
+    }
+    return (base.client as unknown as { fetcher: typeof fetch }).fetcher(input, init);
+  };
+  return { client: new CloudClient('fake', fetcher), patches };
+}
+const kindRow = (over: Record<string, unknown> = {}) => ({
+  kind: 'fix_main_ci',
+  label: 'Fix failing tests on the default branch',
+  enabled: true,
+  accepted: 2,
+  dismissed: 1,
+  ignored: 0,
+  ignoredInARow: 0,
+  backedOff: false,
+  offer: 'none',
+  ...over,
+});
+
+test('a project shows a switch for each kind of suggestion, with what the owner did with them', async () => {
+  const kinds = [
+    kindRow(),
+    kindRow({
+      kind: 'rebase_pr',
+      label: 'Rebase its own pull requests',
+      enabled: false,
+      accepted: 0,
+      dismissed: 0,
+    }),
+  ];
+  const api = serveSuggestions(kinds);
+  render(<Projects client={api.client} />);
+  const list = await screen.findByRole('list', { name: 'Suggestions' });
+  expect(within(list).getByText('2 done · 1 not now · 0 unanswered')).toBeTruthy();
+  expect(within(list).getByText('Nothing suggested yet.')).toBeTruthy();
+  const sw = within(list).getByRole('switch', {
+    name: 'Fix failing tests on the default branch suggestions are on',
+  });
+  fireEvent.click(sw);
+  await waitFor(() => expect(api.patches).toEqual([{ kind: 'fix_main_ci', enabled: false }]));
+  await waitFor(() =>
+    expect(
+      within(list).getByRole('switch', {
+        name: 'Fix failing tests on the default branch suggestions are off',
+      }),
+    ).toBeTruthy(),
+  );
+});
+
+test('a server without suggestions shows no suggestion section and no error', async () => {
+  const api = serveSuggestions(404);
+  render(<Projects client={api.client} />);
+  await screen.findByRole('region', { name: 'example/repo' });
+  expect(screen.queryByRole('list', { name: 'Suggestions' })).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+});

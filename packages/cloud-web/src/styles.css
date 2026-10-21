@@ -392,6 +392,24 @@ textarea {
   padding: 0 6px;
 }
 
+/* Suggestions */
+.suggestion {
+  padding: 16px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-small);
+  background: var(--chip);
+  display: grid;
+  gap: 8px;
+}
+.suggestion h3 {
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+.suggestion-detail {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 /* Decisions */
 .question {
   padding: 16px;
