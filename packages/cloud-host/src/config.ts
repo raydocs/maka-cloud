@@ -69,6 +69,12 @@ export interface StackConfig {
    * run tasks.
    */
   sandboxes: Record<string, string>;
+  /**
+   * Set with `MAKA_CLOUD_BOXES=1`: tasks run on a pool of boxes the server makes, sleeps and deletes
+   * itself, up to `maxPerInvite` per invite, instead of the fixed machine per invite in `sandboxes`
+   * (which is then empty).
+   */
+  boxes?: { templateId: string; maxPerInvite: number };
   /** The model gateway sandbox runs reach the vendors through. It reads the vendor keys itself. */
   gateway: {
     host: string;
@@ -354,7 +360,19 @@ export const ENV_VARIABLES = [
   ['INSTABOX_API_KEY', 'required: sandbox API key'],
   [
     'MAKA_CLOUD_SANDBOXES',
-    'required: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks',
+    'required unless MAKA_CLOUD_BOXES=1: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks',
+  ],
+  [
+    'MAKA_CLOUD_BOXES',
+    '1: the server makes, sleeps and deletes the sandboxes itself, a pool per invite, instead of a fixed machine per invite (do not set MAKA_CLOUD_SANDBOXES); needs MAKA_CLOUD_BOX_TEMPLATE',
+  ],
+  [
+    'MAKA_CLOUD_BOX_TEMPLATE',
+    'the sandbox template id new boxes start from; required with MAKA_CLOUD_BOXES=1',
+  ],
+  [
+    'MAKA_CLOUD_BOX_MAX',
+    'the most boxes one invite may have (1 to 5, default 3); the sandbox account allows 5 in all',
   ],
   ['INSTABOX_API_URL', 'sandbox API base URL'],
   ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
@@ -647,7 +665,15 @@ export function readStackConfig(
         'INSTABOX_MACHINE_ID is no longer used: one machine for every invite lets invites read each other, set MAKA_CLOUD_SANDBOXES',
       );
     }
-    config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
+    const boxes = readBoxes(value, problems);
+    if (boxes !== undefined) config.boxes = boxes;
+    // With the pool asked for, a problem with it is the only thing to report about where tasks run.
+    if (value('MAKA_CLOUD_BOXES') === undefined) {
+      config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
+    }
+  }
+  if (options.sandboxes === 'single-machine' && value('MAKA_CLOUD_BOXES') !== undefined) {
+    problems.push('MAKA_CLOUD_BOXES is not used with a single machine');
   }
   const apiUrl = url('INSTABOX_API_URL');
   if (apiUrl !== undefined) config.instabox.apiUrl = apiUrl;
@@ -702,6 +728,56 @@ function parseDutyLinks(text: string): DutyLink[] | string {
   return links;
 }
 const MACHINE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+/** The most boxes an invite may ask for: the sandbox account allows 5 in all. */
+const MAX_BOXES_PER_INVITE = 5;
+const DEFAULT_BOXES_PER_INVITE = 3;
+
+/**
+ * `MAKA_CLOUD_BOXES=1` with its template, or nothing. Mixing it with `MAKA_CLOUD_SANDBOXES` is an
+ * error: it would be unclear which machine a task runs on. Settings of the pool without the switch
+ * are an error too, so a forgotten switch is not silently ignored.
+ */
+function readBoxes(
+  value: (name: string) => string | undefined,
+  problems: string[],
+): StackConfig['boxes'] {
+  const switchValue = value('MAKA_CLOUD_BOXES');
+  const template = value('MAKA_CLOUD_BOX_TEMPLATE');
+  const max = value('MAKA_CLOUD_BOX_MAX');
+  if (switchValue === undefined) {
+    if (template !== undefined || max !== undefined) {
+      problems.push('MAKA_CLOUD_BOX_TEMPLATE and MAKA_CLOUD_BOX_MAX need MAKA_CLOUD_BOXES=1');
+    }
+    return undefined;
+  }
+  if (switchValue !== '1') {
+    problems.push('MAKA_CLOUD_BOXES must be 1, or unset');
+    return undefined;
+  }
+  let ok = true;
+  if (value('MAKA_CLOUD_SANDBOXES') !== undefined) {
+    problems.push('MAKA_CLOUD_BOXES=1 and MAKA_CLOUD_SANDBOXES are both set: use one of them');
+    ok = false;
+  }
+  if (template === undefined) {
+    problems.push('MAKA_CLOUD_BOX_TEMPLATE is not set');
+    ok = false;
+  } else if (!MACHINE_ID.test(template)) {
+    problems.push('MAKA_CLOUD_BOX_TEMPLATE is not a template id');
+    ok = false;
+  }
+  let maxPerInvite = DEFAULT_BOXES_PER_INVITE;
+  if (max !== undefined) {
+    const parsed = Number(max);
+    if (!/^\d+$/u.test(max) || parsed < 1 || parsed > MAX_BOXES_PER_INVITE) {
+      problems.push(`MAKA_CLOUD_BOX_MAX must be a whole number from 1 to ${MAX_BOXES_PER_INVITE}`);
+      ok = false;
+    } else {
+      maxPerInvite = parsed;
+    }
+  }
+  return ok && template !== undefined ? { templateId: template, maxPerInvite } : undefined;
+}
 
 /** `{"<inviteId>": "<machine>"}`, at least one entry, and no machine used by two invites. */
 function sandboxTable(raw: string | undefined, problems: string[]): Record<string, string> {
@@ -802,7 +878,9 @@ export function describeConfig(config: StackConfig): string[] {
     `MCP URL for tasks:   ${config.mcp.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `model API base URL:  ${config.gateway.anthropicBaseUrl ?? '(default)'}`,
     `model connection id: ${config.conductor.connectionId ?? '(default)'}`,
-    `sandbox machines:    ${Object.keys(config.sandboxes).length} (one per invite)`,
+    config.boxes === undefined
+      ? `sandbox machines:    ${Object.keys(config.sandboxes).length} (one per invite)`
+      : `sandbox boxes:       up to ${config.boxes.maxPerInvite} per invite, from template ${config.boxes.templateId}`,
     `sandbox API URL:     ${config.instabox.apiUrl ?? '(default)'}`,
     `Codex runner key:    ${config.openAiKeySet ? 'set' : 'not set (Codex tasks will fail)'}`,
     `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
