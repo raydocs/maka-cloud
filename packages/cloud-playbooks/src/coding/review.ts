@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ModeId } from '@maka-cloud/modes';
+import { scrubSecretText } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import { isRepoPath } from './task.js';
 
@@ -24,7 +25,9 @@ const MAX_REASON = 300;
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}͏ᅟᅠ឴឵᠋-᠏⠀ㅤ︀-️ﾠ\u{E0100}-\u{E01EF}]/gu;
 
 export function plain(text: string, max: number): string {
-  const flat = text.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim();
+  // Flattened and scrubbed whole, and only then cut: a key cut in two is no longer a key the
+  // scrubber knows, and what is left of it would be shown.
+  const flat = scrubSecretText(text.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim());
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
 }
 

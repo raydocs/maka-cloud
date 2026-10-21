@@ -417,6 +417,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
+| `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
@@ -660,8 +661,8 @@ Preparation:
    on (the invite's generation in the journal moves up), and only then does the
    new run get a budget of its own, starting empty. Every run, takeover or not,
    first stops what an earlier run left going: it cancels each task that has not
-   ended, and asks again about each task that ended in the last ten minutes,
-   because only the server's answer to a cancel says whether the task's run or
+   ended, and asks about every task that has (however long ago, since the task
+   list cannot show a pending stop and the server's flag has no age limit), because only the server's answer to a cancel says whether the task's run or
    its tree is still being stopped. It sends the cancel again every 5 seconds,
    for up to 3 minutes a task (the server itself retries a stop that failed with
    a growing delay), until the answer says the task ended with nothing pending.

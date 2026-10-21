@@ -400,6 +400,7 @@ export async function startStack(
         },
         playbooks: STACK_PLAYBOOKS,
         modes: config.modes,
+        deepMode: config.deepMode,
         tools: [pullRequests],
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
