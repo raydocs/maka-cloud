@@ -310,6 +310,42 @@ describe('applyEgressGuard', () => {
     }
   });
 
+  it('keeps its lock in a directory of the sandbox user that nobody else can enter, not in /tmp', async () => {
+    const home = join(state, 'home');
+    await fs.mkdir(home);
+    await make({ home });
+    await run();
+    const dir = await fs.lstat(join(home, '.maka-egress'));
+    assert.ok(dir.isDirectory());
+    assert.equal(dir.mode & 0o777, 0o700, 'the lock directory is closed to the group and others');
+    const lock = await fs.lstat(join(home, '.maka-egress', 'lock'));
+    assert.ok(lock.isFile());
+    assert.equal(lock.mode & 0o077, 0, 'the lock file opens for nobody else');
+  });
+
+  it('refuses a lock directory or file that is a link, and changes no rule', async () => {
+    const home = join(state, 'home');
+    const elsewhere = join(state, 'elsewhere');
+    await fs.mkdir(home);
+    await fs.mkdir(elsewhere);
+    await fs.symlink(elsewhere, join(home, '.maka-egress'));
+    await make({ home });
+    await assert.rejects(run(), /is not a directory of the sandbox user/u);
+    assert.deepEqual(v4(), []);
+    await h.cleanup();
+    await fs.rm(join(home, '.maka-egress'));
+    await fs.mkdir(join(home, '.maka-egress'), { mode: 0o700 });
+    await fs.symlink(join(elsewhere, 'target'), join(home, '.maka-egress', 'lock'));
+    await make({ home });
+    await assert.rejects(run(), /is a link/u);
+    assert.deepEqual(v4(), []);
+    await assert.rejects(
+      fs.lstat(join(elsewhere, 'target')),
+      /ENOENT/u,
+      'the link was not followed',
+    );
+  });
+
   it('refuses when a rule cannot be added, and says which', async () => {
     await make({ env: { SHIM_FAIL: '169\\.254\\.0\\.0/16' } });
     await assert.rejects(run(), /cannot block 169\.254\.0\.0\/16/u);

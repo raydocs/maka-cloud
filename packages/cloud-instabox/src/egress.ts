@@ -33,8 +33,14 @@ export const EGRESS_LOOPBACK_V6 = '::1/128';
 
 export const EGRESS_CHAIN = 'MAKA_EGRESS';
 
-/** Held while the rules are checked or rebuilt, so that two callers on one box do not trip over each other. */
-const EGRESS_LOCK = '/tmp/.maka-egress.lock';
+/**
+ * Held while the rules are checked or rebuilt, so that two callers on one box do not trip over each
+ * other. It lives in a directory of the sandbox user's home that only that user can enter (the box
+ * check makes sure the agent cannot write the home), never in a directory anyone can write such as
+ * `/tmp`: there the agent could create the path first, or open the file and hold the lock, and every
+ * guard would time out.
+ */
+const EGRESS_LOCK_DIR = '.maka-egress';
 
 const HELPER_TIMEOUT_SECONDS = 60;
 
@@ -168,8 +174,19 @@ guard() {
 # Without the lock two guards interleave, and one flushes the chain the other just made live: hooked
 # and empty. A box that cannot give it is refused.
 command -v flock >/dev/null 2>&1 || fail "flock is not installed, so two guards could interleave"
-exec 9>>"$MAKA_LOCK" || fail "cannot open $MAKA_LOCK"
-flock -w 30 9 || fail "cannot take $MAKA_LOCK"
+[ -n "\${HOME:-}" ] || fail "HOME is not set, so there is no private place for the lock"
+lockdir="$HOME/$MAKA_LOCK_DIR"
+lock="$lockdir/lock"
+(umask 077; mkdir -p "$lockdir") || fail "cannot make $lockdir"
+# Ours, a real directory, and closed to everyone else: then nobody else can make, replace or open the lock.
+[ -d "$lockdir" ] && [ ! -L "$lockdir" ] && [ -O "$lockdir" ] || fail "$lockdir is not a directory of the sandbox user"
+chmod 700 "$lockdir" || fail "cannot close $lockdir"
+[ ! -L "$lock" ] || fail "$lock is a link"
+(umask 077; exec 9>>"$lock") || fail "cannot make $lock"
+exec 9>>"$lock" || fail "cannot open $lock"
+[ -f "$lock" ] && [ -O "$lock" ] || fail "$lock is not a file of the sandbox user"
+chmod 600 "$lock" || fail "cannot close $lock"
+flock -w 30 9 || fail "cannot take $lock"
 FAMILY=4 LOOPBACK="$MAKA_LO4" guard iptables $MAKA_V4
 # procfs files report size 0, so [ -s ] cannot tell: read the content.
 if [ -n "$(cat "$MAKA_IF_INET6" 2>/dev/null)" ]; then FAMILY=6 LOOPBACK="$MAKA_LO6" guard ip6tables $MAKA_V6; fi
@@ -216,7 +233,7 @@ export async function applyEgressGuard(
         MAKA_ICMPV6: EGRESS_ICMPV6_ALLOWED.join(' '),
         MAKA_LO4: EGRESS_LOOPBACK_V4,
         MAKA_LO6: EGRESS_LOOPBACK_V6,
-        MAKA_LOCK: EGRESS_LOCK,
+        MAKA_LOCK_DIR: EGRESS_LOCK_DIR,
         MAKA_RESOLV_CONF: options.resolvConf ?? '/etc/resolv.conf',
         MAKA_IF_INET6: options.ifInet6 ?? '/proc/net/if_inet6',
       },
