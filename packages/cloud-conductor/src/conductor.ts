@@ -477,7 +477,9 @@ export class Conductor {
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
-    if (!run) return this.cancelKeptTasks(conversationId);
+    // Tasks an earlier run kept across a restart belong to no open run: a new run does not hide them.
+    const kept = this.cancelKeptTasks(conversationId, run?.runId);
+    if (!run) return kept;
     return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
   }
 
@@ -486,8 +488,10 @@ export class Conductor {
    * conversation's: it is owed a cancel, which goes out now or when the conversation next has
    * access. True when there was anything to cancel.
    */
-  private cancelKeptTasks(conversationId: string): boolean {
-    const owed = this.state.unsettledDelegations({ conversationId });
+  private cancelKeptTasks(conversationId: string, openRunId?: string): boolean {
+    const owed = this.state
+      .unsettledDelegations({ conversationId })
+      .filter((delegation) => delegation.runId !== openRunId);
     if (owed.length === 0) return false;
     this.state.markCancelPending(owed.map((delegation) => delegation.key));
     // Taking the access queues the retry.

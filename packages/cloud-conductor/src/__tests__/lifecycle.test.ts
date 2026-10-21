@@ -1007,6 +1007,31 @@ test('a user’s stop cancels a task that was kept across a restart, though no r
   assert.equal(await reopened.stop('cnv_1'), false, 'nothing is left to stop');
 });
 
+test('a user’s stop cancels the kept task too when a new run is open after the restart', async (t) => {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: keepTasks(() => h),
+  });
+  const { held } = await runningTaskTurn(h);
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart({ limits: { stopCheckMs: 60_000 } });
+  await reopened.idle();
+  assert.equal(h.orchestrator.stats().activeTasks, 1);
+  // The user writes again; that run is open when they stop.
+  const second = heldStep();
+  h.model.script('planner', text('1. Wait.'));
+  h.model.script('conductor', second.step);
+  await h.send('cnv_1', 'And another thing.');
+  await second.started;
+  assert.ok(reopened.state.openRun('cnv_1'), 'a new run is open');
+  assert.equal(await reopened.stop('cnv_1'), true);
+  second.release();
+  await reopened.idle();
+  await assertNoTasks(h);
+});
+
 test('the operator’s pause still cancels a task that was kept across a restart', async (t) => {
   const h: Harness = await makeHarness(t, {
     autoComplete: false,
