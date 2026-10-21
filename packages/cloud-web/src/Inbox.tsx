@@ -15,6 +15,7 @@ export function InboxCard({
   resultShown?: boolean;
 }) {
   const [note, setNote] = useState('');
+  const [noting, setNoting] = useState(false);
   const card = inboxCardModel(item);
   return (
     <section className="question" aria-label={card.heading}>
@@ -58,7 +59,12 @@ export function InboxCard({
         </p>
       ) : (
         <>
-          {item.allowText && (
+          {item.allowText && !noting && (
+            <button type="button" className="quiet-action" onClick={() => setNoting(true)}>
+              Add a note
+            </button>
+          )}
+          {item.allowText && noting && (
             <label className="note-label">
               Additional context (optional)
               <textarea
@@ -67,6 +73,8 @@ export function InboxCard({
                 value={note}
                 onChange={(e) => setNote(displayText(e.target.value))}
                 disabled={disabled}
+                // The person just asked to write the note.
+                autoFocus
               />
             </label>
           )}

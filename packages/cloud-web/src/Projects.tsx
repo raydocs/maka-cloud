@@ -205,7 +205,7 @@ export function Projects({ client }: { client: CloudClient }) {
       <h1>Projects</h1>
       {unavailable && (
         <section className="card section-card">
-          <p className="muted">Projects and duties are not available on this server.</p>
+          <p className="muted">Projects aren’t turned on for this workspace yet.</p>
         </section>
       )}
       {error && (

@@ -239,7 +239,8 @@ test('a retry of a failed start is one conversation and one message; editing mak
   await expect(starter.start('plan the launch')).rejects.toBeDefined();
   starter.draftEdited();
   const started = await starter.start('plan the launch, please');
-  expect(started).toEqual({ conversationId: 'c-new', title: null, createdAt: 42 });
+  // Named from the sentence it was created with; a retry reuses the conversation and its name.
+  expect(started).toEqual({ conversationId: 'c-new', title: 'plan the launch', createdAt: 42 });
   expect(conversations).toBe(1);
   expect(posts[1]?.clientMessageId).not.toBe(posts[0]?.clientMessageId);
 });

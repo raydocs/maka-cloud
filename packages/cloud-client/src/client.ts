@@ -174,10 +174,10 @@ export class CloudClient {
   deleteFact(id: string) {
     return this.request(`/v1/memory/facts/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
-  createConversation() {
+  createConversation(title?: string) {
     return this.request<{ conversationId: string }>(routes.conversations, {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify(title ? { title } : {}),
     });
   }
   postMessage(id: string, text: string, clientMessageId: string, mode?: Mode) {

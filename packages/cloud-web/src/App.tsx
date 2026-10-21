@@ -177,9 +177,14 @@ function TaskBranch({
         {stopping && (
           <p className="muted">Still stopping. The cost may change until it has stopped.</p>
         )}
-        {task.progress.length > 0 && <StepLine notes={task.progress} />}
+        {/* A finished task has no "current step", and a top-level result is on its own card. */}
+        {task.progress.length > 0 && task.state !== 'succeeded' && (
+          <StepLine notes={task.progress} />
+        )}
         {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
-        {task.manifest && <p>{displayText(task.manifest.summary)}</p>}
+        {task.manifest && task.parentTaskId !== undefined && (
+          <p>{displayText(task.manifest.summary)}</p>
+        )}
         {live && <Computer client={client} task={task} />}
         {live && (
           <div className="task-actions">
