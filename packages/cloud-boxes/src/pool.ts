@@ -167,6 +167,8 @@ export class BoxPool implements SandboxProvider {
   private discovery: Promise<void> | undefined;
   /** Invites with a builder box in this process. */
   private readonly builders = new Set<string>();
+  /** A builder box of an invite that could not be deleted: the next build removes it first. */
+  private readonly leftoverBuilders = new Map<string, string>();
   private closed = false;
   /** The most boxes the account let the pool have, once instabox refused a create. */
   private learned: { boxes: number; at: number } | undefined;
@@ -300,6 +302,18 @@ export class BoxPool implements SandboxProvider {
         if (this.builders.has(tenantId)) {
           throw new NoFreeBoxError('a setup snapshot is already being built for this invite');
         }
+        const leftover = this.leftoverBuilders.get(tenantId);
+        if (leftover !== undefined) {
+          // The fixed name is still taken by the box an earlier build could not delete.
+          try {
+            await this.removeBox(leftover);
+            this.leftoverBuilders.delete(tenantId);
+          } catch (error) {
+            throw new NoFreeBoxError(
+              `an earlier builder box of this invite could not be deleted yet: ${errorText(error)}`,
+            );
+          }
+        }
         this.builders.add(tenantId);
         let machineId: string | undefined;
         try {
@@ -336,9 +350,10 @@ export class BoxPool implements SandboxProvider {
               if (released) return;
               released = true;
               try {
-                await this.api.deleteMachine(id);
+                await this.removeBox(id);
               } catch (error) {
-                // Found and deleted at the next start, which sees it as a builder box nobody is using.
+                // Removed before the next build of this invite, or at the next start.
+                this.leftoverBuilders.set(tenantId, id);
                 this.options.onWarning?.(`could not delete builder box ${id}`, error);
               } finally {
                 this.builders.delete(tenantId);
@@ -347,11 +362,11 @@ export class BoxPool implements SandboxProvider {
           };
         } catch (error) {
           if (machineId !== undefined) {
-            await this.api
-              .deleteMachine(machineId)
-              .catch((e) =>
-                this.options.onWarning?.(`could not delete builder box ${machineId}`, e),
-              );
+            const id = machineId;
+            await this.removeBox(id).catch((e) => {
+              this.leftoverBuilders.set(tenantId, id);
+              this.options.onWarning?.(`could not delete builder box ${id}`, e);
+            });
           }
           this.builders.delete(tenantId);
           throw error;
@@ -933,6 +948,12 @@ export class BoxPool implements SandboxProvider {
     if (this.closed) throw new Error('the box pool was shut down');
   }
 
+  /** Deletes a box and waits until instabox says it is gone: its name is free only then. */
+  private async removeBox(machineId: string): Promise<void> {
+    const operation = await this.api.deleteMachine(machineId);
+    await this.api.waitForOperation(operation.id);
+  }
+
   private async deleteQuietly(machineId: string): Promise<void> {
     try {
       const operation = await this.api.deleteMachine(machineId);
@@ -1298,9 +1319,11 @@ export class BoxPool implements SandboxProvider {
   private async reapBuilder(machine: InstaboxMachine): Promise<void> {
     if (machine.state === 'deleting' || machine.state === 'deleted') return;
     try {
-      await this.api.deleteMachine(machine.id);
+      await this.removeBox(machine.id);
       this.options.onWarning?.(`deleted builder box ${machine.id} left by an earlier process`);
     } catch (error) {
+      const tenantId = machine.metadata?.[LABEL.invite];
+      if (tenantId !== undefined) this.leftoverBuilders.set(tenantId, machine.id);
       this.options.onWarning?.(`could not delete builder box ${machine.id}`, error);
     }
   }

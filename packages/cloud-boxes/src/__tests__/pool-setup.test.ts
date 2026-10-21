@@ -298,6 +298,85 @@ describe('boxes to build setup snapshots in', () => {
     assert.equal([...t.fleet.machines.values()][0]?.state, 'deleted');
   });
 
+  /** Makes the wait for a delete operation a handshake: it ends when the test says. */
+  function holdDeletes(t: ReturnType<typeof setup>) {
+    const real = t.fleet.waitForOperation.bind(t.fleet);
+    const gates: { id: string; open: () => void }[] = [];
+    let reached!: () => void;
+    const first = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const deleting = new Set<string>();
+    const realDelete = t.fleet.deleteMachine.bind(t.fleet);
+    t.fleet.deleteMachine = async (id: string) => {
+      const operation = await realDelete(id);
+      deleting.add(operation.id);
+      return operation;
+    };
+    t.fleet.waitForOperation = async (id: string) => {
+      if (deleting.has(id)) {
+        await new Promise<void>((resolve) => {
+          gates.push({ id, open: resolve });
+          reached();
+        });
+      }
+      return await real(id);
+    };
+    return { first, openAll: () => gates.splice(0).forEach((gate) => gate.open()) };
+  }
+
+  it('waits for instabox to finish deleting before it says the builder is given back', async () => {
+    const t = setup();
+    const gate = holdDeletes(t);
+    const builder = await t.pool.builderBoxes().lease({ tenantId: A, job: 'setup-abc' });
+    let given = false;
+    const release = Promise.resolve(builder.release()).then(() => {
+      given = true;
+    });
+    await gate.first;
+    await flush();
+    assert.equal(given, false, 'the delete operation is still running');
+    gate.openAll();
+    await release;
+    assert.equal(given, true);
+  });
+
+  it('removes a builder it could not delete before the next build, and refuses the build while it cannot', async () => {
+    const t = setup();
+    const boxes = t.pool.builderBoxes();
+    const first = await boxes.lease({ tenantId: A, job: 'setup-abc' });
+    const realDelete = t.fleet.deleteMachine.bind(t.fleet);
+    let failing = true;
+    t.fleet.deleteMachine = async (id: string) => {
+      if (failing) throw new Error('instabox is unreachable');
+      return await realDelete(id);
+    };
+    await first.release();
+    assert.equal(nameOf(t, first.machineId)?.state, 'running', 'it is still there');
+    await assert.rejects(boxes.lease({ tenantId: A, job: 'setup-def' }), NoFreeBoxError);
+    assert.equal(t.fleet.callsTo('createMachine').length, 1, 'nothing is made over the name');
+    failing = false;
+    const second = await boxes.lease({ tenantId: A, job: 'setup-def' });
+    assert.equal(nameOf(t, first.machineId)?.state, 'deleted');
+    assert.notEqual(second.machineId, first.machineId);
+  });
+
+  it('waits for the delete of a builder left by an earlier process before the pool starts', async () => {
+    const t = setup();
+    const gate = holdDeletes(t);
+    const orphan = t.fleet.seed({ name: builderName(A), metadata: builderLabels(A, 'setup-old') });
+    let started = false;
+    const acquire = t.pool.acquire({ tenantId: A, taskId: 't1' }).then(() => {
+      started = true;
+    });
+    await gate.first;
+    await flush();
+    assert.equal(started, false, 'discovery is still waiting for the delete');
+    gate.openAll();
+    await acquire;
+    assert.equal(orphan.state, 'deleted');
+  });
+
   it('is deleted at the next start when a process died with it, and nothing else with the pool label is', async () => {
     const t = setup();
     const orphan = t.fleet.seed({ name: builderName(A), metadata: builderLabels(A, 'setup-old') });
