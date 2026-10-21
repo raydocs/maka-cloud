@@ -613,7 +613,7 @@ test('the run budget of the smoke command holds across UTC midnight, where the d
   assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
 });
 
-test('the smoke command refuses before any request when the server does not enforce run budgets, and sets and clears the budget around a run', async (t) => {
+test('the smoke command starts nothing when the journal does not enforce the run budget it set, and sets and clears the budget around a run', async (t) => {
   const { io, touched, printed } = untouchable();
   const invites = fakeInvites({ dailyUsd: 5, monthlyUsd: 50 });
   io.openInvites = invites.open_ as never;
@@ -633,9 +633,13 @@ test('the smoke command refuses before any request when the server does not enfo
     },
   };
   assert.equal(await smokeCommand(LIVE_ENV, io), 2);
-  assert.deepEqual(calls, ['enforced'], 'nothing is set for a server that would ignore it');
+  assert.deepEqual(
+    calls,
+    ['set', 'enforced', 'clear'],
+    'the budget is checked once set, and taken away again when it would not hold',
+  );
   assert.deepEqual(touched, [], 'and nothing is sent');
-  assert.match(printed.join('\n'), /enforces the run budget/u);
+  assert.match(printed.join('\n'), /does not enforce the run budget/u);
 
   // A run that ends, however it ends, takes its budget with it.
   const down = downServer(() => {});

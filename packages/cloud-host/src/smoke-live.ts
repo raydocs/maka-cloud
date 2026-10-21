@@ -456,21 +456,10 @@ export async function smokeCommand(
   };
   const journalPath = join(settings.dataDir, 'gateway-spend.db');
   const runId = io.runId ?? randomUUID();
-  let enforced = false;
-  try {
-    enforced = budgets.enforced(journalPath);
-  } catch {
-    // Unreadable is as good as not enforced.
-  }
-  if (!enforced) {
-    print(
-      'the server has not been started on a version that enforces the run budget at the gateway: restart it on this version, then run the smoke test again',
-    );
-    return 2;
-  }
-  // From here the gateway refuses the smoke invite's reservations once what it has booked since now
-  // reaches the budget, whatever the UTC day and whether or not the server restarts in between.
-  // One run holds an invite's budget at a time, so two runs cannot overwrite each other's cap.
+  // From here the gateway journal refuses the smoke invite's bookings, from any process, once what it
+  // has booked since now reaches the budget, whatever the UTC day and whether or not the server
+  // restarts in between. One run holds an invite's budget at a time, so two runs cannot overwrite
+  // each other's cap.
   try {
     budgets.set(
       journalPath,
@@ -483,6 +472,24 @@ export async function smokeCommand(
       error instanceof RunBudgetHeld
         ? 'another smoke run holds the run budget of this invite: wait for it to end (or about two minutes after it was killed), then run again'
         : 'the run budget could not be set in the gateway journal, so nothing was started',
+    );
+    return 2;
+  }
+  // The budget is only a cap if the journal file itself enforces it; if that cannot be seen, nothing starts.
+  let enforced = false;
+  try {
+    enforced = budgets.enforced(journalPath);
+  } catch {
+    // Unreadable is as good as not enforced.
+  }
+  if (!enforced) {
+    try {
+      budgets.clear(journalPath, settings.inviteId, runId);
+    } catch {
+      // The budget stays and limits the invite until the next run takes it over.
+    }
+    print(
+      'the gateway journal does not enforce the run budget, so nothing was started: check that the server and this command run the same version',
     );
     return 2;
   }
