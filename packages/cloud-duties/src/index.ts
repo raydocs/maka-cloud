@@ -1,5 +1,5 @@
 export { buildBrief, describeTrigger } from './brief.js';
-export { DutiesDatabaseInUseError } from './db.js';
+export { DutiesDatabaseInUseError, DutiesDatabaseVersionError } from './db.js';
 export {
   Dispatcher,
   type DispatcherOptions,
