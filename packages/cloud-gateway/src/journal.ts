@@ -126,12 +126,6 @@ function openJournal(path: string): DatabaseSync {
         retry_at INTEGER NOT NULL,
         PRIMARY KEY (invite_id, key)
       );
-      CREATE TABLE IF NOT EXISTS raised_alerts (
-        invite_id TEXT NOT NULL,
-        key TEXT NOT NULL,
-        raised_at INTEGER NOT NULL,
-        PRIMARY KEY (invite_id, key)
-      );
       `);
       addColumn(db, 'account_spend', 'booked_at', 'INTEGER NOT NULL DEFAULT 0');
       addColumn(db, 'run_budget', 'run_id', "TEXT NOT NULL DEFAULT ''");
@@ -438,29 +432,6 @@ export class SqliteSpendJournal implements SpendJournal {
     this.db
       .prepare('DELETE FROM pending_alerts WHERE invite_id = ? AND key = ?')
       .run(inviteId, key);
-  }
-
-  /**
-   * Writes down that the loss of alert `key` was raised in `inviteId`'s inbox, so no later round
-   * (after a restart, or a failed `clearPendingAlert`) raises it again. Kept after the item is
-   * answered; the first write stands.
-   */
-  markAlertRaised(inviteId: string, key: string, at: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO raised_alerts (invite_id, key, raised_at) VALUES (?, ?, ?)
-         ON CONFLICT (invite_id, key) DO NOTHING`,
-      )
-      .run(inviteId, key, at);
-  }
-
-  /** Whether the loss of alert `key` was already raised in `inviteId`'s inbox. */
-  alertRaised(inviteId: string, key: string): boolean {
-    return (
-      this.db
-        .prepare('SELECT 1 FROM raised_alerts WHERE invite_id = ? AND key = ?')
-        .get(inviteId, key) !== undefined
-    );
   }
 
   hold(taskId: string, key: string, usd: number): void {

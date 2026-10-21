@@ -598,17 +598,28 @@ export class Supervisor {
    * Raises a budget item for a spending limit that stopped work, which stays until the human
    * acknowledges it. One open item per `key`: more hits on the same limit change nothing. Durable
    * when this returns; the push and the stream follow from the supervisor's own pass.
+   *
+   * With `once`, the key is raised a single time ever: when an item with it exists, open or
+   * answered, nothing is raised. The check and the item are one transaction, so the record that
+   * it was raised is the item itself and cannot be missing when the item exists. Returns false,
+   * and raises nothing, when the supervisor has stopped.
    */
-  raiseCapHit(input: { conversationId: string; taskId?: string; key: string; ask: string }): void {
-    if (this.stopped) return;
-    this.store.tx(() =>
-      openItem(
-        this.store,
-        capSpec(this.store, { ...input, taskId: input.taskId ?? null }),
-        this.now(),
-      ),
-    );
+  raiseCapHit(input: {
+    conversationId: string;
+    taskId?: string;
+    key: string;
+    ask: string;
+    once?: boolean;
+  }): boolean {
+    if (this.stopped) return false;
+    const { once, ...spec } = input;
+    this.store.tx(() => {
+      const made = capSpec(this.store, { ...spec, taskId: spec.taskId ?? null });
+      if (once && this.store.itemEverRaised(made.dedupeKey)) return;
+      openItem(this.store, made, this.now());
+    });
     this.kick();
+    return true;
   }
 
   /**

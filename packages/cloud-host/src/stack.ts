@@ -136,7 +136,13 @@ export async function startStack(
       }
     | undefined;
   let raiseCapHit:
-    | ((input: { conversationId: string; taskId?: string; key: string; ask: string }) => void)
+    | ((input: {
+        conversationId: string;
+        taskId?: string;
+        key: string;
+        ask: string;
+        once?: boolean;
+      }) => boolean)
     | undefined;
   const tenantOf = (taskId: TaskId): string => {
     const owner = ownerOfTask?.(taskId);
@@ -411,12 +417,12 @@ export async function startStack(
           alert: (inviteId, key) => cloud.server.pushAlert(inviteId, key),
           // An alert that never reached a device must not hide a cap breach: it becomes a budget
           // item in the owner's inbox (in the owner's oldest conversation, as the inbox is per
-          // owner; an owner with none gets an empty one made for it). Once raised it is written
-          // down by (invite, alert key), so a restart, or a failed clearing of the owed alert,
-          // does not raise it a second time after the first was answered. An owner who is no
-          // longer active has no inbox, so only the log says.
+          // owner; an owner with none gets an empty one made for it). It is raised once ever per
+          // (invite, alert key), the supervisor keeping that record with the item itself, so a
+          // restart, or a failed clearing of the owed alert, does not raise it a second time after
+          // the first was answered. An owner who is no longer active has no inbox, so only the
+          // log says.
           onDropped: (alert) => {
-            if (journal.alertRaised(alert.inviteId, alert.key)) return;
             let conversationId = cloud.server.conversationsOf(alert.inviteId)[0];
             if (conversationId === undefined) {
               const made = cloud.server.createConversation({
@@ -432,12 +438,13 @@ export async function startStack(
             }
             if (raiseCapHit === undefined) throw new Error('The inbox is not running');
             const day = alert.key.slice('spend:'.length);
-            raiseCapHit({
+            const raised = raiseCapHit({
               conversationId,
               key: `spend_alert:${alert.inviteId}:${day}`,
               ask: `The alert that the server's spend reached its limit on ${day} was never delivered to your devices, so you may not have been told. Check the day's spend.`,
+              once: true,
             });
-            journal.markAlertRaised(alert.inviteId, alert.key, Date.now());
+            if (!raised) throw new Error('The inbox is not running');
           },
           onAlert: (day) => dependencies.onInfo?.('spend.alerted', { day }),
           onWarning: warn,
