@@ -3,6 +3,10 @@
  * `Authorization: Bearer <invite>`; an object another invite owns answers 404.
  * Test against the real server: tests/integration/real-api.test.ts.
  */
+/** How much care a piece of work gets; the server's strict set. */
+export const MODES = ['quick', 'standard', 'deep'] as const;
+export type Mode = (typeof MODES)[number];
+
 export interface Conversation {
   conversationId: string;
   title: string | null;

@@ -280,3 +280,35 @@ test('a failed task page says why and shows no outcome it never reported', async
   expect(screen.queryByRole('region', { name: 'Outcome' })).toBeNull();
   expect(screen.queryByRole('region', { name: 'Steps' })).toBeNull();
 });
+
+test('the second agent’s review is shown on its own, in the runner’s words, and not twice', async () => {
+  const api = serveTask();
+  const base = finished();
+  const line =
+    'review: an independent agent reviewed the change; 1 finding(s) remain: P2 1 (see review.md)';
+  render(
+    <TaskPage
+      client={api.client}
+      task={finished({
+        manifest: {
+          ...(base.manifest as NonNullable<typeof base.manifest>),
+          done: ['Patched the redirect', line],
+        },
+      })}
+      onBack={() => {}}
+    />,
+  );
+  const review = screen.getByRole('region', { name: 'Independent review' });
+  expect(within(review).getByText(line.slice('review: '.length))).toBeTruthy();
+  const outcome = screen.getByRole('region', { name: 'Outcome' });
+  expect(within(outcome).getByText('Patched the redirect')).toBeTruthy();
+  expect(within(outcome).queryByText(line)).toBeNull();
+  await screen.findByText('12 passed');
+});
+
+test('a task with no review line shows no independent review section', async () => {
+  const api = serveTask();
+  render(<TaskPage client={api.client} task={finished()} onBack={() => {}} />);
+  await screen.findByText('12 passed');
+  expect(screen.queryByRole('region', { name: 'Independent review' })).toBeNull();
+});

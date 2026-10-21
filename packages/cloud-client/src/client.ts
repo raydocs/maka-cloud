@@ -13,6 +13,7 @@ import {
   type InboxAnswerResult,
   type InboxItem,
   type MemoryProfile,
+  type Mode,
   type ProjectView,
   type SourceListing,
   type SourcePreview,
@@ -173,10 +174,10 @@ export class CloudClient {
       body: '{}',
     });
   }
-  postMessage(id: string, text: string, clientMessageId: string) {
+  postMessage(id: string, text: string, clientMessageId: string, mode?: Mode) {
     return this.request<{ messageId: string }>(routes.messages(id), {
       method: 'POST',
-      body: JSON.stringify({ text, clientMessageId }),
+      body: JSON.stringify({ text, clientMessageId, ...(mode === undefined ? {} : { mode }) }),
     });
   }
   async listTasks(id: string): Promise<TaskView[]> {

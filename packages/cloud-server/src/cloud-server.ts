@@ -60,6 +60,8 @@ export interface ConversationHandler {
       external?: boolean;
       /** The limits of the run this message starts, from a standing duty. */
       run?: NonNullable<MessageMeta['run']>;
+      /** The mode the user picked for this message (T25); it applies if the message starts a run. */
+      mode?: NonNullable<MessageMeta['mode']>;
     },
     conductor: ConductorAccess,
   ): void | Promise<void>;
@@ -446,6 +448,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
                 text: message.text,
                 ...(message.external === undefined ? {} : { external: message.external }),
                 ...(message.run === undefined ? {} : { run: message.run }),
+                ...(message.mode === undefined ? {} : { mode: message.mode }),
               },
               accessFor(message.sessionId),
             ),

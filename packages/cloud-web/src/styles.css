@@ -1182,3 +1182,50 @@ textarea {
 .delivery .section-heading {
   align-items: center;
 }
+
+/* The mode picker: how much care the next piece of work gets */
+.mode-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.mode-option {
+  position: relative;
+}
+.mode-option input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.mode-option label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: var(--chip);
+  border: 1px solid var(--card-edge);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.mode-option input:checked + label {
+  background: var(--pill-on);
+  border-color: var(--pill-on);
+  color: var(--on-pill-on);
+}
+.mode-option input:focus-visible + label {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.mode-picker:disabled {
+  opacity: 0.6;
+}

@@ -254,6 +254,15 @@ const SCHEMA_V10 = `
 ALTER TABLE task_index ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1;
 `;
 
+/**
+ * v11 (T25): the mode the user picked for a message, kept with it like the rest of its meta so a
+ * delivery retried after a crash still starts its run in that mode. Public routes may set it
+ * (nothing else in the meta); the column is null for every message before this.
+ */
+const SCHEMA_V11 = `
+ALTER TABLE message_meta ADD COLUMN mode TEXT;
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -265,6 +274,7 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V8,
   SCHEMA_V9,
   SCHEMA_V10,
+  SCHEMA_V11,
 ];
 
 /**
