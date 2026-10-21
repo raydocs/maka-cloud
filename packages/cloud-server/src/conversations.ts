@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { MODE_IDS } from '@maka-cloud/modes';
 import type { IssuedSession } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import { transaction } from './db.js';
@@ -16,7 +17,8 @@ export const MAX_MESSAGE_BYTES = 32_000;
 
 /**
  * What an in-process caller (a standing duty) attaches to a message. `external`: the text comes
- * from outside the owner. `run`: the limits of the run the message starts.
+ * from outside the owner. `run`: the limits of the run the message starts. `mode`: the mode the
+ * user picked for it (T25), which a public route may also set.
  */
 export const MessageMetaSchema = z
   .object({
@@ -29,6 +31,7 @@ export const MessageMetaSchema = z
       })
       .strict()
       .optional(),
+    mode: z.enum(MODE_IDS).optional(),
   })
   .strict();
 export type MessageMeta = z.infer<typeof MessageMetaSchema>;
@@ -223,11 +226,12 @@ export class ConversationStore {
       appendFeed(this.db, 'message.posted', conversationId, messageId, at);
       if (meta !== undefined) {
         this.db
-          .prepare('INSERT INTO message_meta (message_id, external, run) VALUES (?, ?, ?)')
+          .prepare('INSERT INTO message_meta (message_id, external, run, mode) VALUES (?, ?, ?, ?)')
           .run(
             messageId,
             meta.external ? 1 : 0,
             meta.run === undefined ? null : JSON.stringify(meta.run),
+            meta.mode ?? null,
           );
       }
       // Committed with the message, so a crash before the handler acks leaves it to retry.

@@ -9,7 +9,7 @@ import {
 import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
-import { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
+import { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
 import { MAX_RESUMES_IN_A_ROW, recoveryNote, resumesInARow } from './recovery.js';
 import type { Recovery, RunHandle, RunnerRegistry, RunSpec } from './runner.js';
 import {
@@ -25,6 +25,8 @@ import {
   isTerminal,
   OrchestratorError,
   type SessionId,
+  type SteerId,
+  type SteerState,
   type StepId,
   type StopPendingCause,
   type StoredEvent,
@@ -49,6 +51,17 @@ const MAX_KEY_LENGTH = 200;
 const MAX_TOMBSTONES = 10_000;
 /** Tasks this process was fenced out of, remembered so it writes nothing more for them. */
 const MAX_FENCED = 10_000;
+/**
+ * What a viewer shows in place of the turn a restart cut off. Fixed text: the viewer replaces what
+ * it had with it, and the agent's own words are not repeated.
+ */
+export const RESTART_TEXT =
+  'The server restarted. The task goes on from its last finished step; the cut-off turn is not repeated here.';
+
+/** A message to a running task: its key, its text, and how many may wait unread at once. */
+const MAX_STEER_ID_LENGTH = 64;
+export const MAX_STEER_CHARS = 4_000;
+export const MAX_PENDING_STEERS = 20;
 export const DEFAULT_ARCHIVE_CACHE: CacheLimits = { maxEntries: 512, maxBytes: 4 * 1024 * 1024 };
 
 export interface OrchestratorOptions {
@@ -88,11 +101,38 @@ export interface OrchestratorOptions {
    * needs is wired (the MCP endpoint, the tenant of each task); until then the tasks read as running.
    */
   resume?: 'automatic' | 'manual';
+  /** Limits on one task on top of the budget of its tree; see `TaskLimits`. */
+  limits?: Partial<TaskLimits>;
 }
 
+/**
+ * Limits of one task, each stopping it with a note for the user.
+ * - `turnUsd`: what one run (a start, or a resume after a restart) may spend. The budget of the
+ *   whole tree still applies; this is the smaller of the two for a run. Absent: no turn limit.
+ * - `runMs`: how long the task may run in all, over every attempt. A restart does not give it a
+ *   fresh start, and time spent paused does not count. Default 4 hours.
+ */
+export interface TaskLimits {
+  turnUsd?: number;
+  runMs: number;
+}
+
+export const DEFAULT_TASK_LIMITS: TaskLimits = { runMs: 4 * 60 * 60_000 };
+/** The longest delay a timer takes; a task with more time left than this arms again when it fires. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 export interface RecoveredSpend {
-  /** Per task, everything its runs spent in earlier processes, open reservations in full. */
-  unrecorded(): ReadonlyArray<{ taskId: TaskId; usd: number }>;
+  /**
+   * Per task, everything its runs spent in earlier processes, open reservations in full. A
+   * reservation still open is a model call the process died in: `cutOffCalls` of them, charged in
+   * full as `cutOffUsd` (included in `usd`) because whether the vendor billed them is unknown.
+   */
+  unrecorded(): ReadonlyArray<{
+    taskId: TaskId;
+    usd: number;
+    cutOffCalls?: number;
+    cutOffUsd?: number;
+  }>;
   /** Called once all of it is in the task log. */
   recorded(): void;
 }
@@ -127,6 +167,8 @@ export interface OrchestratorStats {
   connectionSessions: number;
   /** Tasks whose owed stop, or the cancel of a run that cannot be stopped by id, is being retried. */
   stopRetries: number;
+  /** Running tasks with a run-time timer set. */
+  runClocks: number;
 }
 
 export interface DelegateInput {
@@ -204,6 +246,11 @@ export class Orchestrator {
   /** Runs `restore` decided to start again, held until `startRestored`. */
   private pendingResumes: PendingResume[] = [];
   private readonly resumeMode: 'automatic' | 'manual';
+  private readonly limits: TaskLimits;
+  /** The timer of each running task that ends it when its run time is used up. */
+  private readonly runClocks = new Map<TaskId, NodeJS.Timeout>();
+  /** The messages each run was handed, so a run is offered one once and a new run gets them all. */
+  private readonly offered = new WeakMap<RunHandle, Set<SteerId>>();
 
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
@@ -223,6 +270,14 @@ export class Orchestrator {
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
     this.recoveredSpend = options.recoveredSpend;
     this.resumeMode = options.resume ?? 'automatic';
+    this.limits = { ...DEFAULT_TASK_LIMITS, ...options.limits };
+    if (
+      !(Number.isFinite(this.limits.runMs) && this.limits.runMs > 0) ||
+      (this.limits.turnUsd !== undefined &&
+        !(Number.isFinite(this.limits.turnUsd) && this.limits.turnUsd > 0))
+    ) {
+      throw new RangeError('Task limits are positive numbers');
+    }
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
@@ -317,6 +372,8 @@ export class Orchestrator {
     this.stopRetries.clear();
     for (const retry of this.cancelRetries.values()) retry.abort();
     this.cancelRetries.clear();
+    for (const clock of this.runClocks.values()) clearTimeout(clock);
+    this.runClocks.clear();
   }
 
   stats(): OrchestratorStats {
@@ -330,6 +387,7 @@ export class Orchestrator {
       treesCounted: this.activeByRoot.keys,
       connectionSessions: this.connectionsBySession.keys,
       stopRetries: this.stopRetries.size + this.cancelRetries.size,
+      runClocks: this.runClocks.size,
     };
   }
 
@@ -563,6 +621,142 @@ export class Orchestrator {
       this.visibleToRoot(access.sessionId, taskId);
     });
     return this.view(taskId);
+  }
+
+  /**
+   * Sends the user's message to the agent of a running task, for the public API (the operator is
+   * checked in the write chain, like a pause). It is recorded first, once per `steerId`: a
+   * resend returns the message as it stands and changes nothing. The run is handed it at once when
+   * it can take one, and the agent reads it at the next safe point (after the tool call under way).
+   * A new attempt of the task holds its messages back until its first step has finished. A turn
+   * that makes no more calls never reads them; the task says so when it ends.
+   */
+  async steerAs(
+    access: OperatorAccess,
+    taskId: TaskId,
+    input: { steerId: SteerId; text: string },
+  ): Promise<{ steerId: SteerId; state: SteerState }> {
+    const text = input.text.trim();
+    if (!/^[A-Za-z0-9_.:-]+$/u.test(input.steerId) || input.steerId.length > MAX_STEER_ID_LENGTH) {
+      throw new OrchestratorError('invalid_request', 'The message key is not valid');
+    }
+    if (text === '' || text.length > MAX_STEER_CHARS) {
+      throw new OrchestratorError(
+        'invalid_request',
+        `A message is 1 to ${MAX_STEER_CHARS} characters`,
+      );
+    }
+    this.visibleToRoot(access.sessionId, taskId);
+    await this.record(
+      { type: 'task_steer', taskId, steerId: input.steerId, text, by: access.sessionId },
+      () => {
+        access.authorize();
+        const task = this.visibleToRoot(access.sessionId, taskId);
+        this.assertControllable(task);
+        const known = task.steers.get(input.steerId);
+        if (known) {
+          if (known.text !== text) {
+            throw new OrchestratorError(
+              'invalid_request',
+              'That message key was used for other text',
+            );
+          }
+          throw new Superseded();
+        }
+        if (!this.runners.get(task.runner)?.steerable) {
+          throw new OrchestratorError('unsupported', 'This task cannot be sent messages');
+        }
+        let waiting = 0;
+        for (const steer of task.steers.values()) if (steer.state === 'pending') waiting++;
+        if (waiting >= MAX_PENDING_STEERS) {
+          throw new OrchestratorError('quota_exceeded', 'The agent has too many unread messages');
+        }
+      },
+    );
+    this.deliverSteers(taskId);
+    const steer = this.lookup(taskId)?.steers.get(input.steerId);
+    return { steerId: input.steerId, state: steer?.state ?? 'unseen' };
+  }
+
+  /**
+   * Takes a message back. Only one the agent has not read can be: the run is asked to drop it in
+   * the write chain, and refuses when it has handed it over already.
+   */
+  async withdrawSteerAs(
+    access: OperatorAccess,
+    taskId: TaskId,
+    steerId: SteerId,
+  ): Promise<{ steerId: SteerId; state: SteerState }> {
+    this.visibleToRoot(access.sessionId, taskId);
+    await this.record({ type: 'task_steer_withdrawn', taskId, steerId }, () => {
+      access.authorize();
+      const task = this.visibleToRoot(access.sessionId, taskId);
+      const steer = task.steers.get(steerId);
+      if (!steer) throw new OrchestratorError('not_found', 'No such message');
+      if (steer.state === 'withdrawn') throw new Superseded();
+      if (steer.state !== 'pending') throw invalidState('The agent has already read this message');
+      const handle = this.handles.get(taskId);
+      if (handle && this.offered.get(handle)?.has(steerId) && !handle.unsteer?.(steerId)) {
+        throw invalidState('The agent has already read this message');
+      }
+    });
+    return { steerId, state: this.lookup(taskId)?.steers.get(steerId)?.state ?? 'withdrawn' };
+  }
+
+  /**
+   * Hands the run every message it has not been offered, unless the task is paused, ending, or a
+   * new attempt still holds them back. Offering is not delivery: the run reports `steered` when
+   * the agent has the message, and until then it stays pending (and can be withdrawn).
+   */
+  private deliverSteers(taskId: TaskId): void {
+    const task = this.tasks.get(taskId);
+    const handle = this.handles.get(taskId);
+    if (!task || !handle?.steer || task.state !== 'running' || task.steersHeld) return;
+    if (this.isStopping(taskId) || this.ancestorStopped(taskId)) return;
+    let offered = this.offered.get(handle);
+    if (!offered) this.offered.set(handle, (offered = new Set()));
+    for (const steer of task.steers.values()) {
+      if (steer.state !== 'pending' || offered.has(steer.steerId)) continue;
+      offered.add(steer.steerId);
+      try {
+        handle.steer({ steerId: steer.steerId, text: steer.text });
+      } catch {
+        // The run could not take it now; it stays pending, and a later event offers it again.
+        offered.delete(steer.steerId);
+      }
+    }
+  }
+
+  /**
+   * The run is ending and the agent never read these: they are marked so, and the task says how
+   * many, so whoever sent them knows to send them again. Runs before the end is recorded.
+   */
+  private async markUnseen(taskId: TaskId, fence: Fence): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    const unread = [...task.steers.values()].filter((steer) => steer.state === 'pending');
+    for (const steer of unread) {
+      await this.record(
+        { type: 'task_steer_unseen', taskId, steerId: steer.steerId },
+        undefined,
+        fence,
+      );
+    }
+    if (unread.length === 0) return;
+    await this.record(
+      {
+        type: 'task_progress',
+        taskId,
+        note:
+          unread.length === 1
+            ? 'a message sent to the agent came too late to be read: it ended without another step'
+            : `${unread.length} messages sent to the agent came too late to be read: it ended without another step`,
+      },
+      () => {
+        if (this.isStopping(taskId)) throw new Superseded();
+      },
+      fence,
+    );
   }
 
   /**
@@ -844,6 +1038,12 @@ export class Orchestrator {
     ) {
       return undefined;
     }
+    if (this.overRunTime(task)) {
+      return {
+        kind: 'give_up',
+        reason: `needs you: this task had used its ${formatSpan(this.limits.runMs)} of run time by the time the server came back, so it was not resumed; open it and decide whether to start it again`,
+      };
+    }
     const root = this.treeRoot(task.taskId);
     const costSeqs = (root ? this.store.readTask(root.taskId) : [])
       .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
@@ -869,7 +1069,7 @@ export class Orchestrator {
    */
   private async recordRecoveredSpend(begun: ReadonlyMap<TaskId, number>): Promise<void> {
     const recovered = this.recoveredSpend?.unrecorded() ?? [];
-    for (const { taskId, usd } of recovered) {
+    for (const { taskId, usd, cutOffCalls, cutOffUsd } of recovered) {
       if (!Number.isFinite(usd) || usd <= 0) continue;
       const root = this.treeRoot(taskId);
       if (!root) continue;
@@ -884,6 +1084,20 @@ export class Orchestrator {
         costUsd: usd,
         epoch,
       });
+      // The calls the restart cut off are charged in full and may be made again by the run that
+      // resumes; the task's log says so, under the attempt that now drives it.
+      const attempt = begun.get(taskId);
+      if (attempt !== undefined && cutOffCalls !== undefined && cutOffCalls > 0) {
+        await this.record(
+          {
+            type: 'task_progress',
+            taskId,
+            note: `${cutOffCalls} call${cutOffCalls === 1 ? '' : 's'} to the model gateway cut off by the restart ${cutOffCalls === 1 ? 'was' : 'were'} charged in full ($${(cutOffUsd ?? 0).toFixed(2)}) because the vendor may have billed ${cutOffCalls === 1 ? 'it' : 'them'}`,
+          },
+          undefined,
+          { taskId, epoch: attempt },
+        );
+      }
     }
     if (recovered.length > 0) this.recoveredSpend?.recorded();
   }
@@ -1057,7 +1271,8 @@ export class Orchestrator {
       !runner ||
       this.isStopping(taskId) ||
       this.ancestorStopped(taskId) ||
-      this.overBudget(taskId)
+      this.overBudget(taskId) ||
+      this.overRunTime(task)
     )
       return;
     // Every write for the run carries this epoch, and a newer attempt refuses them.
@@ -1078,6 +1293,9 @@ export class Orchestrator {
         ...(left === undefined
           ? {}
           : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),
+        ...(left === undefined || this.limits.turnUsd === undefined
+          ? {}
+          : { turnBudgetUsd: this.limits.turnUsd }),
         ...(this.endpoint === undefined
           ? {}
           : { mcp: { url: this.endpoint, token: executor.token } }),
@@ -1140,7 +1358,7 @@ export class Orchestrator {
           // the run exists: when another process took it over while the run was starting, the
           // write is refused and fencing out cancels the late run, which has written nothing yet.
           const back = await this.record(
-            { type: 'task_progress', taskId, note: 'the run is back' },
+            { type: 'task_restarted', taskId, epoch: fence.epoch, text: RESTART_TEXT },
             () => {
               if (
                 this.isStopping(taskId) ||
@@ -1152,6 +1370,7 @@ export class Orchestrator {
             fence,
           );
           recorded = back !== undefined;
+          if (recorded) this.armRunClock(taskId);
         } else {
           const started = await this.record(
             { type: 'task_started', taskId },
@@ -1169,6 +1388,7 @@ export class Orchestrator {
           // the reader still records the spend the run reports until then.
           recorded = started !== undefined;
         }
+        if (recorded) this.deliverSteers(taskId);
       } catch (error) {
         // The start could not be written, so nothing the run reports can be. It is stopped, unless
         // a stop already holds it, and the reader records its spend until the stream ends.
@@ -1351,13 +1571,20 @@ export class Orchestrator {
         // The outcome of a stopping task no longer counts, but its stream is read to the end:
         // the run reports what settled while it stopped.
         if (this.isStopping(taskId)) continue;
-        if (event.type === 'progress') {
+        if (event.type === 'steered') {
+          await this.record(
+            { type: 'task_steer_delivered', taskId, steerId: event.steerId, epoch: fence.epoch },
+            undefined,
+            fence,
+          );
+        } else if (event.type === 'progress') {
           await this.recordRunnerOutcome(
             { type: 'task_progress', taskId, note: event.note },
             fence,
           );
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
+          await this.markUnseen(taskId, fence);
           await this.recordRunnerOutcome(
             { type: 'task_failed', taskId, reason: event.reason },
             fence,
@@ -1365,6 +1592,7 @@ export class Orchestrator {
           return;
         } else {
           this.runnerOver(taskId, handle);
+          await this.markUnseen(taskId, fence);
           const result = await this.handoff.readManifest(taskId);
           await this.recordRunnerOutcome(
             result.ok
@@ -1602,6 +1830,7 @@ export class Orchestrator {
       const oldest = this.fenced.values().next().value;
       if (oldest !== undefined) this.fenced.delete(oldest);
     }
+    this.disarmRunClock(taskId);
     const handle = this.handles.get(taskId);
     this.handles.delete(taskId);
     this.starting.delete(taskId);
@@ -1639,7 +1868,17 @@ export class Orchestrator {
       this.activeByRoot.add(task.rootSessionId);
       return;
     }
+    if (event.type === 'task_started' || event.type === 'task_resumed') {
+      this.armRunClock(task.taskId);
+    } else if (event.type === 'task_paused') {
+      this.disarmRunClock(task.taskId);
+    }
+    // A task running again, or past its attempt's first step, may take the messages held for it.
+    if (event.type === 'task_resumed' || event.type === 'step_outcome') {
+      this.deliverSteers(task.taskId);
+    }
     if (!isTerminal(task.state)) return;
+    this.disarmRunClock(task.taskId);
     // A handle still registered when the task ends belongs to a run nobody
     // stopped (its stream broke, say). The task owes its stop until this cancel
     // or a retry confirms it.
@@ -1746,6 +1985,57 @@ export class Orchestrator {
       level = next;
     }
     return false;
+  }
+
+  // Run time. A running task has a timer for the time it has left; when it fires the task is
+  // stopped with a note. The time is read from the log (`runMs`), so a restart does not reset it.
+
+  private overRunTime(task: TaskRecord): boolean {
+    return runTimeMs(task, this.now()) >= this.limits.runMs;
+  }
+
+  /** (Re)sets the timer of a running task for the run time it has left. */
+  private armRunClock(taskId: TaskId): void {
+    this.disarmRunClock(taskId);
+    const task = this.tasks.get(taskId);
+    if (this.closed || this.restoring || !task || task.state !== 'running') return;
+    const left = Math.max(0, this.limits.runMs - runTimeMs(task, this.now()));
+    const timer = setTimeout(
+      () => this.track(this.stopForRunTime(taskId)),
+      Math.min(left, MAX_TIMER_MS),
+    );
+    timer.unref();
+    this.runClocks.set(taskId, timer);
+  }
+
+  private disarmRunClock(taskId: TaskId): void {
+    const timer = this.runClocks.get(taskId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.runClocks.delete(taskId);
+  }
+
+  private async stopForRunTime(taskId: TaskId): Promise<void> {
+    this.runClocks.delete(taskId);
+    const task = this.tasks.get(taskId);
+    if (!task || task.state !== 'running' || this.isStopping(taskId)) return;
+    if (!this.overRunTime(task)) {
+      this.armRunClock(taskId);
+      return;
+    }
+    // Written under this attempt's epoch: a process that lost the task stops nothing of it.
+    const noted = await this.record(
+      {
+        type: 'task_progress',
+        taskId,
+        note: `stopped: the task used its ${formatSpan(this.limits.runMs)} of run time`,
+      },
+      () => {
+        if (this.isStopping(taskId)) throw new Superseded();
+      },
+      { taskId, epoch: task.epoch },
+    );
+    if (noted !== undefined) await this.cancelTree(taskId, 'system');
   }
 
   // Budgets. A top-level task delegated with `budgetUsd` caps the spend its
@@ -2002,6 +2292,14 @@ function cancelHandle(handle: RunHandle): Promise<boolean> {
       () => true,
       () => false,
     );
+}
+
+/** A span for a note to the user: whole hours when it is, else minutes. */
+function formatSpan(ms: number): string {
+  const hours = ms / 3_600_000;
+  if (Number.isInteger(hours)) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 /** Resolves after `ms`, or at once when `signal` aborts. The timer never holds the process open. */

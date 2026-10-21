@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { InstaboxClient } from '@maka-cloud/instabox';
-import type { TaskId } from '@maka-cloud/orchestrator';
+import { applyEgressGuard, type InstaboxClient } from '@maka-cloud/instabox';
+import { scrubSecretShapes, type TaskId } from '@maka-cloud/orchestrator';
 import { DEFAULT_EXPORT_LIMITS, type ExportLimits } from './export.js';
 import type { InputPolicy } from './inputs.js';
 import {
@@ -10,11 +10,13 @@ import {
   type StageLimits,
 } from './machine.js';
 import { MachinePoller, type PollBackoff } from './poller.js';
+import { type AgentChannel, assertAgentChannel, checkAgentIsolation } from './agent-user.js';
 import type { AgentSdk } from './sdk-turn.js';
 import { DEFAULT_TENANT, noModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
 import { MemorySessionStore, referencedSnapshotIds } from './session-store.js';
 import { errorMessage, shq } from './shell.js';
+import type { TranscriptStore } from './transcripts.js';
 import type {
   ModelAccessProvider,
   RunnerSessionRecord,
@@ -49,6 +51,13 @@ export interface CloudRunnersOptions {
    * place, and that task fails to start without a machine being asked for.
    */
   tenantOf?: (taskId: TaskId) => string;
+  /**
+   * Closes a box's network to its host's own addresses (the cloud metadata address, private ranges,
+   * loopback) before a run, an install or a resume starts anything in it. Default: the instabox
+   * firewall rules from `applyEgressGuard`. A box where it fails is refused and the task fails.
+   * A replacement is for a box whose network is closed some other way.
+   */
+  egressGuard?: (client: InstaboxClient, machineId: string, signal?: AbortSignal) => Promise<void>;
   /** Maps the orchestrator's MCP URL to one the sandbox can reach. Default: unchanged. */
   mcpUrlForSandbox?: (url: string) => string;
   /** CLI versions to install. Defaults are pinned in the vendor adapters. */
@@ -86,6 +95,18 @@ export interface CloudRunnersOptions {
    * `loadAgentSdk()` loads the installed one.
    */
   agentSdk?: AgentSdk;
+  /**
+   * The account the CLI runs as when driven by the SDK, so that nothing the agent runs can write
+   * the channel the SDK trusts. Required with `agentSdk`: without it SDK runs are refused. Each
+   * machine is checked once (`checkAgentIsolation`) before it runs one.
+   */
+  agentChannel?: AgentChannel;
+  /**
+   * Keeps the conversation of SDK-driven Claude tasks off the sandbox, so a task whose sandbox is
+   * gone goes on from its stored conversation. Needs `agentSdk`. Without it the conversation lives
+   * only in the sandbox's own files.
+   */
+  transcripts?: TranscriptStore;
   /**
    * How often a run driven by the SDK is polled: every hook the CLI waits for costs a poll, so
    * these runs are polled much faster than `pollIntervalMs` while output is coming, and back off
@@ -144,6 +165,7 @@ export class Fleet {
   leaseRenewals = 0;
   readonly logRoot: string;
   private readonly machines = new Map<string, RemoteMachine>();
+  private readonly isolationChecks = new Map<string, Promise<void>>();
   private readonly setups = new Map<string, Promise<void>>();
   private readonly tools: PreparedTool[];
   private recordChain: Promise<unknown> = Promise.resolve();
@@ -173,10 +195,35 @@ export class Fleet {
   machine(machineId: string): RemoteMachine {
     let machine = this.machines.get(machineId);
     if (!machine) {
-      machine = new RemoteMachine(this.client, machineId, this.root, this.logRoot);
+      const guard = this.options.egressGuard;
+      machine = new RemoteMachine(
+        this.client,
+        machineId,
+        this.root,
+        this.logRoot,
+        this.options.agentChannel?.user,
+        (signal) =>
+          guard
+            ? guard(this.client, machineId, signal)
+            : applyEgressGuard(this.client, machineId, signal ? { signal } : {}),
+      );
       this.machines.set(machineId, machine);
     }
     return machine;
+  }
+
+  /** Checks once per machine that it keeps the agent channel private; a failed check is repeated on the next run. */
+  ensureAgentIsolation(machine: RemoteMachine, signal?: AbortSignal): Promise<void> {
+    const channel = this.options.agentChannel;
+    if (channel === undefined) return Promise.reject(new Error('no agent channel is configured'));
+    assertAgentChannel(channel);
+    let checked = this.isolationChecks.get(machine.machineId);
+    if (!checked) {
+      checked = checkAgentIsolation(machine, channel, signal);
+      this.isolationChecks.set(machine.machineId, checked);
+      checked.catch(() => this.isolationChecks.delete(machine.machineId));
+    }
+    return checked;
   }
 
   leaseId(taskId: TaskId): string {
@@ -197,7 +244,10 @@ export class Fleet {
   }
 
   private async installCli(machine: RemoteMachine, vendor: VendorAdapter): Promise<void> {
-    const version = this.options.versions?.[vendor.name] ?? vendor.defaultVersion;
+    // Driven by the SDK, the CLI is the one the SDK was built for: it passes flags older ones lack.
+    const sdkVersion =
+      vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
+    const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
     const check = await machine.exec(cliCheckScript(vendor.binary), {
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
@@ -236,15 +286,15 @@ mkdir -p "$(dirname ${shq(marker)})"
       for (;;) {
         if (this.now() > deadline) throw new Error('timed out');
         const update = await watch.next();
-        output = (output + update.data.toString('utf8')).slice(-1_500);
+        output = (output + update.data.toString('utf8')).slice(-INSTALL_OUTPUT_WINDOW);
         consumed += update.data.length;
         const state = update.state;
         if (typeof state === 'object' && consumed >= update.size) {
           if (state.exit === 0) return;
-          throw new Error(`exit ${state.exit}: ${output.trim()}`);
+          throw new Error(`exit ${state.exit}: ${installOutputTail(output)}`);
         }
         if (state === 'dead' && consumed >= update.size)
-          throw new Error(`the install was killed: ${output.trim()}`);
+          throw new Error(`the install was killed: ${installOutputTail(output)}`);
       }
     } catch (error) {
       // Drop the lock so the next task tries again instead of waiting on a finished failure.
@@ -531,4 +581,20 @@ function prepareTools(tools: readonly SandboxTool[]): PreparedTool[] {
 export interface SweepResult {
   stopped: TaskId[];
   failed: { machineId: string; taskId?: TaskId; error: string }[];
+}
+
+/** How much of an install's output is kept, before it is scrubbed and cut to its tail. */
+const INSTALL_OUTPUT_WINDOW = 4_000;
+const INSTALL_OUTPUT_TAIL = 1_500;
+
+/**
+ * What an install printed last, for the error that names it. The window starts in the middle of
+ * a line when it is full, so that first part line goes: a piece of a key at its edge would be too
+ * short for the scrubber to know. Scrubbed first, cut after.
+ */
+function installOutputTail(window: string): string {
+  const whole = window.length < INSTALL_OUTPUT_WINDOW;
+  const from = whole ? 0 : window.indexOf('\n') + 1;
+  const kept = from === 0 && !whole ? '' : window.slice(from);
+  return scrubSecretShapes(kept).trim().slice(-INSTALL_OUTPUT_TAIL);
 }

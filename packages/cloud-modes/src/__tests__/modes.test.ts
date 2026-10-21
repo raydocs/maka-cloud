@@ -7,16 +7,19 @@ import {
   DEFAULT_MODES,
   EFFORTS,
   implementerFor,
+  looksLikeModeLine,
   MODE_IDS,
   MODES_CONFIG_VERSION,
   type ModesConfig,
   modelsOf,
   modesConfigFrom,
   otherVendor,
+  parseModeBrief,
   parseModesConfig,
   reviewerFor,
   splitBudget,
   unnamedModels,
+  withModeLine,
 } from '../index.js';
 
 function clone(): ModesConfig {
@@ -183,6 +186,34 @@ test('the budget split never adds up to more than the budget', () => {
   }
 });
 
+test('the split is in whole micro-dollars rounded down, so the parts never add up to more than the budget', () => {
+  const micros = (usd: number) => Math.round(usd * 1e6);
+  // 0.9999999 split by rounding each part on its own came to 0.8 + 0.2 = 1.
+  const { workUsd, reviewUsd } = splitBudget(DEFAULT_MODES, 'standard', 0.9999999);
+  assert.deepEqual([workUsd, reviewUsd], [0.8, 0.199999]);
+  assert.ok(micros(workUsd) + micros(reviewUsd) <= Math.floor(0.9999999 * 1e6));
+  assert.deepEqual(splitBudget(DEFAULT_MODES, 'standard', 0.3), { workUsd: 0.24, reviewUsd: 0.06 });
+  assert.deepEqual(splitBudget(DEFAULT_MODES, 'quick', 0), { workUsd: 0, reviewUsd: 0 });
+  assert.deepEqual(splitBudget(DEFAULT_MODES, 'quick', -1), { workUsd: 0, reviewUsd: 0 });
+  // Many budgets with awkward decimals, in every mode.
+  let seed = 12345;
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  for (const id of MODE_IDS) {
+    for (let i = 0; i < 2000; i++) {
+      const budget = next() * 50 + (i % 7 === 0 ? 0.0000001 : 0);
+      const split = splitBudget(DEFAULT_MODES, id, budget);
+      assert.ok(
+        micros(split.workUsd) + micros(split.reviewUsd) <= Math.floor(budget * 1e6 + 1e-6),
+        `${id} ${budget}`,
+      );
+      assert.ok(
+        Math.abs(split.workUsd * 1e6 - micros(split.workUsd)) < 1e-4,
+        'whole micro-dollars',
+      );
+    }
+  }
+});
+
 test('the models a config names are listed once each, with the vendor that serves them', () => {
   const models = modelsOf(DEFAULT_MODES);
   assert.deepEqual(models.map((m) => `${m.vendor}:${m.model}`).sort(), [
@@ -206,4 +237,55 @@ test('roles left on the CLI default are reported, so the host can say they need 
     }
   }
   assert.deepEqual(unnamedModels(config), []);
+});
+
+test('the mode line goes right after the leading directives and is read back from there', () => {
+  const plain = withModeLine('Fix the bug.\n\nMore.', 'deep');
+  assert.equal(plain, 'maka-mode: deep\nFix the bug.\n\nMore.');
+  assert.deepEqual(parseModeBrief(plain), {
+    ok: true,
+    mode: 'deep',
+    rest: 'Fix the bug.\n\nMore.',
+  });
+
+  const header = 'maka-inputs: tsk_a report.json\nmaka-artifacts: out/report.md\n';
+  const withHeader = withModeLine(`${header}Rerun it.`, 'quick');
+  assert.equal(withHeader, `${header}maka-mode: quick\nRerun it.`);
+  assert.deepEqual(parseModeBrief(withHeader), {
+    ok: true,
+    mode: 'quick',
+    rest: `${header}Rerun it.`,
+  });
+});
+
+test('only the line right after the directives is the mode; any other is plain text', () => {
+  for (const brief of [
+    'Fix it.\nmaka-mode: deep',
+    'Fix it.\n\nmaka-mode: deep\n',
+    '> maka-mode: deep\nFix it.',
+    ' maka-mode: deep\nFix it.',
+  ]) {
+    const parsed = parseModeBrief(brief);
+    assert.deepEqual(parsed, { ok: true, rest: brief }, brief);
+  }
+});
+
+test('a mode line that names no mode is refused, not defaulted', () => {
+  for (const line of [
+    'maka-mode:deep',
+    'maka-mode: Deep',
+    'maka-mode: deep ',
+    'maka-mode: turbo',
+    'maka-mode:',
+  ]) {
+    assert.equal(parseModeBrief(`${line}\nFix it.`).ok, false, line);
+  }
+});
+
+test('a brief that already holds something like a mode line cannot be given one', () => {
+  for (const brief of ['maka-mode: deep\nx', 'x\n  maka-mode : deep', 'x\n> * maka-mode: quick']) {
+    assert.equal(looksLikeModeLine(brief), true, brief);
+    assert.throws(() => withModeLine(brief, 'standard'), /already has a mode line/);
+  }
+  assert.equal(looksLikeModeLine('use maka-mode: in prose'), false);
 });

@@ -26,9 +26,11 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       ...(event.budgetUsd === undefined ? {} : { budgetUsd: event.budgetUsd }),
       state: 'queued',
       createdAt: at,
+      runMs: 0,
       progress: [],
       epoch: 1,
       steps: new Map(),
+      steers: new Map(),
     });
     return;
   }
@@ -57,19 +59,23 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_started':
       task.state = 'running';
       task.startedAt = at;
+      task.runSince = at;
       return;
     case 'task_progress':
-      task.progress.push(event.note);
+    case 'task_restarted':
+      task.progress.push(event.type === 'task_progress' ? event.note : event.text);
       if (task.progress.length > MAX_PROGRESS_NOTES) task.progress.shift();
       return;
     case 'task_succeeded':
       task.state = 'succeeded';
       task.finishedAt = at;
+      stopClock(task, at);
       task.manifest = event.manifest;
       return;
     case 'task_failed':
       task.state = 'failed';
       task.finishedAt = at;
+      stopClock(task, at);
       task.failureReason = event.reason;
       return;
     case 'task_cancel_requested':
@@ -78,12 +84,16 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_cancelled':
       task.state = 'cancelled';
       task.finishedAt = at;
+      stopClock(task, at);
       return;
     case 'task_pause_requested':
       if (task.state === 'running') task.pauseRequested = true;
       return;
     case 'task_paused':
-      if (task.state === 'running' && task.pauseRequested) task.state = 'paused';
+      if (task.state === 'running' && task.pauseRequested) {
+        task.state = 'paused';
+        stopClock(task, at);
+      }
       return;
     case 'task_pause_failed':
       if (task.state === 'running') delete task.pauseRequested;
@@ -97,13 +107,19 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_resumed':
       if (task.state === 'paused') {
         task.state = 'running';
+        task.runSince = at;
         delete task.pauseRequested;
         delete task.resumeRequested;
       }
       return;
     case 'task_attempt':
       // The store lets only the next epoch in; a log that somehow holds another is not followed.
-      if (event.epoch === task.epoch + 1) task.epoch = event.epoch;
+      if (event.epoch === task.epoch + 1) {
+        task.epoch = event.epoch;
+        // What the agent was told in the attempt before is in its conversation; what it is told
+        // now waits until the resumed turn has done one thing, so it is not read among the replay.
+        task.steersHeld = true;
+      }
       return;
     case 'step_intent': {
       if (event.epoch !== task.epoch) return;
@@ -126,6 +142,29 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       // An outcome applies only to a step still running, from the epoch that started it.
       if (step?.state !== 'running' || step.epoch !== event.epoch) return;
       step.state = event.status;
+      delete task.steersHeld;
+      return;
+    }
+    case 'task_steer':
+      if (!task.steers.has(event.steerId)) {
+        task.steers.set(event.steerId, {
+          steerId: event.steerId,
+          text: event.text,
+          state: 'pending',
+        });
+      }
+      return;
+    case 'task_steer_delivered':
+    case 'task_steer_withdrawn':
+    case 'task_steer_unseen': {
+      const steer = task.steers.get(event.steerId);
+      if (steer?.state !== 'pending') return;
+      steer.state =
+        event.type === 'task_steer_delivered'
+          ? 'delivered'
+          : event.type === 'task_steer_withdrawn'
+            ? 'withdrawn'
+            : 'unseen';
       return;
     }
     case 'step_interrupted': {
@@ -134,6 +173,18 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       return;
     }
   }
+}
+
+/** Adds the running interval under way to the time the task has run. */
+function stopClock(task: TaskRecord, at: number): void {
+  if (task.runSince === undefined) return;
+  task.runMs += Math.max(0, at - task.runSince);
+  delete task.runSince;
+}
+
+/** How long the task has run as of `now`, the interval under way included. */
+export function runTimeMs(task: Pick<TaskRecord, 'runMs' | 'runSince'>, now: number): number {
+  return task.runMs + (task.runSince === undefined ? 0 : Math.max(0, now - task.runSince));
 }
 
 export function reduce(events: Iterable<StoredEvent>): TaskMap {

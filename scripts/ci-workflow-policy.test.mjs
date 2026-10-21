@@ -541,6 +541,7 @@ test('pull request triggers stay on an explicit allowlist', () => {
     'dependency-audit.yml',
     'fork-cloud-mobile.yml',
     'fork-cloud-web.yml',
+    'fork-deploy-rehearsal.yml',
     'gitoxide-helper-admission.yml',
     'pr-effort-label.yml',
     'release-linux-check.yml',

@@ -21,14 +21,18 @@ export {
   DEFAULT_MAX_DEPTH,
   DEFAULT_ORPHAN_STOP_TIMEOUT_MS,
   DEFAULT_STOP_RETRY,
+  DEFAULT_TASK_LIMITS,
   DEFAULT_WAIT_MS,
   type DelegateInput,
+  MAX_PENDING_STEERS,
+  MAX_STEER_CHARS,
   MAX_WAIT_MS,
   Orchestrator,
   type OperatorAccess,
   type OrchestratorOptions,
   type RecoveredSpend,
   type OrchestratorStats,
+  type TaskLimits,
 } from './orchestrator.js';
 export {
   MAX_RECOVERY_NOTE_LENGTH,
@@ -37,7 +41,7 @@ export {
   resumesInARow,
 } from './recovery.js';
 export { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits } from './quota.js';
-export { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
+export { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
 export {
   claudeAgentSdkRunner,
   codexRunner,
@@ -65,6 +69,7 @@ export {
   type StepIntentResult,
   type StepLog,
 } from './steps.js';
+export { scrubSecretFields, scrubSecretShapes, setKnownSecrets } from './secret-shapes.js';
 export {
   assertEpoch,
   type Fence,
@@ -73,3 +78,10 @@ export {
   type TaskStore,
 } from './store.js';
 export * from './types.js';
+export {
+  buildTimeline,
+  type RunTimeline,
+  type TimelineCost,
+  type TimelineStep,
+  type TimelineTurn,
+} from './timeline.js';

@@ -1,4 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import {
+  budgetProblem,
+  chooseMode,
+  looksLikeModeLine,
+  MODE_IDS,
+  type ModeChoice,
+  type ModeId,
+  type ModesConfig,
+  withModeLine,
+} from '@maka-cloud/modes';
 import type { MakaTool, MakaToolContext } from '@maka/runtime/tool-runtime';
 import { z } from 'zod';
 import type { ConductorLimits } from './config.js';
@@ -12,6 +22,7 @@ import {
 } from './guard.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook } from './playbooks.js';
+import { reviewLinksOf } from './reviewer.js';
 import { printable, shownValue } from './shown.js';
 import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
 
@@ -38,6 +49,8 @@ export interface ToolHost {
   readonly state: ConductorState;
   readonly limits: ConductorLimits;
   readonly playbooks: readonly Playbook[];
+  /** The modes (T25); absent: delegations carry no mode. */
+  readonly modes?: ModesConfig;
   turnFor(ctx: MakaToolContext): ActiveTurn;
   /** Why the run must stop now, if it must; counts the refusal against the turn. */
   mustStop(turn: ActiveTurn): string | undefined;
@@ -112,6 +125,48 @@ function signalOf(turn: ActiveTurn, ctx: MakaToolContext): AbortSignal {
   return AbortSignal.any([turn.signal, ctx.abortSignal]);
 }
 
+/**
+ * The mode a delegation runs in, decided here and in code: the user's pick for the run if there is
+ * one, else what the conductor suggested if the run's budget affords it, else what the budget
+ * alone says. The mode's own cap on one delegation holds either way. No modes configured: none.
+ */
+function chooseWorkMode(
+  host: ToolHost,
+  turn: ActiveTurn,
+  args: { brief: string; workMode?: ModeId; budgetUsd: number },
+): ModeChoice | undefined {
+  const { modes } = host;
+  if (!modes) return undefined;
+  if (looksLikeModeLine(args.brief)) {
+    throw new ToolRefusal(
+      'mode_line_in_brief',
+      'A brief must not contain a maka-mode line: the system adds it. Name the mode in workMode.',
+    );
+  }
+  const picked = host.state.run(turn.runId)?.mode;
+  // What the task is given decides what it can afford, not what the whole run has.
+  const choice = chooseMode(modes, {
+    ...(picked ? { requested: picked } : {}),
+    ...(args.workMode ? { suggested: args.workMode } : {}),
+    budgetUsd: args.budgetUsd,
+  });
+  const problem = budgetProblem(modes, choice.mode, args.budgetUsd);
+  if (problem) {
+    throw new ToolRefusal(
+      'delegation_under_mode_minimum',
+      `${problem}. Give it more, or ask for a quicker mode.`,
+    );
+  }
+  const cap = modes.modes[choice.mode].budget.maxDelegationUsd;
+  if (args.budgetUsd > cap) {
+    throw new ToolRefusal(
+      'delegation_over_mode_cap',
+      `A ${choice.mode} task may be given at most ${money(cap)}; this one asked for ${money(args.budgetUsd)}. Give it less, or split it.`,
+    );
+  }
+  return choice;
+}
+
 function gate(host: ToolHost, turn: ActiveTurn): void {
   const reason = host.mustStop(turn);
   if (reason) throw new ToolRefusal('run_must_stop', `${reason} End your turn now.`);
@@ -138,7 +193,39 @@ export function conductorTools(
     const manifest = asManifest(view);
     if (!manifest) return view;
     const playbook = playbookOf(host.state.run(turn.runId)?.playbook ?? null);
-    return playbook ? { ...view, verification: playbook.verify(manifest) } : view;
+    if (!playbook) return view;
+    const taskId = typeof view?.taskId === 'string' ? view.taskId : undefined;
+    const mode = taskId === undefined ? undefined : host.state.delegationOfTask(taskId)?.mode;
+    return { ...view, verification: playbook.verify(manifest, mode ? { mode } : {}) };
+  };
+
+  /**
+   * A reviewer must not be the runner that drafted what it reviews, and the runner that uses
+   * judgments must not be the one that wrote them. The tasks are the ones the brief's
+   * `maka-inputs:` lines name; their runner is read from the orchestrator, and a draft
+   * whose runner cannot be read refuses the delegation instead of letting it through.
+   */
+  const requireOtherRunner = async (
+    turn: ActiveTurn,
+    ctx: MakaToolContext,
+    args: { runner: string; brief: string },
+  ): Promise<void> => {
+    for (const source of reviewLinksOf(args.brief).others) {
+      const result = await turn.link.call('task_status', { taskId: source }, signalOf(turn, ctx));
+      const runner = result.isError ? undefined : result.structured?.runner;
+      if (typeof runner !== 'string') {
+        throw new ToolRefusal(
+          'reviewer_unverifiable',
+          `The runner of ${source} could not be read, so the review cannot be checked.`,
+        );
+      }
+      if (runner === args.runner) {
+        throw new ToolRefusal(
+          'reviewer_same_runner',
+          `${source} ran on ${runner}. The review must be done by, and used by, the other runner: delegate it there.`,
+        );
+      }
+    }
   };
 
   const forward = async (
@@ -197,17 +284,19 @@ export function conductorTools(
     brief: string;
     title?: string;
     mode?: 'async' | 'wait';
+    workMode?: ModeId;
     timeoutMs?: number;
     budgetUsd: number;
   }> = {
     name: 'delegate_task',
     description:
-      'Start a child task on a runner with a self-contained brief. budgetUsd is reserved from the run budget and caps what the task and everything it delegates may spend: the task is cancelled when its spend reaches it. mode "async" (default) returns the task at once; "wait" blocks until it ends or timeoutMs passes.',
+      'Start a child task on a runner with a self-contained brief. budgetUsd is reserved from the run budget and caps what the task and everything it delegates may spend: the task is cancelled when its spend reaches it. mode "async" (default) returns the task at once; "wait" blocks until it ends or timeoutMs passes. workMode (quick, standard or deep) says how much care the task deserves; the run\'s mode, if the user chose one, and its budget limit it.',
     parameters: z.object({
       runner: z.string().min(1).describe('A runner the playbook allows'),
       brief: z.string().min(1).max(200_000).describe('What the runner must do, self-contained'),
       title: z.string().max(200).optional(),
       mode: z.enum(['async', 'wait']).optional(),
+      workMode: z.enum(MODE_IDS).optional(),
       timeoutMs: z.number().int().min(0).max(600_000).optional(),
       budgetUsd: z
         .number()
@@ -226,11 +315,13 @@ export function conductorTools(
           `The ${playbook.id} playbook delegates only to: ${playbook.allowedRunners.join(', ')}.`,
         );
       }
+      const chosen = chooseWorkMode(host, turn, args);
+      await requireOtherRunner(turn, ctx, args);
       // Check, reserve and store the delegation in one synchronous transaction,
       // before any await. From here on a stop finds the task by this key, even
       // if the response that names it never arrives.
       const key = `dlg_${randomUUID().replaceAll('-', '')}`;
-      const reserved = host.state.reserveDelegation(turn.runId, args.budgetUsd, key);
+      const reserved = host.state.reserveDelegation(turn.runId, args.budgetUsd, key, chosen?.mode);
       if (!reserved.ok) {
         if (reserved.reason === 'question_open') {
           throw new ToolRefusal(
@@ -244,7 +335,11 @@ export function conductorTools(
           `This delegation needs ${money(args.budgetUsd)} but the run has ${money(reserved.budget.remainingUsd)} left.${question ? ' The user has been asked whether to raise the budget.' : ''} End your turn now.`,
         );
       }
-      const { mode, timeoutMs, ...forwarded } = args;
+      const { mode, timeoutMs, workMode: _workMode, ...unmoded } = args;
+      // The mode reaches the runner as one line written here, never by the model.
+      const forwarded = chosen
+        ? { ...unmoded, brief: withModeLine(args.brief, chosen.mode) }
+        : unmoded;
       const signal = signalOf(turn, ctx);
       // From here the orchestrator answers with task views (T15 `ownTaint`).
       host.state.taint(turn.conversationId, 'tool:delegate_task');
@@ -280,6 +375,7 @@ export function conductorTools(
       host.settleTask(view);
       return {
         task: verifyView(turn, view),
+        ...(chosen ? { workMode: chosen.mode, workModeChosenBy: chosen.source } : {}),
         budget: budgetSummary(host.state.budget(turn.runId)),
       };
     },

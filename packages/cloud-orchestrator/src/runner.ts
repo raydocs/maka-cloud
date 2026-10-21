@@ -20,6 +20,11 @@ export interface RunSpec {
    * model gateway can hold them to it together.
    */
   budgetRootId?: TaskId;
+  /**
+   * What this run alone may spend, when that is less than `budgetUsd` (the orchestrator's turn
+   * limit). A run is one start or one resume after a restart. The smaller of the two binds.
+   */
+  turnBudgetUsd?: number;
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
   /**
@@ -57,7 +62,9 @@ export type RunnerEvent =
   | { type: 'usage'; costUsd: number }
   /** The runner wrote `resultPath`. The orchestrator validates it. */
   | { type: 'finished' }
-  | { type: 'failed'; reason: string };
+  | { type: 'failed'; reason: string }
+  /** The run put a message from `RunHandle.steer` in front of the agent. */
+  | { type: 'steered'; steerId: string };
 
 export interface RunHandle {
   /** Ends when the run is over. An iterator that ends without `finished` or `failed` fails the task. */
@@ -71,10 +78,24 @@ export interface RunHandle {
    */
   pause?(): Promise<void>;
   resume?(): Promise<void>;
+  /**
+   * Hands the run a message for the agent. It reaches the agent at the next point the runner can
+   * safely add to its conversation, which may be a while off (after the tool call under way); the
+   * run reports `steered` when it has. Offering the same `steerId` again changes nothing.
+   * Optional, and only for a runner with `Runner.steerable`.
+   */
+  steer?(message: { steerId: string; text: string }): void;
+  /**
+   * Drops a message from `steer` that the agent has not been given. True when it was still
+   * waiting; false when it was handed over (or is being) and cannot be taken back.
+   */
+  unsteer?(steerId: string): boolean;
 }
 
 export interface Runner {
   readonly name: string;
+  /** Its runs take `RunHandle.steer`. A message for a task whose runner is not is refused. */
+  readonly steerable?: boolean;
   start(spec: RunSpec): Promise<RunHandle>;
   /**
    * Called on restart for every task the log shows as still running. The runner that started it

@@ -87,6 +87,9 @@ test('a request in flight when the process stops is charged in full to its task 
   assert.equal(unrecorded.length, 1);
   assert.equal(unrecorded[0]?.taskId, 'tsk_crash');
   assert.ok(Math.abs((unrecorded[0]?.usd ?? 0) - (settled + reservation)) < 1e-9);
+  // The settled call is spend; the one in flight is a call the process died in, charged in full.
+  assert.equal(unrecorded[0]?.cutOffCalls, 1);
+  assert.ok(Math.abs((unrecorded[0]?.cutOffUsd ?? 0) - reservation) < 1e-9);
   after.recorded();
   assert.deepEqual(after.unrecorded(), []);
 
@@ -154,8 +157,39 @@ test('a web search is written down the same way', async (t) => {
   );
   const next = new SqliteSpendJournal(path);
   t.after(() => next.close());
-  assert.deepEqual(next.unrecorded(), [{ taskId: 'tsk_search', usd: 0.001 }]);
+  assert.deepEqual(next.unrecorded(), [
+    { taskId: 'tsk_search', usd: 0.001, cutOffCalls: 1, cutOffUsd: 0.001 },
+  ]);
   answer?.();
   await searching;
-  assert.deepEqual(next.unrecorded(), [{ taskId: 'tsk_search', usd: 0.001 }]);
+  assert.deepEqual(next.unrecorded(), [
+    { taskId: 'tsk_search', usd: 0.001, cutOffCalls: 0, cutOffUsd: 0 },
+  ]);
+});
+
+test('a call settled twice is charged once, and a process that was replaced cannot settle what the next one recorded', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'journal-settle-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'spend.db');
+  const first = new SqliteSpendJournal(path);
+  first.hold('tsk_a', 'k1', 0.5);
+  first.hold('tsk_a', 'k2', 0.5);
+  first.settle('tsk_a', 'k1', 0.2);
+  first.settle('tsk_a', 'k1', 0.2);
+  first.settle('tsk_a', 'k1', 0.4);
+
+  // A new process takes over: k2 is a call the first one died in, charged at its reservation.
+  const second = new SqliteSpendJournal(path);
+  t.after(() => second.close());
+  assert.deepEqual(second.unrecorded(), [
+    { taskId: 'tsk_a', usd: 0.7, cutOffCalls: 1, cutOffUsd: 0.5 },
+  ]);
+  second.recorded();
+  // The first process, still alive, finishes k2 for less: that does not change what was charged.
+  first.settle('tsk_a', 'k2', 0.01);
+  first.close();
+  assert.deepEqual(second.unrecorded(), []);
+  const third = new SqliteSpendJournal(path);
+  t.after(() => third.close());
+  assert.deepEqual(third.unrecorded(), []);
 });

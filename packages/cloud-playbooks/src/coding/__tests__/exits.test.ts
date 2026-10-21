@@ -15,6 +15,7 @@ import {
   isCheck,
   readJson,
   recordedPids,
+  reviewsNothing,
   recordPid,
   setup,
   terminal,
@@ -234,6 +235,8 @@ test('an edit loop stops the agent and hands the task to the other vendor', asyn
   const h = await setup(t, { sampleIntervalMs: 5 });
   let stopped = false;
   h.claude.script = async (turn) => {
+    // Its second run is the review of the other vendor's change.
+    if (turn.n > 1) return reviewsNothing(turn);
     const file = join(turn.workspace, 'lib', 'add.sh');
     for (let i = 0; !turn.signal.aborted; i++) {
       await fs.writeFile(file, i % 2 === 0 ? 'add() { :; }\n' : 'add() { true; }\n');
@@ -252,7 +255,11 @@ test('an edit loop stops the agent and hands the task to the other vendor', asyn
   const spec = await h.spec('tsk_loop');
   assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
   assert.equal(stopped, true);
-  assert.equal(h.claude.turns.length, 1, 'a loop is not repaired, it is handed over');
+  assert.deepEqual(
+    h.claude.turns.map((turn) => turn.kind),
+    ['start', 'start'],
+    'a loop is not repaired, it is handed over (the second run is the review)',
+  );
   assert.equal(h.codex.turns.length, 1);
   const verification = await readJson(join(h.handoff, 'tsk_loop', 'verification.json'));
   assert.match(

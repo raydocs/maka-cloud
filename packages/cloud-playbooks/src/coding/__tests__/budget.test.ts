@@ -45,8 +45,14 @@ test('each agent run gets what is left of the budget, and the task stops when it
   const events = await collect(await h.runner.start(spec));
   await spent.promise;
   assert.deepEqual(
+    h.claude.turns.map((turn) => turn.spec.turnBudgetUsd),
+    [0.8, 0.2],
+    'each run may spend what is left of its phase (the work share of a $1 task)',
+  );
+  assert.deepEqual(
     h.claude.turns.map((turn) => turn.spec.budgetUsd),
-    [1, 0.4],
+    [1, 1],
+    'and the whole budget is what the gateway pool holds the runs to',
   );
   assert.deepEqual(
     h.claude.turns.map((turn) => turn.spec.budgetRootId),
@@ -57,7 +63,7 @@ test('each agent run gets what is left of the budget, and the task stops when it
   assert.equal(end?.type, 'failed');
   assert.match(
     end?.type === 'failed' ? end.reason : '',
-    /budget of \$1\.00 reached \(\$1\.10 spent\)/,
+    /budget of \$0\.80 reached \(\$1\.10 spent\)/,
   );
   // A spent budget is not a vendor failure: nothing is handed over.
   assert.equal(h.codex.turns.length, 0);

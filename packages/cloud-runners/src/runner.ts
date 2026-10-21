@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { SessionStore } from '@anthropic-ai/claude-agent-sdk';
 import { StringDecoder } from 'node:string_decoder';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
@@ -9,6 +10,7 @@ import {
   type RunnerEvent,
   ResultManifestSchema,
   type RunSpec,
+  scrubSecretShapes,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { attestExports, exportArtifacts } from './export.js';
@@ -16,8 +18,16 @@ import type { Fleet } from './fleet.js';
 import type { RemoteMachine } from './machine.js';
 import { type InputRequest, parseBriefHeader } from './inputs.js';
 import { LineSplitter } from './lines.js';
+import { type AgentChannel, asAgent } from './agent-user.js';
 import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
 import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
+import { steerKeysIn } from './hooks.js';
+import {
+  restoreTranscript,
+  type TranscriptLine,
+  type TranscriptMirror,
+  transcriptSessionStore,
+} from './transcripts.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage, shq } from './shell.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
@@ -108,6 +118,11 @@ export class SandboxCliRunner implements Runner {
     return this.vendor.name;
   }
 
+  /** The Claude runs the SDK drives take messages for the agent, read after each of its steps. */
+  get steerable(): boolean {
+    return this.vendor.name === 'claude-agent-sdk' && this.fleet.options.agentSdk !== undefined;
+  }
+
   async start(spec: RunSpec): Promise<RunHandle> {
     return new Run(this.fleet, this.vendor, spec, undefined).begin();
   }
@@ -186,9 +201,21 @@ class Run implements RunHandle {
    */
   private stopFailure: Error | undefined;
   private readonly secrets = new Set<string>();
+  /** Messages for the agent not yet read, and the keys of those it has (an offer repeated is ignored). */
+  private readonly waitingSteers: Array<{ steerId: string; text: string }> = [];
+  private readonly readSteers = new Set<string>();
+  /** Messages given to the agent in a hook's answer, not yet shown in the kept transcript. */
+  private readonly handedSteers = new Set<string>();
+  /** Whether this run keeps the conversation's transcript off the sandbox (the proof a message was read). */
+  private mirror: TranscriptMirror | undefined;
+  /** On a run that continues an earlier one: the keys the kept transcript shows were given already. */
+  private steerScan: Promise<void> | undefined;
+  private steersToVet: Array<{ steerId: string; text: string }> = [];
   /** Paths the brief says the task must hand back. */
   private requiredArtifacts: string[] = [];
   private machine: RemoteMachine | undefined;
+  /** The task goes on in a new sandbox from its stored conversation: its files are not there. */
+  private freshBox = false;
   private record: RunnerSessionRecord | undefined;
   private access: ModelAccess | undefined;
   /** What the gateway settled for this run's access, when the access is metered. */
@@ -241,6 +268,106 @@ class Run implements RunHandle {
     return this.abort.signal;
   }
 
+  /**
+   * A message for the agent, read after its next step. Offering a key again changes nothing, and a
+   * run that is over takes none: the orchestrator marks what it never read.
+   */
+  steer(message: { steerId: string; text: string }): void {
+    if (this.ended || this.cancelled || this.readSteers.has(message.steerId)) return;
+    if (this.waitingSteers.some((waiting) => waiting.steerId === message.steerId)) return;
+    if (this.steersToVet.some((waiting) => waiting.steerId === message.steerId)) return;
+    // A run that continues an earlier one may be offered a message the earlier run gave the agent
+    // before it died, whose report was lost: the kept transcript says which.
+    if (this.spec.recovery !== undefined && this.fleet.options.transcripts) {
+      this.steersToVet.push(message);
+      this.steerScan ??= this.vetSteers();
+      return;
+    }
+    this.waitingSteers.push(message);
+  }
+
+  /**
+   * Reads the kept transcript once for the keys of messages it shows the agent was given, and
+   * sorts the messages offered meanwhile: those it shows are reported as read and never given
+   * again, the others wait for the next step. A transcript that cannot be read gives nothing
+   * away, and the messages go on as new ones (one the agent saw may then be read twice, which is
+   * better than one it never saw being lost).
+   */
+  private async vetSteers(): Promise<void> {
+    const shown = new Set<string>();
+    try {
+      const sessionId =
+        this.record?.sessionId ?? (await this.fleet.sessions.get(this.spec.taskId))?.sessionId;
+      const transcripts = this.fleet.options.transcripts;
+      if (sessionId !== undefined && transcripts) {
+        let cursor: number | undefined;
+        do {
+          const page = await transcripts.read(this.spec.taskId, sessionId, cursor);
+          for (const line of page.lines) for (const key of steerKeysIn(line)) shown.add(key);
+          cursor = page.next;
+        } while (cursor !== undefined);
+      }
+    } catch (error) {
+      this.progress(
+        `the kept conversation could not be read for messages already given: ${errorMessage(error)}`,
+      );
+    }
+    for (const message of this.steersToVet.splice(0)) {
+      if (this.ended || this.cancelled) continue;
+      if (shown.has(message.steerId)) {
+        this.readSteers.add(message.steerId);
+        this.events.push({ type: 'steered', steerId: message.steerId });
+      } else if (!this.readSteers.has(message.steerId)) {
+        this.waitingSteers.push(message);
+      }
+    }
+    this.steerScan = undefined;
+  }
+
+  /**
+   * The kept transcript holds these lines: a message they show the agent was given is now read, as
+   * far as anyone can prove, and only now is it reported.
+   */
+  private mirrorKept(lines: readonly TranscriptLine[]): void {
+    if (this.handedSteers.size === 0) return;
+    for (const line of lines) {
+      for (const key of steerKeysIn(line.json)) {
+        if (!this.handedSteers.delete(key)) continue;
+        this.events.push({ type: 'steered', steerId: key });
+      }
+    }
+  }
+
+  /** Drops a message the agent has not been given. False when it has been (or never was here). */
+  unsteer(steerId: string): boolean {
+    const at = this.waitingSteers.findIndex((waiting) => waiting.steerId === steerId);
+    if (at < 0) return false;
+    this.waitingSteers.splice(at, 1);
+    return true;
+  }
+
+  /**
+   * Hands the hook the messages that fit and reports each as read, as the hook returns them to the
+   * agent. The first always goes, whatever its size; the rest wait for the next step.
+   */
+  private takeSteers(maxChars: number): Array<{ steerId: string; text: string }> {
+    const taken: Array<{ steerId: string; text: string }> = [];
+    let chars = 0;
+    while (this.waitingSteers.length > 0) {
+      const next = this.waitingSteers[0] as { steerId: string; text: string };
+      if (taken.length > 0 && chars + next.text.length > maxChars) break;
+      this.waitingSteers.shift();
+      chars += next.text.length;
+      taken.push(next);
+      this.readSteers.add(next.steerId);
+      // With the conversation kept off the sandbox, it is read once the kept transcript shows it
+      // (`mirrorKept`); without, there is nothing to show it by, and handing it over is the proof.
+      if (this.mirror) this.handedSteers.add(next.steerId);
+      else this.events.push({ type: 'steered', steerId: next.steerId });
+    }
+    return taken;
+  }
+
   // -- the run ---------------------------------------------------------------------------------
 
   private async execute(): Promise<void> {
@@ -270,7 +397,8 @@ class Run implements RunHandle {
       if (!header.ok) return this.fail(header.reason);
       this.requiredArtifacts = header.artifacts;
       if (resumed) {
-        await machine.prepare(spec.taskId, undefined, this.signal);
+        // A new sandbox has no brief: the conversation refers to it.
+        await machine.prepare(spec.taskId, this.freshBox ? brief : undefined, this.signal);
       } else {
         await machine.prepare(spec.taskId, brief, this.signal);
         if (header.requests.length > 0) {
@@ -383,6 +511,7 @@ class Run implements RunHandle {
       runner: vendor.name,
       ...(spec.budgetUsd === undefined ? {} : { budgetUsd: spec.budgetUsd }),
       ...(spec.budgetRootId === undefined ? {} : { budgetRootId: spec.budgetRootId }),
+      ...(spec.turnBudgetUsd === undefined ? {} : { turnBudgetUsd: spec.turnBudgetUsd }),
     });
     this.adoptAccess(access);
     this.checkCancelled();
@@ -408,10 +537,10 @@ class Run implements RunHandle {
       this.stopMetering = meter.subscribe((state) => {
         this.meteredUsd = state.spentUsd;
         if (state.exhausted && !this.budgetStop) {
-          this.budgetStop =
-            this.spec.budgetUsd === undefined
-              ? 'the model budget is used up'
-              : `budget of ${usd(this.spec.budgetUsd)} reached (${usd(state.spentUsd)} spent)`;
+          const limit = this.binding();
+          this.budgetStop = limit
+            ? `${limit.what} of ${usd(limit.usd)} reached (${usd(state.spentUsd)} spent)`
+            : 'the model budget is used up';
         }
         this.meter();
       });
@@ -457,6 +586,26 @@ class Run implements RunHandle {
 
     const snapshotId = existing.snapshotIds.at(-1);
     if (!snapshotId || !fleet.sandboxes.restoreFromSnapshot) {
+      // No sandbox and no snapshot: with the conversation kept off the sandbox, the task goes on
+      // in a new one, without its files.
+      if (await this.conversationKept(existing)) {
+        this.adoptLease(
+          await fleet.sandboxes.acquire({ tenantId: existing.tenantId, taskId: spec.taskId }),
+        );
+        this.checkCancelled();
+        const machineId = (this.lease as SandboxLease).machineId;
+        const record = await fleet.updateRecord(spec.taskId, (current) => ({
+          ...(current ?? existing),
+          machineId,
+          snapshotIds: [],
+          updatedAt: fleet.now(),
+        }));
+        this.freshBox = true;
+        this.progress(
+          'the sandbox is gone and has no snapshot: the task goes on in a new one from its stored conversation, without its files',
+        );
+        return { record };
+      }
       throw new Error(
         'cannot resume: the sandbox is gone and there is no snapshot to restore it from',
       );
@@ -476,6 +625,69 @@ class Run implements RunHandle {
       updatedAt: fleet.now(),
     }));
     return { record };
+  }
+
+  /** Whether the transcript store holds this record's conversation, so a new sandbox can take it over. */
+  private async conversationKept(record: RunnerSessionRecord): Promise<boolean> {
+    const { fleet, vendor } = this;
+    if (vendor.name !== 'claude-agent-sdk' || !fleet.options.agentSdk) return false;
+    const store = fleet.options.transcripts;
+    if (!store || !record.sessionId) return false;
+    return (await store.locate(this.spec.taskId, record.sessionId)) !== undefined;
+  }
+
+  /**
+   * Gets the conversation ready for an SDK turn when transcripts are kept: a resumed session is put
+   * on the sandbox first if it is not there (a new sandbox, or one restored from an older snapshot),
+   * and the SDK is given the store that keeps every line the CLI writes from here on. A resumed
+   * session the store never saw (it began before transcripts were kept) goes on as it is on the
+   * sandbox, unmirrored.
+   */
+  private async prepareMirror(
+    machine: RemoteMachine,
+    resumeSessionId: string | undefined,
+  ): Promise<{ store: SessionStore; configDir: string } | undefined> {
+    const { fleet, spec } = this;
+    const transcripts = fleet.options.transcripts;
+    if (!transcripts) return undefined;
+    if (resumeSessionId) {
+      let restored: Awaited<ReturnType<typeof restoreTranscript>>;
+      try {
+        restored = await this.guard(
+          restoreTranscript({
+            machine,
+            store: transcripts,
+            taskId: spec.taskId,
+            sessionId: resumeSessionId,
+            signal: this.signal,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof CancelledError) throw error;
+        throw new Error(`the conversation could not be put on the sandbox: ${errorMessage(error)}`);
+      }
+      if (restored.status === 'absent') {
+        this.progress(
+          'this conversation was not kept off the sandbox (it began before that was on); this turn is not saved',
+        );
+        return undefined;
+      }
+      if (restored.status === 'restored') {
+        this.progress(`the conversation (${restored.lines} lines) was put back on the sandbox`);
+      }
+    }
+    const kept = transcriptSessionStore({
+      taskId: spec.taskId,
+      store: transcripts,
+      redact: (text) => this.scrub(text),
+      onProblem: (message) => this.progress(message),
+      onKept: (lines) => this.mirrorKept(lines),
+    });
+    this.mirror = kept;
+    return {
+      store: kept,
+      configDir: machine.configDir(spec.taskId),
+    };
   }
 
   private async machineUsable(machineId: string): Promise<boolean> {
@@ -562,6 +774,11 @@ class Run implements RunHandle {
   private resumedPrompt(dir: string, prompt: string): string {
     return [
       prompt,
+      ...(this.freshBox
+        ? [
+            `The sandbox you were working in is gone and this is a new one. Your conversation is restored, but the files in ${dir}/workspace are not: only the brief (${dir}/brief.md) is here. Rebuild what you need from what you did before, and check what already reached the outside world (a push, a pull request, a message) before you do it again.`,
+          ]
+        : []),
       `When you are finished, write ${dir}/result.json as ${manifestShape()}.`,
       'Write that file as the very last step, then stop. Report only what you actually did and checked.',
     ].join('\n\n');
@@ -611,16 +828,37 @@ class Run implements RunHandle {
         signal: this.signal,
       });
 
-    const reader = this.openReader();
     const sdk = vendor.name === 'claude-agent-sdk' ? fleet.options.agentSdk : undefined;
+    const channel = fleet.options.agentChannel;
+    if (sdk) {
+      // The SDK trusts what arrives on the CLI's stdin, so it is used only on a box that keeps
+      // that channel from the agent's own processes.
+      if (channel === undefined) {
+        return {
+          ok: false,
+          reason:
+            'the agent SDK needs an agent channel (a separate account for the agent) and none is configured',
+        };
+      }
+      try {
+        await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
+        await this.guard(machine.prepareAgent(spec.taskId, channel.group, this.signal));
+      } catch (error) {
+        if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
+        return { ok: false, reason: this.scrubForReader(errorMessage(error)) };
+      }
+    }
+    const reader = this.openReader();
     let drive: Drive;
     try {
+      const mirror = sdk ? await this.prepareMirror(machine, resumeSessionId) : undefined;
       drive = sdk
-        ? await this.driveAgentSdk(sdk, reader, {
+        ? await this.driveAgentSdk(sdk, reader, channel as AgentChannel, {
             prompt,
             run,
             dir,
             launchRun,
+            ...(mirror ? { mirror } : {}),
             ...(resumeSessionId ? { resumeSessionId } : {}),
             ...(mcpUrl ? { mcpUrl } : {}),
             ...(model ? { model } : {}),
@@ -668,7 +906,7 @@ class Run implements RunHandle {
    */
   private openReader(): TurnReader {
     const { vendor } = this;
-    const parser = vendor.parser((text) => this.scrub(text));
+    const parser = vendor.parser((text) => this.scrubForReader(text));
     this.callCosts = new Map();
     this.reportedTotal = undefined;
     const rawTail: string[] = [];
@@ -677,12 +915,12 @@ class Run implements RunHandle {
 
     const handleLine = (line: string): void => {
       if (line.startsWith('MAKA_GUARD: ')) {
-        guardReason = clipQuote(this.scrub(line.slice('MAKA_GUARD: '.length)));
+        guardReason = clipQuote(this.scrubForReader(line.slice('MAKA_GUARD: '.length)));
         return;
       }
       const events = parser.feed(line);
       if (events.length === 0 && line.trim() !== '' && !line.trimStart().startsWith('{')) {
-        rawTail.push(clipQuote(this.scrub(line)));
+        rawTail.push(clipQuote(this.scrubForReader(line)));
         if (rawTail.length > RAW_TAIL_LINES) rawTail.shift();
       }
       for (const event of events) {
@@ -788,6 +1026,7 @@ class Run implements RunHandle {
   private async driveAgentSdk(
     sdk: AgentSdk,
     reader: TurnReader,
+    channel: AgentChannel,
     input: {
       prompt: string;
       run: string;
@@ -796,6 +1035,7 @@ class Run implements RunHandle {
       mcpUrl?: string;
       model?: string;
       effort?: string;
+      mirror?: { store: SessionStore; configDir: string };
       launchRun(
         script: string,
         extraEnvs?: Record<string, string>,
@@ -819,6 +1059,8 @@ class Run implements RunHandle {
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
       ...(spec.steps ? { steps: spec.steps } : {}),
+      steer: { take: (maxChars) => this.takeSteers(maxChars) },
+      ...(input.mirror ? { mirror: input.mirror } : {}),
       redact: (text) => this.scrub(text),
       onProblem: (message) => this.progress(message),
       spawn: ({ args, env, signal }) => {
@@ -836,7 +1078,7 @@ class Run implements RunHandle {
             input.launchRun(
               buildRunScript({
                 preamble: `${preambleFor(vendor)}\n${FEED_FUNCTION}`,
-                command: fedCommand([vendor.binary, ...args.map(shq)].join(' ')),
+                command: fedCommand(asAgent([vendor.binary, ...args.map(shq)].join(' '), channel)),
               }),
               env,
             ),
@@ -861,8 +1103,11 @@ class Run implements RunHandle {
 
     let sdkError: unknown;
     try {
-      for await (const _message of query) {
+      for await (const message of query) {
         this.checkCancelled();
+        if (message.type === 'system' && message.subtype === 'mirror_error') {
+          this.progress(`a transcript batch was not kept: ${this.scrub(message.error)}`);
+        }
         if (this.budgetStop) stopNow({ ok: false, reason: this.budgetStop });
         if (stopped) break;
       }
@@ -871,6 +1116,9 @@ class Run implements RunHandle {
       sdkError = error;
     }
     this.checkCancelled();
+    // What the CLI wrote last is kept (or has failed to be) before the run ends, so a message
+    // given to the agent in its last step is reported while the run can still report it.
+    await this.mirror?.drain().catch(() => undefined);
 
     const process = proc as ExecProcess | undefined;
     if (process === undefined) {
@@ -878,7 +1126,7 @@ class Run implements RunHandle {
         ended: false,
         outcome: {
           ok: false,
-          reason: `the agent SDK did not start the agent: ${this.scrub(errorMessage(sdkError))}`,
+          reason: `the agent SDK did not start the agent: ${this.scrubForReader(errorMessage(sdkError))}`,
         },
       };
     }
@@ -896,7 +1144,7 @@ class Run implements RunHandle {
     if (process.failure) {
       return {
         ended: false,
-        outcome: { ok: false, reason: this.scrub(errorMessage(process.failure)) },
+        outcome: { ok: false, reason: this.scrubForReader(errorMessage(process.failure)) },
       };
     }
     const exit = process.exitCode ?? undefined;
@@ -905,7 +1153,7 @@ class Run implements RunHandle {
         ended: false,
         outcome: {
           ok: false,
-          reason: `the agent SDK reported an error: ${this.scrub(errorMessage(sdkError))}`,
+          reason: `the agent SDK reported an error: ${this.scrubForReader(errorMessage(sdkError))}`,
         },
       };
     }
@@ -942,10 +1190,22 @@ class Run implements RunHandle {
     ) {
       this.publishedUsd = spent;
     }
-    const budget = this.spec.budgetUsd;
-    if (budget !== undefined && spent >= budget && !this.budgetStop) {
-      this.budgetStop = `budget of ${usd(budget)} reached (${usd(spent)} spent)`;
+    const limit = this.binding();
+    if (limit !== undefined && spent >= limit.usd && !this.budgetStop) {
+      this.budgetStop = `${limit.what} of ${usd(limit.usd)} reached (${usd(spent)} spent)`;
     }
+  }
+
+  /**
+   * The limit this run is held to: its turn's, when that is the smaller of the two (a run is one
+   * turn), else what its tree has left.
+   */
+  private binding(): { usd: number; what: string } | undefined {
+    const { budgetUsd, turnBudgetUsd } = this.spec;
+    if (turnBudgetUsd !== undefined && (budgetUsd === undefined || turnBudgetUsd <= budgetUsd)) {
+      return { usd: turnBudgetUsd, what: "this turn's model budget" };
+    }
+    return budgetUsd === undefined ? undefined : { usd: budgetUsd, what: 'budget' };
   }
 
   private async rememberSession(id: string): Promise<void> {
@@ -1236,8 +1496,18 @@ class Run implements RunHandle {
    * of the CLI is scrubbed before anything shortens or reformats it, not after.
    */
   private redact(text: string, max: number): string {
-    const out = this.scrub(text);
+    const out = this.scrubForReader(text);
     return out.length <= max ? out : `${out.slice(0, max - 1)}…`;
+  }
+
+  /**
+   * Text a person will read (a failure, a note, a quote of the CLI): the run's own secrets, then
+   * anything shaped like a key or a credential header, which also catches a key this run was
+   * never given. The transcript the conversation resumes from keeps `scrub` alone, so history is
+   * not rewritten.
+   */
+  private scrubForReader(text: string): string {
+    return scrubSecretShapes(this.scrub(text));
   }
 
   /** Replaces every secret of the run in `text`. Nothing is cut: call this before clipping. */

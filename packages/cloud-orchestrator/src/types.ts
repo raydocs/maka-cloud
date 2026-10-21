@@ -67,6 +67,12 @@ export type TaskEvent =
    */
   | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number; epoch?: number }
   | { type: 'task_progress'; taskId: TaskId; note: string }
+  /**
+   * The run of a task that was cut off by a restart is going again, in `epoch`. `text` is what a
+   * viewer shows in place of whatever it had of the cut-off turn, so the same answer is not shown
+   * twice; it is also kept as the task's latest progress note.
+   */
+  | { type: 'task_restarted'; taskId: TaskId; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
   | { type: 'task_failed'; taskId: TaskId; reason: string }
   | { type: 'task_cancel_requested'; taskId: TaskId; by: SessionId | 'system' }
@@ -109,7 +115,29 @@ export type TaskEvent =
       output?: string;
     }
   /** A new attempt found the step running: its driver is gone and it may or may not have finished. */
-  | { type: 'step_interrupted'; taskId: TaskId; epoch: number; stepId: StepId };
+  | { type: 'step_interrupted'; taskId: TaskId; epoch: number; stepId: StepId }
+  /**
+   * A message for the agent, sent while the task runs. `steerId` is the sender's key: the first
+   * event with an id stands and a resend of it changes nothing, so a message applies once.
+   */
+  | { type: 'task_steer'; taskId: TaskId; steerId: SteerId; text: string; by: SessionId }
+  /** The run put the message in front of the agent (the epoch is the attempt that did). */
+  | { type: 'task_steer_delivered'; taskId: TaskId; steerId: SteerId; epoch: number }
+  /** The sender took the message back before the agent saw it. */
+  | { type: 'task_steer_withdrawn'; taskId: TaskId; steerId: SteerId }
+  /** The task ended or was handed over before the agent saw the message. */
+  | { type: 'task_steer_unseen'; taskId: TaskId; steerId: SteerId };
+
+export type SteerId = string;
+
+/** Where a message sent to a running task is: waiting, seen by the agent, taken back or never seen. */
+export type SteerState = 'pending' | 'delivered' | 'withdrawn' | 'unseen';
+
+export interface SteerRecord {
+  steerId: SteerId;
+  text: string;
+  state: SteerState;
+}
 
 /** Why a new attempt began: a restart of the server, or a resume after a lost box. */
 export type AttemptCause = 'restart' | 'resume';
@@ -179,6 +207,13 @@ export interface TaskRecord {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /**
+   * Time the task has spent running, in milliseconds: the intervals between a start (or a resume
+   * from a pause) and the next pause or end. A server that is down while the task runs counts, the
+   * sandbox keeps going. `runSince` is when the interval under way began.
+   */
+  runMs: number;
+  runSince?: number;
   progress: string[];
   manifest?: ResultManifest;
   failureReason?: string;
@@ -191,6 +226,12 @@ export interface TaskRecord {
   stopPending?: boolean;
   /** The latest attempt's epoch: 1 from creation, one more for each `task_attempt`. */
   epoch: number;
+  /**
+   * Messages sent to the task by `steerId`, in order. Held back, not offered to a run, from a new
+   * attempt until its first step has finished (`steersHeld`).
+   */
+  steers: Map<SteerId, SteerRecord>;
+  steersHeld?: boolean;
   /** Every step in the order of its first intent, without outputs (those stay in the log). */
   steps: Map<StepId, StepRecord>;
 }

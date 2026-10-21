@@ -40,7 +40,7 @@ export function gatewayModelAccess(
   ownerOfTask: (taskId: string) => Owner | undefined,
 ): ModelAccessProvider {
   return {
-    async issue({ taskId, runner, budgetUsd, budgetRootId }) {
+    async issue({ taskId, runner, budgetUsd, budgetRootId, turnBudgetUsd }) {
       if (budgetUsd === undefined) {
         throw new Error('The task has no budget, so it gets no model access.');
       }
@@ -55,10 +55,16 @@ export function gatewayModelAccess(
         taskId,
         account: { inviteId: owner.inviteId },
         ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
-        budget: {
-          limitUsd: budgetUsd,
-          ...(budgetRootId === undefined ? {} : { poolId: budgetRootId }),
-        },
+        // A run is held to its turn's limit when that is the smaller, inside the pool of what its
+        // whole tree has left.
+        budget:
+          turnBudgetUsd !== undefined && turnBudgetUsd < budgetUsd && budgetRootId !== undefined
+            ? { limitUsd: turnBudgetUsd, poolId: budgetRootId, poolLimitUsd: budgetUsd }
+            : {
+                limitUsd:
+                  turnBudgetUsd === undefined ? budgetUsd : Math.min(turnBudgetUsd, budgetUsd),
+                ...(budgetRootId === undefined ? {} : { poolId: budgetRootId }),
+              },
       });
       return {
         apiKey: grant.token,

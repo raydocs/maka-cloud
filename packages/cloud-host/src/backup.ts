@@ -45,6 +45,20 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\bmk[iog]_[\w.-]{16,}/u,
 ];
 
+/**
+ * `text` with every secret shape taken out. For copies of conversations a task may have seen such
+ * a thing in (a key file in a repository): the backup scan refuses a copy that holds one, and one
+ * file in a repository must not stop the daily backup. The replacement adds no quote or backslash,
+ * so a JSON string stays one.
+ */
+export function withoutSecretShapes(text: string): string {
+  let out = text;
+  for (const shape of SECRET_SHAPES) {
+    out = out.replace(new RegExp(shape.source, 'gu'), '[secret removed]');
+  }
+  return out;
+}
+
 export interface ManifestFile {
   path: string;
   size: number;

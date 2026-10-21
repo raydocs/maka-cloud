@@ -78,6 +78,7 @@ const textSourceExtensions = new Set([
   '.css',
   '.csv',
   '.diff',
+  '.env',
   '.html',
   '.js',
   '.json',
@@ -94,6 +95,7 @@ const textSourceExtensions = new Set([
   '.ps1',
   '.py',
   '.rs',
+  '.service',
   '.sh',
   '.sql',
   '.svg',
@@ -108,10 +110,12 @@ const textSourceExtensions = new Set([
   '.yml',
 ]);
 const textSourceBasenames = new Set([
+  '.dockerignore',
   '.git-blame-ignore-revs',
   '.gitattributes',
   '.gitignore',
   '.mailmap',
+  'Caddyfile',
   'DISCLAIMER-WIP',
   'Dockerfile',
   'LICENSE',

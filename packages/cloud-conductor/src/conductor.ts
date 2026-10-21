@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import type { SessionEvent } from '@maka/core/events';
 import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
+import type { ThinkingLevel } from '@maka/core/model-thinking';
+import { isModeId, type ModeId, type ModesConfig } from '@maka-cloud/modes';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import {
   type ConductorLimits,
@@ -58,7 +60,18 @@ export interface ConductorOptions {
    * cancel as before. Default false: every task not known to have ended is cancelled.
    */
   tasksSurviveRestart?: boolean;
+  /**
+   * Cleans a task's own words (its title, summary or failure reason) before the conductor puts
+   * them in a message of its own, as when it tells the user a task ended that a restart left
+   * without a turn. Without it those messages carry no task words at all.
+   */
+  scrubTaskText?: (text: string) => string;
   playbooks?: readonly Playbook[];
+  /**
+   * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
+   * and which mode a task runs in. Without it there are no modes: nothing is added to a brief.
+   */
+  modes?: ModesConfig;
   /**
    * Appended once to each new durable user turn, never to the system prompt or old history. It
    * taints the conversation (T15) unless it says `external: false`; a non-empty string always does.
@@ -106,6 +119,11 @@ export interface UserMessage {
    * conversation is tainted before the message is admitted, and stays tainted (T15).
    */
   external?: boolean;
+  /**
+   * The mode the user picked (T25). It applies when this message starts a run, and then it is
+   * the run's mode: the model cannot choose another. Anything but a mode id starts no run.
+   */
+  mode?: string;
   /**
    * Set only by a standing duty (T23): the run this message starts has this authority and this
    * hard budget, which it cannot raise or ask to raise. It applies when the message starts a run;
@@ -216,6 +234,7 @@ export class Conductor {
   private readonly host: MakaHost;
   private readonly outbox: ConductorOutbox;
   private readonly playbooks: readonly Playbook[];
+  private readonly modes: ModesConfig | undefined;
   private readonly limits: ConductorLimits;
   private readonly prices: ModelPrices;
   private readonly now: () => number;
@@ -236,7 +255,10 @@ export class Conductor {
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly stopChecks = new Map<string, NodeJS.Timeout>();
   private readonly followTimers = new Map<string, NodeJS.Timeout>();
+  /** How long the conversation's followed tasks were last left alone; doubles up to a cap. */
+  private readonly followDelays = new Map<string, number>();
   private readonly tasksSurviveRestart: boolean;
+  private readonly scrubTaskText: ((text: string) => string) | undefined;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -248,6 +270,7 @@ export class Conductor {
     this.state = new ConductorState(join(options.root, 'conductor.db'), this.now);
     this.outbox = options.outbox;
     this.playbooks = options.playbooks ?? DEFAULT_PLAYBOOKS;
+    this.modes = options.modes;
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
@@ -255,6 +278,7 @@ export class Conductor {
     this.turnContext = options.turnContext;
     this.orchestratorAccess = options.orchestratorAccess;
     this.tasksSurviveRestart = options.tasksSurviveRestart === true;
+    this.scrubTaskText = options.scrubTaskText;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
@@ -356,14 +380,31 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
+    if (message.mode !== undefined && !isModeId(message.mode)) {
+      // Fail closed, like limits: a pick that cannot be read starts no run with another mode.
+      this.warn('A message carried a mode that is not valid; it was not run', {
+        messageId: message.messageId,
+      });
+      this.state.enqueueNotice(
+        { conversationId: message.conversationId },
+        'This request could not be started because its mode was not valid.',
+      );
+      this.sendOutbox(message.conversationId);
+      return;
+    }
+    const picked = this.modes && limits === undefined ? message.mode : undefined;
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
       message.messageId,
-      this.limits.defaultRunBudgetUsd,
+      // The user's pick brings the budget that mode starts with; a duty's budget is its own.
+      picked && this.modes
+        ? this.modes.modes[picked as ModeId].budget.defaultRunUsd
+        : this.limits.defaultRunBudgetUsd,
       limits === undefined
         ? undefined
         : { dutyId: limits.dutyId, authority: limits.authority, budgetUsd: limits.budgetUsd },
+      picked as ModeId | undefined,
     );
     if (admitted.duplicate) return;
     this.enqueue(lane, { kind: 'turn', runId: admitted.run.runId, text: message.text });
@@ -647,7 +688,7 @@ export class Conductor {
     let setupError: unknown;
     let timer: NodeJS.Timeout | undefined;
     try {
-      const makaSessionId = await this.ensureSession(lane.conversationId);
+      const makaSessionId = await this.ensureSession(lane.conversationId, job.runId);
       const controller = new AbortController();
       turn = {
         runId: job.runId,
@@ -727,13 +768,26 @@ export class Conductor {
     }
   }
 
-  private async ensureSession(conversationId: string): Promise<string> {
+  /**
+   * The mode a run's conductor and planner think in: the user's pick, else `standard`. The
+   * conductor's model is one for the whole conversation (its preserved thinking is checked against
+   * it), so a mode sets effort only, and a conversation's conductor session keeps the effort of the
+   * run that opened it; each planner session is the run's own.
+   */
+  private effortOf(runId: string | null, role: 'conductor' | 'plannerEffort'): ThinkingLevel {
+    const fallback = role === 'conductor' ? 'medium' : 'high';
+    if (!this.modes) return fallback;
+    const mode = (runId === null ? undefined : this.state.run(runId)?.mode) ?? 'standard';
+    return this.modes.modes[mode].conductor[role === 'conductor' ? 'effort' : 'plannerEffort'];
+  }
+
+  private async ensureSession(conversationId: string, runId: string): Promise<string> {
     const existing = this.state.conversationSession(conversationId);
     if (existing) return existing;
     const makaSessionId = await this.host.createSession({
       kind: 'conductor',
-      systemPrompt: conductorSystemPrompt(this.playbooks),
-      thinkingLevel: 'medium',
+      systemPrompt: conductorSystemPrompt(this.playbooks, this.modes !== undefined),
+      thinkingLevel: this.effortOf(runId, 'conductor'),
       runId: null,
     });
     this.state.bindConversation(conversationId, makaSessionId);
@@ -1023,7 +1077,11 @@ export class Conductor {
    * found no task settles at 0. An ended task whose run may still be going
    * keeps its reservation, and is asked about again until its stop is confirmed.
    */
-  private settleView(delegation: DelegationRow, view: Record<string, unknown> | undefined): void {
+  private settleView(
+    delegation: DelegationRow,
+    view: Record<string, unknown> | undefined,
+    closing?: string,
+  ): void {
     if (!view) return;
     if (view.created === false) {
       this.state.settleDelegation(delegation.key, 0);
@@ -1040,7 +1098,31 @@ export class Conductor {
       return;
     }
     const actual = typeof view.costUsd === 'number' ? view.costUsd : delegation.reservedUsd;
-    this.state.settleDelegation(delegation.key, actual);
+    this.state.settleDelegation(delegation.key, actual, closing);
+  }
+
+  /**
+   * What the user is told when a task ends that the conductor followed across a restart: the run
+   * that started it was cut off, so no turn is left to say it. Fixed wording around the task's own
+   * words, with no model call. Absent when the run did not end for a restart or a shutdown.
+   */
+  private closingOfFollowed(
+    delegation: DelegationRow,
+    view: Record<string, unknown> | undefined,
+  ): string | undefined {
+    const run = this.state.run(delegation.runId);
+    if (run?.state !== 'interrupted' || !['restart', 'shutdown'].includes(run.endReason ?? '')) {
+      return undefined;
+    }
+    const ended = String(view?.state);
+    if (!['succeeded', 'failed', 'cancelled'].includes(ended)) return undefined;
+    const manifest = view?.manifest as { summary?: unknown } | undefined;
+    const words = (value: unknown): string =>
+      typeof value === 'string' && this.scrubTaskText ? this.scrubTaskText(value).trim() : '';
+    const detail = words(manifest?.summary) || words(view?.failureReason);
+    const name = words(view?.title).slice(0, 120);
+    const text = `The server restarted while this ran. The task${name ? ` "${name}"` : ''} ${ended}${detail ? `: ${detail}` : '.'}`;
+    return text.length > 800 ? `${text.slice(0, 799)}…` : text;
   }
 
   /**
@@ -1065,7 +1147,13 @@ export class Conductor {
           }
           // A turn may have settled it while this waited.
           const current = this.state.delegation(delegation.key);
-          if (current && current.state !== 'settled') this.settleView(current, result.structured);
+          if (current && current.state !== 'settled') {
+            this.settleView(
+              current,
+              result.structured,
+              this.closingOfFollowed(current, result.structured),
+            );
+          }
         } catch (error) {
           this.warn(`Asking about delegation ${delegation.key} failed`, error);
         }
@@ -1073,10 +1161,27 @@ export class Conductor {
     } finally {
       await link.close().catch(() => undefined);
     }
+    this.sendOutbox(lane.conversationId);
     if (!this.closing.signal.aborted) {
       this.hooks.followed?.(lane.conversationId);
-      if (this.state.hasFollowedTasks(lane.conversationId)) this.followLater(lane.conversationId);
+      if (this.state.hasFollowedTasks(lane.conversationId)) {
+        this.followLater(lane.conversationId, this.nextFollowDelay(lane.conversationId));
+      } else {
+        this.followDelays.delete(lane.conversationId);
+      }
     }
+  }
+
+  /**
+   * Asks again soon after a restart, when a task is most likely to end, and less often the longer
+   * it runs: one second, doubling to ten (never past the stop-check interval).
+   */
+  private nextFollowDelay(conversationId: string): number {
+    const cap = Math.min(this.limits.stopCheckMs, FOLLOW_MAX_MS);
+    const previous = this.followDelays.get(conversationId);
+    const next = Math.min(previous === undefined ? FOLLOW_FIRST_MS : previous * 2, cap);
+    this.followDelays.set(conversationId, next);
+    return next;
   }
 
   /** Asks about the conversation's followed tasks after `delayMs` (default: the stop-check interval). */
@@ -1271,6 +1376,7 @@ export class Conductor {
       state: this.state,
       limits: this.limits,
       playbooks: this.playbooks,
+      ...(this.modes ? { modes: this.modes } : {}),
       turnFor: (ctx: MakaToolContext) => {
         const turn = this.turns.get(ctx.sessionId);
         if (!turn) throw new ToolRefusal('no_run', 'This session has no running conductor turn.');
@@ -1322,7 +1428,7 @@ export class Conductor {
     const makaSessionId = await this.host.createSession({
       kind: 'planner',
       systemPrompt: PLANNER_SYSTEM_PROMPT,
-      thinkingLevel: 'high',
+      thinkingLevel: this.effortOf(turn.runId, 'plannerEffort'),
       runId: turn.runId,
     });
     this.counters.planners += 1;
@@ -1452,6 +1558,10 @@ export class Conductor {
     }
   }
 }
+
+/** The first and the longest wait between two looks at a task kept across a restart. */
+const FOLLOW_FIRST_MS = 1_000;
+const FOLLOW_MAX_MS = 10_000;
 
 /** The adapter's error kinds that pass by themselves; `auth`, billing, a rejected request and `unknown` are not among them. */
 const TRANSIENT_MODEL_ERRORS: ReadonlySet<string> = new Set([

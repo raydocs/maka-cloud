@@ -5,6 +5,7 @@ import { basename, join } from 'node:path';
 import type { TestContext } from 'node:test';
 import { InstaboxClient } from '@maka-cloud/instabox';
 import { FakeInstabox } from '@maka-cloud/instabox/testing';
+import { DEFAULT_MODES } from '@maka-cloud/modes';
 import type { RunHandle, RunnerEvent, RunSpec } from '@maka-cloud/orchestrator';
 import { Fleet, FixedMachineProvider } from '@maka-cloud/runners';
 import { MemoryCodingDeliveries } from '../deliveries.js';
@@ -79,6 +80,21 @@ export function recordPid(name: string, file = `"$MAKA_TEST_PIDS/${name}-$RANDOM
   return `read -r pid _ < /proc/self/stat; f=${file}; echo "$pid" > "$f.tmp" && mv "$f.tmp" "$f"`;
 }
 
+/**
+ * What an agent does when a test gives it no script: a review brief gets a review that finds nothing
+ * (the runner delivers only a change the other vendor has reviewed), anything else does nothing.
+ */
+export const reviewsNothing: AgentScript = async (turn) => {
+  const brief = await fs.readFile(turn.spec.briefPath, 'utf8');
+  if (/# Review of a change/u.test(brief)) {
+    await fs.writeFile(
+      join(turn.dir, 'review.json'),
+      JSON.stringify({ summary: 'Nothing to report.', findings: [] }),
+    );
+  }
+  return 'ok';
+};
+
 export class FakeAgent implements AgentRunner {
   readonly turns: AgentTurn[] = [];
   open = 0;
@@ -87,7 +103,7 @@ export class FakeAgent implements AgentRunner {
   constructor(
     readonly vendor: Vendor,
     private readonly harness: Harness,
-    public script: AgentScript = async () => 'ok',
+    public script: AgentScript = reviewsNothing,
   ) {}
 
   start(spec: RunSpec): Promise<RunHandle> {
@@ -219,7 +235,8 @@ export interface Harness {
   leases: { acquired: number; released: number };
   /** Resolves after the next workspace sample finishes. */
   nextSample(): Promise<void>;
-  spec(taskId: string, block?: Record<string, unknown> | string): Promise<RunSpec>;
+  /** `lead` is written before the brief, as the conductor's code writes the `maka-mode:` line. */
+  spec(taskId: string, block?: Record<string, unknown> | string, lead?: string): Promise<RunSpec>;
   makeRunner(overrides?: Partial<CodingRunnerOptions>): CodingRunner;
 }
 
@@ -348,11 +365,12 @@ export async function setup(
       deliveries: h.deliveries,
       repoUrl: () => `file://${bare}`,
       sampleIntervalMs: 60_000,
+      modes: DEFAULT_MODES,
       ...options,
       ...overrides,
     });
   h.runner = h.makeRunner();
-  h.spec = async (taskId, block) => {
+  h.spec = async (taskId, block, lead = '') => {
     const dir = join(handoff, taskId);
     await fs.mkdir(dir, { recursive: true });
     const json =
@@ -367,7 +385,7 @@ export async function setup(
           });
     await fs.writeFile(
       join(dir, 'brief.md'),
-      `# Fix add\n\nPlan: write a failing test, fix lib/add.sh.\n\n\`\`\`coding-task\n${json}\n\`\`\`\n`,
+      `${lead}# Fix add\n\nPlan: write a failing test, fix lib/add.sh.\n\n\`\`\`coding-task\n${json}\n\`\`\`\n`,
     );
     return {
       taskId,

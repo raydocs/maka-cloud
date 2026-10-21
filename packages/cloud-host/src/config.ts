@@ -8,8 +8,9 @@ import {
   unnamedModels,
 } from '@maka-cloud/modes';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
+import { assertAgentChannel } from '@maka-cloud/runners';
 import { pushConfigFromEnv } from '@maka-cloud/server';
-import type { BackupLayout } from './backup.js';
+import { type BackupLayout, withoutSecretShapes } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
 /**
@@ -30,6 +31,14 @@ export interface StackConfig {
   gatewaySpendPath: string;
   /** The standing duties' database: projects, duties, webhook deliveries and the run ledger. */
   dutiesDbPath: string;
+  /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
+  transcriptsDbPath: string;
+  /**
+   * The account the Claude CLI runs as inside a sandbox, and its group. With it Claude tasks are
+   * driven through the Agent SDK (step log, durable resume, stored conversation); without it they
+   * run the CLI directly, as before. See `agent-user.ts` in the runners for what the box must have.
+   */
+  agentChannel?: { user: string; group: string };
   /** Where the server writes its daily backups. Unset: it writes none. */
   backupDir?: string;
   /**
@@ -85,6 +94,13 @@ export interface StackConfig {
    * configured cannot spend much.
    */
   spend: SpendCaps;
+  /**
+   * Limits of one task on top of its tree's budget: the most one run (a start, or a resume after a
+   * restart) may spend, and how long the task may run in all.
+   */
+  taskLimits: { turnUsd?: number; runMs: number };
+  /** Task timelines show what each step did, not only its kind. */
+  timelineContent: boolean;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
   /** With it, research runs get a `web-search` command, paid per call from their budget. */
@@ -133,6 +149,7 @@ export function dataPathsOf(
   | 'supervisorDbPath'
   | 'gatewaySpendPath'
   | 'dutiesDbPath'
+  | 'transcriptsDbPath'
 > {
   return {
     dbPath: join(dataDir, 'cloud.db'),
@@ -144,6 +161,7 @@ export function dataPathsOf(
     supervisorDbPath: join(dataDir, 'supervisor.db'),
     gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
     dutiesDbPath: join(dataDir, 'duties.db'),
+    transcriptsDbPath: join(dataDir, 'transcripts.db'),
   };
 }
 
@@ -159,6 +177,7 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       rel(paths.supervisorDbPath),
       rel(paths.gatewaySpendPath),
       rel(paths.dutiesDbPath),
+      rel(paths.transcriptsDbPath),
     ],
     files: [rel(paths.runnerSessionsPath), rel(paths.codingDeliveriesPath)],
     trees: [rel(paths.conductorRoot), rel(paths.handoffRoot)],
@@ -172,6 +191,35 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
           if (!/no such table/iu.test(String((error as Error).message))) throw error;
         }
       },
+      // The runs' own secrets were taken out when each line was kept. What a task read in a
+      // repository was not, and the backup scan refuses a copy that holds a key.
+      [rel(paths.transcriptsDbPath)]: (copy) => {
+        const lines = copy
+          .prepare(
+            `SELECT task_id, session_id, subpath, n, json FROM transcript_lines
+             WHERE instr(json, 'PRIVATE KEY-----') > 0 OR instr(json, 'mki_') > 0
+                OR instr(json, 'mko_') > 0 OR instr(json, 'mkg_') > 0`,
+          )
+          .all() as Array<{
+          task_id: string;
+          session_id: string;
+          subpath: string;
+          n: number;
+          json: string;
+        }>;
+        const update = copy.prepare(
+          'UPDATE transcript_lines SET json = ? WHERE task_id = ? AND session_id = ? AND subpath = ? AND n = ?',
+        );
+        for (const row of lines) {
+          update.run(
+            withoutSecretShapes(row.json),
+            row.task_id,
+            row.session_id,
+            row.subpath,
+            row.n,
+          );
+        }
+      },
     },
   };
 }
@@ -180,6 +228,36 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
 export function pausePathOf(dataDir: string): string {
   return join(dataDir, 'paused');
 }
+
+/** Reads the per-task limits; a bad value is a problem, not a default. */
+function taskLimits(
+  value: (name: string) => string | undefined,
+  problems: string[],
+): StackConfig['taskLimits'] {
+  const limits: StackConfig['taskLimits'] = { runMs: DEFAULT_TASK_RUN_HOURS * 3_600_000 };
+  const turn = value('MAKA_CLOUD_TASK_TURN_USD');
+  if (turn !== undefined) {
+    const usd = Number(turn);
+    if (!/^\d+(\.\d+)?$/u.test(turn) || !(usd > 0) || usd > 100_000) {
+      problems.push('MAKA_CLOUD_TASK_TURN_USD must be a number of dollars above 0, up to 100000');
+    } else {
+      limits.turnUsd = usd;
+    }
+  }
+  const hours = value('MAKA_CLOUD_TASK_RUN_HOURS');
+  if (hours !== undefined) {
+    const parsed = Number(hours);
+    if (!/^\d+(\.\d+)?$/u.test(hours) || !(parsed > 0) || parsed > 168) {
+      problems.push('MAKA_CLOUD_TASK_RUN_HOURS must be a number of hours above 0, up to 168');
+    } else {
+      limits.runMs = Math.round(parsed * 3_600_000);
+    }
+  }
+  return limits;
+}
+
+/** How long a task may run in all, unless set. */
+const DEFAULT_TASK_RUN_HOURS = 4;
 
 export interface SpendCaps {
   inviteDailyUsd: number;
@@ -217,6 +295,26 @@ export const ENV_VARIABLES = [
   [
     'MAKA_CLOUD_BACKUP_DIR',
     'directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups',
+  ],
+  [
+    'MAKA_CLOUD_TASK_TURN_USD',
+    'the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit',
+  ],
+  [
+    'MAKA_CLOUD_TASK_RUN_HOURS',
+    'how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168)',
+  ],
+  [
+    'MAKA_CLOUD_TIMELINE_CONTENT',
+    'set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing',
+  ],
+  [
+    'MAKA_CLOUD_AGENT_USER',
+    'the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly',
+  ],
+  [
+    'MAKA_CLOUD_AGENT_GROUP',
+    'the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER',
   ],
   [
     'MAKA_CLOUD_SPEND_ALERT_USD',
@@ -350,6 +448,13 @@ export function readStackConfig(
     }
     return parsed;
   };
+  const flag = (name: string): boolean => {
+    const raw = value(name);
+    if (raw === undefined || raw === '0') return false;
+    if (raw === '1') return true;
+    problems.push(`${name} must be 1 or 0`);
+    return false;
+  };
   const dollars = (name: string, fallback: number): number => {
     const raw = value(name);
     if (raw === undefined) return fallback;
@@ -410,6 +515,8 @@ export function readStackConfig(
       ),
       serverDailyUsd: dollars('MAKA_CLOUD_SERVER_DAILY_USD', DEFAULT_SPEND_CAPS.serverDailyUsd),
     },
+    taskLimits: taskLimits(value, problems),
+    timelineContent: flag('MAKA_CLOUD_TIMELINE_CONTENT'),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
@@ -453,6 +560,21 @@ export function readStackConfig(
     const problem = backupDirProblem(dataDir, backupDir);
     if (problem === undefined) config.backupDir = backupDir;
     else problems.push(problem);
+  }
+  const agentUser = value('MAKA_CLOUD_AGENT_USER');
+  const agentGroup = value('MAKA_CLOUD_AGENT_GROUP');
+  if (agentUser !== undefined || agentGroup !== undefined) {
+    if (agentUser === undefined || agentGroup === undefined) {
+      problems.push('MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP go together');
+    } else {
+      try {
+        config.agentChannel = assertAgentChannel({ user: agentUser, group: agentGroup });
+      } catch (error) {
+        problems.push(
+          `MAKA_CLOUD_AGENT_USER / MAKA_CLOUD_AGENT_GROUP: ${(error as Error).message}`,
+        );
+      }
+    }
   }
   const alertUsd = value('MAKA_CLOUD_SPEND_ALERT_USD');
   const ownerInvite = value('MAKA_CLOUD_OWNER_INVITE');
@@ -668,6 +790,8 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `Claude runs:         ${config.agentChannel ? `through the Agent SDK as ${config.agentChannel.user} (group ${config.agentChannel.group}), conversation kept in ${config.transcriptsDbPath}` : 'directly (set MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP for the Agent SDK)'}`,
+    `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
     `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,

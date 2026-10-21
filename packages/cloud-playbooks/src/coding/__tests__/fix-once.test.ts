@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODES, type ModesConfig } from '@maka-cloud/modes';
+import type { RunnerEvent } from '@maka-cloud/orchestrator';
 import { fixBrief, MAX_FIX_FINDINGS } from '../review.js';
 import {
   type AgentScript,
@@ -59,6 +60,18 @@ async function deliveredAddSh(h: Harness, id: string): Promise<string> {
   ).toString();
 }
 
+/** A task that ends failed, with nothing delivered, because the review still found a P1. */
+async function failedWithP1(h: Harness, id: string, events: RunnerEvent[], why = /./) {
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', 'a P1 left after the one fix does not end finished');
+  const reason = end?.type === 'failed' ? end.reason : '';
+  assert.match(reason, /still found \d+ serious problem\(s\) after the one fix it allows/);
+  assert.match(reason, /so the change was not delivered/);
+  assert.match(reason, why);
+  assert.equal(await h.deliveries.get(id), undefined, 'the change is not recorded for delivery');
+  await assert.rejects(fs.readFile(join(h.handoff, id, 'review.md')), /ENOENT/);
+}
+
 const reviewLineOf = (manifest: { done: string[] }): string =>
   manifest.done.find((line) => line.startsWith('review:')) ?? '';
 
@@ -98,20 +111,15 @@ test('P1 findings go back to the implementer once, and the fixed change is revie
   zeroStats(h.runner);
 });
 
-test('a reviewer that always answers P1 gets exactly one fix and two reviews, never a third round', async (t) => {
+test('a reviewer that always answers P1 gets exactly one fix and two reviews, and the task then fails instead of finishing', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = reviewsInRounds([[P1]]);
-  const { events, spec, dir } = await run(h, 'tsk_fix2');
-  assert.deepEqual(terminal(events), { type: 'finished' });
-  assert.equal(h.claude.turns.length, 2, 'one implementation and one fix');
+  const { events } = await run(h, 'tsk_fix2');
+  assert.equal(h.claude.turns.length, 2, 'one implementation and one fix, never a third round');
   assert.equal(h.codex.turns.length, 2, 'one review and one review of the fix');
-  // What remains is shown, not hidden and not fixed again.
-  const verification = await readJson(join(dir, 'verification.json'));
-  assert.deepEqual(verification.review.counts, { P1: 1, P2: 0, P3: 0 });
-  assert.equal(verification.review.fix.result, 'applied');
-  assert.match(reviewLineOf(await readJson(spec.resultPath)), /1 finding\(s\) remain: P1 1/);
-  assert.equal(await deliveredAddSh(h, 'tsk_fix2'), GUARDED);
+  await failedWithP1(h, 'tsk_fix2', events);
+  assert.deepEqual(h.leases, { acquired: 1, released: 1 });
   zeroStats(h.runner);
 });
 
@@ -144,54 +152,39 @@ const NOT_APPLIED: [string, AgentScript, RegExp][] = [
 ];
 
 for (const [name, fix, reason] of NOT_APPLIED) {
-  test(`when ${name}, the first verified change is delivered with its P1 findings`, async (t) => {
+  test(`when ${name}, the first change still has its P1, so the task fails and delivers nothing`, async (t) => {
     const h = await setup(t, { modes: MODES });
     h.claude.script = implements_(fix);
     h.codex.script = reviewsInRounds([[P1]]);
-    const { events, spec, dir } = await run(h, 'tsk_na');
-    assert.deepEqual(terminal(events), { type: 'finished' });
+    const { events } = await run(h, 'tsk_na');
     assert.equal(h.claude.turns.length, 2, 'the fix was tried once');
     assert.equal(h.codex.turns.length, 1, 'a failed fix is not reviewed');
-    assert.equal(await deliveredAddSh(h, 'tsk_na'), FIXED_ADD);
-    const verification = await readJson(join(dir, 'verification.json'));
-    assert.equal(verification.review.fix.result, 'not_applied');
-    assert.match(verification.review.fix.reason, reason);
-    assert.deepEqual(verification.review.counts, { P1: 1, P2: 0, P3: 0 });
-    assert.match(
-      reviewLineOf(await readJson(spec.resultPath)),
-      /1 finding\(s\) remain: P1 1; 1 P1 finding\(s\) were sent back to the implementer once and the fix was not used/,
-    );
+    await failedWithP1(h, 'tsk_na', events, reason);
     zeroStats(h.runner);
   });
 }
 
-test('a fixed change that cannot be reviewed again is not delivered in place of the one a reviewer saw', async (t) => {
+test('a fixed change that cannot be reviewed again is not delivered, and the first change still has its P1 so the task fails', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
     if (turn.n === 1) return reviewsInRounds([[P1]])(turn);
     return { failed: 'the reviewer is down' };
   };
-  const { events, dir } = await run(h, 'tsk_na2');
-  assert.deepEqual(terminal(events), { type: 'finished' });
-  assert.equal(await deliveredAddSh(h, 'tsk_na2'), FIXED_ADD);
-  const verification = await readJson(join(dir, 'verification.json'));
-  assert.equal(verification.review.fix.result, 'not_applied');
-  assert.match(verification.review.fix.reason, /could not be reviewed again/);
+  const { events } = await run(h, 'tsk_na2');
+  await failedWithP1(h, 'tsk_na2', events, /could not be reviewed again/);
   zeroStats(h.runner);
 });
 
-test('a fixed change on which the reviewer touched the repository is not delivered either', async (t) => {
+test('a fixed change on which the reviewer touched the repository is not delivered, and the task fails with the first change’s P1', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
     if (turn.n === 2) await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), 'tampered\n');
     return reviewsInRounds([[P1], []])(turn);
   };
-  const { events, dir } = await run(h, 'tsk_na3');
-  assert.deepEqual(terminal(events), { type: 'finished' });
-  assert.equal(await deliveredAddSh(h, 'tsk_na3'), FIXED_ADD);
-  assert.equal((await readJson(join(dir, 'verification.json'))).review.fix.result, 'not_applied');
+  const { events } = await run(h, 'tsk_na3');
+  await failedWithP1(h, 'tsk_na3', events, /the fix was not used/);
   zeroStats(h.runner);
 });
 
@@ -211,11 +204,18 @@ test('the fix and the second review share the review’s limit, which never grow
   const { events } = await run(h, 'tsk_fbudget', spec);
   assert.deepEqual(terminal(events), { type: 'finished' });
   // Standard keeps 20% of $10 for review and fix: after $1 of work, everything after it stops at $3.
-  assert.equal(h.claude.turns[0]?.spec.budgetUsd, 8);
+  assert.equal(h.claude.turns[0]?.spec.turnBudgetUsd, 8);
   const limits = [h.codex.turns[0], h.claude.turns[1], h.codex.turns[1]].map(
-    (turn) => (turn?.spec.budgetUsd ?? 0) + spentBefore(turn, h),
+    (turn) => (turn?.spec.turnBudgetUsd ?? 0) + spentBefore(turn, h),
   );
   assert.deepEqual(limits, [3, 3, 3]);
+  // Every run is held to the whole $10 by the pool, whatever its phase's limit.
+  assert.deepEqual(
+    [h.claude.turns[0], h.codex.turns[0], h.claude.turns[1], h.codex.turns[1]].map(
+      (turn) => turn?.spec.budgetUsd,
+    ),
+    [10, 10, 10, 10],
+  );
   const totals = events.flatMap((event) => (event.type === 'usage' ? [event.costUsd] : []));
   assert.ok(Math.max(...totals) <= 3, `spent ${Math.max(...totals)}`);
   zeroStats(h.runner);
@@ -242,7 +242,7 @@ function spentBefore(turn: AgentTurn | undefined, h: Harness): number {
   return sum;
 }
 
-test('a review that leaves too little for a fix and a second review delivers the change with its P1 findings', async (t) => {
+test('a review that leaves too little for a fix and a second review fails the task with the P1 it found', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -250,16 +250,13 @@ test('a review that leaves too little for a fix and a second review delivers the
     turn.usage(1.95);
     return reviewsInRounds([[P1]])(turn);
   };
-  const { events, dir } = await run(h, 'tsk_fnobudget', { budgetUsd: 10 });
-  assert.deepEqual(terminal(events), { type: 'finished' });
+  const { events } = await run(h, 'tsk_fnobudget', { budgetUsd: 10 });
   assert.equal(h.claude.turns.length, 1, 'no fix was started');
-  const verification = await readJson(join(dir, 'verification.json'));
-  assert.equal(verification.review.fix.result, 'not_applied');
-  assert.match(verification.review.fix.reason, /too little for a fix and a second review/);
+  await failedWithP1(h, 'tsk_fnobudget', events, /too little for a fix and a second review/);
   zeroStats(h.runner);
 });
 
-test('a fix that spends the review’s limit ends the fix, not the task, and delivers the first change', async (t) => {
+test('a fix that spends the review’s limit ends the fix, and the task fails with the first change’s P1', async (t) => {
   const h = await setup(t, { modes: MODES });
   const spent = gate();
   h.claude.script = async (turn) => {
@@ -270,12 +267,9 @@ test('a fix that spends the review’s limit ends the fix, not the task, and del
     return 'ok';
   };
   h.codex.script = reviewsInRounds([[P1]]);
-  const { events, dir } = await run(h, 'tsk_fover', { budgetUsd: 10, budgetRootId: 'tsk_root' });
+  const { events } = await run(h, 'tsk_fover', { budgetUsd: 10, budgetRootId: 'tsk_root' });
   await spent.promise;
-  assert.deepEqual(terminal(events), { type: 'finished' });
-  assert.equal(await deliveredAddSh(h, 'tsk_fover'), FIXED_ADD);
-  const verification = await readJson(join(dir, 'verification.json'));
-  assert.match(verification.review.fix.reason, /ran out of the review's budget/);
+  await failedWithP1(h, 'tsk_fover', events, /ran out of the review's budget/);
   zeroStats(h.runner);
 });
 
@@ -330,7 +324,7 @@ test('cancel while the fixed change is reviewed again: nothing is delivered and 
   zeroStats(h.runner);
 });
 
-test('a fix that cannot start is a fix that was not used, and releases what it held', async (t) => {
+test('a fix that cannot start is a fix that was not used: the task fails with the P1 and releases what it held', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = reviewsInRounds([[P1]]);
@@ -340,11 +334,8 @@ test('a fix that cannot start is a fix that was not used, and releases what it h
     if (++starts === 2) throw new Error('no capacity for a second run');
     return start(spec);
   };
-  const { events, dir } = await run(h, 'tsk_fstart');
-  assert.deepEqual(terminal(events), { type: 'finished' });
-  assert.equal(await deliveredAddSh(h, 'tsk_fstart'), FIXED_ADD);
-  const verification = await readJson(join(dir, 'verification.json'));
-  assert.match(verification.review.fix.reason, /no capacity/);
+  const { events } = await run(h, 'tsk_fstart');
+  await failedWithP1(h, 'tsk_fstart', events, /no capacity/);
   assert.equal(h.claude.open, 0);
   zeroStats(h.runner);
 });

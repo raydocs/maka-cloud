@@ -170,8 +170,9 @@ const call = async (
 test('every answer of the intent has an answer for the CLI', async () => {
   const cases: Array<[StepIntentResult, 'allow' | 'deny', RegExp?]> = [
     [{ status: 'recorded' }, 'allow'],
-    [{ status: 'running' }, 'allow'],
-    [{ status: 'completed', ok: true }, 'allow'],
+    [{ status: 'running' }, 'deny', /already running/],
+    [{ status: 'completed', ok: true }, 'deny', /already finished and is not run again/],
+    [{ status: 'completed', ok: false }, 'deny', /already failed/],
     [{ status: 'interrupted' }, 'deny', /cut off by a restart/],
     [{ status: 'refused', reason: 'a newer attempt drives this task' }, 'deny', /newer attempt/],
   ];
@@ -261,4 +262,21 @@ test('an outcome that cannot be recorded does not fail the tool', async () => {
   );
   assert.deepEqual(await call(hooks, 'PostToolUse'), {});
   assert.deepEqual(problems, ['a step outcome could not be recorded: no space']);
+});
+
+test('a finished step is not run again, and the agent is told what it reported, with secrets taken out', async () => {
+  const answer = (await call(
+    stepHooks(
+      logWith(async () => ({
+        status: 'completed',
+        ok: true,
+        output: 'pushed sk-secret-123456 ok',
+      })),
+      (text) => text.replaceAll('sk-secret-123456', '[redacted]'),
+    ),
+    'PreToolUse',
+  )) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+  assert.equal(answer.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(answer.hookSpecificOutput?.permissionDecisionReason ?? '', /pushed \[redacted\] ok/);
+  assert.ok(!(answer.hookSpecificOutput?.permissionDecisionReason ?? '').includes('sk-secret'));
 });

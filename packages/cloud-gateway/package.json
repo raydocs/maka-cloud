@@ -17,5 +17,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:dist": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@maka-cloud/orchestrator": "0.1.0"
   }
 }

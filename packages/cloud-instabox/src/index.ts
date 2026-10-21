@@ -5,9 +5,11 @@ export {
   DEFAULT_INSTABOX_BASE_URL,
   InstaboxClient,
   type InstaboxClientOptions,
+  type InstaboxCreateMachineRequest,
   type InstaboxExecRequest,
   type InstaboxExecResult,
   type InstaboxFiles,
+  type InstaboxListMachinesOptions,
   type InstaboxMachine,
   type InstaboxMachineState,
   type InstaboxOperation,
@@ -17,6 +19,7 @@ export {
   InstaboxApiError,
   InstaboxOperationError,
   InstaboxTransportError,
+  isQuotaExceeded,
   type InstaboxErrorEnvelope,
 } from './errors.js';
 export {
@@ -27,7 +30,9 @@ export {
 export {
   applyEgressGuard,
   EGRESS_BLOCKED_V4,
+  EGRESS_CHAIN,
   EGRESS_BLOCKED_V6,
+  EGRESS_ICMPV6_ALLOWED,
   EgressGuardError,
   type EgressGuardOptions,
 } from './egress.js';

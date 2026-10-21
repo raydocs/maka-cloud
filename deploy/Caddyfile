@@ -1,0 +1,46 @@
+# The three public names of a maka-cloud host: the app and API, the MCP endpoint and the model
+# gateway. Every name and the upstream come from the environment (deploy/compose.yaml sets them),
+# so the same file serves a real host and the rehearsal:
+#
+#   MAKA_CLOUD_APP_NAME     app.example.com      the web app, /v1/... and /healthz
+#   MAKA_CLOUD_MCP_NAME     mcp.example.com      the orchestrator's MCP endpoint
+#   MAKA_CLOUD_MODELS_NAME  models.example.com   the model gateway
+#   MAKA_CLOUD_UPSTREAM     maka-cloud           the server's host name (default: the compose service)
+#   MAKA_CLOUD_CADDY_GLOBAL local_certs          a global option; the rehearsal uses Caddy's own CA
+#
+# The event stream (GET /v1/events) stays open and carries a heartbeat; `flush_interval -1` sends
+# every write at once. Do not add `encode` to the API handler: compression buffers the stream.
+{
+	{$MAKA_CLOUD_CADDY_GLOBAL:}
+}
+
+{$MAKA_CLOUD_APP_NAME} {
+	root * /srv/web
+	@api path /v1/* /healthz
+	handle @api {
+		reverse_proxy {$MAKA_CLOUD_UPSTREAM:maka-cloud}:8080 {
+			flush_interval -1
+		}
+	}
+	handle /sw.js {
+		header Cache-Control "no-cache"
+		file_server
+	}
+	handle {
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+{$MAKA_CLOUD_MCP_NAME} {
+	reverse_proxy {$MAKA_CLOUD_UPSTREAM:maka-cloud}:8081 {
+		flush_interval -1
+	}
+}
+
+{$MAKA_CLOUD_MODELS_NAME} {
+	reverse_proxy {$MAKA_CLOUD_UPSTREAM:maka-cloud}:8082 {
+		flush_interval -1
+	}
+}

@@ -16,6 +16,13 @@
  * zombie (killed, not yet reaped) is not alive.
  */
 const ALIVE_FN = `
+# With a separate agent account the agent's processes are not the sandbox user's: signalling and
+# reading them goes through sudo, which the sandbox user is assumed to have (see agent-user.ts).
+sig() { kill "$@" 2>/dev/null && return 0; [ -n "\${MAKA_AGENT_USER:-}" ] && sudo -n kill "$@" 2>/dev/null; }
+environ_of() {
+  cat "/proc/$1/environ" 2>/dev/null && return 0
+  [ -n "\${MAKA_AGENT_USER:-}" ] && sudo -n cat "/proc/$1/environ" 2>/dev/null
+}
 pstate() {
   local line
   IFS= read -r line < "/proc/$1/stat" 2>/dev/null || return 1
@@ -30,7 +37,7 @@ alive() {
   [ "$st" = Z ] && return 1
   if [ -r "/proc/$pid/environ" ] && [ -r "$1.token" ]; then
     tok=$(cat "$1.token")
-    tr '\\0' '\\n' < "/proc/$pid/environ" | grep -qxF "MAKA_RUN_TOKEN=$tok" || return 1
+    environ_of "$pid" | tr '\\0' '\\n' | grep -qxF "MAKA_RUN_TOKEN=$tok" || return 1
   fi
   return 0
 }
@@ -61,7 +68,7 @@ group_is_run() {
   tok=$(cat "$1.token" 2>/dev/null) || return 1
   [ -n "$tok" ] || return 1
   for pid in $(group_pids "$2"); do
-    if [ -r "/proc/$pid/environ" ] && tr '\\0' '\\n' < "/proc/$pid/environ" | grep -qxF "MAKA_RUN_TOKEN=$tok"; then return 0; fi
+    if environ_of "$pid" | tr '\\0' '\\n' | grep -qxF "MAKA_RUN_TOKEN=$tok"; then return 0; fi
   done
   return 1
 }
@@ -220,15 +227,15 @@ for pidf in $pids; do
   members=$(group_pids "$pid")
   [ -n "$members" ] || continue
   found=1
-  kill -TERM -- "-$pid" 2>/dev/null
-  for m in $members; do kill -TERM "$m" 2>/dev/null; done
+  sig -TERM -- "-$pid"
+  for m in $members; do sig -TERM "$m"; done
   waited=0
   while [ "$waited" -lt "\${MAKA_GRACE_TENTHS:-30}" ] && [ -n "$(group_pids "$pid")" ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  kill -KILL -- "-$pid" 2>/dev/null
-  for m in $(group_pids "$pid"); do kill -KILL "$m" 2>/dev/null; done
+  sig -KILL -- "-$pid"
+  for m in $(group_pids "$pid"); do sig -KILL "$m"; done
   waited=0
   while [ "$waited" -lt 30 ] && [ -n "$(group_pids "$pid")" ]; do
     sleep 0.1
@@ -438,3 +445,61 @@ export function cliCheckScript(binary: string): string {
   return `export PATH="$HOME/.maka-cli/bin:$PATH"
 [ -f "$MAKA_MARKER" ] && command -v ${binary} >/dev/null 2>&1 && ${binary} --version 2>&1 | grep -qF -- "$MAKA_VERSION"`;
 }
+
+/**
+ * A task's Claude configuration directory in the sandbox: the CLI's transcripts live under
+ * `projects/<key>/<session>.jsonl` there. It is the task's own, so tasks never read each other's.
+ * The key and session id come in as plain, host-checked names; links on the way are refused.
+ */
+const TRANSCRIPT_DIRS = `cfg="$MAKA_DIR/claude-config"
+dir="$cfg/projects/$MAKA_KEY"
+file="$dir/$MAKA_SESSION.jsonl"`;
+
+/** Prints how many lines the session's transcript has in the sandbox (0 when there is none). */
+export const TRANSCRIPT_PROBE_SCRIPT = `${TRANSCRIPT_DIRS}
+for p in "$cfg" "$cfg/projects" "$dir" "$file"; do
+  if [ -L "$p" ]; then echo 0; exit 0; fi
+done
+if [ -f "$file" ]; then wc -l < "$file" | tr -d ' '; else echo 0; fi
+`;
+
+/**
+ * Writes the transcript in chunks into a temporary file, checks its sha256 at the last chunk and
+ * renames it into place, so the CLI never reads a half-written file. A chunk sent again after a
+ * lost answer is recognized by the file's size and not written twice.
+ */
+export const TRANSCRIPT_CHUNK_SCRIPT = `set -eu
+# The agent's account reads and appends to this file through the shared group (see agent-user.ts).
+umask 007
+${TRANSCRIPT_DIRS}
+tmp="$dir/.restore-$MAKA_SESSION.tmp"
+if [ "$MAKA_OFFSET" = 0 ]; then
+  for p in "$cfg" "$cfg/projects" "$dir"; do
+    if [ -L "$p" ]; then echo "refused: $p is a symbolic link" >&2; exit 1; fi
+  done
+  mkdir -p "$dir"
+  rm -f -- "$tmp"
+  # Created or refused: a link planted at the name after the rm is not written through.
+  set -C
+  : > "$tmp"
+  set +C
+fi
+size=$(stat -c %s "$tmp" 2>/dev/null || echo -1)
+if [ "$size" -eq "$MAKA_OFFSET" ]; then
+  base64 -d >> "$tmp"
+elif [ "$size" -eq $((MAKA_OFFSET + MAKA_LEN)) ]; then
+  cat > /dev/null
+else
+  cat > /dev/null
+  echo "the transcript upload is out of step ($size, expected $MAKA_OFFSET)" >&2
+  exit 1
+fi
+if [ "$MAKA_LAST" = 1 ]; then
+  [ "$(sha256sum < "$tmp" | cut -d' ' -f1)" = "$MAKA_HASH" ] || { rm -f -- "$tmp"; echo "the transcript arrived damaged" >&2; exit 1; }
+  mv -f -- "$tmp" "$file"
+fi
+`;
+
+export const TRANSCRIPT_ABORT_SCRIPT = `${TRANSCRIPT_DIRS}
+rm -f -- "$dir/.restore-$MAKA_SESSION.tmp"
+`;

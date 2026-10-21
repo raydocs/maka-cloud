@@ -1,8 +1,18 @@
 import { spawn } from 'node:child_process';
-import { existsSync, promises as fs } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  promises as fs,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { constants as osConstants } from 'node:os';
+import { constants as osConstants, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * A fake instabox API. `exec` really runs the command with bash on this machine, so the
@@ -28,14 +38,83 @@ export type ExecAction =
   | { hold: Promise<void> };
 
 export interface FakeInstaboxOptions {
+  /** Where it listens. Default: 127.0.0.1 on a free port; the deploy rehearsal sets both. */
+  host?: string;
+  port?: number;
   apiKey?: string;
   machineId?: string;
-  /** Replaces PATH for exec'd commands. */
+  /** Replaces PATH for exec'd commands (the firewall stand-ins, when on, stay in front of it). */
   execPath?: string;
   /** HOME for exec'd commands. Defaults to /tmp. */
   home?: string;
   /** Extra environment for exec'd commands, before the request's own `envs`. */
   env?: Record<string, string>;
+  /**
+   * `iptables`, `ip6tables` and `sudo` stand-ins that keep their rules in files instead of
+   * touching this machine's firewall. Default `shim`: a test must never change the real one.
+   * `none` leaves the real tools (or none) in reach, for a test of a box without a firewall tool.
+   */
+  firewall?: 'shim' | 'none';
+  /** Runs every exec'd command behind this prefix (`nsenter --net=...`, to give it a network of its own). */
+  commandPrefix?: string[];
+}
+
+/**
+ * A stand-in for iptables and ip6tables that keeps the rules in files under SHIM_STATE and
+ * understands the few forms the egress guard uses. `SHIM_FAIL` is a pattern: a call whose
+ * arguments match it fails. `SHIM_LIE` makes `-S` print nothing, as if the rules had not stuck.
+ */
+const FIREWALL_SHIM = `#!/bin/bash
+tool=$(basename "$0")
+echo "$tool $*" >> "$SHIM_STATE/log"
+if [ -n "\${SHIM_FAIL:-}" ] && [[ "$*" =~ $SHIM_FAIL ]]; then exit 3; fi
+[ "$1" = -w ] && shift
+op="$1"; shift
+rules() { echo "$SHIM_STATE/$tool.$1"; }
+# What iptables prints is not what it was given: states in its own order, a host as a /32 or /128,
+# the default reject reason, the protocol match, ICMPv6 types as numbers. A rule is stored the way
+# iptables would print it, so a check written against the arguments alone does not pass here.
+norm() {
+  sed -E \\
+    -e 's/--ctstate ESTABLISHED,RELATED/--ctstate RELATED,ESTABLISHED/' \\
+    -e 's/-d ([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+) /-d \\1\\/32 /' \\
+    -e 's/-d ([0-9a-f]*:[0-9a-f:]*) /-d \\1\\/128 /' \\
+    -e 's/-p (udp|tcp) --dport/-p \\1 -m \\1 --dport/' \\
+    -e 's/-p ipv6-icmp --icmpv6-type neighbour-solicitation/-p ipv6-icmp -m icmp6 --icmpv6-type 135/' \\
+    -e 's/-p ipv6-icmp --icmpv6-type neighbour-advertisement/-p ipv6-icmp -m icmp6 --icmpv6-type 136/' \\
+    -e 's/-p ipv6-icmp --icmpv6-type router-solicitation/-p ipv6-icmp -m icmp6 --icmpv6-type 133/'
+}
+case "$op" in
+  -N) [ -e "$(rules "$1")" ] && exit 1; : > "$(rules "$1")" ;;
+  -F) : > "$(rules "$1")" ;;
+  -A) chain="$1"; shift; echo "-A $chain $* " | norm | sed -E -e 's/ $//' -e "s/-j REJECT\$/-j REJECT --reject-with $([ "$tool" = ip6tables ] && echo icmp6-port-unreachable || echo icmp-port-unreachable)/" >> "$(rules "$chain")" ;;
+  -I) chain="$1"; shift 2; { echo "-A $chain $*"; cat "$(rules "$chain")" 2>/dev/null; true; } > "$SHIM_STATE/tmp" \\
+        && mv "$SHIM_STATE/tmp" "$(rules "$chain")" ;;
+  -C) chain="$1"; shift; grep -Fxq -- "-A $chain $*" "$(rules "$chain")" 2>/dev/null ;;
+  -S) [ -n "\${SHIM_LIE:-}" ] && exit 0; echo "-P $1 ACCEPT"; cat "$(rules "$1")" 2>/dev/null ;;
+  *) exit 2 ;;
+esac
+`;
+
+/**
+ * `sudo -n tool ...` runs the tool as this user. `sudo -u account ...` (the agent's account, which
+ * the runners switch to) is a real change of user, so it goes to the real `sudo`, found behind the
+ * stand-ins' own directory, which is first on PATH.
+ */
+const SUDO_SHIM = `#!/bin/bash
+for arg in "$@"; do [ "$arg" = -u ] && PATH="\${PATH#*:}" exec sudo "$@"; done
+[ "$1" = -n ] && shift
+exec "$@"
+`;
+
+/** What the firewall stand-ins did, for a test to read. */
+export interface FakeFirewall {
+  /** The rules of a chain, one `-A chain ...` line each. */
+  rules(tool: 'iptables' | 'ip6tables', chain: string): string[];
+  /** Every call, as `tool args`. */
+  calls(): string[];
+  /** Forgets every rule, as a box restored from a snapshot or resumed after a restart may have. */
+  reset(): void;
 }
 
 export interface FakeSnapshot {
@@ -76,6 +155,9 @@ export class FakeInstabox {
   readonly requests: RecordedRequest[] = [];
   readonly operations = new Map<string, Operation>();
   readonly spawnedPids: number[] = [];
+  /** Commands in flight, by pid, until their process has closed. */
+  private readonly running = new Map<number, Promise<void>>();
+  private closed = false;
   machineState = 'running';
   autoSuspendedAt: string | undefined;
   /** Polls an operation stays `running` before reaching its final state. */
@@ -101,8 +183,12 @@ export class FakeInstabox {
   private execCount = 0;
   private operationCount = 0;
   private readonly execPath: string | undefined;
+  private readonly commandPrefix: string[];
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
+  private readonly listenOn: { host: string; port: number };
+  private readonly firewallDir: string | undefined;
+  readonly firewall: FakeFirewall;
   private snapshotCount = 0;
   private readonly snapshotKeys = new Map<string, string>();
   url = '';
@@ -111,8 +197,31 @@ export class FakeInstabox {
     this.apiKey = options.apiKey ?? 'ibk_test_key';
     this.machineId = options.machineId ?? 'm_aaaaaaaaaaaaaaaaaaaaaaaaaa';
     this.execPath = options.execPath;
+    this.commandPrefix = options.commandPrefix ?? [];
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
+    this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
+    if ((options.firewall ?? 'shim') === 'shim') {
+      this.firewallDir = mkdtempSync(join(tmpdir(), 'fake-instabox-fw-'));
+      const bin = join(this.firewallDir, 'bin');
+      mkdirSync(bin);
+      mkdirSync(join(this.firewallDir, 'state'));
+      for (const tool of ['iptables', 'ip6tables']) {
+        writeFileSync(join(bin, tool), FIREWALL_SHIM, { mode: 0o755 });
+      }
+      writeFileSync(join(bin, 'sudo'), SUDO_SHIM, { mode: 0o755 });
+    }
+    const state = this.firewallDir ? join(this.firewallDir, 'state') : undefined;
+    const read = (name: string): string =>
+      state && existsSync(join(state, name)) ? readFileSync(join(state, name), 'utf8') : '';
+    this.firewall = {
+      rules: (tool, chain) => read(`${tool}.${chain}`).split('\n').filter(Boolean),
+      calls: () => read('log').split('\n').filter(Boolean),
+      reset: () => {
+        if (!state) return;
+        for (const name of readdirSync(state)) if (name !== 'log') rmSync(join(state, name));
+      },
+    };
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((error) => {
         if (!res.headersSent) this.json(res, 500, this.envelope('internal', String(error), false));
@@ -122,14 +231,26 @@ export class FakeInstabox {
   }
 
   async start(): Promise<this> {
-    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) =>
+      this.server.listen(this.listenOn.port, this.listenOn.host, resolve),
+    );
     this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
     return this;
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    // A command still running would find its stand-in tools gone and reach the real ones on this
+    // machine's PATH, the real firewall among them: stop them all before the directory goes.
+    for (const pid of this.running.keys()) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {}
+    }
+    await Promise.all(this.running.values());
+    if (this.firewallDir) rmSync(this.firewallDir, { recursive: true, force: true });
   }
 
   requestsTo(method: string, pathPattern: RegExp): RecordedRequest[] {
@@ -441,19 +562,48 @@ export class FakeInstabox {
     timedOut: boolean;
     truncated: boolean;
   }> {
+    const env: Record<string, string | undefined> = {
+      PATH: this.execPath ?? process.env.PATH,
+      HOME: this.home,
+      ...this.baseEnv,
+      ...body.envs,
+    };
+    if (this.firewallDir) {
+      // In front of whatever PATH a test or a command sets, so no command here can reach the real
+      // firewall of the machine running the tests.
+      env.PATH = [join(this.firewallDir, 'bin'), env.PATH].filter(Boolean).join(':');
+      env.SHIM_STATE = join(this.firewallDir, 'state');
+    }
     return new Promise((resolve) => {
-      const child = spawn(BASH, ['-c', body.cmd], {
+      if (this.closed) {
+        resolve({ stdout: '', stderr: 'closed', exitCode: 1, timedOut: false, truncated: false });
+        return;
+      }
+      const [program = BASH, ...prefixArgs] = this.commandPrefix.length
+        ? this.commandPrefix
+        : [BASH];
+      const args = this.commandPrefix.length
+        ? [...prefixArgs, BASH, '-c', body.cmd]
+        : ['-c', body.cmd];
+      const child = spawn(program, args, {
         cwd: body.cwd ?? '/',
-        env: {
-          PATH: this.execPath ?? process.env.PATH ?? '',
-          HOME: this.home,
-          ...this.baseEnv,
-          ...body.envs,
-        },
+        env,
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      if (child.pid) this.spawnedPids.push(child.pid);
+      if (child.pid) {
+        this.spawnedPids.push(child.pid);
+        const pid = child.pid;
+        this.running.set(
+          pid,
+          new Promise<void>((done) =>
+            child.once('close', () => {
+              this.running.delete(pid);
+              done();
+            }),
+          ),
+        );
+      }
       let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       let truncated = false;

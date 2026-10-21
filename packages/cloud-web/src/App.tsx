@@ -14,6 +14,7 @@ import {
   dollars,
   errorText,
   type InboxItem,
+  type Mode,
   publicLink,
   type Question,
   stepsOf,
@@ -32,6 +33,7 @@ import { InboxPanel } from './Inbox';
 import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
+import { ModePicker } from './ModePicker';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
@@ -341,6 +343,7 @@ export function ConversationView({
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   const { state, status, error, busy, artifacts, noPause } = snapshot;
   const [draft, setDraft] = useState('');
+  const [workMode, setWorkMode] = useState<Mode | undefined>();
   const act = (key: string, work: () => Promise<unknown>) => feed.act(key, work);
   const control = (taskId: string, action: TaskControl) => feed.control(taskId, action);
   const answerItem = (item: InboxItem, optionId: string, text?: string) =>
@@ -411,7 +414,7 @@ export function ConversationView({
           className="composer"
           onSubmit={(e) => {
             e.preventDefault();
-            void feed.send(draft).then((sent) => sent && setDraft(''));
+            void feed.send(draft, workMode).then((sent) => sent && setDraft(''));
           }}
         >
           <label htmlFor="message" className="sr-only">
@@ -438,6 +441,12 @@ export function ConversationView({
               <span aria-hidden="true">↑</span>
             </button>
           </div>
+          <ModePicker
+            value={workMode}
+            onChange={setWorkMode}
+            idPrefix="chat"
+            disabled={Boolean(busy)}
+          />
         </form>
       </section>
       <aside className="work-panel" aria-label="Work and results">

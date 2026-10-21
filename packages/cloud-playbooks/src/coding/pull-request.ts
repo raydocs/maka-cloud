@@ -53,6 +53,13 @@ export function openPullRequestTool(
     const verification = JSON.parse(
       await readFile(delivery.verificationPath, 'utf8'),
     ) as VerificationView;
+    // Only a change a second agent reviewed is opened as a pull request.
+    if (verification.review?.status !== 'reviewed') {
+      throw new ToolRefusal(
+        'not_reviewed',
+        `The change of ${delivery.taskId} was not independently reviewed, so no pull request was opened.`,
+      );
+    }
     const pr = await options.publisher.publish(
       {
         changeSet,

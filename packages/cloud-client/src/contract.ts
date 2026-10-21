@@ -3,6 +3,10 @@
  * `Authorization: Bearer <invite>`; an object another invite owns answers 404.
  * Test against the real server: tests/integration/real-api.test.ts.
  */
+/** How much care a piece of work gets; the server's strict set. */
+export const MODES = ['quick', 'standard', 'deep'] as const;
+export type Mode = (typeof MODES)[number];
+
 export interface Conversation {
   conversationId: string;
   title: string | null;
@@ -63,6 +67,8 @@ export type TaskEvent =
   | { type: 'task_started'; taskId: string }
   | { type: 'task_cost'; taskId: string; fromTaskId: string; costUsd: number }
   | { type: 'task_progress'; taskId: string; note: string }
+  /** A cut-off run goes again: show `text` in place of what you had of its turn. */
+  | { type: 'task_restarted'; taskId: string; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }
   | { type: 'task_failed'; taskId: string; reason: string }
   | { type: 'task_cancel_requested'; taskId: string; by: string }
@@ -218,6 +224,42 @@ export interface SourceListing {
   site: string;
   label: SourceLabel;
 }
+/** Where a message sent to a running task stands. */
+export type TaskMessageState = 'pending' | 'delivered' | 'withdrawn' | 'unseen';
+
+/** One step of a task's run. `label` is present only when the owner turned content on. */
+export interface TimelineStep {
+  stepId: string;
+  kind: string;
+  replay: 'safe' | 'never';
+  state: 'running' | 'done' | 'failed' | 'interrupted';
+  epoch: number;
+  attempts: number;
+  startedAt: number;
+  endedAt?: number;
+  durationMs?: number;
+  label?: string;
+}
+/** The run of a task as its log has it, the same one the task view is computed from. */
+export interface RunTimeline {
+  taskId: string;
+  state: TaskView['state'];
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  runMs: number;
+  turns: Array<{
+    epoch: number;
+    cause: 'start' | 'restart' | 'resume';
+    startedAt: number;
+    endedAt?: number;
+    steps: number;
+  }>;
+  steps: TimelineStep[];
+  cost: Array<{ at: number; totalUsd: number }>;
+  messages: { sent: number; read: number; unseen: number; withdrawn: number };
+  content: boolean;
+}
 export interface SourcePreview {
   site: string;
   title?: string;
@@ -259,6 +301,10 @@ export const routes = {
   inboxAnswer: (item: string) => `/v1/inbox/items/${encodeURIComponent(item)}/answer`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,
+  timeline: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/timeline`,
+  taskMessages: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/messages`,
+  taskMessage: (task: string, message: string) =>
+    `${routes.taskMessages(task)}/${encodeURIComponent(message)}`,
   sources: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/sources`,
   sourcePreview: (task: string, index: number) => `${routes.sources(task)}/${index}/preview`,
   sourceImage: (task: string, index: number) => `${routes.sources(task)}/${index}/image`,

@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
-import type { CloudRunners } from '@maka-cloud/runners';
+import type { CloudRunners, CloudRunnersOptions } from '@maka-cloud/runners';
 import { readStackConfig } from '../config.js';
 import { type Stack, type StackDependencies, startStack } from '../stack.js';
 
@@ -122,4 +122,58 @@ test('a stack that started and was closed, twice, leaves no database open', {
     [],
     'every database of the stack itself is closed',
   );
+});
+
+const AGENT_ENV = { MAKA_CLOUD_AGENT_USER: 'maka-agent', MAKA_CLOUD_AGENT_GROUP: 'maka' };
+
+test('with the agent account set the fleet gets the SDK and the stored conversations, and the stack closes that database', {
+  skip: !LINUX,
+}, async (t) => {
+  const dir = await dataDir(t);
+  let given: Partial<CloudRunnersOptions> | undefined;
+  const stack = await startStack(configFor(dir, AGENT_ENV), ENV, {
+    createRunners: (options) => {
+      given = options;
+      return FLEET();
+    },
+  });
+  assert.deepEqual(given?.agentChannel, { user: 'maka-agent', group: 'maka' });
+  assert.equal(typeof given?.agentSdk?.query, 'function');
+  assert.ok(given?.transcripts, 'the conversations are kept');
+  assert.ok(existsSync(join(dir, 'transcripts.db')));
+  assert.ok(openFilesUnder(dir).some((file) => file.endsWith('transcripts.db')));
+  await stack.close();
+  assert.deepEqual(
+    openFilesUnder(dir).filter((file) => !file.includes(`${join(dir, 'conductor')}/`)),
+    [],
+  );
+});
+
+test('without the agent account the fleet gets neither, and no conversation database is made', async (t) => {
+  const dir = await dataDir(t);
+  let given: Partial<CloudRunnersOptions> | undefined;
+  const stack = await startStack(configFor(dir), ENV, {
+    createRunners: (options) => {
+      given = options;
+      return FLEET();
+    },
+  });
+  t.after(() => stack.close());
+  assert.equal(given?.agentSdk, undefined);
+  assert.equal(given?.agentChannel, undefined);
+  assert.equal(given?.transcripts, undefined);
+  assert.ok(!existsSync(join(dir, 'transcripts.db')));
+});
+
+test('a stack that fails to start with the agent account set leaves the conversation database closed', {
+  skip: !LINUX,
+}, async (t) => {
+  const dir = await dataDir(t);
+  const error = await fails(configFor(dir, AGENT_ENV), ENV, {
+    createRunners: () => {
+      throw new Error('no fleet');
+    },
+  });
+  assert.match(String((error as Error).message), /no fleet/u);
+  assert.deepEqual(openFilesUnder(dir), []);
 });

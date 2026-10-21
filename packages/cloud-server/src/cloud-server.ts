@@ -60,6 +60,8 @@ export interface ConversationHandler {
       external?: boolean;
       /** The limits of the run this message starts, from a standing duty. */
       run?: NonNullable<MessageMeta['run']>;
+      /** The mode the user picked for this message (T25); it applies if the message starts a run. */
+      mode?: NonNullable<MessageMeta['mode']>;
     },
     conductor: ConductorAccess,
   ): void | Promise<void>;
@@ -154,7 +156,7 @@ export interface CloudServerOptions {
   http?: Partial<HttpLimits>;
   orchestrator?: Pick<
     OrchestratorOptions,
-    'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend'
+    'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend' | 'limits'
   >;
   handler?: ConversationHandler;
   /**
@@ -197,6 +199,11 @@ export interface CloudServerOptions {
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
+  /**
+   * Task timelines include what each step did (its command or file), not only its kind. Default
+   * false: a timeline is metadata.
+   */
+  timelineContent?: boolean;
   /** Computer routes are absent without a trusted desktop/terminal adapter. */
   computer?: ComputerSource;
   /** The preview proxy for pages a task opened. Tests give it a fetcher that touches no network. */
@@ -446,6 +453,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
                 text: message.text,
                 ...(message.external === undefined ? {} : { external: message.external }),
                 ...(message.run === undefined ? {} : { run: message.run }),
+                ...(message.mode === undefined ? {} : { mode: message.mode }),
               },
               accessFor(message.sessionId),
             ),
@@ -558,6 +566,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       previews: previewService,
       previewLimiter: new RateLimiter(limits.previewsPerMinute),
       limits,
+      ...(options.timelineContent === true ? { timelineContent: true } : {}),
       onMessage: deliverMessage,
       ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
       ...(options.duties

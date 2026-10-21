@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { FakeRun } from '@maka-cloud/orchestrator';
+import { DEFAULT_FAKE_MANIFEST, type FakeRun } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import type { Conductor, ConductorOptions } from '../conductor.js';
 import type { ConductorToolSpec } from '../tools.js';
@@ -863,6 +863,63 @@ test('with tasks that survive a restart, a restart neither cancels a running tas
   assert.equal(reopened.state.delegation(before.key)?.state, 'settled');
   await reopened.idle();
   assert.equal(reopened.stats().stopChecks, 0);
+});
+
+async function followedClosing(
+  t: Parameters<typeof makeHarness>[0],
+  conductor: Partial<ConductorOptions>,
+) {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { ...keepTasks(() => h), ...conductor },
+  });
+  const { run, held } = await runningTaskTurn(h);
+  const [before] = h.conductor.state.unsettledDelegations();
+  assert.ok(before, 'the task is delegated');
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart();
+  await reopened.idle();
+  assert.equal(h.outbox.messages.length, 0, 'nothing is said while the task runs');
+
+  await run.complete({
+    ...DEFAULT_FAKE_MANIFEST,
+    summary: 'wrote it, key sk-abcdef0123456789 stays out',
+  });
+  await h.orchestrator.settled();
+  for (let pass = 0; reopened.state.unsettledDelegations().length > 0; pass++) {
+    assert.ok(pass < 500, 'the delegation was never settled');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await reopened.idle();
+  return { h, reopened, before };
+}
+
+test('a task followed across a restart ends with one closing message to the user, scrubbed, and none when it is settled again', async (t) => {
+  const { h, reopened, before } = await followedClosing(t, {
+    scrubTaskText: (text) => text.replace(/sk-\w+/gu, '[secret]'),
+  });
+  assert.equal(h.outbox.messages.length, 1, JSON.stringify(h.outbox.messages));
+  const [message] = h.outbox.messages;
+  assert.equal(message?.conversationId, 'cnv_1');
+  assert.equal(
+    message?.text,
+    'The server restarted while this ran. The task succeeded: wrote it, key [secret] stays out',
+  );
+
+  // A later look at the same task says nothing more.
+  assert.equal(reopened.state.settleDelegation(before.key, 0, 'again').settled, false);
+  await reopened.idle();
+  assert.equal(h.outbox.messages.length, 1);
+});
+
+test('without a scrubber the closing message of a followed task carries none of the task’s words', async (t) => {
+  const { h } = await followedClosing(t, {});
+  assert.deepEqual(
+    h.outbox.messages.map((message) => message.text),
+    ['The server restarted while this ran. The task succeeded.'],
+  );
 });
 
 test('the same restart without that setting cancels the task, as before', async (t) => {

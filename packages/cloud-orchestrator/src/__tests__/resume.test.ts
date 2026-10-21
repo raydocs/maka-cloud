@@ -6,6 +6,7 @@ import {
   recoveryNote,
   resumesInARow,
 } from '../recovery.js';
+import { RESTART_TEXT } from '../orchestrator.js';
 import { reduce } from '../reducer.js';
 import type { StepLog } from '../steps.js';
 import { MemoryTaskStore } from '../store.js';
@@ -66,7 +67,7 @@ test('a restart resumes a running task in its session instead of failing it, and
   // the note before the run starts, and the one that proves the attempt still owned the task
   // when the run came back.
   await eventually(
-    () => kinds(store, taskId).filter((type) => type === 'task_progress').length === 2,
+    () => kinds(store, taskId).includes('task_restarted'),
     'the run to be confirmed',
   );
   const log = kinds(store, taskId);
@@ -74,8 +75,13 @@ test('a restart resumes a running task in its session instead of failing it, and
     'task_attempt',
     'step_interrupted',
     'task_progress',
-    'task_progress',
+    'task_restarted',
   ]);
+  const restarted = store
+    .readTask(taskId)
+    .flatMap(({ event }) => (event.type === 'task_restarted' ? [event] : []));
+  assert.deepEqual(restarted, [{ type: 'task_restarted', taskId, epoch: 2, text: RESTART_TEXT }]);
+  assert.equal(reduce(store.readTask(taskId)).get(taskId)?.progress.at(-1), RESTART_TEXT);
   assert.equal(log.filter((type) => type === 'task_started').length, 1);
   assert.equal(second.orchestrator.taskStateOf(taskId), 'running');
 

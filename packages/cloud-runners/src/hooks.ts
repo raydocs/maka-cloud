@@ -13,6 +13,8 @@ import { errorMessage } from './shell.js';
 const HOOK_TIMEOUT_SECONDS = 30;
 const LABEL_CHARS = 120;
 const KIND_CHARS = 40;
+/** How much of a finished step's recorded result goes back to the agent that asks for it again. */
+const COMPLETED_OUTPUT_CHARS = 1_000;
 
 /** Tools that only read, search or keep notes. Running one again changes nothing. */
 const SAFE_TOOLS = new Set([
@@ -204,6 +206,60 @@ export function labelOf(
 
 const ALLOW = {};
 
+/** The most message text one hook answer carries; the rest waits for the next step. */
+export const STEER_CONTEXT_CHARS = 16_000;
+
+/** Where messages for the agent wait until a step ends. */
+export interface SteerInbox {
+  /** Takes the messages that fit in `maxChars` (the first always does), oldest first. */
+  take(maxChars: number): Array<{ steerId: string; text: string }>;
+}
+
+const STEER_ID = /^[A-Za-z0-9_.:-]{1,64}$/u;
+
+/**
+ * The tag that opens a message. It carries the message's key, so the transcript of the
+ * conversation shows which messages the agent was given: a restart reads it to tell a message the
+ * agent has from one it never got.
+ */
+export const steerOpening = (steerId?: string): string =>
+  steerId !== undefined && STEER_ID.test(steerId)
+    ? `<user_message id="${steerId}">`
+    : '<user_message>';
+
+/**
+ * The keys of the messages a piece of transcript shows the agent was given: the opening tag as it
+ * stands in a line's JSON (quotes escaped) or in plain text.
+ */
+export function steerKeysIn(text: string): string[] {
+  const keys: string[] = [];
+  for (const match of text.matchAll(/<user_message id=\\?"([A-Za-z0-9_.:-]{1,64})\\?">/gu)) {
+    keys.push(match[1] as string);
+  }
+  return keys;
+}
+
+/**
+ * The text the agent reads. The messages are the owner's own words, sent while it worked; they are
+ * marked as such so they are not mistaken for the output of the tool that just ran.
+ */
+export function steerContext(
+  messages: ReadonlyArray<{ steerId?: string; text: string }>,
+  redact: (text: string) => string,
+): string {
+  const many = messages.length > 1;
+  return [
+    `The user sent you ${many ? `${messages.length} messages` : 'a message'} while you were working. ${
+      many ? 'They are' : 'It is'
+    } not part of the output of the step that just ended. Read ${many ? 'them' : 'it'} now and take ${
+      many ? 'them' : 'it'
+    } into account from your next step on:`,
+    ...messages.map(
+      (message) => `${steerOpening(message.steerId)}\n${redact(message.text)}\n</user_message>`,
+    ),
+  ].join('\n');
+}
+
 function deny(reason: string) {
   return {
     hookSpecificOutput: {
@@ -227,6 +283,7 @@ export function stepHooks(
   steps: StepLog,
   redact: (text: string) => string,
   onProblem: (message: string) => void = () => undefined,
+  inbox?: SteerInbox,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   const pre: HookCallback = async (input) => {
     const call = input as PreToolUseHookInput;
@@ -240,9 +297,23 @@ export function stepHooks(
       });
       switch (result.status) {
         case 'recorded':
-        case 'running':
-        case 'completed':
           return ALLOW;
+        case 'running':
+          // This attempt started the step and has seen no outcome: a second executor would do it
+          // twice at once.
+          return deny(
+            'This step is already running. Wait for it to finish instead of starting it again.',
+          );
+        case 'completed':
+          // A hook cannot hand the CLI a result in place of running the tool, so the recorded
+          // one goes in the reason, and the step does not run again.
+          return deny(
+            `This step already ${result.ok ? 'finished' : 'failed'} and is not run again.${
+              result.output === undefined
+                ? ''
+                : ` What it reported: ${redact(result.output).slice(0, COMPLETED_OUTPUT_CHARS)}`
+            }`,
+          );
         case 'interrupted':
           return deny(
             'This step was cut off by a restart and may or may not have taken effect. Check the real state before trying it again.',
@@ -261,10 +332,31 @@ export function stepHooks(
     return ALLOW;
   };
 
+  /**
+   * What the owner sent while the agent worked, put in front of it after the step that just ended.
+   * A broken inbox never breaks the step: the messages stay where they are for the next one.
+   */
+  function waiting(event: 'PostToolUse' | 'PostToolUseFailure') {
+    if (!inbox) return ALLOW;
+    try {
+      const messages = inbox.take(STEER_CONTEXT_CHARS);
+      if (messages.length === 0) return ALLOW;
+      return {
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: steerContext(messages, redact),
+        },
+      };
+    } catch (error) {
+      onProblem(`a message for the agent could not be handed over: ${redact(errorMessage(error))}`);
+      return ALLOW;
+    }
+  }
+
   const post: HookCallback = async (input) => {
     const call = input as PostToolUseHookInput;
     await record(call.tool_use_id, { status: 'done' });
-    return ALLOW;
+    return waiting('PostToolUse');
   };
 
   const failed: HookCallback = async (input) => {
@@ -276,7 +368,7 @@ export function stepHooks(
         .trim()
         .slice(0, 500),
     });
-    return ALLOW;
+    return waiting('PostToolUseFailure');
   };
 
   async function record(

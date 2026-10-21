@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import { CloudClient, readEvents } from '../src/client';
 import { displayJson, displayText, publicLink } from '../src/presentation';
 import type { FeedEvent } from '../src/contract';
+import { applyEvent, emptyState } from '../src/state';
 
 test('SSE parses split UTF-8, CRLF, comments and multiline data, discarding an unfinished frame', async () => {
   const text =
@@ -164,4 +165,26 @@ test('a fetch that refuses a foreign `this` (as a browser’s does) still works'
   } as unknown as typeof fetch;
   const client = new CloudClient('fake', { fetcher: platformFetch });
   await expect(client.listConversations()).resolves.toEqual({ conversations: [] });
+});
+
+test('a restarted task shows the restart text as its latest note, once, and keeps running', () => {
+  const frame = (id: number, event: unknown, at = id): FeedEvent =>
+    ({ id, kind: 'task.event', data: { conversationId: 'c', seq: id, at, event } }) as FeedEvent;
+  let state = emptyState();
+  state = applyEvent(
+    state,
+    frame(1, { type: 'task_created', taskId: 't', sessionId: 's', mode: 'async' }),
+  );
+  state = applyEvent(state, frame(2, { type: 'task_started', taskId: 't' }));
+  state = applyEvent(
+    state,
+    frame(3, { type: 'task_progress', taskId: 't', note: 'reading the repo' }),
+  );
+  state = applyEvent(
+    state,
+    frame(4, { type: 'task_restarted', taskId: 't', epoch: 2, text: 'The server restarted.' }),
+  );
+  const task = state.tasks.t;
+  expect(task?.state).toBe('running');
+  expect(task?.progress).toEqual(['reading the repo', 'The server restarted.']);
 });

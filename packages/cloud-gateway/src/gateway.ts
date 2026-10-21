@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import {
   type BoundLimits,
   type Bounded,
@@ -110,9 +111,11 @@ export interface IssueInput {
   /**
    * What the grant's requests are charged to: a port over an existing ledger, or a dollar limit
    * in memory. With `poolId`, every grant of that pool also shares the pool's limit (set by the
-   * first grant of the pool), so grants issued side by side cannot together exceed it.
+   * first grant of the pool), so grants issued side by side cannot together exceed it. The
+   * pool's limit is `poolLimitUsd` when that is given, else `limitUsd`: a grant with a limit of
+   * its own for one turn (`limitUsd`) in a pool that holds what its whole task has left.
    */
-  budget: BudgetPort | { limitUsd: number; poolId?: string };
+  budget: BudgetPort | { limitUsd: number; poolId?: string; poolLimitUsd?: number };
   /** Whose caps the grant's spend counts against. Required when the gateway has `accounts`. */
   account?: Account;
   /** The conversation to tell if a cap stops the grant. Informational: it grants nothing. */
@@ -165,6 +168,9 @@ const NOT_SENT = new Set([
   'ENETUNREACH',
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
+
+/** Shorter upstream keys are not replaced by value: they would eat ordinary words. */
+const MIN_UPSTREAM_KEY_CHARS = 8;
 
 const PASSED_HEADERS = ['content-type', 'request-id', 'x-request-id', 'retry-after'];
 
@@ -569,7 +575,10 @@ export class Gateway {
       this.settle(grant, key, response.ok ? reservedUsd : 0);
       const body = await response.arrayBuffer().catch(() => new ArrayBuffer(0));
       release();
-      return new Response(body, { status: response.status, headers: passedHeaders(response) });
+      return new Response(this.passedBody(response, body), {
+        status: response.status,
+        headers: passedHeaders(response),
+      });
     }
     return this.metered(grant, key, bounded, reservedUsd, response, flight, release);
   }
@@ -676,7 +685,10 @@ export class Gateway {
         signal: flight.controller.signal,
       });
       const body = await response.arrayBuffer();
-      return new Response(body, { status: response.status, headers: passedHeaders(response) });
+      return new Response(this.passedBody(response, body), {
+        status: response.status,
+        headers: passedHeaders(response),
+      });
     } catch {
       return refusalResponse(
         'anthropic',
@@ -686,6 +698,27 @@ export class Gateway {
     } finally {
       release();
     }
+  }
+
+  /**
+   * What the vendor answered with, on its way to the caller. An error body is the vendor's text and
+   * can echo the key it was called with ("Incorrect API key provided: ..."), so it goes out
+   * scrubbed: this gateway's own upstream keys by value, anything shaped like a key by shape. The
+   * caller must never learn a key it was not given.
+   */
+  private passedBody(response: Response, body: ArrayBuffer): ArrayBuffer {
+    if (response.ok) return body;
+    let text = new TextDecoder().decode(body);
+    for (const upstream of Object.values(this.options.upstreams)) {
+      const key = upstream?.apiKey;
+      if (key !== undefined && key.length >= MIN_UPSTREAM_KEY_CHARS)
+        text = text.split(key).join('[secret]');
+    }
+    const scrubbed = new TextEncoder().encode(scrubSecretShapes(text));
+    return scrubbed.buffer.slice(
+      scrubbed.byteOffset,
+      scrubbed.byteOffset + scrubbed.byteLength,
+    ) as ArrayBuffer;
   }
 
   private async count(
@@ -731,8 +764,19 @@ export class Gateway {
       if (!Number.isFinite(budget.limitUsd) || budget.limitUsd <= 0) {
         throw new Error('A grant needs a positive budget.');
       }
-      const own = new Allowance(budget.limitUsd);
-      if (budget.poolId !== undefined) pool = this.pool(budget.poolId, budget.limitUsd);
+      if (
+        budget.poolLimitUsd !== undefined &&
+        !(Number.isFinite(budget.poolLimitUsd) && budget.poolLimitUsd > 0)
+      ) {
+        throw new Error('A grant needs a positive budget.');
+      }
+      const perTurn = budget.poolLimitUsd !== undefined && budget.poolId !== undefined;
+      const own = perTurn
+        ? new Allowance(budget.limitUsd, "this turn's model budget")
+        : new Allowance(budget.limitUsd);
+      if (budget.poolId !== undefined) {
+        pool = this.pool(budget.poolId, budget.poolLimitUsd ?? budget.limitUsd);
+      }
       port = new LimitPort(pool ? [own, pool.allowance] : [own]);
     }
     if (this.options.accounts) {

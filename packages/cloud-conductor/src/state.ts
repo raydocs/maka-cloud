@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isModeId, type ModeId } from '@maka-cloud/modes';
 import type { RunAuthority } from './guard.js';
 import type { OutboxKind } from './outbox.js';
 
@@ -38,6 +39,8 @@ export interface RunRow {
   dutyId: string | null;
   authority: RunAuthority | null;
   hardBudget: boolean;
+  /** The mode the user picked for this run (T25); null: none, and the conductor and the budget choose per delegation. */
+  mode: ModeId | null;
 }
 
 /** What a duty fixes about the run it starts. */
@@ -149,6 +152,8 @@ export interface DelegationRow {
   actualUsd: number | null;
   /** A cancel was asked for and has not succeeded yet; retried on start and when access returns. */
   cancelPending: boolean;
+  /** The mode the task was sent in; absent when no modes were configured. */
+  mode?: ModeId;
 }
 
 export interface SettleResult {
@@ -366,6 +371,14 @@ const SCHEMA_V5 = `
 ALTER TABLE held_actions ADD COLUMN shown TEXT;
 `;
 
+const SCHEMA_V6 = `
+ALTER TABLE runs ADD COLUMN mode TEXT;
+`;
+
+const SCHEMA_V7 = `
+ALTER TABLE delegations ADD COLUMN mode TEXT;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -375,6 +388,8 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V3,
   SCHEMA_V4,
   SCHEMA_V5,
+  SCHEMA_V6,
+  SCHEMA_V7,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -558,6 +573,7 @@ export class ConductorState {
     messageId: string,
     budgetUsd: number,
     limits?: RunLimits,
+    mode?: ModeId,
   ): AdmitResult {
     return this.transaction((): AdmitResult => {
       if (this.db.prepare('SELECT 1 FROM inputs WHERE input_id = ?').get(messageId)) {
@@ -571,7 +587,7 @@ export class ConductorState {
         this.setRunState(run.runId, 'active');
         run = { ...run, state: 'active' };
       } else {
-        run = this.createRun(conversationId, limits?.budgetUsd ?? budgetUsd, limits);
+        run = this.createRun(conversationId, limits?.budgetUsd ?? budgetUsd, limits, mode);
         newRun = true;
       }
       this.db
@@ -583,13 +599,18 @@ export class ConductorState {
     });
   }
 
-  private createRun(conversationId: string, budgetUsd: number, limits?: RunLimits): RunRow {
+  private createRun(
+    conversationId: string,
+    budgetUsd: number,
+    limits?: RunLimits,
+    mode?: ModeId,
+  ): RunRow {
     const runId = `run_${randomUUID().replaceAll('-', '')}`;
     const n = (this.db.prepare('SELECT COALESCE(MAX(n), 0) + 1 AS n FROM runs').get() as Row).n;
     const createdAt = this.now();
     this.db
       .prepare(
-        "INSERT INTO runs (run_id, n, conversation_id, state, budget_usd, created_at, duty_id, authority, hard_budget) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+        "INSERT INTO runs (run_id, n, conversation_id, state, budget_usd, created_at, duty_id, authority, hard_budget, mode) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
       )
       .run(
         runId,
@@ -600,6 +621,7 @@ export class ConductorState {
         limits?.dutyId ?? null,
         limits?.authority ?? null,
         limits ? 1 : 0,
+        mode ?? null,
       );
     return {
       runId,
@@ -613,6 +635,7 @@ export class ConductorState {
       dutyId: limits?.dutyId ?? null,
       authority: limits?.authority ?? null,
       hardBudget: limits !== undefined,
+      mode: mode ?? null,
     };
   }
 
@@ -789,16 +812,16 @@ export class ConductorState {
    * Reserves `usd` for a delegation and stores it under `key` before the call
    * is sent, in one transaction.
    */
-  reserveDelegation(runId: string, usd: number, key: string): ReserveResult {
+  reserveDelegation(runId: string, usd: number, key: string, mode?: ModeId): ReserveResult {
     return this.transaction((): ReserveResult => {
       const reserved = this.tryReserve(runId, usd, `delegate:${key}`);
       if (!reserved.ok) return reserved;
       const run = this.run(runId) as RunRow;
       this.db
         .prepare(
-          "INSERT INTO delegations (key, run_id, conversation_id, reservation, state, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+          "INSERT INTO delegations (key, run_id, conversation_id, reservation, state, mode, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
         )
-        .run(key, runId, run.conversationId, reserved.reservation, this.now());
+        .run(key, runId, run.conversationId, reserved.reservation, mode ?? null, this.now());
       return reserved;
     });
   }
@@ -817,7 +840,7 @@ export class ConductorState {
    * the task is seen ended, or with 0 when the orchestrator refused the call
    * or a cancel by key found that it was never created.
    */
-  settleDelegation(key: string, actualUsd: number): SettleResult {
+  settleDelegation(key: string, actualUsd: number, closing?: string): SettleResult {
     return this.transaction((): SettleResult => {
       const delegation = this.delegation(key);
       if (!delegation || delegation.state === 'settled') return { settled: false, overrunUsd: 0 };
@@ -837,6 +860,14 @@ export class ConductorState {
           "UPDATE delegations SET state = 'settled', actual_usd = ?, cancel_pending = 0 WHERE key = ?",
         )
         .run(actualUsd, key);
+      // Settling and telling the user are one step: the message goes out once, whoever settled it.
+      if (closing !== undefined) {
+        this.enqueueOutbox('message', delegation.conversationId, {
+          conversationId: delegation.conversationId,
+          runId: delegation.runId,
+          text: closing,
+        });
+      }
       return { settled: true, overrunUsd };
     });
   }
@@ -1509,6 +1540,7 @@ function toRun(row: Row): RunRow {
     dutyId: row.duty_id === null ? null : String(row.duty_id),
     authority: row.authority === null ? null : (String(row.authority) as RunAuthority),
     hardBudget: Number(row.hard_budget) === 1,
+    mode: isModeId(row.mode) ? row.mode : null,
   };
 }
 
@@ -1540,6 +1572,7 @@ function toDelegation(row: Row): DelegationRow {
     state: row.state as DelegationRow['state'],
     actualUsd: row.actual_usd === null ? null : Number(row.actual_usd),
     cancelPending: Number(row.cancel_pending) === 1,
+    ...(isModeId(row.mode) ? { mode: row.mode } : {}),
   };
 }
 

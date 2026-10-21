@@ -18,12 +18,19 @@ import {
   type CloudRunnersOptions,
   createCloudRunnersFromEnv,
   JsonFileSessionStore,
+  loadAgentSdk,
   sameConversationInputPolicy,
+  SqliteTranscriptStore,
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
 import type { Supervisor } from '@maka-cloud/supervisor';
-import { InviteStore, type PushTransport, pushConfigFromEnv } from '@maka-cloud/server';
+import {
+  InviteStore,
+  type PushTransport,
+  pushConfigFromEnv,
+  scrubErrorText,
+} from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
 import { createDuties, type DutiesRuntime } from './duties/runtime.js';
 import {
@@ -39,6 +46,7 @@ import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
 import { PauseSwitch, PauseWatcher } from './pause.js';
+import { withModes } from './moded-runner.js';
 import { SpendAlertWatcher } from './spend-alert.js';
 import { BackupScheduler } from './backup-schedule.js';
 import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
@@ -204,7 +212,14 @@ export async function startStack(
   // has no duties: there is no webhook route and no project route.
   const webhookSecret = config.dutiesSet ? env.MAKA_GITHUB_WEBHOOK_SECRET?.trim() : undefined;
   let duties: DutiesRuntime | undefined;
+  // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
+  // the Agent SDK, which needs the agent's account.
+  let transcripts: SqliteTranscriptStore | undefined;
   try {
+    if (config.agentChannel !== undefined) {
+      await mkdir(dirname(config.transcriptsDbPath), { recursive: true });
+      transcripts = SqliteTranscriptStore.open(config.transcriptsDbPath);
+    }
     duties =
       webhookSecret === undefined
         ? undefined
@@ -241,6 +256,13 @@ export async function startStack(
       inputs: sameConversationInputPolicy(directory),
       tenantOf,
       sandboxes: new TenantMachineProvider(config.sandboxes),
+      ...(config.agentChannel === undefined || transcripts === undefined
+        ? {}
+        : {
+            agentSdk: await loadAgentSdk(),
+            agentChannel: config.agentChannel,
+            transcripts,
+          }),
       ...(publicUrl === undefined ? {} : { mcpUrlForSandbox: () => publicUrl }),
     };
     runners = (
@@ -276,12 +298,16 @@ export async function startStack(
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
       handoffRoot: config.handoffRoot,
-      runners: new RunnerRegistry([...runners.runners, coding]),
+      runners: new RunnerRegistry([
+        ...runners.runners.map((runner) => withModes(runner, config.modes)),
+        coding,
+      ]),
       host: config.host,
       port: config.port,
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
-      orchestrator: { recoveredSpend: journal },
+      orchestrator: { recoveredSpend: journal, limits: config.taskLimits },
+      timelineContent: config.timelineContent,
       conductorRoot: config.conductorRoot,
       conductor: {
         // The vendor key stays in the gateway: the conductor's requests go through it in process.
@@ -293,10 +319,12 @@ export async function startStack(
           gateway: conductorGateway(gateway.gateway, ownerOfSession),
         },
         playbooks: STACK_PLAYBOOKS,
+        modes: config.modes,
         tools: [pullRequests],
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
+        scrubTaskText: scrubErrorText,
       },
       supervisor: (context) =>
         startInbox(
@@ -350,6 +378,7 @@ export async function startStack(
   } catch (error) {
     await duties?.stop();
     duties?.close();
+    transcripts?.close();
     await gateway.close();
     invites.close();
     journal.close();
@@ -384,6 +413,12 @@ export async function startStack(
         ...(duties === undefined
           ? {}
           : { [relative(config.dataDir, config.dutiesDbPath)]: (to) => duties.backupTo(to) }),
+        ...(transcripts === undefined
+          ? {}
+          : {
+              [relative(config.dataDir, config.transcriptsDbPath)]: (to) =>
+                transcripts.backupTo(to),
+            }),
       },
     });
   };
@@ -481,6 +516,7 @@ export async function startStack(
             await cloud.close();
           } finally {
             duties?.close();
+            transcripts?.close();
             await gateway.close();
             invites?.close();
             journal.close();

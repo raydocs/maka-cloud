@@ -40,6 +40,13 @@ export class FakeRun implements RunHandle {
   readonly resume?: () => Promise<void>;
   private pauseWait: Promise<void> | undefined;
   private resumeWait: Promise<void> | undefined;
+  /** Absent on a run whose runner is not steerable. */
+  readonly steer?: (message: { steerId: string; text: string }) => void;
+  readonly unsteer?: (steerId: string) => boolean;
+  /** The messages handed to the run and not yet read by the agent, in order. */
+  readonly waiting: Array<{ steerId: string; text: string }> = [];
+  /** Every message handed to the run, offers repeated included. */
+  readonly offers: Array<{ steerId: string; text: string }> = [];
   private readonly queue: RunnerEvent[] = [];
   private crashed: Error | undefined;
   private wake: (() => void) | undefined;
@@ -48,8 +55,23 @@ export class FakeRun implements RunHandle {
   constructor(
     readonly spec: RunSpec,
     pausable = true,
+    steerable = false,
   ) {
     this.events = this.iterate();
+    if (steerable) {
+      this.steer = (message) => {
+        this.offers.push(message);
+        if (!this.waiting.some((waiting) => waiting.steerId === message.steerId)) {
+          this.waiting.push(message);
+        }
+      };
+      this.unsteer = (steerId) => {
+        const at = this.waiting.findIndex((waiting) => waiting.steerId === steerId);
+        if (at < 0) return false;
+        this.waiting.splice(at, 1);
+        return true;
+      };
+    }
     if (pausable) {
       this.pause = async () => {
         this.pauseCalls += 1;
@@ -88,6 +110,13 @@ export class FakeRun implements RunHandle {
 
   progress(note: string): void {
     this.push({ type: 'progress', note });
+  }
+
+  /** The agent reads every waiting message, as at its next tool call; the run reports it. */
+  readWaiting(): Array<{ steerId: string; text: string }> {
+    const read = this.waiting.splice(0);
+    for (const message of read) this.push({ type: 'steered', steerId: message.steerId });
+    return read;
   }
 
   /** Report what the run has spent so far, in dollars. */
@@ -161,6 +190,8 @@ export interface FakeRunnerOptions {
   startError?: Error;
   /** Whether runs offer `pause` and `resume`. Default true. */
   pausable?: boolean;
+  /** Whether the runner takes messages for the agent (`steer`). Default false. */
+  steerable?: boolean;
   /** Gives the runner a `stopOrphaned` that calls this. Without it the runner has none. */
   stopOrphaned?: (
     taskId: string,
@@ -176,6 +207,7 @@ export interface FakeRunnerOptions {
 /** A runner for tests: records every run and does nothing until a test drives it. */
 export class FakeRunner implements Runner {
   readonly name: string;
+  readonly steerable: boolean;
   readonly runs: FakeRun[] = [];
   /** Task ids `stopOrphaned` was called for. Only filled when the runner has the method. */
   readonly orphanStops: string[] = [];
@@ -190,6 +222,7 @@ export class FakeRunner implements Runner {
 
   constructor(private readonly options: FakeRunnerOptions = {}) {
     this.name = options.name ?? 'fake';
+    this.steerable = options.steerable ?? false;
     const stop = options.stopOrphaned;
     if (stop) {
       this.stopOrphaned = async (taskId, callOptions = {}) => {
@@ -202,7 +235,7 @@ export class FakeRunner implements Runner {
       this.recover = async (spec) => {
         this.recoveries.push(spec);
         if (typeof recover === 'object' && recover.error) throw recover.error;
-        const run = new FakeRun(spec, this.options.pausable ?? true);
+        const run = new FakeRun(spec, this.options.pausable ?? true, this.steerable);
         this.runs.push(run);
         await this.options.onStart?.(run);
         return run;
@@ -212,7 +245,7 @@ export class FakeRunner implements Runner {
 
   async start(spec: RunSpec): Promise<RunHandle> {
     if (this.options.startError) throw this.options.startError;
-    const run = new FakeRun(spec, this.options.pausable ?? true);
+    const run = new FakeRun(spec, this.options.pausable ?? true, this.steerable);
     this.runs.push(run);
     await this.options.onStart?.(run);
     return run;

@@ -13,12 +13,16 @@ import {
   type InboxAnswerResult,
   type InboxItem,
   type MemoryProfile,
+  type Mode,
   type ProjectView,
+  type RunTimeline,
   type SourceListing,
   type SourcePreview,
   type TaskControl,
+  type TaskMessageState,
   type TaskView,
 } from './contract';
+import { randomId } from './ids';
 
 const PICTURE_TYPES: ReadonlySet<string> = new Set([
   'image/png',
@@ -175,10 +179,10 @@ export class CloudClient {
       body: '{}',
     });
   }
-  postMessage(id: string, text: string, clientMessageId: string) {
+  postMessage(id: string, text: string, clientMessageId: string, mode?: Mode) {
     return this.request<{ messageId: string }>(routes.messages(id), {
       method: 'POST',
-      body: JSON.stringify({ text, clientMessageId }),
+      body: JSON.stringify({ text, clientMessageId, ...(mode === undefined ? {} : { mode }) }),
     });
   }
   async listTasks(id: string): Promise<TaskView[]> {
@@ -284,6 +288,27 @@ export class CloudClient {
       return { kind: 'image', name, blob: await response.blob() };
     }
     return { kind: 'text', name, text: await response.text() };
+  }
+  /** The run of a task from its log: turns, steps, cost over time. */
+  timeline(task: string) {
+    return this.request<{ timeline: RunTimeline }>(routes.timeline(task));
+  }
+  /**
+   * Tells the agent working on a task something. It reads it after the step it is in. The same
+   * `messageId` sent again applies once, so a retry is safe.
+   */
+  sendTaskMessage(task: string, text: string, messageId: string = randomId()) {
+    return this.request<{ message: { messageId: string; state: TaskMessageState } }>(
+      routes.taskMessages(task),
+      { method: 'POST', body: JSON.stringify({ text, messageId }) },
+    );
+  }
+  /** Takes a message back before the agent reads it; refused (409) once it has. */
+  withdrawTaskMessage(task: string, messageId: string) {
+    return this.request<{ message: { messageId: string; state: TaskMessageState } }>(
+      routes.taskMessage(task, messageId),
+      { method: 'DELETE' },
+    );
   }
   /** The pages the task opened; nothing is fetched from them to answer. */
   listSources(task: string) {

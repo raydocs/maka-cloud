@@ -1,9 +1,11 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   InstaboxApiError,
   type InstaboxClient,
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
+import { PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
   FILE_CLEAN_SCRIPT,
@@ -18,17 +20,28 @@ import {
   RESULT_STAGE_SCRIPT,
   STAGE_INPUTS_SCRIPT,
   SWEEP_SCRIPT,
+  TRANSCRIPT_ABORT_SCRIPT,
+  TRANSCRIPT_CHUNK_SCRIPT,
+  TRANSCRIPT_PROBE_SCRIPT,
   TOOL_ABORT_SCRIPT,
   TOOL_CHECK_SCRIPT,
   TOOL_CHUNK_SCRIPT,
 } from './scripts.js';
 import { assertSafeId } from './shell.js';
 
+/**
+ * Closes the box's network to its host's own addresses and says so only when the rules read back
+ * right. It rejects when it cannot, and the box is not used.
+ */
+export type EgressGuard = (signal?: AbortSignal) => Promise<void>;
+
 export const MAX_RESULT_BYTES = 1024 * 1024;
 export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
 const RESULT_CHUNK_BYTES = 256 * 1024;
 
 const TOOL_CHUNK_BYTES = 256 * 1024;
+const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
+const TRANSCRIPT_ATTEMPTS = 3;
 
 /** Caps on what one task may copy from another's workspace. */
 export interface StageLimits {
@@ -56,6 +69,15 @@ interface ExecOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * The end of what a failed command printed, for the error that names it. Scrubbed before it is
+ * cut, so a key is never cut into a piece the scrubber no longer knows.
+ */
+function commandOutputTail(result: { stderr: string; stdout: string }): string {
+  const text = scrubSecretShapes(result.stderr).trim() || scrubSecretShapes(result.stdout).trim();
+  return text.slice(-300);
+}
+
 /** The scripts of this package run against one sandbox. No state beyond ids. */
 export class RemoteMachine {
   constructor(
@@ -65,12 +87,63 @@ export class RemoteMachine {
     readonly root: string,
     /** Memory-backed directory in the sandbox that holds each task's raw CLI output. */
     readonly logRoot: string = DEFAULT_LOG_ROOT,
+    /** The account the CLI runs as when it is not the sandbox user; its processes are stopped through sudo. */
+    readonly agentUser?: string,
+    /** Run before any task code starts in the box; see `launch`. */
+    private readonly egress?: EgressGuard,
   ) {}
+
+  private guarding: Promise<void> | undefined;
+
+  /**
+   * The egress guard, checked right now. One check at a time: callers that arrive while it runs
+   * share it, and a later caller checks again, because a box that was restarted, restored or
+   * resumed may have lost its rules without anything telling us. A box that fails is refused.
+   */
+  private guardEgress(signal?: AbortSignal): Promise<void> {
+    if (!this.egress) {
+      return Promise.reject(new Error('this sandbox has no egress guard, so no task starts in it'));
+    }
+    const egress = this.egress;
+    this.guarding ??= (async () => {
+      try {
+        // No caller's signal: the check is shared and one caller giving up must not fail the rest.
+        try {
+          await egress();
+        } catch (error) {
+          if (!(error instanceof InstaboxApiError) || error.code !== 'machine_not_running') {
+            throw error;
+          }
+          // Asleep: wake it, and look again, because its rules may be gone.
+          await this.client.ensureRunning(this.machineId);
+          await egress();
+        }
+      } finally {
+        this.guarding = undefined;
+      }
+    })();
+    return signal
+      ? Promise.race([
+          this.guarding,
+          new Promise<never>((_, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+        ])
+      : this.guarding;
+  }
 
   /** Where the raw output of a task's runs lives while they run. */
   logDir(dirName: string): string {
     this.taskDir(dirName);
     return `${this.logRoot}/${dirName}`;
+  }
+
+  /**
+   * The Claude CLI's configuration directory for a task: its transcripts are under `projects/`.
+   * Kept in the task's own directory, so no other task reads it and removing the task removes it.
+   */
+  configDir(dirName: string): string {
+    return `${this.taskDir(dirName)}/claude-config`;
   }
 
   /**
@@ -107,7 +180,7 @@ export class RemoteMachine {
     const result = await this.exec(script, options);
     if (result.exitCode !== 0) {
       throw new Error(
-        `sandbox command failed (exit ${result.exitCode}): ${result.stderr.trim().slice(-300) || result.stdout.trim().slice(-300)}`,
+        `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
     return result.stdout;
@@ -121,6 +194,14 @@ export class RemoteMachine {
         ...(brief === undefined ? {} : { MAKA_WRITE_BRIEF: '1' }),
       },
       ...(brief === undefined ? {} : { stdin: brief }),
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /** Gives a task's directory to the agent's group; see `PREPARE_AGENT_SCRIPT`. */
+  async prepareAgent(dirName: string, group: string, signal?: AbortSignal): Promise<void> {
+    await this.execOk(PREPARE_AGENT_SCRIPT, {
+      envs: { MAKA_DIR: this.taskDir(dirName), MAKA_AGENT_GROUP: assertSafeId('group', group) },
       ...(signal ? { signal } : {}),
     });
   }
@@ -149,6 +230,10 @@ export class RemoteMachine {
       MAKA_WORKDIR: input.workdir,
     };
     const options = { envs, ...(input.signal ? { signal: input.signal } : {}) };
+    // Every run, install and resume starts here, so this is where a box is refused: nothing the
+    // CLI or a package script does starts before the box's egress is closed and read back.
+    input.signal?.throwIfAborted();
+    await this.guardEgress(input.signal);
     for (let attempt = 0; ; attempt++) {
       try {
         const out = await this.execOk(LAUNCH_SCRIPT, { ...options, stdin: input.script });
@@ -189,6 +274,7 @@ export class RemoteMachine {
         MAKA_DIR: this.taskDir(dirName),
         MAKA_LOG_DIR: this.logDir(dirName),
         MAKA_GRACE_TENTHS: String(options.graceTenths ?? 30),
+        ...(this.agentUser === undefined ? {} : { MAKA_AGENT_USER: this.agentUser }),
         ...(options.runs
           ? { MAKA_ONLY_RUNS: options.runs.map((run) => assertSafeId('run', run)).join(' ') }
           : {}),
@@ -210,7 +296,7 @@ export class RemoteMachine {
     }
     if (result.exitCode !== 0) {
       throw new Error(
-        `sandbox command failed (exit ${result.exitCode}): ${result.stderr.trim().slice(-300) || result.stdout.trim().slice(-300)}`,
+        `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
     return lines
@@ -221,7 +307,10 @@ export class RemoteMachine {
   /** Names of task directories that still have a live run. */
   async liveTaskDirs(signal?: AbortSignal): Promise<string[]> {
     const out = await this.execOk(SWEEP_SCRIPT, {
-      envs: { MAKA_ROOT: this.root },
+      envs: {
+        MAKA_ROOT: this.root,
+        ...(this.agentUser === undefined ? {} : { MAKA_AGENT_USER: this.agentUser }),
+      },
       timeoutSeconds: 15,
       ...(signal ? { signal } : {}),
     });
@@ -401,4 +490,76 @@ export class RemoteMachine {
       await this.exec(FILE_CLEAN_SCRIPT, callOptions({})).catch(() => undefined);
     }
   }
+
+  /** Lines in a session's transcript in the task's configuration directory (0 when there is none). */
+  async transcriptLines(dirName: string, projectKey: string, sessionId: string): Promise<number> {
+    const out = await this.execOk(TRANSCRIPT_PROBE_SCRIPT, {
+      envs: transcriptEnvs(this.taskDir(dirName), projectKey, sessionId),
+    });
+    const lines = Number(out.trim());
+    return Number.isSafeInteger(lines) && lines >= 0 ? lines : 0;
+  }
+
+  /**
+   * Puts a session's transcript where the CLI looks for it, from a stream of its bytes: in chunks
+   * into a temporary file, checked by sha256 and renamed into place at the end. A chunk whose answer
+   * was lost is sent again safely (the file's size says whether it landed). A failed upload removes
+   * its temporary file.
+   */
+  async installTranscript(input: {
+    dirName: string;
+    projectKey: string;
+    sessionId: string;
+    bytes: AsyncIterable<Buffer>;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    const base = transcriptEnvs(this.taskDir(input.dirName), input.projectKey, input.sessionId);
+    const hash = createHash('sha256');
+    let offset = 0;
+    let held: Buffer | undefined;
+    const send = async (chunk: Buffer, last: boolean): Promise<void> => {
+      const envs = {
+        ...base,
+        MAKA_OFFSET: String(offset),
+        MAKA_LEN: String(chunk.length),
+        MAKA_LAST: last ? '1' : '0',
+        ...(last ? { MAKA_HASH: hash.copy().digest('hex') } : {}),
+      };
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await this.execOk(TRANSCRIPT_CHUNK_SCRIPT, {
+            envs,
+            stdin: chunk.toString('base64'),
+            ...(input.signal ? { signal: input.signal } : {}),
+          });
+          break;
+        } catch (error) {
+          if (attempt >= TRANSCRIPT_ATTEMPTS || input.signal?.aborted) throw error;
+        }
+      }
+      offset += chunk.length;
+    };
+    try {
+      for await (const piece of input.bytes) {
+        hash.update(piece);
+        for (let at = 0; at < piece.length; at += TRANSCRIPT_CHUNK_BYTES) {
+          // One chunk is held back so that the last one is known to be the last.
+          if (held) await send(held, false);
+          held = piece.subarray(at, at + TRANSCRIPT_CHUNK_BYTES);
+        }
+      }
+      await send(held ?? Buffer.alloc(0), true);
+    } catch (error) {
+      await this.exec(TRANSCRIPT_ABORT_SCRIPT, { envs: base }).catch(() => undefined);
+      throw error;
+    }
+  }
+}
+
+function transcriptEnvs(
+  dir: string,
+  projectKey: string,
+  sessionId: string,
+): Record<string, string> {
+  return { MAKA_DIR: dir, MAKA_KEY: projectKey, MAKA_SESSION: sessionId };
 }
