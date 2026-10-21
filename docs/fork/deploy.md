@@ -607,9 +607,11 @@ Preparation:
    above the budget, or when the server does not enforce the run budget. The
    budget-stop step lowers the daily limit for a few minutes and puts it back.
    If the run is killed in that window, set the limit back by hand: the line
-   printed at the start of the step says what it was. A run that is killed also
-   leaves its run budget in place, which only holds that invite back; the next
-   smoke run replaces it.
+   printed at the start of the step says what it was. One smoke run holds an
+   invite's run budget at a time: a second run is refused (exit 2) while the
+   first is going. A run that is killed leaves its run budget in place, which
+   only holds that invite back; about two minutes after it stopped renewing it,
+   the next smoke run takes it over.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 
