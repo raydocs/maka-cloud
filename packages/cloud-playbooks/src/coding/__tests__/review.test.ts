@@ -216,7 +216,7 @@ test('a sandbox that cannot isolate a check fails the task, and the check never 
   assert.equal(last?.type, 'failed');
   assert.match(
     (last as { reason: string }).reason,
-    /the check repro could not run: the sandbox could not start the check in its own user and PID namespace/,
+    /the check repro could not run: the sandbox could not start the check in its own user and PID namespace .*unprivileged user namespaces/,
   );
   assert.equal(await h.deliveries.get('tsk_noiso'), undefined);
   zeroStats(h.runner);

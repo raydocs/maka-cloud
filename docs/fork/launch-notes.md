@@ -60,6 +60,11 @@ not in `MAKA_REHEARSAL_XFAIL`, and the line below is struck out only when the st
 
 Still not verified by the rehearsal, so the first run on a real host is the first time they run:
 
+- Unprivileged user namespaces on the instabox image. Every check of a coding task runs under `unshare --user --pid`;
+  Docker's default seccomp profile refuses it (the rehearsal's box must allow it), and whether instabox does is
+  unknown. Where it is refused, no check can run and the task fails with the message "the check … could not run:
+  the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed …)". Live-run
+  check: run `unshare --user --map-current-user --pid --fork true` as the sandbox user on the real box first.
 - The firewall is a stand-in that keeps its rules in files: the egress guard's rules are checked as
   text, no packet is filtered.
 - The CLI is scripted: the real `claude`'s flags, its own files and its network use are not exercised.
