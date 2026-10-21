@@ -67,6 +67,8 @@ export type TaskEvent =
   | { type: 'task_started'; taskId: string }
   | { type: 'task_cost'; taskId: string; fromTaskId: string; costUsd: number }
   | { type: 'task_progress'; taskId: string; note: string }
+  /** A cut-off run goes again: show `text` in place of what you had of its turn. */
+  | { type: 'task_restarted'; taskId: string; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }
   | { type: 'task_failed'; taskId: string; reason: string }
   | { type: 'task_cancel_requested'; taskId: string; by: string }

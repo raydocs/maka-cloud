@@ -67,6 +67,12 @@ export type TaskEvent =
    */
   | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number; epoch?: number }
   | { type: 'task_progress'; taskId: TaskId; note: string }
+  /**
+   * The run of a task that was cut off by a restart is going again, in `epoch`. `text` is what a
+   * viewer shows in place of whatever it had of the cut-off turn, so the same answer is not shown
+   * twice; it is also kept as the task's latest progress note.
+   */
+  | { type: 'task_restarted'; taskId: TaskId; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
   | { type: 'task_failed'; taskId: TaskId; reason: string }
   | { type: 'task_cancel_requested'; taskId: TaskId; by: SessionId | 'system' }

@@ -150,6 +150,10 @@ function applyLive(
     case 'task_progress':
       task.progress = [...task.progress, event.note].slice(-MAX_PROGRESS_NOTES);
       break;
+    case 'task_restarted':
+      // The client keeps no partial reply of a task, only its notes, so the text is the note.
+      task.progress = [...task.progress, event.text].slice(-MAX_PROGRESS_NOTES);
+      break;
     case 'task_succeeded':
       task.state = 'succeeded';
       task.manifest = event.manifest;
