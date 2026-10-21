@@ -256,6 +256,7 @@ export const exclusionRules = [
         'AGENTS.md',
         '.github/workflows/fork-upstream-sync.yml',
         '.github/workflows/fork-cloud-web.yml',
+        '.github/workflows/fork-deploy-rehearsal.yml',
         '.dockerignore',
       )(path) ||
       startsWith('docs/fork')(path) ||

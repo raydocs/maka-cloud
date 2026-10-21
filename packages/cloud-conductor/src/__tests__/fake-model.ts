@@ -178,7 +178,9 @@ export async function startFakeModel(listen: FakeModelListen = {}): Promise<Fake
       response.destroy(error instanceof Error ? error : new Error(String(error)));
     });
   });
-  await new Promise<void>((resolve) => server.listen(listen.port ?? 0, listen.host ?? '127.0.0.1', resolve));
+  await new Promise<void>((resolve) =>
+    server.listen(listen.port ?? 0, listen.host ?? '127.0.0.1', resolve),
+  );
   const address = server.address();
   if (!address || typeof address !== 'object') throw new Error('fake model has no address');
   return {
