@@ -662,6 +662,7 @@ class CodingRun implements RunHandle {
       ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
+      ...(this.spec.epoch === undefined ? {} : { epoch: this.spec.epoch }),
     };
     // Every run reads its brief, a resume included.
     await this.guard(writeHostFile(spec.briefPath, brief()));

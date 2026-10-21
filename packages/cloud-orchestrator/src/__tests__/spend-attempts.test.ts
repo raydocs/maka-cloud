@@ -90,6 +90,64 @@ test('spend an earlier process wrote down stands in for the figure its run repor
   await recorded(store, taskId, 4);
 });
 
+test('a journal that is read again after a crash books each attempt where it belongs and double counts nothing', async (t) => {
+  const { store, first, taskId } = await capped(t);
+  first.fake.runFor(taskId).usage(3);
+  await recorded(store, taskId, 3);
+
+  // A process that dies before it tells the journal it booked the rows is read again by the next one.
+  const rows = [{ taskId, attempt: 1, usd: 3.4 }];
+  const journal = { unrecorded: () => rows, recorded: () => undefined };
+  const second = await makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: journal },
+  });
+  assert.equal(costOf(store, taskId), 3.4, 'attempt 1 spent 3.4 in all, not 3 and 3.4');
+  await eventually(() => second.fake.runs.length === 1, 'the second attempt');
+  second.fake.runFor(taskId).usage(0.6);
+  await recorded(store, taskId, 4);
+  rows.push({ taskId, attempt: 2, usd: 0.6 });
+
+  // The third attempt reads attempt 1's row again, and attempt 2's: the task has still spent 4.
+  const third = await makeHarness(t, {
+    store,
+    dir: second.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: journal },
+  });
+  await eventually(() => third.fake.runs.length === 1, 'the third attempt');
+  assert.equal(costOf(store, taskId), 4, 'rows booked before are replaced, not added again');
+  assert.equal(
+    third.fake.runFor(taskId).spec.budgetUsd,
+    1,
+    'and the run is given what is left of the 5',
+  );
+});
+
+test('real spend under the cap is not stopped because a row was booked under the wrong attempt', async (t) => {
+  const { store, first, taskId } = await capped(t);
+  first.fake.runFor(taskId).usage(3);
+  await recorded(store, taskId, 3);
+  const journal = {
+    unrecorded: () => [{ taskId, attempt: 1, usd: 3.4 }],
+    recorded: () => undefined,
+  };
+  const second = await makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: journal },
+  });
+  await eventually(() => second.fake.runs.length === 1, 'the second attempt');
+  assert.equal(
+    second.fake.runFor(taskId).spec.budgetUsd,
+    1.6,
+    '$3.40 of a $5 cap leaves the resumed run $1.60, not a stop',
+  );
+});
+
 test('calls a restart cut off are charged in full and the task log says so, once, under the attempt that resumes it', async (t) => {
   const { store, first, taskId } = await capped(t);
   first.fake.runFor(taskId).usage(1);
