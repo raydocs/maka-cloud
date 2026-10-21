@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { shq } from '../shell.js';
-import { claudeAdapter, clip, codexAdapter, preambleFor } from '../vendors.js';
+import { claudeAdapter, clip, codexAdapter, preambleFor, stepLine } from '../vendors.js';
 
 function feed(adapter: typeof claudeAdapter, lines: unknown[]) {
   const parser = adapter.parser();
@@ -130,5 +130,162 @@ test('neither command nor environment can select a subscription login', () => {
   assert.ok(
     !/claude code/i.test(text),
     'no product branding in anything the agent or user is shown',
+  );
+});
+
+const todoWrite = (todos: unknown) => ({
+  type: 'assistant',
+  message: { content: [{ type: 'tool_use', id: 't1', name: 'TodoWrite', input: { todos } }] },
+});
+
+test('claude: the todo item in progress is the step, from the agent’s own list; no list, no step', () => {
+  const steps = (lines: unknown[]) =>
+    feed(claudeAdapter, lines).filter((event) => event.kind === 'step');
+  assert.deepEqual(
+    steps([
+      todoWrite([
+        { content: 'Read the docs', status: 'completed', activeForm: 'Reading the docs' },
+        {
+          content: 'Fix the login loop',
+          status: 'in_progress',
+          activeForm: 'Fixing the login loop',
+        },
+        { content: 'Run the tests', status: 'pending', activeForm: 'Running the tests' },
+      ]),
+    ]),
+    [{ kind: 'step', text: 'Fixing the login loop' }],
+  );
+  // The imperative form is used when there is no active form.
+  assert.deepEqual(steps([todoWrite([{ content: 'Fix it', status: 'in_progress' }])]), [
+    { kind: 'step', text: 'Fix it' },
+  ]);
+  for (const todos of [
+    [{ content: 'a', status: 'completed' }],
+    [{ content: 'a', status: 'pending' }],
+    [],
+    'not a list',
+    [null, 3, { status: 'in_progress' }],
+  ]) {
+    assert.deepEqual(steps([todoWrite(todos)]), []);
+  }
+  assert.deepEqual(
+    steps([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'TaskUpdate',
+              input: { taskId: '2', status: 'in_progress', activeForm: 'Writing the test' },
+            },
+            {
+              type: 'tool_use',
+              name: 'TaskUpdate',
+              input: { taskId: '3', status: 'completed', activeForm: 'Done thing' },
+            },
+          ],
+        },
+      },
+    ]),
+    [{ kind: 'step', text: 'Writing the test' }],
+  );
+});
+
+test('the step is one short printable line without secrets or look-alike control text', () => {
+  const parser = claudeAdapter.parser((text) => text.replaceAll('sk-secret-123', '[redacted]'));
+  const [, step] = parser.feed(
+    JSON.stringify(
+      todoWrite([
+        {
+          content: 'x',
+          status: 'in_progress',
+          activeForm: `Use sk-secret-123 \u202Eto\u200B fix\n\u0000the ${'very '.repeat(80)}thing`,
+        },
+      ]),
+    ),
+  );
+  assert.equal(step?.kind, 'step');
+  const text = step?.kind === 'step' ? step.text : '';
+  assert.ok(text.startsWith('Use [redacted] to fix the very very'));
+  assert.ok(text.length <= 120 && text.endsWith('…'));
+  assert.ok(!/[\u202E\u200B\u0000\n]/u.test(text));
+  assert.equal(stepLine('\u202E\u200B \n'), undefined);
+});
+
+test('codex: the first todo that is not done is the step', () => {
+  const todo = (items: unknown, type = 'item.updated') => ({
+    type,
+    item: { type: 'todo_list', items },
+  });
+  assert.deepEqual(
+    feed(codexAdapter, [
+      todo(
+        [
+          { text: 'Read', completed: true },
+          { text: 'Fix', completed: false },
+          { text: 'Test', completed: false },
+        ],
+        'item.started',
+      ),
+      todo([
+        { text: 'Read', completed: true },
+        { text: 'Fix', completed: true },
+        { text: 'Test', completed: false },
+      ]),
+      todo([{ text: 'Read', completed: true }], 'item.completed'),
+    ]),
+    [
+      { kind: 'step', text: 'Fix' },
+      { kind: 'step', text: 'Test' },
+    ],
+  );
+});
+
+test('claude: a page counts as opened when its fetch was answered, and only then', () => {
+  const call = (id: string, url: unknown, name = 'WebFetch') => ({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id, name, input: { url } }] },
+  });
+  const result = (id: string, error = false) => ({
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: id,
+          ...(error ? { is_error: true } : {}),
+          content: 'x',
+        },
+      ],
+    },
+  });
+  const opened = (lines: unknown[]) =>
+    feed(claudeAdapter, lines).filter((event) => event.kind === 'opened');
+  assert.deepEqual(
+    opened([
+      call('a', 'https://docs.example/a'),
+      call('b', 'https://gone.example/b'),
+      call('c', 'https://slow.example/c'),
+      result('b', true),
+      result('a'),
+      result('a'),
+      result('unknown'),
+    ]),
+    [{ kind: 'opened', url: 'https://docs.example/a' }],
+  );
+  // Other tools and a URL in the agent's own text are not pages it opened.
+  assert.deepEqual(
+    opened([
+      call('d', 'https://docs.example/d', 'Bash'),
+      result('d'),
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'see https://evil.example/x' }] },
+      },
+      call('e', 42),
+      result('e'),
+    ]),
+    [],
   );
 });

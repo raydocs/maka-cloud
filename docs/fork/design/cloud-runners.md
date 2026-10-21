@@ -34,6 +34,18 @@ means all output is on disk.
   2,000. Polling was chosen over SSH because the sandbox terminal WebSocket has one viewer and is
   reserved for the user handoff (T14). After 5 failed polls in a row the run fails with "sandbox
   unreachable".
+- **What the agent is doing, and the pages it opened (T24).** The parsers read two more things
+  from the CLI's own event stream, so no model is asked and no tokens are spent. The item in
+  progress on the agent's todo list (Claude Code's `TodoWrite`, and `TaskUpdate` to in-progress;
+  Codex's `todo_list` item, which is its `update_plan`) becomes a progress note that starts with
+  `step: `, as one printable line of at most 120 characters with secrets redacted; the web app
+  shows the latest one as the task's step line. The session's own title is in the transcript file,
+  not in this stream, so it waits for T28's mirror. A `WebFetch` call whose result came back
+  without an error is a page the task opened: `onOpenedPage(taskId, url)` is called once per page
+  (at most 40 per run; a throw is ignored) and the host passes it to
+  `CloudServer.recordOpenedPages`. A URL in the agent's own text, a fetch that failed or never
+  answered, and any other tool are not recorded. The idea of reading the todo list is Reason
+  Network's `doing.rs` (MIT or Apache-2.0); no code was taken from it.
 
 ## Secrets
 

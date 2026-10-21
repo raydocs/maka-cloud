@@ -5,6 +5,10 @@ import { shq } from './shell.js';
 export type ParsedEvent =
   | { kind: 'session'; id: string }
   | { kind: 'progress'; note: string }
+  /** What the agent says it is doing now: the item in progress on its own todo list. */
+  | { kind: 'step'; text: string }
+  /** A page the agent fetched and got an answer for. */
+  | { kind: 'opened'; url: string }
   /** Tokens of one model call. A repeat with the same `id` replaces the earlier count. */
   | { kind: 'usage'; id: string; tokens: TokenUsage }
   /** The CLI's own total for this invocation, in dollars; it replaces the token estimate. */
@@ -116,6 +120,38 @@ function obj(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+const MAX_STEP = 120;
+const MAX_PENDING_FETCHES = 32;
+
+// Controls, direction and zero-width marks, private-use and unassigned code points, separators
+// and invisible letters: an agent's line cannot show something other than what it is.
+const UNPRINTABLE =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+
+/**
+ * The item in progress on an agent's own todo list, as one short printable line, or nothing. No
+ * model is asked: the agent keeps this list anyway. The idea is Reason Network's `doing.rs`
+ * (MIT or Apache-2.0); no code is taken from it.
+ */
+export function stepLine(text: string, redact: Redact = keep): string | undefined {
+  const line = redact(text).replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim();
+  return line === '' ? undefined : clip(line, MAX_STEP);
+}
+
+/** The text of the first todo that is in progress, from the shapes the CLIs write. */
+function inProgress(
+  items: unknown,
+  status: (item: Record<string, unknown>) => boolean,
+): string | undefined {
+  if (!Array.isArray(items)) return undefined;
+  for (const item of items) {
+    const entry = obj(item);
+    if (!entry || !status(entry)) continue;
+    return str(entry.activeForm) ?? str(entry.content) ?? str(entry.subject) ?? str(entry.text);
+  }
+  return undefined;
+}
+
 function guardLine(message: string): string {
   return `{ echo ${shq(`MAKA_GUARD: ${message}`)}; finish 42; exit 42; }`;
 }
@@ -123,6 +159,8 @@ function guardLine(message: string): string {
 // -- Claude (the Claude CLI that the Agent SDK drives) ------------------------------------------
 
 function claudeParser(redact: Redact = keep): LineParser {
+  // WebFetch calls waiting for their answer, by tool call id; a page is opened once it answered.
+  const fetches = new Map<string, string>();
   return {
     feed(line) {
       const event = parseJson(line);
@@ -157,7 +195,31 @@ function claudeParser(redact: Redact = keep): LineParser {
               out.push({ kind: 'progress', note: clip(redact(b.text as string)) });
             if (b.type === 'tool_use' && str(b.name)) {
               out.push({ kind: 'progress', note: `tool: ${clip(redact(String(b.name)), 80)}` });
+              const input = obj(b.input);
+              if (b.name === 'TodoWrite') {
+                const text = inProgress(input?.todos, (todo) => todo.status === 'in_progress');
+                const step = text === undefined ? undefined : stepLine(text, redact);
+                if (step !== undefined) out.push({ kind: 'step', text: step });
+              } else if (b.name === 'TaskUpdate' && input?.status === 'in_progress') {
+                const step = stepLine(str(input.activeForm) ?? str(input.subject) ?? '', redact);
+                if (step !== undefined) out.push({ kind: 'step', text: step });
+              } else if (b.name === 'WebFetch' && str(b.id) && str(input?.url)) {
+                if (fetches.size >= MAX_PENDING_FETCHES) fetches.clear();
+                fetches.set(b.id as string, input?.url as string);
+              }
             }
+          }
+        }
+      } else if (type === 'user') {
+        const content = obj(event.message)?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            const b = obj(block);
+            const id = b?.type === 'tool_result' ? str(b.tool_use_id) : undefined;
+            const url = id === undefined ? undefined : fetches.get(id);
+            if (id === undefined || url === undefined) continue;
+            fetches.delete(id);
+            if (b?.is_error !== true) out.push({ kind: 'opened', url });
           }
         }
       } else if (type === 'result') {
@@ -247,6 +309,13 @@ function codexParser(redact: Redact = keep): LineParser {
       if (type === 'thread.started') {
         const id = str(event.thread_id);
         if (id) out.push({ kind: 'session', id });
+      } else if (
+        (type === 'item.started' || type === 'item.updated' || type === 'item.completed') &&
+        obj(event.item)?.type === 'todo_list'
+      ) {
+        const text = inProgress(obj(event.item)?.items, (todo) => todo.completed !== true);
+        const step = text === undefined ? undefined : stepLine(text, redact);
+        if (step !== undefined) out.push({ kind: 'step', text: step });
       } else if (type === 'item.started' || type === 'item.completed') {
         const item = obj(event.item);
         const itemType = str(item?.type);

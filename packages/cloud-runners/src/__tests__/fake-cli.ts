@@ -14,6 +14,7 @@
  *   flood         print 3 MB without a newline first, then behave like ok
  *   floodfail     print 3 MB without a newline, then exit 1
  *   longfail      print a 100 kB line, then exit 1
+ *   todos         report a todo list, a page fetched, one that failed and one that is still waiting; then ok
  *   spend         report token usage for each model call and, for claude, the total cost; then ok
  *   spendhang     report the same usage, then run until killed
  *   custom        write `$HOME/fake-cli/manifest.json` as result.json (`manifest2.json` when resumed, if there is one)
@@ -62,7 +63,7 @@ if [ "$mode" = "floodfail" ]; then head -c 3000000 /dev/zero | tr '\0' x; exit 1
 if [ "$mode" = "longfail" ]; then head -c 100000 /dev/zero | tr '\0' y; echo; exit 1; fi
 write_result() {
   case "$mode" in
-    ok|leakout|flood|spend|wait) printf '%s' "$good" > "$result" ;;
+    ok|leakout|flood|spend|wait|todos) printf '%s' "$good" > "$result" ;;
     badthengood) if [ "$resumed" = 1 ]; then printf '%s' "$good" > "$result"; else printf '%s' '{"summary":""}' > "$result"; fi ;;
     custom) if [ "$resumed" = 1 ] && [ -e "$ctl/manifest2.json" ]; then cp "$ctl/manifest2.json" "$result"; else cp "$ctl/manifest.json" "$result"; fi ;;
     symlink) rm -f "$result"; ln -s "$ctl/secret.txt" "$result" ;;
@@ -80,6 +81,11 @@ echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
 echo 'not json, some stderr-ish noise'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Bash","input":{}}]}}'
 case "$mode" in
+  todos)
+    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"Read the docs","status":"completed","activeForm":"Reading the docs"},{"content":"Fix the login loop","status":"in_progress","activeForm":"Fixing the login loop"},{"content":"Run the tests","status":"pending","activeForm":"Running the tests"}]}}]}}'
+    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"f1","name":"WebFetch","input":{"url":"https://docs.example/login"}},{"type":"tool_use","id":"f2","name":"WebFetch","input":{"url":"https://gone.example/page"}},{"type":"tool_use","id":"f3","name":"WebFetch","input":{"url":"https://slow.example/page"}}]}}'
+    echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"f1","content":"page text"},{"type":"tool_result","tool_use_id":"f2","is_error":true,"content":"404"}]}}'
+    ;;
   spend|spendhang)
     # One model call can come as several events with the same message id and usage.
     echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":100000,"output_tokens":50000},"content":[{"type":"text","text":"step one"}]}}'
@@ -108,6 +114,10 @@ echo '{"type":"thread.started","thread_id":"'"$sid"'"}'
 echo '{"type":"item.started","item":{"type":"command_execution","command":"ls"}}'
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"working on it"}}'
 usage='{}'
+if [ "$mode" = "todos" ]; then
+  echo '{"type":"item.started","item":{"type":"todo_list","items":[{"text":"Read the docs","completed":true},{"text":"Fix the login loop","completed":false},{"text":"Run the tests","completed":false}]}}'
+  echo '{"type":"item.updated","item":{"type":"todo_list","items":[{"text":"Read the docs","completed":true},{"text":"Fix the login loop","completed":true},{"text":"Run the tests","completed":false}]}}'
+fi
 case "$mode" in
   spend|spendhang) usage='{"input_tokens":300000,"cached_input_tokens":100000,"output_tokens":50000}' ;;
 esac
