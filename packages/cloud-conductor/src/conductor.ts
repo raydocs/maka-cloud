@@ -475,8 +475,22 @@ export class Conductor {
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
-    if (!run) return false;
+    if (!run) return this.cancelKeptTasks(conversationId);
     return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
+  }
+
+  /**
+   * A task kept across a restart has no open run to stop it through, but it is still the
+   * conversation's: it is owed a cancel, which goes out now or when the conversation next has
+   * access. True when there was anything to cancel.
+   */
+  private cancelKeptTasks(conversationId: string): boolean {
+    const owed = this.state.unsettledDelegations({ conversationId });
+    if (owed.length === 0) return false;
+    this.state.markCancelPending(owed.map((delegation) => delegation.key));
+    // Taking the access queues the retry.
+    this.lane(conversationId, this.orchestratorAccess?.(conversationId));
+    return true;
   }
 
   /**
@@ -811,6 +825,7 @@ export class Conductor {
     switch (event.type) {
       case 'tool_start':
         turn.sawTool = true;
+        this.state.markToolCalled(turn.runId);
         turn.finalText = [];
         break;
       case 'tool_result':
@@ -963,6 +978,8 @@ export class Conductor {
       turn.errorKind !== undefined &&
       TRANSIENT_MODEL_ERRORS.has(turn.errorKind) &&
       !turn.sawTool &&
+      // Not only this turn: an earlier turn of the run may have planned, spent, notified or asked.
+      this.state.run(runId)?.toolCalled === false &&
       this.state.tasksOf(runId).length === 0
     );
   }
