@@ -385,13 +385,13 @@ export class DutyEngine {
   }
 
   /** What the duty has used on `day`: what each request spent, or what it still holds reserved. */
-  private usedMicro(dutyId: string, day: string): number {
+  private usedMicro(dutyId: string, day: string, exceptRequest = ''): number {
     const row = this.db
       .prepare(
         `SELECT COALESCE(SUM(COALESCE(spent_micro, reserved_micro)), 0) AS used
-         FROM run_requests WHERE duty_id = ? AND day = ?`,
+         FROM run_requests WHERE duty_id = ? AND day = ? AND request_id != ?`,
       )
-      .get(dutyId, day) as { used: number };
+      .get(dutyId, day, exceptRequest) as { used: number };
     return row.used;
   }
 
@@ -724,6 +724,7 @@ export class DutyEngine {
   /** Claims a pending request for launching: pending -> launching, once. */
   beginLaunch(requestId: string): RunRequest | undefined {
     return transaction(this.db, () => {
+      if (!this.rebookToToday(requestId)) return undefined;
       const changed = this.db
         .prepare(
           "UPDATE run_requests SET state = 'launching', attempts = attempts + 1 WHERE request_id = ? AND state = 'pending'",
@@ -732,6 +733,33 @@ export class DutyEngine {
       if (Number(changed.changes) === 0) return undefined;
       return this.requestView(requestId);
     });
+  }
+
+  /**
+   * A reservation belongs to the UTC day its money is spent. One claimed on an earlier day and
+   * launched today moves to today and must fit today's cap beside what is already booked, or it
+   * is ended without a run (the cap, not a retry). Inside the caller's transaction. False when
+   * the request is not pending or no longer fits.
+   */
+  private rebookToToday(requestId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT r.duty_id, r.day, r.reserved_micro, d.daily_cap_micro
+         FROM run_requests r JOIN duties d ON d.duty_id = r.duty_id
+         WHERE r.request_id = ? AND r.state = 'pending'`,
+      )
+      .get(requestId) as
+      | { duty_id: string; day: string; reserved_micro: number; daily_cap_micro: number }
+      | undefined;
+    if (!row) return false;
+    const today = dayOf(this.now());
+    if (row.day === today) return true;
+    if (this.usedMicro(row.duty_id, today, requestId) + row.reserved_micro > row.daily_cap_micro) {
+      this.end(requestId, 'daily_cap', 0);
+      return false;
+    }
+    this.db.prepare('UPDATE run_requests SET day = ? WHERE request_id = ?').run(today, requestId);
+    return true;
   }
 
   /** The launch worked: launching -> started. */
