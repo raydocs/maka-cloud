@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { type ConductorToolSpec, shownValue, ToolRefusal } from '@maka-cloud/conductor';
-import { scrubSecretText } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import type { ChangeSet, CodingDeliveries, Delivery, PublishedPullRequest } from './deliveries.js';
 import type { PullRequestPublisher } from './github.js';
-import { type ReviewSummary, SEVERITIES } from './review.js';
+import { pullRequestBody, type VerificationView } from './evidence.js';
+
+export { pullRequestBody } from './evidence.js';
 
 export const OPEN_PULL_REQUEST_TOOL = 'open_pull_request';
 
@@ -257,71 +258,4 @@ async function loadChange(delivery: Delivery): Promise<LoadedChange> {
     changesSha256,
     recordSha256: createHash('sha256').update(record).digest('hex'),
   };
-}
-
-interface VerificationView {
-  testCommand: string;
-  baseSha: string;
-  repro?: { command: string; files: string[] };
-  attempts: { vendor: string; end?: string }[];
-  /** Set when the change is kept for the owner to look at, not delivered. */
-  kept?: { reason: string };
-  changedFiles?: { path: string; status: string }[];
-  review?: ReviewSummary;
-}
-
-function reviewHeading(review: ReviewSummary): string {
-  if (review.status !== 'reviewed') return 'Not reviewed by a second agent';
-  const total = SEVERITIES.reduce((sum, severity) => sum + review.counts[severity], 0);
-  if (total === 0) return 'Reviewed by a second agent: no findings';
-  const parts = SEVERITIES.filter((severity) => review.counts[severity] > 0).map(
-    (severity) => `${severity} ${review.counts[severity]}`,
-  );
-  return `Reviewed by a second agent: ${total} finding(s) remain (${parts.join(', ')}). They are on the task page.`;
-}
-
-// Everything below comes from the runner's record of a repository anyone may have written (a test
-// command, a path), and the description is posted on GitHub: a key in it would be public there.
-const code = (text: string) => `\`${scrubSecretText(text).replaceAll('`', "'")}\``;
-
-/** The pull request description, built from the runner's verification record. */
-export function pullRequestBody(verification: VerificationView): string {
-  const lines = [
-    ...(verification.kept
-      ? [
-          `**Kept for you to look at. Do not merge this before you have read the review.** ${code(verification.kept.reason)}`,
-          '',
-        ]
-      : []),
-    'Opened by the Maka Cloud coding runner after the user approved it.',
-    '',
-    "**Checked by the runner itself** (not taken from the agent's report):",
-    `- ${code(verification.testCommand)} passed.`,
-  ];
-  if (verification.repro) {
-    lines.push(
-      `- The reproduction test ${code(verification.repro.command)} (${verification.repro.files.map(code).join(', ')}) failed on the base commit ${verification.baseSha.slice(0, 12)} with the rest of this change reverted, and passes with it.`,
-    );
-  }
-  if (verification.attempts.length > 1) {
-    const first = verification.attempts[0];
-    lines.push(
-      `- A first attempt was dropped (${first?.end ?? 'it failed'}); this change is from the second.`,
-    );
-  }
-  if (verification.changedFiles?.length) {
-    lines.push(
-      '',
-      '**Changed files**',
-      ...verification.changedFiles.map((file) => `- ${code(file.path)} (${file.status})`),
-    );
-  }
-  // Counts only: the findings are the reviewer's words about a repository anyone may have written,
-  // and they stay on the task page (review.md), not in a pull request.
-  if (verification.review) lines.push('', `**${reviewHeading(verification.review)}**`);
-  lines.push(
-    '',
-    "**Not verified**: anything those two commands do not cover. This repository's own CI runs on this pull request now.",
-  );
-  return lines.join('\n');
 }
