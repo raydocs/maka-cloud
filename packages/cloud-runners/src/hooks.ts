@@ -206,6 +206,34 @@ export function labelOf(
 
 const ALLOW = {};
 
+/** The most message text one hook answer carries; the rest waits for the next step. */
+export const STEER_CONTEXT_CHARS = 16_000;
+
+/** Where messages for the agent wait until a step ends. */
+export interface SteerInbox {
+  /** Takes the messages that fit in `maxChars` (the first always does), oldest first. */
+  take(maxChars: number): Array<{ steerId: string; text: string }>;
+}
+
+/**
+ * The text the agent reads. The messages are the owner's own words, sent while it worked; they are
+ * marked as such so they are not mistaken for the output of the tool that just ran.
+ */
+export function steerContext(
+  messages: ReadonlyArray<{ text: string }>,
+  redact: (text: string) => string,
+): string {
+  const many = messages.length > 1;
+  return [
+    `The user sent you ${many ? `${messages.length} messages` : 'a message'} while you were working. ${
+      many ? 'They are' : 'It is'
+    } not part of the output of the step that just ended. Read ${many ? 'them' : 'it'} now and take ${
+      many ? 'them' : 'it'
+    } into account from your next step on:`,
+    ...messages.map((message) => `<user_message>\n${redact(message.text)}\n</user_message>`),
+  ].join('\n');
+}
+
 function deny(reason: string) {
   return {
     hookSpecificOutput: {
@@ -229,6 +257,7 @@ export function stepHooks(
   steps: StepLog,
   redact: (text: string) => string,
   onProblem: (message: string) => void = () => undefined,
+  inbox?: SteerInbox,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   const pre: HookCallback = async (input) => {
     const call = input as PreToolUseHookInput;
@@ -277,10 +306,31 @@ export function stepHooks(
     return ALLOW;
   };
 
+  /**
+   * What the owner sent while the agent worked, put in front of it after the step that just ended.
+   * A broken inbox never breaks the step: the messages stay where they are for the next one.
+   */
+  function waiting(event: 'PostToolUse' | 'PostToolUseFailure') {
+    if (!inbox) return ALLOW;
+    try {
+      const messages = inbox.take(STEER_CONTEXT_CHARS);
+      if (messages.length === 0) return ALLOW;
+      return {
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: steerContext(messages, redact),
+        },
+      };
+    } catch (error) {
+      onProblem(`a message for the agent could not be handed over: ${redact(errorMessage(error))}`);
+      return ALLOW;
+    }
+  }
+
   const post: HookCallback = async (input) => {
     const call = input as PostToolUseHookInput;
     await record(call.tool_use_id, { status: 'done' });
-    return ALLOW;
+    return waiting('PostToolUse');
   };
 
   const failed: HookCallback = async (input) => {
@@ -292,7 +342,7 @@ export function stepHooks(
         .trim()
         .slice(0, 500),
     });
-    return ALLOW;
+    return waiting('PostToolUseFailure');
   };
 
   async function record(

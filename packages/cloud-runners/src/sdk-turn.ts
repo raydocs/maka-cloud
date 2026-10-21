@@ -1,7 +1,7 @@
 import type { Options, Query, SessionStore, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import type { StepLog } from '@maka-cloud/orchestrator';
 import { readFile } from 'node:fs/promises';
-import { stepHooks } from './hooks.js';
+import { type SteerInbox, stepHooks } from './hooks.js';
 import type { ExecProcess } from './process-channel.js';
 import { allowedSdkEnv } from './process-channel.js';
 
@@ -55,6 +55,8 @@ export interface AgentQueryInput {
    * both sides are told the same one.
    */
   mirror?: { store: SessionStore; configDir: string };
+  /** Messages for the agent, read after each step. Needs `steps`: the hooks are the same ones. */
+  steer?: SteerInbox;
   redact(text: string): string;
   onProblem(message: string): void;
   /**
@@ -98,7 +100,9 @@ export function startAgentQuery(input: AgentQueryInput): Query {
           strictMcpConfig: true,
         }
       : {}),
-    ...(input.steps ? { hooks: stepHooks(input.steps, input.redact, input.onProblem) } : {}),
+    ...(input.steps
+      ? { hooks: stepHooks(input.steps, input.redact, input.onProblem, input.steer) }
+      : {}),
     ...(input.mirror
       ? {
           sessionStore: input.mirror.store,

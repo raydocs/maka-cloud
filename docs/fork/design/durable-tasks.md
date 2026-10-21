@@ -9,9 +9,9 @@ Status of the pieces (updated by each PR):
 | 1 | Step log and epoch fencing | merged (#162), section 1 |
 | 2 | Resume instead of fail | merged (#164), section 2 |
 | 3 | Process channel and Agent SDK runner | merged (#166), section 3 (off until a deployment passes `agentSdk`) |
-| 4 | Transcript mirror and fresh-box resume | in review, section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
-| 5 | Spend follows the step log, per-task budgets | in review, section 5 |
-| 6 | Steering, `restart` event, catch-up, stream fence | not built |
+| 4 | Transcript mirror and fresh-box resume | merged (#200), section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
+| 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
+| 6 | Steering, `restart` event, catch-up, stream fence | steering in review, section 6; `restart`, catch-up and fence not built |
 | 7 | Run timeline | not built |
 | 8 | Drills, known gaps, bench | not built |
 
@@ -267,3 +267,27 @@ recorded (the journal's process epoch).
 Not here: box-time limits per box rather than per task (instabox bills the machine, which tasks of
 one invite share), and a per-turn limit chosen per task rather than per server.
 
+## 6. Steering
+
+What the owner types while a task runs goes into the agent's conversation at the next safe point, instead of waiting for the end or restarting the task.
+
+### Path
+
+- **Public API.** `POST /v1/tasks/:id/messages {text, messageId?}` answers `{message: {messageId, state}}`; `DELETE /v1/tasks/:id/messages/:messageId` takes a message back. The owner's invite is checked twice, in the handler and in the orchestrator's write chain (`steerAs` / `withdrawSteerAs`, like a pause). The text is the owner's own, so it is not judged as model output. The conductor has no tool for it: a conversation that delegated has read outside content, and a message to a runner with full permissions is as much a send as a brief.
+- **Log.** `task_steer {steerId, text, by}` is recorded once per `steerId` (a resend returns the message as it stands; the same key with other text is refused). `task_steer_delivered {steerId, epoch}` is written when the run reports it put the message in front of the agent, `task_steer_withdrawn` when the owner took it back first, `task_steer_unseen` when the run ended before the agent read it. The reducer keeps them in `TaskRecord.steers` in order. None is shown on the feed (`NOT_IN_FEED`): the conversation does not show the message back as a task event.
+- **Runner.** `Runner.steerable` says whether a task of this runner takes messages; the Claude runner has it when the host passes `agentSdk`. `RunHandle.steer` queues a message in the run's inbox, `RunHandle.unsteer` drops one the agent has not been given (false once it was). The SDK's `PostToolUse` and `PostToolUseFailure` hooks, which already record the step, take the inbox and answer with `additionalContext`: "The user sent you a message while you were working … `<user_message>…</user_message>`", secrets of the run scrubbed, at most 16,000 characters per answer (the first message always goes, the rest wait for the next step). The run then reports `steered`.
+- **Why hooks, not streaming input.** The sandbox channel is exec only, with no stdin to a running process (section 3), so the SDK's streaming input has nowhere to write. Hooks run in the server, between steps, which is the safe point anyway.
+
+### Limits, stated plainly
+
+- A turn that makes no more tool calls never reads a message. When the run ends with messages unread, each is marked `unseen` and the task gets one note ("… came too late to be read: it ended without another step"). Nothing is promised about the time a message takes: it waits for the step under way.
+- A message is not delivered to a paused task; it waits for the resume.
+- At most 20 unread messages per task and 4,000 characters each.
+
+### Restarts
+
+A new attempt (`task_attempt`) sets `steersHeld` on the task; the first `step_outcome` of that epoch clears it. While it is set, nothing is offered to the resumed run, so the owner's message is not read in the middle of the recovery note and the replay of earlier steps (the durable-harness authors leave this undefined). Messages the agent read before the restart are `delivered` and are not offered again; unread ones are offered once to the new run, in the order they were sent. Offers are tracked per run handle, so a new handle gets them all and the same handle gets each once.
+
+### Not verified
+
+No real CLI: the hook answer is checked against the stand-in CLI that speaks the SDK's protocol, not against a real `claude` honouring `additionalContext`.

@@ -45,6 +45,8 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
       cancelAs: () => Promise.reject(new Error('unused')),
       pauseAs: () => Promise.reject(new Error('unused')),
       resumeAs: () => Promise.reject(new Error('unused')),
+      steerAs: () => Promise.reject(new Error('unused')),
+      withdrawSteerAs: () => Promise.reject(new Error('unused')),
     },
     artifacts: { read: () => Promise.resolve({ ok: false, reason: 'not_found' }) },
     artifactLimiter: new RateLimiter(1_000_000),

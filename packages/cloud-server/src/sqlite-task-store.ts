@@ -28,6 +28,11 @@ const NOT_IN_FEED: ReadonlySet<TaskEvent['type']> = new Set([
   'step_intent',
   'step_outcome',
   'step_interrupted',
+  // What the owner told the agent is theirs; the conversation does not show it back as a task event.
+  'task_steer',
+  'task_steer_delivered',
+  'task_steer_withdrawn',
+  'task_steer_unseen',
 ]);
 
 interface LogRow {
