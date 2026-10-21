@@ -43,6 +43,18 @@ passed all seven steps:
 | `restart-reply` | passes |
 | `backup-restore` (backup, restore, a task still runs) | passes |
 
+**Gate for the first live run: a coding task's checkout.** The `task` step runs the `free` playbook, which
+never clones a repository, so nothing in the rehearsal makes the agent account read or edit a checkout or
+write `handoff/repro.json`. A review of the launch-path PRs found that on the launch path it cannot
+(the checkout is cloned under `umask 077` and the agent account is not in its group; `repro.json` is
+written to a directory the agent cannot write). Until a rehearsal step shows the agent account editing a
+file in a real checkout and writing `handoff/repro.json`, and that step passes, no coding task has been
+shown to work and **the first live run does not start**. This is a gate, not an expected failure: it is
+not in `MAKA_REHEARSAL_XFAIL`, and the line below is struck out only when the step is in the flow and green.
+
+- [ ] Rehearsal step `checkout`: the agent account edits a file in the checkout of a coding task and writes
+  `handoff/repro.json`, and the host reads it.
+
 Still not verified by the rehearsal, so the first run on a real host is the first time they run:
 
 - The firewall is a stand-in that keeps its rules in files: the egress guard's rules are checked as
