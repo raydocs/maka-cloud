@@ -4,6 +4,7 @@ import {
   containsSecret,
   scrubSecretFields,
   scrubSecretShapes,
+  scrubSecretText,
   scrubValues,
   setKnownSecrets,
 } from '../secret-shapes.js';
@@ -56,6 +57,15 @@ test('the values this process holds are removed however they are written, and or
   gone(`Authorization: Basic ${Buffer.from(`user:${key}`).toString('base64')}`, 'dXNlcjpnd');
   setKnownSecrets([]);
   assert.equal(scrubSecretShapes(`still ${key}`), `still ${key}`);
+});
+
+test("a short registered value that is a plain word is left alone, so a host's AUTH_PROVIDER does not eat the text", () => {
+  setKnownSecrets(['google', 'invite', 'sqlite']);
+  assert.equal(
+    scrubSecretShapes('Sign in with google or invite to sandbox'),
+    'Sign in with google or invite to sandbox',
+  );
+  assert.equal(containsSecret({ question: 'Sign in with google?' }), false);
 });
 
 test('a short registered key is removed too, in every form, and a blank one is not a key', () => {
@@ -227,5 +237,58 @@ test('a text that is cut off in the middle of nested JSON still loses its creden
   assert.equal(
     scrubSecretShapes('{"title":"fix the nonce","n":[1,2]}'),
     '{"title":"fix the nonce","n":[1,2]}',
+  );
+});
+
+test('a long token followed by a lone percent sign or backslash is scrubbed in linear time', () => {
+  for (const tail of ['!%', '\nbuild 100%', ' C:\\']) {
+    const text = `${'a'.repeat(200_000)}${tail}`;
+    const started = Date.now();
+    scrubSecretShapes(text);
+    assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms for ${tail}`);
+  }
+});
+
+test('JSON nested past the stack is not read as JSON and does not throw', () => {
+  const deep = `${'['.repeat(6000)}${']'.repeat(6000)}`;
+  assert.doesNotThrow(() => scrubSecretShapes(deep));
+  assert.equal(
+    scrubSecretShapes(`${deep} Authorization: Bearer abcdefgh12345678`).includes(
+      'abcdefgh12345678',
+    ),
+    false,
+  );
+});
+
+test('a key split by a character that shows nothing is still found, whichever the character', () => {
+  const key = 'abc12345SECRETkey';
+  setKnownSecrets([key]);
+  for (const mark of [
+    '\u034f',
+    '\ufe0f',
+    '\u180b',
+    '\u3164',
+    '\u{e0100}',
+    '\u0301',
+    '\u200b',
+    '\u00ad',
+  ]) {
+    const split = `abc12345${mark}SECRETkey`;
+    assert.ok(
+      !scrubSecretText(`here: ${split}`).includes('SECRETkey'),
+      `U+${mark.codePointAt(0)?.toString(16)} survived`,
+    );
+    assert.equal(
+      containsSecret({ ask: split }),
+      true,
+      `U+${mark.codePointAt(0)?.toString(16)} not found`,
+    );
+  }
+  // The shape of a token the same way: nothing of its tail is left showing.
+  assert.ok(!scrubSecretText('sk-abcdefgh\u034fijklmnop').includes('ijklmnop'));
+  // Text with nothing in it is not rewritten.
+  assert.equal(
+    scrubSecretText('na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}'),
+    'na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}',
   );
 });

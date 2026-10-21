@@ -37,6 +37,7 @@ export {
   scrubSecretFields,
   scrubSecretShapes,
   setKnownSecrets,
+  withoutInvisible,
 } from './secret-shapes.js';
 export { SqliteSessionStore } from './sqlite-session-store.js';
 export { SqliteTaskStore } from './sqlite-task-store.js';

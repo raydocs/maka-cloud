@@ -110,14 +110,17 @@ const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/
 /**
  * The secret values this process holds (the keys it was given), replaced wherever they appear in
  * text that leaves it: as they are, URL-encoded, escaped for JSON, or as the base64 of a Basic
- * credential that has them in it. Replaces the earlier list. A value of any length counts: what is
- * registered is the caller's word that it is a secret (the host leaves out values shorter than six
- * characters from its environment), so a short key is not left in the text for being short.
+ * credential that has them in it. Replaces the earlier list. A short value counts when it is not a
+ * plain word (it has a digit or a symbol in it, like `p@ss/w?`): a key is not left in the text for
+ * being short. Under eight characters and only letters (`google`, `invite`) it is a word, which the
+ * environment of a host holds under names like AUTH_PROVIDER, and is left alone.
  */
 export function setKnownSecrets(values: readonly string[]): void {
   const forms = new Set<string>();
   for (const value of values) {
     const secret = value.trim();
+    // A short value that is only letters is a word (a provider, a mode): it would eat ordinary text.
+    if (secret.length < 8 && /^\p{L}*$/u.test(secret)) continue;
     if (secret === '') continue;
     for (const form of secretForms(secret)) forms.add(form);
   }
@@ -291,14 +294,14 @@ function scrubJsonFields(text: string): string {
 function scrubParsed(text: string): string | undefined {
   const trimmed = text.trim();
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined;
-  let parsed: unknown;
+  // Text nested deeper than the stack allows is not read as JSON; the patterns below still see it.
   try {
-    parsed = JSON.parse(trimmed);
+    const parsed: unknown = JSON.parse(trimmed);
+    const cleaned = JSON.stringify(scrubSecretFields(parsed));
+    return cleaned === JSON.stringify(parsed) ? undefined : cleaned;
   } catch {
     return undefined;
   }
-  const cleaned = JSON.stringify(scrubSecretFields(parsed));
-  return cleaned === JSON.stringify(parsed) ? undefined : cleaned;
 }
 
 /**
@@ -307,10 +310,11 @@ function scrubParsed(text: string): string | undefined {
  * can be escaped again); one that holds a secret once read is replaced whole.
  */
 const ESCAPE = String.raw`%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}`;
-const ESCAPED_RUN = new RegExp(
-  `(?:[\\w.~+/=:@-]|${ESCAPE})*(?:${ESCAPE})(?:[\\w.~+/=:@-]|${ESCAPE})*`,
-  'gu',
-);
+// One pass over the token characters and escapes; a run without an escape is skipped by the caller.
+// (A pattern that looked for the first escape inside the run backtracked quadratically on a long
+// token followed by a lone `%`.)
+const ESCAPED_RUN = new RegExp(`(?:[\\w.~+/=:@-]|${ESCAPE})+`, 'gu');
+const HAS_ESCAPE = new RegExp(ESCAPE, 'u');
 
 function unescapeRun(run: string): string {
   let text = run;
@@ -338,6 +342,7 @@ function unescapeRun(run: string): string {
 function scrubEscapedRuns(text: string): string {
   if (!text.includes('%') && !text.includes('\\')) return text;
   return text.replace(ESCAPED_RUN, (run) => {
+    if (!HAS_ESCAPE.test(run)) return run;
     const plain = unescapeRun(run);
     return plain !== run && scrubShapes(plain) !== plain ? '[secret]' : run;
   });
@@ -366,12 +371,25 @@ function scrubShapes(text: string): string {
 }
 
 /**
+ * Characters that show nothing, or only change the one before: format characters, combining marks,
+ * variation selectors, the Hangul fillers and the Mongolian free variation selectors. A token with
+ * one between its letters reads as the same token to a person and to a search, not to a pattern.
+ */
+const INVISIBLE =
+  /[\p{Cf}\p{Mn}\p{Me}\u115f\u1160\u2800\u3164\uffa0\u180b-\u180d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+
+/** `value` as it reads: compatibility forms folded, invisible characters gone. For finding secrets, not for showing. */
+export function withoutInvisible(value: string): string {
+  return value.normalize('NFKC').replace(INVISIBLE, '');
+}
+
+/**
  * Text as clients see it when only the secrets must go. Invisible and compatibility characters
  * are read away first, so one cannot split a token past the patterns; text with nothing in it
  * comes back untouched, so an emoji joined by a zero-width joiner survives.
  */
 export function scrubSecretText(value: string): string {
-  const plain = value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+  const plain = withoutInvisible(value);
   const scrubbed = scrubSecretShapes(plain);
   return scrubbed === plain ? scrubSecretShapes(value) : scrubbed;
 }
@@ -384,7 +402,7 @@ export function scrubSecretText(value: string): string {
  */
 export function containsSecret(value: unknown, depth = 0): boolean {
   if (typeof value === 'string') {
-    const plain = value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+    const plain = withoutInvisible(value);
     return scrubSecretShapes(plain) !== plain || scrubSecretShapes(value) !== value;
   }
   if (depth > 12 || typeof value !== 'object' || value === null) return false;

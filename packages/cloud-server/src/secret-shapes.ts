@@ -8,4 +8,5 @@ export {
   scrubSecretShapes,
   scrubSecretText,
   setKnownSecrets,
+  withoutInvisible,
 } from '@maka-cloud/orchestrator';

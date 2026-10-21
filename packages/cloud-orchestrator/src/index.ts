@@ -76,6 +76,7 @@ export {
   scrubSecretFields,
   scrubSecretShapes,
   scrubSecretText,
+  withoutInvisible,
   scrubValues,
   secretForms,
   setKnownSecrets,

@@ -4,6 +4,7 @@ import {
   scrubErrorText,
   scrubSecretShapes,
   setKnownSecrets,
+  withoutInvisible,
 } from '@maka-cloud/server';
 
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -52,7 +53,7 @@ export function createScrubber(env: NodeJS.ProcessEnv = process.env): (text: str
   const values = secretValuesOf(env);
   const exact = values.length === 0 ? undefined : new RegExp(values.map(escape).join('|'), 'gu');
   return (text) => {
-    let out = text.normalize('NFKC').replace(/\p{Cf}/gu, '');
+    let out = withoutInvisible(text);
     if (exact) out = out.replace(exact, '[secret]');
     out = scrubSecretShapes(out);
     for (const shape of LOG_ONLY_SHAPES) {
