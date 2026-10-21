@@ -1,4 +1,4 @@
-import { scrubErrorText } from '@maka-cloud/server';
+import { scrubErrorText, scrubSecretShapes } from '@maka-cloud/server';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 /** Scalars are the norm; anything else (an object, a list) is scrubbed value by value before it prints. */
@@ -18,19 +18,9 @@ const MAX_FIELD_LENGTH = 1_000;
 const NAME = /^[a-z][a-z0-9_.]{0,63}$/u;
 const RESERVED = new Set(['ts', 'level', 'event']);
 
-/** Shapes of the keys and tokens this system and its vendors hand out. */
-const SECRET_SHAPES: readonly RegExp[] = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gu,
-  /\b(?:Bearer|Basic)\s+[\w.~+/=-]+/giu,
-  /\b(?:sk|pk|rk)-[\w-]{8,}/gu,
-  /\bgh[pousr]_\w{16,}/gu,
-  /\bgithub_pat_\w{16,}/gu,
-  /\bAIza[\w-]{20,}/gu,
-  /\bibx-[\w-]{6,}/gu,
-  /\bmk[iog]_[\w.-]{8,}/gu,
-  // A header or setting that carries a secret: the name stays, the value goes.
-  /\b((?:x-api-key|authorization|api[_-]?key|token|secret|password)["']?\s*[:=]\s*["']?)[^\s"',;}]+/giu,
-  // Anything long and key-like that nothing above knew.
+/** What only a log line gets on top of the shared shapes: any setting that smells of a secret, and anything long and key-like. */
+const LOG_ONLY_SHAPES: readonly RegExp[] = [
+  /\b((?:token|secret|password)["']?\s*[:=]\s*["']?)[^\s"',;}]+/giu,
   /[A-Za-z0-9_-]{40,}/gu,
 ];
 
@@ -58,7 +48,8 @@ export function createScrubber(env: NodeJS.ProcessEnv = process.env): (text: str
   return (text) => {
     let out = text.normalize('NFKC').replace(/\p{Cf}/gu, '');
     if (exact) out = out.replace(exact, '[secret]');
-    for (const shape of SECRET_SHAPES) {
+    out = scrubSecretShapes(out);
+    for (const shape of LOG_ONLY_SHAPES) {
       out = out.replace(shape, (match, name: unknown) =>
         typeof name === 'string' ? `${name}[secret]` : '[secret]',
       );

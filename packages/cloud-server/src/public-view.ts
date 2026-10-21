@@ -1,4 +1,5 @@
 import type { TaskEvent, TaskView } from '@maka-cloud/orchestrator';
+import { scrubSecretShapes } from './secret-shapes.js';
 
 /**
  * What the public API shows of a task. The runner id names the vendor behind a
@@ -12,12 +13,16 @@ export type PublicTaskView = Omit<TaskView, 'runner'>;
 const HIDDEN_NAMES =
   /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus/giu;
 
-/** Error text as clients see it: no model or vendor names, by the rule cloud-web applies. */
+/**
+ * Error text as clients see it: no keys or bearer tokens (a failed request often echoes its own
+ * headers), and no model or vendor names, by the rule cloud-web applies. Hidden characters go
+ * first so one cannot split a token past the patterns.
+ */
 export function scrubErrorText(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[\p{Cf}]/gu, '')
-    .replace(HIDDEN_NAMES, 'assistant');
+  return scrubSecretShapes(value.normalize('NFKC').replace(/[\p{Cf}]/gu, '')).replace(
+    HIDDEN_NAMES,
+    'assistant',
+  );
 }
 
 /**
