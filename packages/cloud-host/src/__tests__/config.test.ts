@@ -634,10 +634,13 @@ test('MAKA_CLOUD_BOXES=1 with a template asks for the pool, three boxes per invi
   const config = readStackConfig(POOL_ENV);
   assert.deepEqual(config.boxes, { templateId: 'tpl_node', maxPerInvite: 3 });
   assert.deepEqual(config.sandboxes, {});
-  assert.deepEqual(readStackConfig({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: '5' }).boxes, {
-    templateId: 'tpl_node',
-    maxPerInvite: 5,
-  });
+  // The account limit is not assumed to be 5: more than five is allowed, up to the pool's own bound.
+  for (const max of [5, 12, 32]) {
+    assert.deepEqual(readStackConfig({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: String(max) }).boxes, {
+      templateId: 'tpl_node',
+      maxPerInvite: max,
+    });
+  }
   assert.equal(readStackConfig(ENV).boxes, undefined, 'the fixed machines stay the default');
   assert.ok(describeConfig(config).some((line) => line.includes('up to 3 per invite')));
 });
@@ -648,9 +651,9 @@ test('the pool needs its template, refuses a bad size, and is not mixed with fix
   assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOX_TEMPLATE: 'a b' }), [
     'MAKA_CLOUD_BOX_TEMPLATE is not a template id',
   ]);
-  for (const bad of ['0', '6', '2.5', 'many', '-1']) {
+  for (const bad of ['0', '33', '2.5', 'many', '-1']) {
     assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: bad }), [
-      'MAKA_CLOUD_BOX_MAX must be a whole number from 1 to 5',
+      'MAKA_CLOUD_BOX_MAX must be a whole number from 1 to 32',
     ]);
   }
   assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOXES: 'yes' }), [

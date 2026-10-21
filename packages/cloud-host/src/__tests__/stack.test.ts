@@ -101,6 +101,8 @@ async function start(
             name === 'MAKA_CLOUD_SANDBOXES' ||
             name === 'MAKA_CLOUD_BOXES' ||
             name === 'MAKA_CLOUD_BOX_TEMPLATE' ||
+            name === 'MAKA_CLOUD_AGENT_USER' ||
+            name === 'MAKA_CLOUD_AGENT_GROUP' ||
             name === 'MAKA_CLOUD_BACKUP_DIR' ||
             name === 'MAKA_CLOUD_SPEND_ALERT_USD' ||
             name === 'MAKA_CLOUD_OWNER_INVITE' ||
@@ -1611,4 +1613,30 @@ test('with MAKA_CLOUD_BOXES=1 the fleet runs on the box pool with the pinned CLI
   );
   await stack.close();
   assert.equal(pending.size, 0, 'closing the stack stops both loops');
+});
+
+test('the box pool runs repository scripts as the configured agent account, and as nobody without one', async (t) => {
+  const account = emptyAccount();
+  const timers = { setTimeout: () => 1, clearTimeout: () => undefined };
+  const boxes = { client: account.client, guard: async () => undefined, timers };
+  const poolEnv = { MAKA_CLOUD_BOXES: '1', MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' };
+  const agentOf = (sandboxes: unknown) =>
+    (sandboxes as { options: { agent?: { user: string; group: string } } }).options.agent;
+
+  const without = await start(t, undefined, poolEnv, true, { boxes });
+  assert.equal(agentOf(without.options.sandboxes), undefined, 'no account, no repository script');
+  await without.stack.close();
+
+  const withAgent = await start(
+    t,
+    undefined,
+    { ...poolEnv, MAKA_CLOUD_AGENT_USER: 'maka-agent', MAKA_CLOUD_AGENT_GROUP: 'maka-work' },
+    true,
+    { boxes },
+  );
+  assert.deepEqual(agentOf(withAgent.options.sandboxes), {
+    user: 'maka-agent',
+    group: 'maka-work',
+  });
+  await withAgent.stack.close();
 });

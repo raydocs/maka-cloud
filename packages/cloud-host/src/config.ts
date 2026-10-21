@@ -372,7 +372,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_BOX_MAX',
-    'the most boxes one invite may have (1 to 5, default 3); the sandbox account allows 5 in all',
+    'the most boxes one invite may have (1 to 32, default 3); when instabox refuses a create the task waits for a free box of its invite',
   ],
   ['INSTABOX_API_URL', 'sandbox API base URL'],
   ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
@@ -728,8 +728,11 @@ function parseDutyLinks(text: string): DutyLink[] | string {
   return links;
 }
 const MACHINE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-/** The most boxes an invite may ask for: the sandbox account allows 5 in all. */
-const MAX_BOXES_PER_INVITE = 5;
+/**
+ * The most boxes an invite may ask for: the pool's own bound (slot numbers are labels). The instabox
+ * account limit is not assumed; a refused create makes the task wait for a box of its invite.
+ */
+const MAX_BOXES_PER_INVITE = 32;
 const DEFAULT_BOXES_PER_INVITE = 3;
 
 /**

@@ -269,6 +269,7 @@ export async function startStack(
         client,
         templateId: config.boxes.templateId,
         maxPerInvite: config.boxes.maxPerInvite,
+        ...(config.agentChannel === undefined ? {} : { agent: config.agentChannel }),
         // Until the orchestrator exists every task counts as live: a box is never freed by a guess.
         isTaskLive: (taskId) => {
           const state = orchestrator?.taskStateOf(taskId);

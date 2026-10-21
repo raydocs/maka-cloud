@@ -394,7 +394,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_SANDBOXES` | required unless MAKA_CLOUD_BOXES=1: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks |
 | `MAKA_CLOUD_BOXES` | 1: the server makes, sleeps and deletes the sandboxes itself, a pool per invite, instead of a fixed machine per invite (do not set MAKA_CLOUD_SANDBOXES); needs MAKA_CLOUD_BOX_TEMPLATE |
 | `MAKA_CLOUD_BOX_TEMPLATE` | the sandbox template id new boxes start from; required with MAKA_CLOUD_BOXES=1 |
-| `MAKA_CLOUD_BOX_MAX` | the most boxes one invite may have (1 to 5, default 3); the sandbox account allows 5 in all |
+| `MAKA_CLOUD_BOX_MAX` | the most boxes one invite may have (1 to 32, default 3); when instabox refuses a create the task waits for a free box of its invite |
 | `INSTABOX_API_URL` | sandbox API base URL |
 | `OPENAI_API_KEY` | the model gateway’s key for Codex runs |
 | `OPENAI_BASE_URL` | Responses API base URL for the model gateway |

@@ -1,4 +1,5 @@
 import { applyEgressGuard, type InstaboxClient } from '@maka-cloud/instabox';
+import type { AgentChannel } from '@maka-cloud/runners';
 import { BoxPool } from './pool.js';
 import type { BoxPoolOptions } from './types.js';
 
@@ -11,6 +12,11 @@ export interface BoxServiceOptions {
   templateId: string;
   /** At most this many boxes per invite. Default 3. */
   maxPerInvite?: number;
+  /**
+   * The unprivileged account repository scripts (`.agents/resume`, `.agents/setup`) run as. Without it
+   * no repository script is run.
+   */
+  agent?: AgentChannel;
   /**
    * Whether the orchestrator still considers a task live. Before the orchestrator exists the answer
    * must be `true`: a box labelled with a task is then kept claimed, never freed by a guess.
@@ -64,6 +70,7 @@ export function startBoxService(options: BoxServiceOptions): BoxService {
     onWarning: warn,
     timers,
     ...(options.maxPerInvite === undefined ? {} : { maxPerInvite: options.maxPerInvite }),
+    ...(options.agent === undefined ? {} : { agent: options.agent }),
     ...(options.conversationOf === undefined ? {} : { conversationOf: options.conversationOf }),
   });
 
