@@ -18,7 +18,9 @@ import {
   type CloudRunnersOptions,
   createCloudRunnersFromEnv,
   JsonFileSessionStore,
+  loadAgentSdk,
   sameConversationInputPolicy,
+  SqliteTranscriptStore,
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
@@ -204,7 +206,14 @@ export async function startStack(
   // has no duties: there is no webhook route and no project route.
   const webhookSecret = config.dutiesSet ? env.MAKA_GITHUB_WEBHOOK_SECRET?.trim() : undefined;
   let duties: DutiesRuntime | undefined;
+  // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
+  // the Agent SDK, which needs the agent's account.
+  let transcripts: SqliteTranscriptStore | undefined;
   try {
+    if (config.agentChannel !== undefined) {
+      await mkdir(dirname(config.transcriptsDbPath), { recursive: true });
+      transcripts = SqliteTranscriptStore.open(config.transcriptsDbPath);
+    }
     duties =
       webhookSecret === undefined
         ? undefined
@@ -241,6 +250,13 @@ export async function startStack(
       inputs: sameConversationInputPolicy(directory),
       tenantOf,
       sandboxes: new TenantMachineProvider(config.sandboxes),
+      ...(config.agentChannel === undefined || transcripts === undefined
+        ? {}
+        : {
+            agentSdk: await loadAgentSdk(),
+            agentChannel: config.agentChannel,
+            transcripts,
+          }),
       ...(publicUrl === undefined ? {} : { mcpUrlForSandbox: () => publicUrl }),
     };
     runners = (
@@ -351,6 +367,7 @@ export async function startStack(
   } catch (error) {
     await duties?.stop();
     duties?.close();
+    transcripts?.close();
     await gateway.close();
     invites.close();
     journal.close();
@@ -385,6 +402,12 @@ export async function startStack(
         ...(duties === undefined
           ? {}
           : { [relative(config.dataDir, config.dutiesDbPath)]: (to) => duties.backupTo(to) }),
+        ...(transcripts === undefined
+          ? {}
+          : {
+              [relative(config.dataDir, config.transcriptsDbPath)]: (to) =>
+                transcripts.backupTo(to),
+            }),
       },
     });
   };
@@ -482,6 +505,7 @@ export async function startStack(
             await cloud.close();
           } finally {
             duties?.close();
+            transcripts?.close();
             await gateway.close();
             invites?.close();
             journal.close();

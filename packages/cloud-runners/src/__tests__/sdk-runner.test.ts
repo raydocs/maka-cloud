@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import type { StepLog, StepIntentResult } from '@maka-cloud/orchestrator';
 import { loadAgentSdk } from '../sdk-turn.js';
 import { SDK_CLI } from './fake-sdk-cli.js';
+import { sdkSetup } from './sdk-harness.js';
 import {
   API_KEY,
   collect,
@@ -21,43 +22,6 @@ import {
   terminal,
   until,
 } from './harness.js';
-
-/**
- * A `sudo` that runs the command as the current user. The fake sandbox has one user, so the agent's
- * separate account is only a name here; `agent-user.test.ts` checks the real thing where a second
- * account exists.
- */
-const SUDO_DOUBLE = `#!/bin/bash
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -n|--preserve-env|-H) shift ;;
-    -u) shift 2 ;;
-    --) shift; break ;;
-    *) break ;;
-  esac
-done
-exec "$@"
-`;
-
-/** The real Agent SDK, driving a scripted stand-in for `claude` that runs in the fake sandbox. */
-async function sdkSetup(t: { after(fn: () => Promise<void>): void }): Promise<Harness> {
-  const shim = await fs.mkdtemp(join(tmpdir(), 'sudo-double-'));
-  t.after(() => fs.rm(shim, { recursive: true, force: true }));
-  await fs.writeFile(join(shim, 'sudo'), SUDO_DOUBLE, { mode: 0o755 });
-  const h = await setup({
-    fake: { execPath: `${shim}:${process.env.PATH ?? ''}` },
-    cloud: {
-      agentSdk: await loadAgentSdk(),
-      agentSdkPollMs: { minMs: 5, maxMs: 20 },
-      agentChannel: { user: 'maka-agent', group: execFileSync('id', ['-gn']).toString().trim() },
-    },
-  });
-  t.after(() => h.cleanup());
-  // The box check needs a second account; it has its own tests.
-  h.runners.fleet.ensureAgentIsolation = async () => undefined;
-  await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
-  return h;
-}
 
 const fakeFile = (h: Harness, name: string) => join(h.home, 'fake-cli', name);
 
