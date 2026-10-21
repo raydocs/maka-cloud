@@ -355,3 +355,47 @@ test('a review by a person that does not start a run still lets a stopped chain 
   assert.equal(r.deliver('workflow_run', ownFailure(5)).body.started, 1);
   r.cleanup();
 });
+
+test('a pass that is replayed late does not reopen a chain that hit its limit', async () => {
+  const r = await rig();
+  const [duty] = (await r.activate(OWN_DUTY)) as [string];
+  r.deliver('workflow_run', workflowRun({ id: 1, number: 1, branch: OWN, conclusion: 'success' }));
+  for (let id = 2; id <= MAX_CHAIN_DEPTH + 1; id += 1) r.deliver('workflow_run', ownFailure(id));
+  assert.equal(r.deliver('workflow_run', ownFailure(5)).body.ignored, 'chain_limit');
+  // The old pass arrives again, under a new delivery id: it is older than the failures.
+  r.deliver('workflow_run', workflowRun({ id: 1, number: 1, branch: OWN, conclusion: 'success' }), {
+    id: 'replay-of-an-old-pass',
+  });
+  assert.equal(r.deliver('workflow_run', ownFailure(6)).body.ignored, 'chain_limit');
+  assert.equal(r.engine.requestsOf(duty).length, MAX_CHAIN_DEPTH);
+  r.cleanup();
+});
+
+test('a pass that is newer than the failures still ends the chain, and a replay of it changes nothing', async () => {
+  const r = await rig();
+  const [duty] = (await r.activate(OWN_DUTY)) as [string];
+  for (let id = 1; id <= MAX_CHAIN_DEPTH; id += 1) r.deliver('workflow_run', ownFailure(id));
+  assert.equal(r.deliver('workflow_run', ownFailure(4)).body.ignored, 'chain_limit');
+  const pass = workflowRun({ id: 20, number: 20, branch: OWN, conclusion: 'success' });
+  r.deliver('workflow_run', pass);
+  assert.equal(r.deliver('workflow_run', ownFailure(21)).body.started, 1);
+  r.deliver('workflow_run', pass, { id: 'again' });
+  assert.equal(r.engine.requestsOf(duty).length, MAX_CHAIN_DEPTH + 1);
+  r.cleanup();
+});
+
+test('a review that is delivered again under a new id is not a person acting again', async () => {
+  const r = await rig();
+  await r.activate(OWN_DUTY);
+  for (let id = 1; id <= MAX_CHAIN_DEPTH; id += 1) r.deliver('workflow_run', ownFailure(id));
+  assert.equal(r.deliver('workflow_run', ownFailure(4)).body.ignored, 'chain_limit');
+  const looked = review({ id: 5, state: 'commented', body: 'keep going' });
+  r.deliver('pull_request_review', looked);
+  assert.equal(r.deliver('workflow_run', ownFailure(5)).body.started, 1);
+  for (let id = 6; id <= 7; id += 1) r.deliver('workflow_run', ownFailure(id));
+  assert.equal(r.deliver('workflow_run', ownFailure(8)).body.ignored, 'chain_limit');
+  // The same review arrives again: the chain stays stopped.
+  r.deliver('pull_request_review', looked, { id: 'the-same-review-again' });
+  assert.equal(r.deliver('workflow_run', ownFailure(9)).body.ignored, 'chain_limit');
+  r.cleanup();
+});

@@ -36,7 +36,7 @@ export type Classified =
       /** CI failure only: ignored when a later success of the same scope is already recorded. */
       staleIf?: { scope: string; seq: number };
       /** CI failure of a branch of our own: part of a chain of runs that wake each other. */
-      chain?: { key: string };
+      chain?: { key: string; seq: number };
     };
 
 const Account = z.object({ login: z.string().min(1), type: z.string() });
@@ -239,7 +239,7 @@ function classifyWorkflowRun(data: z.infer<typeof WorkflowRun>, project: Project
     },
     staleIf: { scope, seq: order },
     supersede: { scope, seq: order },
-    ...(own ? { chain: { key: scope } } : {}),
+    ...(own ? { chain: { key: scope, seq: order } } : {}),
   };
 }
 
