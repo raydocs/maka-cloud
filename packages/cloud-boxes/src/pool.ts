@@ -727,7 +727,12 @@ export class BoxPool implements SandboxProvider {
 
   /** Marks the box free, hands it on to a waiting task if there is one, and rewrites its label. */
   private free(box: Box): void {
-    box.state = 'ready';
+    // Giving up a claim does not wake a box: one that is still asleep (found paused after a restart,
+    // or claimed but never woken) stays suspended, so the next task wakes and guards it.
+    box.state =
+      box.state === 'suspended' || (box.state === 'waking' && box.waking === undefined)
+        ? 'suspended'
+        : 'ready';
     box.taskId = undefined;
     box.holder = undefined;
     box.idleSince = this.now();
