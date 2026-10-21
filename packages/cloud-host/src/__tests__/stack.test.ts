@@ -974,9 +974,9 @@ async function staleAlertStack(t: TestContext, ownerConversation: boolean) {
   if (ownerConversation) await api('/v1/conversations', {});
   const journal = new SqliteSpendJournal(join(started.dataDir, 'gateway-spend.db'));
   t.after(() => journal.close());
-  const owe = (): void =>
+  const owe = (inviteId: string = ownerInvite.inviteId): void =>
     journal.savePendingAlert({
-      inviteId: ownerInvite.inviteId,
+      inviteId,
       key: 'spend:2026-10-19',
       firstAt: Date.now() - 25 * 3_600_000,
       failures: 9,
@@ -1024,6 +1024,26 @@ test('an alert given up on is raised once, even when it is owed again after the 
   owe();
   await started.stack.checkSpendAlert();
   assert.deepEqual(await items('open'), [], 'no second item for the same alert');
+});
+
+test('the same day’s alert given up for two invites is raised for each in its own inbox', async (t) => {
+  // The operator changed the owner during the day, so the alert of that day is owed for both.
+  const { started, owe, items, owner } = await staleAlertStack(t, true);
+  const next = started.stack.cloud.server.invites.create('next owner');
+  const nextApi = (path: string, body?: unknown): Promise<Response> =>
+    fetch(`${started.stack.cloud.server.url}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { authorization: `Bearer ${next.token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  await nextApi('/v1/conversations', {});
+  owe(owner.inviteId);
+  owe(next.inviteId);
+  await started.stack.checkSpendAlert();
+
+  assert.equal((await items('open')).length, 1, 'the first owner has an item');
+  const theirs = (await (await nextApi('/v1/inbox/items')).json()) as { items: unknown[] };
+  assert.equal(theirs.items.length, 1, 'and so has the second, not the first one’s item');
 });
 
 test('without a spend alert set the check does nothing', async (t) => {
