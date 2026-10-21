@@ -65,11 +65,20 @@ In the order to do them when cards come next, or before `MAKA_CLOUD_CARDS` is tu
    result to use that review's artifact. Test: Claude reads its own draft plus an unrelated Codex
    `notes.txt`, and the deep verdict must fail.
 
-## Per-task accounts
+## Per-task agent accounts (r19-4)
 
-Parked by the coordinator; no review finding is recorded for it yet, so this is a placeholder for the
-lane that raised it to fill in. Today the agent account is one per sandbox machine
-(`MAKA_CLOUD_AGENT_USER`), shared by every task on that machine.
+Today the agent account is one per sandbox machine (`MAKA_CLOUD_AGENT_USER`), shared by every task on
+that machine. A pool of accounts, one per task, is built and tested locally and kept as a patch at
+`/mnt/project-files/security/r19-4-agent-pool.patch` (not merged). It reads `MAKA_CLOUD_AGENT_ACCOUNTS`,
+leases an account to a task through a `.agent` file in the task directory, and releases it once the
+stop is confirmed.
+
+Still missing before it can merge:
+
+1. A peer test with real accounts (one task's account cannot read another's workspace).
+2. Host configuration tests for `MAKA_CLOUD_AGENT_ACCOUNTS`.
+3. The text in `docs/fork/deploy.md`.
+4. The host's `taskOver` wiring, so the lease is released when a task is over.
 
 ## Go-live rehearsal
 
