@@ -16,6 +16,7 @@ import type { ConversationPublisher } from './conductor-feed.js';
 import type { ComputerSource } from './computer.js';
 import { type ConversationStore, MAX_MESSAGE_BYTES, MAX_TITLE_LENGTH } from './conversations.js';
 import { type ArtifactSource, displayName, linkOf, listArtifact } from './artifacts.js';
+import { type OpenedPages, type PreviewService, PreviewBusy, siteOf } from './previews.js';
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
 import type { InboxRoutes } from './inbox.js';
@@ -31,6 +32,7 @@ const TASK_PAGE_DEFAULT = 50;
 const TASK_PAGE_MAX = 200;
 const HEARTBEAT_MS = 15_000;
 const MAX_LISTED_ARTIFACTS = 500;
+const MAX_LISTED_SOURCES = 20;
 
 export interface HttpLimits {
   /** Open event streams per invite. */
@@ -45,6 +47,8 @@ export interface HttpLimits {
   artifactsPerMinute: number;
   /** Artifact reads running at once, over all invites. */
   artifactReadsInFlight: number;
+  /** Source previews (a title or an image of a page the task opened) asked per minute per invite. */
+  previewsPerMinute: number;
   /** How long a stream may leave a write undrained before it is closed. */
   drainTimeoutMs: number;
   heartbeatMs: number;
@@ -63,6 +67,7 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = {
   controlPerMinute: 30,
   artifactsPerMinute: 60,
   artifactReadsInFlight: 8,
+  previewsPerMinute: 60,
   drainTimeoutMs: 30_000,
   heartbeatMs: HEARTBEAT_MS,
   revokeCheckMs: 1000,
@@ -123,6 +128,10 @@ export interface PublicApiDeps {
   computer?: ComputerSource;
   publisher?: ConversationPublisher;
   artifactLimiter: RateLimiter;
+  /** The pages tasks opened, and the proxy that fetches their previews. */
+  opened: OpenedPages;
+  previews: PreviewService;
+  previewLimiter: RateLimiter;
   limits: HttpLimits;
   /**
    * Called after a post, a retried one included: the message is stored with a
@@ -457,6 +466,13 @@ export class PublicApi {
       if (artifacts[2] === undefined) return this.listArtifacts(res, invite, taskId);
       return this.readArtifact(res, invite, taskId, decodeURIComponent(artifacts[2]));
     }
+    const sources = /^\/v1\/tasks\/([^/]+)\/sources(?:\/(\d{1,3})\/(preview|image))?$/u.exec(path);
+    if (sources) {
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      const taskId = decodeURIComponent(sources[1] ?? '');
+      if (sources[2] === undefined) return this.listSources(res, invite, taskId);
+      return this.sourcePreview(res, invite, taskId, Number(sources[2]), sources[3] === 'image');
+    }
     if (path === '/v1/push/key' || path === '/v1/push/subscriptions') {
       const { push } = this.deps;
       if (!push) throw new HttpError(404, 'not_found');
@@ -626,6 +642,72 @@ export class PublicApi {
       artifacts: refs.slice(0, MAX_LISTED_ARTIFACTS).map((ref, index) => listArtifact(ref, index)),
       total: refs.length,
     });
+  }
+
+  /** The pages the task opened, as the log has them; nothing is fetched to answer. */
+  private listSources(res: ServerResponse, invite: InviteInfo, taskId: string): void {
+    this.ownTaskSession(invite, taskId);
+    const pages = this.deps.opened.list(taskId);
+    respond(res, 200, {
+      sources: pages.slice(0, MAX_LISTED_SOURCES).map((page) => ({
+        index: page.index,
+        url: page.url,
+        site: siteOf(page.url),
+        label: page.label,
+      })),
+      total: pages.length,
+    });
+  }
+
+  /**
+   * The title, or the image, of one page the task opened. The server fetches it (the browser never
+   * contacts the site) through the checked fetcher, and only a page in the task's log is asked for:
+   * the path holds an index into that log, never a URL. Ownership is checked again after the fetch.
+   */
+  private async sourcePreview(
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+    index: number,
+    wantImage: boolean,
+  ): Promise<void> {
+    this.ownTaskSession(invite, taskId);
+    const page = this.deps.opened.list(taskId)[index];
+    if (page === undefined) throw new HttpError(404, 'not_found');
+    take(this.deps.previewLimiter, invite);
+    let preview: Awaited<ReturnType<PreviewService['get']>>;
+    try {
+      preview = await this.deps.previews.get(page.url);
+    } catch (error) {
+      if (error instanceof PreviewBusy) {
+        throw new HttpError(429, 'quota_exceeded', { 'retry-after': '2' });
+      }
+      throw error;
+    }
+    this.reauthenticate(invite);
+    this.ownTaskSession(invite, taskId);
+    if (!wantImage) {
+      return respond(
+        res,
+        200,
+        {
+          site: preview.site,
+          ...(preview.title === undefined ? {} : { title: preview.title }),
+          image: preview.image !== undefined,
+        },
+        { 'cache-control': 'private, no-store' },
+      );
+    }
+    if (preview.image === undefined) throw new HttpError(404, 'not_found');
+    res.writeHead(200, {
+      'content-type': preview.image.type,
+      'content-length': String(preview.image.bytes.length),
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cross-origin-resource-policy': 'same-origin',
+      'cache-control': 'private, no-store',
+    });
+    res.end(preview.image.bytes);
   }
 
   /**
