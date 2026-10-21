@@ -3,11 +3,10 @@ import { newMarker, parseFramed } from './scripts.js';
 
 /**
  * What a box may not reach. The cloud metadata address (169.254.169.254) answers with the host's
- * credentials, the private ranges are the host's own network, and loopback is where the sandbox's
- * own services listen (the agent runs as a user of the machine, not in a box of its own). Replies,
- * the box's name servers and IPv6 neighbour discovery are let through first; nothing else is.
- * A program that serves itself on loopback (a dev server, a test that binds a port) cannot reach
- * it either, until an explicit exception is made.
+ * credentials, the private ranges are the host's own network. Replies, the box's name servers and
+ * IPv6 neighbour discovery are let through first, and so is the box talking to itself (a dev
+ * server, a test that binds a port): 127/8 and ::1, out of the loopback interface only. Anything
+ * else addressed to those ranges, and every other blocked range, is refused.
  */
 export const EGRESS_BLOCKED_V4 = [
   '169.254.0.0/16',
@@ -27,6 +26,10 @@ export const EGRESS_ICMPV6_ALLOWED = [
   'neighbour-advertisement',
   'router-solicitation',
 ] as const;
+
+/** What the box may reach on itself, through the loopback interface (the owner's decision, 2026-10-21). */
+export const EGRESS_LOOPBACK_V4 = '127.0.0.0/8';
+export const EGRESS_LOOPBACK_V6 = '::1/128';
 
 export const EGRESS_CHAIN = 'MAKA_EGRESS';
 
@@ -80,6 +83,9 @@ build() {
         || fail "$tool: cannot add the $kind rule"
     done
   fi
+  # The box talking to itself, through the loopback interface and nowhere else.
+  as_root "$tool" -w -A "$chain" -d "$LOOPBACK" -o lo -j RETURN \\
+    || fail "$tool: cannot add the loopback rule"
   for net in "$@"; do
     as_root "$tool" -w -A "$chain" -d "$net" -j REJECT || fail "$tool: cannot block $net"
   done
@@ -96,6 +102,11 @@ sane() {
   for net in "$@"; do
     printf '%s\\n' "$listed" | grep -Fq -- "-d $net -j REJECT" || { WHY="$net is not blocked"; return 1; }
   done
+  # The one exception to loopback, exactly: out of lo only, and before the reject of that range.
+  pass=$(printf '%s\\n' "$listed" | awk -v n="-A $MAKA_CHAIN -d $LOOPBACK -o lo -j RETURN" '$0 == n { print NR; exit }')
+  stop=$(printf '%s\\n' "$listed" | awk -v n="-A $MAKA_CHAIN -d $LOOPBACK -j REJECT" 'index($0, n) == 1 { print NR; exit }')
+  [ -n "$pass" ] || { WHY="loopback is not allowed to the box itself"; return 1; }
+  [ -n "$stop" ] && [ "$pass" -lt "$stop" ] || { WHY="loopback is not refused from anything but lo"; return 1; }
 }
 unhook() {
   n=0
@@ -137,9 +148,9 @@ if command -v flock >/dev/null 2>&1; then
   exec 9>"$MAKA_LOCK"
   flock -w 30 9 || fail "cannot take $MAKA_LOCK"
 fi
-FAMILY=4 guard iptables $MAKA_V4
+FAMILY=4 LOOPBACK="$MAKA_LO4" guard iptables $MAKA_V4
 # procfs files report size 0, so [ -s ] cannot tell: read the content.
-if [ -n "$(cat "$MAKA_IF_INET6" 2>/dev/null)" ]; then FAMILY=6 guard ip6tables $MAKA_V6; fi
+if [ -n "$(cat "$MAKA_IF_INET6" 2>/dev/null)" ]; then FAMILY=6 LOOPBACK="$MAKA_LO6" guard ip6tables $MAKA_V6; fi
 printf '%s' "$M"; printf 'OK\\0'; printf '%s' "$M"
 `;
 
@@ -181,6 +192,8 @@ export async function applyEgressGuard(
         MAKA_V4: EGRESS_BLOCKED_V4.join(' '),
         MAKA_V6: EGRESS_BLOCKED_V6.join(' '),
         MAKA_ICMPV6: EGRESS_ICMPV6_ALLOWED.join(' '),
+        MAKA_LO4: EGRESS_LOOPBACK_V4,
+        MAKA_LO6: EGRESS_LOOPBACK_V6,
         MAKA_LOCK: EGRESS_LOCK,
         MAKA_RESOLV_CONF: options.resolvConf ?? '/etc/resolv.conf',
         MAKA_IF_INET6: options.ifInet6 ?? '/proc/net/if_inet6',
