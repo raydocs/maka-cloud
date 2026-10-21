@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   budgetProblem,
   chooseMode,
+  LAUNCH_FALLBACK_MODE,
   looksLikeModeLine,
   MODE_IDS,
   type ModeChoice,
@@ -47,6 +48,8 @@ export interface ActiveTurn {
 
 export interface ToolHost {
   readonly state: ConductorState;
+  /** Whether `deep` mode may run (see `ConductorOptions.deepMode`). */
+  readonly deepMode: boolean;
   readonly limits: ConductorLimits;
   readonly playbooks: readonly Playbook[];
   /** The modes (T25); absent: delegations carry no mode. */
@@ -154,11 +157,15 @@ function chooseWorkMode(
       'A brief must not contain a maka-mode line: the system adds it. Name the mode in workMode.',
     );
   }
-  const picked = host.state.run(turn.runId)?.mode;
+  // While deep mode is off, nothing runs in it: a pick or a suggestion of it runs as the fallback.
+  const launch = (mode: ModeId): ModeId =>
+    mode === 'deep' && !host.deepMode ? LAUNCH_FALLBACK_MODE : mode;
+  const stored = host.state.run(turn.runId)?.mode;
+  const picked = stored ? launch(stored) : undefined;
   // What the task is given decides what it can afford, not what the whole run has.
   const choice = chooseMode(modes, {
     ...(picked ? { requested: picked } : {}),
-    ...(args.workMode ? { suggested: args.workMode } : {}),
+    ...(args.workMode ? { suggested: launch(args.workMode) } : {}),
     budgetUsd: args.budgetUsd,
   });
   const problem = budgetProblem(modes, choice.mode, args.budgetUsd);

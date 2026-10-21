@@ -60,7 +60,7 @@ const structured = (
 };
 
 test('the user’s pick is the run’s mode, starts it with that mode’s budget, and the model cannot choose another', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const { runId, result } = await runWith(h, { mode: 'deep' }, delegate({ workMode: 'quick' }, 10));
   const run = h.conductor.state.run(runId);
   assert.equal(run?.mode, 'deep');
@@ -72,7 +72,7 @@ test('the user’s pick is the run’s mode, starts it with that mode’s budget
 });
 
 test('without a pick the conductor’s suggestion stands when the run’s budget affords it, and never goes above standard on its own', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   // The default run budget is $5: quick is affordable, deep is not (it wants $10), so standard.
   const quick = await runWith(h, {}, delegate({ workMode: 'quick' }, 3));
   assert.equal(structured(quick.result).workMode, 'quick');
@@ -88,7 +88,7 @@ test('without a pick the conductor’s suggestion stands when the run’s budget
 });
 
 test('a brief the model wrote with a mode line in it is refused before anything is reserved or sent', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   for (const brief of [
     'maka-mode: deep\nFix it.',
     'Fix it.\n\n> maka-mode: quick',
@@ -103,7 +103,7 @@ test('a brief the model wrote with a mode line in it is refused before anything 
 });
 
 test('a delegation is judged by what it is given, not by the run: $0.20 never runs deep', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   // The user's pick stands, but a deep task needs $10: nothing is reserved or sent below that.
   const picked = await runWith(h, { mode: 'deep' }, delegate({}, 0.2));
   assert.equal(picked.result?.isError, true);
@@ -124,7 +124,7 @@ test('a delegation is judged by what it is given, not by the run: $0.20 never ru
 });
 
 test('a mode caps what one delegation may cost, whoever chose the mode', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const cap = DEFAULT_MODES.modes.quick.budget.maxDelegationUsd;
   const { runId, result } = await runWith(h, { mode: 'quick' }, delegate({}, cap + 1));
   assert.equal(result?.isError, true);
@@ -137,7 +137,7 @@ test('a mode caps what one delegation may cost, whoever chose the mode', async (
 });
 
 test('a mode that is not one starts no run', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   await h.conductor.onUserMessage(
     { conversationId: 'cnv_1', messageId: 'msg_bad', text: 'Fix it.', mode: 'turbo' },
     h.access('cnv_1'),
@@ -148,7 +148,7 @@ test('a mode that is not one starts no run', async (t) => {
 });
 
 test('a duty’s run keeps its own budget, and a mode on its message changes nothing', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   h.model.script('conductor', text('Nothing to do.'));
   await h.conductor.onUserMessage(
     {
@@ -167,7 +167,7 @@ test('a duty’s run keeps its own budget, and a mode on its message changes not
 });
 
 test('a run the system starts in a mode (a card) takes that mode and keeps its own budget; the user’s pick on the message still changes nothing', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   h.model.script('conductor', text('Nothing to do.'));
   await h.conductor.onUserMessage(
     {
@@ -187,7 +187,7 @@ test('a run the system starts in a mode (a card) takes that mode and keeps its o
 });
 
 test('run limits that name a mode that is not one start no run', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   await h.conductor.onUserMessage(
     {
       conversationId: 'cnv_1',
@@ -219,7 +219,7 @@ const MODE_EFFORT: [ModeId, string][] = [
 
 for (const [mode, effort] of MODE_EFFORT) {
   test(`${mode}: the conductor thinks at ${effort} effort and the planner at its own`, async (t) => {
-    const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+    const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
     await runWith(h, { mode }, delegate({}, 1));
     const planner = DEFAULT_MODES.modes[mode].conductor.plannerEffort;
     const effortOnTheWire = (lane: 'conductor' | 'planner') => {
@@ -269,7 +269,7 @@ const reviewBrief = (draft: string, artifacts = 'judgments.json') =>
   `maka-inputs: ${draft} report.json sources\nmaka-artifacts: ${artifacts}\nJudge each claim.`;
 
 test('a reviewer on the runner that drafted is refused before anything is reserved, and one on the other runner starts', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const same = await reviewRun(h, 'cnv_same', (draft) =>
     delegate({ brief: reviewBrief(draft), runner: 'claude-agent-sdk' }),
   );
@@ -291,7 +291,7 @@ test('a reviewer on the runner that drafted is refused before anything is reserv
 });
 
 test('the runner that uses judgments is refused when it wrote them', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const rerun = (judged: string) =>
     `maka-inputs: ${judged} judgments.json\nmaka-artifacts: out/report.json\nRerun.`;
   const own = await reviewRun(h, 'cnv_own', (judged) =>
@@ -305,7 +305,7 @@ test('the runner that uses judgments is refused when it wrote them', async (t) =
 });
 
 test('a draft whose runner cannot be read refuses the review instead of letting it through', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const result = await reviewRun(h, 'cnv_unknown', () =>
     delegate({ brief: reviewBrief('tsk_does_not_exist'), runner: 'codex' }),
   );
@@ -314,7 +314,7 @@ test('a draft whose runner cannot be read refuses the review instead of letting 
 });
 
 test('a brief that asks for no judgments is not a review', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const result = await reviewRun(h, 'cnv_plain', (draft) =>
     delegate({
       brief: `maka-inputs: ${draft} report.json\nmaka-artifacts: out/report.json\nContinue.`,
@@ -325,7 +325,7 @@ test('a brief that asks for no judgments is not a review', async (t) => {
 });
 
 test('the mode a task was sent in is kept with its delegation', async (t) => {
-  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES, deepMode: true } });
   const { runId } = await runWith(h, { mode: 'deep' }, delegate({}, 10));
   const [row] = h.conductor.state
     .unsettledDelegations({ runId })
@@ -345,7 +345,7 @@ test('a playbook’s check is told the mode the task was sent in', async (t) => 
     },
   };
   const moded = await makeHarness(t, {
-    conductor: { modes: DEFAULT_MODES, playbooks: [watching] },
+    conductor: { modes: DEFAULT_MODES, deepMode: true, playbooks: [watching] },
   });
   await runWith(moded, { mode: 'deep' }, delegate({}, 10));
   assert.deepEqual(seen, [{ mode: 'deep', otherRunnerInput: false }]);
@@ -398,7 +398,7 @@ async function deepResearch(
 
 test('in a deep research run a review is refused on the drafter’s runner whatever its files are called', async (t) => {
   const h = await makeHarness(t, {
-    conductor: { modes: DEFAULT_MODES, playbooks: researchPlaybooks() },
+    conductor: { modes: DEFAULT_MODES, deepMode: true, playbooks: researchPlaybooks() },
   });
   const brief = (draft: string) =>
     `maka-inputs: ${draft} report.json sources\nmaka-artifacts: out/Judgments.JSON\nJudge each claim.`;
@@ -431,7 +431,7 @@ test('in a deep research run a review is refused on the drafter’s runner whate
 
 test('a deep research task that reuses a draft on its own runner is only allowed with a file from the other runner', async (t) => {
   const h = await makeHarness(t, {
-    conductor: { modes: DEFAULT_MODES, playbooks: researchPlaybooks() },
+    conductor: { modes: DEFAULT_MODES, deepMode: true, playbooks: researchPlaybooks() },
   });
   const seen: Array<string | undefined> = [];
   const result = await deepResearch(h, 'cnv_deep_rerun', (draft) =>
@@ -454,4 +454,32 @@ test('a deep research task that reuses a draft on its own runner is only allowed
     }),
   );
   assert.equal(plain?.isError, false, plain?.text ?? '');
+});
+
+test('deep mode is off by default: a suggestion of it runs as standard, and the conductor is not told about it', async (t) => {
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const { result } = await runWith(h, {}, delegate({ workMode: 'deep' }, 3));
+  assert.equal(structured(result).workMode, 'standard');
+  assert.match(await briefOf(h), /^maka-mode: standard\n/);
+  const prompt = JSON.stringify(
+    h.model.requests.find((request) => request.lane === 'conductor')?.body.system ?? '',
+  );
+  assert.match(prompt, /quick \(small, well-understood work\) or standard\./);
+  assert.doesNotMatch(prompt, /\bdeep\b/);
+});
+
+test('deep mode off: the user’s pick of it runs the request as standard, with a notice and the standard budget', async (t) => {
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  const { runId, result } = await runWith(h, { mode: 'deep' }, delegate({}, 3));
+  assert.equal(h.conductor.state.run(runId)?.mode, 'standard');
+  assert.equal(
+    h.conductor.state.run(runId)?.budgetUsd,
+    DEFAULT_MODES.modes.standard.budget.defaultRunUsd,
+  );
+  assert.equal(structured(result).workMode, 'standard');
+  assert.match(await briefOf(h), /^maka-mode: standard\n/);
+  assert.ok(
+    h.outbox.notices.some((notice) => /Deep mode is not available yet/.test(notice.text)),
+    'the user was told',
+  );
 });

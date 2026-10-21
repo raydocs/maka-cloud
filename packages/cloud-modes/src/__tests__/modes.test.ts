@@ -20,6 +20,7 @@ import {
   splitBudget,
   unnamedModels,
   withModeLine,
+  withoutDeep,
 } from '../index.js';
 
 function clone(): ModesConfig {
@@ -288,4 +289,12 @@ test('a brief that already holds something like a mode line cannot be given one'
     assert.throws(() => withModeLine(brief, 'standard'), /already has a mode line/);
   }
   assert.equal(looksLikeModeLine('use maka-mode: in prose'), false);
+});
+
+test('without deep, deep is a copy of standard: its models, effort and budget', () => {
+  const off = withoutDeep(DEFAULT_MODES);
+  assert.deepEqual(off.modes.deep, DEFAULT_MODES.modes.standard);
+  assert.deepEqual(off.modes.quick, DEFAULT_MODES.modes.quick);
+  assert.notDeepEqual(DEFAULT_MODES.modes.deep, DEFAULT_MODES.modes.standard);
+  assert.equal(parseModesConfig(JSON.stringify(off)).ok, true);
 });

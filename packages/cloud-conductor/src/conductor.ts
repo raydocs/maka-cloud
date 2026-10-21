@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { SessionEvent } from '@maka/core/events';
 import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
-import { isModeId, type ModeId, type ModesConfig } from '@maka-cloud/modes';
+import { isModeId, LAUNCH_FALLBACK_MODE, type ModeId, type ModesConfig } from '@maka-cloud/modes';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import {
   type ConductorLimits,
@@ -78,6 +78,13 @@ export interface ConductorOptions {
    * and which mode a task runs in. Without it there are no modes: nothing is added to a brief.
    */
   modes?: ModesConfig;
+  /**
+   * Whether `deep` mode may be used. Off by default: deep research has a gap that is parked until
+   * after launch (any file from the other runner passes as its cross-runner review). With it off
+   * the conductor is not told about `deep`, a suggestion of it runs as `standard`, and a user's
+   * pick of it runs as `standard` with a notice.
+   */
+  deepMode?: boolean;
   /**
    * Appended once to each new durable user turn, never to the system prompt or old history. It
    * taints the conversation (T15) unless it says `external: false`; a non-empty string always does.
@@ -242,6 +249,7 @@ export class Conductor {
   private readonly outbox: ConductorOutbox;
   private readonly playbooks: readonly Playbook[];
   private readonly modes: ModesConfig | undefined;
+  private readonly deepMode: boolean;
   private readonly limits: ConductorLimits;
   private readonly prices: ModelPrices;
   private readonly now: () => number;
@@ -279,6 +287,7 @@ export class Conductor {
     this.outbox = options.outbox;
     this.playbooks = options.playbooks ?? DEFAULT_PLAYBOOKS;
     this.modes = options.modes;
+    this.deepMode = options.deepMode === true;
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
@@ -402,7 +411,15 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
-    const picked = this.modes ? (limits === undefined ? message.mode : limits.mode) : undefined;
+    let picked = this.modes ? (limits === undefined ? message.mode : limits.mode) : undefined;
+    if (picked === 'deep' && !this.deepMode) {
+      picked = LAUNCH_FALLBACK_MODE;
+      this.state.enqueueNotice(
+        { conversationId: message.conversationId },
+        `Deep mode is not available yet, so this request runs in ${LAUNCH_FALLBACK_MODE} mode.`,
+      );
+      this.sendOutbox(message.conversationId);
+    }
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
@@ -805,7 +822,8 @@ export class Conductor {
   private effortOf(runId: string | null, role: 'conductor' | 'plannerEffort'): ThinkingLevel {
     const fallback = role === 'conductor' ? 'medium' : 'high';
     if (!this.modes) return fallback;
-    const mode = (runId === null ? undefined : this.state.run(runId)?.mode) ?? 'standard';
+    const stored = (runId === null ? undefined : this.state.run(runId)?.mode) ?? 'standard';
+    const mode = stored === 'deep' && !this.deepMode ? LAUNCH_FALLBACK_MODE : stored;
     return this.modes.modes[mode].conductor[role === 'conductor' ? 'effort' : 'plannerEffort'];
   }
 
@@ -814,7 +832,7 @@ export class Conductor {
     if (existing) return existing;
     const makaSessionId = await this.host.createSession({
       kind: 'conductor',
-      systemPrompt: conductorSystemPrompt(this.playbooks, this.modes !== undefined),
+      systemPrompt: conductorSystemPrompt(this.playbooks, this.modes !== undefined, this.deepMode),
       thinkingLevel: this.effortOf(runId, 'conductor'),
       runId: null,
     });
@@ -1408,6 +1426,7 @@ export class Conductor {
       limits: this.limits,
       playbooks: this.playbooks,
       ...(this.modes ? { modes: this.modes } : {}),
+      deepMode: this.deepMode,
       turnFor: (ctx: MakaToolContext) => {
         const turn = this.turns.get(ctx.sessionId);
         if (!turn) throw new ToolRefusal('no_run', 'This session has no running conductor turn.');

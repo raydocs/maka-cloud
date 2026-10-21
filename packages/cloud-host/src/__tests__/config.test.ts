@@ -474,7 +474,7 @@ test('standing duties need a long enough secret and a list of repositories, and 
 });
 
 test('the modes default to the built-in ones, and the built-in ones are priced by the gateway', () => {
-  assert.deepEqual(readStackConfig(ENV).modes, DEFAULT_MODES);
+  assert.deepEqual(readStackConfig({ ...ENV, MAKA_CLOUD_DEEP_MODE: '1' }).modes, DEFAULT_MODES);
   assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /modes: +quick, standard, deep/);
 });
 
@@ -492,6 +492,7 @@ test('MAKA_CLOUD_MODES replaces the modes, and a Codex model it names needs a ga
     ...ENV,
     MAKA_CLOUD_MODES: JSON.stringify(modes),
     MAKA_CLOUD_GATEWAY_MODELS: JSON.stringify([price]),
+    MAKA_CLOUD_DEEP_MODE: '1',
   });
   assert.deepEqual(config.modes, modes);
   assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_MODES: JSON.stringify(modes) }), [
@@ -699,5 +700,19 @@ test('proposed cards are off unless asked for, and need duties and a GitHub toke
     problemsOf({ ...duties, MAKA_CLOUD_CARDS: 'yes' }).some((p) =>
       /MAKA_CLOUD_CARDS must be 1 or 0/u.test(p),
     ),
+  );
+});
+
+test('deep mode is off unless MAKA_CLOUD_DEEP_MODE=1: off, deep holds standard’s values', () => {
+  const off = readStackConfig(ENV);
+  assert.equal(off.deepMode, false);
+  assert.deepEqual(off.modes.modes.deep, off.modes.modes.standard);
+  assert.match(describeConfig(off).join('\n'), /deep mode: +off \(set MAKA_CLOUD_DEEP_MODE=1/);
+  const on = readStackConfig({ ...ENV, MAKA_CLOUD_DEEP_MODE: '1' });
+  assert.equal(on.deepMode, true);
+  assert.notDeepEqual(on.modes.modes.deep, on.modes.modes.standard);
+  assert.throws(
+    () => readStackConfig({ ...ENV, MAKA_CLOUD_DEEP_MODE: 'yes' }),
+    /MAKA_CLOUD_DEEP_MODE must be 1 or 0/,
   );
 });

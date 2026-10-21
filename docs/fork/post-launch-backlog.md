@@ -60,6 +60,9 @@ In the order to do them when cards come next, or before `MAKA_CLOUD_CARDS` is tu
 
 ## Deep research (T25)
 
+Deep mode is off at launch (`MAKA_CLOUD_DEEP_MODE`, see `launch-notes.md`) because of the item below:
+a request for it runs as standard. Turn it on once this is closed.
+
 1. Recheck 16 item 5: in a deep research run, `otherRunnerInput` only proves that some file of the
    other runner was read. Record provenance (draft, review task, judgment) and require the final
    result to use that review's artifact. Test: Claude reads its own draft plus an unrelated Codex
