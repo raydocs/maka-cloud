@@ -356,6 +356,8 @@ export class FuzzWorld {
   readonly rng: Prng;
   /** Whether the runner can stop a task's work by id. Taken from the seed, so the PRNG stream is unchanged. */
   private readonly stopsById: boolean;
+  /** Whether the runner has `recover`, so a restart resumes its started tasks. Also taken from the seed. */
+  private readonly recovers: boolean;
   readonly clock = new FakeClock();
   readonly trace: string[] = [];
   readonly violations: string[] = [];
@@ -397,6 +399,7 @@ export class FuzzWorld {
   ) {
     this.rng = new Prng(seed);
     this.stopsById = seed % 4 !== 0;
+    this.recovers = seed % 2 === 0;
   }
 
   async run(): Promise<FuzzResult> {
@@ -453,6 +456,8 @@ export class FuzzWorld {
       sessions: this.sessions,
       quotas: QUOTAS,
       caches: { archivedTasks },
+      // Resumed runs start once the handoff and the endpoint below are in place.
+      resume: 'manual',
     }).then(
       (orchestrator) => {
         if (epoch !== this.epoch) return;
@@ -460,8 +465,11 @@ export class FuzzWorld {
         (orchestrator as unknown as { handoff: unknown }).handoff = this.handoffFor(epoch);
         orchestrator.setEndpoint('http://fuzz.invalid/mcp');
         this.orchestrator = orchestrator;
-        this.note(`epoch ${epoch} ready, orphaned [${orchestrator.orphanedTaskIds.join(' ')}]`);
+        this.note(
+          `epoch ${epoch} ready, orphaned [${orchestrator.orphanedTaskIds.join(' ')}], resumed [${orchestrator.resumedTaskIds.join(' ')}]`,
+        );
         this.checkRestore(orchestrator, expectedOrphans);
+        orchestrator.startRestored();
       },
       (error: unknown) => this.violation(`restore failed: ${errorMessage(error)}`),
     );
@@ -547,29 +555,31 @@ export class FuzzWorld {
   }
 
   private runnerFor(epoch: number): Runner {
+    const start = (spec: RunSpec): Promise<RunHandle> => {
+      this.noteExecutor(spec);
+      if (this.rng.chance(0.05)) {
+        this.note(`start ${spec.taskId} throws synchronously`);
+        throw new Error('start threw');
+      }
+      this.startsOut.set(spec.taskId, (this.startsOut.get(spec.taskId) ?? 0) + 1);
+      return new Promise<RunHandle>((resolve, reject) =>
+        this.gate(epoch, 'start', spec.taskId, () => {
+          this.startsOut.set(spec.taskId, (this.startsOut.get(spec.taskId) ?? 1) - 1);
+          if (this.rng.chance(0.15)) {
+            reject(new Error('start failed'));
+            return 'rejected';
+          }
+          const run = new FuzzRun(this, epoch, spec.taskId);
+          this.runs.push(run);
+          resolve(run);
+          return 'handle';
+        }),
+      );
+    };
     return {
       name: 'fuzz',
-      start: (spec: RunSpec) => {
-        this.noteExecutor(spec);
-        if (this.rng.chance(0.05)) {
-          this.note(`start ${spec.taskId} throws synchronously`);
-          throw new Error('start threw');
-        }
-        this.startsOut.set(spec.taskId, (this.startsOut.get(spec.taskId) ?? 0) + 1);
-        return new Promise<RunHandle>((resolve, reject) =>
-          this.gate(epoch, 'start', spec.taskId, () => {
-            this.startsOut.set(spec.taskId, (this.startsOut.get(spec.taskId) ?? 1) - 1);
-            if (this.rng.chance(0.15)) {
-              reject(new Error('start failed'));
-              return 'rejected';
-            }
-            const run = new FuzzRun(this, epoch, spec.taskId);
-            this.runs.push(run);
-            resolve(run);
-            return 'handle';
-          }),
-        );
-      },
+      start,
+      ...(this.recovers ? { recover: start } : {}),
       ...(this.stopsById ? { stopOrphaned: (taskId: TaskId) => this.stopById(epoch, taskId) } : {}),
     };
   }
@@ -1022,13 +1032,31 @@ export class FuzzWorld {
 
   private checkRestore(orchestrator: Orchestrator, expected: Set<TaskId>): void {
     const orphans = [...orchestrator.orphanedTaskIds].sort();
+    const resumed = [...orchestrator.resumedTaskIds].sort();
     const wanted = [...expected].sort();
-    if (orphans.join(' ') !== wanted.join(' ')) {
+    const handled = [...orphans, ...resumed].sort();
+    if (handled.join(' ') !== wanted.join(' ')) {
       this.violation(
-        `restore loaded [${orphans.join(' ')}], unfinished were [${wanted.join(' ')}]`,
+        `restore ended [${orphans.join(' ')}] and resumed [${resumed.join(' ')}], unfinished were [${wanted.join(' ')}]`,
       );
     }
-    for (const taskId of orphans) {
+    if (!this.recovers && resumed.length > 0) {
+      this.violation(`restore resumed [${resumed.join(' ')}] with a runner that cannot recover`);
+    }
+    for (const taskId of resumed) {
+      if (this.tasks.get(taskId)?.terminals !== 0) {
+        this.violation(`resumed ${taskId} already has a terminal event`);
+      }
+    }
+    for (const taskId of handled) {
+      if (!orphans.includes(taskId)) {
+        for (const token of this.executorTokens.get(taskId) ?? []) {
+          if (orchestrator.authenticate(token)) {
+            this.violation(`the executor token of resumed ${taskId} survived the restart`);
+          }
+        }
+        continue;
+      }
       if (this.tasks.get(taskId)?.terminals !== 1) {
         this.violation(`orphan ${taskId} has ${this.tasks.get(taskId)?.terminals} terminal events`);
       }
@@ -1038,8 +1066,10 @@ export class FuzzWorld {
         }
       }
     }
-    if (orchestrator.stats().activeTasks !== 0) {
-      this.violation(`${orchestrator.stats().activeTasks} tasks still active after restore`);
+    if (orchestrator.stats().activeTasks !== resumed.length) {
+      this.violation(
+        `${orchestrator.stats().activeTasks} tasks active after restore, ${resumed.length} resumed`,
+      );
     }
   }
 

@@ -30,11 +30,18 @@ export {
   type RecoveredSpend,
   type OrchestratorStats,
 } from './orchestrator.js';
+export {
+  MAX_RECOVERY_NOTE_LENGTH,
+  MAX_RESUMES_IN_A_ROW,
+  recoveryNote,
+  resumesInARow,
+} from './recovery.js';
 export { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits } from './quota.js';
 export { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
 export {
   claudeAgentSdkRunner,
   codexRunner,
+  type Recovery,
   type RunHandle,
   type Runner,
   type RunnerEvent,

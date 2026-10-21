@@ -10,7 +10,8 @@ import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
 import { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
-import type { RunHandle, RunnerRegistry } from './runner.js';
+import { MAX_RESUMES_IN_A_ROW, recoveryNote, resumesInARow } from './recovery.js';
+import type { Recovery, RunHandle, RunnerRegistry, RunSpec } from './runner.js';
 import {
   cleanIntent,
   clipOutput,
@@ -81,6 +82,12 @@ export interface OrchestratorOptions {
    * Restore records it on each task's tree before anything else, then calls `recorded`.
    */
   recoveredSpend?: RecoveredSpend;
+  /**
+   * When the tasks a restart resumes start running again. `automatic` (default): at the end of
+   * `create`. `manual`: when the caller calls `startRestored()`, once everything a resumed run
+   * needs is wired (the MCP endpoint, the tenant of each task); until then the tasks read as running.
+   */
+  resume?: 'automatic' | 'manual';
 }
 
 export interface RecoveredSpend {
@@ -192,6 +199,14 @@ export class Orchestrator {
   private endpoint: string | undefined;
   /** Tasks `restore` found unfinished and ended. */
   private orphans: TaskId[] = [];
+  /** Tasks `restore` found unfinished and drove again instead of ending them. */
+  private resumed: TaskId[] = [];
+  /** Runs `restore` decided to start again, held until `startRestored`. */
+  private pendingResumes: Array<{
+    task: TaskRecord;
+    recovery?: Omit<Recovery, 'epoch'>;
+  }> = [];
+  private readonly resumeMode: 'automatic' | 'manual';
 
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
@@ -210,6 +225,7 @@ export class Orchestrator {
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
     this.recoveredSpend = options.recoveredSpend;
+    this.resumeMode = options.resume ?? 'automatic';
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
@@ -220,6 +236,7 @@ export class Orchestrator {
   static async create(options: OrchestratorOptions): Promise<Orchestrator> {
     const orchestrator = new Orchestrator(options);
     await orchestrator.restore();
+    if (orchestrator.resumeMode === 'automatic') orchestrator.startRestored();
     return orchestrator;
   }
 
@@ -247,11 +264,31 @@ export class Orchestrator {
   }
 
   /**
+   * Starts the runs of the tasks `create` decided to continue (all of them, once). Called by
+   * `create` itself unless it was given `resume: 'manual'`. After it, a task that ends at once
+   * cascades to what is below it like any other.
+   */
+  startRestored(): void {
+    const pending = this.pendingResumes;
+    this.pendingResumes = [];
+    if (this.closed) return;
+    for (const { task, recovery } of pending) {
+      this.track(this.launch(task.taskId, task.runner, this.handoff.paths(task.taskId), recovery));
+    }
+  }
+
+  /** Tasks the last `create` found unfinished and started driving again (their runner has `recover`). */
+  get resumedTaskIds(): readonly TaskId[] {
+    return this.resumed;
+  }
+
+  /**
    * Stops retrying the stops tasks are owed. The obligations stay in the log, so
    * the next process over the same store retries them.
    */
   close(): void {
     this.closed = true;
+    this.pendingResumes = [];
     for (const retry of this.stopRetries.values()) retry.abort();
     this.stopRetries.clear();
     for (const retry of this.cancelRetries.values()) retry.abort();
@@ -683,6 +720,7 @@ export class Orchestrator {
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(orphans.map((task) => this.stopLeftover(task)));
+    const toResume: Array<{ task: TaskRecord; recovery?: Omit<Recovery, 'epoch'> }> = [];
     for (const [index, task] of orphans.entries()) {
       const stop = stops[index] ?? 'none';
       if (typeof stop === 'object') {
@@ -698,25 +736,79 @@ export class Orchestrator {
       } else if (stop === 'stopped' && task.stopPending) {
         await this.record({ type: 'task_stopped', taskId: task.taskId });
       }
-      // Nothing is running after a restart. History is never edited, so the
-      // outcome is appended.
-      this.orphans.push(task.taskId);
       // The map of executor sessions died with the process, but a durable
       // session store still holds the digests of the ones this task was given.
       this.auth.revokeForTask(task.taskId);
+      const plan = typeof stop === 'object' ? undefined : this.resumePlan(task);
+      if (plan?.kind === 'resume') {
+        const resumes = plan.resumes;
+        await this.record({
+          type: 'task_progress',
+          taskId: task.taskId,
+          note: `resuming after a restart (resume ${resumes} in a row)`,
+        });
+        this.resumed.push(task.taskId);
+        toResume.push({
+          task,
+          ...(task.state === 'queued'
+            ? {}
+            : { recovery: { resumes, note: recoveryNote(task.steps.values(), resumes) } }),
+        });
+        continue;
+      }
+      // Nothing is running after a restart. History is never edited, so the
+      // outcome is appended.
+      this.orphans.push(task.taskId);
       await this.record(
         task.cancelRequestedBy !== undefined
           ? { type: 'task_cancelled', taskId: task.taskId }
           : {
               type: 'task_failed',
               taskId: task.taskId,
-              reason: 'orphaned: the orchestrator restarted while this task was running',
+              reason:
+                plan?.kind === 'give_up'
+                  ? plan.reason
+                  : 'orphaned: the orchestrator restarted while this task was running',
             },
       );
     }
     this.restoring = false;
+    this.pendingResumes = toResume;
     // Ended tasks whose stop an earlier process could not confirm.
     for (const taskId of this.store.stopPendingTaskIds()) this.retryStop(taskId);
+  }
+
+  /**
+   * Whether `restore` drives the task again instead of ending it. Only a task whose runner has
+   * `recover`, that nobody is cancelling or pausing, and whose tree can still spend. A task that
+   * was resumed `MAX_RESUMES_IN_A_ROW` times without getting anywhere is ended for the user.
+   */
+  private resumePlan(
+    task: TaskRecord,
+  ): { kind: 'resume'; resumes: number } | { kind: 'give_up'; reason: string } | undefined {
+    const runner = this.runners.get(task.runner);
+    if (
+      !runner?.recover ||
+      task.cancelRequestedBy !== undefined ||
+      task.state === 'paused' ||
+      task.pauseRequested === true ||
+      this.ancestorStopped(task.taskId) ||
+      this.overBudget(task.taskId)
+    ) {
+      return undefined;
+    }
+    const root = this.treeRoot(task.taskId);
+    const costSeqs = (root ? this.store.readTask(root.taskId) : [])
+      .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
+      .map(({ seq }) => seq);
+    const resumes = resumesInARow(this.store.readTask(task.taskId), costSeqs);
+    if (resumes > MAX_RESUMES_IN_A_ROW) {
+      return {
+        kind: 'give_up',
+        reason: `needs you: this task was resumed ${MAX_RESUMES_IN_A_ROW} times in a row without finishing a step or spending anything, so it stopped; open it and decide whether to start it again`,
+      };
+    }
+    return { kind: 'resume', resumes };
   }
 
   /**
@@ -890,7 +982,16 @@ export class Orchestrator {
     }
   }
 
-  private async launch(taskId: TaskId, runnerName: string, paths: HandoffPaths): Promise<void> {
+  /**
+   * Starts the run of a task. With `recovery` it continues what an earlier attempt was doing
+   * (`runner.recover`) instead of starting it, and the task's start is already in the log.
+   */
+  private async launch(
+    taskId: TaskId,
+    runnerName: string,
+    paths: HandoffPaths,
+    recovery?: Omit<Recovery, 'epoch'>,
+  ): Promise<void> {
     const task = this.tasks.get(taskId);
     const runner = this.runners.get(runnerName);
     if (
@@ -910,7 +1011,7 @@ export class Orchestrator {
     this.starting.add(taskId);
     let handle: RunHandle;
     try {
-      handle = await runner.start({
+      const spec: RunSpec = {
         taskId,
         runner: runnerName,
         briefPath: paths.briefPath,
@@ -922,14 +1023,21 @@ export class Orchestrator {
         ...(this.endpoint === undefined
           ? {}
           : { mcp: { url: this.endpoint, token: executor.token } }),
-      });
+      };
+      handle =
+        recovery !== undefined && runner.recover
+          ? await runner.recover({ ...spec, recovery: { ...recovery, epoch: fence.epoch } })
+          : await runner.start(spec);
     } catch (error) {
       this.starting.delete(taskId);
       await this.recordRunnerOutcome(
         {
           type: 'task_failed',
           taskId,
-          reason: `runner failed to start: ${errorMessage(error)}`,
+          reason:
+            recovery === undefined
+              ? `runner failed to start: ${errorMessage(error)}`
+              : `orphaned: could not resume after a restart: ${errorMessage(error)}`,
         },
         fence,
       );
@@ -968,17 +1076,27 @@ export class Orchestrator {
       this.handles.set(taskId, handle);
       this.starting.delete(taskId);
       try {
-        const started = await this.record(
-          { type: 'task_started', taskId },
-          () => {
-            if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
-              throw new Superseded();
-          },
-          fence,
-        );
-        // Dropped: whatever is stopping the task also holds the handle now and ends its stream;
-        // the reader still records the spend the run reports until then.
-        recorded = started !== undefined;
+        if (recovery !== undefined && this.tasks.get(taskId)?.state === 'running') {
+          // A task a restart resumed started long ago: its start is in the log already, and the
+          // run is registered above with nothing awaited since the stopping checks.
+          recorded = true;
+        } else {
+          const started = await this.record(
+            { type: 'task_started', taskId },
+            () => {
+              if (
+                this.isStopping(taskId) ||
+                this.ancestorStopped(taskId) ||
+                this.overBudget(taskId)
+              )
+                throw new Superseded();
+            },
+            fence,
+          );
+          // Dropped: whatever is stopping the task also holds the handle now and ends its stream;
+          // the reader still records the spend the run reports until then.
+          recorded = started !== undefined;
+        }
       } catch (error) {
         // The start could not be written, so nothing the run reports can be. It is stopped, unless
         // a stop already holds it, and the reader records its spend until the stream ends.

@@ -122,3 +122,48 @@ test('a task handed to the other vendor starts a new run instead of reusing the 
   assert.equal(record?.turns, 2);
   assert.equal(record?.sessionId, 'thr-1');
 });
+
+test('recover continues the recorded session with the recovery note, and an unrecorded task fails the same way as resume', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_recover');
+  assert.equal(terminal(await collect(await h.runners.claude.start(spec)))?.type, 'finished');
+
+  const note = 'The server running this task restarted (resume 1 in a row).\n- push: "git push"';
+  const events = await collect(
+    await h.runners.claude.recover({ ...spec, recovery: { epoch: 2, resumes: 1, note } }),
+  );
+  assert.equal(terminal(events)?.type, 'finished');
+  const { argv } = await h.cliCall('claude', 2);
+  assert.equal(argv[argv.indexOf('--resume') + 1], 'sess-1');
+  const prompt = argv[argv.indexOf('-p') + 1] ?? '';
+  assert.ok(prompt.startsWith(note));
+  assert.match(prompt, /write \S+\/tsk_recover\/result\.json as a JSON object/);
+
+  const none = await h.spec('tsk_unrecorded');
+  const failed = terminal(
+    await collect(
+      await h.runners.claude.recover({ ...none, recovery: { epoch: 2, resumes: 1, note } }),
+    ),
+  );
+  assert.equal(failed?.type, 'failed');
+  assert.match(failed?.type === 'failed' ? failed.reason : '', /nothing to resume/);
+});
+
+test('a restart stops the leftover run by task id first and the recovered run still starts', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_restart');
+  assert.equal(terminal(await collect(await h.runners.claude.start(spec)))?.type, 'finished');
+
+  // What the orchestrator does at restart: stop whatever the earlier attempt left, then recover.
+  await h.runners.claude.stopOrphaned('tsk_restart');
+  const events = await collect(
+    await h.runners.claude.recover({
+      ...spec,
+      recovery: { epoch: 2, resumes: 1, note: 'The server restarted.' },
+    }),
+  );
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  assert.equal(h.runners.fleet.openRuns, 0);
+});
