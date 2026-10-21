@@ -112,7 +112,15 @@ function unreadable(
 // ---------------------------------------------------------------- coding
 
 const TestRecord = z
-  .object({ result: z.enum(['verified', 'failed']), testCommand: z.string().optional() })
+  .object({
+    result: z.enum(['verified', 'failed']),
+    testCommand: z.string().optional(),
+    /** What the runner recorded about the review of the change: `review.md` must be exactly this file. */
+    review: z
+      .object({ reviewSha256: z.string().regex(/^[0-9a-f]{64}$/u) })
+      .passthrough()
+      .optional(),
+  })
   .passthrough();
 
 const ChangedFile = z.discriminatedUnion('status', [
@@ -169,6 +177,43 @@ export async function prepareCoding(input: {
         });
       }
     }
+  }
+
+  // `review.md` is the second agent's review, shown to the user with the change. Nothing in it is a
+  // claim this check weighs, but it may be listed only as the very file the runner recorded: a
+  // review the record does not vouch for, or a recorded one that is not delivered, is a mismatch.
+  const review = await read('review.md');
+  const recordedReview = record.ok ? parseJson(record.text, TestRecord)?.review : undefined;
+  if (review.ok) {
+    if (recordedReview === undefined) {
+      failures.push({
+        claim: 'review.md is the review the runner recorded',
+        found: 'the record of the test run has no review to match it',
+      });
+    } else if (
+      createHash('sha256').update(review.bytes).digest('hex') !== recordedReview.reviewSha256
+    ) {
+      failures.push({
+        claim: 'review.md is the review the runner recorded',
+        found: 'its content does not match the recorded hash',
+      });
+    }
+  } else if (review.reason === 'ambiguous') {
+    unverified.push(
+      'review.md is listed more than once or as a link, so which one was delivered is unknown',
+    );
+  } else if (review.reason === 'unavailable') {
+    unavailable.push({ reason: 'review.md could not be read', transient: true });
+  } else if (review.reason === 'too_large') {
+    unavailable.push({ reason: 'review.md is too large to check', transient: false });
+  } else if (review.reason === 'not_found') {
+    failures.push({ claim: 'review.md was delivered', found: 'review.md does not exist' });
+  } else if (recordedReview !== undefined) {
+    // Recorded and not listed.
+    failures.push({
+      claim: 'the review of the change was delivered',
+      found: "review.md is not among the task's artifacts",
+    });
   }
 
   const changes = await read('changes.json');

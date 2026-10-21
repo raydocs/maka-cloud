@@ -14,11 +14,22 @@ test("only a manifest made entirely of one check's own files is accepted for it"
     'coding',
   );
   assert.equal(
+    acceptedKindOf(
+      listing('out/change.patch', 'out/changes.json', 'out/verification.json', 'out/review.md'),
+    ),
+    'coding',
+    'the review of a change is one of the coding files',
+  );
+  assert.equal(
     acceptedKindOf(listing('/out/report.md', 'out/report.json', 'out/verification.json')),
     'research',
   );
   for (const rejected of [
     listing('out/changes.json', 'out/report.json'),
+    listing('out/report.json', 'out/review.md'),
+    listing('out/review.md'),
+    listing('out/changes.json', 'out/Review.md'),
+    listing('out/changes.json', 'https://example.com/review.md'),
     listing('out/changes.json', 'out/report.md'),
     listing('out/report.json', 'out/notes.txt'),
     listing('out/report.json', 'out/report.json.md'),

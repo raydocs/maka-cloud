@@ -216,6 +216,9 @@ export async function verifyRig(
 
 export const CODING_ARTIFACTS = ['out/change.patch', 'out/changes.json', 'out/verification.json'];
 
+/** The same with the review of the change, which the runner records by hash. */
+export const REVIEWED_ARTIFACTS = [...CODING_ARTIFACTS, 'out/review.md'];
+
 /** The three files a coding run delivers, consistent with each other. */
 export function codingFiles(
   w: World,
@@ -224,6 +227,11 @@ export function codingFiles(
     result?: 'verified' | 'failed';
     files?: Array<{ path: string; content: string }>;
     patch?: string;
+    /**
+     * The review the runner delivered with the change: `content` is `review.md`; `recorded` is the
+     * hash the record holds (default: the content's own), `false` for a record that holds none.
+     */
+    review?: { content: string; recorded?: string | false };
   } = {},
 ): void {
   const files = options.files ?? [{ path: 'src/a.ts', content: 'export const a = 1;\n' }];
@@ -249,8 +257,19 @@ export function codingFiles(
       repo: 'acme/app',
       result: options.result ?? 'verified',
       testCommand: 'npm test',
+      ...(options.review && options.review.recorded !== false
+        ? {
+            review: {
+              status: 'reviewed',
+              reviewSha256:
+                options.review.recorded ??
+                createHash('sha256').update(options.review.content).digest('hex'),
+            },
+          }
+        : {}),
     }),
   );
+  if (options.review) w.evidence.set(taskId, 'review.md', options.review.content);
   w.evidence.set(
     taskId,
     'change.patch',
