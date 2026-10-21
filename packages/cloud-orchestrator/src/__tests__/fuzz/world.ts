@@ -511,6 +511,7 @@ export class FuzzWorld {
       },
       read: (afterSeq) => inner.read(afterSeq),
       readTask: (taskId) => inner.readTask(taskId),
+      iterateTask: (taskId) => inner.iterateTask(taskId),
       childrenOf: (taskId) => inner.childrenOf(taskId),
       activeTaskIds: () => inner.activeTaskIds(),
       taskIds: () => inner.taskIds(),
