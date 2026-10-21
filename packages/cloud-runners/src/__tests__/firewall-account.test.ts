@@ -113,6 +113,10 @@ const FACTS = [
   'FACT chan_write=no',
   'FACT chan_create=no',
   'FACT task_list=no',
+  'FACT task_file_write=no',
+  'FACT brief_read=yes',
+  'FACT result_write=yes',
+  'FACT result_cleanup=yes',
   'FACT workspace_write=yes',
   'FACT workspace_cleanup=yes',
 ];
