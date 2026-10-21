@@ -99,6 +99,25 @@ Not here: `.agents/resume` after a wake (with the setup snapshots).
 - Not decided: deleting an idle box of one invite to make room for another when the account is at its
   limit. It would lose that box's files, so it is not done.
 
+## Setup snapshots and `.agents/resume`
+
+- A task can name the setup snapshot of its repository (`setupOf(tenantId, taskId)`). A free box that
+  already holds that setup (label `maka.setup`) is preferred, after conversation affinity and before
+  awake-over-asleep. With none, a new box is made from the snapshot and labelled with the setup and the
+  repository (`maka.repo`). If instabox says the snapshot is gone (400/404/422) the box is made from the
+  template instead, with no setup labels, and a warning is raised. A failing lookup is a warning, not a failure.
+- `.agents/resume` of the checkout (`/data/maka/repos/<repo>`) runs after the guard, on every wake and on
+  every box made from a setup snapshot, with a limit (default 120 s). If it fails, times out or cannot run,
+  `onWarning` and `onResumeFailure` hear of it and the box is still handed out: the task starts without the
+  dev server, it does not wait for an operator.
+- Builders: `builderBoxes()` gives `SetupSnapshots` its own sandbox for each build (the pool's three
+  boxes are soon all used by tasks, and a snapshot of a used box would carry a task's files). It is made
+  from the template, guarded before anything runs in it, labelled `maka.slot=builder` with the exact
+  name `mk-<invite>-b`, outside the slots (never given to a task, slept or counted), one at a time per
+  invite, and deleted when given back. A refusal for the account's limit is a `NoFreeBoxError`.
+  A builder found at start belongs to a dead process and is deleted, if its name and labels are exactly
+  those of a builder; anything else with the pool label is only refused.
+
 ## Restoring
 
 `restoreFromSnapshot` drops the task's old box from the registry (a broken one that still exists

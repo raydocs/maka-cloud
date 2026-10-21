@@ -2,13 +2,23 @@ import { isQuotaExceeded } from '@maka-cloud/instabox';
 import type { InstaboxApiError, InstaboxMachine } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
 import type { SandboxLease, SandboxProvider } from '@maka-cloud/runners';
-import { boxLabels, boxName, checkBox, LABEL } from './labels.js';
+import {
+  boxLabels,
+  boxName,
+  builderLabels,
+  builderName,
+  checkBox,
+  isBuilderBox,
+  LABEL,
+} from './labels.js';
+import { REPOS_ROOT, type BuilderBoxes } from './snapshots.js';
 import {
   BoxRefusedError,
   NoFreeBoxError,
   type BoxApi,
   type BoxPoolOptions,
   type BoxUseReason,
+  type SetupChoice,
 } from './types.js';
 
 const DEFAULT_MAX_PER_INVITE = 3;
@@ -24,6 +34,12 @@ const DEFAULT_LOST_GRACE_MS = 30 * 60_000;
 const DEFAULT_LOST_DELETE_MS = 24 * 60 * 60_000;
 const CLEANUP_RETRY_MS = 30 * 60_000;
 const CHECKPOINT_TIMEOUT_SECONDS = 30;
+const DEFAULT_RESUME_TIMEOUT_SECONDS = 120;
+/** Runs `.agents/resume` of the box's checkout when the repository has one. */
+const RESUME_SCRIPT = `[ -d "$MAKA_REPO_DIR" ] || exit 0
+cd "$MAKA_REPO_DIR"
+[ -x .agents/resume ] || exit 0
+exec ./.agents/resume`;
 
 /**
  * `suspending` is a box being put to sleep: while it is still in its `checkpoint` phase a task may
@@ -55,6 +71,8 @@ interface Box {
   /** The conversation of the last task that held it, so its next task prefers this box. */
   conversationId: string | undefined;
   setup: string | undefined;
+  /** The `repoKey` of the repository whose checkout the box holds, when it was made from a setup snapshot. */
+  repo: string | undefined;
   /** While the box is being made: a second ask by the same task waits on it. */
   creation: Promise<void> | undefined;
   /** While the box is being woken: a second ask by the same task waits on it. True when it woke. */
@@ -75,14 +93,23 @@ interface Box {
 interface Waiter {
   tenantId: string;
   taskId: TaskId;
+  choice: SetupChoice | undefined;
   settle: (finish: () => Promise<Box>) => void;
   fail: (error: Error) => void;
   timer: unknown;
 }
 
+/** What a task wants of the box it gets. */
+interface Want {
+  /** Restoring a task: a box made from this task snapshot. */
+  snapshotId?: string;
+  /** The setup snapshot of the task's repository. */
+  choice?: SetupChoice;
+}
+
 type Plan =
-  | { kind: 'have'; box: Box }
-  | { kind: 'create'; box: Box; why: BoxUseReason; snapshotId?: string }
+  | { kind: 'have'; box: Box; choice?: SetupChoice }
+  | { kind: 'create'; box: Box; why: BoxUseReason; snapshotId?: string; choice?: SetupChoice }
   | { kind: 'none' };
 
 /**
@@ -116,6 +143,8 @@ export class BoxPool implements SandboxProvider {
   private readonly tenants = new Map<string, Map<number, Box>>();
   private readonly waiters: Waiter[] = [];
   private discovery: Promise<void> | undefined;
+  /** Invites with a builder box in this process. */
+  private readonly builders = new Set<string>();
   private closed = false;
   private createCount = 0;
   /** The most boxes the account let the pool have, once instabox refused a create. */
@@ -152,7 +181,18 @@ export class BoxPool implements SandboxProvider {
   async acquire(input: { tenantId: string; taskId: TaskId }): Promise<SandboxLease> {
     this.assertOpen();
     await this.discovered();
-    return this.lease(await this.take(input.tenantId, input.taskId));
+    const choice = await this.setupChoice(input.tenantId, input.taskId);
+    return this.lease(await this.take(input.tenantId, input.taskId, choice));
+  }
+
+  private async setupChoice(tenantId: string, taskId: TaskId): Promise<SetupChoice | undefined> {
+    try {
+      return await this.options.setupOf?.(tenantId, taskId);
+    } catch (error) {
+      // No setup snapshot is not a reason to keep the task from a box.
+      this.options.onWarning?.(`could not look up the setup snapshot for task ${taskId}`, error);
+      return undefined;
+    }
   }
 
   /**
@@ -168,7 +208,7 @@ export class BoxPool implements SandboxProvider {
     this.assertOpen();
     await this.discovered();
     await this.dropBoxOf(input.tenantId, input.taskId);
-    const plan = this.plan(input.tenantId, input.taskId, input.snapshotId);
+    const plan = this.plan(input.tenantId, input.taskId, { snapshotId: input.snapshotId });
     if (plan.kind !== 'create') {
       throw new NoFreeBoxError(
         'no box slot is free to restore the task into (every slot of the invite is in use, or the account limit is reached)',
@@ -216,6 +256,81 @@ export class BoxPool implements SandboxProvider {
     }
   }
 
+  /**
+   * Boxes for `SetupSnapshots` to build in. A builder is its own sandbox, made from the template for
+   * the build and deleted when it is given back: a snapshot of a box a task used would carry that
+   * task's files, and the three task boxes of an invite are soon all used. It is guarded first like any
+   * box, is outside the pool's slots (it is never handed to a task, put to sleep or counted for them),
+   * and there is one at a time per invite. A refusal for the account's limit is a `NoFreeBoxError`.
+   */
+  builderBoxes(): BuilderBoxes {
+    return {
+      lease: async ({ tenantId, job }) => {
+        this.assertOpen();
+        await this.discovered();
+        if (this.builders.has(tenantId)) {
+          throw new NoFreeBoxError('a setup snapshot is already being built for this invite');
+        }
+        this.builders.add(tenantId);
+        let machineId: string | undefined;
+        try {
+          const name = builderName(tenantId);
+          let machine: InstaboxMachine;
+          try {
+            const operation = await this.api.createMachine(
+              {
+                name,
+                ...this.options.source(tenantId),
+                metadata: builderLabels(tenantId, job),
+              },
+              { idempotencyKey: `maka-box-${name}-${++this.createCount}` },
+            );
+            machineId = operation.machineId;
+            await this.api.waitForOperation(operation.id);
+            machine = await this.api.getMachine(operation.machineId);
+          } catch (error) {
+            if (isQuotaExceeded(error)) {
+              throw new NoFreeBoxError('the account has no room for a builder box right now');
+            }
+            throw error;
+          }
+          machineId = machine.id;
+          if (!isBuilderBox(machine, tenantId)) {
+            throw new BoxRefusedError(`the builder box ${machine.id} does not carry its labels`);
+          }
+          await this.options.beforeUse?.(machine.id, 'create');
+          const id = machine.id;
+          let released = false;
+          return {
+            machineId: id,
+            release: async () => {
+              if (released) return;
+              released = true;
+              try {
+                await this.api.deleteMachine(id);
+              } catch (error) {
+                // Found and deleted at the next start, which sees it as a builder box nobody is using.
+                this.options.onWarning?.(`could not delete builder box ${id}`, error);
+              } finally {
+                this.builders.delete(tenantId);
+              }
+            },
+          };
+        } catch (error) {
+          if (machineId !== undefined) {
+            await this.api
+              .deleteMachine(machineId)
+              .catch((e) =>
+                this.options.onWarning?.(`could not delete builder box ${machineId}`, e),
+              );
+          }
+          this.builders.delete(tenantId);
+          throw error;
+        }
+      },
+    };
+  }
+
   /** How many tasks wait for a box, of one invite or of all. */
   waiting(tenantId?: string): number {
     return this.waiters.filter((w) => tenantId === undefined || w.tenantId === tenantId).length;
@@ -246,22 +361,25 @@ export class BoxPool implements SandboxProvider {
 
   // -- taking a box ------------------------------------------------------------------------------
 
-  private async take(tenantId: string, taskId: TaskId): Promise<Box> {
-    const plan = this.plan(tenantId, taskId);
-    return plan.kind === 'none' ? await this.wait(tenantId, taskId) : await this.finish(plan);
+  private async take(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Box> {
+    const plan = this.plan(tenantId, taskId, choice === undefined ? {} : { choice });
+    return plan.kind === 'none'
+      ? await this.wait(tenantId, taskId, choice)
+      : await this.finish(plan);
   }
 
   /**
    * Decides, in one synchronous step, which box this task gets, and marks it taken. Nothing
    * awaits between the check and the mark.
    */
-  private plan(tenantId: string, taskId: TaskId, snapshotId?: string): Plan {
+  private plan(tenantId: string, taskId: TaskId, want: Want = {}): Plan {
+    const { snapshotId, choice } = want;
     const boxes = this.boxesOf(tenantId);
     for (const box of boxes.values()) {
       if (box.taskId === taskId && box.state !== 'lost') {
         // The same task again (a resume, a repeated call): the same box, with a newer lease.
         box.holder = Symbol('lease');
-        return { kind: 'have', box };
+        return { kind: 'have', box, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (snapshotId === undefined) {
@@ -281,12 +399,14 @@ export class BoxPool implements SandboxProvider {
           (a, b) =>
             Number(conversationId !== undefined && b.conversationId === conversationId) -
               Number(conversationId !== undefined && a.conversationId === conversationId) ||
+            Number(choice !== undefined && b.setup === choice.setupHash) -
+              Number(choice !== undefined && a.setup === choice.setupHash) ||
             rank(a) - rank(b) ||
             a.slot - b.slot,
         )[0];
       if (free) {
         this.claim(free, taskId);
-        return { kind: 'have', box: free };
+        return { kind: 'have', box: free, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (this.atAccountLimit()) return { kind: 'none' };
@@ -301,6 +421,7 @@ export class BoxPool implements SandboxProvider {
         box,
         why: snapshotId === undefined ? 'create' : 'restore',
         ...(snapshotId === undefined ? {} : { snapshotId }),
+        ...(choice === undefined || snapshotId !== undefined ? {} : { choice }),
       };
     }
     return { kind: 'none' };
@@ -331,7 +452,7 @@ export class BoxPool implements SandboxProvider {
         await box.creation;
         if (box.state === 'waking') {
           box.waking ??= this.wake(box);
-          if (!(await box.waking)) return await this.take(box.tenantId, taskId);
+          if (!(await box.waking)) return await this.take(box.tenantId, taskId, plan.choice);
         }
         await this.writeLabels(box);
       }
@@ -346,7 +467,7 @@ export class BoxPool implements SandboxProvider {
             "the account's sandbox limit is reached, so the task cannot be restored into a new box",
           );
         }
-        return await this.wait(box.tenantId, taskId);
+        return await this.wait(box.tenantId, taskId, plan.choice);
       }
       throw error;
     } finally {
@@ -357,20 +478,40 @@ export class BoxPool implements SandboxProvider {
   private async create(plan: Extract<Plan, { kind: 'create' }>): Promise<void> {
     const { box } = plan;
     const name = boxName(box.tenantId, box.slot);
-    const source =
-      plan.snapshotId === undefined
-        ? this.options.source(box.tenantId)
-        : { snapshotId: plan.snapshotId };
-    const generation = ++this.createCount;
+    let source =
+      plan.snapshotId !== undefined
+        ? { snapshotId: plan.snapshotId }
+        : plan.choice !== undefined
+          ? { snapshotId: plan.choice.snapshotId }
+          : this.options.source(box.tenantId);
+    if (plan.snapshotId === undefined && plan.choice !== undefined) {
+      box.setup = plan.choice.setupHash;
+      box.repo = plan.choice.repo;
+    }
     let machine: InstaboxMachine;
     let adopted = false;
     try {
-      const operation = await this.api.createMachine(
-        { name, ...source, metadata: this.desiredLabels(box) },
-        { idempotencyKey: `maka-box-${name}-${generation}` },
-      );
-      await this.api.waitForOperation(operation.id);
-      machine = await this.api.getMachine(operation.machineId);
+      const make = async (): Promise<InstaboxMachine> => {
+        const operation = await this.api.createMachine(
+          { name, ...source, metadata: this.desiredLabels(box) },
+          { idempotencyKey: `maka-box-${name}-${++this.createCount}` },
+        );
+        await this.api.waitForOperation(operation.id);
+        return await this.api.getMachine(operation.machineId);
+      };
+      try {
+        machine = await make();
+      } catch (error) {
+        const status = (error as { status?: number }).status;
+        if (plan.choice === undefined || plan.snapshotId !== undefined) throw error;
+        if (status !== 400 && status !== 404 && status !== 422) throw error;
+        // The setup snapshot is gone (expired, deleted): start from the template, without its labels.
+        this.options.onWarning?.(`setup snapshot ${plan.choice.snapshotId} cannot be used`, error);
+        box.setup = undefined;
+        box.repo = undefined;
+        source = this.options.source(box.tenantId);
+        machine = await make();
+      }
     } catch (error) {
       if (isQuotaExceeded(error)) {
         this.learned = { boxes: this.countBoxes() - 1, at: this.now() };
@@ -405,6 +546,7 @@ export class BoxPool implements SandboxProvider {
     }
     box.machineId = machine.id;
     box.setup = checked.setup;
+    box.repo = checked.repo;
     try {
       await this.options.beforeUse?.(machine.id, plan.why);
     } catch (error) {
@@ -417,6 +559,35 @@ export class BoxPool implements SandboxProvider {
     }
     box.state = 'claimed';
     if (adopted) await this.writeLabels(box);
+    // A box made from a setup snapshot starts without the programs a running box had: the same as after a wake.
+    if (box.repo !== undefined) await this.resume(box);
+  }
+
+  /**
+   * Runs the checked-out repository's `.agents/resume` (if it has one) in a box that was just woken or
+   * made from its setup snapshot, as the box's user. A failure is reported and the box is still used.
+   */
+  private async resume(box: Box): Promise<void> {
+    const machineId = box.machineId as string;
+    if (box.repo === undefined || !/^[0-9a-f]{8}$/.test(box.repo)) return;
+    const timeoutSeconds = this.options.resumeTimeoutSeconds ?? DEFAULT_RESUME_TIMEOUT_SECONDS;
+    try {
+      const result = await this.api.exec(machineId, {
+        cmd: RESUME_SCRIPT,
+        envs: { MAKA_REPO_DIR: `${REPOS_ROOT}/${box.repo}` },
+        timeoutSeconds,
+      });
+      if (result.timedOut) throw new Error(`it took longer than ${timeoutSeconds} s`);
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `exit ${result.exitCode}: ${`${result.stdout}\n${result.stderr}`.trim().slice(-1000)}`,
+        );
+      }
+    } catch (error) {
+      const reason = `.agents/resume failed: ${errorText(error)}`;
+      this.options.onWarning?.(`box ${machineId}: ${reason}`);
+      this.options.onResumeFailure?.(machineId, reason);
+    }
   }
 
   private async findNamed(box: Box, name: string): Promise<InstaboxMachine | undefined> {
@@ -428,11 +599,12 @@ export class BoxPool implements SandboxProvider {
 
   // -- waiting -----------------------------------------------------------------------------------
 
-  private wait(tenantId: string, taskId: TaskId): Promise<Box> {
+  private wait(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Box> {
     return new Promise<Box>((resolve, reject) => {
       const waiter: Waiter = {
         tenantId,
         taskId,
+        choice,
         timer: undefined,
         settle: (finish) => {
           this.timers.clearTimeout(waiter.timer);
@@ -465,7 +637,11 @@ export class BoxPool implements SandboxProvider {
         index++;
         continue;
       }
-      const plan = this.plan(tenantId, waiter.taskId);
+      const plan = this.plan(
+        tenantId,
+        waiter.taskId,
+        waiter.choice === undefined ? {} : { choice: waiter.choice },
+      );
       if (plan.kind === 'none') return;
       this.waiters.splice(index, 1);
       waiter.settle(() => this.finish(plan));
@@ -513,7 +689,10 @@ export class BoxPool implements SandboxProvider {
 
   private desiredLabels(box: Box): Record<string, string> {
     return {
-      ...boxLabels(box.tenantId, box.slot, box.setup === undefined ? {} : { setup: box.setup }),
+      ...boxLabels(box.tenantId, box.slot, {
+        ...(box.setup === undefined ? {} : { setup: box.setup }),
+        ...(box.repo === undefined ? {} : { repo: box.repo }),
+      }),
       ...(box.taskId === undefined ? {} : { [LABEL.task]: box.taskId }),
     };
   }
@@ -530,6 +709,7 @@ export class BoxPool implements SandboxProvider {
       holder: undefined,
       conversationId: undefined,
       setup: undefined,
+      repo: undefined,
       creation: undefined,
       waking: undefined,
       idleSince: this.now(),
@@ -775,6 +955,7 @@ export class BoxPool implements SandboxProvider {
         return false;
       }
       box.state = 'claimed';
+      await this.resume(box);
       return true;
     } finally {
       box.waking = undefined;
@@ -939,7 +1120,24 @@ export class BoxPool implements SandboxProvider {
 
   private async discover(): Promise<void> {
     const machines = await this.api.listMachines({ metadata: { [LABEL.pool]: '1' } });
-    for (const machine of machines) this.register(machine);
+    for (const machine of machines) {
+      if (isBuilderBox(machine)) await this.reapBuilder(machine);
+      else this.register(machine);
+    }
+  }
+
+  /**
+   * A builder box found at start belongs to a process that is gone and its build with it: nothing
+   * is using it. It goes by its exact name and labels; anything else with the pool label is only refused.
+   */
+  private async reapBuilder(machine: InstaboxMachine): Promise<void> {
+    if (machine.state === 'deleting' || machine.state === 'deleted') return;
+    try {
+      await this.api.deleteMachine(machine.id);
+      this.options.onWarning?.(`deleted builder box ${machine.id} left by an earlier process`);
+    } catch (error) {
+      this.options.onWarning?.(`could not delete builder box ${machine.id}`, error);
+    }
   }
 
   private register(machine: InstaboxMachine): void {
@@ -960,6 +1158,7 @@ export class BoxPool implements SandboxProvider {
     const box = this.newBox(checked.tenantId, checked.slot);
     box.machineId = machine.id;
     box.setup = checked.setup;
+    box.repo = checked.repo;
     boxes.set(checked.slot, box);
     if (machine.state === 'error') {
       box.state = 'lost';
