@@ -236,6 +236,8 @@ class Run implements RunHandle {
   private readonly handedSteers = new Map<string, SteerReceipt>();
   /** Hand-overs are one at a time: each writes its receipts down before the answer goes out. */
   private takeChain: Promise<unknown> = Promise.resolve();
+  /** Set when a batch of the conversation could not be kept: the turn does not go on without it. */
+  private mirrorFailure: string | undefined;
   /** Whether this run keeps the conversation's transcript off the sandbox (the proof a message was read). */
   private mirror: TranscriptMirror | undefined;
   /** On a run that continues an earlier one: the keys the kept transcript shows were given already. */
@@ -1193,9 +1195,12 @@ class Run implements RunHandle {
       for await (const message of query) {
         this.checkCancelled();
         if (message.type === 'system' && message.subtype === 'mirror_error') {
-          this.progress(`a transcript batch was not kept: ${this.scrub(message.error)}`);
+          const text = `a transcript batch was not kept: ${this.scrub(message.error)}`;
+          this.mirrorFailure ??= text;
+          this.progress(text);
         }
         if (this.budgetStop) stopNow({ ok: false, reason: this.budgetStop });
+        if (this.mirrorFailure) stopNow(this.mirrorStop(this.mirrorFailure));
         if (stopped) break;
       }
     } catch (error) {
@@ -1206,6 +1211,11 @@ class Run implements RunHandle {
     // What the CLI wrote last is kept (or has failed to be) before the run ends, so a message
     // given to the agent in its last step is reported while the run can still report it.
     await this.mirror?.drain().catch(() => undefined);
+    // A batch the SDK gave up on is not kept; one it offered again and the store then kept is.
+    this.mirrorFailure ??= this.mirror?.unkept();
+    // A conversation that is not all kept cannot be resumed from the server's copy, and what the
+    // agent did after the gap would be missing from it: the turn ends here, as a failure.
+    if (this.mirrorFailure) stopNow(this.mirrorStop(this.mirrorFailure));
 
     const process = proc as ExecProcess | undefined;
     if (process === undefined) {
@@ -1245,6 +1255,13 @@ class Run implements RunHandle {
       };
     }
     return { ended: true, exit };
+  }
+
+  private mirrorStop(problem: string): TurnOutcome {
+    return {
+      ok: false,
+      reason: `the conversation could not be kept off the sandbox, so the task was stopped (${problem})`,
+    };
   }
 
   // -- spend ------------------------------------------------------------------------------------
