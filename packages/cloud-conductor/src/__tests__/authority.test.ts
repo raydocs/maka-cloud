@@ -465,3 +465,29 @@ test('a run from before the tool history was recorded counts as having called a 
   );
   state.close();
 });
+
+test('a database already at v9 has its open runs counted as having called a tool', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const path = join(mkdtempSync(join(tmpdir(), 'conductor-mig-')), 'c.db');
+  const old = new DatabaseSync(path);
+  for (const step of CONDUCTOR_MIGRATIONS.slice(0, 9)) {
+    if (typeof step === 'string') old.exec(step);
+    else step(old);
+  }
+  old.exec('PRAGMA user_version = 9');
+  for (const [id, n, state] of [
+    ['run_waiting', 1, 'waiting'],
+    ['run_done', 2, 'done'],
+  ] as const) {
+    old.exec(
+      `INSERT INTO runs (run_id, n, conversation_id, state, budget_usd, created_at) VALUES ('${id}', ${n}, 'cnv_old', '${state}', 3, 0)`,
+    );
+  }
+  old.close();
+  const state = new ConductorState(path);
+  assert.equal(state.run('run_waiting')?.toolCalled, true, 'an open run may have had effects');
+  assert.equal(state.run('run_done')?.toolCalled, false, 'a closed run is never retried');
+  state.close();
+});
