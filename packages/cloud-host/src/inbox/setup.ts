@@ -48,6 +48,8 @@ export interface InboxSetup {
   accountOf?: AccountOf;
   /** Where `proposal` options are delivered: the duties engine's decision route. Without it no proposal item is raised. */
   proposals?: SupervisorHost['proposals'];
+  /** Where `suggestion` options are delivered: the cards service. Without it no card is shown. */
+  suggestions?: SupervisorHost['suggestions'];
   /** Called with the running supervisor, so the host can raise items of its own. */
   onStarted?: (supervisor: Supervisor) => void;
   /** Replaces what is built from the config, for tests. */
@@ -78,6 +80,7 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     answers: parts.answers,
     messages: parts.messages,
     ...(setup.proposals === undefined ? {} : { proposals: setup.proposals }),
+    ...(setup.suggestions === undefined ? {} : { suggestions: setup.suggestions }),
     // A digest is built per owner, so each owner pays for the summary of their own items.
     ownerOf: (conversationId) => {
       const account = setup.accountOf?.(conversationId);

@@ -11,6 +11,8 @@ import {
   type ProposalChoice,
   proposalSpec,
   type SuggestionChoice,
+  type SuggestionOfferChoice,
+  suggestionOfferSpec,
   suggestionSpec,
   type Reassessment,
   reassess,
@@ -654,6 +656,17 @@ export class Supervisor {
   raiseSuggestion(input: SuggestionChoice): boolean {
     if (this.stopped || !this.host.suggestions) return false;
     this.store.tx(() => openItem(this.store, suggestionSpec(this.store, input), this.now()));
+    this.kick();
+    return true;
+  }
+
+  /**
+   * Shows the offer to stop suggesting a kind after several went unanswered. One open item for
+   * each project and kind, however often it is raised.
+   */
+  raiseSuggestionOffer(input: SuggestionOfferChoice): boolean {
+    if (this.stopped || !this.host.suggestions) return false;
+    this.store.tx(() => openItem(this.store, suggestionOfferSpec(this.store, input), this.now()));
     this.kick();
     return true;
   }

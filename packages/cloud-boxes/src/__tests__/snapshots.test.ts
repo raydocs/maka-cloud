@@ -12,6 +12,7 @@ import {
   setupHash,
   snapshotName,
 } from '../snapshots.js';
+import { SCRUB_SCRIPT } from '../scrub.js';
 import { FakeFleet } from './fake-fleet.js';
 import { AGENT } from './support.js';
 
@@ -103,7 +104,11 @@ describe('SetupSnapshots', () => {
     assert.equal(t.guarded.length, 1);
 
     const steps = t.fleet.execRequests;
-    assert.equal(steps.length, 4, 'checkout, one prepare step, the setup, sync');
+    assert.equal(
+      steps.length,
+      6,
+      'checkout, one prepare step, the setup, scrub, scrub check, sync',
+    );
     assert.match(steps[0]?.cmd ?? '', /git clone/);
     assert.equal(steps[0]?.envs.MAKA_REPO_URL, REPO);
     assert.equal(steps[0]?.envs.MAKA_REF, SHA);
@@ -115,7 +120,9 @@ describe('SetupSnapshots', () => {
     assert.equal(steps[1]?.cmd, 'echo install the pinned CLIs');
     assert.match(steps[2]?.cmd ?? '', /\.agents\/setup/);
     assert.equal(steps[2]?.envs.MAKA_SETUP_HASH, hash);
-    assert.equal(steps[3]?.cmd, 'sync');
+    assert.equal(steps[3]?.envs.MAKA_SCRUB_MODE, 'clean');
+    assert.equal(steps[4]?.envs.MAKA_SCRUB_MODE, 'check');
+    assert.equal(steps[5]?.cmd, 'sync');
     assert.equal(
       new Set(steps.map((s) => s.machineId)).size,
       1,
@@ -313,6 +320,47 @@ describe('SetupSnapshots', () => {
     const result = await t.snapshots.ensure(recipe());
     assert.equal(result.built, true);
     assert.equal(t.fleet.snapshots.has(failed.id), false);
+  });
+
+  describe('what the snapshot carries', () => {
+    it('cleans the builder, then looks again, before it syncs and saves the snapshot', async () => {
+      const t = setup();
+      await t.snapshots.ensure(recipe());
+      const steps = t.fleet.execRequests
+        .map((request, index) => ({ request, index }))
+        .filter(({ request }) => request.cmd === SCRUB_SCRIPT);
+      assert.deepEqual(
+        steps.map(({ request }) => request.envs.MAKA_SCRUB_MODE),
+        ['clean', 'check'],
+      );
+      for (const { request } of steps) {
+        assert.equal(request.envs.MAKA_REPO_DIR, repoDir(REPO));
+        assert.equal(request.envs.MAKA_AGENT_USER, AGENT.user);
+      }
+      const sync = t.fleet.execRequests.findIndex((request) => request.cmd === 'sync');
+      assert.ok(
+        sync > (steps[1]?.index ?? Number.POSITIVE_INFINITY),
+        'the scrub comes before sync',
+      );
+      assert.equal(t.fleet.snapshots.size, 1);
+    });
+
+    it('refuses to save a snapshot when the check still finds a credential, and gives the builder back', async () => {
+      const t = setup();
+      t.fleet.execHandler = (_id, request) =>
+        request.envs?.MAKA_SCRUB_MODE === 'check'
+          ? { exitCode: 7, stdout: 'FOUND /home/dev/.ssh\n' }
+          : {};
+      await assert.rejects(t.snapshots.ensure(recipe()), (error: unknown) => {
+        assert.ok(error instanceof SetupFailedError);
+        assert.equal(error.step, 'scrub check');
+        assert.match(error.message, /FOUND \/home\/dev\/\.ssh/);
+        return true;
+      });
+      assert.equal(t.fleet.callsTo('createSnapshot').length, 0);
+      assert.equal(t.fleet.snapshots.size, 0);
+      assert.equal(t.log.released, 1);
+    });
   });
 
   describe('a failure in the box', () => {

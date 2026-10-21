@@ -194,6 +194,7 @@ test("a proposed card's facts are scrubbed like its ask, and nothing else about 
       kind: 'rebase_pr',
       mode: 'quick',
       estimateUsd: 1,
+      typical: false,
       repo: 'acme/widgets',
       detail:
         'PR #12 "Fix the Codex login with sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA" cannot be merged.',

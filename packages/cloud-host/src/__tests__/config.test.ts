@@ -624,3 +624,32 @@ test('a key too short for the scrubber to know is refused at start, naming the v
     assert.ok(!longer.some((problem) => problem.includes('too short')), longer.join('\n'));
   }
 });
+
+test('proposed cards are off unless asked for, and need duties and a GitHub token', () => {
+  assert.equal(readStackConfig(ENV).cardsSet, false);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /proposed cards:\s+off/);
+  const duties = { ...ENV, MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET };
+  const token =
+    'github_pat_11AAAAAAA0abcdefghijkl_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345678';
+  assert.equal(readStackConfig({ ...duties, MAKA_GITHUB_TOKEN: token }).cardsSet, false);
+  const on = readStackConfig({ ...duties, MAKA_GITHUB_TOKEN: token, MAKA_CLOUD_CARDS: '1' });
+  assert.equal(on.cardsSet, true);
+  assert.match(describeConfig(on).join('\n'), /proposed cards:\s+on/);
+  assert.ok(!describeConfig(on).join('\n').includes(token));
+  assert.equal(readStackConfig({ ...duties, MAKA_CLOUD_CARDS: '0' }).cardsSet, false);
+  assert.ok(
+    problemsOf({ ...ENV, MAKA_CLOUD_CARDS: '1', MAKA_GITHUB_TOKEN: token }).some((p) =>
+      /needs MAKA_GITHUB_WEBHOOK_SECRET/u.test(p),
+    ),
+  );
+  assert.ok(
+    problemsOf({ ...duties, MAKA_CLOUD_CARDS: '1' }).some((p) =>
+      /needs MAKA_GITHUB_TOKEN/u.test(p),
+    ),
+  );
+  assert.ok(
+    problemsOf({ ...duties, MAKA_CLOUD_CARDS: 'yes' }).some((p) =>
+      /MAKA_CLOUD_CARDS must be 1 or 0/u.test(p),
+    ),
+  );
+});

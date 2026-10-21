@@ -28,6 +28,8 @@ export const MessageMetaSchema = z
         dutyId: z.string().min(1).max(100),
         authority: z.enum(['read-only', 'open-pr', 'merge-when-green']),
         budgetUsd: z.number().positive().max(1000),
+        /** The mode the run starts in. Set by the system for a run it starts (T30 cards), never by the user's pick. */
+        mode: z.enum(MODE_IDS).optional(),
       })
       .strict()
       .optional(),

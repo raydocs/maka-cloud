@@ -610,6 +610,17 @@ export class DutyEngine {
     return rows.map((row) => this.projectView(row));
   }
 
+  /** Every project that is not removed, with its owner: what the card scheduler walks. No view of a project leaves here. */
+  activeProjects(): Array<{ owner: string; projectId: string }> {
+    return (
+      this.db
+        .prepare(
+          'SELECT owner, project_id FROM projects WHERE removed = 0 ORDER BY created_at, project_id',
+        )
+        .all() as unknown as Array<{ owner: string; project_id: string }>
+    ).map((row) => ({ owner: row.owner, projectId: row.project_id }));
+  }
+
   project(owner: string, projectId: string): Project | undefined {
     const row = this.projectById(projectId);
     return row && row.owner === owner && row.removed === 0 ? this.projectView(row) : undefined;

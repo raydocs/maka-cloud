@@ -114,6 +114,11 @@ export interface StackConfig {
    */
   dutiesSet: boolean;
   /**
+   * Proposed cards are on (T30): each project's daily read-only scan and the one-tap cards it makes.
+   * Needs standing duties and the GitHub token.
+   */
+  cardsSet: boolean;
+  /**
    * The repositories a project may be registered for, each tied by the operator to the GitHub
    * App installation it lives in and to the one invite that owns it. Empty: none, whatever the
    * invites ask.
@@ -410,6 +415,10 @@ export const ENV_VARIABLES = [
     'the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties',
   ],
   [
+    'MAKA_CLOUD_CARDS',
+    '1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off',
+  ],
+  [
     'MAKA_CLOUD_DUTY_REPOS',
     'comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
   ],
@@ -538,6 +547,7 @@ export function readStackConfig(
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
     dutiesSet: false,
+    cardsSet: false,
     dutyLinks: [],
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
@@ -579,6 +589,12 @@ export function readStackConfig(
   }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
+  if (flag('MAKA_CLOUD_CARDS')) {
+    if (!config.dutiesSet) problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_WEBHOOK_SECRET');
+    else if (value('MAKA_GITHUB_TOKEN') === undefined) {
+      problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_TOKEN, which the scan reads with');
+    } else config.cardsSet = true;
+  }
   const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
   if (backupDir !== undefined) {
     const problem = backupDirProblem(dataDir, backupDir);
@@ -814,6 +830,7 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
     `CLIs run as:         ${config.agentChannel ? `${config.agentChannel.user} (group ${config.agentChannel.group}); Claude through the Agent SDK, conversation kept in ${config.transcriptsDbPath}` : 'nothing: no CLI starts until MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP are set'}`,
     `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,
     `invites file:        ${config.invitesPath}`,
