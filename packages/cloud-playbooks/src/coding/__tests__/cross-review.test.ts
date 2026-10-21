@@ -365,11 +365,30 @@ test("the orchestrator's limit for this turn is one allowance for the implemente
     turnBudgetUsd: 2.5,
   };
   assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
-  // The task has $10, but this turn may spend $2.5: the work's $8 and the review's $3 are both
-  // above it, so each run gets what is left of the $2.5, not of its phase.
-  assert.equal(h.claude.turns[0]?.spec.turnBudgetUsd, 2.5);
-  assert.equal(h.codex.turns[0]?.spec.turnBudgetUsd, 1.5);
+  // The task has $10, but this turn may spend $2.5, and the split is made of that: the work keeps
+  // $2 and the review the other $0.50, so each run gets what is left of its share of the $2.5.
+  assert.equal(h.claude.turns[0]?.spec.turnBudgetUsd, 2);
+  assert.equal(h.codex.turns[0]?.spec.turnBudgetUsd, 0.5);
   assert.equal(h.codex.turns[0]?.spec.budgetUsd, 10, 'the pool is still the whole budget');
+  zeroStats(h.runner);
+});
+
+test("a turn's allowance keeps the review's share: an implementer cannot spend it all", async (t) => {
+  const h = await setup(t, { modes: MODES });
+  const spent = gate();
+  h.claude.script = async (turn) => {
+    turn.usage(2.49);
+    spent.open();
+    await new Promise<void>((resolve) => turn.signal.addEventListener('abort', () => resolve()));
+    return 'ok';
+  };
+  const spec = { ...(await h.spec('tsk_turnshare')), budgetUsd: 10, turnBudgetUsd: 2.5 };
+  const events = await collect(await h.runner.start(spec));
+  await spent.promise;
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed');
+  assert.match(end?.type === 'failed' ? end.reason : '', /budget of \$2\.00 reached/);
+  assert.equal(h.codex.turns.length, 0, 'a review of $0.01 is never started');
   zeroStats(h.runner);
 });
 
@@ -389,7 +408,7 @@ test("a turn's allowance that the implementer spends leaves nothing to deliver",
   assert.equal(end?.type, 'failed');
   assert.match(
     end?.type === 'failed' ? end.reason : '',
-    /budget of \$2\.50 reached \(\$3\.00 spent\)/,
+    /budget of \$2\.00 reached \(\$3\.00 spent\)/,
   );
   assert.equal(h.codex.turns.length, 0, 'no review is started on an allowance that is gone');
   assert.equal(await h.deliveries.get('tsk_turn2'), undefined);
