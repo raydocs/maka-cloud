@@ -11,7 +11,9 @@ import {
   type FeedEvent,
   type InboxAnswerRequest,
   type InboxAnswerResult,
+  type InboxItem,
   type MemoryProfile,
+  type ProjectView,
   type SourceListing,
   type SourcePreview,
   type TaskControl,
@@ -223,6 +225,28 @@ export class CloudClient {
       method: 'POST',
       body: JSON.stringify(answer),
     });
+  }
+  /** The decisions waiting on this invite, across its conversations. */
+  async listInbox(state: 'open' | 'closed' | 'all' = 'open'): Promise<InboxItem[]> {
+    const result = await this.request<{ items: InboxItem[] }>(
+      `${routes.inboxItems}?state=${state}&limit=200`,
+      {},
+      'inbox',
+    );
+    return Array.isArray(result.items) ? result.items : [];
+  }
+  /** The invite's projects and their duties; `Unsupported` where no duties engine runs. */
+  async listProjects(): Promise<ProjectView[]> {
+    const result = await this.request<{ projects: ProjectView[] }>(routes.projects, {}, 'projects');
+    return Array.isArray(result.projects) ? result.projects : [];
+  }
+  /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
+  async fingerprint(): Promise<string> {
+    const bytes = new TextEncoder().encode(this.token);
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest).slice(0, 8)]
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
   }
   /** 200 closed or recorded, 202 still being delivered; a refusal is an ApiError whose body may carry the refreshed item. */
   answerInbox(item: string, answer: InboxAnswerRequest) {

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { App, NotificationsPanel, Settings, Shell, StartForm } from '../src/App';
+import { App, NotificationsPanel, Settings, Shell } from '../src/App';
+import { Home } from '../src/Home';
 import { CloudClient } from '../src/client';
 import type { Conversation } from '../src/contract';
 import { readMode, ThemeProvider, useMode } from '../src/theme';
@@ -97,7 +98,7 @@ const conversations: Conversation[] = Array.from({ length: 7 }, (_, i) => ({
 test('Home lists the five latest conversations, newest first, and opens the one tapped', () => {
   const opened: string[] = [];
   render(
-    <StartForm
+    <Home
       client={new CloudClient('fake', async () => json({}))}
       conversations={conversations}
       onStarted={() => {}}
@@ -124,7 +125,7 @@ test('Home with no conversations shows no recent list, and the start sentence is
       : json({ conversationId: 'cnv_new' });
   };
   render(
-    <StartForm
+    <Home
       client={new CloudClient('fake', fetcher)}
       conversations={[]}
       onStarted={(c) => started.push(c)}

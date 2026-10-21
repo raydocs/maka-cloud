@@ -3,6 +3,7 @@ import { Button } from '@astryxdesign/core';
 import { ChoicePanel } from '@maka/ui';
 import { useMode } from './theme';
 import { ApiError, CloudClient, Unsupported } from './client';
+import { errorText } from './errors';
 import {
   type ArtifactContent,
   type ArtifactListing,
@@ -12,7 +13,9 @@ import {
   TERMINAL,
   type TaskView,
 } from './contract';
+import { Home } from './Home';
 import { InboxPanel } from './Inbox';
+import { inboxAnswerer } from './inboxAnswer';
 import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
@@ -26,45 +29,6 @@ import {
   mergeViews,
   totalCost,
 } from './state';
-
-const ERROR_TEXT: Record<string, string> = {
-  pause_unsupported: 'This task cannot be paused.',
-  computer_in_control: 'Hand back computer control before resuming this task.',
-  invalid_state: 'The task is not in a state where that can be done.',
-  not_open: 'This question is no longer open.',
-  closed: 'This question is no longer open.',
-  conflict: 'A different answer was already recorded for this question.',
-  unknown_option: 'That answer is not one of the options.',
-  text_too_long: 'The additional context is too long.',
-  artifact_too_large: 'This result is too large to show here.',
-  forgotten_fact: 'That fact was forgotten and cannot be saved again.',
-  invalid_fact: 'Enter a fact between 1 and 500 characters.',
-  fact_limit: 'You can save up to 50 facts. Delete one before adding another.',
-  stale: 'This changed while you were looking. It has been refreshed; check it before you answer.',
-  already_answered: 'This was already answered.',
-  question_open:
-    'The conversation is still waiting for an answer to its own question. Answer that first.',
-  invalid_option: 'That answer is not one of the options.',
-  text_not_allowed: 'This item does not take additional context.',
-  stopped: 'The inbox is restarting. Try again in a moment.',
-  invalid_endpoint: 'This browser’s notification service is not accepted by this server.',
-  invalid_keys: 'This browser’s notification keys were not accepted.',
-  too_many_subscriptions: 'Notifications are already on for as many devices as are allowed.',
-};
-
-function errorText(error: unknown): string {
-  if (error instanceof Unsupported)
-    return 'This action is unavailable on this server. No change was made.';
-  if (error instanceof ApiError) {
-    if (error.status === 401) return 'Your invite is no longer valid. Please reconnect.';
-    const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
-    if (known) return known;
-    if (error.status === 429) return 'Too many requests. Try again in a moment.';
-    if (error.status === 404) return 'That is no longer available.';
-    return `Could not complete the request (${error.status}). Try again.`;
-  }
-  return 'Could not complete the request. Check your connection and try again.';
-}
 
 const REASON_HEADING = {
   taste: 'Needs your decision',
@@ -489,33 +453,11 @@ export function ConversationView({
     }
   }
 
-  // One id per distinct answer, reused when the same answer is sent again: the server counts a
-  // retry of an answer it already took as the same answer, not a second one.
-  const answerIds = useRef(new Map<string, string>());
+  const answerInbox = useRef(
+    inboxAnswerer(client, (item) => setState((previous) => applyInboxItem(previous, item))),
+  );
   function answerItem(item: InboxItem, optionId: string, text?: string) {
-    void act('inbox', async () => {
-      const key = [item.itemId, item.preconditionHash, optionId, text ?? ''].join('\u0000');
-      const answerId = answerIds.current.get(key) ?? crypto.randomUUID();
-      answerIds.current.set(key, answerId);
-      try {
-        const result = await client.answerInbox(item.itemId, {
-          answerId,
-          optionId,
-          ...(text ? { text } : {}),
-          preconditionHash: item.preconditionHash,
-        });
-        setState((previous) => applyInboxItem(previous, result.item));
-        answerIds.current.delete(key);
-      } catch (e) {
-        // A refused answer carries the item as it is now (stale, closed, already answered).
-        if (e instanceof ApiError && typeof e.body === 'object' && e.body !== null) {
-          const refreshed = (e.body as { item?: unknown }).item;
-          setState((previous) => applyInboxItem(previous, refreshed));
-          answerIds.current.delete(key);
-        }
-        throw e;
-      }
-    });
+    void act('inbox', () => answerInbox.current(item, optionId, text));
   }
 
   const tasks = Object.values(state.tasks);
@@ -823,101 +765,6 @@ export function Settings({
   );
 }
 
-/** The first message of a new conversation: creates the conversation, then posts into it. */
-export function StartForm({
-  client,
-  conversations,
-  onStarted,
-  onOpen,
-}: {
-  client: CloudClient;
-  conversations: Conversation[];
-  onStarted: (conversation: Conversation) => void;
-  onOpen: (conversationId: string) => void;
-}) {
-  const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  // A retry after a failed post reuses the conversation and the message id.
-  const attempt = useRef<{ conversationId: string; clientMessageId: string } | null>(null);
-  const recent = [...conversations].reverse().slice(0, 5);
-  return (
-    <div className="page">
-      <section className="card start" aria-label="Start something">
-        <h1>Make room for your next idea.</h1>
-        <p>Tell us what you’d like done, in a sentence. We’ll take it from there.</p>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!draft.trim() || busy) return;
-            setBusy(true);
-            setError('');
-            void (async () => {
-              try {
-                attempt.current ??= {
-                  conversationId: (await client.createConversation()).conversationId,
-                  clientMessageId: crypto.randomUUID(),
-                };
-                const { conversationId, clientMessageId } = attempt.current;
-                await client.postMessage(conversationId, draft.trim(), clientMessageId);
-                attempt.current = null;
-                onStarted({ conversationId, title: null, createdAt: Date.now() });
-              } catch (failure) {
-                setError(errorText(failure));
-                setBusy(false);
-              }
-            })();
-          }}
-        >
-          <label htmlFor="first-message" className="sr-only">
-            What would you like to get done?
-          </label>
-          <div className="pill-field">
-            <textarea
-              id="first-message"
-              rows={1}
-              maxLength={16000}
-              placeholder="What would you like to get done?"
-              value={draft}
-              onChange={(e) => {
-                setDraft(displayText(e.target.value));
-                if (attempt.current) attempt.current.clientMessageId = crypto.randomUUID();
-              }}
-            />
-            <button
-              type="submit"
-              className="round-button"
-              aria-label={busy ? 'Starting…' : 'Start'}
-              disabled={busy || !draft.trim()}
-            >
-              <span aria-hidden="true">↑</span>
-            </button>
-          </div>
-        </form>
-        {error && (
-          <p role="alert" className="error">
-            {error}
-          </p>
-        )}
-      </section>
-      {recent.length > 0 && (
-        <section className="card section-card" aria-label="Recent conversations">
-          <h2>Pick up where you left off</h2>
-          <ul className="recent">
-            {recent.map((c) => (
-              <li key={c.conversationId}>
-                <button type="button" onClick={() => onOpen(c.conversationId)}>
-                  {displayText(c.title ?? 'Untitled conversation')}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </div>
-  );
-}
-
 type View = 'home' | 'chat' | 'settings';
 const VIEWS: ReadonlyArray<{ view: View; label: string }> = [
   { view: 'home', label: 'Home' },
@@ -1014,8 +861,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         </p>
       )}
       {view === 'home' && (
-        <StartForm
-          key={session.conversations.length}
+        <Home
           client={session.client}
           conversations={session.conversations}
           onStarted={(conversation) => {

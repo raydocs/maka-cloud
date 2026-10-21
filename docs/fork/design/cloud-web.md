@@ -10,6 +10,9 @@ are in place; Home decisions and Projects follow in later pieces.
   backdrop filter the card falls back to a near-opaque fill, so nothing becomes unreadable.
 - **Anything that holds code, a diff, test output or the computer viewer is opaque and dense** (`.solid`,
   `.artifact pre`, `.computer-viewer`): no blur, no tint, monospace, small.
+- Astryx's own buttons keep their styling: its rules sit in a cascade layer, so the page's reset must not
+  touch them (an unlayered `button { color: inherit }` once made a primary button's label unreadable; a
+  Playwright check on its contrast guards it).
 - Controls are pills: the segmented navigation, the start and message fields (a floating pill with a round
   44 px send button), and Astryx's buttons (theme override `borderRadius: 9999px`).
 - Dark is the default, light is one tap in Settings. The choice is kept in `localStorage` only (the page
@@ -28,8 +31,22 @@ code 7:1. A palette change that breaks reading fails that test; the code surface
 Signed-in screens share a header (brand and a segmented navigation: Home, Chat, Settings; Projects arrives
 with piece 8). The navigation is full width on a phone and 44 px tall on touch screens.
 
-- **Home**: the start sentence and the five latest conversations. A first visit lands here; someone with
-  conversations lands in the latest chat.
+- **Home** (`Home.tsx`), top to bottom: what waits on the person, the start sentence, what was done since they
+  were last here, what runs next, the five latest conversations. A first visit lands here; someone with
+  conversations lands in the latest chat. Each part fills in as its data arrives and is absent when empty or
+  when the server has no such feature (no inbox, no duties engine).
+  - *Waiting on you*: the open inbox items of every conversation of the invite (`GET /v1/inbox/items`) as
+    one-tap cards: a verb chip (Approve, Decide, Unblock, Review), the supervisor's own sentence as sent, its
+    options (the recommended one filled), and a link to the conversation. An answer carries a stable id for
+    the same answer to the same state of the same card, so a retry is the server's duplicate; a refusal that
+    carries the item (stale, closed, answered) refreshes the card instead of acting. A failure that may have
+    reached the server keeps the id, so the retry is still one answer.
+  - *Since you were last here*: three tiles (done, needs you, spent) and one line per finished top-level task
+    of the five latest conversations with its outcome and cost. The visit is remembered in `localStorage`
+    under a short hash of the invite (never the token) and written when the person leaves; a first visit
+    shows the last day.
+  - *What runs next*: the active scheduled duties of `GET /v1/projects`, soonest first (a schedule counts
+    from when the duty was approved), and a count of duties that wake on GitHub events.
 - **Chat**: the conversation (messages, decisions, the inbox, the message field) beside the work (tasks,
   cost, results). The chat is one column on a phone, two from 1000 px.
 - **Settings**: appearance, memory, notifications, and Disconnect. These moved out of the chat so the chat
@@ -60,7 +77,7 @@ result summary, one visual, a caption, and at most two one-tap actions (the pull
 
 ## Tests
 
-`tests/shell.test.tsx` (theme storage, navigation, Home, Settings, landing), `tests/contrast.test.ts`,
+`tests/shell.test.tsx` (theme storage, navigation, Settings, landing), `tests/home.test.tsx` (decisions, answers once, stale refresh, since last visit, next runs, answer ids), Playwright `tests/e2e/home.spec.ts` (a real supervisor: the card, one answer for a double tap, readable button, another invite's items never shown), `tests/contrast.test.ts`,
 `tests/delivery.test.tsx` (card, viewer, stack, step line, text is text), Playwright `tests/e2e/delivery.spec.ts`
 (a real server with a fake preview network: card, stack, viewer covering the screen, every way back, a diff
 on an opaque surface, another invite's 404, no request to a task's site) and `tests/e2e/look.spec.ts` (desktop and phone width: no sideways scroll on Home, Chat and

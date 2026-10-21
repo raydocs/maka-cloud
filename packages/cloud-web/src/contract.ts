@@ -160,6 +160,26 @@ export interface InboxAnswerResult {
   item: InboxItem;
 }
 
+/** A standing duty of a project as the public API shows it (T23). Only what a page shows is typed. */
+export interface DutyView {
+  dutyId: string;
+  name: string;
+  trigger: { kind: string; everyMinutes?: number };
+  authority: 'read-only' | 'open-pr' | 'merge-when-green';
+  runBudgetUsd: number;
+  dailyCapUsd: number;
+  state: 'proposed' | 'active' | 'off';
+  activatedAt: number | null;
+  offReason: 'failures' | null;
+  consecutiveFailures: number;
+}
+export interface ProjectView {
+  projectId: string;
+  repo: string;
+  defaultBranch: string;
+  duties: DutyView[];
+}
+
 export interface AnswerRequest {
   questionId: string;
   optionId: string;
@@ -234,6 +254,8 @@ export const routes = {
   events: (id: string) => `/v1/events?conversation=${encodeURIComponent(id)}`,
   control: (task: string, action: TaskControl) => `/v1/tasks/${encodeURIComponent(task)}/${action}`,
   computer: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/computer`,
+  inboxItems: '/v1/inbox/items',
+  projects: '/v1/projects',
   inboxAnswer: (item: string) => `/v1/inbox/items/${encodeURIComponent(item)}/answer`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,

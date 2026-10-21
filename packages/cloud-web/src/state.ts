@@ -26,12 +26,21 @@ function isInboxItem(value: unknown): value is InboxItem {
   );
 }
 
+/** Takes an item the server sent into `held`, unless `held` already has a newer version of it. */
+export function mergeInboxItem(
+  held: Record<string, InboxItem>,
+  item: unknown,
+): Record<string, InboxItem> {
+  if (!isInboxItem(item)) return held;
+  const current = held[item.itemId];
+  if (current && current.version > item.version) return held;
+  return { ...held, [item.itemId]: item };
+}
+
 /** Takes an item the server sent, unless this view already holds a newer version of it. */
 export function applyInboxItem(state: ConversationState, item: unknown): ConversationState {
-  if (!isInboxItem(item)) return state;
-  const held = state.inbox[item.itemId];
-  if (held && held.version > item.version) return state;
-  return { ...state, inbox: { ...state.inbox, [item.itemId]: item } };
+  const inbox = mergeInboxItem(state.inbox, item);
+  return inbox === state.inbox ? state : { ...state, inbox };
 }
 
 const MAX_PROGRESS_NOTES = 20;
