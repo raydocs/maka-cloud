@@ -20,6 +20,9 @@ const DEFAULT_USER_IDLE_MS = 20 * 60_000;
 /** A wake that times out is tried once more with a longer limit before the box counts as lost. */
 const DEFAULT_WAKE_TIMEOUTS_MS = [60_000, 180_000] as const;
 const SLEEP_RETRY_MS = 5 * 60_000;
+const DEFAULT_LOST_GRACE_MS = 30 * 60_000;
+const DEFAULT_LOST_DELETE_MS = 24 * 60 * 60_000;
+const CLEANUP_RETRY_MS = 30 * 60_000;
 const CHECKPOINT_TIMEOUT_SECONDS = 30;
 
 /**
@@ -27,7 +30,16 @@ const CHECKPOINT_TIMEOUT_SECONDS = 30;
  * take it (that cancels the sleep); once the suspend is issued it is not available until it is
  * `suspended`. A `suspended` box is taken by waking it (`waking`).
  */
-type BoxState = 'creating' | 'ready' | 'claimed' | 'suspending' | 'suspended' | 'waking' | 'lost';
+type BoxState =
+  | 'creating'
+  | 'ready'
+  | 'claimed'
+  | 'suspending'
+  | 'suspended'
+  | 'waking'
+  | 'lost'
+  /** Being checked for deletion: nothing may take it. */
+  | 'deleting';
 
 /** `adopted` marks a claim found in the labels after a restart: no lease object will ever release it. */
 type Holder = symbol | 'adopted';
@@ -52,6 +64,8 @@ interface Box {
   /** The last time a person looked at the box (a terminal or desktop view), if ever. */
   userSeenAt: number | undefined;
   sleepPhase: 'checkpoint' | 'suspend' | undefined;
+  /** When the box was marked lost. */
+  lostAt: number | undefined;
   /** No sleep attempt before this time, after one that failed or was turned back. */
   sleepAfter: number;
   /** Label writes of this box run one after another; each sends what the box is by then. */
@@ -92,6 +106,11 @@ export class BoxPool implements SandboxProvider {
   private readonly userIdleMs: number;
   private readonly wakeTimeoutsMs: readonly number[];
   private sweeping: Promise<string[]> | undefined;
+  private cleaning: Promise<CleanupResult> | undefined;
+  private readonly refused: { machineId: string; reason: string }[] = [];
+  private readonly lostGraceMs: number;
+  private readonly lostDeleteMs: number;
+  private readonly idleDeleteMs: number | undefined;
   private readonly now: () => number;
   private readonly timers: NonNullable<BoxPoolOptions['timers']>;
   private readonly tenants = new Map<string, Map<number, Box>>();
@@ -112,6 +131,9 @@ export class BoxPool implements SandboxProvider {
     this.limitRecheckMs = options.limitRecheckMs ?? DEFAULT_LIMIT_RECHECK_MS;
     this.agentIdleMs = options.idle?.agentMs ?? DEFAULT_AGENT_IDLE_MS;
     this.userIdleMs = options.idle?.userMs ?? DEFAULT_USER_IDLE_MS;
+    this.lostGraceMs = options.cleanup?.lostGraceMs ?? DEFAULT_LOST_GRACE_MS;
+    this.lostDeleteMs = options.cleanup?.lostDeleteMs ?? DEFAULT_LOST_DELETE_MS;
+    this.idleDeleteMs = options.cleanup?.idleDeleteMs;
     this.wakeTimeoutsMs = options.wakeTimeoutsMs ?? DEFAULT_WAKE_TIMEOUTS_MS;
     if (this.wakeTimeoutsMs.length === 0) throw new Error('BoxPool: wakeTimeoutsMs is empty');
     this.now = options.now ?? Date.now;
@@ -513,6 +535,7 @@ export class BoxPool implements SandboxProvider {
       idleSince: this.now(),
       userSeenAt: undefined,
       sleepPhase: undefined,
+      lostAt: undefined,
       sleepAfter: 0,
       labels: Promise.resolve(),
     };
@@ -762,9 +785,145 @@ export class BoxPool implements SandboxProvider {
   private markLost(box: Box, why: string): void {
     this.options.onWarning?.(`box ${box.machineId ?? ''} is lost: ${why}`);
     box.state = 'lost';
+    box.lostAt = this.now();
     box.sleepPhase = undefined;
     box.holder = undefined;
     box.taskId = undefined;
+  }
+
+  // -- cleanup -----------------------------------------------------------------------------------
+
+  /** Boxes the pool found with its label but refused. It deletes none of them: whose they are is for the operator to say. */
+  refusedBoxes(): { machineId: string; reason: string }[] {
+    return this.refused.map((entry) => ({ ...entry }));
+  }
+
+  private refuse(machineId: string, reason: string): void {
+    this.refused.push({ machineId, reason });
+    this.options.onWarning?.(`refused box ${machineId}: ${reason}`);
+  }
+
+  /**
+   * Looks after the boxes nobody is using: a lost box that has been lost for `cleanup.lostGraceMs`
+   * is tried once more (woken and guarded) and goes back into use if that works; one that has stayed
+   * lost for `cleanup.lostDeleteMs` is deleted. With `cleanup.idleDeleteMs` set, a box that has done
+   * nothing for that long is deleted too (off by default). Before any delete the box is looked at
+   * again, right then: it must still carry this pool's labels for this slot, no live task, no
+   * recent write, and nothing may have taken it. One run at a time.
+   */
+  cleanup(): Promise<CleanupResult> {
+    this.cleaning ??= this.runCleanup().finally(() => {
+      this.cleaning = undefined;
+    });
+    return this.cleaning;
+  }
+
+  private async runCleanup(): Promise<CleanupResult> {
+    await this.discovered();
+    const now = this.now();
+    const result: CleanupResult = { recovered: [], deleted: [] };
+    const work: Promise<void>[] = [];
+    for (const boxes of this.tenants.values()) {
+      for (const box of [...boxes.values()]) {
+        if (box.machineId === undefined || now < box.sleepAfter) continue;
+        const machineId = box.machineId;
+        if (box.state === 'lost' && box.lostAt !== undefined) {
+          const lostFor = now - box.lostAt;
+          if (lostFor >= this.lostDeleteMs) {
+            work.push(this.delete(box, result));
+          } else if (lostFor >= this.lostGraceMs) {
+            box.state = 'waking';
+            work.push(
+              this.recover(box).then((ok) => {
+                if (ok) result.recovered.push(machineId);
+              }),
+            );
+          }
+        } else if (
+          this.idleDeleteMs !== undefined &&
+          (box.state === 'ready' || box.state === 'suspended') &&
+          now - box.idleSince >= this.idleDeleteMs &&
+          now - (box.userSeenAt ?? Number.NEGATIVE_INFINITY) >= this.idleDeleteMs
+        ) {
+          work.push(this.delete(box, result));
+        }
+      }
+    }
+    await Promise.all(work);
+    return result;
+  }
+
+  /** A lost box (already marked `waking` by the caller) gets one more try, with the longest limit. */
+  private async recover(box: Box): Promise<boolean> {
+    const machineId = box.machineId as string;
+    const limitMs = this.wakeTimeoutsMs.at(-1) as number;
+    const controller = new AbortController();
+    const timer = this.timers.setTimeout(
+      () => controller.abort(new Error('recovery timed out')),
+      limitMs,
+    );
+    try {
+      await this.api.ensureRunning(machineId, { signal: controller.signal });
+      await this.options.beforeUse?.(machineId, 'wake');
+      box.state = 'ready';
+      box.lostAt = undefined;
+      box.idleSince = this.now();
+      this.pump(box.tenantId);
+      return true;
+    } catch (error) {
+      box.state = 'lost';
+      box.sleepAfter = this.now() + CLEANUP_RETRY_MS;
+      this.options.onWarning?.(`box ${machineId} is still lost: ${errorText(error)}`);
+      return false;
+    } finally {
+      this.timers.clearTimeout(timer);
+    }
+  }
+
+  private async delete(box: Box, result: CleanupResult): Promise<void> {
+    const previous = box.state;
+    const machineId = box.machineId as string;
+    // The compare-and-set: from here nothing can take the box, and a task that comes meanwhile gets another.
+    box.state = 'deleting';
+    const keep = (why: string): void => {
+      this.options.onWarning?.(`box ${machineId} was not deleted: ${why}`);
+      box.state = previous;
+      box.sleepAfter = this.now() + CLEANUP_RETRY_MS;
+    };
+    try {
+      let machine: InstaboxMachine | undefined;
+      try {
+        machine = await this.api.getMachine(machineId);
+      } catch (error) {
+        if ((error as { status?: number }).status !== 404) throw error;
+      }
+      if (machine === undefined || machine.state === 'deleted') {
+        this.forget(box);
+        result.deleted.push(machineId);
+        return;
+      }
+      const checked = checkBox(
+        machine,
+        { maxPerInvite: this.maxPerInvite },
+        {
+          tenantId: box.tenantId,
+          slot: box.slot,
+        },
+      );
+      if (!checked.ok) return keep(`it is not this pool's box any more (${checked.reason})`);
+      if (checked.taskId !== undefined && this.options.isTaskLive(checked.taskId)) {
+        return keep(`task ${checked.taskId} holds it`);
+      }
+      if (machine.state === 'running' && ((await this.options.recentWrite?.(machineId)) ?? false)) {
+        return keep('something wrote to it a moment ago');
+      }
+      const operation = await this.api.deleteMachine(machineId);
+      await this.api.waitForOperation(operation.id);
+      this.forget(box);
+      result.deleted.push(machineId);
+    } catch (error) {
+      keep(errorText(error));
+    }
   }
 
   // -- finding what is already there -------------------------------------------------------------
@@ -787,13 +946,14 @@ export class BoxPool implements SandboxProvider {
     if (machine.state === 'deleting' || machine.state === 'deleted') return;
     const checked = checkBox(machine, { maxPerInvite: this.maxPerInvite });
     if (!checked.ok) {
-      this.options.onWarning?.(`refused box ${machine.id}: ${checked.reason}`);
+      this.refuse(machine.id, checked.reason);
       return;
     }
     const boxes = this.boxesOf(checked.tenantId);
     if (boxes.has(checked.slot)) {
-      this.options.onWarning?.(
-        `refused box ${machine.id}: slot ${checked.slot} of that invite is already box ${boxes.get(checked.slot)?.machineId}`,
+      this.refuse(
+        machine.id,
+        `slot ${checked.slot} of that invite is already box ${boxes.get(checked.slot)?.machineId}`,
       );
       return;
     }
@@ -803,6 +963,7 @@ export class BoxPool implements SandboxProvider {
     boxes.set(checked.slot, box);
     if (machine.state === 'error') {
       box.state = 'lost';
+      box.lostAt = this.now();
       return;
     }
     // Anything that is not running (paused by us or by instabox, stopped, between states) is taken by waking it.
@@ -817,6 +978,12 @@ export class BoxPool implements SandboxProvider {
       this.free(box);
     }
   }
+}
+
+/** What a cleanup run did. */
+export interface CleanupResult {
+  recovered: string[];
+  deleted: string[];
 }
 
 function errorText(error: unknown): string {
