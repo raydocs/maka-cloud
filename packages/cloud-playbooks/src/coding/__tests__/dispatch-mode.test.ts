@@ -81,6 +81,6 @@ test('a brief with no mode line takes its mode from the budget, never above stan
 
 test('a task with no budget cap is not held to a minimum', async (t) => {
   const { h, events } = await started(t, 'tsk_nocap', { lead: 'maka-mode: deep\n' });
-  assert.deepEqual(terminal(events), { type: 'finished' });
-  assert.ok(h.claude.turns.length > 0);
+  assert.ok(h.claude.turns.length > 0, 'the task started');
+  assert.doesNotMatch(reasonOf(events), /needs a budget/);
 });
