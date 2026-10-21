@@ -16,6 +16,9 @@ export function toView(item: ItemRecord, answer?: AnswerRecord): ItemView {
     preconditionHash: item.precondition,
     version: item.version,
     interrupts: item.interrupt,
+    ...(item.context.subject === 'suggestion' && item.context.suggestion
+      ? { suggestion: item.context.suggestion }
+      : {}),
     delivery:
       item.state === 'answering' && answer
         ? answer.attempts <= 1 && answer.inFlight

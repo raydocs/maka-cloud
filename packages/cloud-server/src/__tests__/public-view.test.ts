@@ -185,3 +185,28 @@ test('an approval that carries a key is withheld whole, with no way to approve; 
     assert.ok(!JSON.stringify(shown).includes(KEY.slice(4, 30)));
   }
 });
+
+test("a proposed card's facts are scrubbed like its ask, and nothing else about it changes", () => {
+  const item = {
+    kind: 'suggestion',
+    ask: 'Rebase PR #12, it conflicts with main',
+    suggestion: {
+      kind: 'rebase_pr',
+      mode: 'quick',
+      estimateUsd: 1,
+      repo: 'acme/widgets',
+      detail:
+        'PR #12 "Fix the Codex login with sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA" cannot be merged.',
+      external: true,
+    },
+  };
+  const shown = toPublicItem(item) as typeof item;
+  assert.equal(shown.ask, item.ask);
+  assert.ok(!shown.suggestion.detail.includes('sk-ant'));
+  assert.ok(!/codex/iu.test(shown.suggestion.detail));
+  assert.deepEqual({ ...shown.suggestion, detail: '' }, { ...item.suggestion, detail: '' });
+  assert.deepEqual(toPublicItem({ kind: 'suggestion', ask: 'x' }), {
+    kind: 'suggestion',
+    ask: 'x',
+  });
+});

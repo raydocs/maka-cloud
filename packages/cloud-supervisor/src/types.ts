@@ -5,6 +5,7 @@ export const ITEM_KINDS = [
   'verification_failed',
   'budget',
   'finished',
+  'suggestion',
 ] as const;
 export type ItemKind = (typeof ITEM_KINDS)[number];
 
@@ -16,11 +17,12 @@ export const KIND_PRIORITY: Record<ItemKind, number> = {
   verification_failed: 3,
   blocked: 4,
   finished: 5,
+  suggestion: 6,
 };
 
-/** Only `finished` never interrupts. */
+/** Only `finished` and `suggestion` never interrupt: nothing is wrong, and nobody is waiting. */
 export function interrupts(kind: ItemKind): boolean {
-  return kind !== 'finished';
+  return kind !== 'finished' && kind !== 'suggestion';
 }
 
 /** What choosing an option does. */
@@ -32,7 +34,9 @@ export type OptionEffect =
   /** Records the decision and sends nothing. */
   | 'local'
   /** Tells the duties engine which set of standing duties the owner chose (`proposalSetId`). */
-  | 'proposal';
+  | 'proposal'
+  /** Accepts or dismisses a proposed card (T30); the host's cards service does it. */
+  | 'card';
 
 export interface ItemOption {
   id: string;
@@ -47,6 +51,8 @@ export interface ItemOption {
   localAction?: 'recheck';
   /** For `proposal` options: which set of the proposal this option chooses. */
   proposalSetId?: string;
+  /** For `card` options: what the answer does to the card. */
+  cardAction?: 'accept' | 'dismiss';
 }
 
 export type EvidenceLink =
@@ -68,7 +74,15 @@ export type PushState = 'none' | 'pending' | 'sent' | 'held' | 'muted';
 /** What item text and the precondition hash are built from. Agent-written parts are always quoted. */
 export interface ItemContext {
   /** Which state the item depends on; picks the precondition and the reassessment. */
-  subject: 'question' | 'stall' | 'failed_twice' | 'result' | 'verification' | 'cap' | 'proposal';
+  subject:
+    | 'question'
+    | 'stall'
+    | 'failed_twice'
+    | 'result'
+    | 'verification'
+    | 'cap'
+    | 'proposal'
+    | 'suggestion';
   taskTitle?: string;
   taskId?: string;
   questionId?: string;
@@ -85,6 +99,20 @@ export interface ItemContext {
   verificationState?: string;
   /** For `finished` items: whether an independent check ran. */
   checked?: 'passed' | 'not_checked';
+  /** For `suggestion` items (`detail` is the card's id): what the card shows besides its title. */
+  suggestion?: SuggestionFacts;
+}
+
+/** What a proposed card shows beside its verb-first title. Cost and mode are the kind's, not words. */
+export interface SuggestionFacts {
+  /** The card's kind, for the owner's per-kind switch. */
+  kind: string;
+  mode: string;
+  estimateUsd: number;
+  repo: string;
+  detail: string;
+  /** Text from outside the owner shaped the card: the task it starts runs tainted. */
+  external: boolean;
 }
 
 /** What clients see. No runner, model or vendor name is ever in here. */
@@ -103,6 +131,8 @@ export interface ItemView {
   preconditionHash: string;
   version: number;
   interrupts: boolean;
+  /** For a proposed card: what it will do besides its title. */
+  suggestion?: SuggestionFacts;
   /** The answer is chosen and being delivered. */
   delivery: 'none' | 'sending' | 'retrying';
   createdAt: number;

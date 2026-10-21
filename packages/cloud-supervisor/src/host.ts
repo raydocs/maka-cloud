@@ -4,6 +4,8 @@
  * composition code) passes an object of this shape.
  */
 
+import type { SuggestionFacts } from './types.js';
+
 /** One entry of the server's feed, as `readFeed` returns it. */
 export interface FeedEntry {
   id: number;
@@ -36,6 +38,30 @@ export type ProposalOutcome =
       accepted: false;
       reason: 'not_found' | 'forbidden' | 'unknown_set' | 'conflict' | 'duty_limit';
     };
+
+/**
+ * What the owner's tap on a proposed card did. A refusal is final (the answer is closed without
+ * delivery); `decide` throws for a failure that may pass, and the supervisor tries again.
+ */
+export type SuggestionOutcome =
+  | { accepted: true; duplicate: boolean }
+  | { accepted: false; reason: 'not_found' | 'forbidden' | 'stale' | 'closed' };
+
+/** Whether a proposed card still describes the repository, read fresh before a tap acts. */
+export type SuggestionCheck =
+  | { state: 'fresh' }
+  /** The state moved: the card was replaced by this one, to show instead of acting. */
+  | { state: 'refreshed'; card: SuggestionCard }
+  /** The work is gone: nothing to offer any more. */
+  | { state: 'gone' };
+
+/** A card as the supervisor shows it. Whoever builds it has already made its text safe to show. */
+export interface SuggestionCard {
+  lineage: string;
+  cardId: string;
+  title: string;
+  facts: SuggestionFacts;
+}
 
 /** What an interrupt carries. The channel decides how to show it. */
 export interface Interrupt {
@@ -91,6 +117,21 @@ export interface SupervisorHost {
       decision: { proposalId: string; setId: string; caller?: string },
       signal: AbortSignal,
     ): Promise<ProposalOutcome>;
+  };
+  /**
+   * Proposed cards (T30). `verify` reads the repository again before a tap on "Do it" acts, and
+   * says whether the card is still true; `decide` accepts or dismisses it, once. Absent when no
+   * cards run; a suggestion is then never raised.
+   */
+  suggestions?: {
+    verify(
+      request: { cardId: string; caller?: string },
+      signal: AbortSignal,
+    ): Promise<SuggestionCheck>;
+    decide(
+      decision: { cardId: string; action: 'accept' | 'dismiss'; caller?: string },
+      signal: AbortSignal,
+    ): Promise<SuggestionOutcome>;
   };
   /**
    * The owner of a conversation (an invite), or undefined when nobody owns it. With it the

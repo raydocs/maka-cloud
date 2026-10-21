@@ -146,6 +146,7 @@ test('each way an answer can be refused has its own status, and a stale answer c
     closed: 409,
     already_answered: 409,
     question_open: 409,
+    unavailable: 503,
     stopped: 503,
   };
   let reason = '';

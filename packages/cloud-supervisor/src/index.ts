@@ -6,9 +6,13 @@ export type {
   ProposalOutcome,
   QuestionDelivery,
   QuestionOutcome,
+  SuggestionCard,
+  SuggestionCheck,
+  SuggestionOutcome,
   SummaryModel,
   SupervisorHost,
 } from './host.js';
+export type { SuggestionChoice } from './rules.js';
 export {
   DEFAULT_SETTINGS,
   type Settings,
