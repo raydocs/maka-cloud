@@ -97,6 +97,7 @@ test('the other vendor reviews a change, and the review is part of what is deliv
   // The files the runner writes in the task directory are not for an agent's artifact to replace.
   for (const turn of [h.claude.turns[0], h.codex.turns[0]]) {
     assert.deepEqual([...(turn?.spec.reserved ?? [])].sort(), [
+      'brief.md',
       'change.patch',
       'changes.json',
       'failure_brief.json',
