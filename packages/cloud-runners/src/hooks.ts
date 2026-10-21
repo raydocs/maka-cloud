@@ -13,6 +13,8 @@ import { errorMessage } from './shell.js';
 const HOOK_TIMEOUT_SECONDS = 30;
 const LABEL_CHARS = 120;
 const KIND_CHARS = 40;
+/** How much of a finished step's recorded result goes back to the agent that asks for it again. */
+const COMPLETED_OUTPUT_CHARS = 1_000;
 
 /** Tools that only read, search or keep notes. Running one again changes nothing. */
 const SAFE_TOOLS = new Set([
@@ -240,9 +242,23 @@ export function stepHooks(
       });
       switch (result.status) {
         case 'recorded':
-        case 'running':
-        case 'completed':
           return ALLOW;
+        case 'running':
+          // This attempt started the step and has seen no outcome: a second executor would do it
+          // twice at once.
+          return deny(
+            'This step is already running. Wait for it to finish instead of starting it again.',
+          );
+        case 'completed':
+          // A hook cannot hand the CLI a result in place of running the tool, so the recorded
+          // one goes in the reason, and the step does not run again.
+          return deny(
+            `This step already ${result.ok ? 'finished' : 'failed'} and is not run again.${
+              result.output === undefined
+                ? ''
+                : ` What it reported: ${redact(result.output).slice(0, COMPLETED_OUTPUT_CHARS)}`
+            }`,
+          );
         case 'interrupted':
           return deny(
             'This step was cut off by a restart and may or may not have taken effect. Check the real state before trying it again.',

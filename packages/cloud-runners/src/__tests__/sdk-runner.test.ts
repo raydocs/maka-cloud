@@ -254,6 +254,24 @@ test('a step log that fails stops every step, repeatable or not', async (t) => {
   );
 });
 
+test('a step the log already holds as finished or running is not run again', async (t) => {
+  const h = await sdkSetup(t);
+  const steps = recorder();
+  steps.answer.set('toolu_1', async () => ({ status: 'completed', ok: true, output: 'pr opened' }));
+  steps.answer.set('toolu_2', async () => ({ status: 'running' }));
+  await tools(h, [
+    { id: 'toolu_1', name: 'Bash', input: { command: 'gh pr create' } },
+    { id: 'toolu_2', name: 'Bash', input: { command: 'git push origin pr' } },
+    { id: 'toolu_3', name: 'Grep', input: { pattern: 'x' } },
+  ]);
+  const events = await collect(
+    await h.runners.claude.start(await h.spec('tsk_sdk_memo', { steps })),
+  );
+
+  assert.equal(terminal(events)?.type, 'finished');
+  assert.deepEqual(await lines(fakeFile(h, 'ran.log')), ['toolu_3']);
+});
+
 test('a secret in a tool call is not written to the step log', async (t) => {
   const h = await sdkSetup(t);
   const steps = recorder();
