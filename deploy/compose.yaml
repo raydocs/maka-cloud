@@ -1,0 +1,68 @@
+# One maka-cloud host under Docker Compose: the server and Caddy in front of it.
+#
+#   docker compose -f deploy/compose.yaml --env-file /etc/maka-cloud.compose.env up -d --build
+#
+# The server's own settings (keys, MAKA_CLOUD_SANDBOXES, the public URLs) are read from the file
+# named by MAKA_CLOUD_ENV_FILE (default /etc/maka-cloud.env). The names Caddy serves are set in
+# the --env-file: MAKA_CLOUD_APP_NAME, MAKA_CLOUD_MCP_NAME and MAKA_CLOUD_MODELS_NAME, see
+# docs/fork/deploy.md. Only Caddy publishes ports; the server is reached through it.
+name: maka-cloud
+
+services:
+  maka-cloud:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    image: maka-cloud:local
+    restart: unless-stopped
+    env_file: ${MAKA_CLOUD_ENV_FILE:-/etc/maka-cloud.env}
+    environment:
+      MAKA_CLOUD_DATA_DIR: /data
+      MAKA_CLOUD_BACKUP_DIR: /backups
+      # Inside the container; the ports are not published, only Caddy reaches them.
+      MAKA_CLOUD_HOST: 0.0.0.0
+      MAKA_CLOUD_MCP_HOST: 0.0.0.0
+      MAKA_CLOUD_GATEWAY_HOST: 0.0.0.0
+    volumes:
+      - maka-data:/data
+      - maka-backups:/backups
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    stop_grace_period: 60s
+
+  proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: proxy
+    image: maka-cloud-proxy:local
+    restart: unless-stopped
+    depends_on:
+      maka-cloud:
+        condition: service_healthy
+    environment:
+      MAKA_CLOUD_APP_NAME: ${MAKA_CLOUD_APP_NAME:?set the name of the app, for example app.example.com}
+      MAKA_CLOUD_MCP_NAME: ${MAKA_CLOUD_MCP_NAME:?set the name of the MCP endpoint}
+      MAKA_CLOUD_MODELS_NAME: ${MAKA_CLOUD_MODELS_NAME:?set the name of the model gateway}
+      MAKA_CLOUD_CADDY_GLOBAL: ${MAKA_CLOUD_CADDY_GLOBAL:-}
+    ports:
+      - "${MAKA_CLOUD_HTTP_PORT:-80}:80"
+      - "${MAKA_CLOUD_HTTPS_PORT:-443}:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  maka-data:
+  maka-backups:
+  caddy-data:
+  caddy-config:

@@ -112,6 +112,10 @@ function openJournal(path: string): DatabaseSync {
         run_id TEXT NOT NULL DEFAULT '',
         heartbeat_at INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS run_generation (
+        account TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS spend_policy (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         invite_daily_usd REAL NOT NULL,
@@ -128,11 +132,11 @@ function openJournal(path: string): DatabaseSync {
       );
       `);
       addColumn(db, 'account_spend', 'booked_at', 'INTEGER NOT NULL DEFAULT 0');
+      addColumn(db, 'account_spend', 'generation', 'INTEGER');
       addColumn(db, 'run_budget', 'run_id', "TEXT NOT NULL DEFAULT ''");
       addColumn(db, 'run_budget', 'heartbeat_at', 'INTEGER NOT NULL DEFAULT 0');
       addColumn(db, 'run_budget', 'since_seq', 'INTEGER');
-      db.exec(`DROP TRIGGER IF EXISTS run_budget_guard_v1`);
-      db.exec(RUN_BUDGET_TRIGGERS);
+      installRunBudgetTriggers(db);
       return db;
     } catch (error) {
       try {
@@ -171,19 +175,26 @@ function addColumn(db: DatabaseSync, table: string, column: string, definition: 
 const IN_RUN_WINDOW =
   '(booked_at >= run.since_ms OR (run.since_seq IS NOT NULL AND account_spend.rowid > run.since_seq))';
 
-const TRIGGER_GUARD = 'run_budget_guard_v2';
+const TRIGGER_GUARD = 'run_budget_guard_v3';
+const TRIGGER_FENCE = 'run_generation_fence_v1';
 const TRIGGER_STAMP = 'run_budget_stamp_v1';
+/** Earlier guards. A file may still carry them; the current one covers what they did. */
+const OLDER_GUARDS = ['run_budget_guard_v1', 'run_budget_guard_v2'];
 
 /**
  * A run budget is enforced by the journal file itself, so it binds every process that books into
  * it, whatever code that process runs: a server on an older version, or one that is still running
  * while a newer one fails to start, books through the same `account_spend` table.
  *
- * `run_budget_guard_v2` aborts an insert that would take what the account booked since the budget
- * began above its limit, and `run_budget_stamp_v1` gives a row inserted without a time (by a
- * process that does not know the column) the time of its insert, so its spend counts from then on.
- * Both are in the file once any process on this code has opened it, and a connection that is open
- * already sees them at its next statement.
+ * `run_budget_guard_v3` aborts an insert that would take what the account booked since the budget
+ * began above its limit, and any insert while the budget is one an earlier version left without a
+ * row sequence (`since_seq` NULL), which cannot be trusted to count every booking until a run
+ * reopens it. `run_generation_fence_v1` aborts an insert that carries a generation other than the
+ * account's current one: a credential issued under an earlier run (see `setRunBudget`) books
+ * nothing. `run_budget_stamp_v1` gives a row inserted without a time (by a process that does not
+ * know the column) the time of its insert, so its spend counts from then on. All are in the file
+ * once any process on this code has opened it, and a connection that is open already sees them at
+ * its next statement.
  */
 const RUN_BUDGET_TRIGGERS = `
   CREATE TRIGGER IF NOT EXISTS ${TRIGGER_GUARD} BEFORE INSERT ON account_spend
@@ -191,12 +202,23 @@ const RUN_BUDGET_TRIGGERS = `
     SELECT 1 FROM run_budget AS run
     WHERE run.account = NEW.account
       AND (
-        SELECT COALESCE(SUM(usd), 0) FROM account_spend
-        WHERE account = NEW.account AND ${IN_RUN_WINDOW}
-      ) + NEW.usd > run.limit_usd + 1e-9
+        run.since_seq IS NULL
+        OR (
+          SELECT COALESCE(SUM(usd), 0) FROM account_spend
+          WHERE account = NEW.account AND ${IN_RUN_WINDOW}
+        ) + NEW.usd > run.limit_usd + 1e-9
+      )
   )
   BEGIN
     SELECT RAISE(ABORT, 'the run budget of this account is used up');
+  END;
+  CREATE TRIGGER IF NOT EXISTS ${TRIGGER_FENCE} BEFORE INSERT ON account_spend
+  WHEN NEW.generation IS NOT NULL
+    AND NEW.generation <> COALESCE(
+      (SELECT generation FROM run_generation WHERE account = NEW.account), 0
+    )
+  BEGIN
+    SELECT RAISE(ABORT, 'the credential belongs to an earlier run of this account');
   END;
   CREATE TRIGGER IF NOT EXISTS ${TRIGGER_STAMP} AFTER INSERT ON account_spend
   WHEN NEW.booked_at = 0
@@ -206,6 +228,40 @@ const RUN_BUDGET_TRIGGERS = `
     WHERE key = NEW.key;
   END;
 `;
+
+/**
+ * Puts the current guards in the file, then takes the earlier ones out, in one transaction: a
+ * process that books through the file is never between two guards, and a failure leaves the
+ * earlier ones where they were.
+ */
+function installRunBudgetTriggers(db: DatabaseSync): void {
+  const names = [TRIGGER_GUARD, TRIGGER_FENCE, TRIGGER_STAMP, ...OLDER_GUARDS];
+  const present = new Set(
+    (
+      db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (${names.map(() => '?').join(', ')})`,
+        )
+        .all(...names) as Array<{ name: string }>
+    ).map((row) => row.name),
+  );
+  // Nothing to write, so no write lock to wait for.
+  if (
+    [TRIGGER_GUARD, TRIGGER_FENCE, TRIGGER_STAMP].every((name) => present.has(name)) &&
+    OLDER_GUARDS.every((name) => !present.has(name))
+  ) {
+    return;
+  }
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(RUN_BUDGET_TRIGGERS);
+    for (const name of OLDER_GUARDS) db.exec(`DROP TRIGGER IF EXISTS ${name}`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
 
 /**
  * What an invite may spend in one run, wherever the run falls: a budget that starts at `sinceMs`
@@ -226,9 +282,9 @@ export function journalEnforcesRunBudgets(path: string): boolean {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
     const found = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (?, ?)")
-      .all(TRIGGER_GUARD, TRIGGER_STAMP);
-    return found.length === 2;
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (?, ?, ?)")
+      .all(TRIGGER_GUARD, TRIGGER_FENCE, TRIGGER_STAMP);
+    return found.length === 3;
   } finally {
     db.close();
   }
@@ -259,10 +315,17 @@ export class RunBudgetHeld extends Error {
  *
  * One run holds an invite's budget at a time: while another run renewed it within `RUN_LEASE_MS`
  * this throws `RunBudgetHeld` and changes nothing. A budget nobody renews (its run was killed) is
- * taken over, and the new run inherits its window, not a fresh one: the dead run's tasks may still
- * be on the server booking under the same account, and they must not get a second budget's worth.
- * What the invite booked since the first run began counts toward the new limit. Renew it with
- * `renewRunBudget` while the run lasts.
+ * taken over, and the takeover first fences the run it takes over from: the account's generation
+ * moves up, and every credential issued under the earlier one (a gateway key, a conductor
+ * session) books nothing from then on, wherever it is still in use. Only then does the new run get
+ * a window of its own, which starts empty. Each run is held to its own limit, and none of an
+ * earlier run's tasks can add to it.
+ *
+ * The run that holds the budget may set it again (a retry, a changed limit): that keeps its window
+ * and its generation, so it never gives the run a fresh start. Renew it with `renewRunBudget`
+ * while the run lasts.
+ *
+ * Returns whether a takeover fenced another run's credentials.
  */
 export function setRunBudget(
   path: string,
@@ -270,7 +333,7 @@ export function setRunBudget(
   budget: RunBudget,
   runId: string,
   now: number = Date.now(),
-): void {
+): { fenced: boolean } {
   if (
     !Number.isFinite(budget.limitUsd) ||
     budget.limitUsd < 0 ||
@@ -279,41 +342,54 @@ export function setRunBudget(
     throw new RangeError('A run budget is a number of dollars, 0 or more, from a point in time');
   }
   if (runId === '') throw new RangeError('A run budget belongs to a run with an id');
-  withJournal(path, (db) => {
+  return withJournal(path, (db) => {
     db.exec('BEGIN IMMEDIATE');
     try {
       const held = db
-        .prepare(
-          'SELECT run_id, heartbeat_at, since_ms, since_seq FROM run_budget WHERE account = ?',
-        )
+        .prepare('SELECT run_id, heartbeat_at, since_seq FROM run_budget WHERE account = ?')
         .get(inviteId) as
-        | { run_id: string; heartbeat_at: number; since_ms: number; since_seq: number | null }
+        | { run_id: string; heartbeat_at: number; since_seq: number | null }
         | undefined;
       if (held && held.run_id !== runId && held.heartbeat_at + RUN_LEASE_MS > now) {
         throw new RunBudgetHeld('another run holds the run budget of this invite');
       }
+      // The holder sets its own limit again: same window, same generation. A budget an earlier
+      // version left without a row sequence is never the holder's, whatever its run id says.
+      if (held && held.run_id === runId && held.since_seq !== null) {
+        db.prepare(
+          'UPDATE run_budget SET limit_usd = ?, heartbeat_at = ? WHERE account = ? AND run_id = ?',
+        ).run(budget.limitUsd, now, inviteId, runId);
+        db.exec('COMMIT');
+        return { fenced: false };
+      }
+      // A new run: fence the earlier one's credentials, then open the new window.
+      bumpGeneration(db, inviteId);
       // Rows after this one were booked after the budget was set, whatever their timestamps say.
       const { seq } = db
         .prepare('SELECT COALESCE(MAX(rowid), 0) AS seq FROM account_spend')
         .get() as { seq: number };
-      // A takeover keeps the window of the run it takes over from; the same run setting its budget
-      // again starts over, as it always did.
-      const inherits = held !== undefined && held.run_id !== runId;
-      const sinceMs = inherits ? Math.min(held.since_ms, budget.sinceMs) : budget.sinceMs;
-      const sinceSeq = inherits ? held.since_seq : seq;
       db.prepare(
         `INSERT INTO run_budget (account, limit_usd, since_ms, since_seq, run_id, heartbeat_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (account) DO UPDATE SET limit_usd = excluded.limit_usd,
            since_ms = excluded.since_ms, since_seq = excluded.since_seq, run_id = excluded.run_id,
            heartbeat_at = excluded.heartbeat_at`,
-      ).run(inviteId, budget.limitUsd, sinceMs, sinceSeq, runId, now);
+      ).run(inviteId, budget.limitUsd, budget.sinceMs, seq, runId, now);
       db.exec('COMMIT');
+      return { fenced: held !== undefined };
     } catch (error) {
       db.exec('ROLLBACK');
       throw error;
     }
   });
+}
+
+/** Moves the account to the next generation, which makes every credential of the earlier one book nothing. */
+function bumpGeneration(db: DatabaseSync, account: string): void {
+  db.prepare(
+    `INSERT INTO run_generation (account, generation) VALUES (?, 1)
+     ON CONFLICT (account) DO UPDATE SET generation = generation + 1`,
+  ).run(account);
 }
 
 /** Keeps the hold of run `runId` on the invite's run budget. False when the run no longer holds it. */
@@ -336,18 +412,28 @@ export function renewRunBudget(
 
 /**
  * Ends the run budget of `inviteId` if run `runId` holds it; another run's budget is never
- * touched. The invite is then held to its daily and monthly caps alone. False when it was not
+ * touched. The invite is then held to its daily and monthly caps alone, and the run's credentials
+ * are fenced like a taken-over run's: the run is over, so what it left behind books nothing, and
+ * ending the budget does not lift the cap off a task of an earlier run. False when it was not
  * this run's.
  */
 export function clearRunBudget(path: string, inviteId: string, runId: string): boolean {
-  return withJournal(
-    path,
-    (db) =>
-      Number(
-        db.prepare('DELETE FROM run_budget WHERE account = ? AND run_id = ?').run(inviteId, runId)
-          .changes,
-      ) > 0,
-  );
+  return withJournal(path, (db) => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const removed =
+        Number(
+          db.prepare('DELETE FROM run_budget WHERE account = ? AND run_id = ?').run(inviteId, runId)
+            .changes,
+        ) > 0;
+      if (removed) bumpGeneration(db, inviteId);
+      db.exec('COMMIT');
+      return removed;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  });
 }
 
 /** What an invite may spend per UTC day and month unless it has caps of its own, and what the whole server may spend per day. */
@@ -587,7 +673,14 @@ export class SqliteSpendJournal implements SpendJournal {
           .prepare(`SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE ${where}`)
           .get(...args) as { usd: number }
       ).usd;
+    const generationOf = (name: string): number => {
+      const row = this.db
+        .prepare('SELECT generation FROM run_generation WHERE account = ?')
+        .get(name) as { generation: number } | undefined;
+      return row?.generation ?? 0;
+    };
     return {
+      generationOf,
       reserve: (account: Account, key, usd): ReserveResult => {
         if (!Number.isFinite(usd) || usd < 0) {
           return { ok: false, reason: 'the request has no valid cost' };
@@ -619,6 +712,16 @@ export class SqliteSpendJournal implements SpendJournal {
         try {
           const refusal = ((): ReserveResult | undefined => {
             if (inviteId !== undefined && limits) {
+              // A credential issued under an earlier run books nothing, run budget or not.
+              if (account !== 'server' && account.generation !== undefined) {
+                const current = generationOf(name);
+                if (account.generation !== current) {
+                  return {
+                    ok: false,
+                    reason: 'this credential belongs to an earlier run of the invite',
+                  };
+                }
+              }
               const run = this.db
                 .prepare('SELECT limit_usd, since_ms, since_seq FROM run_budget WHERE account = ?')
                 .get(name) as
@@ -627,6 +730,15 @@ export class SqliteSpendJournal implements SpendJournal {
               if (run) {
                 if (!Number.isFinite(run.limit_usd) || !Number.isFinite(run.since_ms)) {
                   return { ok: false, budget: true, reason: 'this invite may not spend' };
+                }
+                // An earlier version's budget has no row sequence: nothing says it counted every
+                // booking, so nothing books until a run reopens it.
+                if (run.since_seq === null) {
+                  return {
+                    ok: false,
+                    budget: true,
+                    reason: 'the run budget of this invite must be reopened by a new run',
+                  };
                 }
                 if (
                   sum(
@@ -667,9 +779,17 @@ export class SqliteSpendJournal implements SpendJournal {
           }
           this.db
             .prepare(
-              'INSERT INTO account_spend (key, account, day, month, usd, booked_at) VALUES (?, ?, ?, ?, ?, ?)',
+              'INSERT INTO account_spend (key, account, day, month, usd, booked_at, generation) VALUES (?, ?, ?, ?, ?, ?, ?)',
             )
-            .run(key, name, day, month, usd, now());
+            .run(
+              key,
+              name,
+              day,
+              month,
+              usd,
+              now(),
+              account !== 'server' && account.generation !== undefined ? account.generation : null,
+            );
           this.db.exec('COMMIT');
           return { ok: true };
         } catch {

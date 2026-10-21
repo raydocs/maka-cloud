@@ -31,7 +31,29 @@ export {
 export { type PollBackoff } from './poller.js';
 export { ExecProcess, type ExecProcessOptions } from './process-channel.js';
 export { type ResumeInput, SandboxCliRunner } from './runner.js';
+export { type AgentChannel, assertAgentChannel } from './agent-user.js';
 export { type AgentSdk, loadAgentSdk } from './sdk-turn.js';
+export {
+  SqliteTranscriptStore,
+  TranscriptDatabaseInUseError,
+  TranscriptDatabaseVersionError,
+} from './sqlite-transcripts.js';
+export {
+  DEFAULT_TRANSCRIPT_LIMITS,
+  MemoryTranscriptStore,
+  restoreTranscript,
+  TranscriptFull,
+  type TranscriptInfo,
+  type TranscriptKey,
+  type TranscriptLimits,
+  type TranscriptLine,
+  type TranscriptPage,
+  type TranscriptStore,
+  checkAppend,
+  isProjectKey,
+  isSessionId,
+  keyProblem,
+} from './transcripts.js';
 export {
   JsonFileSessionStore,
   MemorySessionStore,

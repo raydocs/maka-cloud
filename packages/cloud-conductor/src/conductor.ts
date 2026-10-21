@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import type { SessionEvent } from '@maka/core/events';
 import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
+import type { ThinkingLevel } from '@maka/core/model-thinking';
+import { isModeId, type ModeId, type ModesConfig } from '@maka-cloud/modes';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import {
   type ConductorLimits,
@@ -60,6 +62,11 @@ export interface ConductorOptions {
   tasksSurviveRestart?: boolean;
   playbooks?: readonly Playbook[];
   /**
+   * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
+   * and which mode a task runs in. Without it there are no modes: nothing is added to a brief.
+   */
+  modes?: ModesConfig;
+  /**
    * Appended once to each new durable user turn, never to the system prompt or old history. It
    * taints the conversation (T15) unless it says `external: false`; a non-empty string always does.
    */
@@ -106,6 +113,11 @@ export interface UserMessage {
    * conversation is tainted before the message is admitted, and stays tainted (T15).
    */
   external?: boolean;
+  /**
+   * The mode the user picked (T25). It applies when this message starts a run, and then it is
+   * the run's mode: the model cannot choose another. Anything but a mode id starts no run.
+   */
+  mode?: string;
   /**
    * Set only by a standing duty (T23): the run this message starts has this authority and this
    * hard budget, which it cannot raise or ask to raise. It applies when the message starts a run;
@@ -216,6 +228,7 @@ export class Conductor {
   private readonly host: MakaHost;
   private readonly outbox: ConductorOutbox;
   private readonly playbooks: readonly Playbook[];
+  private readonly modes: ModesConfig | undefined;
   private readonly limits: ConductorLimits;
   private readonly prices: ModelPrices;
   private readonly now: () => number;
@@ -248,6 +261,7 @@ export class Conductor {
     this.state = new ConductorState(join(options.root, 'conductor.db'), this.now);
     this.outbox = options.outbox;
     this.playbooks = options.playbooks ?? DEFAULT_PLAYBOOKS;
+    this.modes = options.modes;
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
@@ -356,14 +370,31 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
+    if (message.mode !== undefined && !isModeId(message.mode)) {
+      // Fail closed, like limits: a pick that cannot be read starts no run with another mode.
+      this.warn('A message carried a mode that is not valid; it was not run', {
+        messageId: message.messageId,
+      });
+      this.state.enqueueNotice(
+        { conversationId: message.conversationId },
+        'This request could not be started because its mode was not valid.',
+      );
+      this.sendOutbox(message.conversationId);
+      return;
+    }
+    const picked = this.modes && limits === undefined ? message.mode : undefined;
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
       message.messageId,
-      this.limits.defaultRunBudgetUsd,
+      // The user's pick brings the budget that mode starts with; a duty's budget is its own.
+      picked && this.modes
+        ? this.modes.modes[picked as ModeId].budget.defaultRunUsd
+        : this.limits.defaultRunBudgetUsd,
       limits === undefined
         ? undefined
         : { dutyId: limits.dutyId, authority: limits.authority, budgetUsd: limits.budgetUsd },
+      picked as ModeId | undefined,
     );
     if (admitted.duplicate) return;
     this.enqueue(lane, { kind: 'turn', runId: admitted.run.runId, text: message.text });
@@ -647,7 +678,7 @@ export class Conductor {
     let setupError: unknown;
     let timer: NodeJS.Timeout | undefined;
     try {
-      const makaSessionId = await this.ensureSession(lane.conversationId);
+      const makaSessionId = await this.ensureSession(lane.conversationId, job.runId);
       const controller = new AbortController();
       turn = {
         runId: job.runId,
@@ -727,13 +758,26 @@ export class Conductor {
     }
   }
 
-  private async ensureSession(conversationId: string): Promise<string> {
+  /**
+   * The mode a run's conductor and planner think in: the user's pick, else `standard`. The
+   * conductor's model is one for the whole conversation (its preserved thinking is checked against
+   * it), so a mode sets effort only, and a conversation's conductor session keeps the effort of the
+   * run that opened it; each planner session is the run's own.
+   */
+  private effortOf(runId: string | null, role: 'conductor' | 'plannerEffort'): ThinkingLevel {
+    const fallback = role === 'conductor' ? 'medium' : 'high';
+    if (!this.modes) return fallback;
+    const mode = (runId === null ? undefined : this.state.run(runId)?.mode) ?? 'standard';
+    return this.modes.modes[mode].conductor[role === 'conductor' ? 'effort' : 'plannerEffort'];
+  }
+
+  private async ensureSession(conversationId: string, runId: string): Promise<string> {
     const existing = this.state.conversationSession(conversationId);
     if (existing) return existing;
     const makaSessionId = await this.host.createSession({
       kind: 'conductor',
-      systemPrompt: conductorSystemPrompt(this.playbooks),
-      thinkingLevel: 'medium',
+      systemPrompt: conductorSystemPrompt(this.playbooks, this.modes !== undefined),
+      thinkingLevel: this.effortOf(runId, 'conductor'),
       runId: null,
     });
     this.state.bindConversation(conversationId, makaSessionId);
@@ -1271,6 +1315,7 @@ export class Conductor {
       state: this.state,
       limits: this.limits,
       playbooks: this.playbooks,
+      ...(this.modes ? { modes: this.modes } : {}),
       turnFor: (ctx: MakaToolContext) => {
         const turn = this.turns.get(ctx.sessionId);
         if (!turn) throw new ToolRefusal('no_run', 'This session has no running conductor turn.');
@@ -1322,7 +1367,7 @@ export class Conductor {
     const makaSessionId = await this.host.createSession({
       kind: 'planner',
       systemPrompt: PLANNER_SYSTEM_PROMPT,
-      thinkingLevel: 'high',
+      thinkingLevel: this.effortOf(turn.runId, 'plannerEffort'),
       runId: turn.runId,
     });
     this.counters.planners += 1;

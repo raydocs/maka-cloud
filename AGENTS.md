@@ -63,6 +63,8 @@ Upstream files this fork changes, so a sync knows what to re-check.
 |---|---|---|
 | `package.json`, `package-lock.json` | T11: `packages/cloud-memory` joins workspaces and both build chains before its server consumer; npm regenerates the workspace/server dependency entries and normalizes existing Web Push transitive dev flags and entry order (no version changes) | never; on a sync, keep the entry and build order |
 | `scripts/asf-license-headers.mjs` | `maka-cloud-fork` exclusion rule for our files | never |
+| `scripts/asf-license-headers.mjs` | go-live rehearsal lane: `deploy/` and the root `.dockerignore` join the `maka-cloud-fork` header exclusion | never; on a sync, keep the entries |
+| `scripts/asf-source-release.mjs` | go-live rehearsal lane: `.dockerignore`, `Caddyfile` and `.service` count as text release inputs | never; on a sync, keep the entries |
 | `.github/dependabot.yml` | deleted: dependency bumps come through upstream syncs, not separate Dependabot PRs | never; on a sync, keep it deleted |
 | `package.json`, `packages/runtime/package.json`, `package-lock.json`, `apps/desktop/artifact-budget.json`, `patches/@ai-sdk+*`, `scripts/generate-third-party-notices.mjs`, `LICENSE`, `*THIRD_PARTY_NOTICES.txt` | ai-sdk family upgrade for Claude Haiku 5.5 (branch `chore/ai-sdk-upgrade`) | upstream ships the same or newer ai-sdk versions |
 | `package.json`, `package-lock.json` | T2: `packages/cloud-orchestrator` added to `workspaces`, and its build added to the `build` and `build:test` chains so CI runs its tests (the lockfile change is the new workspace entry only) | never; on a sync, keep our workspace entry and build step |

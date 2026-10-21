@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
+import { SqliteTranscriptStore } from '@maka-cloud/runners';
 import {
   assertNoServer,
   BackupError,
@@ -483,4 +484,47 @@ test('from outside, a database a running server holds exclusively is refused wit
     /held by a running server, which backs itself up/u,
   );
   assert.deepEqual(await readdir(backupDir), [], 'no scratch directory is left');
+});
+
+test('the stored conversations are backed up with key-shaped text taken out of the copy, and left in the live file', async (t) => {
+  const { dataDir, backupDir } = await dirs(t);
+  await populate(dataDir);
+  const paths = dataPathsOf(dataDir);
+  const store = SqliteTranscriptStore.open(paths.transcriptsDbPath);
+  const session = '11111111-2222-4333-8444-555555555555';
+  const key = '-----BEGIN RSA PRIVATE KEY-----';
+  await store.append('tsk_1', { projectKey: '-work-x', sessionId: session }, [
+    {
+      json: JSON.stringify({ type: 'user', uuid: 'a', text: `a file in the repository: ${key}` }),
+      uuid: 'a',
+    },
+    {
+      json: JSON.stringify({
+        type: 'user',
+        uuid: 'b',
+        text: 'token mki_0123456789abcdef0123 seen',
+      }),
+      uuid: 'b',
+    },
+    { json: JSON.stringify({ type: 'user', uuid: 'c', text: 'plain' }), uuid: 'c' },
+  ]);
+  const done = await backupAll({
+    dataDir,
+    backupDir,
+    layout: backupLayoutOf(dataDir),
+    env,
+    now: () => T0,
+    inProcess: { 'transcripts.db': (to) => store.backupTo(to) },
+  });
+  const copy = SqliteTranscriptStore.open(join(done.path, 'transcripts.db'));
+  const lines = (await copy.read('tsk_1', session)).lines.map((text) => JSON.parse(text).text);
+  copy.close();
+  assert.deepEqual(lines, [
+    'a file in the repository: [secret removed]',
+    'token [secret removed] seen',
+    'plain',
+  ]);
+  const live = (await store.read('tsk_1', session)).lines.map((text) => JSON.parse(text).text);
+  assert.match(live[0], /PRIVATE KEY/u);
+  store.close();
 });

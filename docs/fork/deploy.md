@@ -3,8 +3,9 @@
 This is the runbook for the internal beta: one Linux host runs the server, a TLS
 proxy sits in front of it, and every task runs in a sandbox of its own (one per
 invite). Nothing here was run against a real host, a real proxy or a real push
-service; the unit file, the compose file and the proxy settings are written
-from the code's own behavior and should be tried on a throwaway host first.
+service. The unit file, the compose file, the Dockerfile and the Caddyfile are
+real files under `deploy/` (checked with `docker compose config` and
+`caddy validate`); try them on a throwaway host first.
 
 Every command below that starts with `maka-cloud` is
 `node /opt/maka-cloud/packages/cloud-host/dist/cli.js <command>`; make a shell
@@ -175,34 +176,12 @@ or `https:` contact for the push services.
 
 ## Run it under systemd
 
-`/etc/systemd/system/maka-cloud.service`:
-
-```ini
-[Unit]
-Description=maka-cloud
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=maka-cloud
-Group=maka-cloud
-WorkingDirectory=/opt/maka-cloud
-EnvironmentFile=/etc/maka-cloud.env
-Environment=MAKA_CLOUD_DATA_DIR=/var/lib/maka-cloud
-Environment=MAKA_CLOUD_BACKUP_DIR=/var/backups/maka-cloud
-ExecStart=/usr/bin/node /opt/maka-cloud/packages/cloud-host/dist/cli.js start
-Restart=on-failure
-RestartSec=5
-# SIGTERM closes the stack in order; give it time to stop running work.
-KillSignal=SIGTERM
-TimeoutStopSec=60
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-```
+Install `deploy/maka-cloud.service` as `/etc/systemd/system/maka-cloud.service`
+(it expects the checkout in `/opt/maka-cloud`, the settings in
+`/etc/maka-cloud.env`, and the user and directories from the section above):
 
 ```sh
+install -m 644 deploy/maka-cloud.service /etc/systemd/system/maka-cloud.service
 systemctl daemon-reload
 systemctl enable --now maka-cloud
 journalctl -u maka-cloud -f
@@ -221,41 +200,35 @@ Starting runs nothing by itself: a task starts only when a user posts a message.
 
 ## Run it under Docker Compose
 
-There is no image in this repository. This file runs the checkout you built
-above inside a stock Node image, so the host's `node_modules` and `dist` are
-what runs:
+`deploy/Dockerfile` builds the server and a Caddy image with the web app in it,
+and `deploy/compose.yaml` runs both: the server is reached only through Caddy,
+which publishes ports 80 and 443 (`MAKA_CLOUD_HTTP_PORT` and
+`MAKA_CLOUD_HTTPS_PORT` change them). The server's data is the volume
+`maka-data` (at `/data`) and its backups are the volume `maka-backups` (at
+`/backups`, outside the data directory as `check` requires); Caddy's
+certificates are kept in `caddy-data`.
 
-```yaml
-services:
-  maka-cloud:
-    image: node:24-slim
-    working_dir: /app
-    command: ["node", "packages/cloud-host/dist/cli.js", "start"]
-    restart: unless-stopped
-    env_file: /etc/maka-cloud.env
-    environment:
-      MAKA_CLOUD_DATA_DIR: /data
-      MAKA_CLOUD_BACKUP_DIR: /backups
-      MAKA_CLOUD_HOST: 0.0.0.0        # inside the container; publish below only on loopback
-      MAKA_CLOUD_MCP_HOST: 0.0.0.0
-      MAKA_CLOUD_GATEWAY_HOST: 0.0.0.0
-    volumes:
-      - /opt/maka-cloud:/app:ro
-      - maka-data:/data
-      - /var/backups/maka-cloud:/backups
-    ports:
-      - "127.0.0.1:8080:8080"
-      - "127.0.0.1:8081:8081"
-      - "127.0.0.1:8082:8082"
-    stop_grace_period: 60s
-volumes:
-  maka-data:
+Put the server's settings in `/etc/maka-cloud.env` (or point
+`MAKA_CLOUD_ENV_FILE` at another file) and the three names in a second file
+that Compose reads for its own substitutions:
+
+```sh
+# /etc/maka-cloud.compose.env
+MAKA_CLOUD_APP_NAME=app.example.com
+MAKA_CLOUD_MCP_NAME=mcp.example.com
+MAKA_CLOUD_MODELS_NAME=models.example.com
 ```
 
-Run the container as a user that owns `/data` and `/backups` (add `user:` with
-that uid), and give the host side of `/backups` the same mode as in the
-systemd setup. Under Compose, run the commands below with
-`docker compose run --rm --no-deps maka-cloud node packages/cloud-host/dist/cli.js <command>`.
+```sh
+docker compose -f deploy/compose.yaml --env-file /etc/maka-cloud.compose.env up -d --build
+```
+
+Under Compose, run the commands below as
+`docker compose -f deploy/compose.yaml run --rm --no-deps maka-cloud <command>`
+(the image's entry point is `maka-cloud`), for example `check` or `backups`.
+`backup` and `restore` need the server stopped: `docker compose -f
+deploy/compose.yaml stop maka-cloud` first. Copy the `maka-backups` volume off
+the host as the backup section says.
 
 ## The TLS proxy
 
@@ -343,38 +316,12 @@ server {
 
 ### Caddy
 
-```caddy
-app.example.com {
-    root * /opt/maka-cloud/packages/cloud-web/dist
-    @api path /v1/* /healthz
-    handle @api {
-        reverse_proxy 127.0.0.1:8080 {
-            flush_interval -1          # send every write at once: the event stream
-        }
-    }
-    handle /sw.js {
-        header Cache-Control "no-cache"
-        file_server
-    }
-    handle {
-        header Cache-Control "no-cache"
-        try_files {path} /index.html
-        file_server
-    }
-}
-
-mcp.example.com {
-    reverse_proxy 127.0.0.1:8081 {
-        flush_interval -1
-    }
-}
-
-models.example.com {
-    reverse_proxy 127.0.0.1:8082 {
-        flush_interval -1
-    }
-}
-```
+`deploy/Caddyfile` is the file the Compose setup uses. It reads the three names
+from `MAKA_CLOUD_APP_NAME`, `MAKA_CLOUD_MCP_NAME` and `MAKA_CLOUD_MODELS_NAME`,
+the server's host name from `MAKA_CLOUD_UPSTREAM` (default `maka-cloud`, the
+Compose service; use `127.0.0.1` for a Caddy on the host) and serves the web
+app from `/srv/web`. For a Caddy on the host, copy the web build there
+(`packages/cloud-web/dist`) and set `root` to it.
 
 Caddy compresses only with `encode`; do not add it to the `@api` handler.
 
@@ -406,6 +353,8 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | --- | --- |
 | `MAKA_CLOUD_DATA_DIR` | required: directory for the databases, handoff files and conductor storage |
 | `MAKA_CLOUD_BACKUP_DIR` | directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups |
+| `MAKA_CLOUD_AGENT_USER` | the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly |
+| `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
 | `MAKA_CLOUD_SPEND_ALERT_USD` | send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push |
 | `MAKA_CLOUD_OWNER_INVITE` | the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app |
 | `MAKA_CLOUD_HOST` | public API host (default 127.0.0.1) |
@@ -463,6 +412,18 @@ CLI's own default model, which the gateway cannot price, so a Codex run (and wit
 it the review of a Claude change) is refused: `maka-cloud check` says how many
 roles are in that state.
 
+How a mode is chosen: a mode the user picks for a message that starts a run is that
+run's mode, and the run starts with that mode's default budget; the conductor cannot
+choose another. Without a pick, the conductor may name a mode for each delegation
+(`workMode`), and the run's budget decides whether it is affordable (never `deep`
+by itself). The mode's own cap on one delegation holds either way. The mode reaches
+the runner as one `maka-mode:` line the conductor's code adds to the brief, right
+after any `maka-inputs:` and `maka-artifacts:` lines; a brief the model wrote with
+such a line in it is refused. The conductor keeps one model for a conversation, so
+a mode sets how hard it thinks, not which model it is; its own thinking effort is
+fixed when the conversation's first run opens its session, and its planner's effort
+follows each run's mode.
+
 ## Standing duties and the GitHub webhook
 
 Standing duties are off until `MAKA_GITHUB_WEBHOOK_SECRET` is set. With it, the
@@ -493,6 +454,15 @@ delivery id is handled once, and a run started by an event carries text from
 outside the owner, so the conversation is marked as such. A run has the duty's
 authority level for its whole life and a budget it cannot raise. The duties
 database is `duties.db` in the data directory and is part of the daily backup.
+
+### Claude through the Agent SDK
+
+Set `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` to run Claude tasks through the Agent SDK:
+the step log, resume after a restart and the stored conversation (`transcripts.db` in the data
+directory, part of the daily backup) need it. The box image must have that account (no sudo, not the
+sandbox user), a group the sandbox user shares with it, a `claude` binary it can read, and
+passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
+that fails the check refuses the turn with the reason. Unset, Claude runs the CLI directly as before.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
@@ -630,9 +600,13 @@ Preparation:
    invite's run budget at a time: a second run is refused (exit 2) while the
    first is going. A run that is killed leaves its run budget in place, which
    only holds that invite back; about two minutes after it stopped renewing it,
-   the next smoke run takes it over. The new run counts what the killed run
-   spent toward its own budget, because that run's tasks may still be on the
-   server, so a run killed late leaves the next one little to spend.
+   the next smoke run takes it over. A takeover first fences the killed run:
+   every model key and conductor session issued under it books nothing from then
+   on (the invite's generation in the journal moves up), the new run cancels the
+   tasks it left running, and only then does the new run get a budget of its
+   own, starting empty. A run that ends clears its budget and fences its own
+   keys the same way. A budget left by an older version, without a row
+   sequence, books nothing until the next run reopens it.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 

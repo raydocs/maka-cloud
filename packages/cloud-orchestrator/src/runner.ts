@@ -80,9 +80,12 @@ export interface Runner {
    * Called on restart for every task the log shows as still running. The runner that started it
    * is gone from memory, but its work may still run somewhere else (a remote sandbox), so stop
    * whatever is left for `taskId`, finding it by id alone. Must be idempotent and may be a no-op
-   * for an unknown task. `signal` aborts when the orchestrator stops waiting.
+   * for an unknown task. `signal` aborts when the orchestrator stops waiting. `epoch` is the
+   * attempt asking: a runner that can tell runs of different attempts apart must leave alone a
+   * run started by a later attempt, since a slow stop can arrive after another process took the
+   * task over.
    */
-  stopOrphaned?(taskId: TaskId, options?: { signal?: AbortSignal }): Promise<void>;
+  stopOrphaned?(taskId: TaskId, options?: { signal?: AbortSignal; epoch?: number }): Promise<void>;
   /**
    * Continues a task after a restart instead of starting it again: the same session where the
    * runner kept one, told `spec.recovery.note` first. A runner without it has its unfinished

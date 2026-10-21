@@ -13,6 +13,8 @@ import { errorMessage } from './shell.js';
 const HOOK_TIMEOUT_SECONDS = 30;
 const LABEL_CHARS = 120;
 const KIND_CHARS = 40;
+/** How much of a finished step's recorded result goes back to the agent that asks for it again. */
+const COMPLETED_OUTPUT_CHARS = 1_000;
 
 /** Tools that only read, search or keep notes. Running one again changes nothing. */
 const SAFE_TOOLS = new Set([
@@ -39,12 +41,97 @@ const SAFE_TOOLS = new Set([
 ]);
 
 /**
- * A shell command that only looks: one plain command, no pipes, redirects, substitutions or
- * separators, whose program and first argument are on this list. Anything else may do something
- * that must not happen twice (a push, a request, a message), so it is `never`.
+ * Shell commands that only look, decided by the program and its arguments, not by the program
+ * alone: `find . -delete`, `sort -o file` and `git branch -D x` start with a harmless program and
+ * are not harmless. Each entry says which argument lists of its program are safe; a program, a
+ * subcommand or a form that is not here is `never`.
  */
-const READ_ONLY_COMMAND =
-  /^(?:ls|cat|head|tail|wc|pwd|echo|printf|grep|rg|find|stat|file|diff|sort|uniq|tree|which|env|date|true|false|sleep|test|\[|git\s+(?:status|diff|log|show|branch|rev-parse|ls-files|blame|describe|remote\s+-v)|npm\s+(?:test|run\s+(?:test|build|lint|typecheck|check)(?::\S+)?)|npx\s+(?:tsc|biome|eslint|vitest|jest)|node\s+--test|pnpm\s+(?:test|lint|typecheck|build)|yarn\s+(?:test|lint|typecheck|build)|cargo\s+(?:test|check|build|clippy)|go\s+(?:test|build|vet)|pytest|tsc|make\s+(?:test|check|lint|build))(?:\s|$)/u;
+const WITHOUT =
+  (...banned: string[]) =>
+  (args: string[]) =>
+    !args.some((arg) => banned.some((flag) => arg === flag || arg.startsWith(`${flag}=`)));
+const ANYTHING = () => true;
+const GIT_READ_BANNED = WITHOUT('--output', '--ext-diff', '--open-files-in-pager', '-O');
+const GIT_BRANCH_LISTING = new Set(['-a', '-r', '-v', '-vv', '--list', '--show-current', '--all']);
+
+const READ_ONLY_PROGRAMS: Record<string, (args: string[]) => boolean> = {
+  ls: ANYTHING,
+  cat: ANYTHING,
+  head: ANYTHING,
+  tail: ANYTHING,
+  wc: ANYTHING,
+  pwd: ANYTHING,
+  echo: ANYTHING,
+  printf: ANYTHING,
+  grep: ANYTHING,
+  stat: ANYTHING,
+  diff: ANYTHING,
+  which: ANYTHING,
+  true: ANYTHING,
+  false: ANYTHING,
+  sleep: ANYTHING,
+  test: ANYTHING,
+  '[': ANYTHING,
+  // Runs a program when given arguments; bare, it prints the environment.
+  env: (args) => args.length === 0,
+  rg: WITHOUT('--pre', '--pre-glob', '--hostname-bin'),
+  tree: WITHOUT('-o'),
+  file: WITHOUT('-C', '--compile'),
+  sort: WITHOUT('-o', '--output', '--compress-program'),
+  // A second positional argument is the file it writes.
+  uniq: (args) => args.filter((arg) => !arg.startsWith('-')).length <= 1,
+  // Setting the clock takes a bare argument; only a `+format` or none reads it.
+  date: (args) =>
+    args.every((arg) => arg.startsWith('+') || ['-u', '--utc', '-I', '-R'].includes(arg)),
+  find: WITHOUT(
+    '-delete',
+    '-exec',
+    '-execdir',
+    '-ok',
+    '-okdir',
+    '-fprint',
+    '-fprint0',
+    '-fprintf',
+    '-fls',
+  ),
+  tsc: ANYTHING,
+  pytest: ANYTHING,
+};
+
+/** `<program> <subcommand>` pairs and their argument rules, for programs that do more than look. */
+const READ_ONLY_SUBCOMMANDS: Record<string, Record<string, (args: string[]) => boolean>> = {
+  git: {
+    status: GIT_READ_BANNED,
+    diff: GIT_READ_BANNED,
+    log: GIT_READ_BANNED,
+    show: GIT_READ_BANNED,
+    'rev-parse': GIT_READ_BANNED,
+    'ls-files': GIT_READ_BANNED,
+    blame: GIT_READ_BANNED,
+    describe: GIT_READ_BANNED,
+    // Listing only: -d, -D, -m, -c and a bare name create, move or delete branches.
+    branch: (args) => args.every((arg) => GIT_BRANCH_LISTING.has(arg)),
+    remote: (args) => args.length === 1 && args[0] === '-v',
+  },
+  // Runs the project's own script of that name: repeatable, as a build or test is.
+  npm: {
+    test: ANYTHING,
+    run: (args) => /^(?:test|build|lint|typecheck|check)(?::\S+)?$/u.test(args[0] ?? ''),
+  },
+  pnpm: { test: ANYTHING, lint: ANYTHING, typecheck: ANYTHING, build: ANYTHING },
+  yarn: { test: ANYTHING, lint: ANYTHING, typecheck: ANYTHING, build: ANYTHING },
+  npx: {
+    tsc: ANYTHING,
+    biome: ANYTHING,
+    eslint: ANYTHING,
+    vitest: ANYTHING,
+    jest: ANYTHING,
+  },
+  node: { '--test': ANYTHING },
+  cargo: { test: ANYTHING, check: ANYTHING, build: ANYTHING, clippy: ANYTHING },
+  go: { test: ANYTHING, build: ANYTHING, vet: ANYTHING },
+  make: { test: ANYTHING, check: ANYTHING, lint: ANYTHING, build: ANYTHING },
+};
 const SHELL_OPERATORS = /[;&|<>`$\n\r\\(){}]/u;
 
 /** Whether a tool call can be run again after a crash. Unknown tools and commands are `never`. */
@@ -52,15 +139,30 @@ export function replayClassOf(toolName: string, toolInput: unknown): ReplayClass
   if (SAFE_TOOLS.has(toolName)) return 'safe';
   if (toolName === 'Bash') {
     const command = commandOf(toolInput);
-    if (
-      command !== undefined &&
-      !SHELL_OPERATORS.test(command) &&
-      READ_ONLY_COMMAND.test(command.trim())
-    ) {
+    if (command !== undefined && !SHELL_OPERATORS.test(command) && readsOnly(command)) {
       return 'safe';
     }
   }
   return 'never';
+}
+
+/** One plain command whose program and arguments are on the list above. Quotes are looked through. */
+function readsOnly(command: string): boolean {
+  const words = command
+    .trim()
+    .split(/\s+/u)
+    .map((word) => word.replaceAll(/["']/gu, ''));
+  const [program, ...args] = words;
+  if (program === undefined || program === '') return false;
+  const subcommands = READ_ONLY_SUBCOMMANDS[program];
+  if (subcommands !== undefined) {
+    const [subcommand, ...rest] = args;
+    const rule = subcommand === undefined ? undefined : subcommands[subcommand];
+    return rule !== undefined && Object.hasOwn(subcommands, subcommand as string) && rule(rest);
+  }
+  return (
+    Object.hasOwn(READ_ONLY_PROGRAMS, program) && (READ_ONLY_PROGRAMS[program]?.(args) ?? false)
+  );
 }
 
 function commandOf(toolInput: unknown): string | undefined {
@@ -120,8 +222,8 @@ function deny(reason: string) {
  * tool, its outcome is recorded; the outcome carries no tool output (the log holds metadata, the
  * transcript holds content).
  *
- * A step that cannot be recorded does not run when it is `never`: a crash would then leave an
- * effect nobody knows about. A `safe` one runs, since it can run again.
+ * A step that cannot be recorded does not run, whatever its class: a crash would leave an effect
+ * nobody knows about, and a `safe` step is only safe to repeat when the log knows it ran.
  */
 export function stepHooks(
   steps: StepLog,
@@ -140,9 +242,23 @@ export function stepHooks(
       });
       switch (result.status) {
         case 'recorded':
-        case 'running':
-        case 'completed':
           return ALLOW;
+        case 'running':
+          // This attempt started the step and has seen no outcome: a second executor would do it
+          // twice at once.
+          return deny(
+            'This step is already running. Wait for it to finish instead of starting it again.',
+          );
+        case 'completed':
+          // A hook cannot hand the CLI a result in place of running the tool, so the recorded
+          // one goes in the reason, and the step does not run again.
+          return deny(
+            `This step already ${result.ok ? 'finished' : 'failed'} and is not run again.${
+              result.output === undefined
+                ? ''
+                : ` What it reported: ${redact(result.output).slice(0, COMPLETED_OUTPUT_CHARS)}`
+            }`,
+          );
         case 'interrupted':
           return deny(
             'This step was cut off by a restart and may or may not have taken effect. Check the real state before trying it again.',
@@ -152,12 +268,11 @@ export function stepHooks(
       }
     } catch (error) {
       onProblem(`a step could not be recorded: ${redact(errorMessage(error))}`);
-      if (replay === 'never') {
-        return deny(
-          'This step was not started: the step log is not available, so its effect could not be recovered after a crash.',
-        );
-      }
-      return ALLOW;
+      // Whatever the class: a step with no intent on record is a step the log cannot account for,
+      // and "it can run again" is only true of one the log knows about.
+      return deny(
+        'This step was not started: the step log is not available, so what the step does could not be recorded. Try again in a moment.',
+      );
     }
     return ALLOW;
   };

@@ -5,6 +5,13 @@ made once: the API client and its event stream (`client.ts`), the server's contr
 reducer (`state.ts`), how things are put in words (`presentation.ts`, `errors.ts`) and how an inbox answer is
 sent exactly once (`inboxAnswer.ts`).
 
+The flows both clients run live here as plain classes that React reads through `useSyncExternalStore`
+(`store.ts`): `ConversationFeed` (the stream, the task list, results, one action at a time, a message
+retried under one id), `HomeFeed` (waiting decisions, what was done since the last visit, what runs next),
+`ConversationStarter`, and `openWorkspace` (sign-in and where to land). What a device must supply is an
+interface: `VisitStore` for Home's last visit; `fetch` is passed to the client. The words and ordering
+rules (`home.ts`, `inbox.ts`, `duties.ts`, `sources.ts`) are plain functions.
+
 - Source only. `main` is `src/index.ts`; clients import `@maka-cloud/client` through a bundler alias, so there is
   no build between an edit and the apps.
 - No DOM and no UI framework. The hosts supply `fetch` (with a streaming body), `TextDecoder` and `crypto`.

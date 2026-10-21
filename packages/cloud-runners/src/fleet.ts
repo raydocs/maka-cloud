@@ -10,11 +10,13 @@ import {
   type StageLimits,
 } from './machine.js';
 import { MachinePoller, type PollBackoff } from './poller.js';
+import { type AgentChannel, assertAgentChannel, checkAgentIsolation } from './agent-user.js';
 import type { AgentSdk } from './sdk-turn.js';
 import { DEFAULT_TENANT, noModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
 import { MemorySessionStore, referencedSnapshotIds } from './session-store.js';
 import { errorMessage, shq } from './shell.js';
+import type { TranscriptStore } from './transcripts.js';
 import type {
   ModelAccessProvider,
   RunnerSessionRecord,
@@ -87,6 +89,18 @@ export interface CloudRunnersOptions {
    */
   agentSdk?: AgentSdk;
   /**
+   * The account the CLI runs as when driven by the SDK, so that nothing the agent runs can write
+   * the channel the SDK trusts. Required with `agentSdk`: without it SDK runs are refused. Each
+   * machine is checked once (`checkAgentIsolation`) before it runs one.
+   */
+  agentChannel?: AgentChannel;
+  /**
+   * Keeps the conversation of SDK-driven Claude tasks off the sandbox, so a task whose sandbox is
+   * gone goes on from its stored conversation. Needs `agentSdk`. Without it the conversation lives
+   * only in the sandbox's own files.
+   */
+  transcripts?: TranscriptStore;
+  /**
    * How often a run driven by the SDK is polled: every hook the CLI waits for costs a poll, so
    * these runs are polled much faster than `pollIntervalMs` while output is coming, and back off
    * (doubling) towards `maxMs` while it is quiet. Default 150 ms and 1 s.
@@ -144,6 +158,7 @@ export class Fleet {
   leaseRenewals = 0;
   readonly logRoot: string;
   private readonly machines = new Map<string, RemoteMachine>();
+  private readonly isolationChecks = new Map<string, Promise<void>>();
   private readonly setups = new Map<string, Promise<void>>();
   private readonly tools: PreparedTool[];
   private recordChain: Promise<unknown> = Promise.resolve();
@@ -173,10 +188,30 @@ export class Fleet {
   machine(machineId: string): RemoteMachine {
     let machine = this.machines.get(machineId);
     if (!machine) {
-      machine = new RemoteMachine(this.client, machineId, this.root, this.logRoot);
+      machine = new RemoteMachine(
+        this.client,
+        machineId,
+        this.root,
+        this.logRoot,
+        this.options.agentChannel?.user,
+      );
       this.machines.set(machineId, machine);
     }
     return machine;
+  }
+
+  /** Checks once per machine that it keeps the agent channel private; a failed check is repeated on the next run. */
+  ensureAgentIsolation(machine: RemoteMachine, signal?: AbortSignal): Promise<void> {
+    const channel = this.options.agentChannel;
+    if (channel === undefined) return Promise.reject(new Error('no agent channel is configured'));
+    assertAgentChannel(channel);
+    let checked = this.isolationChecks.get(machine.machineId);
+    if (!checked) {
+      checked = checkAgentIsolation(machine, channel, signal);
+      this.isolationChecks.set(machine.machineId, checked);
+      checked.catch(() => this.isolationChecks.delete(machine.machineId));
+    }
+    return checked;
   }
 
   leaseId(taskId: TaskId): string {
@@ -197,7 +232,10 @@ export class Fleet {
   }
 
   private async installCli(machine: RemoteMachine, vendor: VendorAdapter): Promise<void> {
-    const version = this.options.versions?.[vendor.name] ?? vendor.defaultVersion;
+    // Driven by the SDK, the CLI is the one the SDK was built for: it passes flags older ones lack.
+    const sdkVersion =
+      vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
+    const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
     const check = await machine.exec(cliCheckScript(vendor.binary), {
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
