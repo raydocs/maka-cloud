@@ -62,11 +62,18 @@ test('a restart resumes a running task in its session instead of failing it, and
   assert.equal(second.fake.runs.length, 1);
   assert.equal(second.fake.runs[0]?.spec.briefPath, first.fake.runFor(taskId).spec.briefPath);
 
-  // The log says what happened, in order, and the task never stopped running or started twice.
+  // The log says what happened, in order, and the task never stopped running or started twice:
+  // the note before the run starts, and the one that proves the attempt still owned the task
+  // when the run came back.
+  await eventually(
+    () => kinds(store, taskId).filter((type) => type === 'task_progress').length === 2,
+    'the run to be confirmed',
+  );
   const log = kinds(store, taskId);
   assert.deepEqual(log.slice(log.indexOf('task_attempt')), [
     'task_attempt',
     'step_interrupted',
+    'task_progress',
     'task_progress',
   ]);
   assert.equal(log.filter((type) => type === 'task_started').length, 1);

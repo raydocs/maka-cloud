@@ -202,10 +202,7 @@ export class Orchestrator {
   /** Tasks `restore` found unfinished and drove again instead of ending them. */
   private resumed: TaskId[] = [];
   /** Runs `restore` decided to start again, held until `startRestored`. */
-  private pendingResumes: Array<{
-    task: TaskRecord;
-    recovery?: Omit<Recovery, 'epoch'>;
-  }> = [];
+  private pendingResumes: PendingResume[] = [];
   private readonly resumeMode: 'automatic' | 'manual';
 
   private constructor(options: OrchestratorOptions) {
@@ -272,9 +269,36 @@ export class Orchestrator {
     const pending = this.pendingResumes;
     this.pendingResumes = [];
     if (this.closed) return;
-    for (const { task, recovery } of pending) {
-      this.track(this.launch(task.taskId, task.runner, this.handoff.paths(task.taskId), recovery));
-    }
+    for (const resume of pending) this.track(this.resumeRun(resume));
+  }
+
+  /**
+   * Starts one restored run. `restore` decided this a while ago, and another process may have
+   * taken the task over since (the plan is stale then): nothing is started until a write under
+   * this attempt's epoch has been accepted, which is how ownership is proven right before the
+   * spawn. Refused (or dropped for a task that is being stopped), the run is not started.
+   */
+  private async resumeRun(resume: PendingResume): Promise<void> {
+    const { task, recovery, resumes } = resume;
+    const fence: Fence = { taskId: task.taskId, epoch: task.epoch };
+    const claimed = await this.record(
+      {
+        type: 'task_progress',
+        taskId: task.taskId,
+        note: `resuming after a restart (resume ${resumes} in a row)`,
+      },
+      () => {
+        if (
+          this.isStopping(task.taskId) ||
+          this.ancestorStopped(task.taskId) ||
+          this.overBudget(task.taskId)
+        )
+          throw new Superseded();
+      },
+      fence,
+    );
+    if (claimed === undefined) return;
+    await this.launch(task.taskId, task.runner, this.handoff.paths(task.taskId), recovery);
   }
 
   /** Tasks the last `create` found unfinished and started driving again (their runner has `recover`). */
@@ -724,7 +748,7 @@ export class Orchestrator {
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(orphans.map((task) => this.stopLeftover(task)));
-    const toResume: Array<{ task: TaskRecord; recovery?: Omit<Recovery, 'epoch'> }> = [];
+    const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
       const stop = stops[index] ?? 'none';
       if (typeof stop === 'object') {
@@ -746,14 +770,10 @@ export class Orchestrator {
       const plan = typeof stop === 'object' ? undefined : this.resumePlan(task);
       if (plan?.kind === 'resume') {
         const resumes = plan.resumes;
-        await this.record({
-          type: 'task_progress',
-          taskId: task.taskId,
-          note: `resuming after a restart (resume ${resumes} in a row)`,
-        });
         this.resumed.push(task.taskId);
         toResume.push({
           task,
+          resumes,
           ...(task.state === 'queued'
             ? {}
             : { recovery: { resumes, note: recoveryNote(task.steps.values(), resumes) } }),
@@ -1089,9 +1109,23 @@ export class Orchestrator {
       this.starting.delete(taskId);
       try {
         if (recovery !== undefined && this.tasks.get(taskId)?.state === 'running') {
-          // A task a restart resumed started long ago: its start is in the log already, and the
-          // run is registered above with nothing awaited since the stopping checks.
-          recorded = true;
+          // A task a restart resumed started long ago: its start is in the log already. What is
+          // written instead is a fenced note, which proves this attempt still owns the task now
+          // the run exists: when another process took it over while the run was starting, the
+          // write is refused and fencing out cancels the late run, which has written nothing yet.
+          const back = await this.record(
+            { type: 'task_progress', taskId, note: 'the run is back' },
+            () => {
+              if (
+                this.isStopping(taskId) ||
+                this.ancestorStopped(taskId) ||
+                this.overBudget(taskId)
+              )
+                throw new Superseded();
+            },
+            fence,
+          );
+          recorded = back !== undefined;
         } else {
           const started = await this.record(
             { type: 'task_started', taskId },
@@ -1899,6 +1933,14 @@ class ControlTimeout extends Error {}
 
 /** Thrown by a write guard to drop an event that no longer applies. */
 class Superseded extends Error {}
+
+/** A run `restore` decided to start again, held until `startRestored`. */
+interface PendingResume {
+  task: TaskRecord;
+  /** How many times in a row the task is resumed, for the note that says so. */
+  resumes: number;
+  recovery?: Omit<Recovery, 'epoch'>;
+}
 
 function isTerminalEvent(event: TaskEvent): boolean {
   return (
