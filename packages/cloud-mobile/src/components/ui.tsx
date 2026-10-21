@@ -35,6 +35,8 @@ const glass = Platform.OS === 'ios' && isLiquidGlassAvailable();
 /**
  * A frosted card: the system's Liquid Glass on iOS 26 and later, a blur with a translucent fill
  * elsewhere. Anything that holds code or a diff uses `Solid` instead and is never blurred.
+ * The label names the card for tests and the web preview; the card is never one accessibility
+ * element itself, or iOS would fold the fields and buttons inside it into it.
  */
 export function Card({
   children,
@@ -49,14 +51,13 @@ export function Card({
   const body = [styles.cardBody, { borderColor: t.cardEdge }, style];
   if (glass)
     return (
-      <GlassView style={body} accessible={label !== undefined} accessibilityLabel={label}>
+      <GlassView style={body} accessibilityLabel={label}>
         {children}
       </GlassView>
     );
   return (
     <View
       style={[styles.cardWrap, { borderColor: t.cardEdge }]}
-      accessible={label !== undefined}
       accessibilityLabel={label}
     >
       <BlurView
