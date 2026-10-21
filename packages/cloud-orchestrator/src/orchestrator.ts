@@ -202,10 +202,7 @@ export class Orchestrator {
   /** Tasks `restore` found unfinished and drove again instead of ending them. */
   private resumed: TaskId[] = [];
   /** Runs `restore` decided to start again, held until `startRestored`. */
-  private pendingResumes: Array<{
-    task: TaskRecord;
-    recovery?: Omit<Recovery, 'epoch'>;
-  }> = [];
+  private pendingResumes: PendingResume[] = [];
   private readonly resumeMode: 'automatic' | 'manual';
 
   private constructor(options: OrchestratorOptions) {
@@ -272,9 +269,36 @@ export class Orchestrator {
     const pending = this.pendingResumes;
     this.pendingResumes = [];
     if (this.closed) return;
-    for (const { task, recovery } of pending) {
-      this.track(this.launch(task.taskId, task.runner, this.handoff.paths(task.taskId), recovery));
-    }
+    for (const resume of pending) this.track(this.resumeRun(resume));
+  }
+
+  /**
+   * Starts one restored run. `restore` decided this a while ago, and another process may have
+   * taken the task over since (the plan is stale then): nothing is started until a write under
+   * this attempt's epoch has been accepted, which is how ownership is proven right before the
+   * spawn. Refused (or dropped for a task that is being stopped), the run is not started.
+   */
+  private async resumeRun(resume: PendingResume): Promise<void> {
+    const { task, recovery, resumes } = resume;
+    const fence: Fence = { taskId: task.taskId, epoch: task.epoch };
+    const claimed = await this.record(
+      {
+        type: 'task_progress',
+        taskId: task.taskId,
+        note: `resuming after a restart (resume ${resumes} in a row)`,
+      },
+      () => {
+        if (
+          this.isStopping(task.taskId) ||
+          this.ancestorStopped(task.taskId) ||
+          this.overBudget(task.taskId)
+        )
+          throw new Superseded();
+      },
+      fence,
+    );
+    if (claimed === undefined) return;
+    await this.launch(task.taskId, task.runner, this.handoff.paths(task.taskId), recovery);
   }
 
   /** Tasks the last `create` found unfinished and started driving again (their runner has `recover`). */
@@ -711,45 +735,66 @@ export class Orchestrator {
     // Take every unfinished task over before anything else: from here a process that still
     // drives one of them (a restart that raced its predecessor) is refused at its next write. A
     // task another process took first is let go of, and is not ended below.
+    const begun = new Map<TaskId, number>();
     for (const taskId of [...this.tasks.keys()]) {
       const epoch = await this.beginAttempt(taskId, 'restart');
-      if (epoch !== undefined) await this.interruptOpenSteps({ taskId, epoch });
+      if (epoch !== undefined) {
+        begun.set(taskId, epoch);
+        await this.interruptOpenSteps({ taskId, epoch });
+      }
     }
-    await this.recordRecoveredSpend();
+    await this.recordRecoveredSpend(begun);
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
-    const stops = await Promise.all(orphans.map((task) => this.stopLeftover(task)));
-    const toResume: Array<{ task: TaskRecord; recovery?: Omit<Recovery, 'epoch'> }> = [];
+    const stops = await Promise.all(
+      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId))),
+    );
+    const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
       const stop = stops[index] ?? 'none';
+      // The stop above can take long; another process may have taken the task over meanwhile.
+      // Then nothing below is this attempt's to do: not the notes, the owed stop, the credential
+      // revoke or the outcome, all of which would land on the newer attempt.
+      const epoch = begun.get(task.taskId);
+      if (epoch === undefined || !this.holdsAttempt({ taskId: task.taskId, epoch })) {
+        this.fenceOut(task.taskId);
+        continue;
+      }
+      const fence: Fence = { taskId: task.taskId, epoch };
+      // The map of executor sessions died with the process, but a durable session store still
+      // holds the digests of the ones this task was given. Checked just above, with nothing
+      // awaited since, so the sessions revoked are the earlier attempts'.
+      this.auth.revokeForTask(task.taskId);
       if (typeof stop === 'object') {
-        await this.record({
-          type: 'task_progress',
-          taskId: task.taskId,
-          note: `could not stop the leftover runner: ${stop.problem}`,
-        });
+        await this.record(
+          {
+            type: 'task_progress',
+            taskId: task.taskId,
+            note: `could not stop the leftover runner: ${stop.problem}`,
+          },
+          undefined,
+          fence,
+        );
         // Ending the task does not stop its run: the stop stays owed and is retried.
-        if (!task.stopPending) {
-          await this.record({ type: 'task_stop_pending', taskId: task.taskId, cause: 'restart' });
+        if (!task.stopPending && !this.fenced.has(task.taskId)) {
+          await this.record(
+            { type: 'task_stop_pending', taskId: task.taskId, cause: 'restart' },
+            undefined,
+            fence,
+          );
         }
       } else if (stop === 'stopped' && task.stopPending) {
-        await this.record({ type: 'task_stopped', taskId: task.taskId });
+        await this.record({ type: 'task_stopped', taskId: task.taskId }, undefined, fence);
       }
-      // The map of executor sessions died with the process, but a durable
-      // session store still holds the digests of the ones this task was given.
-      this.auth.revokeForTask(task.taskId);
+      if (this.fenced.has(task.taskId)) continue;
       const plan = typeof stop === 'object' ? undefined : this.resumePlan(task);
       if (plan?.kind === 'resume') {
         const resumes = plan.resumes;
-        await this.record({
-          type: 'task_progress',
-          taskId: task.taskId,
-          note: `resuming after a restart (resume ${resumes} in a row)`,
-        });
         this.resumed.push(task.taskId);
         toResume.push({
           task,
+          resumes,
           ...(task.state === 'queued'
             ? {}
             : { recovery: { resumes, note: recoveryNote(task.steps.values(), resumes) } }),
@@ -758,8 +803,7 @@ export class Orchestrator {
       }
       // Nothing is running after a restart. History is never edited, so the
       // outcome is appended.
-      this.orphans.push(task.taskId);
-      await this.record(
+      const ended = await this.record(
         task.cancelRequestedBy !== undefined
           ? { type: 'task_cancelled', taskId: task.taskId }
           : {
@@ -770,7 +814,10 @@ export class Orchestrator {
                   ? plan.reason
                   : 'orphaned: the orchestrator restarted while this task was running',
             },
+        undefined,
+        fence,
       );
+      if (ended !== undefined) this.orphans.push(task.taskId);
     }
     this.restoring = false;
     this.pendingResumes = toResume;
@@ -812,22 +859,30 @@ export class Orchestrator {
   }
 
   /**
-   * Records what runs of an earlier process spent, before any task here ends or settles. A run's
-   * spend is recorded as its total (`task_cost` keeps the highest per task), so recording again
-   * after a crash in between changes nothing. Its tree is not cancelled for it here: every task
-   * still running is ended just below.
+   * Records what runs of an earlier process spent, before any task here ends or settles. It is
+   * recorded as the total of the attempt that process drove (`task_cost` keeps the highest per
+   * task and attempt, and attempts add up), so it replaces the figure the run reported live rather
+   * than adding to it. A crash after the records and before `recorded()` hands the same rows to
+   * the next process, which counts them once more under the attempt before its own: spend is
+   * never lost, and in that one window it is counted twice (the safe side of a cap). The tree is
+   * not cancelled for it here: every task still running is ended just below.
    */
-  private async recordRecoveredSpend(): Promise<void> {
+  private async recordRecoveredSpend(begun: ReadonlyMap<TaskId, number>): Promise<void> {
     const recovered = this.recoveredSpend?.unrecorded() ?? [];
     for (const { taskId, usd } of recovered) {
       if (!Number.isFinite(usd) || usd <= 0) continue;
       const root = this.treeRoot(taskId);
       if (!root) continue;
+      // The earlier process drove the attempt before the one this process just began.
+      const epoch = begun.has(taskId)
+        ? (begun.get(taskId) as number) - 1
+        : (this.lookup(taskId)?.epoch ?? 0);
       await this.record({
         type: 'task_cost',
         taskId: root.taskId,
         fromTaskId: taskId,
         costUsd: usd,
+        epoch,
       });
     }
     if (recovered.length > 0) this.recoveredSpend?.recorded();
@@ -838,7 +893,7 @@ export class Orchestrator {
    * means its runner is registered and cannot leave work behind (it has no
    * `stopOrphaned`). A runner that is not registered is unknown, never stopped.
    */
-  private async stopLeftover(task: TaskRecord): Promise<LeftoverStop> {
+  private async stopLeftover(task: TaskRecord, epoch?: number): Promise<LeftoverStop> {
     const runner = this.runners.get(task.runner);
     if (!runner) return { problem: 'its runner is not registered' };
     if (!runner.stopOrphaned) return 'none';
@@ -847,7 +902,10 @@ export class Orchestrator {
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
-        runner.stopOrphaned(task.taskId, { signal: controller.signal }),
+        runner.stopOrphaned(task.taskId, {
+          signal: controller.signal,
+          ...(epoch === undefined ? {} : { epoch }),
+        }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             controller.abort();
@@ -1077,9 +1135,23 @@ export class Orchestrator {
       this.starting.delete(taskId);
       try {
         if (recovery !== undefined && this.tasks.get(taskId)?.state === 'running') {
-          // A task a restart resumed started long ago: its start is in the log already, and the
-          // run is registered above with nothing awaited since the stopping checks.
-          recorded = true;
+          // A task a restart resumed started long ago: its start is in the log already. What is
+          // written instead is a fenced note, which proves this attempt still owns the task now
+          // the run exists: when another process took it over while the run was starting, the
+          // write is refused and fencing out cancels the late run, which has written nothing yet.
+          const back = await this.record(
+            { type: 'task_progress', taskId, note: 'the run is back' },
+            () => {
+              if (
+                this.isStopping(taskId) ||
+                this.ancestorStopped(taskId) ||
+                this.overBudget(taskId)
+              )
+                throw new Superseded();
+            },
+            fence,
+          );
+          recorded = back !== undefined;
         } else {
           const started = await this.record(
             { type: 'task_started', taskId },
@@ -1423,6 +1495,8 @@ export class Orchestrator {
         taskId: root.taskId,
         fromTaskId: taskId,
         costUsd,
+        // The run's figure is its own attempt's: a resumed run counts from zero again.
+        epoch: fence?.epoch ?? this.lookup(taskId)?.epoch ?? 0,
       },
       undefined,
       fence,
@@ -1471,6 +1545,20 @@ export class Orchestrator {
     });
     this.writeChain = written.catch(() => undefined);
     return written;
+  }
+
+  /**
+   * Whether the store still has this attempt as the task's latest, read now (not from this
+   * process's view, which only learns of a takeover at a refused write). Synchronous, so a caller
+   * can act on the answer with nothing awaited in between.
+   */
+  private holdsAttempt(fence: Fence): boolean {
+    if (this.fenced.has(fence.taskId)) return false;
+    let latest = 1;
+    for (const { event } of this.store.readTask(fence.taskId)) {
+      if (event.type === 'task_attempt') latest = event.epoch;
+    }
+    return latest === fence.epoch;
   }
 
   /**
@@ -1523,7 +1611,8 @@ export class Orchestrator {
       this.auth.revoke(executor);
       this.executorSessions.delete(taskId);
     }
-    this.auth.revokeForTask(taskId);
+    // A process that lost the task revokes only the session it issued itself: the sessions in a
+    // shared store now belong to the attempt that took the task over.
     const task = this.tasks.get(taskId);
     if (task) {
       this.activeByRoot.release(task.rootSessionId);
@@ -1885,6 +1974,14 @@ class ControlTimeout extends Error {}
 
 /** Thrown by a write guard to drop an event that no longer applies. */
 class Superseded extends Error {}
+
+/** A run `restore` decided to start again, held until `startRestored`. */
+interface PendingResume {
+  task: TaskRecord;
+  /** How many times in a row the task is resumed, for the note that says so. */
+  resumes: number;
+  recovery?: Omit<Recovery, 'epoch'>;
+}
 
 function isTerminalEvent(event: TaskEvent): boolean {
   return (

@@ -60,9 +60,12 @@ export type TaskEvent =
   | { type: 'task_started'; taskId: TaskId }
   /**
    * What the runner of `fromTaskId` has spent so far, in dollars, recorded on the top-level task
-   * of its tree (`taskId`). Cumulative per runner: each report replaces that runner's last one.
+   * of its tree (`taskId`). Cumulative per run: within one attempt (`epoch`) each report replaces
+   * that run's last one (the highest stands), and the attempts of a task add up, since a resumed
+   * run starts counting from zero. An event without `epoch` (written before attempts were keyed)
+   * counts as epoch 0.
    */
-  | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number }
+  | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number; epoch?: number }
   | { type: 'task_progress'; taskId: TaskId; note: string }
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
   | { type: 'task_failed'; taskId: TaskId; reason: string }
@@ -165,9 +168,12 @@ export interface TaskRecord {
   mode: TaskMode;
   /** Set on a top-level task: the cap its whole tree shares. */
   budgetUsd?: number;
-  /** On a top-level task: what the runners of its tree reported spending, by task. */
-  spendByTask?: Record<TaskId, number>;
-  /** On a top-level task: the sum of `spendByTask`. */
+  /**
+   * On a top-level task: what the runners of its tree reported spending, by task and attempt
+   * (key `<epoch>:<taskId>`).
+   */
+  spendByRun?: Record<string, number>;
+  /** On a top-level task: the sum of `spendByRun`. */
   costUsd?: number;
   state: TaskState;
   createdAt: number;

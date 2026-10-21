@@ -49,6 +49,15 @@ export interface ConductorOptions {
    * in this process: used to retry cancels a shutdown or crash left undone.
    */
   orchestratorAccess?: (conversationId: string) => ConductorAccess | undefined;
+  /**
+   * The orchestrator keeps its tasks across a restart (it resumes them, or ends them itself when
+   * their runner cannot). With it, neither a shutdown nor a crash cancels the tasks the conductor
+   * delegated: they stay reserved against their run's budget, and the conductor asks about them
+   * until each has ended, then settles it. A delegation whose task the conductor never learned of
+   * (the response was lost) is still cancelled by its key. A user's stop and the operator's pause
+   * cancel as before. Default false: every task not known to have ended is cancelled.
+   */
+  tasksSurviveRestart?: boolean;
   playbooks?: readonly Playbook[];
   /**
    * Appended once to each new durable user turn, never to the system prompt or old history. It
@@ -77,6 +86,8 @@ export interface ConductorOptions {
     turnTimer?(fire: () => void): void;
     /** When a conversation's outbox is found empty, before its sender is released. */
     outboxDrained?(conversationId: string): void;
+    /** After a pass that asked about a conversation's followed tasks. */
+    followed?(conversationId: string): void;
   };
 }
 
@@ -178,7 +189,9 @@ type Job =
   | { kind: 'turn'; runId: string; text: string }
   | { kind: 'cancel_tasks'; runId: string }
   /** Retries the conversation's cancels that have not succeeded yet. */
-  | { kind: 'cancel_pending'; runId?: undefined };
+  | { kind: 'cancel_pending'; runId?: undefined }
+  /** Asks the orchestrator how the conversation's followed tasks are doing. */
+  | { kind: 'follow_tasks'; runId?: undefined };
 
 interface Lane {
   readonly conversationId: string;
@@ -222,6 +235,8 @@ export class Conductor {
   private readonly sending = new Map<string, Promise<void>>();
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly stopChecks = new Map<string, NodeJS.Timeout>();
+  private readonly followTimers = new Map<string, NodeJS.Timeout>();
+  private readonly tasksSurviveRestart: boolean;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -239,6 +254,7 @@ export class Conductor {
     this.hooks = options.hooks ?? {};
     this.turnContext = options.turnContext;
     this.orchestratorAccess = options.orchestratorAccess;
+    this.tasksSurviveRestart = options.tasksSurviveRestart === true;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
@@ -275,8 +291,13 @@ export class Conductor {
           'This run was interrupted by a restart. Send the request again to start over.',
         );
       }
+      // A task the orchestrator keeps is followed, not cancelled. One the conductor never learned
+      // of cannot be followed (it has no id), so its key is cancelled either way.
       conductor.state.markCancelPending(
-        conductor.state.unsettledDelegations().map((delegation) => delegation.key),
+        conductor.state
+          .unsettledDelegations()
+          .filter((delegation) => !conductor.tasksSurviveRestart || delegation.taskId === null)
+          .map((delegation) => delegation.key),
       );
       conductor.state.settleOpenModelRequests();
       await conductor.host.recoverInterrupted();
@@ -289,6 +310,11 @@ export class Conductor {
       const access = conductor.orchestratorAccess?.(conversationId);
       // Taking the access queues the retry.
       if (access) conductor.lane(conversationId, access);
+    }
+    if (conductor.tasksSurviveRestart) {
+      for (const conversationId of conductor.state.conversationsWithFollowedTasks()) {
+        conductor.followLater(conversationId, 0);
+      }
     }
     for (const conversationId of conductor.state.outboxConversations()) {
       conductor.sendOutbox(conversationId);
@@ -413,6 +439,12 @@ export class Conductor {
    */
   async stopAll(reason: string, notice: string): Promise<number> {
     if (this.closing.signal.aborted) return 0;
+    // Tasks kept across a restart have no open run to be stopped through: they are owed a cancel.
+    if (this.tasksSurviveRestart) {
+      this.state.markCancelPending(
+        this.state.unsettledDelegations().map((delegation) => delegation.key),
+      );
+    }
     let stopped = 0;
     for (const run of OPEN_RUN_STATES.flatMap((state) => this.state.runsInState(state))) {
       const access = this.orchestratorAccess?.(run.conversationId);
@@ -517,6 +549,8 @@ export class Conductor {
       }
       for (const timer of this.retryTimers.values()) clearTimeout(timer);
       this.retryTimers.clear();
+      for (const timer of this.followTimers.values()) clearTimeout(timer);
+      this.followTimers.clear();
       for (const timer of this.stopChecks.values()) clearTimeout(timer);
       this.stopChecks.clear();
       await this.idle();
@@ -569,6 +603,7 @@ export class Conductor {
     for (let job = lane.queue.shift(); job; job = lane.queue.shift()) {
       try {
         if (job.kind === 'turn') await this.executeTurn(lane, job);
+        else if (job.kind === 'follow_tasks') await this.followTasks(lane);
         else await this.cancelTasks(lane, job.runId);
       } catch (error) {
         this.warn('A conductor job failed', error);
@@ -748,9 +783,10 @@ export class Conductor {
     const run = this.state.run(runId);
     if (!run) return;
     if (turn?.stopReason === 'shutdown') {
-      // Stop what it started while the orchestrator can still be reached.
       this.state.endRun(runId, 'interrupted', 'shutdown');
-      await this.cancelRunTasks(runId, link);
+      // Stop what it started while the orchestrator can still be reached, unless the orchestrator
+      // keeps its tasks across the restart: then the next start follows them.
+      if (!this.tasksSurviveRestart) await this.cancelRunTasks(runId, link);
       return;
     }
     if (!OPEN_RUN_STATES.includes(run.state)) {
@@ -956,6 +992,8 @@ export class Conductor {
   private async cancelEverything(): Promise<void> {
     const byConversation = new Map<string, DelegationRow[]>();
     for (const delegation of this.state.unsettledDelegations()) {
+      // The orchestrator keeps these across the restart: only a cancel already owed goes ahead.
+      if (this.tasksSurviveRestart && !delegation.cancelPending) continue;
       const list = byConversation.get(delegation.conversationId) ?? [];
       list.push(delegation);
       byConversation.set(delegation.conversationId, list);
@@ -1003,6 +1041,62 @@ export class Conductor {
     }
     const actual = typeof view.costUsd === 'number' ? view.costUsd : delegation.reservedUsd;
     this.state.settleDelegation(delegation.key, actual);
+  }
+
+  /**
+   * Asks the orchestrator about each task of the conversation that was delegated before a restart
+   * and is not settled: one that has ended is settled at what its tree spent. A task that cannot
+   * be asked about is asked about again later; its reservation stays.
+   */
+  private async followTasks(lane: Lane): Promise<void> {
+    const delegations = this.state
+      .unsettledDelegations({ conversationId: lane.conversationId })
+      .filter((delegation) => !delegation.cancelPending && delegation.taskId !== null);
+    if (!lane.access || delegations.length === 0) return;
+    const link = new OrchestratorLink(lane.conversationId, lane.access, this.tokens, this.counters);
+    try {
+      for (const delegation of delegations) {
+        if (this.closing.signal.aborted) return;
+        try {
+          const result = await link.call('task_status', { taskId: delegation.taskId });
+          if (result.isError) {
+            this.warn(`Asking about delegation ${delegation.key} failed`, result.text);
+            continue;
+          }
+          // A turn may have settled it while this waited.
+          const current = this.state.delegation(delegation.key);
+          if (current && current.state !== 'settled') this.settleView(current, result.structured);
+        } catch (error) {
+          this.warn(`Asking about delegation ${delegation.key} failed`, error);
+        }
+      }
+    } finally {
+      await link.close().catch(() => undefined);
+    }
+    if (!this.closing.signal.aborted) {
+      this.hooks.followed?.(lane.conversationId);
+      if (this.state.hasFollowedTasks(lane.conversationId)) this.followLater(lane.conversationId);
+    }
+  }
+
+  /** Asks about the conversation's followed tasks after `delayMs` (default: the stop-check interval). */
+  private followLater(conversationId: string, delayMs = this.limits.stopCheckMs): void {
+    if (this.closing.signal.aborted || this.followTimers.has(conversationId)) return;
+    const timer = setTimeout(() => {
+      this.followTimers.delete(conversationId);
+      if (this.closing.signal.aborted) return;
+      const access =
+        this.lanes.get(conversationId)?.access ?? this.orchestratorAccess?.(conversationId);
+      if (!access) {
+        this.followLater(conversationId);
+        return;
+      }
+      const lane = this.lane(conversationId, access);
+      if (!lane.queue.some((job) => job.kind === 'follow_tasks'))
+        this.enqueue(lane, { kind: 'follow_tasks' });
+    }, delayMs);
+    timer.unref();
+    this.followTimers.set(conversationId, timer);
   }
 
   /** Asks the orchestrator again, after a while, about the conversation's tasks that are owed a cancel. */

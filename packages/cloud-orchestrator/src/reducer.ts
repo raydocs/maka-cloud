@@ -45,8 +45,9 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
   }
   // Spend settles after a cancel or an end too (a request in flight when the run stopped).
   if (event.type === 'task_cost') {
-    const spend = (task.spendByTask ??= {});
-    spend[event.fromTaskId] = Math.max(spend[event.fromTaskId] ?? 0, event.costUsd);
+    const spend = (task.spendByRun ??= {});
+    const run = spendKey(event);
+    spend[run] = Math.max(spend[run] ?? 0, event.costUsd);
     const total = Object.values(spend).reduce((sum, usd) => sum + usd, 0);
     task.costUsd = Math.round(total * 1e9) / 1e9;
     return;
@@ -165,4 +166,9 @@ export function toView(task: TaskRecord): TaskView {
           ...((task.costUsd ?? 0) >= task.budgetUsd ? { budgetExceeded: true } : {}),
         }),
   };
+}
+
+/** The run a `task_cost` event reports on: one task's runner in one attempt. */
+export function spendKey(event: { fromTaskId: TaskId; epoch?: number }): string {
+  return `${event.epoch ?? 0}:${event.fromTaskId}`;
 }

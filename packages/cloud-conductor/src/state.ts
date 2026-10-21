@@ -897,6 +897,27 @@ export class ConductorState {
     ).map((row) => String(row.conversation_id));
   }
 
+  /** Conversations with a delegated task that is not settled and is not owed a cancel. */
+  conversationsWithFollowedTasks(): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT DISTINCT conversation_id FROM delegations WHERE cancel_pending = 0 AND task_id IS NOT NULL AND state <> 'settled'",
+        )
+        .all() as Row[]
+    ).map((row) => String(row.conversation_id));
+  }
+
+  hasFollowedTasks(conversationId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          "SELECT 1 FROM delegations WHERE conversation_id = ? AND cancel_pending = 0 AND task_id IS NOT NULL AND state <> 'settled' LIMIT 1",
+        )
+        .get(conversationId) !== undefined
+    );
+  }
+
   hasPendingCancels(conversationId: string): boolean {
     return (
       this.db

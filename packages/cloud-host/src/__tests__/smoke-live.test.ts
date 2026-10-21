@@ -7,7 +7,16 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { type JournalTotals, type ReserveResult, SqliteSpendJournal } from '@maka-cloud/gateway';
+import {
+  accountPort,
+  Allowance,
+  type JournalTotals,
+  LimitPort,
+  type ReserveResult,
+  RUN_LEASE_MS,
+  SqliteSpendJournal,
+  setRunBudget,
+} from '@maka-cloud/gateway';
 import { createLiveSmokeDeps, smokeCapProblem, smokeCommand } from '../smoke-live.js';
 import { SMOKE_VARIABLES, type SmokeSettings, smokeGate } from '../smoke.js';
 
@@ -686,6 +695,64 @@ test('a second smoke run is refused while the first holds the invite’s run bud
   assert.match(printedB.join('\n'), /another smoke run holds the run budget/u);
   // B did not replace A's budget and did not clear it either: A's own cleanup ended it.
   assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
+});
+
+test('a smoke run that takes over an abandoned budget fences the earlier run’s credentials and cancels the tasks it left running', async (t) => {
+  const clock = { now: Date.now() };
+  const { dir, ledger } = await serverLedger(t, clock);
+  const journalPath = join(dir, 'gateway-spend.db');
+  setRunBudget(
+    journalPath,
+    INVITE,
+    { limitUsd: 5, sinceMs: clock.now - 3_600_000 },
+    'run_old',
+    clock.now - 3 * RUN_LEASE_MS,
+  );
+  const old = accountPort(new LimitPort([new Allowance(100)]), ledger, { inviteId: INVITE });
+  assert.deepEqual(old.reserve('old1', 1), { ok: true });
+
+  const cancelled: string[] = [];
+  const printed: string[] = [];
+  const answer = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  const io = downServer(() => {});
+  io.print = (line) => printed.push(line);
+  io.runId = 'run_new';
+  io.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (init?.method === 'POST' && url.pathname.endsWith('/cancel')) {
+      cancelled.push(url.pathname.split('/')[3] ?? '');
+      return answer({});
+    }
+    if (url.pathname === '/v1/conversations') {
+      return answer({ conversations: [{ conversationId: 'cnv_old' }] });
+    }
+    if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+      return answer({
+        tasks: [
+          { taskId: 'tsk_running', state: 'running' },
+          { taskId: 'tsk_done', state: 'succeeded' },
+          { taskId: 'tsk_paused', state: 'paused' },
+        ],
+      });
+    }
+    throw new Error('the server is down');
+  }) as typeof fetch;
+  const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+  await smokeCommand(env, io);
+
+  assert.deepEqual(cancelled, ['tsk_running', 'tsk_paused']);
+  assert.match(printed.join('\n'), /took over the run budget of an earlier run/u);
+  const refusal = old.reserve('old2', 0.01);
+  assert.equal(refusal.ok, false, 'the earlier run’s credential books nothing');
+  // A first run, with nothing to take over, cancels nothing.
+  cancelled.length = 0;
+  const fresh = await mkdtemp(join(tmpdir(), 'smoke-first-run-'));
+  t.after(() => rm(fresh, { recursive: true, force: true }));
+  const journal = new SqliteSpendJournal(join(fresh, 'gateway-spend.db'));
+  journal.close();
+  await smokeCommand({ ...env, MAKA_CLOUD_DATA_DIR: fresh }, io);
+  assert.deepEqual(cancelled, []);
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {

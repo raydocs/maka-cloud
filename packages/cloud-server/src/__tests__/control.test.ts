@@ -271,6 +271,38 @@ test('cost comes from the orchestrator log: absent until a run reports it, a tot
   assert.deepEqual(replayed, [0.25, 0.25, 0.75, 1]);
 });
 
+test('a task’s cost adds up over its attempts: the run a restart resumes counts from zero and the total keeps what the first one spent', async (t) => {
+  const { h, conversationId, start } = await setup(t, { fake: { recover: true } });
+  const taskId = await start();
+  const costNow = async () =>
+    (await listed(h, conversationId)).find((x) => x.taskId === taskId)?.costUsd;
+  const reaches = async (usd: number, what: string) => {
+    for (let i = 0; i < 500; i++) {
+      if ((await costNow()) === usd) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail(`${what}: the cost is ${await costNow()}, not ${usd}`);
+  };
+  h.fake.runFor(taskId).usage(0.5);
+  await reaches(0.5, 'first attempt');
+
+  await h.restart();
+  await eventually(() => h.fake.recoveries.length === 1, 'the task to be resumed');
+  h.fake.runs.at(-1)?.usage(0.25);
+  await reaches(0.75, 'second attempt added');
+  // The feed's running total is worked out the same way, from the log.
+  const stream = await openStream(t, h, `?conversation=${conversationId}`);
+  await eventually(
+    () =>
+      stream.events.some(
+        (e) =>
+          (e.data.event as { type?: string } | undefined)?.type === 'task_cost' &&
+          e.data.totalCostUsd === 0.75,
+      ),
+    'replayed total',
+  );
+});
+
 // The orchestrator's own suite proves `authorize` runs in the write chain. This
 // proves the server's `authorize` is the real check: it looks at the invite and the
 // conversation at that moment, not at what was true when the request arrived.

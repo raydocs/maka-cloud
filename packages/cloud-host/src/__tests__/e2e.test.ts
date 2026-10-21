@@ -64,13 +64,19 @@ async function startStack(
   t: TestContext,
   runnerStart?: (run: FakeRun) => void,
   access?: (modelUrl: string) => ConductorAccess,
+  extra: {
+    /** The runners can resume a task after a restart. */
+    recover?: boolean;
+    conductor?: Partial<NonNullable<CloudOptions['conductor']>>;
+  } = {},
 ): Promise<Stack> {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-test-'));
   const model = await startFakeModel();
   const onStart =
     runnerStart ?? ((run: FakeRun) => setImmediate(() => void run.complete(RESEARCH_MANIFEST)));
-  const claude = new FakeRunner({ name: 'claude-agent-sdk', onStart });
-  const codex = new FakeRunner({ name: 'codex', onStart });
+  const recover = extra.recover ? { recover: true } : {};
+  const claude = new FakeRunner({ name: 'claude-agent-sdk', onStart, ...recover });
+  const codex = new FakeRunner({ name: 'codex', onStart, ...recover });
   const warnings: Stack['warnings'] = [];
   const options: CloudOptions = {
     dbPath: join(dir, 'server.sqlite'),
@@ -84,6 +90,7 @@ async function startStack(
         baseUrl: model.url,
         unmeteredTestAccess: true,
       },
+      ...extra.conductor,
     },
     onWarning: (message, detail) => warnings.push({ message, detail }),
   };
@@ -558,4 +565,55 @@ test('shutting the cloud down cancels a running task while the orchestrator is s
     0,
     JSON.stringify(stack.warnings),
   );
+});
+
+test('a restart resumes a delegated task and the conductor leaves it running, tracked, until it ends', async (t) => {
+  let started: (run: FakeRun) => void = () => undefined;
+  const running = new Promise<FakeRun>((resolve) => {
+    started = resolve;
+  });
+  const stack = await startStack(t, (run) => started(run), undefined, {
+    recover: true,
+    conductor: { tasksSurviveRestart: true, limits: { stopCheckMs: 1 } },
+  });
+  stack.model.script('planner', text('1. Do it.'));
+  stack.model.script(
+    'conductor',
+    calls(tool('start_playbook', { playbook: 'free', goal: 'Long job' })),
+    calls(tool('delegate_task', { runner: 'codex', brief: 'Long job.', budgetUsd: 1 })),
+    // The model call is still open when the server stops.
+    () => new Promise(() => undefined),
+  );
+  const conversationId = await newConversation(stack);
+  await stack.api(`/v1/conversations/${conversationId}/messages`, { text: 'Start the long job.' });
+  await running;
+  // The task id reaches the conductor with the delegation's answer, a moment after the start.
+  for (let i = 0; i < 400 && !stack.cloud.conductor.state.unsettledDelegations()[0]?.taskId; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const [delegation] = stack.cloud.conductor.state.unsettledDelegations();
+  assert.ok(delegation?.taskId);
+
+  await stack.restart();
+  // The resumed task is driven again, and nothing cancels it.
+  for (let i = 0; i < 200 && stack.codex.recoveries.length === 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(stack.codex.recoveries.length, 1, 'the server resumed the task');
+  const resumed = stack.codex.runs.at(-1) as FakeRun;
+  assert.equal(
+    stack.cloud.server.orchestrator.taskStateOf(delegation.taskId),
+    'running',
+    JSON.stringify(stack.warnings),
+  );
+  await stack.cloud.conductor.idle();
+  assert.equal(resumed.cancelled, false, 'the conductor did not cancel the resumed task');
+  const [kept] = stack.cloud.conductor.state.unsettledDelegations();
+  assert.equal(kept?.cancelPending, false);
+
+  await resumed.complete(RESEARCH_MANIFEST);
+  for (let i = 0; i < 400 && stack.cloud.conductor.state.unsettledDelegations().length > 0; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(stack.cloud.conductor.state.unsettledDelegations(), []);
 });

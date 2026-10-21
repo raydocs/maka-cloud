@@ -158,14 +158,14 @@ function readRows(
 
 /**
  * What a task has cost so far as of log position `seq`, worked out the way the
- * orchestrator's reducer does: the most each run reported, added up.
+ * orchestrator's reducer does: the most each run reported in each attempt, added up.
  */
 function costSoFar(db: DatabaseSync, taskId: string, seq: number): number {
   const rows = db
     .prepare(
       `SELECT MAX(json_extract(event, '$.costUsd')) AS usd FROM task_log
        WHERE task_id = ? AND seq <= ? AND json_extract(event, '$.type') = 'task_cost'
-       GROUP BY json_extract(event, '$.fromTaskId')`,
+       GROUP BY json_extract(event, '$.fromTaskId'), COALESCE(json_extract(event, '$.epoch'), 0)`,
     )
     .all(taskId, seq) as unknown as Array<{ usd: number }>;
   return Math.round(rows.reduce((sum, row) => sum + row.usd, 0) * 1e9) / 1e9;
