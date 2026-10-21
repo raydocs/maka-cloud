@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { type DutySpec, DutyEngine, LaunchRefused, type RunRequest } from '@maka-cloud/duties';
 import { serverLauncher } from '../duties/launcher.js';
@@ -426,6 +429,43 @@ test('a repository is claimed only by the invite and under the installation the 
     reason: 'not_allowed',
   });
   r.runtime.close();
+});
+
+test('a project stored for one invite gets nothing once the operator ties the repository to another', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'duties-host-'));
+  try {
+    const dbPath = join(dir, 'duties.db');
+    const OTHER = 'inv_0000000000ff';
+    const first = runtimeRig({ dbPath });
+    const added = first.runtime.service.addProject(OWNER, REGISTER);
+    assert.ok(added.ok);
+    first.runtime.close();
+
+    // The link now names another invite for the same repository and installation.
+    const second = runtimeRig({
+      dbPath,
+      links: [{ repo: 'acme/widgets', installationId: 7, inviteId: OTHER }],
+    });
+    const body = Buffer.from(JSON.stringify(issuePayload(1)));
+    const delivery = second.runtime.service.webhook(
+      {
+        'x-github-event': 'issues',
+        'x-github-delivery': 'after-the-link-changed',
+        'x-hub-signature-256': `sha256=${createHmac('sha256', SECRET).update(body).digest('hex')}`,
+      },
+      body,
+    );
+    assert.equal(delivery.body.ignored, 'project_not_allowed');
+    assert.equal(delivery.body.started, undefined);
+    // New registration by the new invite is refused while the old project still holds the repository.
+    assert.deepEqual(second.runtime.service.addProject(OTHER, REGISTER), {
+      ok: false,
+      reason: 'exists',
+    });
+    second.runtime.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('only repositories the operator named can be registered, and only by the decision of the owner', async () => {
