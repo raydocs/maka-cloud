@@ -156,6 +156,8 @@ export interface DelegationRow {
   cancelPending: boolean;
   /** The mode the task was sent in; absent when no modes were configured. */
   mode?: ModeId;
+  /** Whether the brief took files from a task that ran on the other runner: what a review is made of. */
+  otherRunnerInput: boolean;
 }
 
 export interface SettleResult {
@@ -385,6 +387,10 @@ const SCHEMA_V8 = `
 ALTER TABLE runs ADD COLUMN tool_called INTEGER NOT NULL DEFAULT 0;
 `;
 
+const SCHEMA_V9 = `
+ALTER TABLE delegations ADD COLUMN other_runner_input INTEGER NOT NULL DEFAULT 0;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -397,6 +403,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V6,
   SCHEMA_V7,
   SCHEMA_V8,
+  SCHEMA_V9,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -827,16 +834,30 @@ export class ConductorState {
    * Reserves `usd` for a delegation and stores it under `key` before the call
    * is sent, in one transaction.
    */
-  reserveDelegation(runId: string, usd: number, key: string, mode?: ModeId): ReserveResult {
+  reserveDelegation(
+    runId: string,
+    usd: number,
+    key: string,
+    mode?: ModeId,
+    otherRunnerInput = false,
+  ): ReserveResult {
     return this.transaction((): ReserveResult => {
       const reserved = this.tryReserve(runId, usd, `delegate:${key}`);
       if (!reserved.ok) return reserved;
       const run = this.run(runId) as RunRow;
       this.db
         .prepare(
-          "INSERT INTO delegations (key, run_id, conversation_id, reservation, state, mode, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+          "INSERT INTO delegations (key, run_id, conversation_id, reservation, state, mode, other_runner_input, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
         )
-        .run(key, runId, run.conversationId, reserved.reservation, mode ?? null, this.now());
+        .run(
+          key,
+          runId,
+          run.conversationId,
+          reserved.reservation,
+          mode ?? null,
+          otherRunnerInput ? 1 : 0,
+          this.now(),
+        );
       return reserved;
     });
   }
@@ -1589,6 +1610,7 @@ function toDelegation(row: Row): DelegationRow {
     actualUsd: row.actual_usd === null ? null : Number(row.actual_usd),
     cancelPending: Number(row.cancel_pending) === 1,
     ...(isModeId(row.mode) ? { mode: row.mode } : {}),
+    otherRunnerInput: Number(row.other_runner_input) === 1,
   };
 }
 

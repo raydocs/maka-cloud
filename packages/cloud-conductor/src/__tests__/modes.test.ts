@@ -312,9 +312,110 @@ test('a playbook’s check is told the mode the task was sent in', async (t) => 
     conductor: { modes: DEFAULT_MODES, playbooks: [watching] },
   });
   await runWith(moded, { mode: 'deep' }, delegate({}, 10));
-  assert.deepEqual(seen, [{ mode: 'deep' }]);
+  assert.deepEqual(seen, [{ mode: 'deep', otherRunnerInput: false }]);
   seen.length = 0;
   const plain = await makeHarness(t, { conductor: { playbooks: [watching] } });
   await runWith(plain, {}, delegate());
-  assert.deepEqual(seen, [{}]);
+  assert.deepEqual(seen, [{ otherRunnerInput: false }]);
+});
+
+// A deep research run: who reviewed is read from which runner ran the tasks a brief builds on,
+// never from what the files are called.
+
+const researchPlaybooks = (): Playbook[] => {
+  const coding = DEFAULT_PLAYBOOKS.find((playbook) => playbook.id === 'coding');
+  assert.ok(coding);
+  return [coding, { ...coding, id: 'research' }];
+};
+
+async function deepResearch(
+  h: Harness,
+  conversationId: string,
+  next: (draft: string) => ReturnType<typeof delegate>,
+): Promise<ReturnType<typeof toolResults>[number] | undefined> {
+  h.model.script('planner', plan);
+  let result: ReturnType<typeof toolResults>[number] | undefined;
+  h.model.script(
+    'conductor',
+    calls(tool('start_playbook', { playbook: 'research', goal: 'g' })),
+    async () => {
+      const session = h.orchestrator.authenticate(h.access(conversationId).rotateToken());
+      assert.ok(session);
+      const draft = await h.orchestrator.delegate(session, {
+        runner: 'claude-agent-sdk',
+        brief: 'draft',
+      });
+      return calls(next(draft.taskId));
+    },
+    (request) => {
+      result = toolResults(request)[0];
+      return text('Done.');
+    },
+  );
+  await h.conductor.onUserMessage(
+    { conversationId, messageId: `msg_${conversationId}`, text: 'Research it.', mode: 'deep' },
+    h.access(conversationId),
+  );
+  await h.conductor.idle();
+  return result;
+}
+
+test('in a deep research run a review is refused on the drafter’s runner whatever its files are called', async (t) => {
+  const h = await makeHarness(t, {
+    conductor: { modes: DEFAULT_MODES, playbooks: researchPlaybooks() },
+  });
+  const brief = (draft: string) =>
+    `maka-inputs: ${draft} report.json sources\nmaka-artifacts: out/Judgments.JSON\nJudge each claim.`;
+  const same = await deepResearch(h, 'cnv_deep_same', (draft) =>
+    delegate({ brief: brief(draft), runner: 'claude-agent-sdk', workMode: 'deep' }, 10),
+  );
+  assert.match(refusal(same), /^reviewer_same_runner:/);
+  // A brief that hides the judgments behind another name is no way round it: the runner of the
+  // task it builds on is what counts.
+  const renamed = await deepResearch(h, 'cnv_deep_renamed', (draft) =>
+    delegate(
+      {
+        brief: `maka-inputs: ${draft} report.json sources\nmaka-artifacts: out/notes.json\nJudge each claim.`,
+        runner: 'claude-agent-sdk',
+        workMode: 'deep',
+      },
+      10,
+    ),
+  );
+  assert.match(refusal(renamed), /^reviewer_same_runner:/);
+  assert.equal(h.claude.runs.length, 2, 'only the two drafts ran: no review was started on claude');
+
+  const other = await deepResearch(h, 'cnv_deep_other', (draft) =>
+    delegate({ brief: brief(draft), runner: 'codex', workMode: 'deep' }, 10),
+  );
+  assert.equal(other?.isError, false, other?.text ?? '');
+  const row = h.conductor.state.delegationOfTask(h.codex.runs[0]?.spec.taskId ?? '');
+  assert.equal(row?.otherRunnerInput, true, 'the delegation took files from the other runner');
+});
+
+test('a deep research task that reuses a draft on its own runner is only allowed with a file from the other runner', async (t) => {
+  const h = await makeHarness(t, {
+    conductor: { modes: DEFAULT_MODES, playbooks: researchPlaybooks() },
+  });
+  const seen: Array<string | undefined> = [];
+  const result = await deepResearch(h, 'cnv_deep_rerun', (draft) =>
+    delegate(
+      {
+        brief: `maka-inputs: ${draft} report.json sources\nmaka-artifacts: out/report.json\nRerun.`,
+        runner: 'claude-agent-sdk',
+        workMode: 'deep',
+      },
+      10,
+    ),
+  );
+  seen.push(refusal(result));
+  assert.match(seen[0] ?? '', /^reviewer_same_runner:/);
+  // The same brief outside a deep task is an ordinary continuation.
+  const plain = await reviewRun(h, 'cnv_not_deep', (draft) =>
+    delegate({
+      brief: `maka-inputs: ${draft} report.json\nmaka-artifacts: out/report.json\nContinue.`,
+      runner: 'claude-agent-sdk',
+    }),
+  );
+  assert.equal(plain?.isError, false, plain?.text ?? '');
 });

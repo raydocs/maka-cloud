@@ -15,6 +15,13 @@ export const JUDGMENTS_FILE = 'judgments.json';
 export interface ReviewLinks {
   /** Tasks whose runner must differ from the runner of this delegation. */
   others: string[];
+  /** Every task the brief takes files from. */
+  sources: string[];
+}
+
+/** A path's last segment, compared without case: `out/Judgments.JSON` is `judgments.json`. */
+function isJudgments(path: string): boolean {
+  return (path.split(/[\\/]/u).pop() ?? '').toLowerCase() === JUDGMENTS_FILE;
 }
 
 /**
@@ -36,12 +43,12 @@ export function reviewLinksOf(brief: string): ReviewLinks {
       const [, source, ...paths] = line.slice(INPUTS.length).split(' ');
       if (!source) continue;
       if (!sources.includes(source)) sources.push(source);
-      if (paths.includes(JUDGMENTS_FILE) && !judges.includes(source)) judges.push(source);
+      if (paths.some(isJudgments) && !judges.includes(source)) judges.push(source);
     } else if (line.startsWith(ARTIFACTS)) {
-      if (line.slice(ARTIFACTS.length).split(' ').includes(JUDGMENTS_FILE)) asksForJudgments = true;
+      if (line.slice(ARTIFACTS.length).split(' ').some(isJudgments)) asksForJudgments = true;
     } else {
       break;
     }
   }
-  return { others: asksForJudgments ? [...new Set([...sources, ...judges])] : judges };
+  return { others: asksForJudgments ? [...new Set([...sources, ...judges])] : judges, sources };
 }
