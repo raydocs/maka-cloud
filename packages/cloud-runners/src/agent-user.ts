@@ -95,6 +95,36 @@ chmod 2770 claude-config
  * files to the task directory, can read the brief and write the result in `handoff`, and can write
  * the workspace, in ways the sandbox user can clean up. Prints `FACT <name>=<yes|no|...>`.
  */
+/**
+ * Whether any program the agent can run carries a file capability. `getcap -r` is asked for the
+ * directories that exist and its exit status counts: a listing that failed is `unchecked`, never
+ * `none`. Every capability on a program the agent can execute is `found`, except the few that the
+ * stock tools of a distribution carry and that cannot reach the firewall or the control user
+ * (raw sockets for ping, the id-mapping helpers). `as_agent` is defined by the probe around it.
+ */
+export const FILE_CAPS_PROBE = `if command -v getcap >/dev/null 2>&1; then
+  capdirs=""
+  for dir in /usr/sbin /usr/bin /sbin /bin /usr/local/bin /usr/local/sbin; do
+    if [ -d "$dir" ]; then capdirs="$capdirs $dir"; fi
+  done
+  rc=0
+  listing=$(getcap -r $capdirs 2>/dev/null) || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "FACT agent_filecaps=unchecked"
+  else
+    found=$(printf '%s\\n' "$listing" | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      path=\${line%% *}
+      if printf '%s\\n' "$line" | grep -Eq '^[^ ]*/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
+      if printf '%s\\n' "$line" | grep -Eq '^[^ ]*/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
+      if as_agent test -x "$path" >/dev/null 2>&1; then echo yes; fi
+    done)
+    if [ -n "$found" ]; then echo "FACT agent_filecaps=found"; else echo "FACT agent_filecaps=none"; fi
+  fi
+else
+  echo "FACT agent_filecaps=unchecked"
+fi`;
+
 export const AGENT_PROBE_SCRIPT = `set -u
 umask 077
 mkdir -p "$MAKA_ROOT"
@@ -143,12 +173,7 @@ caps=$(as_agent sh -c 'grep -E "^Cap(Prm|Eff|Amb):" /proc/self/status' 2>/dev/nu
 if [ -z "$caps" ]; then echo "FACT agent_caps=unknown"
 elif printf '%s\n' "$caps" | awk '{ if ($2 !~ /^0+$/) bad = 1 } END { exit bad ? 0 : 1 }'; then echo "FACT agent_caps=held"
 else echo "FACT agent_caps=none"; fi
-if command -v getcap >/dev/null 2>&1; then
-  filecaps=$(getcap -r /usr/sbin /usr/bin /sbin /bin /usr/local/bin /usr/local/sbin 2>/dev/null | grep -Ei 'cap_(net_admin|sys_admin|setuid|setgid|dac_override|dac_read_search|sys_ptrace|sys_module)' || true)
-  if [ -z "$filecaps" ]; then echo "FACT agent_filecaps=none"; else echo "FACT agent_filecaps=found"; fi
-else
-  echo "FACT agent_filecaps=unchecked"
-fi
+${FILE_CAPS_PROBE}
 # Groups that are root by another name, and the sockets that run containers for whoever may write them.
 groups=$(as_agent id -Gn 2>/dev/null || true)
 if [ -z "$groups" ]; then echo "FACT agent_groups=unknown"; else echo "FACT agent_groups=$groups"; fi
