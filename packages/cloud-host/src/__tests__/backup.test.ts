@@ -507,6 +507,15 @@ test('the stored conversations are backed up with key-shaped text taken out of t
       uuid: 'b',
     },
     { json: JSON.stringify({ type: 'user', uuid: 'c', text: 'plain' }), uuid: 'c' },
+    {
+      json: JSON.stringify({
+        type: 'assistant',
+        uuid: 'd',
+        text: 'pasted ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 and sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx',
+        signature: 'EqQBCkYIBxgCKkA0Vh7Pq9m',
+      }),
+      uuid: 'd',
+    },
   ]);
   const done = await backupAll({
     dataDir,
@@ -517,13 +526,19 @@ test('the stored conversations are backed up with key-shaped text taken out of t
     inProcess: { 'transcripts.db': (to) => store.backupTo(to) },
   });
   const copy = SqliteTranscriptStore.open(join(done.path, 'transcripts.db'));
-  const lines = (await copy.read('tsk_1', session)).lines.map((text) => JSON.parse(text).text);
+  const rows = (await copy.read('tsk_1', session)).lines.map((text) => JSON.parse(text));
   copy.close();
-  assert.deepEqual(lines, [
-    'a file in the repository: [secret removed]',
-    'token [secret removed] seen',
-    'plain',
-  ]);
+  assert.deepEqual(
+    rows.map((row) => row.text),
+    [
+      'a file in the repository: [secret removed]',
+      'token [secret removed] seen',
+      'plain',
+      'pasted [secret] and [secret]',
+    ],
+  );
+  // Only key shapes go: the model's own signature stays.
+  assert.equal(rows[3].signature, 'EqQBCkYIBxgCKkA0Vh7Pq9m');
   const live = (await store.read('tsk_1', session)).lines.map((text) => JSON.parse(text).text);
   assert.match(live[0], /PRIVATE KEY/u);
   store.close();

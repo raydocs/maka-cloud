@@ -7,6 +7,7 @@ import {
   parseModesConfig,
   unnamedModels,
 } from '@maka-cloud/modes';
+import { scrubKeyShapes } from '@maka-cloud/orchestrator';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { assertAgentChannel } from '@maka-cloud/runners';
 import { pushConfigFromEnv } from '@maka-cloud/server';
@@ -204,34 +205,34 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
         }
       },
       // The lines are kept exactly as the CLI wrote them (the model checks them on a resume), so a
-      // run's own keys are still in them. The backup scan refuses a copy that holds a key: the
-      // lines that carry one are scrubbed in the copy, and a conversation restored from it loses
-      // only those lines' thinking signatures, never the live database's.
+      // key a task saw (a pasted one, a file in a repository, a run's own) is still in the live
+      // file. A backup holds no keys: every line of the copy loses its key shapes, and only those
+      // (no field is blanked for its name, so the signature of a thinking block stays). A
+      // conversation restored from a backup loses only the lines that held a key.
       [rel(paths.transcriptsDbPath)]: (copy) => {
-        const lines = copy
-          .prepare(
-            `SELECT task_id, session_id, subpath, n, json FROM transcript_lines
-             WHERE instr(json, 'PRIVATE KEY-----') > 0 OR instr(json, 'mki_') > 0
-                OR instr(json, 'mko_') > 0 OR instr(json, 'mkg_') > 0`,
-          )
-          .all() as Array<{
-          task_id: string;
-          session_id: string;
-          subpath: string;
-          n: number;
-          json: string;
-        }>;
+        const page = copy.prepare(
+          `SELECT task_id, session_id, subpath, n, json FROM transcript_lines
+           ORDER BY task_id, session_id, subpath, n LIMIT ? OFFSET ?`,
+        );
         const update = copy.prepare(
           'UPDATE transcript_lines SET json = ? WHERE task_id = ? AND session_id = ? AND subpath = ? AND n = ?',
         );
-        for (const row of lines) {
-          update.run(
-            withoutSecretShapes(row.json),
-            row.task_id,
-            row.session_id,
-            row.subpath,
-            row.n,
-          );
+        const size = 500;
+        for (let offset = 0; ; offset += size) {
+          const rows = page.all(size, offset) as Array<{
+            task_id: string;
+            session_id: string;
+            subpath: string;
+            n: number;
+            json: string;
+          }>;
+          for (const row of rows) {
+            const clean = scrubKeyShapes(withoutSecretShapes(row.json));
+            if (clean !== row.json) {
+              update.run(clean, row.task_id, row.session_id, row.subpath, row.n);
+            }
+          }
+          if (rows.length < size) break;
         }
       },
     },
