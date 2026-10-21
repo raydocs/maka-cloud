@@ -61,25 +61,82 @@ function attributes(tag: string): Map<string, string> {
   return found;
 }
 
-/** The title and preview image the page names for itself, read from the start of its HTML. */
+const SKIPPED = new Set(['script', 'style', 'template', 'noscript']);
+const MAX_TAG_CHARS = 6000;
+const MAX_TITLE_SOURCE_CHARS = 600;
+
+/**
+ * The title and preview image the page names for itself, read from the start of its HTML. One
+ * pass over the text, each position visited once and every search for a closing mark remembered,
+ * so hostile input (thousands of unclosed comments, tags or titles) costs time in proportion to
+ * its size and no more. Comments and the contents of script, style, template and noscript are
+ * not the page's own tags; reading stops at the end of `<head>`.
+ */
 export function readPageMeta(html: string, base: URL): PageMeta {
-  const head = html
-    .slice(0, MAX_HEAD_CHARS)
-    .replace(/<!--[\s\S]{0,20000}?-->/gu, '')
-    .replace(/<(script|style|template|noscript)\b[\s\S]{0,50000}?<\/\1\s*>/giu, '');
-  const end = head.search(/<\/head\s*>|<body\b/iu);
-  const scope = end === -1 ? head : head.slice(0, end);
+  const text = html.slice(0, MAX_HEAD_CHARS);
+  const lower = text.toLowerCase();
+  // `indexOf` from `from`, remembered: a mark that was not found is never searched for again, and
+  // one that was found is searched for again only once the scan has gone past it.
+  const memo = new Map<string, number>();
+  const find = (needle: string, from: number): number => {
+    const known = memo.get(needle);
+    if (known === -1 || (known !== undefined && known >= from)) return known;
+    const found = lower.indexOf(needle, from);
+    memo.set(needle, found);
+    return found;
+  };
 
   const meta = new Map<string, string>();
-  for (const tag of scope.matchAll(/<meta\b[^<>]{0,6000}>/giu)) {
-    const attrs = attributes(tag[0]);
-    const key = (attrs.get('property') ?? attrs.get('name') ?? '').toLowerCase();
-    const content = attrs.get('content');
-    if (key !== '' && content !== undefined && !meta.has(key)) meta.set(key, content);
+  let titleTag: string | undefined;
+  for (let at = 0; at < lower.length; ) {
+    const open = find('<', at);
+    if (open === -1) break;
+    if (lower.startsWith('<!--', open)) {
+      const close = find('-->', open + 4);
+      if (close === -1) break;
+      at = close + 3;
+      continue;
+    }
+    const name = /^<(\/?)([a-z][a-z0-9]{0,15})/u.exec(lower.slice(open, open + 20));
+    if (!name) {
+      at = open + 1;
+      continue;
+    }
+    const tag = name[2] ?? '';
+    const closing = name[1] === '/';
+    if ((closing && tag === 'head') || (!closing && tag === 'body')) break;
+    const end = find('>', open);
+    if (end === -1) break;
+    if (end - open > MAX_TAG_CHARS) {
+      at = open + 1;
+      continue;
+    }
+    at = end + 1;
+    if (closing) continue;
+    if (SKIPPED.has(tag)) {
+      const close = find(`</${tag}`, at);
+      if (close === -1) break;
+      const closeEnd = find('>', close);
+      if (closeEnd === -1) break;
+      at = closeEnd + 1;
+    } else if (tag === 'meta') {
+      const attrs = attributes(text.slice(open, end + 1));
+      const key = (attrs.get('property') ?? attrs.get('name') ?? '').toLowerCase();
+      const content = attrs.get('content');
+      if (key !== '' && content !== undefined && !meta.has(key)) meta.set(key, content);
+    } else if (tag === 'title' && titleTag === undefined) {
+      const close = find('</title', at);
+      if (close !== -1 && close - at <= MAX_TITLE_SOURCE_CHARS) {
+        titleTag = text.slice(at, close);
+        const closeEnd = find('>', close);
+        if (closeEnd === -1) break;
+        at = closeEnd + 1;
+      }
+    }
   }
-  const titleTag = /<title\b[^>]{0,200}>([\s\S]{0,600}?)<\/title\s*>/iu.exec(scope)?.[1];
+
   const title = [meta.get('og:title'), meta.get('twitter:title'), titleTag]
-    .map((text) => plainLine(text ?? ''))
+    .map((value) => plainLine(value ?? ''))
     .find((line) => line !== undefined);
   const image = meta.get('og:image') ?? meta.get('og:image:url') ?? meta.get('twitter:image');
   const imageUrl =

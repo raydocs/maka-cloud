@@ -94,11 +94,20 @@ test('a title is cut, cleaned of invisible and direction characters, and never n
     'Using assistant and assistant with assistant',
   );
   assert.equal(plainLine('&#0; &#x110000; &#9999999; ok'), 'ok');
-  // Work on a hostile page stays bounded.
+  // Work on a hostile page stays in proportion to its size: each of these is a full 200 kB head.
+  const hostile = [
+    `<head>${'<!--'.repeat(50_000)}`,
+    '<meta '.repeat(33_000),
+    '<title>'.repeat(28_000),
+    '<script>'.repeat(25_000),
+    '<title>x</title'.repeat(12_000),
+    '<'.repeat(200_000),
+    `<meta ${'x'.repeat(7000)}>${'<meta '.repeat(20_000)}`,
+    `<meta ${'a="b" '.repeat(30_000)}>`,
+  ];
   const started = Date.now();
-  readPageMeta(`<meta ${'a="b" '.repeat(50_000)}>${'<title>'.repeat(20_000)}`, BASE);
-  readPageMeta(`<head>${'<!--'.repeat(30_000)}`, BASE);
-  assert.ok(Date.now() - started < 2000);
+  for (const page of hostile) readPageMeta(page, BASE);
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
 });
 
 function database(): DatabaseSync {
