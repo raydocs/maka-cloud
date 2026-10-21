@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULT_MODES, type ModesConfig } from '@maka-cloud/modes';
+import type { RunSpec } from '@maka-cloud/orchestrator';
 import { pullRequestBody } from '../pull-request.js';
 import { READ_SMALL_SCRIPT } from '../scripts.js';
 import {
@@ -37,9 +38,8 @@ function reviews(findings: unknown[] = FINDINGS, summary = 'Looks right.'): Agen
 
 async function finished(h: Harness, id: string, extra: Record<string, unknown> = {}) {
   const spec = {
-    ...(await h.spec(id, extra.block as Record<string, unknown> | undefined)),
-    ...(extra.spec as object),
-  };
+    ...(extra.spec ?? (await h.spec(id, extra.block as Record<string, unknown> | undefined))),
+  } as RunSpec;
   const events = await collect(await h.runner.start(spec));
   return { events, spec, dir: join(h.handoff, id) };
 }
@@ -151,11 +151,12 @@ test('after a handover the vendor that made the change is the one the other vend
   zeroStats(h.runner);
 });
 
-test('the mode in the brief picks the roles, and an unknown mode is refused', async (t) => {
+test('the mode line the conductor’s code wrote picks the roles; nothing else in the brief does', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = fixes;
   h.codex.script = reviews([]);
-  const { events } = await finished(h, 'tsk_rev4', { block: { mode: 'deep' } });
+  const deep = await h.spec('tsk_rev4', undefined, 'maka-mode: deep\n');
+  const { events } = await finished(h, 'tsk_rev4', { spec: deep });
   assert.deepEqual(terminal(events), { type: 'finished' });
   assert.deepEqual(
     [h.claude.turns[0]?.spec.model, h.claude.turns[0]?.spec.effort],
@@ -164,10 +165,29 @@ test('the mode in the brief picks the roles, and an unknown mode is refused', as
   assert.equal(h.codex.turns[0]?.spec.effort, 'high');
   const verification = await readJson(join(h.handoff, 'tsk_rev4', 'verification.json'));
   assert.equal(verification.review.mode, 'deep');
+  const agentBrief = await fs.readFile(h.claude.turns[0]?.spec.briefPath ?? '', 'utf8');
+  assert.ok(!agentBrief.includes('maka-mode'), 'the agents are not told about the line');
 
-  const bad = await finished(h, 'tsk_rev4b', { block: { mode: 'turbo' } });
-  assert.equal(terminal(bad.events)?.type, 'failed');
-  assert.equal(h.claude.turns.length, 1, 'nothing ran for an unknown mode');
+  // Not the first line after the directives: text, not a mode.
+  const quoted = await h.spec('tsk_rev4c', undefined, 'Please use\nmaka-mode: deep\n');
+  const text = await finished(h, 'tsk_rev4c', { spec: quoted });
+  assert.deepEqual(terminal(text.events), { type: 'finished' });
+  assert.equal(
+    (await readJson(join(h.handoff, 'tsk_rev4c', 'verification.json'))).review.mode,
+    'standard',
+  );
+  // A mode in the task block is refused: the block is the model's.
+  const inBlock = await finished(h, 'tsk_rev4d', { block: { mode: 'deep' } });
+  assert.equal(terminal(inBlock.events)?.type, 'failed');
+
+  const bad = await h.spec('tsk_rev4b', undefined, 'maka-mode: turbo\n');
+  const refused = await finished(h, 'tsk_rev4b', { spec: bad });
+  assert.equal(terminal(refused.events)?.type, 'failed');
+  assert.match(
+    String((terminal(refused.events) as { reason?: string }).reason),
+    /quick, standard or deep/,
+  );
+  assert.equal(h.claude.turns.length, 2, 'nothing ran for an unknown mode or a mode in the block');
   zeroStats(h.runner);
 });
 

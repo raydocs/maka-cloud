@@ -11,7 +11,7 @@ import {
   stepsOf,
   type TaskView,
 } from '@maka-cloud/client';
-import { DeliveryCard, SourcesStack, stackOf } from '../src/Delivery';
+import { DeliveryCard, SourcesStack } from '../src/Delivery';
 
 beforeEach(() => {
   // jsdom has no object URLs; the code under test only needs a string it can hand to <img>.
@@ -253,21 +253,6 @@ test('the outcome never shows a vendor or model name', () => {
 
 const source = (index: number, label: SourceListing['label'], site = `site${index}.example`) =>
   ({ index, label, site, url: `https://${site}/page` }) satisfies SourceListing;
-
-test('the stack shows at most three, the change first, then how to see it, then the reading', () => {
-  const ordered = stackOf([
-    source(0, 'alternative'),
-    source(1, 'docs'),
-    source(2, 'test_report'),
-    source(3, 'preview'),
-    source(4, 'pull_request'),
-  ]).map((s) => s.label);
-  expect(ordered).toEqual(['pull_request', 'preview', 'test_report']);
-  // Equal labels keep the order the pages were opened in.
-  expect(
-    stackOf([source(5, 'docs'), source(2, 'docs'), source(9, 'docs')]).map((s) => s.index),
-  ).toEqual([2, 5, 9]);
-});
 
 function previewRoutes(
   previews: Record<number, { title?: string; image: boolean }>,

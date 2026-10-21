@@ -189,6 +189,8 @@ function assertUpgraded(state: ConductorState): void {
     ],
   );
   assert.equal(state.budget('run_1').reservedUsd, 2);
+  // A run from before modes has none picked (T25).
+  assert.equal(state.run('run_1')?.mode, null);
   // The question survived, and the columns it gained read as empty.
   assert.equal(state.question('qst_1')?.state, 'open');
   // The outbox works.

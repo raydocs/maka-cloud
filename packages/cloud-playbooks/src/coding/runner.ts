@@ -5,6 +5,7 @@ import {
   implementerFor,
   type ModeId,
   type ModesConfig,
+  parseModeBrief,
   reviewerFor,
   splitBudget,
 } from '@maka-cloud/modes';
@@ -388,11 +389,16 @@ class CodingRun implements RunHandle {
     const { stats } = this.runner;
     stats.runs++;
     try {
-      const brief = await this.guard(readFile(this.spec.briefPath, 'utf8'));
+      const written = await this.guard(readFile(this.spec.briefPath, 'utf8'));
+      // The mode is the one line the conductor's code put into the brief; the agents are not told
+      // about it, and nothing else in the brief can set it.
+      const modeBrief = parseModeBrief(written);
+      if (!modeBrief.ok) return this.setTerminal({ type: 'failed', reason: modeBrief.reason });
+      const brief = modeBrief.rest;
       const parsed = parseCodingBrief(brief);
       if (!parsed.ok) return this.setTerminal({ type: 'failed', reason: parsed.reason });
       const task = parsed.task;
-      this.mode = task.mode ?? 'standard';
+      this.mode = modeBrief.mode ?? 'standard';
       this.limitUsd = this.workLimit();
 
       this.adoptWorkspace(

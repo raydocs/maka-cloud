@@ -540,3 +540,27 @@ test('"modes" prints the modes in force as JSON that MAKA_CLOUD_MODES accepts', 
     },
   );
 });
+
+test('Claude runs through the Agent SDK only when its account and group are both set, and as plain names', () => {
+  assert.equal(readStackConfig(ENV).agentChannel, undefined);
+  assert.deepEqual(
+    readStackConfig({ ...ENV, MAKA_CLOUD_AGENT_USER: 'maka-agent', MAKA_CLOUD_AGENT_GROUP: 'maka' })
+      .agentChannel,
+    { user: 'maka-agent', group: 'maka' },
+  );
+  const problem = (env: NodeJS.ProcessEnv): string =>
+    problemsOf({ ...ENV, ...env })
+      .filter((text) => /AGENT_/u.test(text))
+      .join(' | ');
+  assert.match(problem({ MAKA_CLOUD_AGENT_USER: 'maka-agent' }), /go together/u);
+  assert.match(problem({ MAKA_CLOUD_AGENT_GROUP: 'maka' }), /go together/u);
+  for (const bad of ['root user', 'a;b', 'Agent', '../x', '-u']) {
+    assert.match(
+      problem({ MAKA_CLOUD_AGENT_USER: bad, MAKA_CLOUD_AGENT_GROUP: 'maka' }),
+      /Unsafe agent channel user/u,
+      bad,
+    );
+  }
+  assert.ok(ENV_VARIABLES.some(([name]) => name === 'MAKA_CLOUD_AGENT_USER'));
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /Claude runs: +directly/u);
+});
