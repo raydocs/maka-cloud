@@ -60,6 +60,12 @@ export interface ConductorOptions {
    * cancel as before. Default false: every task not known to have ended is cancelled.
    */
   tasksSurviveRestart?: boolean;
+  /**
+   * Cleans a task's own words (its title, summary or failure reason) before the conductor puts
+   * them in a message of its own, as when it tells the user a task ended that a restart left
+   * without a turn. Without it those messages carry no task words at all.
+   */
+  scrubTaskText?: (text: string) => string;
   playbooks?: readonly Playbook[];
   /**
    * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
@@ -249,7 +255,10 @@ export class Conductor {
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly stopChecks = new Map<string, NodeJS.Timeout>();
   private readonly followTimers = new Map<string, NodeJS.Timeout>();
+  /** How long the conversation's followed tasks were last left alone; doubles up to a cap. */
+  private readonly followDelays = new Map<string, number>();
   private readonly tasksSurviveRestart: boolean;
+  private readonly scrubTaskText: ((text: string) => string) | undefined;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -269,6 +278,7 @@ export class Conductor {
     this.turnContext = options.turnContext;
     this.orchestratorAccess = options.orchestratorAccess;
     this.tasksSurviveRestart = options.tasksSurviveRestart === true;
+    this.scrubTaskText = options.scrubTaskText;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
@@ -1067,7 +1077,11 @@ export class Conductor {
    * found no task settles at 0. An ended task whose run may still be going
    * keeps its reservation, and is asked about again until its stop is confirmed.
    */
-  private settleView(delegation: DelegationRow, view: Record<string, unknown> | undefined): void {
+  private settleView(
+    delegation: DelegationRow,
+    view: Record<string, unknown> | undefined,
+    closing?: string,
+  ): void {
     if (!view) return;
     if (view.created === false) {
       this.state.settleDelegation(delegation.key, 0);
@@ -1084,7 +1098,31 @@ export class Conductor {
       return;
     }
     const actual = typeof view.costUsd === 'number' ? view.costUsd : delegation.reservedUsd;
-    this.state.settleDelegation(delegation.key, actual);
+    this.state.settleDelegation(delegation.key, actual, closing);
+  }
+
+  /**
+   * What the user is told when a task ends that the conductor followed across a restart: the run
+   * that started it was cut off, so no turn is left to say it. Fixed wording around the task's own
+   * words, with no model call. Absent when the run did not end for a restart or a shutdown.
+   */
+  private closingOfFollowed(
+    delegation: DelegationRow,
+    view: Record<string, unknown> | undefined,
+  ): string | undefined {
+    const run = this.state.run(delegation.runId);
+    if (run?.state !== 'interrupted' || !['restart', 'shutdown'].includes(run.endReason ?? '')) {
+      return undefined;
+    }
+    const ended = String(view?.state);
+    if (!['succeeded', 'failed', 'cancelled'].includes(ended)) return undefined;
+    const manifest = view?.manifest as { summary?: unknown } | undefined;
+    const words = (value: unknown): string =>
+      typeof value === 'string' && this.scrubTaskText ? this.scrubTaskText(value).trim() : '';
+    const detail = words(manifest?.summary) || words(view?.failureReason);
+    const name = words(view?.title).slice(0, 120);
+    const text = `The server restarted while this ran. The task${name ? ` "${name}"` : ''} ${ended}${detail ? `: ${detail}` : '.'}`;
+    return text.length > 800 ? `${text.slice(0, 799)}…` : text;
   }
 
   /**
@@ -1109,7 +1147,13 @@ export class Conductor {
           }
           // A turn may have settled it while this waited.
           const current = this.state.delegation(delegation.key);
-          if (current && current.state !== 'settled') this.settleView(current, result.structured);
+          if (current && current.state !== 'settled') {
+            this.settleView(
+              current,
+              result.structured,
+              this.closingOfFollowed(current, result.structured),
+            );
+          }
         } catch (error) {
           this.warn(`Asking about delegation ${delegation.key} failed`, error);
         }
@@ -1117,10 +1161,27 @@ export class Conductor {
     } finally {
       await link.close().catch(() => undefined);
     }
+    this.sendOutbox(lane.conversationId);
     if (!this.closing.signal.aborted) {
       this.hooks.followed?.(lane.conversationId);
-      if (this.state.hasFollowedTasks(lane.conversationId)) this.followLater(lane.conversationId);
+      if (this.state.hasFollowedTasks(lane.conversationId)) {
+        this.followLater(lane.conversationId, this.nextFollowDelay(lane.conversationId));
+      } else {
+        this.followDelays.delete(lane.conversationId);
+      }
     }
+  }
+
+  /**
+   * Asks again soon after a restart, when a task is most likely to end, and less often the longer
+   * it runs: one second, doubling to ten (never past the stop-check interval).
+   */
+  private nextFollowDelay(conversationId: string): number {
+    const cap = Math.min(this.limits.stopCheckMs, FOLLOW_MAX_MS);
+    const previous = this.followDelays.get(conversationId);
+    const next = Math.min(previous === undefined ? FOLLOW_FIRST_MS : previous * 2, cap);
+    this.followDelays.set(conversationId, next);
+    return next;
   }
 
   /** Asks about the conversation's followed tasks after `delayMs` (default: the stop-check interval). */
@@ -1497,6 +1558,10 @@ export class Conductor {
     }
   }
 }
+
+/** The first and the longest wait between two looks at a task kept across a restart. */
+const FOLLOW_FIRST_MS = 1_000;
+const FOLLOW_MAX_MS = 10_000;
 
 /** The adapter's error kinds that pass by themselves; `auth`, billing, a rejected request and `unknown` are not among them. */
 const TRANSIENT_MODEL_ERRORS: ReadonlySet<string> = new Set([
