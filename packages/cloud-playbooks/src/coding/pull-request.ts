@@ -4,6 +4,7 @@ import { type ConductorToolSpec, shownValue, ToolRefusal } from '@maka-cloud/con
 import { z } from 'zod';
 import type { ChangeSet, CodingDeliveries, Delivery, PublishedPullRequest } from './deliveries.js';
 import type { PullRequestPublisher } from './github.js';
+import { type ReviewSummary, SEVERITIES } from './review.js';
 
 export const OPEN_PULL_REQUEST_TOOL = 'open_pull_request';
 
@@ -124,6 +125,17 @@ interface VerificationView {
   repro?: { command: string; files: string[] };
   attempts: { vendor: string; end?: string }[];
   changedFiles?: { path: string; status: string }[];
+  review?: ReviewSummary;
+}
+
+function reviewHeading(review: ReviewSummary): string {
+  if (review.status !== 'reviewed') return 'Not reviewed by a second agent';
+  const total = SEVERITIES.reduce((sum, severity) => sum + review.counts[severity], 0);
+  if (total === 0) return 'Reviewed by a second agent: no findings';
+  const parts = SEVERITIES.filter((severity) => review.counts[severity] > 0).map(
+    (severity) => `${severity} ${review.counts[severity]}`,
+  );
+  return `Reviewed by a second agent: ${total} finding(s) remain (${parts.join(', ')}). They are on the task page.`;
 }
 
 const code = (text: string) => `\`${text.replaceAll('`', "'")}\``;
@@ -154,6 +166,9 @@ export function pullRequestBody(verification: VerificationView): string {
       ...verification.changedFiles.map((file) => `- ${code(file.path)} (${file.status})`),
     );
   }
+  // Counts only: the findings are the reviewer's words about a repository anyone may have written,
+  // and they stay on the task page (review.md), not in a pull request.
+  if (verification.review) lines.push('', `**${reviewHeading(verification.review)}**`);
   lines.push(
     '',
     "**Not verified**: anything those two commands do not cover. This repository's own CI runs on this pull request now.",

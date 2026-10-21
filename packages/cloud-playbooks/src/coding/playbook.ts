@@ -2,7 +2,12 @@ import { type Manifest, type Playbook, type Verdict, verifyManifest } from '@mak
 import { OPEN_PULL_REQUEST_TOOL } from './pull-request.js';
 
 export const CODING_RUNNER = 'coding';
-export const CODING_ARTIFACTS = ['change.patch', 'changes.json', 'verification.json'] as const;
+export const CODING_ARTIFACTS = [
+  'change.patch',
+  'changes.json',
+  'verification.json',
+  'review.md',
+] as const;
 
 function artifactName(artifact: string): string {
   return artifact.split(/[\\/]/).pop() ?? artifact;
@@ -20,6 +25,16 @@ export function verifyCodingManifest(manifest: Manifest): Verdict {
       verified.length === 0
         ? 'the change was not verified by the coding runner'
         : 'done has more than one verified line',
+    );
+  }
+  // Whether the change was reviewed is always said, in the runner's own words: a manifest with no
+  // review line is not one this runner wrote.
+  const reviews = manifest.done.filter((line) => line.trim().startsWith('review:'));
+  if (reviews.length !== 1) {
+    problems.push(
+      reviews.length === 0
+        ? 'the manifest does not say whether the change was reviewed'
+        : 'done has more than one review line',
     );
   }
   const names = new Set((manifest.artifacts ?? []).map(artifactName));
@@ -48,7 +63,7 @@ export const codingPlaybook: Playbook = {
     `Delegate one task to the "${CODING_RUNNER}" runner. Its brief is the plan followed by one block:\n${BLOCK_EXAMPLE}\nAdd "runner": "codex" only if the user asked for it. One task per change: the runner already repairs and hands a failing task to the other agent once, so never start a second attempt yourself.`,
     'Wait for the task and read its verdict. A verified result lists the changed files and the checks the runner ran itself.',
     `If it is verified, call ${OPEN_PULL_REQUEST_TOOL} with the task id and a short title. It is held for approval: ask the user with ask_user (reason "irreversible") and the actionRef it returns, then call it again with that actionRef after they approve.`,
-    'Deliver the pull request link and what was and was not verified. If the task was not verified, say what failed from its manifest and stop.',
+    'Deliver the pull request link and what was and was not verified, including the `review:` line of the manifest: say what the independent review found, or plainly that the change was not reviewed. Never call a change reviewed when that line says it was not done. If the task was not verified, say what failed from its manifest and stop.',
   ],
   verify: verifyCodingManifest,
 };

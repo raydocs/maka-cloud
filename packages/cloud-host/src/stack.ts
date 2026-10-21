@@ -244,6 +244,7 @@ export async function startStack(
     const deliveries = new JsonFileCodingDeliveries(config.codingDeliveriesPath);
     coding = createCodingRunner(runners, {
       deliveries,
+      modes: config.modes,
       onCleanupError: (failure) => warn('A coding task cleanup step failed', failure),
     });
     const pullRequests = openPullRequestTool({
