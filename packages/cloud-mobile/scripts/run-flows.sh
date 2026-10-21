@@ -14,6 +14,8 @@ case "$platform" in
 esac
 
 if [ "$platform" = android ]; then
+  # A busy hosted emulator makes the launcher "not respond"; the box then covers the app mid-flow.
+  adb shell settings put global hide_error_dialogs 1
   adb install -r android/app/build/outputs/apk/release/app-release.apk
 fi
 

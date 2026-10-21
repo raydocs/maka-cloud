@@ -144,6 +144,7 @@ jobs:
           arch: x86_64
           target: google_apis
           profile: pixel_7
+          ram-size: 4096M
           disable-animations: true
           script: bash packages/cloud-mobile/scripts/run-flows.sh android
 
