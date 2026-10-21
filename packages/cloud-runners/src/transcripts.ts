@@ -293,17 +293,15 @@ function scrubbed(entry: SessionStoreEntry, redact: (text: string) => string): T
 }
 
 export type RestoreResult =
-  /** The sandbox has the transcript, as far as the store knows it. */
-  | { status: 'present'; projectKey: string }
+  /** The sandbox has the server's copy of the transcript, put there now. */
   | { status: 'restored'; projectKey: string; lines: number }
   /** The store has nothing for this session. */
   | { status: 'absent' };
 
 /**
- * Makes the sandbox hold a session's transcript before the CLI is asked to resume it. A sandbox
- * that has the file with at least as many lines as the store is left alone (it is the same
- * conversation, and its own copy may be ahead of what was mirrored); otherwise the store's copy is
- * written in place, atomically.
+ * Makes the sandbox hold the server's copy of a session's transcript before the CLI is asked to
+ * resume it. The server's copy is the only one that is trusted: the sandbox file is the agent's own
+ * to write, however many lines it has, so it is always replaced (atomically), never compared with.
  */
 export async function restoreTranscript(input: {
   machine: RemoteMachine;
@@ -318,9 +316,6 @@ export async function restoreTranscript(input: {
   if (!info) return { status: 'absent' };
   if (!isProjectKey(info.projectKey)) {
     throw new Error('the stored transcript is under a project key that is not a plain name');
-  }
-  if ((await machine.transcriptLines(taskId, info.projectKey, sessionId)) >= info.lines) {
-    return { status: 'present', projectKey: info.projectKey };
   }
   await machine.installTranscript({
     dirName: taskId,
