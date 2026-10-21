@@ -51,7 +51,8 @@ code also needs its NOTICE). Say in the PR what was taken and from where.
 |---|---|---|---|
 | Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) | Anthropic terms | `query()` with `spawnClaudeCodeProcess` (run the unmodified `claude` binary on the box over our exec channel), `sessionStore` (the transcript mirror), hooks (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) for the step log, streaming input for steering | T28, T27 |
 | Codex app-server (`codex app-server`, JSON-RPC) | Apache-2.0 | `thread/start`, `thread/resume` by id, `thread/inject_items` for cut-off calls, dynamic tools, `chatgptAuthTokens` | T27, T28 |
-| vercel-labs/durable-harness | Apache-2.0 | step log and fencing design; `harness-process/src/tail.ts` (file tail), `recovery.ts` (recovery note), `harness-claude-code/src/env.ts` and `spawn.ts` (env allowlist, path rewrite of mirrored lines, upload of `projects/**` only), `harness-codex/src/config.ts` (gateway provider, `shell_environment_policy` excluding token variables), `rollout.ts` (rollout path checks) | T28 |
+| vercel-labs/durable-harness | Apache-2.0 | step log and fencing design; `harness-process/src/tail.ts` (file tail), `recovery.ts` (recovery note), `harness-claude-code/src/env.ts` and `spawn.ts` (env allowlist, path rewrite of mirrored lines, upload of `projects/**` only), `harness-codex/src/config.ts` (gateway provider, `shell_environment_policy` excluding token variables), `rollout.ts` (rollout path checks); `sandbox-host/src/wake.ts` (wake probe), `harness-sandbox/src/base.ts` (base snapshot keyed by recipe hash), `cleanup.ts` (idle cleanup), `relay/relay.ts` (fence kept on the box); `cli-check/src/known.ts` and `scenarios/` (known gaps as expected failures, the kill-inside-a-`never`-step drill, the scripted fake CLI); `bench/src/stats.ts` (overhead method) | T28, T26, T27 |
+| Vercel docs, "Agent harnesses" (`vercel.com/docs/agent-harnesses`: claude-code, security, observability) | docs | the box holds no secret, tools off until listed, per-task spend and box-time budgets, egress allowlist, the `restart` stream event, owner recorded before the first message, no remote images from model output, a trace per task with content off by default | T28, T27, T24, T15 |
 | CopilotKit/OpenBot | MIT | `agent-claude-sdk` (setup-token handling: refuse both a token and an API key), routines limits, approvals pages, the component gallery, the per-tool-call policy check with an audit row first | T27, T23, T20, T13, T15 |
 | CopilotKit/openmuse | MIT | rich thread cards (`docs/RICH-THREADS.md`) and the browser "Take control" flow; the headless mobile client for later | T24, T14b, T18 |
 | CopilotKit/OpenDots | MIT | approval cards ("Approve & run" for write tools), interrupted scheduled-run recovery | T20, T23 |
@@ -418,7 +419,10 @@ proposals and T20 items).
   test report. Preview images are fetched by the server through a proxy that
   refuses private and local addresses, caps size and time, and caches; the
   browser never loads them from the source site, and a page without one gets
-  a plain card with the site's initial.
+  a plain card with the site's initial. The proxy fetches only pages the task
+  actually opened (from its tool results), never a URL the model wrote, and
+  an image inside model output (a markdown image) is never loaded until the
+  user taps it: a URL fetched without a click is a way to send data out.
 - Briefs end with one offer ("Want me to update the two failing
   dependencies?") and say the offer is also saved on Home.
 - Projects: the list, and per project its duties (on or off, authority,
@@ -528,6 +532,39 @@ Vercel Sandbox. Keep our SQLite stores, our gateway and instabox.
   allowlist; Codex's `shell_environment_policy` excludes our token variables
   so tools the agent runs cannot read them; the model token in a box only
   works from the CLI's own process tree where the box can enforce it.
+- The box holds no long-lived secret (Vercel's rule): the CLI's model calls
+  go to our gateway with a token armed for this attach only, short-lived and
+  refreshed by the server before it expires; a box's own secret is derived
+  per box and boot (HMAC of a server key, the machine id and the boot id), so
+  a copied value is useless on another box or after a reboot. The one
+  exception is T27's Claude plan token, which Claude Code itself must hold;
+  T27 limits it to the `claude` process. The box keeps
+  the highest epoch it has seen on disk, so a restarted box helper still
+  refuses a stale driver.
+- Fence the live stream too, not only the log: after a takeover, events from
+  the old driver never reach viewers (the durable-harness authors list this
+  as their own open gap). The stream serves only events already written to
+  the log, so a cursor is exact and a crash between write and send loses or
+  repeats nothing.
+- A box command with a side effect is settled only after the box confirms
+  its process group is gone, and no driver deadline cuts a command that is
+  running (their handover stops a long `npm install` mid-way; ours must not).
+  A `never` step that calls an outside system passes it an idempotency key,
+  or checks first (for GitHub: an existing branch or PR for this task).
+- When a cut-off turn resumes, the stream sends a `restart` event with the
+  text to show in place of the partial reply, so the user never sees the
+  same answer twice.
+- Steering during recovery: hold steers until the resumed turn's first step
+  has finished; durable-harness leaves steers during replay undefined.
+- Per-task budgets on top of the invite's caps: model spend per turn and per
+  task, and box time per task (default 4 hours, as Vercel's), each stopping
+  the task with a note for the user.
+- Run timeline from the step log: one trace per task with turns, steps, model
+  and tool calls, tokens (cached input too), cost from the gateway and
+  timing; resumed calls are read back, not shown twice. It records only
+  metadata unless the owner turns content on, and a tracing failure never
+  fails a task. The web and phone views must agree with the step log exactly
+  (their "agree" check).
 - Tests with fakes: a crash after a `never` step is never rerun and the
   recovery note lists it; a crash mid-`safe` step reruns it once; two
   processes driving one task, the stale one refused at its first write and the
@@ -536,7 +573,17 @@ Vercel Sandbox. Keep our SQLite stores, our gateway and instabox.
   transcript; an unmappable transcript line stops the turn and keeps the task;
   a resent user message is applied once; a reconnecting viewer gets every
   event after its cursor exactly once; no completed model call is billed
-  twice.
+  twice; a drill that kills the driver inside a `never` step while its child
+  process lives on in its own process group (the step is reported
+  interrupted and never rerun, the child's late writes are refused); a stale
+  driver's live events never reach a viewer. Use a scripted fake CLI
+  (`call <tool> <json>` makes one tool call, anything else is echoed), and
+  keep each known gap as an expected-failure test with an owner, so fixing
+  it fails the test until the entry is removed.
+- Measure the cost of durability once against plain runs, the way their
+  `bench` does (median of per-round differences, warm-up and recovery rounds
+  left out), and keep gates: first token within 150 ms of a plain run, and a
+  killed driver's task running again within 12 seconds.
 
 ## T26: sandbox sleep and wake, and Ship
 
@@ -594,6 +641,26 @@ for, and we pay only for boxes.
   maximum (default 3), one task per box, boxes from T26 that sleep when idle.
   Boxes of different invites never share a machine, a credential or a
   checkout. Box time is counted by T21 per invite.
+- Set up once, like Amp's project snapshot: per repository, run its setup
+  (install the CLIs and the dependencies) once, save an instabox snapshot
+  keyed by the setup's hash, and start new pool boxes from it; a changed
+  setup builds a new one, two builders racing end with one snapshot, and old
+  ones expire. A resume script runs after every wake. A box is found again
+  by its labels (invite and pool slot), and a box whose labels or settings
+  do not match is refused, not used (OpenMuse's rule).
+- Sleep like Amp: a box sleeps only when its agent has done nothing for 5
+  minutes and the user has not looked at it for 20. A wake that times out is
+  retried once with a longer limit before the box counts as lost ("slow, not
+  dead"). Idle cleanup re-checks each box right before it deletes anything,
+  and never touches a box with a running task or a recent write.
+- Tools: each runner mode lists the built-in tools it allows instead of
+  today's full access, and the egress of a box is an allowlist (GitHub, the
+  package registries, our two public names) when instabox can enforce one;
+  check that with a probe first.
+- Probes: small scripts, run by hand behind `MAKA_CLOUD_LIVE=1`, that check
+  what we assume about instabox (wake time, a snapshot restores files, exec
+  after sleep, one box cannot reach another, the egress rule, the plan's box
+  limit learned from a refusal). Rerun them when instabox changes.
 - Spend: plan use costs us nothing per token, so a plan task reserves box
   time, not model money. When the plan says its usage limit is reached, the
   task pauses and tells the user (with the reset time when the CLI gives
