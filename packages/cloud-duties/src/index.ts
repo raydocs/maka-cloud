@@ -29,9 +29,19 @@ export {
   type Candidate,
   type CandidateInput,
   buildCandidates,
+  capPerKind,
+  PER_KIND_LIMIT,
   type OwnResult,
 } from './cards/candidates.js';
 export { stableHash } from './cards/hash.js';
+export {
+  applyRanking,
+  type CardRanker,
+  CardScanner,
+  type ScanOptions,
+  type ScanOutcome,
+  type ScanResult,
+} from './cards/scan.js';
 export {
   GitHubSignalReader,
   type GitHubSignalReaderOptions,

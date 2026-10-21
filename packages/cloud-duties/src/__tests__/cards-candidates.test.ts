@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildCandidates, type CandidateInput } from '../cards/candidates.js';
+import { buildCandidates, type CandidateInput, capPerKind } from '../cards/candidates.js';
 import { defaultEnabledKinds, KIND_SPECS } from '../cards/kinds.js';
 import { GitHubSignalReader, type RepoSignals } from '../cards/signals.js';
 import { NewCardSchema } from '../cards/store.js';
@@ -134,8 +134,10 @@ test('issues an active duty already answers are not offered again, and a kind is
   const issues = [1, 2, 3, 4, 5].map((number) => ({ number, title: `Issue ${number}` }));
   const signals = { ...EMPTY, newIssues: issues };
   assert.deepEqual(buildCandidates(input({ signals, issueDutyActive: true })), []);
+  const all = buildCandidates(input({ signals }));
+  assert.equal(all.length, 5);
   assert.deepEqual(
-    buildCandidates(input({ signals })).map((c) => c.card.subjectKey),
+    capPerKind(all).map((c) => c.card.subjectKey),
     ['issue:1', 'issue:2', 'issue:3'],
   );
 });
