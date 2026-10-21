@@ -391,7 +391,10 @@ test('an implementer that spends its share fails the task before any review is s
 });
 
 test('a budget with too little left for a review fails the task rather than delivering the change unreviewed', async (t) => {
-  const h = await setup(t, { modes: MODES });
+  // The shipped minimums leave a review at least $0.10; a config with a small quick mode does not.
+  const small = structuredClone(MODES);
+  small.modes.quick.budget = { ...small.modes.quick.budget, minRunUsd: 0.1, reviewShare: 0.05 };
+  const h = await setup(t, { modes: small });
   h.claude.script = async (turn) => {
     turn.usage(0.1);
     return fixes(turn);
@@ -403,7 +406,7 @@ test('a budget with too little left for a review fails the task rather than deli
     h,
     'tsk_small',
     events,
-    /the budget leaves \$0\.04 for a review, too little to start one/,
+    /the budget leaves \$0\.01 for a review, too little to start one/,
   );
   zeroStats(h.runner);
 });
