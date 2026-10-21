@@ -1,3 +1,4 @@
+import type { StepLog } from './steps.js';
 import type { TaskId } from './types.js';
 
 /** Everything a runner is given to start one task. */
@@ -21,6 +22,11 @@ export interface RunSpec {
   budgetRootId?: TaskId;
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
+  /**
+   * The step log of this attempt: a runner that wants a step to survive a crash records its intent
+   * here before it runs the step and its outcome after. Every write carries the attempt's epoch.
+   */
+  steps?: StepLog;
 }
 
 export type RunnerEvent =

@@ -57,8 +57,11 @@ test('a task left running at restart is marked failed by appending, never by edi
   await makeHarness(t, { store, dir: first.dir });
   const logAfter = await store.read();
   assert.deepEqual(logAfter.slice(0, logBefore.length), logBefore);
-  assert.equal(logAfter.length, logBefore.length + 1);
-  assert.equal(logAfter.at(-1)?.event.type, 'task_failed');
+  // The restart takes the task over (a new epoch) and then ends it.
+  assert.deepEqual(
+    logAfter.slice(logBefore.length).map(({ event }) => event.type),
+    ['task_attempt', 'task_failed'],
+  );
 
   const view = reduce(logAfter).get(taskId);
   assert.equal(view?.state, 'failed');

@@ -244,6 +244,16 @@ CREATE TABLE opened_pages (
 );
 `;
 
+/**
+ * v10 (T28): the epoch of the attempt that drives a task. A task starts at 1 (its creation is the
+ * first attempt, which is also what every task already in the log is), and each `task_attempt`
+ * event raises it by one. The log append checks it in its own transaction, so a writer from an
+ * older attempt is refused and never reaches the log.
+ */
+const SCHEMA_V10 = `
+ALTER TABLE task_index ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1;
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -254,6 +264,7 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V7,
   SCHEMA_V8,
   SCHEMA_V9,
+  SCHEMA_V10,
 ];
 
 /**
