@@ -94,6 +94,11 @@ export interface StackConfig {
    * configured cannot spend much.
    */
   spend: SpendCaps;
+  /**
+   * Limits of one task on top of its tree's budget: the most one run (a start, or a resume after a
+   * restart) may spend, and how long the task may run in all.
+   */
+  taskLimits: { turnUsd?: number; runMs: number };
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
   /** With it, research runs get a `web-search` command, paid per call from their budget. */
@@ -222,6 +227,36 @@ export function pausePathOf(dataDir: string): string {
   return join(dataDir, 'paused');
 }
 
+/** Reads the per-task limits; a bad value is a problem, not a default. */
+function taskLimits(
+  value: (name: string) => string | undefined,
+  problems: string[],
+): StackConfig['taskLimits'] {
+  const limits: StackConfig['taskLimits'] = { runMs: DEFAULT_TASK_RUN_HOURS * 3_600_000 };
+  const turn = value('MAKA_CLOUD_TASK_TURN_USD');
+  if (turn !== undefined) {
+    const usd = Number(turn);
+    if (!/^\d+(\.\d+)?$/u.test(turn) || !(usd > 0) || usd > 100_000) {
+      problems.push('MAKA_CLOUD_TASK_TURN_USD must be a number of dollars above 0, up to 100000');
+    } else {
+      limits.turnUsd = usd;
+    }
+  }
+  const hours = value('MAKA_CLOUD_TASK_RUN_HOURS');
+  if (hours !== undefined) {
+    const parsed = Number(hours);
+    if (!/^\d+(\.\d+)?$/u.test(hours) || !(parsed > 0) || parsed > 168) {
+      problems.push('MAKA_CLOUD_TASK_RUN_HOURS must be a number of hours above 0, up to 168');
+    } else {
+      limits.runMs = Math.round(parsed * 3_600_000);
+    }
+  }
+  return limits;
+}
+
+/** How long a task may run in all, unless set. */
+const DEFAULT_TASK_RUN_HOURS = 4;
+
 export interface SpendCaps {
   inviteDailyUsd: number;
   inviteMonthlyUsd: number;
@@ -258,6 +293,14 @@ export const ENV_VARIABLES = [
   [
     'MAKA_CLOUD_BACKUP_DIR',
     'directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups',
+  ],
+  [
+    'MAKA_CLOUD_TASK_TURN_USD',
+    'the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit',
+  ],
+  [
+    'MAKA_CLOUD_TASK_RUN_HOURS',
+    'how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168)',
   ],
   [
     'MAKA_CLOUD_AGENT_USER',
@@ -459,6 +502,7 @@ export function readStackConfig(
       ),
       serverDailyUsd: dollars('MAKA_CLOUD_SERVER_DAILY_USD', DEFAULT_SPEND_CAPS.serverDailyUsd),
     },
+    taskLimits: taskLimits(value, problems),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
@@ -733,6 +777,7 @@ export function describeConfig(config: StackConfig): string[] {
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `Claude runs:         ${config.agentChannel ? `through the Agent SDK as ${config.agentChannel.user} (group ${config.agentChannel.group}), conversation kept in ${config.transcriptsDbPath}` : 'directly (set MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP for the Agent SDK)'}`,
+    `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
     `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,

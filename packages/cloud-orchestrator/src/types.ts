@@ -179,6 +179,13 @@ export interface TaskRecord {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /**
+   * Time the task has spent running, in milliseconds: the intervals between a start (or a resume
+   * from a pause) and the next pause or end. A server that is down while the task runs counts, the
+   * sandbox keeps going. `runSince` is when the interval under way began.
+   */
+  runMs: number;
+  runSince?: number;
   progress: string[];
   manifest?: ResultManifest;
   failureReason?: string;

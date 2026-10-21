@@ -10,7 +10,7 @@ Status of the pieces (updated by each PR):
 | 2 | Resume instead of fail | merged (#164), section 2 |
 | 3 | Process channel and Agent SDK runner | merged (#166), section 3 (off until a deployment passes `agentSdk`) |
 | 4 | Transcript mirror and fresh-box resume | in review, section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
-| 5 | Spend follows the step log, per-task budgets | not built |
+| 5 | Spend follows the step log, per-task budgets | in review, section 5 |
 | 6 | Steering, `restart` event, catch-up, stream fence | not built |
 | 7 | Run timeline | not built |
 | 8 | Drills, known gaps, bench | not built |
@@ -220,4 +220,50 @@ swap a link between the check and the write.
 Known limits: the store keeps subagent transcripts but does not put them back; a conversation is
 kept in full (capped at 256 MB per task); nothing here is verified on a real box, only against the
 stand-in CLI and the real SDK.
+
+## 5. Spend and per-task limits
+
+**What the journal already guarantees.** Every request through the gateway is a reservation (`hold`,
+before it is sent) and a settle (after), in the gateway's SQLite journal. A call is keyed by its
+own reservation, so a settle that arrives twice charges once; a settle from a process that was
+replaced finds nothing to settle (its rows are the next process's to read) and changes nothing; a
+reservation still open when a process died is a call it died in, and the next process charges it
+in full because whether the vendor billed it is unknown. `restore()` records that spend on the task's
+tree under the attempt that drove it (`task_cost` keeps the highest figure per attempt, and attempts
+add up). What piece 5 adds: the calls cut off are counted (`cutOffCalls`, `cutOffUsd` in
+`RecoveredSpend.unrecorded()`) and the task's log says so, once, under the attempt that resumes it:
+"2 calls to the model gateway cut off by the restart were charged in full ($0.75) because the
+vendor may have billed them". The resumed run makes the call again if it still needs it, and that
+is billed again.
+
+**Why reservations are not keyed by step id.** The plan was "intent reserves, outcome settles". A
+model call is not a step the hooks see: the CLI makes it between tools, and it reaches the gateway
+as an HTTP request that knows its grant (one per run, hence per attempt) and nothing else. The
+attempt is the key that matters for money, and it is already there: the grant is for one run, the
+orchestrator fences by epoch, and `task_cost` is keyed by epoch. A fenced attempt cannot reserve
+(its grant is revoked when the task is taken over) and cannot settle what a newer process already
+recorded (the journal's process epoch).
+
+**Limits of one task** (`OrchestratorOptions.limits`, set from `MAKA_CLOUD_TASK_TURN_USD` and
+`MAKA_CLOUD_TASK_RUN_HOURS`), on top of the invite's caps and the tree's budget:
+
+- *Spend per turn.* A run (one start, or one resume after a restart) may spend at most `turnUsd`.
+  The orchestrator puts it in `RunSpec.turnBudgetUsd`; the host's `gatewayModelAccess` gives the
+  grant a limit of its own (`budget.limitUsd`) inside the pool of what the whole tree has left
+  (`poolLimitUsd`), so the gateway refuses the request that would cross it ("this turn's model
+  budget has $x left…") and the runner stops the run with a note ("this turn's model budget of $x
+  reached"). When the tree has less left than the turn limit, the tree's budget is the one that
+  binds, as before.
+- *Run time per task.* `runMs` (default 4 hours) over every attempt. The reducer keeps `runMs` and
+  `runSince` per task: the time between a start (or a resume from a pause) and the next pause or
+  end. A restart does not reset it and time paused does not count; time the server is down does, the
+  sandbox keeps going. A timer per running task ends it with a note ("stopped: the task used its 4
+  hours of run time") and cancels its subtree; the timer is set when the run is registered or
+  resumed, cleared at a pause, an end, a takeover and `close()`, and counted in `stats().runClocks`
+  (the schedule fuzzer checks it is 0 at quiescence). A restart finding a task already past its
+  limit does not resume it: it ends "needs you: this task had used its 3 hours of run time by the
+  time the server came back".
+
+Not here: box-time limits per box rather than per task (instabox bills the machine, which tasks of
+one invite share), and a per-turn limit chosen per task rather than per server.
 

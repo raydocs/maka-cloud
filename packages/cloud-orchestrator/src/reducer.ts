@@ -26,6 +26,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       ...(event.budgetUsd === undefined ? {} : { budgetUsd: event.budgetUsd }),
       state: 'queued',
       createdAt: at,
+      runMs: 0,
       progress: [],
       epoch: 1,
       steps: new Map(),
@@ -57,6 +58,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_started':
       task.state = 'running';
       task.startedAt = at;
+      task.runSince = at;
       return;
     case 'task_progress':
       task.progress.push(event.note);
@@ -65,11 +67,13 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_succeeded':
       task.state = 'succeeded';
       task.finishedAt = at;
+      stopClock(task, at);
       task.manifest = event.manifest;
       return;
     case 'task_failed':
       task.state = 'failed';
       task.finishedAt = at;
+      stopClock(task, at);
       task.failureReason = event.reason;
       return;
     case 'task_cancel_requested':
@@ -78,12 +82,16 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_cancelled':
       task.state = 'cancelled';
       task.finishedAt = at;
+      stopClock(task, at);
       return;
     case 'task_pause_requested':
       if (task.state === 'running') task.pauseRequested = true;
       return;
     case 'task_paused':
-      if (task.state === 'running' && task.pauseRequested) task.state = 'paused';
+      if (task.state === 'running' && task.pauseRequested) {
+        task.state = 'paused';
+        stopClock(task, at);
+      }
       return;
     case 'task_pause_failed':
       if (task.state === 'running') delete task.pauseRequested;
@@ -97,6 +105,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
     case 'task_resumed':
       if (task.state === 'paused') {
         task.state = 'running';
+        task.runSince = at;
         delete task.pauseRequested;
         delete task.resumeRequested;
       }
@@ -134,6 +143,18 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       return;
     }
   }
+}
+
+/** Adds the running interval under way to the time the task has run. */
+function stopClock(task: TaskRecord, at: number): void {
+  if (task.runSince === undefined) return;
+  task.runMs += Math.max(0, at - task.runSince);
+  delete task.runSince;
+}
+
+/** How long the task has run as of `now`, the interval under way included. */
+export function runTimeMs(task: Pick<TaskRecord, 'runMs' | 'runSince'>, now: number): number {
+  return task.runMs + (task.runSince === undefined ? 0 : Math.max(0, now - task.runSince));
 }
 
 export function reduce(events: Iterable<StoredEvent>): TaskMap {
