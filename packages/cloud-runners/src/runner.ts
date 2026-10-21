@@ -829,31 +829,29 @@ class Run implements RunHandle {
       });
 
     const sdk = vendor.name === 'claude-agent-sdk' ? fleet.options.agentSdk : undefined;
+    // Whatever the CLI is, it runs the agent's code: as an account of its own, never the sandbox
+    // user, who holds the channel the SDK trusts, the task's files and the egress rules. A box
+    // without that account, or one that does not keep it out, runs nothing.
     const channel = fleet.options.agentChannel;
-    if (sdk) {
-      // The SDK trusts what arrives on the CLI's stdin, so it is used only on a box that keeps
-      // that channel from the agent's own processes.
-      if (channel === undefined) {
-        return {
-          ok: false,
-          reason:
-            'the agent SDK needs an agent channel (a separate account for the agent) and none is configured',
-        };
-      }
-      try {
-        await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
-        await this.guard(machine.prepareAgent(spec.taskId, channel.group, this.signal));
-      } catch (error) {
-        if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
-        return { ok: false, reason: this.scrubForReader(errorMessage(error)) };
-      }
+    if (channel === undefined) {
+      return {
+        ok: false,
+        reason: `the ${vendor.binary} CLI needs an agent channel (a separate account for the agent) and none is configured`,
+      };
+    }
+    try {
+      await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
+      await this.guard(machine.prepareAgent(spec.taskId, channel.group, this.signal));
+    } catch (error) {
+      if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
+      return { ok: false, reason: this.scrubForReader(errorMessage(error)) };
     }
     const reader = this.openReader();
     let drive: Drive;
     try {
       const mirror = sdk ? await this.prepareMirror(machine, resumeSessionId) : undefined;
       drive = sdk
-        ? await this.driveAgentSdk(sdk, reader, channel as AgentChannel, {
+        ? await this.driveAgentSdk(sdk, reader, channel, {
             prompt,
             run,
             dir,
@@ -868,14 +866,17 @@ class Run implements RunHandle {
             launchRun(
               buildRunScript({
                 preamble: preambleFor(vendor),
-                command: vendor.command({
-                  prompt,
-                  ...(resumeSessionId ? { resumeSessionId } : {}),
-                  ...(mcpUrl ? { mcpUrl } : {}),
-                  ...(model ? { model } : {}),
-                  ...(spec.effort ? { effort: spec.effort } : {}),
-                  ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
-                }),
+                command: asAgent(
+                  vendor.command({
+                    prompt,
+                    ...(resumeSessionId ? { resumeSessionId } : {}),
+                    ...(mcpUrl ? { mcpUrl } : {}),
+                    ...(model ? { model } : {}),
+                    ...(spec.effort ? { effort: spec.effort } : {}),
+                    ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
+                  }),
+                  channel,
+                ),
               }),
             ),
           );
