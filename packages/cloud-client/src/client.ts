@@ -15,6 +15,7 @@ import {
   type MemoryProfile,
   type Mode,
   type ProjectView,
+  type SuggestionsView,
   type RunTimeline,
   type SourceListing,
   type SourcePreview,
@@ -254,6 +255,23 @@ export class CloudClient {
       'projects',
     );
   }
+  /** The project's suggestion switches; `Unsupported` where cards are off or the project is not the invite's. */
+  async listSuggestions(projectId: string): Promise<SuggestionsView> {
+    const result = await this.request<{ suggestions: SuggestionsView }>(
+      `${routes.projects}/${encodeURIComponent(projectId)}/suggestions`,
+      {},
+      'suggestions',
+    );
+    return { kinds: Array.isArray(result.suggestions?.kinds) ? result.suggestions.kinds : [] };
+  }
+  /** Turns one kind of suggestion on or off for a project. */
+  setSuggestionKind(projectId: string, kind: string, enabled: boolean) {
+    return this.request<{ kind: string; enabled: boolean }>(
+      `${routes.projects}/${encodeURIComponent(projectId)}/suggestions`,
+      { method: 'PATCH', body: JSON.stringify({ kind, enabled }) },
+      'suggestions',
+    );
+  }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {
     const bytes = new TextEncoder().encode(this.token);
@@ -290,8 +308,12 @@ export class CloudClient {
     return { kind: 'text', name, text: await response.text() };
   }
   /** The run of a task from its log: turns, steps, cost over time. */
-  timeline(task: string) {
-    return this.request<{ timeline: RunTimeline }>(routes.timeline(task));
+  timeline(task: string, page: { after?: number; limit?: number } = {}) {
+    const query = new URLSearchParams();
+    if (page.after !== undefined) query.set('after', String(page.after));
+    if (page.limit !== undefined) query.set('limit', String(page.limit));
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return this.request<{ timeline: RunTimeline }>(`${routes.timeline(task)}${suffix}`);
   }
   /**
    * Tells the agent working on a task something. It reads it after the step it is in. The same

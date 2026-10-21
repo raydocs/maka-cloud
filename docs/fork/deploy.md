@@ -238,9 +238,19 @@ and the sandbox, on `app.localhost`, `mcp.localhost` and `models.localhost` with
 certificate authority, and runs the whole first-user flow on them: sign in with an invite, a task and
 its result card, an approval answered once, a restart in the middle of a task, a backup and a restore.
 CI runs it on every pull request and daily (`.github/workflows/fork-deploy-rehearsal.yml`); to run it
-by hand, see `deploy/rehearsal/README.md`. It costs nothing and uses no key. What it does not cover is
+by hand, see `deploy/rehearsal/README.md`. It runs in its own Compose project (`maka-rehearsal`), with its
+own volumes and image tags, and refuses to touch anything else, so it cannot stop or delete a deployment
+on the same host. It costs nothing and uses no key. What it does not cover is
 the real model, the real sandbox, GitHub, a real certificate and a real domain: the first live run
 still needs everything under "First live run: what you provide".
+
+## What goes into an image
+
+The Docker build context is an allowlist (`.dockerignore`): the root manifests, `packages/`, the one
+script the core package's build runs and `deploy/Caddyfile`. The Dockerfile copies those paths by
+name, never the whole context. An `.env`, an `.npmrc` with a registry token or a key left in the
+checkout is not sent to the build and is in no layer. `packages/cloud-host/src/__tests__/docker-context.test.ts`
+checks the context against the tracked files and a list of secret-shaped names.
 
 ## The TLS proxy
 
@@ -368,7 +378,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_TASK_TURN_USD` | the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit |
 | `MAKA_CLOUD_TASK_RUN_HOURS` | how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168) |
 | `MAKA_CLOUD_TIMELINE_CONTENT` | set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing |
-| `MAKA_CLOUD_AGENT_USER` | the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly |
+| `MAKA_CLOUD_AGENT_USER` | the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started |
 | `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
 | `MAKA_CLOUD_SPEND_ALERT_USD` | send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push |
 | `MAKA_CLOUD_OWNER_INVITE` | the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app |
@@ -381,7 +391,10 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `ANTHROPIC_BASE_URL` | Messages API base URL, for the conductor and the model gateway |
 | `MAKA_CLOUD_LLM_CONNECTION_ID` | stable id of the conductor’s model connection |
 | `INSTABOX_API_KEY` | required: sandbox API key |
-| `MAKA_CLOUD_SANDBOXES` | required: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks |
+| `MAKA_CLOUD_SANDBOXES` | required unless MAKA_CLOUD_BOXES=1: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks |
+| `MAKA_CLOUD_BOXES` | 1: the server makes, sleeps and deletes the sandboxes itself, a pool per invite, instead of a fixed machine per invite (do not set MAKA_CLOUD_SANDBOXES); needs MAKA_CLOUD_BOX_TEMPLATE |
+| `MAKA_CLOUD_BOX_TEMPLATE` | the sandbox template id new boxes start from; required with MAKA_CLOUD_BOXES=1 |
+| `MAKA_CLOUD_BOX_MAX` | the most boxes one invite may have (1 to 32, default 3); when instabox refuses a create the task waits for a free box of its invite |
 | `INSTABOX_API_URL` | sandbox API base URL |
 | `OPENAI_API_KEY` | the model gateway’s key for Codex runs |
 | `OPENAI_BASE_URL` | Responses API base URL for the model gateway |
@@ -404,6 +417,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
+| `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 
@@ -470,14 +484,23 @@ outside the owner, so the conversation is marked as such. A run has the duty's
 authority level for its whole life and a budget it cannot raise. The duties
 database is `duties.db` in the data directory and is part of the daily backup.
 
-### Claude through the Agent SDK
+### The agent account, and Claude through the Agent SDK
 
-Set `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` to run Claude tasks through the Agent SDK:
+Every CLI runs as an account that is not the sandbox user: the sandbox user holds the channel the
+SDK trusts, the task's files and the egress rules, and the agent's code must not be able to touch
+them. A host without `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` starts no CLI (Claude or
+Codex): the run fails at once and says so. Those two also run Claude tasks through the Agent SDK:
 the step log, resume after a restart and the stored conversation (`transcripts.db` in the data
 directory, part of the daily backup) need it. The box image must have that account (no sudo, not the
 sandbox user), a group the sandbox user shares with it, a `claude` binary it can read, and
 passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
-that fails the check refuses the turn with the reason. Unset, Claude runs the CLI directly as before.
+that fails the check refuses the turn with the reason.
+
+The check also tries the firewall as that account: it may not run anything through sudo (`sudo -n -l`
+must fail) and must not be able to create an iptables or ip6tables chain, so code the agent runs
+cannot take the egress rules away. The server itself starts nothing as the sandbox user either: a run
+whose command is not handed to the agent account is refused before the box is touched (the pinned
+CLI install, which writes the sandbox user's own `~/.maka-cli`, is the one exception).
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns

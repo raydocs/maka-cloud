@@ -16,15 +16,14 @@ work="${MAKA_REHEARSAL_DIR:-$(mktemp -d)}"
 mkdir -p "$work"
 work="$(cd "$work" && pwd)"
 
-compose() {
-  docker compose -f "$here/../compose.yaml" -f "$here/compose.yaml" \
-    --env-file "$here/compose.env" "$@"
-}
+# shellcheck source=lib.sh
+. "$here/lib.sh"
 export MAKA_CLOUD_ENV_FILE="$work/server.env"
 
 # Compose reads the server's env file before it runs anything, so it exists first.
 { cat "$here/server.env"; echo "MAKA_CLOUD_SANDBOXES='{}'"; } > "$work/server.env"
 
+guard_rehearsal
 compose build
 
 # The invite lives in the server's data volume, so it is made there before the first start.

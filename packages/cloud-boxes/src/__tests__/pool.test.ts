@@ -47,6 +47,33 @@ describe('BoxPool', () => {
     assert.equal((await other).machineId, lease1.machineId);
   });
 
+  it('keeps a box that instabox accepted but could not be read back, as lost, so later tasks are not refused', async () => {
+    const t = setup();
+    const real = t.fleet.getMachine.bind(t.fleet);
+    let failed = false;
+    t.fleet.getMachine = async (id: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('network dropped');
+      }
+      return await real(id);
+    };
+    await assert.rejects(t.pool.acquire({ tenantId: A, taskId: 't1' }), /network dropped/);
+    const [kept] = t.pool.state();
+    assert.equal(kept?.state, 'lost', 'the slot keeps the machine instead of forgetting it');
+    assert.ok(kept?.machineId);
+    assert.ok(t.fleet.machines.has(kept?.machineId as string));
+    // The real machine still carries t1's label; the next tasks take other slots and are not refused.
+    const second = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    const third = await t.pool.acquire({ tenantId: A, taskId: 't3' });
+    assert.notEqual(second.machineId, kept?.machineId);
+    assert.notEqual(third.machineId, kept?.machineId);
+    // The next cleanup looks at it at once and puts it back into use.
+    const cleaned = await t.pool.cleanup();
+    assert.deepEqual(cleaned.recovered, [kept?.machineId]);
+    assert.equal(t.pool.state().find((row) => row.machineId === kept?.machineId)?.state, 'ready');
+  });
+
   it('gives each task its own box, makes the next slot only when none is free, and queues the rest first come first served', async () => {
     const { pool, fleet } = setup();
     const leases = [];
@@ -252,6 +279,80 @@ describe('BoxPool', () => {
     });
   });
 
+  describe('a box whose identity changed under the pool', () => {
+    it('is not handed out and not relabelled: it is refused, and the task gets another box', async () => {
+      const { pool, fleet, warnings } = setup();
+      const first = await pool.acquire({ tenantId: A, taskId: 't1' });
+      await first.release();
+      const machine = fleet.machines.get(first.machineId);
+      assert.ok(machine);
+      // Someone relabels the idle box for another invite.
+      machine.metadata = { ...machine.metadata, [LABEL.invite]: B };
+      const lease = await pool.acquire({ tenantId: A, taskId: 't2' });
+      assert.notEqual(lease.machineId, first.machineId, 'A is not given the box labelled for B');
+      assert.equal(
+        fleet.machines.get(first.machineId)?.metadata?.[LABEL.invite],
+        B,
+        'its labels were not overwritten',
+      );
+      assert.equal(pool.state().find((row) => row.machineId === first.machineId)?.state, 'refused');
+      assert.deepEqual(
+        pool.refusedBoxes().map((entry) => entry.machineId),
+        [first.machineId],
+      );
+      assert.ok(warnings.some((w) => w.includes('refused box')));
+      await lease.release();
+      assert.equal(
+        fleet.machines.get(first.machineId)?.metadata?.[LABEL.invite],
+        B,
+        'still untouched',
+      );
+    });
+
+    it('is refused when another live task holds it, and its label is left alone', async () => {
+      const { pool, fleet, live } = setup();
+      const first = await pool.acquire({ tenantId: A, taskId: 't1' });
+      await first.release();
+      live.add('elsewhere');
+      const machine = fleet.machines.get(first.machineId);
+      assert.ok(machine);
+      machine.metadata = { ...machine.metadata, [LABEL.task]: 'elsewhere' };
+      const lease = await pool.acquire({ tenantId: A, taskId: 't2' });
+      assert.notEqual(lease.machineId, first.machineId);
+      assert.equal(fleet.machines.get(first.machineId)?.metadata?.[LABEL.task], 'elsewhere');
+    });
+
+    it('is not put to sleep: the sweep refuses it before the checkpoint', async () => {
+      const t = setup();
+      const first = await t.pool.acquire({ tenantId: A, taskId: 't1' });
+      await first.release();
+      t.clock.now += 30 * 60_000;
+      const machine = t.fleet.machines.get(first.machineId);
+      assert.ok(machine);
+      machine.metadata = { ...machine.metadata, [LABEL.slot]: '2' };
+      assert.deepEqual(await t.pool.sweepIdle(), []);
+      assert.equal(t.fleet.execLog.length, 0, 'no checkpoint ran in it');
+      assert.equal(t.fleet.callsTo('suspendMachine').length, 0);
+      assert.equal(t.pool.state()[0]?.state, 'refused');
+    });
+
+    it('is refused, not marked lost, when a restore finds it broken under other labels', async () => {
+      const { pool, fleet } = setup({ maxPerInvite: 2 });
+      const old = await pool.acquire({ tenantId: A, taskId: 't1' });
+      const machine = fleet.machines.get(old.machineId);
+      assert.ok(machine);
+      machine.state = 'error';
+      machine.metadata = { ...machine.metadata, [LABEL.invite]: B };
+      const lease = await pool.restoreFromSnapshot({
+        tenantId: A,
+        taskId: 't1',
+        snapshotId: 'sn_9',
+      });
+      assert.notEqual(lease.machineId, old.machineId);
+      assert.equal(pool.state().find((row) => row.machineId === old.machineId)?.state, 'refused');
+    });
+  });
+
   describe('finding boxes again', () => {
     it('uses only boxes whose labels all match, and re-claims a live task but frees a dead one', async () => {
       const { pool, fleet, live, warnings } = setup();
@@ -289,6 +390,41 @@ describe('BoxPool', () => {
       const b = await pool.acquire({ tenantId: B, taskId: 'b1' });
       assert.ok(![wrongName.id, outOfRange.id, duplicate.id, noInvite.id].includes(b.machineId));
       assert.equal(labelsOf(fleet, b.machineId)?.[LABEL.invite], B);
+    });
+
+    it('keeps a paused box suspended when its stale task label is cleared, so the next task wakes and guards it', async () => {
+      const { pool, fleet, guarded } = setup();
+      const paused = fleet.seed({
+        name: boxName(A, 0),
+        state: 'suspended',
+        metadata: { [LABEL.pool]: '1', [LABEL.invite]: A, [LABEL.slot]: '0', [LABEL.task]: 'dead' },
+      });
+      await pool.knownMachines();
+      assert.equal(pool.state()[0]?.state, 'suspended');
+      await flush();
+      assert.equal(
+        labelsOf(fleet, paused.id)?.[LABEL.task],
+        undefined,
+        'the stale label is cleared',
+      );
+      const lease = await pool.acquire({ tenantId: A, taskId: 't1' });
+      assert.equal(lease.machineId, paused.id);
+      assert.equal(fleet.callsTo('ensureRunning').length, 1, 'it was woken');
+      assert.deepEqual(guarded, [{ machineId: paused.id, reason: 'wake' }]);
+
+      // The same through reconcile: a paused box adopted for a task that has since ended.
+      const other = setup();
+      other.live.add('old');
+      const adoptedFleet = other.fleet;
+      adoptedFleet.seed({
+        name: boxName(A, 1),
+        state: 'suspended',
+        metadata: { [LABEL.pool]: '1', [LABEL.invite]: A, [LABEL.slot]: '1', [LABEL.task]: 'old' },
+      });
+      await other.pool.knownMachines();
+      other.live.clear();
+      await other.pool.reconcile();
+      assert.equal(other.pool.state()[0]?.state, 'suspended');
     });
 
     it('adopts the box a repeated create finds by name, and guards it before use', async () => {
@@ -383,6 +519,29 @@ describe('BoxPool', () => {
       );
       assert.equal(fleet.callsTo('createMachine').length, 1);
       assert.equal(pool.state()[0]?.state, 'lost');
+    });
+
+    it('dates the broken box it leaves behind, so cleanup deletes it and the slot comes back', async () => {
+      const { pool, fleet, clock } = setup({ maxPerInvite: 1 });
+      const old = await pool.acquire({ tenantId: A, taskId: 't1' });
+      const broken = fleet.machines.get(old.machineId);
+      if (broken) broken.state = 'error';
+      await assert.rejects(
+        pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' }),
+        NoFreeBoxError,
+      );
+      // Repeated restores do not use up more slots, and the broken one is not forgotten.
+      assert.equal(pool.state().length, 1);
+      clock.now += 24 * 60 * 60_000;
+      const result = await pool.cleanup();
+      assert.deepEqual(result.deleted, [old.machineId]);
+      assert.equal(pool.state().length, 0, 'the slot is free again');
+      const lease = await pool.restoreFromSnapshot({
+        tenantId: A,
+        taskId: 't1',
+        snapshotId: 'sn_9',
+      });
+      assert.notEqual(lease.machineId, old.machineId);
     });
 
     it('does not wait for a slot: another task holding the only box fails the restore at once', async () => {

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { builderLabels, builderName, LABEL } from '../labels.js';
+import { BoxPool } from '../pool.js';
 import { BoxRefusedError, NoFreeBoxError } from '../types.js';
 import { repoKey, SetupSnapshots } from '../snapshots.js';
-import { flush, labelsOf, setup } from './support.js';
+import { AGENT, flush, labelsOf, setup } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
 const B = 'inv_bbbbbbbbbbbb';
@@ -158,6 +159,63 @@ describe('.agents/resume', () => {
     assert.equal((await other).machineId, t.machineId, 't2 gets the box once t1 is done');
   });
 
+  it('runs as the unprivileged agent account, after checking that account on this box once', async () => {
+    const t = await sleepingBox();
+    const first = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    const [run] = resumeRuns(t);
+    assert.match(run?.cmd ?? '', /^sudo -n -u 'maka-agent' --preserve-env -- /);
+    assert.match(run?.cmd ?? '', /\.agents\/resume/);
+    assert.deepEqual(t.fleet.agentChecks, [{ machineId: t.machineId, user: 'maka-agent' }]);
+    await first.release();
+    t.clock.now += 21 * MIN;
+    await t.pool.sweepIdle();
+    await t.pool.acquire({ tenantId: A, taskId: 't3' });
+    assert.equal(resumeRuns(t).length, 2, 'it runs again after the next wake');
+    assert.equal(t.fleet.agentChecks.length, 1, 'but the account is checked once per box');
+  });
+
+  it('does not run the repository script, and says so, when the account can use sudo or has capabilities', async () => {
+    for (const facts of [
+      'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=yes\nFACT agent_nocaps=yes\n',
+      'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=no\nFACT agent_nocaps=no\n',
+      'FACT dev_uid=1000\nFACT agent_uid=1000\nFACT agent_sudo=no\nFACT agent_nocaps=yes\n',
+      '',
+    ]) {
+      const failures: string[] = [];
+      const t = setup({
+        setupOf: async () => choice(),
+        onResumeFailure: (_id, reason) => failures.push(reason),
+      });
+      t.fleet.agentFacts = facts;
+      const lease = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+      assert.ok(lease.machineId, 'the box is still handed out');
+      assert.equal(resumeRuns(t).length, 0, 'but no repository code ran on it');
+      assert.match(failures[0] ?? '', /agent account/);
+    }
+  });
+
+  it('runs no repository script at all when no agent account is configured', async () => {
+    const failures: string[] = [];
+    const t = setup({
+      setupOf: async () => choice(),
+      onResumeFailure: (_id, reason) => failures.push(reason),
+    });
+    // A pool built without the account, over the same fleet.
+    const bare = new BoxPool({
+      api: t.fleet,
+      source: () => ({ templateId: 't_node' }),
+      isTaskLive: () => false,
+      setupOf: async () => choice(),
+      onResumeFailure: (_id, reason) => failures.push(reason),
+      timers: t.timers,
+      now: () => t.clock.now,
+    });
+    await bare.acquire({ tenantId: A, taskId: 't1' });
+    assert.equal(resumeRuns(t).length, 0);
+    assert.equal(t.fleet.agentChecks.length, 0);
+    assert.match(failures[0] ?? '', /no unprivileged agent account/);
+  });
+
   it('runs on a box made from the setup snapshot, after the guard', async () => {
     const t = setup({ setupOf: async () => choice() });
     const order: string[] = [];
@@ -298,6 +356,85 @@ describe('boxes to build setup snapshots in', () => {
     assert.equal([...t.fleet.machines.values()][0]?.state, 'deleted');
   });
 
+  /** Makes the wait for a delete operation a handshake: it ends when the test says. */
+  function holdDeletes(t: ReturnType<typeof setup>) {
+    const real = t.fleet.waitForOperation.bind(t.fleet);
+    const gates: { id: string; open: () => void }[] = [];
+    let reached!: () => void;
+    const first = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const deleting = new Set<string>();
+    const realDelete = t.fleet.deleteMachine.bind(t.fleet);
+    t.fleet.deleteMachine = async (id: string) => {
+      const operation = await realDelete(id);
+      deleting.add(operation.id);
+      return operation;
+    };
+    t.fleet.waitForOperation = async (id: string) => {
+      if (deleting.has(id)) {
+        await new Promise<void>((resolve) => {
+          gates.push({ id, open: resolve });
+          reached();
+        });
+      }
+      return await real(id);
+    };
+    return { first, openAll: () => gates.splice(0).forEach((gate) => gate.open()) };
+  }
+
+  it('waits for instabox to finish deleting before it says the builder is given back', async () => {
+    const t = setup();
+    const gate = holdDeletes(t);
+    const builder = await t.pool.builderBoxes().lease({ tenantId: A, job: 'setup-abc' });
+    let given = false;
+    const release = Promise.resolve(builder.release()).then(() => {
+      given = true;
+    });
+    await gate.first;
+    await flush();
+    assert.equal(given, false, 'the delete operation is still running');
+    gate.openAll();
+    await release;
+    assert.equal(given, true);
+  });
+
+  it('removes a builder it could not delete before the next build, and refuses the build while it cannot', async () => {
+    const t = setup();
+    const boxes = t.pool.builderBoxes();
+    const first = await boxes.lease({ tenantId: A, job: 'setup-abc' });
+    const realDelete = t.fleet.deleteMachine.bind(t.fleet);
+    let failing = true;
+    t.fleet.deleteMachine = async (id: string) => {
+      if (failing) throw new Error('instabox is unreachable');
+      return await realDelete(id);
+    };
+    await first.release();
+    assert.equal(nameOf(t, first.machineId)?.state, 'running', 'it is still there');
+    await assert.rejects(boxes.lease({ tenantId: A, job: 'setup-def' }), NoFreeBoxError);
+    assert.equal(t.fleet.callsTo('createMachine').length, 1, 'nothing is made over the name');
+    failing = false;
+    const second = await boxes.lease({ tenantId: A, job: 'setup-def' });
+    assert.equal(nameOf(t, first.machineId)?.state, 'deleted');
+    assert.notEqual(second.machineId, first.machineId);
+  });
+
+  it('waits for the delete of a builder left by an earlier process before the pool starts', async () => {
+    const t = setup();
+    const gate = holdDeletes(t);
+    const orphan = t.fleet.seed({ name: builderName(A), metadata: builderLabels(A, 'setup-old') });
+    let started = false;
+    const acquire = t.pool.acquire({ tenantId: A, taskId: 't1' }).then(() => {
+      started = true;
+    });
+    await gate.first;
+    await flush();
+    assert.equal(started, false, 'discovery is still waiting for the delete');
+    gate.openAll();
+    await acquire;
+    assert.equal(orphan.state, 'deleted');
+  });
+
   it('is deleted at the next start when a process died with it, and nothing else with the pool label is', async () => {
     const t = setup();
     const orphan = t.fleet.seed({ name: builderName(A), metadata: builderLabels(A, 'setup-old') });
@@ -323,6 +460,7 @@ describe('boxes to build setup snapshots in', () => {
     const snapshots = new SetupSnapshots({
       api: t.fleet,
       boxes: t.pool.builderBoxes(),
+      agent: AGENT,
       guard: async () => {
         order.push('guard:snapshots');
       },

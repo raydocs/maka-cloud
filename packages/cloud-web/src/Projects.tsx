@@ -7,6 +7,7 @@ import {
   type DutyView,
   errorText,
   type ProjectView,
+  type SuggestionKindView,
   triggerWords,
   Unsupported,
 } from '@maka-cloud/client';
@@ -54,6 +55,106 @@ function DutyRow({
         </button>
       )}
     </li>
+  );
+}
+
+function SuggestionRow({
+  kind,
+  busy,
+  onToggle,
+}: {
+  kind: SuggestionKindView;
+  busy: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const shown = kind.accepted + kind.dismissed + kind.ignored;
+  return (
+    <li className="duty">
+      <div className="duty-text">
+        <strong>{displayText(kind.label)}</strong>
+        <span className="muted">
+          {shown === 0
+            ? 'Nothing suggested yet.'
+            : `${kind.accepted} done · ${kind.dismissed} not now · ${kind.ignored} unanswered`}
+        </span>
+        {kind.enabled && kind.backedOff && (
+          <span className="muted">Shown less often: the last few went unanswered.</span>
+        )}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={kind.enabled}
+        aria-label={`${displayText(kind.label)} suggestions are ${kind.enabled ? 'on' : 'off'}`}
+        className={`switch${kind.enabled ? ' on' : ''}`}
+        disabled={busy}
+        onClick={() => onToggle(!kind.enabled)}
+      >
+        <span aria-hidden="true" className="switch-knob" />
+      </button>
+    </li>
+  );
+}
+
+/**
+ * What the employee may suggest in a project, one switch for each kind. Hidden where the server has
+ * no suggestions (cards off), so a server without them shows nothing new.
+ */
+function Suggestions({ client, projectId }: { client: CloudClient; projectId: string }) {
+  const [kinds, setKinds] = useState<SuggestionKindView[] | undefined>();
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const load = useCallback(async () => {
+    try {
+      setKinds((await client.listSuggestions(projectId)).kinds);
+    } catch (e) {
+      if (!(e instanceof Unsupported)) setError(errorText(e));
+    }
+  }, [client, projectId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function toggle(kind: SuggestionKindView, enabled: boolean) {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      await client.setSuggestionKind(projectId, kind.kind, enabled);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      await load();
+      pending.current = false;
+      setBusy(false);
+    }
+  }
+
+  if (kinds === undefined || kinds.length === 0) return null;
+  return (
+    <>
+      <h3>Suggestions</h3>
+      <p className="muted">
+        Things it may notice and offer to do. Nothing starts until you tap Do it.
+      </p>
+      {error && (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+      <ul className="duties" aria-label="Suggestions">
+        {kinds.map((kind) => (
+          <SuggestionRow
+            key={kind.kind}
+            kind={kind}
+            busy={busy}
+            onToggle={(enabled) => void toggle(kind, enabled)}
+          />
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -140,6 +241,7 @@ export function Projects({ client }: { client: CloudClient }) {
               ))}
             </ul>
           )}
+          <Suggestions client={client} projectId={project.projectId} />
         </section>
       ))}
     </div>

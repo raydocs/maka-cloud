@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { backup as sqliteBackup, type DatabaseSync } from 'node:sqlite';
 import { buildBrief } from './brief.js';
+import { CardStore } from './cards/store.js';
+import type { CardKind } from './cards/kinds.js';
 import { openDatabase, transaction } from './db.js';
 import { type Classified, type EventFacts, parseEvent, type ProjectView } from './events.js';
 import { type DutyProposal, proposeDuties, type RepoFacts, type RepoInspector } from './propose.js';
@@ -34,6 +36,8 @@ export interface EngineOptions {
    * default refuses every project, so registration is a decision the operator makes in code.
    */
   allowProject?: (input: { owner: string; repo: string; installationId: number }) => boolean;
+  /** The kinds of card (T30) a scan may propose. Default: every kind whose tool exists. */
+  cardKinds?: ReadonlySet<CardKind>;
   /** Chooses the duties to propose from what the inspector found. Default: `proposeDuties`. */
   proposer?: (facts: RepoFacts) => DutyProposal;
   now?: () => number;
@@ -174,6 +178,8 @@ export class DutyEngine {
   private readonly allowProject: NonNullable<EngineOptions['allowProject']>;
   private readonly listeners = new Set<() => void>();
   private closed = false;
+  /** The cards projects have been offered (T30). Shares this database and its single owner. */
+  readonly cards: CardStore;
 
   constructor(private readonly options: EngineOptions) {
     if (options.webhookSecret.length < MIN_SECRET_LENGTH) {
@@ -183,6 +189,15 @@ export class DutyEngine {
     this.now = options.now ?? Date.now;
     this.allowProject = options.allowProject ?? (() => false);
     this.db = openDatabase(options.dbPath);
+    this.cards = new CardStore(this.db, {
+      now: this.now,
+      // Read each time, like every other route: a project the operator stopped permitting offers nothing.
+      projectOk: (owner, projectId) => {
+        const project = this.projectById(projectId);
+        return project !== undefined && project.owner === owner && this.permitted(project);
+      },
+      ...(options.cardKinds === undefined ? {} : { enabled: options.cardKinds }),
+    });
     // A launch a crash cut short: the launcher is idempotent per request, so it runs again.
     this.db.exec("UPDATE run_requests SET state = 'pending' WHERE state = 'launching'");
     this.parkMismatchedProjects();
@@ -593,6 +608,17 @@ export class DutyEngine {
       )
       .all(owner) as unknown as ProjectRow[];
     return rows.map((row) => this.projectView(row));
+  }
+
+  /** Every project that is not removed, with its owner: what the card scheduler walks. No view of a project leaves here. */
+  activeProjects(): Array<{ owner: string; projectId: string }> {
+    return (
+      this.db
+        .prepare(
+          'SELECT owner, project_id FROM projects WHERE removed = 0 ORDER BY created_at, project_id',
+        )
+        .all() as unknown as Array<{ owner: string; project_id: string }>
+    ).map((row) => ({ owner: row.owner, projectId: row.project_id }));
   }
 
   project(owner: string, projectId: string): Project | undefined {

@@ -23,6 +23,11 @@ export interface TaskStore {
   read(afterSeq?: number): Promise<StoredEvent[]>;
   /** The log entries of one task in order; empty for an id that was never created. */
   readTask(taskId: TaskId): StoredEvent[];
+  /**
+   * The same entries, read a page at a time: the caller never holds the whole log of a task that
+   * has run for long, and may stop reading whenever it has enough.
+   */
+  iterateTask(taskId: TaskId): Iterable<StoredEvent>;
   /** Direct children of a task in creation order, whatever their state. */
   childrenOf(taskId: TaskId): TaskId[];
   /** Tasks that have no terminal event yet. */
@@ -114,6 +119,11 @@ export class MemoryTaskStore implements TaskStore {
 
   readTask(taskId: TaskId): StoredEvent[] {
     return [...(this.rows.get(taskId)?.events ?? [])];
+  }
+
+  *iterateTask(taskId: TaskId): Iterable<StoredEvent> {
+    const events = this.rows.get(taskId)?.events;
+    if (events) yield* events;
   }
 
   childrenOf(taskId: TaskId): TaskId[] {

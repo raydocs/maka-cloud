@@ -21,7 +21,7 @@ import {
   type ToolEffect,
 } from './guard.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
-import type { Manifest, Playbook } from './playbooks.js';
+import type { Manifest, Playbook, VerifyContext } from './playbooks.js';
 import { reviewLinksOf } from './reviewer.js';
 import { printable, shownValue } from './shown.js';
 import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
@@ -73,6 +73,8 @@ export interface ToolHost {
   decidedOnTaint(turn: ActiveTurn): boolean;
   /** Whether who approved a held call may still have it run (their invite is active and owns the conversation). */
   approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
+  /** Whether a text carries a key or token (see `ConductorOptions.carriesSecret`). */
+  carriesSecret(text: string): boolean;
 }
 
 /**
@@ -195,8 +197,12 @@ export function conductorTools(
     const playbook = playbookOf(host.state.run(turn.runId)?.playbook ?? null);
     if (!playbook) return view;
     const taskId = typeof view?.taskId === 'string' ? view.taskId : undefined;
-    const mode = taskId === undefined ? undefined : host.state.delegationOfTask(taskId)?.mode;
-    return { ...view, verification: playbook.verify(manifest, mode ? { mode } : {}) };
+    const delegation = taskId === undefined ? undefined : host.state.delegationOfTask(taskId);
+    const context: VerifyContext = {
+      ...(delegation?.mode ? { mode: delegation.mode } : {}),
+      ...(delegation ? { otherRunnerInput: delegation.otherRunnerInput } : {}),
+    };
+    return { ...view, verification: playbook.verify(manifest, context) };
   };
 
   /**
@@ -204,28 +210,48 @@ export function conductorTools(
    * judgments must not be the one that wrote them. The tasks are the ones the brief's
    * `maka-inputs:` lines name; their runner is read from the orchestrator, and a draft
    * whose runner cannot be read refuses the delegation instead of letting it through.
+   *
+   * In a deep research run the rule does not depend on what the files are called: a delegation
+   * that builds on a task run by the same runner must also take files from a task run by the
+   * other runner, so one runner cannot do the draft, its review and the rerun by itself. Returns
+   * whether the brief takes files from a task on the other runner.
    */
   const requireOtherRunner = async (
     turn: ActiveTurn,
     ctx: MakaToolContext,
     args: { runner: string; brief: string },
-  ): Promise<void> => {
-    for (const source of reviewLinksOf(args.brief).others) {
+    deepResearch: boolean,
+  ): Promise<boolean> => {
+    const links = reviewLinksOf(args.brief);
+    const runners = new Map<string, string>();
+    for (const source of links.sources) {
+      const mustKnow = deepResearch || links.others.includes(source);
       const result = await turn.link.call('task_status', { taskId: source }, signalOf(turn, ctx));
       const runner = result.isError ? undefined : result.structured?.runner;
       if (typeof runner !== 'string') {
+        if (!mustKnow) continue;
         throw new ToolRefusal(
           'reviewer_unverifiable',
           `The runner of ${source} could not be read, so the review cannot be checked.`,
         );
       }
-      if (runner === args.runner) {
+      runners.set(source, runner);
+      if (links.others.includes(source) && runner === args.runner) {
         throw new ToolRefusal(
           'reviewer_same_runner',
           `${source} ran on ${runner}. The review must be done by, and used by, the other runner: delegate it there.`,
         );
       }
     }
+    const used = [...runners.values()];
+    const other = used.some((runner) => runner !== args.runner);
+    if (deepResearch && used.includes(args.runner) && !other) {
+      throw new ToolRefusal(
+        'reviewer_same_runner',
+        `Every task this brief builds on ran on ${args.runner}. In a deep task a review is made by the other runner: take its files too, or delegate this to the other runner.`,
+      );
+    }
+    return other;
   };
 
   const forward = async (
@@ -316,12 +342,23 @@ export function conductorTools(
         );
       }
       const chosen = chooseWorkMode(host, turn, args);
-      await requireOtherRunner(turn, ctx, args);
+      const otherRunnerInput = await requireOtherRunner(
+        turn,
+        ctx,
+        args,
+        playbook.id === 'research' && chosen?.mode === 'deep',
+      );
       // Check, reserve and store the delegation in one synchronous transaction,
       // before any await. From here on a stop finds the task by this key, even
       // if the response that names it never arrives.
       const key = `dlg_${randomUUID().replaceAll('-', '')}`;
-      const reserved = host.state.reserveDelegation(turn.runId, args.budgetUsd, key, chosen?.mode);
+      const reserved = host.state.reserveDelegation(
+        turn.runId,
+        args.budgetUsd,
+        key,
+        chosen?.mode,
+        otherRunnerInput,
+      );
       if (!reserved.ok) {
         if (reserved.reason === 'question_open') {
           throw new ToolRefusal(
@@ -540,6 +577,13 @@ export function conductorTools(
             action = ownerCall(held);
             const spec = extra.find((tool) => tool.name === held.tool);
             question = await approvalCard(spec, held.tool, held.args);
+            // The card is shown and bound as it is, so a card with a key in it is not asked at all.
+            if (host.carriesSecret(question) || host.carriesSecret(JSON.stringify(held.args))) {
+              throw new ToolRefusal(
+                'secret_in_call',
+                'The held call carries what looks like a key or token, and the approval card must show a call word for word, so it cannot be asked. Do not ask; tell the user the action was dropped and why. Keep secrets out of the call: name where the credential is kept instead.',
+              );
+            }
             note = args.question;
           }
           check = () => {

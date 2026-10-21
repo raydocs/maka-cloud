@@ -276,25 +276,26 @@ mkdir -p "$(dirname ${shq(marker)})"
       runToken: randomUUID(),
       workdir: machine.taskDir(dirName),
       rawLogs: false,
+      runsAs: 'sandbox-user',
     });
 
     const watch = this.poller.watch(machine, { dir: dirName, run });
     const deadline = this.now() + (this.options.setupTimeoutMs ?? SETUP_TIMEOUT_MS);
-    let output = '';
+    const output = new InstallOutput();
     let consumed = 0;
     try {
       for (;;) {
         if (this.now() > deadline) throw new Error('timed out');
         const update = await watch.next();
-        output = (output + update.data.toString('utf8')).slice(-INSTALL_OUTPUT_WINDOW);
+        output.push(update.data.toString('utf8'));
         consumed += update.data.length;
         const state = update.state;
         if (typeof state === 'object' && consumed >= update.size) {
           if (state.exit === 0) return;
-          throw new Error(`exit ${state.exit}: ${installOutputTail(output)}`);
+          throw new Error(`exit ${state.exit}: ${output.tail()}`);
         }
         if (state === 'dead' && consumed >= update.size)
-          throw new Error(`the install was killed: ${installOutputTail(output)}`);
+          throw new Error(`the install was killed: ${output.tail()}`);
       }
     } catch (error) {
       // Drop the lock so the next task tries again instead of waiting on a finished failure.
@@ -583,18 +584,58 @@ export interface SweepResult {
   failed: { machineId: string; taskId?: TaskId; error: string }[];
 }
 
-/** How much of an install's output is kept, before it is scrubbed and cut to its tail. */
-const INSTALL_OUTPUT_WINDOW = 4_000;
+/** How much of an install's output is kept, scrubbed, for the error that names it. */
 const INSTALL_OUTPUT_TAIL = 1_500;
+/** The most an unfinished line or private key block is held back before it is judged as it is. */
+const INSTALL_OUTPUT_HELD = 1_000_000;
 
 /**
- * What an install printed last, for the error that names it. The window starts in the middle of
- * a line when it is full, so that first part line goes: a piece of a key at its edge would be too
- * short for the scrubber to know. Scrubbed first, cut after.
+ * What an install printed, scrubbed as it arrives and only then cut to its tail. Cutting first
+ * would leave the body of a private key whose BEGIN line fell outside the kept part, and nothing
+ * would know it for a key. Complete lines are scrubbed and put away; an unfinished line, or a
+ * private key block still open, is held until it ends (the scrubber reads a whole block).
  */
-function installOutputTail(window: string): string {
-  const whole = window.length < INSTALL_OUTPUT_WINDOW;
-  const from = whole ? 0 : window.indexOf('\n') + 1;
-  const kept = from === 0 && !whole ? '' : window.slice(from);
-  return scrubSecretShapes(kept).trim().slice(-INSTALL_OUTPUT_TAIL);
+class InstallOutput {
+  private scrubbed = '';
+  private held = '';
+
+  push(chunk: string): void {
+    this.held += chunk;
+    // Everything before the last line break is a whole line, unless a key block is open in it.
+    const cut = this.held.lastIndexOf('\n') + 1;
+    const open = openBlockStart(this.held);
+    const upTo = open === undefined ? cut : Math.min(cut, open);
+    if (this.held.length > INSTALL_OUTPUT_HELD) {
+      this.release(this.held.length);
+      return;
+    }
+    if (upTo > 0) this.release(upTo);
+  }
+
+  private release(upTo: number): void {
+    this.scrubbed = `${this.scrubbed}${scrubSecretShapes(this.held.slice(0, upTo))}`.slice(
+      -INSTALL_OUTPUT_TAIL,
+    );
+    this.held = this.held.slice(upTo);
+  }
+
+  tail(): string {
+    // What is still held reads as it is: a key block never closed is scrubbed to the end.
+    return `${this.scrubbed}${scrubSecretShapes(this.held)}`.trim().slice(-INSTALL_OUTPUT_TAIL);
+  }
+}
+
+/** Where a private key block that has not ended yet starts, if one is open. */
+function openBlockStart(text: string): number | undefined {
+  const begin = /-----BEGIN [A-Z ]*PRIVATE KEY-----/gu;
+  let open: number | undefined;
+  for (let match = begin.exec(text); match; match = begin.exec(text)) {
+    const end = text.indexOf('-----END', match.index + match[0].length);
+    if (end === -1) {
+      open = match.index;
+      break;
+    }
+    begin.lastIndex = end;
+  }
+  return open;
 }

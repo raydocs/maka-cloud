@@ -5,7 +5,7 @@ import {
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
 import { scrubSecretShapes } from '@maka-cloud/orchestrator';
-import { PREPARE_AGENT_SCRIPT } from './agent-user.js';
+import { agentPrefix, PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
   FILE_CLEAN_SCRIPT,
@@ -26,6 +26,7 @@ import {
   TOOL_ABORT_SCRIPT,
   TOOL_CHECK_SCRIPT,
   TOOL_CHUNK_SCRIPT,
+  commandOfRunScript,
 } from './scripts.js';
 import { assertSafeId } from './shell.js';
 
@@ -63,6 +64,11 @@ export type StageResult =
 export type ResultRead = { ok: true; bytes: Buffer } | { ok: false; reason: string };
 
 interface ExecOptions {
+  /**
+   * Wake a paused sandbox and run the command again when it answers `machine_not_running`
+   * (default). Task code turns this off: after a wake its caller must look at the box again first.
+   */
+  wake?: boolean;
   envs?: Record<string, string>;
   stdin?: string;
   timeoutSeconds?: number;
@@ -76,6 +82,11 @@ interface ExecOptions {
 function commandOutputTail(result: { stderr: string; stdout: string }): string {
   const text = scrubSecretShapes(result.stderr).trim() || scrubSecretShapes(result.stdout).trim();
   return text.slice(-300);
+}
+
+/** The sandbox answered that it is not running; the command did not start. */
+function isAsleep(error: unknown): boolean {
+  return error instanceof InstaboxApiError && error.code === 'machine_not_running';
 }
 
 /** The scripts of this package run against one sandbox. No state beyond ids. */
@@ -111,9 +122,7 @@ export class RemoteMachine {
         try {
           await egress();
         } catch (error) {
-          if (!(error instanceof InstaboxApiError) || error.code !== 'machine_not_running') {
-            throw error;
-          }
+          if (!isAsleep(error)) throw error;
           // Asleep: wake it, and look again, because its rules may be gone.
           await this.client.ensureRunning(this.machineId);
           await egress();
@@ -169,7 +178,7 @@ export class RemoteMachine {
     try {
       return await this.client.exec(this.machineId, request, call);
     } catch (error) {
-      if (!(error instanceof InstaboxApiError) || error.code !== 'machine_not_running') throw error;
+      if (!isAsleep(error) || options.wake === false) throw error;
       await this.client.ensureRunning(this.machineId, call);
       return await this.client.exec(this.machineId, request, call);
     }
@@ -219,8 +228,27 @@ export class RemoteMachine {
     workdir: string;
     /** Keep the raw output in the memory-backed log directory (default), or next to the run. */
     rawLogs?: boolean;
+    /**
+     * Set only by the pinned CLI install, which runs as the sandbox user because it writes
+     * the sandbox user's own `~/.maka-cli`, which the agent's account cannot. Everything else is
+     * task code, and task code must not be able to change the firewall.
+     */
+    runsAs?: 'sandbox-user';
     signal?: AbortSignal;
   }): Promise<'started' | 'already' | 'cancelled'> {
+    // The sandbox user may change the egress rules (the guard does, through sudo); the agent's
+    // account may not. So no task code starts as the sandbox user: the script must hand its command
+    // to the agent's account, and a machine that has none starts nothing.
+    if (input.runsAs !== 'sandbox-user') {
+      if (this.agentUser === undefined) {
+        throw new Error('this sandbox has no agent account, so no task code starts in it');
+      }
+      if (!commandOfRunScript(input.script)?.startsWith(agentPrefix(this.agentUser))) {
+        throw new Error(
+          `the run ${input.run} would start as the sandbox user, who can change the firewall; task code runs as ${this.agentUser}`,
+        );
+      }
+    }
     const envs = {
       ...input.envs,
       MAKA_DIR: this.taskDir(input.dirName),
@@ -236,7 +264,7 @@ export class RemoteMachine {
     await this.guardEgress(input.signal);
     for (let attempt = 0; ; attempt++) {
       try {
-        const out = await this.execOk(LAUNCH_SCRIPT, { ...options, stdin: input.script });
+        const out = await this.startOnce(options, input.script, input.signal);
         if (out.includes('CANCELLED')) return 'cancelled';
         return out.includes('ALREADY') ? 'already' : 'started';
       } catch (error) {
@@ -250,6 +278,28 @@ export class RemoteMachine {
         if (state?.includes('LOCKED')) return 'started';
         if (attempt >= 2) throw error;
       }
+    }
+  }
+
+  /**
+   * The launch command, once. The box may have gone to sleep since it was guarded: it answers
+   * `machine_not_running` and the command does not start. It is then woken, guarded and read back
+   * again, and only then is the command sent a second time; the plain retry of `exec` would run the
+   * task's code in a box whose rules a restore may have dropped.
+   */
+  private async startOnce(
+    options: { envs: Record<string, string>; signal?: AbortSignal },
+    script: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const run = () => this.execOk(LAUNCH_SCRIPT, { ...options, stdin: script, wake: false });
+    try {
+      return await run();
+    } catch (error) {
+      if (!isAsleep(error)) throw error;
+      await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
+      await this.guardEgress(signal);
+      return await run();
     }
   }
 

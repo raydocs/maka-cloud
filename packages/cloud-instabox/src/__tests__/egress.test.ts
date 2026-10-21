@@ -9,6 +9,8 @@ import {
   EGRESS_BLOCKED_V6,
   EGRESS_CHAIN,
   EGRESS_ICMPV6_ALLOWED,
+  EGRESS_LOOPBACK_V4,
+  EGRESS_LOOPBACK_V6,
   EgressGuardError,
 } from '../egress.js';
 import { type FakeInstaboxOptions, isAlive } from './fake-instabox.js';
@@ -34,6 +36,8 @@ describe('applyEgressGuard', () => {
   const replies = `-A ${EGRESS_CHAIN} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN`;
   const reject4 = (net: string) =>
     `-A ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp-port-unreachable`;
+  // The box talking to itself: the one exception to the loopback range, out of lo only.
+  const loopback = (net: string) => `-A ${EGRESS_CHAIN} -d ${net} -o lo -j RETURN`;
   const reject6 = (net: string) =>
     `-A ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp6-port-unreachable`;
   const ICMPV6_TYPE = {
@@ -61,6 +65,7 @@ describe('applyEgressGuard', () => {
       replies,
       `-A ${EGRESS_CHAIN} -d 127.0.0.53/32 -p udp -m udp --dport 53 -j RETURN`,
       `-A ${EGRESS_CHAIN} -d 127.0.0.53/32 -p tcp -m tcp --dport 53 -j RETURN`,
+      loopback(EGRESS_LOOPBACK_V4),
       ...EGRESS_BLOCKED_V4.map(reject4),
     ]);
     for (const net of ['169.254.0.0/16', '127.0.0.0/8', '10.0.0.0/8']) {
@@ -83,6 +88,7 @@ describe('applyEgressGuard', () => {
         (kind) =>
           `-A ${EGRESS_CHAIN} -p ipv6-icmp -m icmp6 --icmpv6-type ${ICMPV6_TYPE[kind]} -j RETURN`,
       ),
+      loopback(EGRESS_LOOPBACK_V6),
       ...EGRESS_BLOCKED_V6.map(reject6),
     ]);
     for (const net of ['::1/128', 'fe80::/10', 'fc00::/7']) {
@@ -137,6 +143,90 @@ describe('applyEgressGuard', () => {
     await pending;
   });
 
+  const isMutation = (call: string) => /(^| )-(N|F|A|I|D|X|E) /u.test(call);
+  const live = (calls: string[]) => calls.filter((call) => !call.includes(`${EGRESS_CHAIN}_NEW`));
+
+  it('leaves the live chain and its hook alone when the policy is already in place', async () => {
+    await make();
+    await run();
+    const before = h.fake.firewall.calls().length;
+    await run();
+    const second = h.fake.firewall.calls().slice(before);
+    assert.deepEqual(live(second).filter(isMutation), [], 'only the scratch chain was touched');
+  });
+
+  it('follows a name server that changed, and drops the exception for the old one', async () => {
+    await make();
+    await run();
+    await fs.writeFile(resolv, 'nameserver 10.0.0.53\nsearch example\n');
+    await run();
+    const rules = v4();
+    assert.ok(
+      rules.includes(`-A ${EGRESS_CHAIN} -d 10.0.0.53/32 -p udp -m udp --dport 53 -j RETURN`),
+    );
+    assert.ok(!rules.some((rule) => rule.includes('127.0.0.53')), 'the old exception is gone');
+    const firstReject = rules.findIndex((rule) => rule.includes('-j REJECT'));
+    assert.ok(rules.findIndex((rule) => rule.includes('10.0.0.53')) < firstReject);
+  });
+
+  it('puts the policy back when a rule was added or lost', async () => {
+    await make();
+    await run();
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -A ${EGRESS_CHAIN} -d 10.1.2.3 -j ACCEPT`,
+    });
+    assert.ok(v4().some((rule) => rule.includes('10.1.2.3')));
+    await run();
+    assert.ok(
+      !v4().some((rule) => rule.includes('10.1.2.3')),
+      'an exception nobody wrote is removed',
+    );
+  });
+
+  it('refuses to keep a chain with a rule that lets traffic through, however the rest reads', async () => {
+    await make();
+    await run();
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -A ${EGRESS_CHAIN} -j ACCEPT`,
+    });
+    // An ACCEPT behind the reply rule: every REJECT is still there, but the chain is not ours.
+    await run();
+    assert.ok(!v4().some((rule) => rule.includes('ACCEPT')), v4().join('\n'));
+  });
+
+  it('does not accept rejects that are narrowed to one source', async () => {
+    await make();
+    await run();
+    const cmds = EGRESS_BLOCKED_V4.flatMap((net) => [
+      `iptables -w -D ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp-port-unreachable`,
+      `iptables -w -A ${EGRESS_CHAIN} -s 192.0.2.7/32 -d ${net} -j REJECT`,
+    ]);
+    await h.client.exec(h.fake.machineId, { cmd: cmds.join(' && ') });
+    assert.ok(v4().every((rule) => !rule.includes('REJECT') || rule.includes('-s 192.0.2.7/32')));
+    await run();
+    assert.deepEqual(
+      v4().filter((rule) => rule.includes('-s 192.0.2.7/32')),
+      [],
+      'a reject that only applies to one source is not a reject',
+    );
+    for (const net of EGRESS_BLOCKED_V4) assert.ok(v4().includes(reject4(net)), net);
+  });
+
+  it('never takes the hook away before the new chain has one', async () => {
+    await make();
+    await run();
+    await fs.writeFile(resolv, 'nameserver 10.0.0.54\n');
+    const before = h.fake.firewall.calls().length;
+    await run();
+    const calls = h.fake.firewall
+      .calls()
+      .slice(before)
+      .filter((call) => call.includes('OUTPUT'));
+    const hookNew = calls.findIndex((call) => call.includes(`-I OUTPUT 1 -j ${EGRESS_CHAIN}_NEW`));
+    const unhookOld = calls.findIndex((call) => call.includes(`-D OUTPUT -j ${EGRESS_CHAIN}`));
+    assert.ok(hookNew >= 0 && unhookOld > hookNew, `${calls.join(' | ')}`);
+  });
+
   it('keeps the stand-ins in front when a test sets its own PATH', async () => {
     await make({ env: { PATH: '/usr/sbin:/usr/bin:/bin' } });
     await run();
@@ -158,18 +248,61 @@ describe('applyEgressGuard', () => {
   });
 
   it('refuses when loopback cannot be blocked', async () => {
-    await make({ env: { SHIM_FAIL: '127\\.0\\.0\\.0/8' } });
+    await make({ env: { SHIM_FAIL: '127\\.0\\.0\\.0/8 -j REJECT' } });
     await assert.rejects(run(), /cannot block 127\.0\.0\.0\/8/u);
+  });
+
+  it('lets the box reach itself through lo, before the reject of the loopback range, and nothing wider', async () => {
+    await make();
+    await run();
+    for (const [rules, net, reject] of [
+      [v4(), EGRESS_LOOPBACK_V4, reject4],
+      [v6(), EGRESS_LOOPBACK_V6, reject6],
+    ] as const) {
+      const pass = rules.indexOf(loopback(net));
+      assert.ok(pass >= 0, `${net} is allowed to the box itself`);
+      assert.ok(pass < rules.indexOf(reject(net)), 'and the reject of the range stays behind it');
+      assert.equal(
+        rules.filter((rule) => rule.includes('-j RETURN') && rule.includes(net)).length,
+        1,
+        'one exception',
+      );
+    }
+  });
+
+  it('puts the loopback rule back when it was lost, and narrows one that is wider than lo', async () => {
+    await make();
+    await run();
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -D ${EGRESS_CHAIN} -d ${EGRESS_LOOPBACK_V4} -o lo -j RETURN`,
+    });
+    assert.ok(!v4().includes(loopback(EGRESS_LOOPBACK_V4)));
+    await run();
+    assert.ok(v4().includes(loopback(EGRESS_LOOPBACK_V4)));
+    // An exception for the range that is not tied to lo is not the rule the owner agreed to.
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -I ${EGRESS_CHAIN} 1 -d ${EGRESS_LOOPBACK_V4} -j RETURN`,
+    });
+    await run();
+    assert.deepEqual(
+      v4().filter((rule) => rule.includes(EGRESS_LOOPBACK_V4) && rule.includes('RETURN')),
+      [loopback(EGRESS_LOOPBACK_V4)],
+    );
+  });
+
+  it('refuses when the loopback exception cannot be installed', async () => {
+    await make({ env: { SHIM_FAIL: '-o lo' } });
+    await assert.rejects(run(), /cannot add the loopback rule/u);
   });
 
   it('refuses when the hook cannot be installed', async () => {
     await make({ env: { SHIM_FAIL: '-I OUTPUT' } });
-    await assert.rejects(run(), /cannot hook MAKA_EGRESS into OUTPUT/u);
+    await assert.rejects(run(), /cannot hook MAKA_EGRESS_NEW into OUTPUT/u);
   });
 
   it('refuses when the rules read back are not the ones it wrote', async () => {
     await make({ env: { SHIM_LIE: '1' } });
-    await assert.rejects(run(), /is not the first OUTPUT rule/u);
+    await assert.rejects(run(), /cannot read MAKA_EGRESS_NEW back/u);
   });
 
   it('refuses when the IPv6 half fails on a box that has IPv6', async () => {

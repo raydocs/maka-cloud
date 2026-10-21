@@ -269,7 +269,7 @@ test('a step the log already holds as finished or running is not run again', asy
 });
 
 test('without an agent channel the SDK path refuses to run, and the CLI is never started', async (t) => {
-  const h = await setup({ cloud: { agentSdk: await loadAgentSdk() } });
+  const h = await setup({ noAgentChannel: true, cloud: { agentSdk: await loadAgentSdk() } });
   t.after(() => h.cleanup());
   await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
   await tools(h, [{ id: 'toolu_1', name: 'Bash', input: { command: 'gh pr create' } }]);

@@ -485,3 +485,40 @@ test('an irreversible tool can add code-built details to the approval card, unde
   );
   assert.equal(question.note, 'Delete it?');
 });
+
+test('an approval whose call carries a key is not asked: the card is shown as it is, so it is refused instead', async (t) => {
+  published.length = 0;
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const h = await makeHarness(t, {
+    conductor: {
+      tools: [publish],
+      carriesSecret: (text) => text.includes('ghp_'),
+    },
+  });
+  let seen = '';
+  h.model.script(
+    'conductor',
+    calls(tool('publish_page', { title: `Deploy with ${key}` })),
+    (request) => {
+      const actionRef = /actionRef "(act_\w+)"/.exec(refusal(toolResults(request)[0]))?.[1] ?? '';
+      return calls(
+        tool('ask_user', {
+          reason: 'irreversible',
+          question: 'Publish?',
+          actionRef,
+          recommended: 'reject',
+        }),
+      );
+    },
+    (request) => {
+      seen = refusal(toolResults(request)[0]);
+      return text('Dropped.');
+    },
+  );
+  await h.send('cnv_1', 'Publish my page.');
+  await h.conductor.idle();
+  assert.match(seen, /^secret_in_call:/);
+  assert.ok(!seen.includes(key));
+  assert.deepEqual(h.outbox.questions, [], 'no approval was posted');
+  assert.deepEqual(published, []);
+});

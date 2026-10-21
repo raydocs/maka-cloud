@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { boxName, LABEL } from '../labels.js';
+import { BoxPool } from '../pool.js';
 import { flush, labelsOf, setup } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
@@ -224,5 +225,31 @@ describe('cleanup of boxes nobody uses', () => {
       [outOfRange.id, wrongName.id].sort(),
     );
     assert.equal(t.fleet.callsTo('deleteMachine').length, 0);
+  });
+});
+
+describe('creating a box after a restart', () => {
+  it('does not reuse the idempotency key of an earlier process, so it never gets a deleted box’s operation', async () => {
+    const t = setup({ cleanup: { idleDeleteMs: HOUR } });
+    const first = await t.pool.acquire({ tenantId: A, taskId: 't1' });
+    await first.release();
+    t.clock.now += 2 * HOUR;
+    assert.deepEqual((await t.pool.cleanup()).deleted, [first.machineId]);
+    // A new process: its counters start again, the account (and its idempotency records) does not.
+    const restarted = new BoxPool({
+      api: t.fleet,
+      source: () => ({ templateId: 't_node' }),
+      isTaskLive: () => false,
+      beforeUse: async () => undefined,
+      timers: t.timers,
+      now: () => t.clock.now,
+    });
+    const lease = await restarted.acquire({ tenantId: A, taskId: 't2' });
+    assert.notEqual(lease.machineId, first.machineId);
+    assert.equal(t.fleet.machines.get(lease.machineId)?.state, 'running');
+    const keys = t.fleet
+      .callsTo('createMachine')
+      .map((call) => (call[1] as { idempotencyKey?: string }).idempotencyKey);
+    assert.equal(new Set(keys).size, keys.length, 'every attempt has its own key');
   });
 });

@@ -42,6 +42,8 @@ export const flush = (): Promise<void> => new Promise((resolve) => setImmediate(
 export const labelsOf = (fleet: FakeFleet, machineId: string) =>
   fleet.machines.get(machineId)?.metadata;
 
+export const AGENT = { user: 'maka-agent', group: 'maka-agent' };
+
 export function setup(overrides: Partial<BoxPoolOptions> = {}) {
   const fleet = new FakeFleet();
   const live = new Set<string>();
@@ -59,6 +61,7 @@ export function setup(overrides: Partial<BoxPoolOptions> = {}) {
     },
     timers,
     now: () => clock.now,
+    agent: AGENT,
     ...overrides,
   });
   return { fleet, live, timers, warnings, guarded, clock, pool };

@@ -84,14 +84,27 @@ norm() {
     -e 's/-p ipv6-icmp --icmpv6-type neighbour-advertisement/-p ipv6-icmp -m icmp6 --icmpv6-type 136/' \\
     -e 's/-p ipv6-icmp --icmpv6-type router-solicitation/-p ipv6-icmp -m icmp6 --icmpv6-type 133/'
 }
+builtin() { [ "$1" = OUTPUT ] || [ "$1" = INPUT ] || [ "$1" = FORWARD ]; }
+exists() { builtin "$1" || [ -e "$(rules "$1")" ]; }
 case "$op" in
   -N) [ -e "$(rules "$1")" ] && exit 1; : > "$(rules "$1")" ;;
-  -F) : > "$(rules "$1")" ;;
-  -A) chain="$1"; shift; echo "-A $chain $* " | norm | sed -E -e 's/ $//' -e "s/-j REJECT\$/-j REJECT --reject-with $([ "$tool" = ip6tables ] && echo icmp6-port-unreachable || echo icmp-port-unreachable)/" >> "$(rules "$chain")" ;;
-  -I) chain="$1"; shift 2; { echo "-A $chain $*"; cat "$(rules "$chain")" 2>/dev/null; true; } > "$SHIM_STATE/tmp" \\
+  -F) exists "$1" || exit 1; : > "$(rules "$1")" ;;
+  -X) builtin "$1" && exit 1; [ -e "$(rules "$1")" ] || exit 1
+      grep -q -- " -j $1\\$" "$SHIM_STATE/$tool".* 2>/dev/null && exit 1
+      rm -f "$(rules "$1")" ;;
+  -E) old="$1"; new="$2"; builtin "$old" && exit 1; [ -e "$(rules "$old")" ] || exit 1; [ -e "$(rules "$new")" ] && exit 1
+      mv "$(rules "$old")" "$(rules "$new")"
+      sed -i -e "s/^-A $old /-A $new /" "$(rules "$new")"
+      for f in "$SHIM_STATE/$tool".*; do sed -i -e "s/ -j $old\\$/ -j $new/" "$f"; done ;;
+  -A) exists "$1" || exit 1; chain="$1"; shift; echo "-A $chain $* " | norm | sed -E -e 's/ $//' -e "s/-j REJECT\\$/-j REJECT --reject-with $([ "$tool" = ip6tables ] && echo icmp6-port-unreachable || echo icmp-port-unreachable)/" >> "$(rules "$chain")" ;;
+  -I) exists "$1" || exit 1; chain="$1"; shift 2; { echo "-A $chain $*"; cat "$(rules "$chain")" 2>/dev/null; true; } > "$SHIM_STATE/tmp" \\
+        && mv "$SHIM_STATE/tmp" "$(rules "$chain")" ;;
+  -D) exists "$1" || exit 1; chain="$1"; shift
+      awk -v want="-A $chain $*" '!done && $0 == want { done = 1; found = 1; next } { print } END { exit found ? 0 : 1 }' "$(rules "$chain")" > "$SHIM_STATE/tmp" \\
         && mv "$SHIM_STATE/tmp" "$(rules "$chain")" ;;
   -C) chain="$1"; shift; grep -Fxq -- "-A $chain $*" "$(rules "$chain")" 2>/dev/null ;;
-  -S) [ -n "\${SHIM_LIE:-}" ] && exit 0; echo "-P $1 ACCEPT"; cat "$(rules "$1")" 2>/dev/null ;;
+  -S) [ -n "\${SHIM_LIE:-}" ] && exit 0; exists "$1" || exit 1
+      if builtin "$1"; then echo "-P $1 ACCEPT"; else echo "-N $1"; fi; cat "$(rules "$1")" 2>/dev/null; true ;;
   *) exit 2 ;;
 esac
 `;

@@ -1,10 +1,12 @@
 import {
   InstaboxApiError,
+  InstaboxOperationError,
   type InstaboxExecResult,
   type InstaboxMachine,
   type InstaboxOperation,
   type InstaboxSnapshot,
 } from '@maka-cloud/instabox';
+import { AGENT_CHECK_SCRIPT } from '../agent.js';
 import type { BoxApi } from '../types.js';
 
 type Method =
@@ -43,6 +45,11 @@ export class FakeFleet implements BoxApi {
   wakeScript: ('ok' | 'hang' | 'fail' | 'gone')[] = [];
   /** The suspend is accepted but the operation fails, once. */
   failNextSuspend = false;
+  /** What the check of the agent account prints: an unprivileged account by default. */
+  agentFacts =
+    'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=no\nFACT agent_nocaps=yes\n';
+  /** Every check of the agent account, on which box and for which account. */
+  readonly agentChecks: { machineId: string; user: string }[] = [];
   /** Every command run on a box. */
   readonly execLog: { machineId: string; cmd: string }[] = [];
   /** Makes `exec` fail, once. */
@@ -168,7 +175,7 @@ export class FakeFleet implements BoxApi {
   async waitForOperation(id: string): Promise<InstaboxOperation> {
     this.calls.push({ method: 'waitForOperation', args: [id] });
     if (this.failedOperations.has(id)) {
-      throw new Error(`instabox operation ${id} (create) failed: no_capacity`);
+      throw new InstaboxOperationError(id, `instabox operation ${id} (create) failed: no_capacity`);
     }
     return operation(id.replace(/^op_/, ''));
   }
@@ -210,6 +217,17 @@ export class FakeFleet implements BoxApi {
     request: { cmd: string; envs?: Record<string, string>; timeoutSeconds?: number },
   ): Promise<InstaboxExecResult> {
     await this.pass('exec', [machineId, request]);
+    if (request.cmd === AGENT_CHECK_SCRIPT) {
+      // The account check is not one of the commands a test counts; its answer is the test's to set.
+      this.agentChecks.push({ machineId, user: request.envs?.MAKA_AGENT_USER ?? '' });
+      return {
+        stdout: this.agentFacts,
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        truncated: false,
+      };
+    }
     this.execLog.push({ machineId, cmd: request.cmd });
     this.execRequests.push({ machineId, cmd: request.cmd, envs: { ...(request.envs ?? {}) } });
     if (this.failNextExec) {

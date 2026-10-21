@@ -339,3 +339,21 @@ test('a notice in the conversation feed shows no secret to the client', async (t
   assert.ok(!text.includes('abc123DEF456') && !text.includes('tok-0123456789'), text);
   assert.match(text, /^The push failed: /u);
 });
+
+test('an assistant message in the feed carries no key; a user message is theirs and stays as typed', async (t) => {
+  const h = await startHarness(t);
+  const conversationId = await newConversation(h);
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  h.server.publisher.publish({
+    kind: 'message',
+    eventId: 'evt_leak',
+    conversationId,
+    text: `The command printed GITHUB_TOKEN=${key} before it failed.`,
+  });
+  const stream = await openStream(t, h, `?conversation=${conversationId}`);
+  const [, message] = await stream.until(2);
+  assert.equal(message?.event, 'message.posted');
+  const text = String(message?.data.text);
+  assert.ok(!text.includes(key.slice(4, 30)), text);
+  assert.match(text, /^The command printed /u);
+});

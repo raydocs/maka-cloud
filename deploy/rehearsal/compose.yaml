@@ -7,6 +7,13 @@
 # The server's settings are deploy/rehearsal/server.env (with the sandbox map up.sh adds), the names
 # are deploy/rehearsal/compose.env. See deploy/rehearsal/README.md.
 # Relative paths here resolve against the first file (deploy/), not against this one.
+#
+# Nothing here may be shared with a real deployment on the same host: the project has its own name
+# (so its volumes, networks and containers do), and so do the images, which the rehearsal builds
+# itself rather than retagging maka-cloud:local. lib.sh refuses to change a stack that does not
+# resolve to these names.
+name: maka-rehearsal
+
 services:
   stubs:
     # The server's own image (the stand-ins use the workspaces' test doubles, which it carries).
@@ -14,8 +21,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
       target: server
-    image: maka-cloud:local
+    image: maka-rehearsal:local
     entrypoint: ["node", "deploy/rehearsal/stubs.mjs"]
+    volumes:
+      # The image carries no rehearsal code (the build context is an allowlist), so the script is mounted.
+      - ./rehearsal/stubs.mjs:/app/deploy/rehearsal/stubs.mjs:ro
     environment:
       INSTABOX_API_KEY: ibk_rehearsal
     healthcheck:
@@ -32,6 +42,10 @@ services:
       - "127.0.0.1:9102:9102"
 
   maka-cloud:
+    image: maka-rehearsal:local
     depends_on:
       stubs:
         condition: service_healthy
+
+  proxy:
+    image: maka-rehearsal-proxy:local

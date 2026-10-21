@@ -107,6 +107,19 @@ box's current claim frees the box. A woken box stays `waking` until its `.agents
 every ask for it in that time waits on the same wake, so a second ask cannot return (and release) a box
 that is still being set up.
 
+Identity is read again, not remembered: before a cached box is handed out the pool fetches it and checks
+the pool label, invite, slot, name and machine id (and that no other live task holds it); the sleep sweep and
+a restore check the same, without the task label. A box that fails is `refused`: it keeps its slot, is listed by
+`refusedBoxes()`, is never used, relabelled, slept or deleted by the pool, and the task takes another box.
+
+Repository scripts never run as the sandbox user. `.agents/resume` and a builder's `.agents/setup` run through
+`asAgent` as the unprivileged account of `agent` (the same `AgentChannel` the Agent SDK path uses), after a
+check on that box, run once, that the account is not the sandbox user or root, cannot `sudo -n`, and holds no
+capabilities. Without `agent`, or if the check finds anything, no repository script is run: a resume reports its
+failure and still hands the box out, and a repository with a setup script gets no snapshot. The checkout is
+given to the agent's group so the account can run in it; our own preparation (the pinned CLI installs) stays
+with the sandbox user, so those files are not writable by the account.
+
 ## Setup snapshots and `.agents/resume`
 
 - A task can name the setup snapshot of its repository (`setupOf(tenantId, taskId)`). A free box that
@@ -116,9 +129,18 @@ that is still being set up.
   template instead, with no setup labels, and a warning is raised. A failing lookup is a warning, not a failure.
 - Whose snapshot is whose: the name is `mk-<24 hex of sha256(invite)>-<12 hex of sha256(repo URL)>-<16 hex of
   the setup hash>` (an 8-digit prefix collided for two real ids), and the description holds the full
-  digests. A snapshot found by name is reused or deleted only when its description, if the API returns
-  one, is exactly this invite's, repository's and setup's; otherwise the build refuses. The pool also
+  digests. A snapshot found by name is reused or deleted only when its description is exactly this
+  invite's, repository's and setup's; one with no description, or another one, is not ours and the
+  build refuses (the name alone is never proof, and expiry skips such a snapshot too). The pool also
   refuses a `SetupChoice` whose `tenantId` is not the task's invite and starts from the template.
+- What a snapshot carries: it is the whole disk of the builder, and every box of the invite boots from it, so
+  before it is saved the builder is cleaned (`scrub.ts`): credential, history and transcript paths in the homes
+  of the sandbox user and the agent account (`.ssh`, `.aws`, `.config/gh`, `.netrc`, `.npmrc`, `.claude`,
+  `.codex`, shell histories and so on), everything in the task folders (`/data/work`, `/data/maka` except
+  `repos`), and untracked `.env`/`.env.*`/`.npmrc` files in the checkout are removed. A second pass only looks:
+  if it finds anything (it prints `FOUND <path>`, exit 7) the build fails at step `scrub check`, nothing is
+  saved, and the builder is given back. Tracked files and `*.example`/`*.sample`/`*.template` stay. The builder
+  is made fresh from the template for each build, so the list is a second line behind that, not the first.
 - `.agents/resume` of the checkout (`/data/maka/repos/<repo>`) runs after the guard, on every wake and on
   every box made from a setup snapshot, with a limit (default 120 s). If it fails, times out or cannot run,
   `onWarning` and `onResumeFailure` hear of it and the box is still handed out: the task starts without the

@@ -19,6 +19,8 @@ export interface Verdict {
 export interface VerifyContext {
   /** The mode the task was sent in; absent when no modes are configured. */
   mode?: ModeId;
+  /** Whether the task's brief took files from a task that ran on the other runner. */
+  otherRunnerInput?: boolean;
 }
 
 export interface Playbook {

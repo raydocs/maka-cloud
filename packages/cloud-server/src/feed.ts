@@ -1,6 +1,11 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
-import { toPublicConductorData, toPublicEvent, toPublicItem } from './public-view.js';
+import {
+  scrubSecretText,
+  toPublicConductorData,
+  toPublicEvent,
+  toPublicItem,
+} from './public-view.js';
 
 export type FeedKind =
   | 'conversation.created'
@@ -186,7 +191,14 @@ function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
       };
     }
     case 'message.posted':
-      return { messageId: row.message_id, role: row.role, text: row.text, at: row.m_at };
+      return {
+        messageId: row.message_id,
+        role: row.role,
+        // The assistant's words can repeat whatever a tool printed; a user's own are theirs.
+        text:
+          !internal && row.role === 'assistant' && row.text ? scrubSecretText(row.text) : row.text,
+        at: row.m_at,
+      };
     case 'conversation.created':
       return { title: row.title, at: row.c_at };
     case 'conductor.notice':

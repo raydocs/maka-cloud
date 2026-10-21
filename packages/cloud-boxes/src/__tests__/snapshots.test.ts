@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import {
   type BuilderBoxes,
+  ownerRecord,
   repoDir,
   SetupFailedError,
   type SetupRecipe,
@@ -11,7 +12,9 @@ import {
   setupHash,
   snapshotName,
 } from '../snapshots.js';
+import { SCRUB_SCRIPT } from '../scrub.js';
 import { FakeFleet } from './fake-fleet.js';
+import { AGENT } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
 const B = 'inv_bbbbbbbbbbbb';
@@ -56,6 +59,7 @@ function setup(overrides: { guard?: (machineId: string) => Promise<void>; keep?:
     new SetupSnapshots({
       api: fleet,
       boxes,
+      agent: AGENT,
       guard:
         overrides.guard ??
         (async (machineId) => {
@@ -100,7 +104,11 @@ describe('SetupSnapshots', () => {
     assert.equal(t.guarded.length, 1);
 
     const steps = t.fleet.execRequests;
-    assert.equal(steps.length, 4, 'checkout, one prepare step, the setup, sync');
+    assert.equal(
+      steps.length,
+      6,
+      'checkout, one prepare step, the setup, scrub, scrub check, sync',
+    );
     assert.match(steps[0]?.cmd ?? '', /git clone/);
     assert.equal(steps[0]?.envs.MAKA_REPO_URL, REPO);
     assert.equal(steps[0]?.envs.MAKA_REF, SHA);
@@ -112,7 +120,9 @@ describe('SetupSnapshots', () => {
     assert.equal(steps[1]?.cmd, 'echo install the pinned CLIs');
     assert.match(steps[2]?.cmd ?? '', /\.agents\/setup/);
     assert.equal(steps[2]?.envs.MAKA_SETUP_HASH, hash);
-    assert.equal(steps[3]?.cmd, 'sync');
+    assert.equal(steps[3]?.envs.MAKA_SCRUB_MODE, 'clean');
+    assert.equal(steps[4]?.envs.MAKA_SCRUB_MODE, 'check');
+    assert.equal(steps[5]?.cmd, 'sync');
     assert.equal(
       new Set(steps.map((s) => s.machineId)).size,
       1,
@@ -130,6 +140,50 @@ describe('SetupSnapshots', () => {
     assert.deepEqual(t.fleet.execRequests, []);
     assert.equal(t.fleet.snapshots.size, 0);
     assert.equal(t.log.released, 1);
+  });
+
+  it('runs the repository setup as the agent account after checking it, and hands the checkout to its group', async () => {
+    const t = setup();
+    await t.snapshots.ensure(recipe());
+    const steps = t.fleet.execRequests;
+    assert.deepEqual(
+      t.fleet.agentChecks.map((check) => check.user),
+      [AGENT.user],
+    );
+    assert.equal(steps[0]?.envs.MAKA_AGENT_GROUP, AGENT.group);
+    assert.match(steps[0]?.cmd ?? '', /chgrp -R/);
+    const setupStep = steps.find(
+      (step) => step.cmd.includes('.agents/setup') && step.cmd.includes('exec'),
+    );
+    assert.match(setupStep?.cmd ?? '', /^sudo -n -u 'maka-agent' --preserve-env -- /);
+    // Our own preparation (the pinned CLI installs) is not repository code and stays as it is.
+    assert.equal(
+      steps.find((step) => step.cmd.startsWith('echo install'))?.cmd,
+      'echo install the pinned CLIs',
+    );
+  });
+
+  it('builds nothing for a repository with a setup script when no agent account is configured, and leases no box', async () => {
+    const fleet = new FakeFleet();
+    const { boxes, log } = builders(fleet);
+    const snapshots = new SetupSnapshots({ api: fleet, boxes, guard: async () => undefined });
+    await assert.rejects(snapshots.ensure(recipe()), SetupFailedError);
+    assert.equal(log.leased.length, 0);
+    assert.equal(fleet.execRequests.length, 0);
+    assert.equal(fleet.snapshots.size, 0);
+  });
+
+  it('runs the setup in no box whose agent account has sudo, and gives the builder back', async () => {
+    const t = setup();
+    t.fleet.agentFacts =
+      'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=yes\nFACT agent_nocaps=yes\n';
+    await assert.rejects(
+      t.snapshots.ensure(recipe()),
+      /agent check: the agent account can use sudo/,
+    );
+    assert.ok(!t.fleet.execRequests.some((step) => step.cmd.includes('./.agents/setup')));
+    assert.equal(t.log.released, 1);
+    assert.equal(t.fleet.snapshots.size, 0);
   });
 
   it('a snapshot of the same setup is reused without leasing a box or running anything', async () => {
@@ -189,6 +243,29 @@ describe('SetupSnapshots', () => {
     assert.equal(t.log.leased.length, 1, 'nothing was built over it');
   });
 
+  it('a snapshot of this name with no description is not ours: refused, not reused or written over', async () => {
+    const t = setup();
+    const built = await t.snapshots.ensure(recipe());
+    const stored = t.fleet.snapshots.get(built.snapshotId);
+    assert.ok(stored);
+    stored.description = undefined;
+    await assert.rejects(t.snapshots.ensure(recipe()), SnapshotOwnerError);
+    assert.equal(t.fleet.snapshots.get(built.snapshotId)?.description, undefined, 'left as it was');
+    assert.equal(t.fleet.callsTo('deleteSnapshot').length, 0);
+    assert.equal(t.log.leased.length, 1, 'nothing was built over it');
+  });
+
+  it('expiry never deletes a same-prefix snapshot that has no description', async () => {
+    const t = setup({ keep: 1 });
+    const first = await t.snapshots.ensure(recipe());
+    const stored = t.fleet.snapshots.get(first.snapshotId);
+    assert.ok(stored);
+    stored.description = undefined;
+    await t.snapshots.ensure(recipe({ setupScript: `${SCRIPT}# v2\n` }));
+    assert.ok(t.fleet.snapshots.has(first.snapshotId), 'it is not ours to delete');
+    assert.equal(t.fleet.callsTo('deleteSnapshot').length, 0);
+  });
+
   it('two callers in one process for the same setup share one build', async () => {
     const t = setup();
     const [one, two] = await Promise.all([
@@ -220,7 +297,10 @@ describe('SetupSnapshots', () => {
     const t = setup();
     const name = snapshotName(A, REPO, setupHash(recipe()));
     const source = t.fleet.seed({ name: 'someone' });
-    await t.fleet.createSnapshot(source.id, { name });
+    await t.fleet.createSnapshot(source.id, {
+      name,
+      description: ownerRecord(A, REPO, setupHash(recipe())),
+    });
     const result = await t.snapshots.ensure(recipe());
     assert.equal(result.built, false);
     assert.equal(t.fleet.snapshots.get(result.snapshotId)?.status, 'ready');
@@ -231,12 +311,56 @@ describe('SetupSnapshots', () => {
     const t = setup();
     const name = snapshotName(A, REPO, setupHash(recipe()));
     const source = t.fleet.seed({ name: 'someone' });
-    const failed = await t.fleet.createSnapshot(source.id, { name });
+    const failed = await t.fleet.createSnapshot(source.id, {
+      name,
+      description: ownerRecord(A, REPO, setupHash(recipe())),
+    });
     const entry = t.fleet.snapshots.get(failed.id);
     if (entry) entry.status = 'failed';
     const result = await t.snapshots.ensure(recipe());
     assert.equal(result.built, true);
     assert.equal(t.fleet.snapshots.has(failed.id), false);
+  });
+
+  describe('what the snapshot carries', () => {
+    it('cleans the builder, then looks again, before it syncs and saves the snapshot', async () => {
+      const t = setup();
+      await t.snapshots.ensure(recipe());
+      const steps = t.fleet.execRequests
+        .map((request, index) => ({ request, index }))
+        .filter(({ request }) => request.cmd === SCRUB_SCRIPT);
+      assert.deepEqual(
+        steps.map(({ request }) => request.envs.MAKA_SCRUB_MODE),
+        ['clean', 'check'],
+      );
+      for (const { request } of steps) {
+        assert.equal(request.envs.MAKA_REPO_DIR, repoDir(REPO));
+        assert.equal(request.envs.MAKA_AGENT_USER, AGENT.user);
+      }
+      const sync = t.fleet.execRequests.findIndex((request) => request.cmd === 'sync');
+      assert.ok(
+        sync > (steps[1]?.index ?? Number.POSITIVE_INFINITY),
+        'the scrub comes before sync',
+      );
+      assert.equal(t.fleet.snapshots.size, 1);
+    });
+
+    it('refuses to save a snapshot when the check still finds a credential, and gives the builder back', async () => {
+      const t = setup();
+      t.fleet.execHandler = (_id, request) =>
+        request.envs?.MAKA_SCRUB_MODE === 'check'
+          ? { exitCode: 7, stdout: 'FOUND /home/dev/.ssh\n' }
+          : {};
+      await assert.rejects(t.snapshots.ensure(recipe()), (error: unknown) => {
+        assert.ok(error instanceof SetupFailedError);
+        assert.equal(error.step, 'scrub check');
+        assert.match(error.message, /FOUND \/home\/dev\/\.ssh/);
+        return true;
+      });
+      assert.equal(t.fleet.callsTo('createSnapshot').length, 0);
+      assert.equal(t.fleet.snapshots.size, 0);
+      assert.equal(t.log.released, 1);
+    });
   });
 
   describe('a failure in the box', () => {
@@ -276,6 +400,7 @@ describe('SetupSnapshots', () => {
       const fleet = new FakeFleet();
       const snapshots = new SetupSnapshots({
         api: fleet,
+        agent: AGENT,
         boxes: {
           lease: async () => {
             throw new Error('no box free');

@@ -360,3 +360,58 @@ test('a change nobody reviewed is never opened as a pull request', async (t) => 
     assert.equal(publisher.calls, 0, 'nothing reached GitHub');
   }
 });
+
+test('a change kept for the owner to look at opens only as a draft that says so, and the approval card says it too', async (t) => {
+  const kept = {
+    ...VERIFICATION,
+    review: { ...VERIFICATION.review, status: 'unavailable' as const, reason: 'x' },
+    kept: { reason: 'no independent review (the reviewer could not start)' },
+  };
+  const { deliveries } = await deliveryFiles(t, kept);
+  const fake = await github(t);
+  const tool = openPullRequestTool({
+    deliveries,
+    publisher: publisher(fake),
+    ownsTask: () => true,
+  });
+
+  const card = await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' });
+  assert.match(
+    card ?? '',
+    /Opens as a draft, kept for you to look at: .*the reviewer could not start/,
+  );
+
+  await tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
+  const pull = fake.pulls[0];
+  assert.equal(pull?.draft, true, 'a kept change is never opened ready for review');
+  assert.equal(pull?.title, '[Kept for your review] Fix add');
+  assert.match(
+    pull?.body ?? '',
+    /^\*\*Kept for you to look at\. Do not merge this before you have read the review\.\*\*/,
+  );
+  assert.match(pull?.body ?? '', /the reviewer could not start/);
+
+  // A change that was reviewed is opened as an ordinary pull request.
+  const reviewed = await deliveryFiles(t);
+  const second = await github(t);
+  await openPullRequestTool({
+    deliveries: reviewed.deliveries,
+    publisher: publisher(second),
+    ownsTask: () => true,
+  }).impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
+  assert.equal(second.pulls[0]?.draft, false);
+  assert.equal(second.pulls[0]?.title, 'Fix add');
+});
+
+test('the description built from the runner record carries no key, since it is posted on GitHub', () => {
+  const leak = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const body = pullRequestBody({
+    ...VERIFICATION,
+    testCommand: `GITHUB_TOKEN=${leak} bash tests/run.sh`,
+    repro: { command: `curl -H "Authorization: Bearer ${leak}" x`, files: [`tests/${leak}.sh`] },
+    changedFiles: [{ path: `lib/${leak}.txt`, status: 'added' }],
+  });
+  assert.ok(!body.includes(leak.slice(4, 30)), body);
+  assert.match(body, /\[secret\]/u);
+  assert.match(body, /bash tests\/run\.sh/u);
+});

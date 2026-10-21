@@ -9,6 +9,8 @@
   },
   "include": ["src"],
   "references": [
+    { "path": "../cloud-boxes" },
+    { "path": "../cloud-instabox" },
     { "path": "../cloud-orchestrator" },
     { "path": "../cloud-conductor" },
     { "path": "../cloud-duties" },

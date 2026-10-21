@@ -1085,3 +1085,34 @@ test('a grant needs a positive budget and a configured vendor', () => {
   );
   assert.throws(() => gateway.issue({ vendor: 'openai', subject: 'x', budget: { limitUsd: 1 } }));
 });
+
+test('the gateway’s own key is scrubbed from an error however short it is and however the vendor wrote it', async () => {
+  const short = 'k3y-6c';
+  const tricky = 'p@ss"w\\rd/1';
+  for (const key of [short, tricky]) {
+    const { gateway, upstream } = rig({ upstreams: { anthropic: { apiKey: key } } });
+    const client = gateway.inProcess({
+      vendor: 'anthropic',
+      subject: 'x',
+      budget: { limitUsd: 1 },
+    });
+    const echoes = [
+      `bad key ${key}`,
+      `see https://user:${encodeURIComponent(key)}@vendor.example/docs`,
+      `see https://user:${encodeURIComponent(key).toLowerCase()}@vendor.example/docs`,
+      `key was ${JSON.stringify(key)}`,
+    ];
+    for (const message of echoes) {
+      upstream.next(() =>
+        json({ type: 'error', error: { type: 'authentication_error', message } }, 401),
+      );
+      const refused = await post(client, body());
+      assert.equal(refused.status, 401);
+      const refusedText = await text(refused);
+      for (const form of [key, encodeURIComponent(key), JSON.stringify(key).slice(1, -1)]) {
+        assert.ok(!refusedText.includes(form), `${form} in ${refusedText}`);
+      }
+      assert.match(refusedText, /authentication_error/u, 'the rest of the error is still there');
+    }
+  }
+});

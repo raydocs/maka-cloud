@@ -27,6 +27,14 @@ async function run(body: Body): Promise<unknown> {
       return stack.ask(text('conversationId'), body.question as never);
     case 'answers':
       return stack.answers;
+    case 'suggest':
+      return stack.suggest(body.choice as never);
+    case 'suggest-offer':
+      return stack.suggestOffer(body.offer as never);
+    case 'suggestion-decisions':
+      return stack.suggestionDecisions;
+    case 'suggestion-moves':
+      return stack.moveSuggestion(text('cardId'), body.next as never);
     case 'pushed':
       return stack.pushed;
     case 'computer-inputs':

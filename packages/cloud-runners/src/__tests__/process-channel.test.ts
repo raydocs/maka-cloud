@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { asAgent } from '../agent-user.js';
 import type { RemoteMachine } from '../machine.js';
 import {
   allowedSdkEnv,
@@ -15,7 +16,8 @@ import {
 } from '../process-channel.js';
 import type { Watch } from '../poller.js';
 import { buildRunScript } from '../scripts.js';
-import { type Harness, isRunning, setup, settles, until } from './harness.js';
+import { shq } from '../shell.js';
+import { HARNESS_AGENT, type Harness, isRunning, setup, settles, until } from './harness.js';
 
 interface Rig {
   h: Harness;
@@ -48,7 +50,10 @@ async function rig(t: { after(fn: () => Promise<void>): void }, dir: string): Pr
         machine.launch({
           dirName: dir,
           run,
-          script: buildRunScript({ preamble: FEED_FUNCTION, command: fedCommand(command) }),
+          script: buildRunScript({
+            preamble: FEED_FUNCTION,
+            command: fedCommand(asAgent(`sh -c ${shq(command)}`, HARNESS_AGENT)),
+          }),
           envs: {},
           runToken: token,
           workdir: `${machine.taskDir(dir)}/workspace`,

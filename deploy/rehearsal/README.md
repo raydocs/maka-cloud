@@ -7,7 +7,8 @@ health check that never goes green.
 
 | Part | What it is |
 | --- | --- |
-| `compose.yaml` | adds the `stubs` service to `deploy/compose.yaml` |
+| `compose.yaml` | adds the `stubs` service to `deploy/compose.yaml`, and gives the rehearsal its own project name (`maka-rehearsal`) and image tags |
+| `lib.sh` | the one place that runs Compose (`-p maka-rehearsal`), and `guard_rehearsal`, which every script calls before it changes the stack |
 | `compose.env` | the three names (`app`, `mcp`, `models` on `.localhost`) and Caddy's own certificate authority (`local_certs`) |
 | `server.env` | the server's settings: fake keys, the stand-ins as the model and sandbox APIs |
 | `stubs.mjs` | the model API and the sandbox API, and a control API for the scripted `claude` |
@@ -22,6 +23,20 @@ set -a; . "$MAKA_REHEARSAL_DIR/env"; set +a
 node deploy/rehearsal/flow.mjs            # Node 22 or later
 deploy/rehearsal/down.sh
 ```
+
+## Never the deployment's project
+
+`down.sh` deletes volumes, and `ops.sh` stops, restores and backs up, so the rehearsal must not be able
+to reach a real deployment on the same host (project `maka-cloud`, volumes `maka-cloud_maka-data`,
+`maka-cloud_maka-backups` and Caddy's state, images `maka-cloud:local` and `maka-cloud-proxy:local`).
+It has its own project, `maka-rehearsal` (the override names it, and every call passes `-p`), its own
+volumes, networks and containers, and builds its own images (`maka-rehearsal:local`,
+`maka-rehearsal-proxy:local`) instead of retagging the deployment's. Before any step that changes the
+stack, `guard_rehearsal` reads the resolved Compose configuration and refuses unless the project, every
+volume and every image are the rehearsal's. `MAKA_REHEARSAL_PROJECT` may rename the project, but only to
+`maka-rehearsal` or a name that starts with `maka-rehearsal-`. The rehearsal publishes ports 80 and 443,
+so it cannot start next to a running deployment on the same ports either (set `MAKA_CLOUD_HTTP_PORT` and
+`MAKA_CLOUD_HTTPS_PORT` in `compose.env` to run both).
 
 `up.sh` leaves, in `$MAKA_REHEARSAL_DIR`, the server's settings (`server.env`), the invite's token
 (`token`), the root certificate of Caddy's authority (`ca.crt`) and the settings the flow reads (`env`).
@@ -75,8 +90,19 @@ server's real sandbox and model code runs against them:
 Nothing in the rehearsal calls a real model, sandbox, GitHub or push service, and nothing in it is a
 secret: the keys are fake and the token belongs to a database that `down.sh` deletes.
 
-## When the server runs the real Agent SDK path
+## The agent account
 
-The server starts `claude -p` today. When `createCloudRunnersFromEnv` wires the Agent SDK channel, the
-scripted `claude` has to speak its stream-json protocol (`SDK_CLI` in the runners' tests does); the
-rehearsal then fails at its first task until `stubs.mjs` installs that one. That is what it is for.
+Every CLI runs as an account that is not the sandbox user (`MAKA_CLOUD_AGENT_USER`, `_GROUP`), and
+the server checks the box for that account before its first run. The stand-in sandbox is one
+container with one user, so it has no such account: a task fails at once with "needs an agent
+channel", and the steps that run a task (`task`, `approval`, `restart`, `restart-reply`,
+`backup-restore`) are marked as expected failures in the workflow (`MAKA_REHEARSAL_XFAIL`;
+`restart-reply?` depends on `restart` and may pass).
+
+What takes them off the list, all of it in this directory:
+
+- the stubs container gets a real second account without sudo, a group shared with the sandbox user
+  and passwordless `sudo -n` for the sandbox user (the box image's job on a real host);
+- `server.env` sets `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP`, which also turns the
+  Agent SDK path on, so the scripted `claude` has to speak its stream-json protocol (`SDK_CLI` in
+  the runners' tests does) and the control API's `waitinit` and `release` have to work with it.

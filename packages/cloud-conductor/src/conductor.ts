@@ -66,6 +66,12 @@ export interface ConductorOptions {
    * without a turn. Without it those messages carry no task words at all.
    */
   scrubTaskText?: (text: string) => string;
+  /**
+   * Whether a text carries a key or token. An approval binds its card word for word (T15), so a
+   * card that carries one is not asked: the owner cannot be shown it and it cannot be edited.
+   * The host sets it from the server's scrubber; without it no card is checked.
+   */
+  carriesSecret?: (text: string) => boolean;
   playbooks?: readonly Playbook[];
   /**
    * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
@@ -127,9 +133,10 @@ export interface UserMessage {
   /**
    * Set only by a standing duty (T23): the run this message starts has this authority and this
    * hard budget, which it cannot raise or ask to raise. It applies when the message starts a run;
-   * a message that joins a run already open changes nothing about it.
+   * a message that joins a run already open changes nothing about it. `mode` is the mode the
+   * system started it in (a card's); the user's pick on the message never applies to such a run.
    */
-  run?: { dutyId: string; authority: RunAuthority; budgetUsd: number };
+  run?: { dutyId: string; authority: RunAuthority; budgetUsd: number; mode?: string };
 }
 
 export interface UserAnswer {
@@ -259,6 +266,7 @@ export class Conductor {
   private readonly followDelays = new Map<string, number>();
   private readonly tasksSurviveRestart: boolean;
   private readonly scrubTaskText: ((text: string) => string) | undefined;
+  private readonly carriesSecret: ((text: string) => boolean) | undefined;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -279,6 +287,7 @@ export class Conductor {
     this.orchestratorAccess = options.orchestratorAccess;
     this.tasksSurviveRestart = options.tasksSurviveRestart === true;
     this.scrubTaskText = options.scrubTaskText;
+    this.carriesSecret = options.carriesSecret;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
@@ -366,7 +375,8 @@ export class Conductor {
         limits.dutyId !== '' &&
         isRunAuthority(limits.authority) &&
         Number.isFinite(limits.budgetUsd) &&
-        limits.budgetUsd > 0
+        limits.budgetUsd > 0 &&
+        (limits.mode === undefined || isModeId(limits.mode))
       )
     ) {
       // Fail closed: limits that cannot be read start no run, instead of a run with the defaults.
@@ -392,7 +402,7 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
-    const picked = this.modes && limits === undefined ? message.mode : undefined;
+    const picked = this.modes ? (limits === undefined ? message.mode : limits.mode) : undefined;
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
@@ -467,8 +477,22 @@ export class Conductor {
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
-    if (!run) return false;
+    if (!run) return this.cancelKeptTasks(conversationId);
     return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
+  }
+
+  /**
+   * A task kept across a restart has no open run to stop it through, but it is still the
+   * conversation's: it is owed a cancel, which goes out now or when the conversation next has
+   * access. True when there was anything to cancel.
+   */
+  private cancelKeptTasks(conversationId: string): boolean {
+    const owed = this.state.unsettledDelegations({ conversationId });
+    if (owed.length === 0) return false;
+    this.state.markCancelPending(owed.map((delegation) => delegation.key));
+    // Taking the access queues the retry.
+    this.lane(conversationId, this.orchestratorAccess?.(conversationId));
+    return true;
   }
 
   /**
@@ -803,6 +827,7 @@ export class Conductor {
     switch (event.type) {
       case 'tool_start':
         turn.sawTool = true;
+        this.state.markToolCalled(turn.runId);
         turn.finalText = [];
         break;
       case 'tool_result':
@@ -955,6 +980,8 @@ export class Conductor {
       turn.errorKind !== undefined &&
       TRANSIENT_MODEL_ERRORS.has(turn.errorKind) &&
       !turn.sawTool &&
+      // Not only this turn: an earlier turn of the run may have planned, spent, notified or asked.
+      this.state.run(runId)?.toolCalled === false &&
       this.state.tasksOf(runId).length === 0
     );
   }
@@ -1400,6 +1427,7 @@ export class Conductor {
       decidedOnTaint: (active) => (active as Turn).contextTainted ?? true,
       approverAuthorized: (approvedBy, conversationId) =>
         this.approverAuthorized ? this.approverAuthorized(approvedBy, conversationId) : true,
+      carriesSecret: (text) => this.carriesSecret?.(text) ?? false,
     };
   }
 

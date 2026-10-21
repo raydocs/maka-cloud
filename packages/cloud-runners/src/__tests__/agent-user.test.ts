@@ -19,12 +19,19 @@ const GOOD = [
   'FACT dev_uid=0',
   'FACT agent_uid=65534',
   'FACT agent_sudo=no',
+  'FACT agent_sudo_list=no',
+  'FACT agent_iptables=no',
+  'FACT agent_ip6tables=absent',
   'FACT chan_enter=no',
   'FACT chan_list=no',
   'FACT chan_read=no',
   'FACT chan_write=no',
   'FACT chan_create=no',
   'FACT task_list=no',
+  'FACT task_file_write=no',
+  'FACT brief_read=yes',
+  'FACT result_write=yes',
+  'FACT result_cleanup=yes',
   'FACT workspace_write=yes',
   'FACT workspace_cleanup=yes',
 ];
@@ -47,6 +54,11 @@ test('a box passes only when every fact of the probe is as the channel needs it'
     [without('chan_write', 'yes'), /write the channel/u],
     [without('chan_create', 'yes'), /create files in the channel directory/u],
     [without('task_list', 'yes'), /list a task directory/u],
+    [without('task_file_write', 'yes'), /create files in the task directory/u],
+    [without('brief_read', 'no'), /cannot read the brief/u],
+    [without('result_write', 'no'), /cannot write the result/u],
+    [without('result_cleanup', 'no'), /cannot remove the result/u],
+    [without('brief_read'), /cannot read the brief/u],
     [without('workspace_write', 'no'), /cannot write a workspace/u],
     [without('workspace_cleanup', 'no'), /cannot remove what the agent wrote/u],
     // A missing answer is never taken as a good one.
@@ -156,6 +168,46 @@ test('what the agent runs cannot write, replace or remove the channel, but works
   assert.equal(asAgentRun('echo mine > workspace/note.txt').status, 0);
   assert.equal(await fs.readFile(join(taskDir, 'workspace', 'note.txt'), 'utf8'), 'mine\n');
   await fs.rm(join(taskDir, 'workspace', 'note.txt'));
+});
+
+test('the agent account reads the brief and writes the result in the handoff directory, and nothing else of the task directory', {
+  skip,
+}, async (t) => {
+  const { machine, h } = await boxes(t);
+  const dir = 'tsk_agent_handoff';
+  await machine.prepare(dir, '# the brief\n');
+  await machine.prepareAgent(dir, CHANNEL.group);
+  const taskDir = machine.taskDir(dir);
+  const asAgentRun = (script: string) =>
+    spawnSync('bash', ['-c', asAgent(`sh -c ${JSON.stringify(script)}`, CHANNEL)], {
+      env: { PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+    });
+  // The two paths the agent is told about work for it.
+  assert.equal(asAgentRun(`cat ${taskDir}/handoff/brief.md`).stdout, '# the brief\n');
+  const manifest = '{"summary":"s","done":[],"notDone":[],"confidence":"high","knownIssues":[]}';
+  assert.equal(
+    asAgentRun(`umask 002; echo '${manifest}' > ${taskDir}/handoff/result.json`).status,
+    0,
+  );
+  const read = await machine.readResult(dir);
+  assert.ok(read.ok, JSON.stringify(read));
+  assert.equal(read.bytes.toString('utf8').trim(), manifest);
+  // The task directory and the channel stay out of its reach.
+  assert.notEqual(asAgentRun(`ls ${taskDir}`).status, 0);
+  assert.notEqual(asAgentRun(`: > ${taskDir}/result.json`).status, 0);
+  assert.notEqual(asAgentRun(`cat ${taskDir}/chan/t1.in`).status, 0);
+  // A new run clears what the last one wrote there, though the agent owns it.
+  await machine.launch({
+    dirName: dir,
+    run: 't2',
+    script: 'exit 0\n',
+    envs: {},
+    runToken: 'tok',
+    workdir: join(taskDir, 'workspace'),
+  });
+  await assert.rejects(fs.stat(join(taskDir, 'handoff', 'result.json')));
+  assert.ok(h.root);
 });
 
 test('a conversation put back by the sandbox user is read and extended by the agent, and read again by the sandbox user', {

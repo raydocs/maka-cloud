@@ -8,7 +8,7 @@ the vendor CLI inside an instabox sandbox (T1). The package depends on
 
 The CLI runs detached in the sandbox, not inside an `exec` call: `exec` collects output, caps
 it at 1 MiB per stream and ends after 10 minutes at most. Per task, `<workRoot>/<taskId>/`
-holds `brief.md`, `result.json`, a `workspace/` directory, and for each CLI invocation (`t1`,
+holds a `handoff/` directory (`brief.md` going down, `result.json` coming back), a `workspace/` directory, and for each CLI invocation (`t1`,
 `t2`, ...) a lock, script, token, pid, cancel mark and `.exit` file. The output (stdout and stderr
 together, `.out`) is kept apart, see "Secrets". The exit file is written last, so its presence
 means all output is on disk.
@@ -77,13 +77,16 @@ Before the CLI starts, the run script unsets login-selector variables and refuse
 
 ## Result hand-back
 
-`result.json` is copied with `exec` as the sandbox user, never with `GET /files` (which reads
+`handoff/result.json` is copied with `exec` as the sandbox user, never with `GET /files` (which reads
 as root and would follow a task-controlled symlink). The script refuses symlinks and
 non-regular files, opens with `nofollow`, copies at most 1 MiB + 1 byte, and sends it in 256 KiB
 base64 chunks. The host validates the manifest, writes `resultPath` through a temp file and a
 rename (mode 0600), and only then reports `finished`. If the file is missing or invalid and a
 session id is known, the session is resumed once with "write it again" before the task fails.
-The start script deletes the previous turn's `result.json` once it holds the run's lock (a retried
+The agent account is not the sandbox user, so the task directory is enter-only for it and the two
+files it needs live in `handoff/` (group-writable, the brief group-readable); the box check proves
+the agent can read the brief and write the result there, and cannot add files above it. The start
+script deletes the previous turn's `result.json` once it holds the run's lock (a retried
 start does not reach that line), and a resumed turn is told to write it, so a turn that does no
 work cannot pass for one that did.
 Runner code on the host writes `resultPath` and the exported artifacts (below) into the task's

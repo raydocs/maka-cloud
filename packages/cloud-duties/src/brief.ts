@@ -14,7 +14,7 @@ const money = (usd: number) => `$${usd.toFixed(2)}`;
  * that looks like a double quote. The idea is Reason Network's `defang` and `util::printable`
  * (src/render.rs, src/util.rs; MIT OR Apache-2.0); no code is taken from it.
  */
-const UNSAFE =
+export const UNSAFE =
   /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}\u02BA\u02DD\u02EE\u05F4\u1CD3\u201C-\u201F\u2033\u2036\u275D\u275E\u2760\u3003\u301D-\u301F\uFF02]/gu;
 
 /**
@@ -37,7 +37,7 @@ function clip(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}… (cut)` : text;
 }
 
-const AUTHORITY_TEXT: Record<Authority, string> = {
+export const AUTHORITY_TEXT: Record<Authority, string> = {
   'read-only':
     'You may read the repository and report what you find. You may not open pull requests or change anything outside your sandbox.',
   'open-pr':

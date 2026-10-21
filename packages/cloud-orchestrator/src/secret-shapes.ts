@@ -33,13 +33,47 @@ const SECRET_JSON_FIELD = new RegExp(`(\\\\?)(["'])(?:${SECRET_FIELD})\\1\\2\\s*
 /**
  * Header and credential pairs written as data rather than as `name: value`:
  * `{"scheme":"Basic","value":"..."}`, `{"name":"Authorization","value":"..."}`, `["Authorization","..."]`.
+ * Also when the text was serialised again inside a string, which escapes the quotes (`{\\"scheme\\":
+ * \\"Basic\\",...}`), once or twice over.
  */
-const SECRET_PAIRS: readonly RegExp[] = [
-  /("(?:scheme|type)"\s*:\s*"(?:Bearer|Basic|Digest|Token|ApiKey)"[^{}]*?"(?:value|credentials?|token|param|parameter)"\s*:\s*)"(?:[^"\\]|\\.)*"/giu,
-  /("(?:value|credentials?|token|param|parameter)"\s*:\s*)"(?:[^"\\]|\\.)*"(?=[^{}]*?"(?:scheme|type)"\s*:\s*"(?:Bearer|Basic|Digest|Token|ApiKey)")/giu,
-  /("(?:name|key|header)"\s*:\s*"(?:authorization|proxy-authorization|x-api-key|cookie)"[^{}]*?"value"\s*:\s*)"(?:[^"\\]|\\.)*"/giu,
-  /(\[\s*"(?:authorization|proxy-authorization|x-api-key|cookie)"\s*,\s*)"(?:[^"\\]|\\.)*"/giu,
-];
+const SCHEMES = 'Bearer|Basic|Digest|Token|ApiKey';
+const CREDENTIAL_KEYS = 'value|credentials?|token|param|parameter';
+const SECRET_PAIRS: readonly [RegExp, string][] = ['', '\\', '\\\\\\'].flatMap((slashes) => {
+  // `q` is one quote as it is written at this depth of escaping. A value ends at the next one.
+  const q = `${slashes.replaceAll('\\', '\\\\')}"`;
+  const value = slashes === '' ? '(?:[^"\\\\]|\\\\.)*' : `(?:(?!${q})[\\s\\S])*?`;
+  const literal = `${slashes}"`;
+  return [
+    [
+      new RegExp(
+        `(${q}(?:scheme|type)${q}\\s*:\\s*${q}(?:${SCHEMES})${q}[^{}]*?${q}(?:${CREDENTIAL_KEYS})${q}\\s*:\\s*)${q}${value}${q}`,
+        'giu',
+      ),
+      literal,
+    ],
+    [
+      new RegExp(
+        `(${q}(?:${CREDENTIAL_KEYS})${q}\\s*:\\s*)${q}${value}${q}(?=[^{}]*?${q}(?:scheme|type)${q}\\s*:\\s*${q}(?:${SCHEMES})${q})`,
+        'giu',
+      ),
+      literal,
+    ],
+    [
+      new RegExp(
+        `(${q}(?:name|key|header)${q}\\s*:\\s*${q}(?:authorization|proxy-authorization|x-api-key|cookie)${q}[^{}]*?${q}value${q}\\s*:\\s*)${q}${value}${q}`,
+        'giu',
+      ),
+      literal,
+    ],
+    [
+      new RegExp(
+        `(\\[\\s*${q}(?:authorization|proxy-authorization|x-api-key|cookie)${q}\\s*,\\s*)${q}${value}${q}`,
+        'giu',
+      ),
+      literal,
+    ],
+  ] as [RegExp, string][];
+});
 
 const MIN_KNOWN_SECRET_LENGTH = 8;
 let knownSecrets: RegExp | undefined;
@@ -57,21 +91,74 @@ export function setKnownSecrets(values: readonly string[]): void {
   for (const value of values) {
     const secret = value.trim();
     if (secret.length < MIN_KNOWN_SECRET_LENGTH) continue;
-    forms.add(secret);
-    forms.add(encodeURIComponent(secret));
-    forms.add(JSON.stringify(secret).slice(1, -1));
-    forms.add(Buffer.from(secret).toString('base64').replace(/=+$/u, ''));
+    for (const form of secretForms(secret)) forms.add(form);
   }
-  knownSecrets =
-    forms.size === 0
-      ? undefined
-      : new RegExp(
-          [...forms]
-            .sort((a, b) => b.length - a.length)
-            .map(escapeRegExp)
-            .join('|'),
-          'gu',
-        );
+  knownSecrets = formsPattern(forms);
+}
+
+/**
+ * The ways a secret can show up in text that was built from it: as it is, percent-encoded (in
+ * either case of hex, and as a URL's userinfo encodes it), escaped for JSON, and as the base64 of
+ * a Basic credential that has it in it.
+ */
+export function secretForms(secret: string): string[] {
+  const forms = new Set<string>([secret]);
+  const encoded = encodeURIComponent(secret);
+  forms.add(encoded);
+  forms.add(encoded.replace(/%[0-9A-F]{2}/gu, (hex) => hex.toLowerCase()));
+  try {
+    const url = new URL('https://x.invalid');
+    url.password = secret;
+    forms.add(url.password);
+  } catch {}
+  const escaped = JSON.stringify(secret).slice(1, -1);
+  forms.add(escaped);
+  forms.add(escaped.replaceAll('/', '\\/'));
+  forms.add(Buffer.from(secret).toString('base64').replace(/=+$/u, ''));
+  forms.delete('');
+  return [...forms];
+}
+
+function formsPattern(forms: ReadonlySet<string>): RegExp | undefined {
+  return forms.size === 0
+    ? undefined
+    : new RegExp(
+        [...forms]
+          .sort((a, b) => b.length - a.length)
+          .map(escapeRegExp)
+          .join('|'),
+        'gu',
+      );
+}
+
+/**
+ * `text` with each of these values, in every form `secretForms` lists, replaced by `[secret]`. A
+ * value of any length counts: the caller says these are secrets, so there is no minimum. A text
+ * that is JSON is read first and the replacement made inside each string (a key is escaped by the
+ * sender however it likes, `\u0041` included), then the written-out text is checked again.
+ */
+export function scrubValues(text: string, values: readonly string[]): string {
+  const forms = new Set<string>();
+  for (const value of values) for (const form of secretForms(value)) forms.add(form);
+  const pattern = formsPattern(forms);
+  if (!pattern) return text;
+  const replace = (value: string) => value.replace(pattern, '[secret]');
+  let out = text;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === 'object' && parsed !== null) {
+      const walk = (value: unknown): unknown => {
+        if (typeof value === 'string') return replace(value);
+        if (Array.isArray(value)) return value.map(walk);
+        if (typeof value === 'object' && value !== null) {
+          return Object.fromEntries(Object.entries(value).map(([k, v]) => [replace(k), walk(v)]));
+        }
+        return value;
+      };
+      out = JSON.stringify(walk(parsed));
+    }
+  } catch {}
+  return replace(out);
 }
 
 /** The index just after the value that starts at `start`: a string, an array or object (balanced), or a bare word. */
@@ -129,7 +216,7 @@ function scrubJsonFields(text: string): string {
 export function scrubSecretShapes(text: string): string {
   let out = knownSecrets ? text.replace(knownSecrets, '[secret]') : text;
   out = scrubJsonFields(out);
-  for (const pair of SECRET_PAIRS) out = out.replace(pair, '$1"[secret]"');
+  for (const [pair, quote] of SECRET_PAIRS) out = out.replace(pair, `$1${quote}[secret]${quote}`);
   out = out.replace(SECRET_PARAM, '$1[secret]');
   for (const shape of SECRET_SHAPES) {
     out = out.replace(shape, (match, name: unknown) =>
@@ -141,6 +228,32 @@ export function scrubSecretShapes(text: string): string {
 
 const SECRET_KEY = new RegExp(`^(?:${SECRET_FIELD})$`, 'iu');
 
+const CREDENTIAL_SCHEME = new RegExp(`^(?:${SCHEMES})$`, 'iu');
+const CREDENTIAL_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS})$`, 'iu');
+
+/**
+ * The keys of an object whose value is a secret because of another field beside it, which the
+ * keys alone do not say: `{scheme: 'Basic', value}`, `{name: 'Authorization', value}`. Walking an
+ * object field by field loses that link, and the base64 of a Basic credential has no shape.
+ */
+export function linkedSecretKeys(record: Record<string, unknown>): Set<string> {
+  const keys = new Set<string>();
+  for (const [name, value] of Object.entries(record)) {
+    if (typeof value !== 'string') continue;
+    if (/^(?:scheme|type)$/iu.test(name) && CREDENTIAL_SCHEME.test(value)) {
+      for (const other of Object.keys(record)) if (CREDENTIAL_KEY.test(other)) keys.add(other);
+    }
+    if (/^(?:name|key|header)$/iu.test(name) && SECRET_KEY.test(value)) keys.add('value');
+  }
+  return keys;
+}
+
+/** The same for an array that is one header written as a pair: `['Authorization', value]`. */
+export function linkedSecretPair(items: readonly unknown[]): boolean {
+  const [name] = items;
+  return items.length >= 2 && typeof name === 'string' && SECRET_KEY.test(name);
+}
+
 /**
  * A value as clients see it, field by field before it is written out: a field with a secret name
  * loses its whole value, and every string goes through `scrubSecretShapes`.
@@ -148,11 +261,19 @@ const SECRET_KEY = new RegExp(`^(?:${SECRET_FIELD})$`, 'iu');
 export function scrubSecretFields(value: unknown, depth = 0): unknown {
   if (typeof value === 'string') return scrubSecretShapes(value);
   if (depth > 12 || typeof value !== 'object' || value === null) return value;
-  if (Array.isArray(value)) return value.map((item) => scrubSecretFields(item, depth + 1));
+  if (Array.isArray(value)) {
+    const pair = linkedSecretPair(value);
+    return value.map((item, index) =>
+      pair && index > 0 && item !== null && item !== undefined
+        ? '[secret]'
+        : scrubSecretFields(item, depth + 1),
+    );
+  }
+  const linked = linkedSecretKeys(value as Record<string, unknown>);
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,
-      SECRET_KEY.test(key) && item !== null && item !== undefined
+      (SECRET_KEY.test(key) || linked.has(key)) && item !== null && item !== undefined
         ? '[secret]'
         : scrubSecretFields(item, depth + 1),
     ]),

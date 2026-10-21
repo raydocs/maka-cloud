@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { InstaboxClient, InstaboxExecResult } from '@maka-cloud/instabox';
+import type { AgentChannel } from '@maka-cloud/runners';
+import { AGENT_CHECK_SCRIPT, agentProblems, asRepoUser } from './agent.js';
+import { SCRUB_SCRIPT } from './scrub.js';
 
 /** Bump when the way a snapshot is built changes, so old snapshots are no longer reused. */
-const RECIPE_VERSION = 1;
+const RECIPE_VERSION = 2;
 
 /** Where the checkout of a repository lives in a box that was made from its setup snapshot. */
 export const REPOS_ROOT = '/data/maka/repos';
@@ -64,6 +67,12 @@ export interface SetupSnapshotsOptions {
    * is run and no snapshot is made.
    */
   guard: (machineId: string) => Promise<void>;
+  /**
+   * The unprivileged account the repository's `.agents/setup` runs as. Without it no repository
+   * script is run and a repository with a setup script gets no snapshot: the builder's sandbox user
+   * has passwordless sudo, so a script as that user could undo the egress guard.
+   */
+  agent?: AgentChannel;
   /** How long the repository's setup may run, in seconds. Default 1200. */
   setupTimeoutSeconds?: number;
   /** How many snapshots of one repository an invite keeps. Default 2. */
@@ -113,14 +122,15 @@ const repoPrefix = (tenantId: string, repoUrl: string): string =>
 
 /**
  * What the snapshot's description says it is, with the full digests. A snapshot found by name is used,
- * or deleted, only when this matches (and when the API returns no description, the long name stands).
+ * or deleted, only when this matches. A snapshot with no description, or another one, is not ours: a name
+ * is not proof, so there is no fallback to it.
  */
-function ownerRecord(tenantId: string, repoUrl: string, hash: string): string {
+export function ownerRecord(tenantId: string, repoUrl: string, hash: string): string {
   return `maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=${hash}`;
 }
 
 const ownsPrefix = (description: string | undefined, tenantId: string, repoUrl: string): boolean =>
-  description === undefined ||
+  description !== undefined &&
   description.startsWith(`maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=`);
 
 export class SnapshotOwnerError extends Error {}
@@ -216,7 +226,13 @@ export class SetupSnapshots {
   }
 
   private async build(recipe: SetupRecipe, hash: string, name: string): Promise<SetupSnapshot> {
-    const { api } = this.options;
+    const { api, agent } = this.options;
+    if (recipe.setupScript !== undefined && agent === undefined) {
+      throw new SetupFailedError(
+        '.agents/setup',
+        'no unprivileged agent account is configured, so no repository script is run',
+      );
+    }
     const box = await this.options.boxes.lease({
       tenantId: recipe.tenantId,
       job: `setup-${hash.slice(0, 12)}`,
@@ -227,6 +243,7 @@ export class SetupSnapshots {
         MAKA_REPO_URL: recipe.repoUrl,
         MAKA_REF: recipe.ref,
         MAKA_REPO_DIR: repoDir(recipe.repoUrl),
+        ...(agent === undefined ? {} : { MAKA_AGENT_GROUP: agent.group }),
         ...(recipe.setupScript === undefined
           ? {}
           : { MAKA_SETUP_SHA256: sha(recipe.setupScript), MAKA_HAS_SETUP: '1' }),
@@ -234,15 +251,30 @@ export class SetupSnapshots {
       for (const [index, command] of recipe.prepare.entries()) {
         await this.run(box.machineId, `prepare step ${index + 1}`, command, {});
       }
-      if (recipe.setupScript !== undefined) {
+      if (recipe.setupScript !== undefined && agent !== undefined) {
+        await this.checkAgent(box.machineId, agent);
         await this.run(
           box.machineId,
           '.agents/setup',
-          'cd "$MAKA_REPO_DIR" && exec ./.agents/setup',
+          asRepoUser('cd "$MAKA_REPO_DIR" && exec ./.agents/setup', agent),
           { MAKA_REPO_DIR: repoDir(recipe.repoUrl), MAKA_SETUP_HASH: hash },
           this.options.setupTimeoutSeconds ?? DEFAULT_SETUP_TIMEOUT_SECONDS,
         );
       }
+      // The snapshot is the whole disk and every box of the invite boots from it: take credentials,
+      // history, transcripts and other tasks' folders off it, then look again and refuse if any is left.
+      const scrubEnv = {
+        MAKA_REPO_DIR: repoDir(recipe.repoUrl),
+        ...(agent === undefined ? {} : { MAKA_AGENT_USER: agent.user }),
+      };
+      await this.run(box.machineId, 'scrub', SCRUB_SCRIPT, {
+        ...scrubEnv,
+        MAKA_SCRUB_MODE: 'clean',
+      });
+      await this.run(box.machineId, 'scrub check', SCRUB_SCRIPT, {
+        ...scrubEnv,
+        MAKA_SCRUB_MODE: 'check',
+      });
       await this.run(box.machineId, 'sync', 'sync', {});
       let snapshotId: string;
       try {
@@ -283,11 +315,28 @@ export class SetupSnapshots {
     }
   }
 
+  private async checkAgent(machineId: string, agent: AgentChannel): Promise<void> {
+    let result: InstaboxExecResult;
+    try {
+      result = await this.options.api.exec(machineId, {
+        cmd: AGENT_CHECK_SCRIPT,
+        envs: { MAKA_AGENT_USER: agent.user },
+        timeoutSeconds: STEP_TIMEOUT_SECONDS,
+      });
+    } catch (error) {
+      throw new SetupFailedError(
+        'agent check',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const problems = agentProblems(result.stdout);
+    if (problems.length > 0) {
+      throw new SetupFailedError('agent check', problems.join('; '));
+    }
+  }
+
   private assertOwned(snapshot: SnapshotRecord, recipe: SetupRecipe, hash: string): void {
-    if (
-      snapshot.description !== undefined &&
-      snapshot.description !== ownerRecord(recipe.tenantId, recipe.repoUrl, hash)
-    ) {
+    if (snapshot.description !== ownerRecord(recipe.tenantId, recipe.repoUrl, hash)) {
       throw new SnapshotOwnerError(
         `snapshot ${snapshot.name} belongs to another invite, repository or setup`,
       );
@@ -350,6 +399,12 @@ if [ "\${MAKA_HAS_SETUP:-}" = 1 ]; then
   [ "$(sha256sum < .agents/setup | cut -d' ' -f1)" = "$MAKA_SETUP_SHA256" ] \\
     || { echo ".agents/setup is not the script that was hashed" >&2; exit 4; }
   chmod +x .agents/setup
+fi
+# The agent's account runs the repository's scripts: the checkout is its group's, and it can walk to it.
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  chgrp -R -- "$MAKA_AGENT_GROUP" "$MAKA_REPO_DIR"
+  chmod -R g+rwX -- "$MAKA_REPO_DIR"
+  chmod 755 -- "$(dirname -- "$MAKA_REPO_DIR")"
 fi
 `;
 }

@@ -1,4 +1,4 @@
-import type { TaskEvent, TaskView } from '@maka-cloud/orchestrator';
+import type { ResultManifest, TaskEvent, TaskView } from '@maka-cloud/orchestrator';
 import { scrubSecretFields, scrubSecretShapes } from './secret-shapes.js';
 
 /**
@@ -26,6 +26,31 @@ export function scrubErrorText(value: string): string {
 }
 
 /**
+ * Text as clients see it when only the secrets must go: what an assistant wrote, or a manifest a
+ * runner returned, may name any vendor but must not carry a key. Text with nothing in it comes
+ * back untouched, so an emoji joined by a zero-width joiner survives; text that hides a key behind
+ * invisible characters comes back without them.
+ */
+export function scrubSecretText(value: string): string {
+  const plain = value.normalize('NFKC').replace(/[\p{Cf}]/gu, '');
+  const scrubbed = scrubSecretShapes(plain);
+  return scrubbed === plain ? scrubSecretShapes(value) : scrubbed;
+}
+
+/** A result manifest as clients see it. Every line of it is the runner's own words. */
+function toPublicManifest(manifest: ResultManifest): ResultManifest {
+  const lines = (values: string[]) => values.map(scrubSecretText);
+  return {
+    ...manifest,
+    summary: scrubSecretText(manifest.summary),
+    done: lines(manifest.done),
+    notDone: lines(manifest.notDone),
+    knownIssues: lines(manifest.knownIssues),
+    ...(manifest.artifacts === undefined ? {} : { artifacts: lines(manifest.artifacts) }),
+  };
+}
+
+/**
  * An inbox item as clients see it. The supervisor builds its ask from agent-written
  * text (a failure reason, a summary), so it is scrubbed like error text. An approval's ask is the
  * conductor's card, which the approval binds word for word, so it is shown as it is (T15): the card
@@ -33,14 +58,61 @@ export function scrubErrorText(value: string): string {
  */
 export function toPublicItem(item: unknown): unknown {
   if (typeof item !== 'object' || item === null || !('ask' in item)) return item;
-  if ('kind' in item && item.kind === 'approval') return item;
-  return typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
+  if ('kind' in item && item.kind === 'approval') return toPublicApproval(item);
+  const scrubbed = typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
+  return 'suggestion' in scrubbed ? toPublicSuggestion(scrubbed) : scrubbed;
+}
+
+/** A proposed card's facts: its detail quotes a pull request or an issue, so it is scrubbed like the ask. */
+function toPublicSuggestion(item: object): unknown {
+  const suggestion = (item as { suggestion?: unknown }).suggestion;
+  if (typeof suggestion !== 'object' || suggestion === null) return item;
+  const facts = suggestion as Record<string, unknown>;
+  return {
+    ...item,
+    suggestion: {
+      ...facts,
+      ...(typeof facts.detail === 'string' ? { detail: scrubErrorText(facts.detail) } : {}),
+      ...(typeof facts.repo === 'string' ? { repo: scrubErrorText(facts.repo) } : {}),
+    },
+  };
+}
+
+/** What an approval shows when its card carries a secret: the owner cannot approve what they were not shown. */
+export const WITHHELD_APPROVAL =
+  'This approval cannot be shown: the action it would run carries a key or token. Decline it.';
+
+/**
+ * An approval binds its card word for word (T15), so the text is never edited. The conductor does
+ * not ask for an approval whose card carries a secret; one that is stored anyway (from before that
+ * rule) is withheld whole and offers no way to approve.
+ */
+function toPublicApproval(item: object): unknown {
+  const carries = (value: unknown) => {
+    const text = JSON.stringify(value) ?? '';
+    return scrubSecretText(text) !== text;
+  };
+  const { ask, evidence, options } = item as {
+    ask?: unknown;
+    evidence?: unknown;
+    options?: unknown;
+  };
+  if (!carries(ask) && !carries(evidence)) return item;
+  return {
+    ...item,
+    ask: WITHHELD_APPROVAL,
+    evidence: [],
+    ...(Array.isArray(options)
+      ? { options: options.filter((option) => (option as { id?: unknown })?.id !== 'approve') }
+      : {}),
+  };
 }
 
 export function toPublicView(view: TaskView): PublicTaskView {
   const { runner: _runner, ...rest } = view;
   return {
     ...rest,
+    ...(rest.manifest === undefined ? {} : { manifest: toPublicManifest(rest.manifest) }),
     // The runner's progress notes carry whatever its tools printed.
     ...(Array.isArray(rest.progress) ? { progress: rest.progress.map(scrubErrorText) } : {}),
     ...(rest.failureReason === undefined
@@ -89,6 +161,8 @@ export function toPublicEvent(event: TaskEvent): unknown {
     case 'task_pause_failed':
     case 'task_resume_failed':
       return { ...event, reason: scrubErrorText(event.reason) };
+    case 'task_succeeded':
+      return { ...event, manifest: toPublicManifest(event.manifest) };
     case 'task_progress':
       return { ...event, note: scrubErrorText(event.note) };
     case 'step_intent':

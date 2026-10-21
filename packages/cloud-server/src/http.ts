@@ -4,7 +4,9 @@ import type { DatabaseSync } from 'node:sqlite';
 import { MemoryError, type MemoryStore } from '@maka-cloud/memory';
 import { MODE_IDS } from '@maka-cloud/modes';
 import {
-  buildTimeline,
+  STEPS_PAGE_DEFAULT,
+  STEPS_PAGE_MAX,
+  TimelineBuilder,
   KeyedCounter,
   MAX_STEER_CHARS,
   type Orchestrator,
@@ -38,6 +40,18 @@ import type { SqliteTaskStore } from './sqlite-task-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const FEED_PAGE = 100;
+/**
+ * What one timeline request may cost: the log entries folded (past this the request is refused,
+ * not answered from a part of the log) and the bytes of the answer (past this the page of steps
+ * shrinks until it fits).
+ */
+export interface TimelineLimits {
+  maxEvents: number;
+  maxBytes: number;
+}
+export const TIMELINE_LIMITS: TimelineLimits = { maxEvents: 250_000, maxBytes: 256 * 1024 };
+/** Log entries folded between two turns of the event loop. */
+const TIMELINE_YIELD_EVERY = 2000;
 const TASK_PAGE_DEFAULT = 50;
 const TASK_PAGE_MAX = 200;
 const HEARTBEAT_MS = 15_000;
@@ -148,6 +162,8 @@ export interface PublicApiDeps {
   limits: HttpLimits;
   /** The owner turned content on: a task's timeline includes what each step did, not only its kind. */
   timelineContent?: boolean;
+  /** Bounds on one timeline response; tests lower them. */
+  timelineLimits?: Partial<TimelineLimits>;
   /**
    * Called after a post, a retried one included: the message is stored with a
    * pending delivery, and this asks for an attempt now.
@@ -477,7 +493,7 @@ export class PublicApi {
     const timeline = /^\/v1\/tasks\/([^/]+)\/timeline$/u.exec(path);
     if (timeline) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
-      return this.taskTimeline(res, invite, decodeURIComponent(timeline[1] ?? ''));
+      return this.taskTimeline(res, url, invite, decodeURIComponent(timeline[1] ?? ''));
     }
     const taskMessages = /^\/v1\/tasks\/([^/]+)\/messages(?:\/([^/]+))?$/u.exec(path);
     if (taskMessages) {
@@ -869,18 +885,44 @@ export class PublicApi {
 
   /**
    * The run of a task as its log has it: turns, steps, cost over time. Read from the log alone, so
-   * nothing here can fail a task, and metadata only unless the owner turned content on.
+   * nothing here can fail a task, and metadata only unless the owner turned content on. The cost of
+   * a request does not grow with the task: the log is folded a page at a time with the event loop
+   * given its turns (and refused past `maxEvents`), the series are thinned, the steps come in pages
+   * (`after`, `limit`), and the answer is held to `maxBytes`.
    */
-  private taskTimeline(res: ServerResponse, invite: InviteInfo, taskId: string): void {
+  private async taskTimeline(
+    res: ServerResponse,
+    url: URL,
+    invite: InviteInfo,
+    taskId: string,
+  ): Promise<void> {
     take(this.deps.controlLimiter, invite);
     this.reauthenticate(invite);
     this.ownTaskSession(invite, taskId);
-    const timeline = buildTimeline(this.deps.tasks.readTask(taskId), {
-      content: this.deps.timelineContent === true,
-      now: Date.now(),
-    });
-    if (!timeline) throw new HttpError(404, 'not_found');
-    respond(res, 200, { timeline: scrubSecretFields(timeline) });
+    const after = parseCount(url.searchParams.get('after'), 0);
+    const limit = parseCount(url.searchParams.get('limit'), STEPS_PAGE_DEFAULT);
+    const limits = { ...TIMELINE_LIMITS, ...this.deps.timelineLimits };
+    const builder = new TimelineBuilder();
+    for (const stored of this.deps.tasks.iterateTask(taskId)) {
+      if (builder.added >= limits.maxEvents) {
+        throw new HttpError(413, 'task_log_too_large');
+      }
+      builder.add(stored);
+      if (builder.added % TIMELINE_YIELD_EVERY === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+    const content = this.deps.timelineContent === true;
+    const asked = Math.min(limit, STEPS_PAGE_MAX);
+    for (let size = asked; ; size = Math.max(1, size >> 1)) {
+      const built = builder.build({ content, now: Date.now(), after, limit: size });
+      if (!built) throw new HttpError(404, 'not_found');
+      const timeline = scrubSecretFields(size < asked ? { ...built, truncated: true } : built);
+      if (size <= 1 || JSON.stringify(timeline).length <= limits.maxBytes) {
+        respond(res, 200, { timeline });
+        return;
+      }
+    }
   }
 
   /** The owner as the orchestrator checks them, in its write chain, so a revoke in between stops it. */

@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { scrubSecretFields, scrubSecretShapes, setKnownSecrets } from '../secret-shapes.js';
+import {
+  scrubSecretFields,
+  scrubSecretShapes,
+  scrubValues,
+  setKnownSecrets,
+} from '../secret-shapes.js';
 
 afterEach(() => setKnownSecrets([]));
 
@@ -81,4 +86,53 @@ test('an object is scrubbed field by field before it is written out', () => {
     count: 3,
     none: null,
   });
+});
+
+test('scrubValues replaces a value of any length, in the forms a vendor echoes it, inside JSON strings too', () => {
+  const key = 'a"b\\c/1';
+  const quoted = JSON.stringify({ error: { message: `bad ${key}` } });
+  assert.ok(!scrubValues(quoted, [key]).includes('a\\"b'), 'escaped for JSON');
+  // The same key written with a unicode escape is only found by reading the JSON.
+  const unicode = '{"message":"bad \\u0061\\"b\\\\c/1"}';
+  assert.ok(!scrubValues(unicode, [key]).includes('\\u0061'), scrubValues(unicode, [key]));
+  assert.equal(
+    scrubValues(`https://u:${encodeURIComponent('p@s')}@h`, ['p@s']),
+    'https://u:[secret]@h',
+  );
+  assert.equal(scrubValues('abc', ['b']), 'a[secret]c', 'there is no minimum length');
+  assert.equal(scrubValues('abc', []), 'abc');
+  assert.equal(scrubValues('abc', ['']), 'abc');
+});
+
+test('credential pairs are scrubbed when the JSON was serialised again inside a string, once or twice', () => {
+  const basic = 'dXNlcjpwYXNzd29yZDEyMw==';
+  const pairs = [
+    { scheme: 'Basic', value: basic },
+    { value: basic, type: 'Bearer' },
+    { name: 'Authorization', value: basic },
+  ];
+  for (const pair of pairs) {
+    const once = JSON.stringify(pair);
+    for (const text of [once, JSON.stringify(once), JSON.stringify(JSON.stringify(once))]) {
+      const out = scrubSecretShapes(`request failed: ${text}`);
+      assert.ok(!out.includes(basic), `${text} -> ${out}`);
+    }
+  }
+  const header = JSON.stringify(JSON.stringify(['Authorization', basic]));
+  assert.ok(!scrubSecretShapes(header).includes(basic), scrubSecretShapes(header));
+  // What is around them stays.
+  assert.match(
+    scrubSecretShapes(JSON.stringify(JSON.stringify({ scheme: 'Basic', value: basic, ok: 1 }))),
+    /"ok\\":1|ok\\":1/u,
+  );
+});
+
+test('an object keeps the link between a scheme or header name and its value', () => {
+  const basic = 'dXNlcjpwYXNzd29yZDEyMw==';
+  const out = scrubSecretFields({
+    a: { scheme: 'Basic', value: basic },
+    b: [{ name: 'X-Api-Key', value: basic }, ['Cookie', basic], { name: 'Accept', value: 'x' }],
+  });
+  assert.ok(!JSON.stringify(out).includes(basic), JSON.stringify(out));
+  assert.match(JSON.stringify(out), /"value":"x"/u);
 });
