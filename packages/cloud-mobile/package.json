@@ -44,6 +44,9 @@
   },
   "jest": {
     "preset": "jest-expo",
+    "modulePaths": [
+      "<rootDir>/node_modules"
+    ],
     "moduleNameMapper": {
       "^@maka-cloud/client$": "<rootDir>/../cloud-client/src/index.ts",
       "^@/(.*)$": "<rootDir>/src/$1"

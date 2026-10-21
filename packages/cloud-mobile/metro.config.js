@@ -11,6 +11,7 @@ config.resolver.extraNodeModules = {
   ...config.resolver.extraNodeModules,
   '@maka-cloud/client': client,
 };
-// The shared package must use this app's React, never a copy of its own.
-config.resolver.disableHierarchicalLookup = false;
+// The shared package must use this app's React and Babel helpers, never a copy of its own (and
+// not whatever happens to sit in a parent folder of this checkout).
+config.resolver.nodeModulesPaths = [path.resolve(__dirname, 'node_modules')];
 module.exports = config;
