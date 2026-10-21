@@ -255,6 +255,8 @@ export class Conductor {
   private readonly retryTimers = new Map<string, NodeJS.Timeout>();
   private readonly stopChecks = new Map<string, NodeJS.Timeout>();
   private readonly followTimers = new Map<string, NodeJS.Timeout>();
+  /** How long the conversation's followed tasks were last left alone; doubles up to a cap. */
+  private readonly followDelays = new Map<string, number>();
   private readonly tasksSurviveRestart: boolean;
   private readonly scrubTaskText: ((text: string) => string) | undefined;
   private slotsInUse = 0;
@@ -1162,8 +1164,24 @@ export class Conductor {
     this.sendOutbox(lane.conversationId);
     if (!this.closing.signal.aborted) {
       this.hooks.followed?.(lane.conversationId);
-      if (this.state.hasFollowedTasks(lane.conversationId)) this.followLater(lane.conversationId);
+      if (this.state.hasFollowedTasks(lane.conversationId)) {
+        this.followLater(lane.conversationId, this.nextFollowDelay(lane.conversationId));
+      } else {
+        this.followDelays.delete(lane.conversationId);
+      }
     }
+  }
+
+  /**
+   * Asks again soon after a restart, when a task is most likely to end, and less often the longer
+   * it runs: one second, doubling to ten (never past the stop-check interval).
+   */
+  private nextFollowDelay(conversationId: string): number {
+    const cap = Math.min(this.limits.stopCheckMs, FOLLOW_MAX_MS);
+    const previous = this.followDelays.get(conversationId);
+    const next = Math.min(previous === undefined ? FOLLOW_FIRST_MS : previous * 2, cap);
+    this.followDelays.set(conversationId, next);
+    return next;
   }
 
   /** Asks about the conversation's followed tasks after `delayMs` (default: the stop-check interval). */
@@ -1540,6 +1558,10 @@ export class Conductor {
     }
   }
 }
+
+/** The first and the longest wait between two looks at a task kept across a restart. */
+const FOLLOW_FIRST_MS = 1_000;
+const FOLLOW_MAX_MS = 10_000;
 
 /** The adapter's error kinds that pass by themselves; `auth`, billing, a rejected request and `unknown` are not among them. */
 const TRANSIENT_MODEL_ERRORS: ReadonlySet<string> = new Set([
