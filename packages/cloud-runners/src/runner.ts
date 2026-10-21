@@ -769,10 +769,7 @@ class Run implements RunHandle {
       // A key the run was never given, pasted by the user or read from a file, is shaped like one:
       // the kept conversation is read by people and by later sandboxes, and holds none.
       redact: (text) => this.scrubForReader(text),
-      onProblem: (message) => {
-        this.mirrorFailure ??= message;
-        this.progress(message);
-      },
+      onProblem: (message) => this.progress(message),
       onKept: (lines) => this.mirrorKept(lines),
     });
     this.mirror = kept;
@@ -1199,8 +1196,8 @@ class Run implements RunHandle {
           this.mirrorFailure ??= text;
           this.progress(text);
         }
-        if (this.mirrorFailure) stopNow(this.mirrorStop(this.mirrorFailure));
         if (this.budgetStop) stopNow({ ok: false, reason: this.budgetStop });
+        if (this.mirrorFailure) stopNow(this.mirrorStop(this.mirrorFailure));
         if (stopped) break;
       }
     } catch (error) {
@@ -1211,6 +1208,8 @@ class Run implements RunHandle {
     // What the CLI wrote last is kept (or has failed to be) before the run ends, so a message
     // given to the agent in its last step is reported while the run can still report it.
     await this.mirror?.drain().catch(() => undefined);
+    // A batch the SDK gave up on is not kept; one it offered again and the store then kept is.
+    this.mirrorFailure ??= this.mirror?.unkept();
     // A conversation that is not all kept cannot be resumed from the server's copy, and what the
     // agent did after the gap would be missing from it: the turn ends here, as a failure.
     if (this.mirrorFailure) stopNow(this.mirrorStop(this.mirrorFailure));

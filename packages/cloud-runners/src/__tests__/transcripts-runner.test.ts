@@ -292,6 +292,24 @@ test('a store that fails only on the last lines still ends the turn as a failure
   assert.match(end?.type === 'failed' ? end.reason : '', /the transcript database went away/u);
 });
 
+test('a refusal that the SDK retries and the store then keeps does not fail the turn', async (t) => {
+  const busy = new MemoryTranscriptStore();
+  const append = busy.append.bind(busy);
+  const refusedOnce = new Set<string>();
+  busy.append = async (taskId, key, lines) => {
+    const batch = lines.map((line) => line.json).join('\n');
+    if (!refusedOnce.has(batch)) {
+      refusedOnce.add(batch);
+      throw new Error('the transcript database is busy');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: busy });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_busy')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  assert.ok(refusedOnce.size > 0);
+});
+
 test('a conversation that cannot be put on the sandbox fails the turn before the CLI starts', async (t) => {
   const r = await rig(t);
   const spec = await r.h.spec('tsk_tr_readfail');
