@@ -37,6 +37,13 @@ const VERIFICATION = {
   repro: { command: 'bash tests/test_add.sh', files: ['tests/test_add.sh'] },
   attempts: [{ vendor: 'claude-agent-sdk' }],
   changedFiles: [{ path: 'lib/add.sh', status: 'modified' }],
+  review: {
+    status: 'reviewed' as 'reviewed' | 'unavailable' | 'not_configured',
+    mode: 'standard' as const,
+    modesVersion: 1,
+    counts: { P1: 0, P2: 0, P3: 0 },
+    reviewSha256: '0'.repeat(64),
+  },
 };
 
 async function github(t: TestContext): Promise<FakeGitHub> {
@@ -170,14 +177,14 @@ test('publishing refuses to start without a fine-grained token', async (t) => {
 
 // -- the conductor tool ---------------------------------------------------------------------------
 
-async function deliveryFiles(t: TestContext) {
+async function deliveryFiles(t: TestContext, verification: object = VERIFICATION) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'pr-tool-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const changesPath = join(dir, 'changes.json');
   const verificationPath = join(dir, 'verification.json');
   const changes = JSON.stringify(CHANGES);
   await fs.writeFile(changesPath, changes);
-  await fs.writeFile(verificationPath, JSON.stringify(VERIFICATION));
+  await fs.writeFile(verificationPath, JSON.stringify(verification));
   const deliveries = new MemoryCodingDeliveries();
   await deliveries.record({
     taskId: 'tsk_1',
@@ -333,4 +340,23 @@ test('deliveries in a JSON file survive a restart', async (t) => {
     publishedPr: { url: 'u', number: 1, branch: 'maka/tsk_1' },
   });
   assert.equal((await reopened.get('tsk_2'))?.taskId, 'tsk_2');
+});
+
+test('a change nobody reviewed is never opened as a pull request', async (t) => {
+  const { review: _reviewed, ...withoutReview } = VERIFICATION;
+  const unreviewed = [
+    withoutReview,
+    { ...VERIFICATION, review: { ...VERIFICATION.review, status: 'unavailable', reason: 'x' } },
+    { ...VERIFICATION, review: { ...VERIFICATION.review, status: 'not_configured', reason: 'x' } },
+  ];
+  for (const verification of unreviewed) {
+    const { deliveries } = await deliveryFiles(t, verification);
+    const publisher = new CountingPublisher();
+    const tool = openPullRequestTool({ deliveries, publisher, ownsTask: () => true });
+    await assert.rejects(
+      tool.impl({ taskId: 'tsk_1', title: 'x' }, context()),
+      /not independently reviewed/,
+    );
+    assert.equal(publisher.calls, 0, 'nothing reached GitHub');
+  }
 });
