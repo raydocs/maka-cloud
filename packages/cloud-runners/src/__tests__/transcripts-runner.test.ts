@@ -93,6 +93,18 @@ test('every line the CLI writes is kept in the store, scrubbed of the run’s se
   assert.equal((await r.h.sessions.get('tsk_tr_mirror'))?.sessionId, SESSION);
 });
 
+test('a key the run was never given is scrubbed from the kept conversation too', async (t) => {
+  const r = await rig(t);
+  await r.h.setMode('shape');
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_shape')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(terminal(events)));
+  const text = (await r.stored('tsk_tr_shape')).join('\n');
+  assert.ok(!text.includes('sk-ant-api03-AbCd'), 'an API key reached the store');
+  assert.ok(!text.includes('ghp_AbCd'), 'a token reached the store');
+  assert.match(text, /the user pasted \[secret\] and \[secret\]/);
+  for (const line of await r.stored('tsk_tr_shape')) JSON.parse(line);
+});
+
 test('without a transcript store the CLI is not asked to mirror anything and keeps its own configuration directory', async (t) => {
   const h = await sdkSetup(t);
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_tr_off')));

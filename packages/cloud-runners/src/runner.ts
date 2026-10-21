@@ -692,7 +692,9 @@ class Run implements RunHandle {
     const kept = transcriptSessionStore({
       taskId: spec.taskId,
       store: transcripts,
-      redact: (text) => this.scrub(text),
+      // A key the run was never given, pasted by the user or read from a file, is shaped like one:
+      // the kept conversation is read by people and by later sandboxes, and holds none.
+      redact: (text) => this.scrubForReader(text),
       onProblem: (message) => this.progress(message),
       onKept: (lines) => this.mirrorKept(lines),
     });
@@ -1530,8 +1532,7 @@ class Run implements RunHandle {
   /**
    * Text a person will read (a failure, a note, a quote of the CLI): the run's own secrets, then
    * anything shaped like a key or a credential header, which also catches a key this run was
-   * never given. The transcript the conversation resumes from keeps `scrub` alone, so history is
-   * not rewritten.
+   * never given. The kept transcript goes through it too, so no key shape is ever stored.
    */
   private scrubForReader(text: string): string {
     return scrubSecretShapes(this.scrub(text));
