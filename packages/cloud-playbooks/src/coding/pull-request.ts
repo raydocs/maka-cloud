@@ -53,18 +53,8 @@ export function openPullRequestTool(
 ): ConductorToolSpec<typeof parameters> {
   const inFlight = new Map<string, Promise<PublishedPullRequest>>();
 
-  const publish = async (delivery: Delivery, title: string, signal: AbortSignal) => {
-    const changes = await readFile(delivery.changesPath, 'utf8');
-    if (createHash('sha256').update(changes).digest('hex') !== delivery.changesSha256) {
-      throw new ToolRefusal(
-        'change_modified',
-        `The verified change of ${delivery.taskId} was modified after it was verified; nothing was opened.`,
-      );
-    }
-    const changeSet = JSON.parse(changes) as ChangeSet;
-    const verification = JSON.parse(
-      await readFile(delivery.verificationPath, 'utf8'),
-    ) as VerificationView;
+  const publish = async (loaded: LoadedChange, title: string, signal: AbortSignal) => {
+    const { delivery, changeSet, verification } = loaded;
     // A change a second agent reviewed is opened as a pull request. One that was kept for the owner
     // to look at is not pushed at all, unless the owner asked for that as its own action; it then
     // opens only as a draft that says so. Any other unreviewed change is not opened.
@@ -109,13 +99,28 @@ export function openPullRequestTool(
         // The model wrote the title: shown quoted, a line break or a hidden character as an escape (T15).
         `Title: ${shownValue(args.title)}`,
       ];
-      const kept = await keptReasonOf(delivery);
-      if (kept !== undefined) {
-        lines.push(
-          args.publishUnreviewed === true
-            ? `NOT REVIEWED. Opens as a draft because you asked to open a change kept for you to look at: ${shownValue(kept)}`
-            : `This cannot be opened: the change is kept for you to look at and nothing is pushed unless you ask to open it unreviewed: ${shownValue(kept)}`,
-        );
+      if (delivery) {
+        // The card names the exact change and record it stands for, so a change that is replaced
+        // after the owner approved reads differently and the approval no longer covers it.
+        try {
+          const loaded = await loadChange(delivery);
+          lines.push(
+            `${CHANGE_LABEL} ${loaded.changesSha256}`,
+            `${RECORD_LABEL} ${loaded.recordSha256}`,
+          );
+          const kept = loaded.verification.kept?.reason;
+          if (kept !== undefined) {
+            lines.push(
+              args.publishUnreviewed === true
+                ? `NOT REVIEWED. Opens as a draft because you asked to open a change kept for you to look at: ${shownValue(kept)}`
+                : `This cannot be opened: the change is kept for you to look at and nothing is pushed unless you ask to open it unreviewed: ${shownValue(kept)}`,
+            );
+          }
+        } catch (error) {
+          lines.push(
+            `This cannot be opened: ${error instanceof ToolRefusal ? error.message : 'its record cannot be read'}`,
+          );
+        }
       }
       const problem = options.publisher.precheck();
       if (problem) lines.push(`This cannot be opened yet: ${problem}`);
@@ -136,8 +141,21 @@ export function openPullRequestTool(
         );
       }
       if (delivery.publishedPr) return { ...delivery.publishedPr, alreadyOpen: true };
+      // One read of the change and its record: what the card was checked against is what is opened.
+      const loaded = await loadChange(delivery);
+      const approved = approvedHashes(context.approved);
+      if (
+        !approved ||
+        approved.changes !== loaded.changesSha256 ||
+        approved.record !== loaded.recordSha256
+      ) {
+        throw new ToolRefusal(
+          'change_modified',
+          `The change of ${args.taskId} is not the one you approved (it was replaced after the approval card was shown); nothing was opened. Ask again to see the current change.`,
+        );
+      }
       // A change kept for the owner is not a delivery: pushing its branch would be one.
-      const kept = await keptReasonOf(delivery);
+      const kept = loaded.verification.kept?.reason;
       if (kept !== undefined && args.publishUnreviewed !== true) {
         throw new ToolRefusal(
           'kept_not_publishable',
@@ -146,9 +164,13 @@ export function openPullRequestTool(
       }
       const problem = options.publisher.precheck();
       if (problem) throw new ToolRefusal('github_token', problem);
+      // Read again with nothing awaited before the check below: a call that finished while this one
+      // read the change has recorded its pull request, and this one returns it.
+      const latest = await options.deliveries.get(args.taskId);
+      if (latest?.publishedPr) return { ...latest.publishedPr, alreadyOpen: true };
       let pending = inFlight.get(args.taskId);
       if (!pending) {
-        pending = publish(delivery, args.title, context.signal).finally(() =>
+        pending = publish(loaded, args.title, context.signal).finally(() =>
           inFlight.delete(args.taskId),
         );
         inFlight.set(args.taskId, pending);
@@ -159,16 +181,48 @@ export function openPullRequestTool(
 }
 
 /** The reason a task's change is kept for the owner, read from the runner's record; undefined if it is not kept. */
-async function keptReasonOf(delivery: Delivery | undefined): Promise<string | undefined> {
-  if (!delivery) return undefined;
-  try {
-    const record = JSON.parse(await readFile(delivery.verificationPath, 'utf8')) as {
-      kept?: { reason?: unknown };
-    };
-    return typeof record.kept?.reason === 'string' ? record.kept.reason : undefined;
-  } catch {
-    return undefined;
+const CHANGE_LABEL = 'Change (sha256):';
+const RECORD_LABEL = 'Record (sha256):';
+
+/** The hashes an approved card names, or nothing when it names none. */
+function approvedHashes(card: string | undefined): { changes: string; record: string } | undefined {
+  if (card === undefined) return undefined;
+  const find = (label: string) =>
+    new RegExp(`^${label.replace(/[()]/g, '\\$&')} ([0-9a-f]{64})$`, 'm').exec(card)?.[1];
+  const changes = find(CHANGE_LABEL);
+  const record = find(RECORD_LABEL);
+  return changes && record ? { changes, record } : undefined;
+}
+
+interface LoadedChange {
+  delivery: Delivery;
+  changeSet: ChangeSet;
+  verification: VerificationView;
+  changesSha256: string;
+  recordSha256: string;
+}
+
+/**
+ * A delivery's change and record, each read once and hashed from the bytes read. The change must be
+ * the one the store holds the hash of; the record's hash is what the owner's card names.
+ */
+async function loadChange(delivery: Delivery): Promise<LoadedChange> {
+  const changes = await readFile(delivery.changesPath, 'utf8');
+  const changesSha256 = createHash('sha256').update(changes).digest('hex');
+  if (changesSha256 !== delivery.changesSha256) {
+    throw new ToolRefusal(
+      'change_modified',
+      `The verified change of ${delivery.taskId} was modified after it was verified; nothing was opened.`,
+    );
   }
+  const record = await readFile(delivery.verificationPath, 'utf8');
+  return {
+    delivery,
+    changeSet: JSON.parse(changes) as ChangeSet,
+    verification: JSON.parse(record) as VerificationView,
+    changesSha256,
+    recordSha256: createHash('sha256').update(record).digest('hex'),
+  };
 }
 
 interface VerificationView {

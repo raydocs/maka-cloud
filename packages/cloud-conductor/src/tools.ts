@@ -105,7 +105,16 @@ export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
   approvalDetails?(args: z.infer<P>): Promise<string> | string;
   impl(
     args: z.infer<P>,
-    context: { runId: string; conversationId: string; signal: AbortSignal },
+    context: {
+      runId: string;
+      conversationId: string;
+      signal: AbortSignal;
+      /**
+       * For a held call: the card the owner approved, exactly as it was shown. A tool whose card
+       * names what it will act on checks that it acts on that, read again at the moment it runs.
+       */
+      approved?: string;
+    },
   ): Promise<unknown>;
 }
 
@@ -877,18 +886,21 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
       gate(host, turn);
       requireAuthority(host, turn, spec.name, policy, guarded);
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
+      let approved: string | undefined;
       if (guarded) {
         // An approval covers the call only while its card reads as the owner saw it (T15).
         const shown =
           actionRef === undefined ? undefined : await approvalCard(spec, spec.name, args);
         if (actionRef !== undefined) gate(host, turn);
         holdUnlessApproved(host, turn, spec.name, args, actionRef, always, shown);
+        approved = shown;
       }
       if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
       return spec.impl(args as never, {
         runId: turn.runId,
         conversationId: turn.conversationId,
         signal: signalOf(turn, ctx),
+        ...(approved === undefined ? {} : { approved }),
       });
     },
   };
