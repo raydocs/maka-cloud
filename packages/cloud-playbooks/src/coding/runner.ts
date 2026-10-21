@@ -5,6 +5,8 @@ import {
   implementerFor,
   type ModeId,
   type ModesConfig,
+  budgetProblem,
+  chooseMode,
   parseModeBrief,
   reviewerFor,
   splitBudget,
@@ -405,7 +407,21 @@ class CodingRun implements RunHandle {
       const parsed = parseCodingBrief(brief);
       if (!parsed.ok) return this.setTerminal({ type: 'failed', reason: parsed.reason });
       const task = parsed.task;
-      this.mode = modeBrief.mode ?? 'standard';
+      // A brief with no mode line is a task whose budget alone decides (never above standard).
+      const { modes } = this.options;
+      this.mode =
+        modeBrief.mode ??
+        (modes
+          ? chooseMode(modes, {
+              ...(this.spec.budgetUsd === undefined ? {} : { budgetUsd: this.spec.budgetUsd }),
+            }).mode
+          : 'standard');
+      // A task whose budget is below what its mode needs is refused before anything is acquired.
+      const tooSmall =
+        modes && this.spec.budgetUsd !== undefined
+          ? budgetProblem(modes, this.mode, this.spec.budgetUsd)
+          : undefined;
+      if (tooSmall) return this.setTerminal({ type: 'failed', reason: tooSmall });
       this.limitUsd = this.workLimit();
 
       this.adoptWorkspace(

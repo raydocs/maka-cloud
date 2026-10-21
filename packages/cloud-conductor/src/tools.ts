@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  budgetProblem,
   chooseMode,
   looksLikeModeLine,
   MODE_IDS,
@@ -142,11 +143,19 @@ function chooseWorkMode(
     );
   }
   const picked = host.state.run(turn.runId)?.mode;
+  // What the task is given decides what it can afford, not what the whole run has.
   const choice = chooseMode(modes, {
     ...(picked ? { requested: picked } : {}),
     ...(args.workMode ? { suggested: args.workMode } : {}),
-    budgetUsd: host.state.budget(turn.runId).budgetUsd,
+    budgetUsd: args.budgetUsd,
   });
+  const problem = budgetProblem(modes, choice.mode, args.budgetUsd);
+  if (problem) {
+    throw new ToolRefusal(
+      'delegation_under_mode_minimum',
+      `${problem}. Give it more, or ask for a quicker mode.`,
+    );
+  }
   const cap = modes.modes[choice.mode].budget.maxDelegationUsd;
   if (args.budgetUsd > cap) {
     throw new ToolRefusal(

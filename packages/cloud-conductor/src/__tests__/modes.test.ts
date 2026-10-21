@@ -60,7 +60,7 @@ const structured = (
 
 test('the user’s pick is the run’s mode, starts it with that mode’s budget, and the model cannot choose another', async (t) => {
   const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
-  const { runId, result } = await runWith(h, { mode: 'deep' }, delegate({ workMode: 'quick' }, 4));
+  const { runId, result } = await runWith(h, { mode: 'deep' }, delegate({ workMode: 'quick' }, 10));
   const run = h.conductor.state.run(runId);
   assert.equal(run?.mode, 'deep');
   assert.equal(run?.budgetUsd, DEFAULT_MODES.modes.deep.budget.defaultRunUsd);
@@ -73,15 +73,15 @@ test('the user’s pick is the run’s mode, starts it with that mode’s budget
 test('without a pick the conductor’s suggestion stands when the run’s budget affords it, and never goes above standard on its own', async (t) => {
   const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
   // The default run budget is $5: quick is affordable, deep is not (it wants $10), so standard.
-  const quick = await runWith(h, {}, delegate({ workMode: 'quick' }));
+  const quick = await runWith(h, {}, delegate({ workMode: 'quick' }, 3));
   assert.equal(structured(quick.result).workMode, 'quick');
   assert.equal(structured(quick.result).workModeChosenBy, 'conductor');
   assert.match(await briefOf(h, 0), /^maka-mode: quick\n/);
   assert.equal(h.conductor.state.run(quick.runId)?.mode, null);
 
-  const deep = await runWith(h, {}, delegate({ workMode: 'deep' }));
-  assert.equal(structured(deep.result).workMode, 'standard', 'deep is not affordable at $5');
-  const none = await runWith(h, {}, delegate());
+  const deep = await runWith(h, {}, delegate({ workMode: 'deep' }, 4));
+  assert.equal(structured(deep.result).workMode, 'standard', 'deep is not affordable at $4');
+  const none = await runWith(h, {}, delegate({}, 4));
   assert.equal(structured(none.result).workMode, 'standard');
   assert.equal(structured(none.result).workModeChosenBy, 'budget');
 });
@@ -99,6 +99,27 @@ test('a brief the model wrote with a mode line in it is refused before anything 
     assert.equal(h.conductor.state.budget(runId).reservedUsd, 0);
   }
   assert.equal(h.claude.runs.length, 0, 'nothing was delegated');
+});
+
+test('a delegation is judged by what it is given, not by the run: $0.20 never runs deep', async (t) => {
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  // The user's pick stands, but a deep task needs $10: nothing is reserved or sent below that.
+  const picked = await runWith(h, { mode: 'deep' }, delegate({}, 0.2));
+  assert.equal(picked.result?.isError, true);
+  assert.match(
+    refusal(picked.result),
+    /^delegation_under_mode_minimum: a deep run needs a budget of at least \$10\.00, this one has \$0\.20\./,
+  );
+  assert.equal(h.conductor.state.budget(picked.runId).reservedUsd, 0);
+  assert.equal(h.claude.runs.length, 0);
+  // Without a pick, a suggestion of deep with $0.20 is clamped down to quick, which needs $0.50.
+  const small = await runWith(h, {}, delegate({ workMode: 'deep' }, 0.2));
+  assert.equal(small.result?.isError, true);
+  assert.match(refusal(small.result), /^delegation_under_mode_minimum: a quick run needs/);
+  assert.equal(h.claude.runs.length, 0);
+  // Given enough, the pick runs.
+  const enough = await runWith(h, { mode: 'deep' }, delegate({}, 10));
+  assert.equal(structured(enough.result).workMode, 'deep');
 });
 
 test('a mode caps what one delegation may cost, whoever chose the mode', async (t) => {
