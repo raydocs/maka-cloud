@@ -823,6 +823,7 @@ class CodingRun implements RunHandle {
     const { stats } = this.runner;
     const interval = this.options.sampleIntervalMs ?? 15_000;
     let stopped = false;
+    let told = false;
     let timer: NodeJS.Timeout | undefined;
     let inFlight: Promise<void> | undefined;
     stats.samplers++;
@@ -845,6 +846,13 @@ class CodingRun implements RunHandle {
           signal: this.signal,
         });
         if (stopped) return;
+        // The script refuses a tree it cannot look at safely (a repository inside the checkout): the
+        // loop check is blind until that is gone, and the owner sees why.
+        const refusal = /^ERR (.*)$/mu.exec(result.stdout);
+        if (refusal !== null && !told) {
+          told = true;
+          this.progress(`the loop check cannot look at the files: ${refusal[1]}`);
+        }
         const reason = detector.observe(parseSample(result.stdout));
         if (reason !== undefined) {
           stopped = true;
