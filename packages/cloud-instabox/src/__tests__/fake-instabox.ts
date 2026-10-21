@@ -533,21 +533,22 @@ export class FakeInstabox {
     timedOut: boolean;
     truncated: boolean;
   }> {
+    const env: Record<string, string | undefined> = {
+      PATH: this.execPath ?? process.env.PATH,
+      HOME: this.home,
+      ...this.baseEnv,
+      ...body.envs,
+    };
+    if (this.firewallDir) {
+      // In front of whatever PATH a test or a command sets, so no command here can reach the real
+      // firewall of the machine running the tests.
+      env.PATH = [join(this.firewallDir, 'bin'), env.PATH].filter(Boolean).join(':');
+      env.SHIM_STATE = join(this.firewallDir, 'state');
+    }
     return new Promise((resolve) => {
       const child = spawn(BASH, ['-c', body.cmd], {
         cwd: body.cwd ?? '/',
-        env: {
-          PATH: [
-            this.firewallDir && join(this.firewallDir, 'bin'),
-            this.execPath ?? process.env.PATH,
-          ]
-            .filter(Boolean)
-            .join(':'),
-          ...(this.firewallDir ? { SHIM_STATE: join(this.firewallDir, 'state') } : {}),
-          HOME: this.home,
-          ...this.baseEnv,
-          ...body.envs,
-        },
+        env,
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

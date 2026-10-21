@@ -106,6 +106,12 @@ describe('applyEgressGuard', () => {
     assert.doesNotMatch(h.fake.firewall.calls().join('\n'), /ip6tables/u);
   });
 
+  it('keeps the stand-ins in front when a test sets its own PATH', async () => {
+    await make({ env: { PATH: '/usr/sbin:/usr/bin:/bin' } });
+    await run();
+    assert.ok(v4().length > 0, 'the rules went to the stand-in, not to the real firewall');
+  });
+
   it('refuses when there is no firewall tool', async () => {
     await make({ firewall: 'none', execPath: '/usr/bin:/bin' });
     await assert.rejects(run(), (error: unknown) => {
