@@ -636,7 +636,14 @@ class CodingRun implements RunHandle {
       briefPath: join(this.hostDir, `agent-${n}-brief.md`),
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
       // Each agent run may spend what is left of its phase's limit.
-      ...(limit === undefined ? {} : { budgetUsd: roundUsd(limit - this.spentBefore) }),
+      // The run's own limit is what is left of its phase (work, then review and fix). The whole
+      // budget stays `budgetUsd`, so the gateway pool is the whole and not the first phase's share.
+      ...(limit === undefined || this.spec.budgetUsd === undefined
+        ? {}
+        : {
+            budgetUsd: this.spec.budgetUsd,
+            turnBudgetUsd: roundUsd(limit - this.spentBefore),
+          }),
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),

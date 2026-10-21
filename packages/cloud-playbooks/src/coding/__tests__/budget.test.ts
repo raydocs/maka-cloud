@@ -45,8 +45,14 @@ test('each agent run gets what is left of the budget, and the task stops when it
   const events = await collect(await h.runner.start(spec));
   await spent.promise;
   assert.deepEqual(
-    h.claude.turns.map((turn) => turn.spec.budgetUsd),
+    h.claude.turns.map((turn) => turn.spec.turnBudgetUsd),
     [1, 0.4],
+    'each run may spend what is left of its phase',
+  );
+  assert.deepEqual(
+    h.claude.turns.map((turn) => turn.spec.budgetUsd),
+    [1, 1],
+    'and the whole budget is what the gateway pool holds the runs to',
   );
   assert.deepEqual(
     h.claude.turns.map((turn) => turn.spec.budgetRootId),

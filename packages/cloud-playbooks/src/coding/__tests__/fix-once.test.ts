@@ -204,11 +204,18 @@ test('the fix and the second review share the review’s limit, which never grow
   const { events } = await run(h, 'tsk_fbudget', spec);
   assert.deepEqual(terminal(events), { type: 'finished' });
   // Standard keeps 20% of $10 for review and fix: after $1 of work, everything after it stops at $3.
-  assert.equal(h.claude.turns[0]?.spec.budgetUsd, 8);
+  assert.equal(h.claude.turns[0]?.spec.turnBudgetUsd, 8);
   const limits = [h.codex.turns[0], h.claude.turns[1], h.codex.turns[1]].map(
-    (turn) => (turn?.spec.budgetUsd ?? 0) + spentBefore(turn, h),
+    (turn) => (turn?.spec.turnBudgetUsd ?? 0) + spentBefore(turn, h),
   );
   assert.deepEqual(limits, [3, 3, 3]);
+  // Every run is held to the whole $10 by the pool, whatever its phase's limit.
+  assert.deepEqual(
+    [h.claude.turns[0], h.codex.turns[0], h.claude.turns[1], h.codex.turns[1]].map(
+      (turn) => turn?.spec.budgetUsd,
+    ),
+    [10, 10, 10, 10],
+  );
   const totals = events.flatMap((event) => (event.type === 'usage' ? [event.costUsd] : []));
   assert.ok(Math.max(...totals) <= 3, `spent ${Math.max(...totals)}`);
   zeroStats(h.runner);
