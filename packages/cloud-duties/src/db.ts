@@ -13,9 +13,12 @@ export class DutiesDatabaseInUseError extends Error {
  * folded into one number) and chains that remember their newest failure. A database of any other
  * version was written by a build that ordered runs differently, and mixing the two encodings
  * would compare unlike numbers, so it is refused rather than migrated. No deployment holds one;
- * the file is left exactly as it was.
+ * the file is left exactly as it was. Version 3 adds the cards of T30 to version 2, and a version 2
+ * database is opened by adding them.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+/** Version 2 had no cards; opening it adds them (T30) and changes nothing else. */
+const CARDS_FROM_VERSION = 2;
 
 /** The duties database was written by a build this one cannot read. It is not touched. */
 export class DutiesDatabaseVersionError extends Error {
@@ -153,6 +156,50 @@ CREATE INDEX run_requests_day ON run_requests (duty_id, day);
 `;
 
 /**
+ * T30: the cards a project's scan proposes. A card is the proposal of one task; accepting it starts
+ * one conversation and nothing else. `day` is the UTC day it was made (the daily cap counts it);
+ * a card that refreshed another has `replaces` set and does not count as new. `card_kinds`
+ * keeps the counts that back a kind off and the owner's switch per kind and project.
+ */
+const CARDS_SCHEMA = `
+CREATE TABLE cards (
+  card_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  subject_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  brief TEXT NOT NULL,
+  estimate_micro INTEGER NOT NULL CHECK (estimate_micro > 0),
+  precondition TEXT NOT NULL,
+  external INTEGER NOT NULL CHECK (external IN (0, 1)),
+  state TEXT NOT NULL CHECK (state IN ('open', 'accepted', 'dismissed', 'stale', 'expired')),
+  day TEXT NOT NULL,
+  replaces TEXT,
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER,
+  conversation_id TEXT
+);
+CREATE UNIQUE INDEX cards_one_open ON cards (project_id, kind, subject_key) WHERE state = 'open';
+CREATE INDEX cards_by_project ON cards (project_id, day);
+CREATE INDEX cards_by_subject ON cards (project_id, kind, subject_key);
+CREATE INDEX cards_by_owner ON cards (owner);
+
+CREATE TABLE card_kinds (
+  project_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  accepted INTEGER NOT NULL DEFAULT 0,
+  dismissed INTEGER NOT NULL DEFAULT 0,
+  ignored INTEGER NOT NULL DEFAULT 0,
+  streak INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  offer TEXT NOT NULL DEFAULT 'none' CHECK (offer IN ('none', 'due', 'offered', 'off')),
+  PRIMARY KEY (project_id, kind)
+);
+`;
+
+/**
  * Opens the duties database for this process alone: claims check the day's cap and write in one
  * transaction and assume nobody else writes, so a second opener fails at once.
  */
@@ -161,7 +208,7 @@ export function openDatabase(path: string): DatabaseSync {
   try {
     // Before anything is changed in the file, not even its journal mode.
     const version = userVersion(db);
-    if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (version !== 0 && version !== SCHEMA_VERSION && version !== CARDS_FROM_VERSION) {
       throw new DutiesDatabaseVersionError(path, version);
     }
     db.exec('PRAGMA locking_mode = EXCLUSIVE');
@@ -192,12 +239,14 @@ function userVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
 }
 
-/** Makes the tables of a new database. An existing one has the current version (checked on open). */
+/** Makes the tables of a new database, or adds the cards to a version 2 one. Any other version was refused on open. */
 function migrate(db: DatabaseSync): void {
-  if (userVersion(db) === SCHEMA_VERSION) return;
+  const version = userVersion(db);
+  if (version === SCHEMA_VERSION) return;
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.exec(SCHEMA);
+    if (version === 0) db.exec(SCHEMA);
+    db.exec(CARDS_SCHEMA);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {
