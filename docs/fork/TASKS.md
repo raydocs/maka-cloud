@@ -39,7 +39,8 @@ not code. We combine the two:
 
 Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
 T28, T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
-T23 and T24.
+T23 and T24. T29 (iOS and Android) runs in a second lane from now on, in
+parallel with the main order.
 
 Borrow before building (2026-10-20). The owner wants to start testing as
 soon as possible, so a task takes a working piece from these projects before
@@ -54,11 +55,11 @@ code also needs its NOTICE). Say in the PR what was taken and from where.
 | vercel-labs/durable-harness | Apache-2.0 | step log and fencing design; `harness-process/src/tail.ts` (file tail), `recovery.ts` (recovery note), `harness-claude-code/src/env.ts` and `spawn.ts` (env allowlist, path rewrite of mirrored lines, upload of `projects/**` only), `harness-codex/src/config.ts` (gateway provider, `shell_environment_policy` excluding token variables), `rollout.ts` (rollout path checks); `sandbox-host/src/wake.ts` (wake probe), `harness-sandbox/src/base.ts` (base snapshot keyed by recipe hash), `cleanup.ts` (idle cleanup), `relay/relay.ts` (fence kept on the box); `cli-check/src/known.ts` and `scenarios/` (known gaps as expected failures, the kill-inside-a-`never`-step drill, the scripted fake CLI); `bench/src/stats.ts` (overhead method) | T28, T26, T27 |
 | Vercel docs, "Agent harnesses" (`vercel.com/docs/agent-harnesses`: claude-code, security, observability) | docs | the box holds no secret, tools off until listed, per-task spend and box-time budgets, egress allowlist, the `restart` stream event, owner recorded before the first message, no remote images from model output, a trace per task with content off by default | T28, T27, T24, T15 |
 | CopilotKit/OpenBot | MIT | `agent-claude-sdk` (setup-token handling: refuse both a token and an API key), routines limits, approvals pages, the component gallery, the per-tool-call policy check with an audit row first | T27, T23, T20, T13, T15 |
-| CopilotKit/openmuse | MIT | rich thread cards (`docs/RICH-THREADS.md`) and the browser "Take control" flow; the headless mobile client for later | T24, T14b, T18 |
+| CopilotKit/openmuse | MIT | rich thread cards (`docs/RICH-THREADS.md`) and the browser "Take control" flow; the headless mobile client for later | T24, T14b, T29 |
 | CopilotKit/OpenDots | MIT | approval cards ("Approve & run" for write tools), interrupted scheduled-run recovery | T20, T23 |
 | trycua/cua (libraries, not the Spaces app) | MIT | `cua-driver` on the box: open what the agent built, click through it, take the screenshot that the delivery card shows and the reviewer checks | T24, T25, T14b |
 | reason-machines/reason-network | MIT or Apache-2.0 | `src/files.rs` rules for files an agent sends out (no hidden files, no `~/.ssh`, `~/.aws` and similar, size caps), the loop guard; `src/doing.rs` (what a session is doing, from its own title and todo list); `src/render.rs` `defang` and `util::printable` (outside text cannot open or close a frame, and loses control, direction and look-alike characters); `src/hook.rs` (messages shown to a running agent at its next step through its hooks); the install rule that never puts an unverified build over a verified one | T15, T20, T23, T24, T27, T28 |
-| elie222/rakazo | Apache-2.0 | box sleep in `packages/adapters/src/computer-idle.ts` (compare-and-set `running` to `suspending`, checkpoint, re-check holds, then revert or stop; billed providers capped at 2 h active) and `computer-lifecycle.ts` (a stored provider ref only speeds things up, otherwise restore the saved home); screen handoff in `packages/core/src/node/screen-capability.ts`, `apps/api/src/screen-proxy.ts` and `packages/adapters/src/computer-control.ts` (sealed capability with policy and expiry as AAD, a server check on every open, a 15 min control lease, no takeover during a run except the agent's own request for 2FA or a CAPTCHA, the terminal tied to the control token); credentials in `secrets.ts` and `pi-oauth.ts` (record-bound AAD, terminal refresh errors disable the credential, a changed account id on refresh is refused, refresh 5 min early, but make the refresh lock cross-process); `secret_request` (`docs/bot-secrets.md`: the server injects a secret into one request for an exact origin, no redirects, the model never sees it) and `connector-safety.ts` (Bearer tokens stripped from errors); host hardening and egress that blocks 169.254.169.254 (`docs/self-host.md`, `network-address.ts`); tool activity that shows the last six steps and folds to one line when done (`docs/tool-activity.md`); a judge as a separate tool-free call and helpers one level deep, at most 4 at once (`judge.ts`, `pi-runtime.ts`); one retry only for a transient model error, skipped when the next run is within 30 min (`executor.ts`); the Expo, EAS and push setup (`docs/mobile-release.md`); the `VoiceProvider` and call RPC (`interfaces.ts`, `rpc.ts`); the loopback model emulator that checks every request (`docs/agent-verification.md`) | T26, T27, T14b, T15, T22, T24, T25, T23, T18, T19 |
+| elie222/rakazo | Apache-2.0 | box sleep in `packages/adapters/src/computer-idle.ts` (compare-and-set `running` to `suspending`, checkpoint, re-check holds, then revert or stop; billed providers capped at 2 h active) and `computer-lifecycle.ts` (a stored provider ref only speeds things up, otherwise restore the saved home); screen handoff in `packages/core/src/node/screen-capability.ts`, `apps/api/src/screen-proxy.ts` and `packages/adapters/src/computer-control.ts` (sealed capability with policy and expiry as AAD, a server check on every open, a 15 min control lease, no takeover during a run except the agent's own request for 2FA or a CAPTCHA, the terminal tied to the control token); credentials in `secrets.ts` and `pi-oauth.ts` (record-bound AAD, terminal refresh errors disable the credential, a changed account id on refresh is refused, refresh 5 min early, but make the refresh lock cross-process); `secret_request` (`docs/bot-secrets.md`: the server injects a secret into one request for an exact origin, no redirects, the model never sees it) and `connector-safety.ts` (Bearer tokens stripped from errors); host hardening and egress that blocks 169.254.169.254 (`docs/self-host.md`, `network-address.ts`); tool activity that shows the last six steps and folds to one line when done (`docs/tool-activity.md`); a judge as a separate tool-free call and helpers one level deep, at most 4 at once (`judge.ts`, `pi-runtime.ts`); one retry only for a transient model error, skipped when the next run is within 30 min (`executor.ts`); the Expo, EAS and push setup (`docs/mobile-release.md`); the `VoiceProvider` and call RPC (`interfaces.ts`, `rpc.ts`); the loopback model emulator that checks every request (`docs/agent-verification.md`) | T26, T27, T14b, T15, T22, T24, T25, T23, T29, T19 |
 
 Not taken from Rakazo: its Claude plan sign-in reuses Claude Code's OAuth client id to call the
 API directly, which Anthropic's terms forbid (T27 keeps running the unmodified `claude` binary);
@@ -459,7 +460,7 @@ proposals and T20 items).
   terminal) is dense, on an opaque surface, and uses a monospace font for
   code, because that is where a programmer reads. Never blur or tint behind
   code or diffs.
-- Native Liquid Glass waits for the iOS app (T18), which gets it from the
+- Native Liquid Glass waits for the iOS app (T29), which gets it from the
   system; the web uses plain CSS backdrop blur only.
 - Light and dark themes both, dark by default; check contrast on both.
 - Tests: Playwright at desktop and phone width for Home, a project and a task
@@ -732,6 +733,81 @@ default), T26.
   licence of each piece before copying or depending on it: the libraries are
   MIT, the Spaces app is FSL-1.1-MIT. Say in the PR what was borrowed.
 
+## T29: iOS and Android apps (Expo), built alongside the server
+
+Depends on: T24 (the web app is the reference for every screen), T9.
+Replaces T18. The owner wants both phone apps now, with the full UI and
+all the logic of the web app, not a web view. A second lane runs it in
+parallel with T25, T28 and T27; it touches only `packages/cloud-client`,
+`packages/cloud-mobile` and the imports in `packages/cloud-web`. When it
+needs a server change, that goes in its own small PR on the main lane.
+
+- One codebase for both platforms: Expo with expo-router, TypeScript,
+  exact versions pinned like the rest of the repo. Borrow the layout, EAS
+  profiles, push setup and Maestro flows from Rakazo's `apps/mobile` and
+  `docs/mobile-release.md` (Apache-2.0; licence header, THIRD_PARTY.md and
+  NOTICE as for any Apache code).
+- PR 1, shared logic: move `client.ts`, `contract.ts`, `state.ts`,
+  `presentation.ts`, `inboxAnswer.ts` and `errors.ts` from `cloud-web` into
+  `packages/cloud-client` with no DOM and no change in behaviour. Storage,
+  push registration and the event stream go behind small interfaces that
+  the web and the app each implement. Their tests move with them and run
+  once for both; the web's Playwright suite must pass unchanged. After
+  this, a logic change is made once and the web and both apps get it.
+- Screens, the same four places as T24: Home (verb-first one-tap cards with
+  the precondition-hash refresh, answered exactly once), Chat (one updating
+  step line per running task, the result card, the viewer opened over a
+  blurred Chat and closed by a swipe), the sources stack as a horizontal
+  swipe, Projects (duties, tasks, the task page with plan, steps, diff,
+  tests, review, cost and PR link), the inbox and approval cards, and
+  Settings (spend limits and the kill switch). Approval text is shown
+  exactly as the approval binds it (#155): no normalisation, no brand
+  replacement. Never show model or vendor names.
+- Look and feel: T24's design, made native. On iOS 26 and later, the tab
+  bar, composer and floating cards use the system's Liquid Glass
+  (expo-glass-effect); older iOS and Android get a plain blur or a frosted
+  fill. Android keeps its own back gesture, system bars and edge-to-edge
+  layout. Dark by default, light too. Text scales to 200 percent without
+  clipping, every control has a VoiceOver and TalkBack label, touch targets
+  are at least 44 pt, reduced motion is respected, and one-tap actions give
+  a light haptic. The task page stays dense and opaque, in monospace for
+  code, never blurred.
+- Sign-in: the session token lives in the Keychain or Keystore
+  (expo-secure-store), never in plain storage or a URL. Deep links
+  (`makacloud://` plus universal and App Links on the app's domain) open a
+  task or a card and carry only its id.
+- Push through APNs and FCM (expo-notifications). A notification carries an
+  id and a generic line ("A decision is waiting"), never task content; the
+  app fetches the details after it opens. The server keeps one token per
+  device and drops it on sign-out.
+- Share sheet and Android share intent: a shared link or text opens a draft
+  task that the user confirms; it never starts on its own.
+- Same safety rules as the web: images in model output load only on tap,
+  preview images come only from the server proxy. Offline, the last state
+  is shown read-only with actions disabled; on reconnect the stream resumes
+  from its cursor (T28).
+- Tests: shared-logic unit tests in `cloud-client`; component tests with
+  jest-expo and React Native Testing Library; Maestro flows against the fake
+  stack (`cloud-web/tests/support/serve.ts`) on the iOS simulator and the
+  Android emulator: sign-in, a Home card answered exactly once, a stale card
+  refreshing instead of acting, result card to viewer and back, approval
+  text identical to the server's bytes, a push tap opening its task, a
+  shared link opening a draft. Screenshots of every screen at a small and
+  a large phone size, light and dark, kept as review artifacts.
+- CI on every PR that touches these packages: an iOS simulator build on a
+  hosted macOS runner and a debug APK plus emulator run on Linux (hosted
+  runners are free while the repo is public). Nothing is submitted to a
+  store from CI.
+- Human steps, prepared and listed but not done by an agent: an Apple
+  Developer account, the bundle id, the App Store Connect record and the
+  APNs key; a Google Play console app, the package name and the FCM
+  project; the Expo account and EAS project; TestFlight and Play internal
+  testing. Signing keys and secrets go into EAS by the owner only.
+- PRs in order: 1 shared logic; 2 the app with sign-in, Home and Chat;
+  3 Projects, the task page and the viewer; 4 push, share and deep links;
+  5 release profiles, ready for the owner's first TestFlight and internal
+  track build.
+
 ---
 
 # Batch 3: personal assistant feel
@@ -847,13 +923,7 @@ Depends on: T4.
 
 ## T18: iOS app
 
-Depends on: T9, T17.
-
-- `packages/cloud-ios`: a SwiftUI shell around the web app in a WKWebView,
-  with native sign-in, APNs push and a share-sheet entry that starts a task.
-- Signing, App Store Connect and TestFlight are human steps; prepare them and
-  list what a person must do.
-- Check: the project builds for the simulator in CI on macOS.
+Replaced by T29 (iOS and Android with Expo, built now, not after T17).
 
 ## T19: voice
 
