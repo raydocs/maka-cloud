@@ -28,6 +28,7 @@ export {
   applyEgressGuard,
   EGRESS_BLOCKED_V4,
   EGRESS_BLOCKED_V6,
+  EGRESS_ICMPV6_ALLOWED,
   EgressGuardError,
   type EgressGuardOptions,
 } from './egress.js';

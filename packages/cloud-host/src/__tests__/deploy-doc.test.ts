@@ -89,3 +89,44 @@ test('the deploy doc holds no key or token', () => {
     /\bsk-[\w-]{8,}|\bgh[pousr]_\w{16,}|\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/u,
   );
 });
+
+const DEPLOY = (name: string): string =>
+  readFileSync(fileURLToPath(new URL(`../../../../deploy/${name}`, import.meta.url)), 'utf8');
+
+test('the unit file, the compose file and the Caddyfile are files under deploy/, and the doc points at them instead of carrying copies', () => {
+  for (const file of ['deploy/maka-cloud.service', 'deploy/compose.yaml', 'deploy/Caddyfile']) {
+    assert.ok(DOC.includes(file), `${file} is named in docs/fork/deploy.md`);
+  }
+  assert.ok(DOC.includes('deploy/Dockerfile'));
+  for (const copy of ['[Service]', 'image: node:24-slim', 'reverse_proxy 127.0.0.1:8080']) {
+    assert.ok(!DOC.includes(copy), `the doc does not carry a copy (${copy})`);
+  }
+  // The unit runs what the doc installs.
+  const unit = DEPLOY('maka-cloud.service');
+  assert.match(
+    unit,
+    /^ExecStart=\/usr\/bin\/node \/opt\/maka-cloud\/packages\/cloud-host\/dist\/cli\.js start$/mu,
+  );
+  assert.match(unit, /^EnvironmentFile=\/etc\/maka-cloud\.env$/mu);
+});
+
+test('every name the Caddyfile reads from the environment is set by the compose file, or has a default', () => {
+  const caddyfile = DEPLOY('Caddyfile');
+  const compose = DEPLOY('compose.yaml');
+  const names = new Map<string, boolean>();
+  for (const match of caddyfile.matchAll(/\{\$([A-Z_]+)(:[^}]*)?\}/gu)) {
+    names.set(match[1] ?? '', names.get(match[1] ?? '') === true || match[2] !== undefined);
+  }
+  assert.ok(names.has('MAKA_CLOUD_APP_NAME') && names.has('MAKA_CLOUD_MODELS_NAME'));
+  for (const [name, hasDefault] of names) {
+    assert.ok(
+      hasDefault || new RegExp(`^\\s+${name}:`, 'mu').test(compose),
+      `${name} is set in compose.yaml`,
+    );
+  }
+  // The server is reached only through the proxy: the compose file publishes nothing for it.
+  const server = compose.slice(compose.indexOf('  maka-cloud:'), compose.indexOf('  proxy:'));
+  assert.ok(!/^\s+ports:/mu.test(server), 'the server service publishes no port');
+  assert.match(server, /MAKA_CLOUD_BACKUP_DIR: \/backups/u);
+  assert.match(server, /MAKA_CLOUD_DATA_DIR: \/data/u);
+});
