@@ -194,7 +194,8 @@ export class DutyEngine {
   /**
    * At start, runs that were waiting for a project the policy no longer names are ended without
    * a run (their reservations released), and the owner is told once. A run already started is
-   * left to settle.
+   * left to settle, and so is a request whose launch was attempted: its run may exist, and the
+   * dispatcher decides (finish it if it exists, end it if not).
    */
   private parkMismatchedProjects(): void {
     transaction(this.db, () => {
@@ -205,7 +206,7 @@ export class DutyEngine {
       for (const project of projects) {
         if (this.permitted(project)) continue;
         this.cancelWhere(
-          "project_id = ? AND state IN ('pending', 'launching')",
+          "project_id = ? AND state IN ('pending', 'launching') AND attempts = 0",
           [project.project_id],
           'project_not_allowed',
           at,

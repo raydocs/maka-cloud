@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { Dispatcher } from '../dispatcher.js';
 import { HOUR, issueOpened, rig, spec } from './harness.js';
 
 const ISSUE = spec({ trigger: { kind: 'issue_opened' }, runBudgetUsd: 1, dailyCapUsd: 10 });
@@ -100,5 +101,38 @@ test('the policy is asked with the project that is stored, not with what a deliv
   seen.length = 0;
   r.deliver('issues', issueOpened({ number: 1 }));
   assert.deepEqual(seen, [{ owner: 'inv_owner', repo: 'acme/widgets', installationId: 4242 }]);
+  r.cleanup();
+});
+
+test('a request whose run an earlier attempt made is finished even when the project is parked; one with no run is ended', async () => {
+  const { r, policy } = await setup();
+  const [duty] = (await r.activate(ISSUE)) as [string];
+  r.deliver('issues', issueOpened({ number: 1 }));
+  r.deliver('issues', issueOpened({ number: 2 }));
+  const [withRun, withoutRun] = r.engine.requestsOf(duty).map((request) => request.requestId) as [
+    string,
+    string,
+  ];
+  // Both launches were cut short; only the first got as far as making the run.
+  assert.ok(r.engine.beginLaunch(withRun));
+  assert.ok(r.engine.beginLaunch(withoutRun));
+  policy.named = false;
+  r.reopen();
+  assert.equal(r.engine.request(withRun)?.state, 'pending', 'the sweep leaves attempted requests');
+
+  const dispatcher = new Dispatcher({
+    engine: r.engine,
+    now: r.clock.now,
+    launcher: {
+      begun: (request) => request.requestId === withRun,
+      start: async (request) => ({ conversationId: `cnv_${request.requestId}` }),
+    },
+  });
+  dispatcher.kick();
+  await dispatcher.settled();
+  assert.equal(r.engine.request(withRun)?.state, 'started');
+  assert.equal(r.engine.finish(withRun, 'completed', 0.5), true, 'and it settles');
+  assert.equal(r.engine.request(withoutRun)?.reason, 'project_not_allowed');
+  await dispatcher.close();
   r.cleanup();
 });
