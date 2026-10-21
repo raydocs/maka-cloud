@@ -8,7 +8,20 @@ export class DutiesDatabaseInUseError extends Error {
   }
 }
 
-const SCHEMA_VERSION = 1;
+/**
+ * Steps in order; a database at version N has run the first N. A step only ever adds, so a
+ * database from an earlier build opens and keeps what it holds.
+ */
+const MIGRATIONS: readonly string[] = [
+  // 2: a chain remembers the newest failure it counted, so only a later success ends it; and the
+  // review events seen are remembered, so a replay does not count as a person acting again.
+  `ALTER TABLE chains ADD COLUMN last_failure_seq INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE person_events (
+  event_key TEXT PRIMARY KEY,
+  seen_at INTEGER NOT NULL
+);
+CREATE INDEX person_events_by_time ON person_events (seen_at);`,
+];
 
 /**
  * Money columns are whole micro-dollars. `run_requests` is the ledger of a duty's runs: its
@@ -156,14 +169,15 @@ function isBusy(error: unknown): boolean {
 
 function migrate(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
-  if (row.user_version === SCHEMA_VERSION) return;
-  if (row.user_version > SCHEMA_VERSION) {
+  const steps = [SCHEMA, ...MIGRATIONS];
+  if (row.user_version === steps.length) return;
+  if (row.user_version > steps.length) {
     throw new Error(`Unsupported duties database schema version ${row.user_version}`);
   }
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.exec(SCHEMA);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    for (const step of steps.slice(row.user_version)) db.exec(step);
+    db.exec(`PRAGMA user_version = ${steps.length}`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

@@ -249,8 +249,11 @@ export class DutyEngine {
              ON CONFLICT (scope) DO UPDATE SET last_success_seq = MAX(last_success_seq, excluded.last_success_seq)`,
           )
           .run(event.scope, event.seq);
-        // The branch passes again: its chain of runs is over.
-        this.db.prepare('DELETE FROM chains WHERE chain_key = ?').run(event.scope);
+        // The branch passes again: its chain of runs is over, if this run is newer than the
+        // failures that built it. A pass that arrives again later, or an old one, ends nothing.
+        this.db
+          .prepare('DELETE FROM chains WHERE chain_key = ? AND last_failure_seq < ?')
+          .run(event.scope, event.seq);
         // A failure that has not started yet is stale once a later run of the same workflow passed.
         const cancelled = this.cancelWhere(
           "state = 'pending' AND supersede_scope = ? AND supersede_seq < ?",
@@ -270,9 +273,17 @@ export class DutyEngine {
           }
         }
         // A person acted on the project (a review or a comment on a pull request of ours): runs
-        // that woke each other may go on.
+        // that woke each other may go on. Only the first time this review or comment is seen
+        // counts: a replay of it is not a person acting again.
         if (event.trigger === 'review_comment_own_pr') {
-          this.db.prepare('DELETE FROM chains WHERE project_id = ?').run(project.project_id);
+          const first = this.db
+            .prepare(
+              'INSERT INTO person_events (event_key, seen_at) VALUES (?, ?) ON CONFLICT DO NOTHING',
+            )
+            .run(event.key, at);
+          if (Number(first.changes) > 0) {
+            this.db.prepare('DELETE FROM chains WHERE project_id = ?').run(project.project_id);
+          }
         }
         const matching = this.activeDuties(project.project_id).filter(
           (duty) => (JSON.parse(duty.trigger) as Trigger).kind === event.trigger,
@@ -313,10 +324,12 @@ export class DutyEngine {
         if (event.chain && started > 0) {
           this.db
             .prepare(
-              `INSERT INTO chains (chain_key, project_id, depth, started_at) VALUES (?, ?, 1, ?)
-               ON CONFLICT (chain_key) DO UPDATE SET depth = depth + 1`,
+              `INSERT INTO chains (chain_key, project_id, depth, started_at, last_failure_seq)
+               VALUES (?, ?, 1, ?, ?)
+               ON CONFLICT (chain_key) DO UPDATE SET depth = depth + 1,
+                 last_failure_seq = MAX(last_failure_seq, excluded.last_failure_seq)`,
             )
-            .run(event.chain.key, project.project_id, at);
+            .run(event.chain.key, project.project_id, at, event.chain.seq);
         }
         return { status: 200, body: { ok: true, started, capped } };
       }
@@ -452,6 +465,9 @@ export class DutyEngine {
       }
       this.db
         .prepare('DELETE FROM deliveries WHERE received_at < ?')
+        .run(at - DELIVERY_RETENTION_MS);
+      this.db
+        .prepare('DELETE FROM person_events WHERE seen_at < ?')
         .run(at - DELIVERY_RETENTION_MS);
       return { started, missedSlots };
     });
