@@ -274,6 +274,22 @@ export const DEFAULT_SPEND_CAPS: SpendCaps = {
 /** The shortest webhook secret accepted: the duties engine refuses a shorter one. */
 const MIN_WEBHOOK_SECRET_LENGTH = 16;
 
+/**
+ * The shortest key accepted for a service. The scrubber that keeps keys out of logs, errors and
+ * events replaces a known value only from this length up (a shorter one would eat ordinary
+ * words), so a shorter key would print in the clear: it is refused at start instead. No real key
+ * is this short.
+ */
+const MIN_KEY_LENGTH = 8;
+const KEY_VARIABLES = [
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'INSTABOX_API_KEY',
+  'CLOUD_PUSH_VAPID_PRIVATE',
+  'MAKA_GITHUB_TOKEN',
+] as const;
+
 export class ConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
     super(
@@ -530,6 +546,13 @@ export function readStackConfig(
   } catch (error) {
     // The message names the missing variables and never a value.
     problems.push(error instanceof Error ? error.message : 'the Web Push settings are not valid');
+  }
+  for (const name of KEY_VARIABLES) {
+    const key = value(name);
+    // The message never carries the value.
+    if (key !== undefined && key.length < MIN_KEY_LENGTH) {
+      problems.push(`${name} is too short to be a key (at least ${MIN_KEY_LENGTH} characters)`);
+    }
   }
   const webhookSecret = value('MAKA_GITHUB_WEBHOOK_SECRET');
   if (webhookSecret !== undefined) {

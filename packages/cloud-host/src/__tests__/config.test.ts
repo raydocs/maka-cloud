@@ -364,7 +364,7 @@ test('the backup directory is optional, absolute and apart from the data directo
 test('the spend alert needs an amount, the owner’s invite and Web Push, and says what is missing', () => {
   const push = {
     CLOUD_PUSH_VAPID_PUBLIC: 'public',
-    CLOUD_PUSH_VAPID_PRIVATE: 'private',
+    CLOUD_PUSH_VAPID_PRIVATE: 'private-key-value',
     CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
   };
   const good = {
@@ -601,5 +601,26 @@ test('timeline content is off unless the owner sets 1, and anything else but 0 i
       /TIMELINE_CONTENT must be 1 or 0/u,
       bad,
     );
+  }
+});
+
+test('a key too short for the scrubber to know is refused at start, naming the variable and never its value', () => {
+  for (const name of [
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+    'DEEPSEEK_API_KEY',
+    'INSTABOX_API_KEY',
+    'CLOUD_PUSH_VAPID_PRIVATE',
+    'MAKA_GITHUB_TOKEN',
+  ]) {
+    const problems = problemsOf({ ...ENV, [name]: 'abc123' });
+    assert.ok(
+      problems.includes(`${name} is too short to be a key (at least 8 characters)`),
+      problems.join('\n'),
+    );
+    assert.ok(!problems.join('\n').includes('abc123'));
+    // Long enough, it is no longer refused for its length (other settings may still be missing).
+    const longer = problemsOf({ ...ENV, [name]: 'abc12345', MAKA_CLOUD_PORT: 'x' });
+    assert.ok(!longer.some((problem) => problem.includes('too short')), longer.join('\n'));
   }
 });
