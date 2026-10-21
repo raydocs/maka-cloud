@@ -48,6 +48,25 @@ EXPOSE 8080 8081 8082
 ENTRYPOINT ["node", "packages/cloud-host/dist/cli.js"]
 CMD ["start"]
 
+# Only the go-live rehearsal uses this one (deploy/rehearsal/compose.yaml): the stand-in for a sandbox
+# machine. A real machine has an agent account the CLIs run as, a group it shares with the sandbox
+# user, passwordless sudo for the sandbox user and `getcap` (the box check lists file capabilities and
+# refuses a box that cannot); this one is made like that, from the server's
+# own image, so the server's agent-account code runs against two real accounts. It is not a deployment
+# target and no real deployment builds it.
+FROM server AS rehearsal-sandbox
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sudo libcap2-bin \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd maka-box \
+ && useradd --no-create-home --gid maka-box --shell /bin/bash maka-agent \
+ && usermod -aG maka-box node \
+ && echo 'node ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/rehearsal-node \
+ && chmod 440 /etc/sudoers.d/rehearsal-node \
+ && chmod 711 /data
+USER node
+
 FROM caddy:2-alpine AS proxy
 COPY --from=build /web-dist /srv/web
 COPY deploy/Caddyfile /etc/caddy/Caddyfile

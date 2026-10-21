@@ -55,6 +55,13 @@ export interface FakeInstaboxOptions {
    * `none` leaves the real tools (or none) in reach, for a test of a box without a firewall tool.
    */
   firewall?: 'shim' | 'none';
+  /**
+   * With the firewall stand-ins on, `sudo -n tool ...` runs the tool as this user. With `rootSudo`,
+   * only the firewall tools do; anything else goes to the real `sudo`, for a machine where this user
+   * has passwordless sudo (the rehearsal's sandbox image), so what the runners end or read as root
+   * is really done as root.
+   */
+  rootSudo?: boolean;
   /** Runs every exec'd command behind this prefix (`nsenter --net=...`, to give it a network of its own). */
   commandPrefix?: string[];
 }
@@ -127,10 +134,18 @@ esac
 /**
  * `sudo -n tool ...` runs the tool as this user. `sudo -u account ...` (the agent's account, which
  * the runners switch to) and `sudo -l -U account` (its sudo rules) are real, so it goes to the real `sudo`, found behind the
- * stand-ins' own directory, which is first on PATH.
+ * stand-ins' own directory, which is first on PATH. With `SHIM_ROOT_SUDO` set, so does everything
+ * but the firewall tools.
  */
 const SUDO_SHIM = `#!/bin/bash
 for arg in "$@"; do { [ "$arg" = -u ] || [ "$arg" = -U ] || [ "$arg" = -l ]; } && PATH="\${PATH#*:}" exec sudo "$@"; done
+if [ -n "\${SHIM_ROOT_SUDO:-}" ]; then
+  rest=("$@"); [ "\${rest[0]:-}" = -n ] && rest=("\${rest[@]:1}")
+  case "$(basename "\${rest[0]:-}")" in
+    iptables|ip6tables) ;;
+    *) PATH="\${PATH#*:}" exec sudo "$@" ;;
+  esac
+fi
 [ "$1" = -n ] && shift
 exec "$@"
 `;
@@ -218,6 +233,7 @@ export class FakeInstabox {
   private readonly commandPrefix: string[];
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
+  private readonly rootSudo: boolean;
   private readonly listenOn: { host: string; port: number };
   private readonly firewallDir: string | undefined;
   readonly firewall: FakeFirewall;
@@ -232,6 +248,7 @@ export class FakeInstabox {
     this.commandPrefix = options.commandPrefix ?? [];
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
+    this.rootSudo = options.rootSudo ?? false;
     this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
     if ((options.firewall ?? 'shim') === 'shim') {
       this.firewallDir = mkdtempSync(join(tmpdir(), 'fake-instabox-fw-'));
@@ -609,6 +626,7 @@ export class FakeInstabox {
       // firewall of the machine running the tests.
       env.PATH = [join(this.firewallDir, 'bin'), env.PATH].filter(Boolean).join(':');
       env.SHIM_STATE = join(this.firewallDir, 'state');
+      if (this.rootSudo) env.SHIM_ROOT_SUDO = '1';
     }
     return new Promise((resolve) => {
       if (this.closed) {
