@@ -496,11 +496,22 @@ sandbox user), a group the sandbox user shares with it, a `claude` binary it can
 passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
 that fails the check refuses the turn with the reason.
 
-The check also tries the firewall as that account: it may not run anything through sudo (`sudo -n -l`
-must fail) and must not be able to create an iptables or ip6tables chain, so code the agent runs
-cannot take the egress rules away. The server itself starts nothing as the sandbox user either: a run
-whose command is not handed to the agent account is refused before the box is touched (the pinned
-CLI install, which writes the sandbox user's own `~/.maka-cli`, is the one exception).
+The check also looks at what the account could do to the egress rules, so code the agent runs
+cannot take them away. The sandbox user (it needs `sudo -n`, which the egress guard needs too) reads
+the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
+account is not allowed to run anything; a query that fails is a failed check. The account must hold no
+Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), no program under `/usr/sbin`, `/usr/bin`,
+`/sbin`, `/bin` or `/usr/local` may carry a capability such as `cap_net_admin` or `cap_setuid`
+(the box needs `getcap`, from `libcap2-bin`; without it the check fails), it must not be in a group that
+is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
+socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
+not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
+out of the check.
+
+The server starts nothing as the sandbox user either. A run is a program and its arguments; the
+server quotes them and hands the whole command to the agent account itself, so no argument can add a
+command that runs as the sandbox user. The pinned CLI install, which writes the sandbox user's own
+`~/.maka-cli`, is its own method and the only run that stays the sandbox user.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
