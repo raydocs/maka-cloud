@@ -1082,7 +1082,19 @@ export class Orchestrator {
       const root = this.treeRoot(taskId);
       if (!root) continue;
       let epoch: number;
-      if (spentIn !== undefined && Number.isInteger(spentIn) && spentIn >= 1) {
+      // A row without an attempt is booked under an attempt that depends on this process (the one
+      // before the one just begun). A crash after the record and before `recorded()` hands the same
+      // row to the next process, whose attempt is another: the row's id says where it went.
+      const recovery =
+        spentIn === undefined
+          ? createHash('sha256')
+              .update(JSON.stringify([taskId, usd, cutOffCalls ?? 0, cutOffUsd ?? 0]))
+              .digest('hex')
+          : undefined;
+      const booked = recovery === undefined ? undefined : root.recoveredRows?.[recovery];
+      if (booked !== undefined) {
+        epoch = booked;
+      } else if (spentIn !== undefined && Number.isInteger(spentIn) && spentIn >= 1) {
         epoch = spentIn;
       } else if (root.spendByRun?.[spendKey({ fromTaskId: taskId })] !== undefined) {
         epoch = 0;
@@ -1097,6 +1109,7 @@ export class Orchestrator {
         fromTaskId: taskId,
         costUsd: usd,
         epoch,
+        ...(recovery === undefined ? {} : { recovery }),
       });
       // The calls the restart cut off are charged in full and may be made again by the run that
       // resumes; the task's log says so, under the attempt that now drives it.
