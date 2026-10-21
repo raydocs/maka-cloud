@@ -100,7 +100,8 @@ test('a box that is asleep is woken and checked again, and a failing guard refus
   t.after(() => h.cleanup());
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_eg_wake')));
   assert.equal(terminal(events)?.type, 'finished');
-  assert.equal(calls, 2, 'checked again after waking');
+  // The CLI check guards first (asleep, woken, checked again), then the launch checks once more.
+  assert.equal(calls, 3, 'checked again after waking');
 
   const refused = await setup({
     cloud: {

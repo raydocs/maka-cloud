@@ -76,9 +76,9 @@ interface ExecOptions {
    */
   wake?: boolean;
   /**
-   * The command runs repo or task code. Such a command only reaches a box whose egress was checked
-   * since the box was last woken here: after a wake, and while a check has failed, it is guarded
-   * first and a failure is final (the box is awake, which is not the same as closed).
+   * The command runs repo, task or CLI code. Such a command only reaches a box whose egress was
+   * checked and passed since the box was made or last woken here: until then it is guarded first,
+   * and a failure is final (the box is awake, which is not the same as closed).
    */
   taskCode?: boolean;
   envs?: Record<string, string>;
@@ -117,8 +117,8 @@ export class RemoteMachine {
   ) {}
 
   private guarding: Promise<void> | undefined;
-  /** This machine was woken here (or a check failed) and has not passed a check since. */
-  private unguarded = false;
+  /** No check has passed since this machine was made, woken here, or failed one: not verified. */
+  private unguarded = true;
   /** Errors the egress check threw: a retry must not start task code after one of these. */
   private readonly refusals = new WeakSet<object>();
 
@@ -206,7 +206,7 @@ export class RemoteMachine {
       ...(options.timeoutSeconds ? { timeoutSeconds: options.timeoutSeconds } : {}),
     };
     const call = options.signal ? { signal: options.signal } : {};
-    // A box that was woken here, or whose last check failed, may have no rules: look first.
+    // A box nobody has checked yet, woken here, or whose last check failed may have no rules: look first.
     if (options.taskCode && this.unguarded) await this.guardEgress(options.signal);
     try {
       return await this.client.exec(this.machineId, request, call);
