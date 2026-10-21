@@ -3,6 +3,12 @@ appId: cloud.maka.app
 ---
 - launchApp:
     clearState: true
+# A slow hosted emulator sometimes shows the launcher's "isn't responding" box over the app.
+- runFlow:
+    when:
+      visible: "Pixel Launcher isn't responding"
+    commands:
+      - tapOn: "Wait"
 - assertVisible: "Enter your workspace"
 - tapOn:
     id: "field-Server address"
