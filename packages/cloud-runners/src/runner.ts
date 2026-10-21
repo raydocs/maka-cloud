@@ -21,6 +21,7 @@ import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js'
 import {
   DEFAULT_PRICES,
   preambleFor,
+  runSettingsProblem,
   type TokenPrices,
   tokenCostUsd,
   type VendorAdapter,
@@ -209,6 +210,9 @@ class Run implements RunHandle {
     fleet.openRuns++;
     try {
       this.checkCancelled();
+      // Before anything is issued or started: a model or effort that is not plain fails the run here.
+      const unusable = runSettingsProblem(spec);
+      if (unusable !== undefined) return this.fail(unusable);
       await this.guard(this.issueAccess());
 
       const acquired = await this.guard(this.prepareMachine());
@@ -551,12 +555,13 @@ class Run implements RunHandle {
     const mcpUrl = spec.mcp
       ? (fleet.options.mcpUrlForSandbox?.(spec.mcp.url) ?? spec.mcp.url)
       : undefined;
-    const model = fleet.options.models?.[vendor.name];
+    const model = spec.model ?? fleet.options.models?.[vendor.name];
     const command = vendor.command({
       prompt,
       ...(resumeSessionId ? { resumeSessionId } : {}),
       ...(mcpUrl ? { mcpUrl } : {}),
       ...(model ? { model } : {}),
+      ...(spec.effort ? { effort: spec.effort } : {}),
       ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
     });
     const launched = await machine.launch({
