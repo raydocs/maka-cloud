@@ -326,6 +326,7 @@ export async function startStack(
           dutyId: run.dutyId,
           state: run.state,
           spentUsd: conductorState.budget(run.runId).spentUsd,
+          endReason: run.endReason,
         }));
       },
       postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
