@@ -961,6 +961,25 @@ test('a task the conductor never learned of is still cancelled by its key at a r
   await assertNoTasks(h);
 });
 
+test('a user’s stop cancels a task that was kept across a restart, though no run is open', async (t) => {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: keepTasks(() => h),
+  });
+  const { held } = await runningTaskTurn(h);
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart({ limits: { stopCheckMs: 60_000 } });
+  await reopened.idle();
+  assert.equal(h.orchestrator.stats().activeTasks, 1);
+  assert.equal(reopened.state.openRun('cnv_1'), undefined, 'no run is open');
+  assert.equal(await reopened.stop('cnv_1'), true, 'there was a task to stop');
+  await reopened.idle();
+  await assertNoTasks(h);
+  assert.equal(await reopened.stop('cnv_1'), false, 'nothing is left to stop');
+});
+
 test('the operator’s pause still cancels a task that was kept across a restart', async (t) => {
   const h: Harness = await makeHarness(t, {
     autoComplete: false,
