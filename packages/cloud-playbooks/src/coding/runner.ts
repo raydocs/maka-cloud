@@ -296,6 +296,13 @@ function clipText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+/** How many serious (P1) findings a finished review still carries. */
+function p1Of(review: ReviewRecord): number {
+  return review.status === 'reviewed'
+    ? review.findings.filter((finding) => finding.severity === 'P1').length
+    : 0;
+}
+
 function roundUsd(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
@@ -433,6 +440,19 @@ class CodingRun implements RunHandle {
           if (this.options.modes && reviewed.review.status !== 'reviewed') {
             throw new Error(
               `The change passed the repository's checks but could not be independently reviewed (${reviewed.review.reason}), so it was not delivered.`,
+            );
+          }
+          // A serious problem the review still finds after the one fix is not delivered either: the
+          // task fails with the reason, instead of finishing with a change known to be wrong.
+          const left = this.options.modes ? p1Of(reviewed.review) : 0;
+          if (left > 0) {
+            const fix = reviewed.review.status === 'reviewed' ? reviewed.review.fix : undefined;
+            const unused =
+              fix?.result === 'not_applied'
+                ? ` (the fix was not used: ${fix.reason ?? 'no reason given'})`
+                : '';
+            throw new Error(
+              `The independent review still found ${left} serious problem(s) after the one fix it allows${unused}, so the change was not delivered.`,
             );
           }
           await this.deliver(task, verification, reviewed.outcome, reviewed.review);
