@@ -215,12 +215,36 @@ export interface SteerInbox {
   take(maxChars: number): Array<{ steerId: string; text: string }>;
 }
 
+const STEER_ID = /^[A-Za-z0-9_.:-]{1,64}$/u;
+
+/**
+ * The tag that opens a message. It carries the message's key, so the transcript of the
+ * conversation shows which messages the agent was given: a restart reads it to tell a message the
+ * agent has from one it never got.
+ */
+export const steerOpening = (steerId?: string): string =>
+  steerId !== undefined && STEER_ID.test(steerId)
+    ? `<user_message id="${steerId}">`
+    : '<user_message>';
+
+/**
+ * The keys of the messages a piece of transcript shows the agent was given: the opening tag as it
+ * stands in a line's JSON (quotes escaped) or in plain text.
+ */
+export function steerKeysIn(text: string): string[] {
+  const keys: string[] = [];
+  for (const match of text.matchAll(/<user_message id=\\?"([A-Za-z0-9_.:-]{1,64})\\?">/gu)) {
+    keys.push(match[1] as string);
+  }
+  return keys;
+}
+
 /**
  * The text the agent reads. The messages are the owner's own words, sent while it worked; they are
  * marked as such so they are not mistaken for the output of the tool that just ran.
  */
 export function steerContext(
-  messages: ReadonlyArray<{ text: string }>,
+  messages: ReadonlyArray<{ steerId?: string; text: string }>,
   redact: (text: string) => string,
 ): string {
   const many = messages.length > 1;
@@ -230,7 +254,9 @@ export function steerContext(
     } not part of the output of the step that just ended. Read ${many ? 'them' : 'it'} now and take ${
       many ? 'them' : 'it'
     } into account from your next step on:`,
-    ...messages.map((message) => `<user_message>\n${redact(message.text)}\n</user_message>`),
+    ...messages.map(
+      (message) => `${steerOpening(message.steerId)}\n${redact(message.text)}\n</user_message>`,
+    ),
   ].join('\n');
 }
 
