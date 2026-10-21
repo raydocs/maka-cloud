@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { InstaboxOperationError, isQuotaExceeded } from '@maka-cloud/instabox';
 import type { InstaboxApiError, InstaboxMachine } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
-import type { SandboxLease, SandboxProvider } from '@maka-cloud/runners';
+import type { AgentChannel, SandboxLease, SandboxProvider } from '@maka-cloud/runners';
 import {
   boxLabels,
   boxName,
@@ -13,6 +13,7 @@ import {
   LABEL,
 } from './labels.js';
 import { REPOS_ROOT, type BuilderBoxes } from './snapshots.js';
+import { AGENT_CHECK_SCRIPT, agentProblems, asRepoUser } from './agent.js';
 import {
   BoxRefusedError,
   NoFreeBoxError,
@@ -165,6 +166,8 @@ export class BoxPool implements SandboxProvider {
   private readonly tenants = new Map<string, Map<number, Box>>();
   private readonly waiters: Waiter[] = [];
   private discovery: Promise<void> | undefined;
+  /** Boxes whose agent account passed the check in this process. */
+  private readonly agentChecked = new Set<string>();
   /** Invites with a builder box in this process. */
   private readonly builders = new Set<string>();
   /** A builder box of an invite that could not be deleted: the next build removes it first. */
@@ -721,8 +724,15 @@ export class BoxPool implements SandboxProvider {
     if (box.repo === undefined || !/^[0-9a-f]{8}$/.test(box.repo)) return;
     const timeoutSeconds = this.options.resumeTimeoutSeconds ?? DEFAULT_RESUME_TIMEOUT_SECONDS;
     try {
+      const agent = this.options.agent;
+      if (agent === undefined) {
+        throw new Error(
+          'no unprivileged agent account is configured, so no repository script is run',
+        );
+      }
+      await this.checkAgent(machineId, agent);
       const result = await this.api.exec(machineId, {
-        cmd: RESUME_SCRIPT,
+        cmd: asRepoUser(RESUME_SCRIPT, agent),
         envs: { MAKA_REPO_DIR: `${REPOS_ROOT}/${box.repo}` },
         timeoutSeconds,
       });
@@ -737,6 +747,21 @@ export class BoxPool implements SandboxProvider {
       this.options.onWarning?.(`box ${machineId}: ${reason}`);
       this.options.onResumeFailure?.(machineId, reason);
     }
+  }
+
+  /** The agent account must be unprivileged on this box before any repository script runs as it. */
+  private async checkAgent(machineId: string, agent: AgentChannel): Promise<void> {
+    if (this.agentChecked.has(machineId)) return;
+    const result = await this.api.exec(machineId, {
+      cmd: AGENT_CHECK_SCRIPT,
+      envs: { MAKA_AGENT_USER: agent.user },
+      timeoutSeconds: 60,
+    });
+    const problems = agentProblems(result.stdout);
+    if (problems.length > 0) {
+      throw new Error(`the agent account is not safe for repository code: ${problems.join('; ')}`);
+    }
+    this.agentChecked.add(machineId);
   }
 
   private async findNamed(box: Box, name: string): Promise<InstaboxMachine | undefined> {

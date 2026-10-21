@@ -13,6 +13,7 @@ import {
   snapshotName,
 } from '../snapshots.js';
 import { FakeFleet } from './fake-fleet.js';
+import { AGENT } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
 const B = 'inv_bbbbbbbbbbbb';
@@ -57,6 +58,7 @@ function setup(overrides: { guard?: (machineId: string) => Promise<void>; keep?:
     new SetupSnapshots({
       api: fleet,
       boxes,
+      agent: AGENT,
       guard:
         overrides.guard ??
         (async (machineId) => {
@@ -131,6 +133,50 @@ describe('SetupSnapshots', () => {
     assert.deepEqual(t.fleet.execRequests, []);
     assert.equal(t.fleet.snapshots.size, 0);
     assert.equal(t.log.released, 1);
+  });
+
+  it('runs the repository setup as the agent account after checking it, and hands the checkout to its group', async () => {
+    const t = setup();
+    await t.snapshots.ensure(recipe());
+    const steps = t.fleet.execRequests;
+    assert.deepEqual(
+      t.fleet.agentChecks.map((check) => check.user),
+      [AGENT.user],
+    );
+    assert.equal(steps[0]?.envs.MAKA_AGENT_GROUP, AGENT.group);
+    assert.match(steps[0]?.cmd ?? '', /chgrp -R/);
+    const setupStep = steps.find(
+      (step) => step.cmd.includes('.agents/setup') && step.cmd.includes('exec'),
+    );
+    assert.match(setupStep?.cmd ?? '', /^sudo -n -u 'maka-agent' --preserve-env -- /);
+    // Our own preparation (the pinned CLI installs) is not repository code and stays as it is.
+    assert.equal(
+      steps.find((step) => step.cmd.startsWith('echo install'))?.cmd,
+      'echo install the pinned CLIs',
+    );
+  });
+
+  it('builds nothing for a repository with a setup script when no agent account is configured, and leases no box', async () => {
+    const fleet = new FakeFleet();
+    const { boxes, log } = builders(fleet);
+    const snapshots = new SetupSnapshots({ api: fleet, boxes, guard: async () => undefined });
+    await assert.rejects(snapshots.ensure(recipe()), SetupFailedError);
+    assert.equal(log.leased.length, 0);
+    assert.equal(fleet.execRequests.length, 0);
+    assert.equal(fleet.snapshots.size, 0);
+  });
+
+  it('runs the setup in no box whose agent account has sudo, and gives the builder back', async () => {
+    const t = setup();
+    t.fleet.agentFacts =
+      'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=yes\nFACT agent_nocaps=yes\n';
+    await assert.rejects(
+      t.snapshots.ensure(recipe()),
+      /agent check: the agent account can use sudo/,
+    );
+    assert.ok(!t.fleet.execRequests.some((step) => step.cmd.includes('./.agents/setup')));
+    assert.equal(t.log.released, 1);
+    assert.equal(t.fleet.snapshots.size, 0);
   });
 
   it('a snapshot of the same setup is reused without leasing a box or running anything', async () => {
@@ -306,6 +352,7 @@ describe('SetupSnapshots', () => {
       const fleet = new FakeFleet();
       const snapshots = new SetupSnapshots({
         api: fleet,
+        agent: AGENT,
         boxes: {
           lease: async () => {
             throw new Error('no box free');
