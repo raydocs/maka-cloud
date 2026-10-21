@@ -402,3 +402,16 @@ test('a change kept for the owner to look at opens only as a draft that says so,
   assert.equal(second.pulls[0]?.draft, false);
   assert.equal(second.pulls[0]?.title, 'Fix add');
 });
+
+test('the description built from the runner record carries no key, since it is posted on GitHub', () => {
+  const leak = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const body = pullRequestBody({
+    ...VERIFICATION,
+    testCommand: `GITHUB_TOKEN=${leak} bash tests/run.sh`,
+    repro: { command: `curl -H "Authorization: Bearer ${leak}" x`, files: [`tests/${leak}.sh`] },
+    changedFiles: [{ path: `lib/${leak}.txt`, status: 'added' }],
+  });
+  assert.ok(!body.includes(leak.slice(4, 30)), body);
+  assert.match(body, /\[secret\]/u);
+  assert.match(body, /bash tests\/run\.sh/u);
+});

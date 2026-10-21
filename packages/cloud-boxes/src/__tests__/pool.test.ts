@@ -47,6 +47,33 @@ describe('BoxPool', () => {
     assert.equal((await other).machineId, lease1.machineId);
   });
 
+  it('keeps a box that instabox accepted but could not be read back, as lost, so later tasks are not refused', async () => {
+    const t = setup();
+    const real = t.fleet.getMachine.bind(t.fleet);
+    let failed = false;
+    t.fleet.getMachine = async (id: string) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('network dropped');
+      }
+      return await real(id);
+    };
+    await assert.rejects(t.pool.acquire({ tenantId: A, taskId: 't1' }), /network dropped/);
+    const [kept] = t.pool.state();
+    assert.equal(kept?.state, 'lost', 'the slot keeps the machine instead of forgetting it');
+    assert.ok(kept?.machineId);
+    assert.ok(t.fleet.machines.has(kept?.machineId as string));
+    // The real machine still carries t1's label; the next tasks take other slots and are not refused.
+    const second = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    const third = await t.pool.acquire({ tenantId: A, taskId: 't3' });
+    assert.notEqual(second.machineId, kept?.machineId);
+    assert.notEqual(third.machineId, kept?.machineId);
+    // The next cleanup looks at it at once and puts it back into use.
+    const cleaned = await t.pool.cleanup();
+    assert.deepEqual(cleaned.recovered, [kept?.machineId]);
+    assert.equal(t.pool.state().find((row) => row.machineId === kept?.machineId)?.state, 'ready');
+  });
+
   it('gives each task its own box, makes the next slot only when none is free, and queues the rest first come first served', async () => {
     const { pool, fleet } = setup();
     const leases = [];

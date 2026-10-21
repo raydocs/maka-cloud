@@ -1,5 +1,6 @@
 import {
   InstaboxApiError,
+  InstaboxOperationError,
   type InstaboxExecResult,
   type InstaboxMachine,
   type InstaboxOperation,
@@ -168,7 +169,7 @@ export class FakeFleet implements BoxApi {
   async waitForOperation(id: string): Promise<InstaboxOperation> {
     this.calls.push({ method: 'waitForOperation', args: [id] });
     if (this.failedOperations.has(id)) {
-      throw new Error(`instabox operation ${id} (create) failed: no_capacity`);
+      throw new InstaboxOperationError(id, `instabox operation ${id} (create) failed: no_capacity`);
     }
     return operation(id.replace(/^op_/, ''));
   }

@@ -54,11 +54,8 @@ jobs:
       - name: Show the logs of the stack
         if: failure()
         run: |
-          export MAKA_CLOUD_ENV_FILE="${MAKA_REHEARSAL_DIR:-$RUNNER_TEMP/rehearsal}/server.env"
-          docker compose -f deploy/compose.yaml -f deploy/rehearsal/compose.yaml \
-            --env-file deploy/rehearsal/compose.env ps --all || true
-          docker compose -f deploy/compose.yaml -f deploy/rehearsal/compose.yaml \
-            --env-file deploy/rehearsal/compose.env logs --no-color --tail=200 || true
+          deploy/rehearsal/ops.sh ps || true
+          deploy/rehearsal/ops.sh logs || true
 
       - name: Take the stack down
         if: always()

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { type ConductorToolSpec, shownValue, ToolRefusal } from '@maka-cloud/conductor';
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import type { ChangeSet, CodingDeliveries, Delivery, PublishedPullRequest } from './deliveries.js';
 import type { PullRequestPublisher } from './github.js';
@@ -172,7 +173,9 @@ function reviewHeading(review: ReviewSummary): string {
   return `Reviewed by a second agent: ${total} finding(s) remain (${parts.join(', ')}). They are on the task page.`;
 }
 
-const code = (text: string) => `\`${text.replaceAll('`', "'")}\``;
+// Everything below comes from the runner's record of a repository anyone may have written (a test
+// command, a path), and the description is posted on GitHub: a key in it would be public there.
+const code = (text: string) => `\`${scrubSecretShapes(text).replaceAll('`', "'")}\``;
 
 /** The pull request description, built from the runner's verification record. */
 export function pullRequestBody(verification: VerificationView): string {

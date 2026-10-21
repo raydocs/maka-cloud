@@ -201,6 +201,33 @@ test('a model that is overloaded before the run did anything ends it as model_tr
   assertReleased(h.conductor);
 });
 
+test('a run that asked a question in an earlier turn is model_error when a later turn is overloaded: the question was already asked', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  h.model.script(
+    'conductor',
+    calls(
+      tool('ask_user', {
+        reason: 'taste',
+        question: 'A or B?',
+        options: [
+          { id: 'a', label: 'A' },
+          { id: 'b', label: 'B' },
+        ],
+        recommended: 'a',
+      }),
+    ),
+    overloaded,
+  );
+  await h.send('cnv_1', 'Choose for me later.');
+  await h.conductor.idle();
+  const question = h.outbox.questions[0]!;
+  // The second turn is a new Turn: it has called no tool, but its run has.
+  await h.answer('cnv_1', question.questionId, 'a');
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.runsInState('failed')[0]?.endReason, 'model_error');
+  assertReleased(h.conductor);
+});
+
 test('a refused key, a billing refusal or a bad request is model_error, never model_transient', async (t) => {
   for (const [status, type] of [
     [401, 'authentication_error'],
@@ -959,6 +986,25 @@ test('a task the conductor never learned of is still cancelled by its key at a r
   await reopened.idle();
   await h.orchestrator.settled();
   await assertNoTasks(h);
+});
+
+test('a user’s stop cancels a task that was kept across a restart, though no run is open', async (t) => {
+  const h: Harness = await makeHarness(t, {
+    autoComplete: false,
+    conductor: keepTasks(() => h),
+  });
+  const { held } = await runningTaskTurn(h);
+  const closing = h.conductor.close();
+  held.release();
+  await closing;
+  const reopened = await h.restart({ limits: { stopCheckMs: 60_000 } });
+  await reopened.idle();
+  assert.equal(h.orchestrator.stats().activeTasks, 1);
+  assert.equal(reopened.state.openRun('cnv_1'), undefined, 'no run is open');
+  assert.equal(await reopened.stop('cnv_1'), true, 'there was a task to stop');
+  await reopened.idle();
+  await assertNoTasks(h);
+  assert.equal(await reopened.stop('cnv_1'), false, 'nothing is left to stop');
 });
 
 test('the operator’s pause still cancels a task that was kept across a restart', async (t) => {

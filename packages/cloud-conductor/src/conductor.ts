@@ -66,6 +66,12 @@ export interface ConductorOptions {
    * without a turn. Without it those messages carry no task words at all.
    */
   scrubTaskText?: (text: string) => string;
+  /**
+   * Whether a text carries a key or token. An approval binds its card word for word (T15), so a
+   * card that carries one is not asked: the owner cannot be shown it and it cannot be edited.
+   * The host sets it from the server's scrubber; without it no card is checked.
+   */
+  carriesSecret?: (text: string) => boolean;
   playbooks?: readonly Playbook[];
   /**
    * The modes (T25): how hard the conductor and its planner think, what a delegation may cost,
@@ -259,6 +265,7 @@ export class Conductor {
   private readonly followDelays = new Map<string, number>();
   private readonly tasksSurviveRestart: boolean;
   private readonly scrubTaskText: ((text: string) => string) | undefined;
+  private readonly carriesSecret: ((text: string) => boolean) | undefined;
   private slotsInUse = 0;
   private readonly slotWaiters: Array<{ grant: () => void; refuse: (error: Error) => void }> = [];
   private closed: Promise<void> | undefined;
@@ -279,6 +286,7 @@ export class Conductor {
     this.orchestratorAccess = options.orchestratorAccess;
     this.tasksSurviveRestart = options.tasksSurviveRestart === true;
     this.scrubTaskText = options.scrubTaskText;
+    this.carriesSecret = options.carriesSecret;
     this.approverAuthorized = options.approverAuthorized;
     const tools = conductorTools(this.toolHost(), options.tools);
     this.host = new MakaHost({
@@ -467,8 +475,22 @@ export class Conductor {
   /** Stops the conversation's open run: its turn, queued inputs and tasks. */
   async stop(conversationId: string): Promise<boolean> {
     const run = this.state.openRun(conversationId);
-    if (!run) return false;
+    if (!run) return this.cancelKeptTasks(conversationId);
     return this.stopRun(this.lane(conversationId), run.runId, 'user_stop');
+  }
+
+  /**
+   * A task kept across a restart has no open run to stop it through, but it is still the
+   * conversation's: it is owed a cancel, which goes out now or when the conversation next has
+   * access. True when there was anything to cancel.
+   */
+  private cancelKeptTasks(conversationId: string): boolean {
+    const owed = this.state.unsettledDelegations({ conversationId });
+    if (owed.length === 0) return false;
+    this.state.markCancelPending(owed.map((delegation) => delegation.key));
+    // Taking the access queues the retry.
+    this.lane(conversationId, this.orchestratorAccess?.(conversationId));
+    return true;
   }
 
   /**
@@ -803,6 +825,7 @@ export class Conductor {
     switch (event.type) {
       case 'tool_start':
         turn.sawTool = true;
+        this.state.markToolCalled(turn.runId);
         turn.finalText = [];
         break;
       case 'tool_result':
@@ -955,6 +978,8 @@ export class Conductor {
       turn.errorKind !== undefined &&
       TRANSIENT_MODEL_ERRORS.has(turn.errorKind) &&
       !turn.sawTool &&
+      // Not only this turn: an earlier turn of the run may have planned, spent, notified or asked.
+      this.state.run(runId)?.toolCalled === false &&
       this.state.tasksOf(runId).length === 0
     );
   }
@@ -1400,6 +1425,7 @@ export class Conductor {
       decidedOnTaint: (active) => (active as Turn).contextTainted ?? true,
       approverAuthorized: (approvedBy, conversationId) =>
         this.approverAuthorized ? this.approverAuthorized(approvedBy, conversationId) : true,
+      carriesSecret: (text) => this.carriesSecret?.(text) ?? false,
     };
   }
 

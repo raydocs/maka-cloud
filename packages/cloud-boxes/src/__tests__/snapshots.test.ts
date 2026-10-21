@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import {
   type BuilderBoxes,
+  ownerRecord,
   repoDir,
   SetupFailedError,
   type SetupRecipe,
@@ -189,6 +190,29 @@ describe('SetupSnapshots', () => {
     assert.equal(t.log.leased.length, 1, 'nothing was built over it');
   });
 
+  it('a snapshot of this name with no description is not ours: refused, not reused or written over', async () => {
+    const t = setup();
+    const built = await t.snapshots.ensure(recipe());
+    const stored = t.fleet.snapshots.get(built.snapshotId);
+    assert.ok(stored);
+    stored.description = undefined;
+    await assert.rejects(t.snapshots.ensure(recipe()), SnapshotOwnerError);
+    assert.equal(t.fleet.snapshots.get(built.snapshotId)?.description, undefined, 'left as it was');
+    assert.equal(t.fleet.callsTo('deleteSnapshot').length, 0);
+    assert.equal(t.log.leased.length, 1, 'nothing was built over it');
+  });
+
+  it('expiry never deletes a same-prefix snapshot that has no description', async () => {
+    const t = setup({ keep: 1 });
+    const first = await t.snapshots.ensure(recipe());
+    const stored = t.fleet.snapshots.get(first.snapshotId);
+    assert.ok(stored);
+    stored.description = undefined;
+    await t.snapshots.ensure(recipe({ setupScript: `${SCRIPT}# v2\n` }));
+    assert.ok(t.fleet.snapshots.has(first.snapshotId), 'it is not ours to delete');
+    assert.equal(t.fleet.callsTo('deleteSnapshot').length, 0);
+  });
+
   it('two callers in one process for the same setup share one build', async () => {
     const t = setup();
     const [one, two] = await Promise.all([
@@ -220,7 +244,10 @@ describe('SetupSnapshots', () => {
     const t = setup();
     const name = snapshotName(A, REPO, setupHash(recipe()));
     const source = t.fleet.seed({ name: 'someone' });
-    await t.fleet.createSnapshot(source.id, { name });
+    await t.fleet.createSnapshot(source.id, {
+      name,
+      description: ownerRecord(A, REPO, setupHash(recipe())),
+    });
     const result = await t.snapshots.ensure(recipe());
     assert.equal(result.built, false);
     assert.equal(t.fleet.snapshots.get(result.snapshotId)?.status, 'ready');
@@ -231,7 +258,10 @@ describe('SetupSnapshots', () => {
     const t = setup();
     const name = snapshotName(A, REPO, setupHash(recipe()));
     const source = t.fleet.seed({ name: 'someone' });
-    const failed = await t.fleet.createSnapshot(source.id, { name });
+    const failed = await t.fleet.createSnapshot(source.id, {
+      name,
+      description: ownerRecord(A, REPO, setupHash(recipe())),
+    });
     const entry = t.fleet.snapshots.get(failed.id);
     if (entry) entry.status = 'failed';
     const result = await t.snapshots.ensure(recipe());
