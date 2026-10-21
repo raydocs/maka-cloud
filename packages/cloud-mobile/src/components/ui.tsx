@@ -56,10 +56,7 @@ export function Card({
       </GlassView>
     );
   return (
-    <View
-      style={[styles.cardWrap, { borderColor: t.cardEdge }]}
-      accessibilityLabel={label}
-    >
+    <View style={[styles.cardWrap, { borderColor: t.cardEdge }]} accessibilityLabel={label}>
       <BlurView
         intensity={40}
         tint={t.scheme === 'dark' ? 'dark' : 'light'}
