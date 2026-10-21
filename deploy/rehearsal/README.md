@@ -12,14 +12,51 @@ health check that never goes green.
 | `server.env` | the server's settings: fake keys, the stand-ins as the model and sandbox APIs |
 | `stubs.mjs` | the model API and the sandbox API, and a control API for the scripted `claude` |
 | `up.sh`, `down.sh` | build and bring the stack up behind Caddy and check it over TLS; take it down |
+| `flow.mjs` | the flow: sign in, a task and its result card, an approval, a restart, a backup and a restore |
+| `ops.sh` | what the flow does to the Compose stack: stop, start, restart, backup, restore |
 
 ```sh
-MAKA_REHEARSAL_DIR=/tmp/rehearsal deploy/rehearsal/up.sh     # needs Docker, and ports 80 and 443
+export MAKA_REHEARSAL_DIR=/tmp/rehearsal
+deploy/rehearsal/up.sh                    # needs Docker, and ports 80 and 443
+set -a; . "$MAKA_REHEARSAL_DIR/env"; set +a
+node deploy/rehearsal/flow.mjs            # Node 22 or later
 deploy/rehearsal/down.sh
 ```
 
 `up.sh` leaves, in `$MAKA_REHEARSAL_DIR`, the server's settings (`server.env`), the invite's token
 (`token`), the root certificate of Caddy's authority (`ca.crt`) and the settings the flow reads (`env`).
+
+## The flow
+
+`flow.mjs` plays a first user and the first operator against the stack, over HTTP only:
+
+1. `health`: the health check passes through the proxy, over TLS.
+2. `sign-in`: the invite's token opens the API; no token and a wrong one do not.
+3. `task`: a message starts a task; the result card (an inbox item of kind `finished`) and the
+   closing message arrive.
+4. `approval`: two tasks in one conversation; the second is held for the user. Each approval card is
+   answered, the first one twice (the second answer must be a duplicate), and exactly that many
+   answers are recorded and tasks run.
+5. `restart`: the server restarts while a task is running in the sandbox; the task resumes and
+   finishes once, with one result card.
+6. `restart-reply` (expected to fail for now): the conductor, whose turn the restart cut, says the
+   task is done. It does not yet; the step is in `MAKA_REHEARSAL_XFAIL`. When the fix lands the step
+   passes, the flow fails with "unexpected pass", and the mark comes off.
+7. `backup-restore`: the server is stopped and backed up, something new happens, the backup is
+   restored, and the conversations and the inbox are as they were; a new task still runs.
+
+A conversation after the first holds each delegation for approval (the invite's memory has read
+content from outside), so a step that waits for work answers the approval cards it meets.
+
+### Against another host
+
+The flow reads where to go from `MAKA_REHEARSAL_URL`, `MAKA_REHEARSAL_TOKEN_FILE`,
+`MAKA_REHEARSAL_CA` and `MAKA_REHEARSAL_RESOLVE` (see the head of `flow.mjs`), steers the scripted
+`claude` through `MAKA_REHEARSAL_CONTROL_URL`, and stops, starts and backs up the server through the
+one script in `MAKA_REHEARSAL_OPS`. A second stack on the owner's host, started with this override so
+that it runs on the stand-ins, with an `ops.sh` that uses that host's own service commands, runs the
+same flow after every merge and daily. Nothing of that is set up yet. Never point the flow at a stack
+that has real keys: its tasks are scripted and the control API has no login.
 
 ## What the stand-ins are
 
