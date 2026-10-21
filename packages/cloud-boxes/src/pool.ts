@@ -1,0 +1,594 @@
+import { isQuotaExceeded } from '@maka-cloud/instabox';
+import type { InstaboxApiError, InstaboxMachine } from '@maka-cloud/instabox';
+import type { TaskId } from '@maka-cloud/orchestrator';
+import type { SandboxLease, SandboxProvider } from '@maka-cloud/runners';
+import { boxLabels, boxName, checkBox, LABEL } from './labels.js';
+import {
+  BoxRefusedError,
+  NoFreeBoxError,
+  type BoxApi,
+  type BoxPoolOptions,
+  type BoxUseReason,
+} from './types.js';
+
+const DEFAULT_MAX_PER_INVITE = 3;
+const DEFAULT_WAIT_MS = 120_000;
+const DEFAULT_LIMIT_RECHECK_MS = 600_000;
+
+type BoxState = 'creating' | 'ready' | 'claimed' | 'lost';
+
+/** `adopted` marks a claim found in the labels after a restart: no lease object will ever release it. */
+type Holder = symbol | 'adopted';
+
+interface Box {
+  tenantId: string;
+  slot: number;
+  /** Unset while the box is being created. */
+  machineId: string | undefined;
+  state: BoxState;
+  taskId: TaskId | undefined;
+  holder: Holder | undefined;
+  /** The conversation of the last task that held it, so its next task prefers this box. */
+  conversationId: string | undefined;
+  setup: string | undefined;
+  /** While the box is being made: a second ask by the same task waits on it. */
+  creation: Promise<void> | undefined;
+  /** Label writes of this box run one after another; each sends what the box is by then. */
+  labels: Promise<void>;
+}
+
+interface Waiter {
+  tenantId: string;
+  taskId: TaskId;
+  settle: (finish: () => Promise<Box>) => void;
+  fail: (error: Error) => void;
+  timer: unknown;
+}
+
+type Plan =
+  | { kind: 'have'; box: Box }
+  | { kind: 'create'; box: Box; why: BoxUseReason; snapshotId?: string }
+  | { kind: 'none' };
+
+/**
+ * A pool of labelled instabox boxes per invite, handed out one task at a time.
+ *
+ * - A box is found by its labels and used only when they all match; anything else is refused.
+ * - One task per box. A task asks again and gets its own box back (`acquire` is idempotent per
+ *   task), and a lease that was replaced by a newer one frees nothing.
+ * - Boxes are made when a task needs one, up to `maxPerInvite`, and never more than the account
+ *   allows: the limit is learned from instabox's refusal, and a task waits (bounded) rather than fail
+ *   while its invite has a box it can wait for.
+ * - Every decision about shared state (is it free, who has it, may I make one) is made in one
+ *   synchronous step, before any await, so two callers cannot take the same box or the last slot.
+ */
+export class BoxPool implements SandboxProvider {
+  private readonly api: BoxApi;
+  private readonly maxPerInvite: number;
+  private readonly waitMs: number;
+  private readonly limitRecheckMs: number;
+  private readonly now: () => number;
+  private readonly timers: NonNullable<BoxPoolOptions['timers']>;
+  private readonly tenants = new Map<string, Map<number, Box>>();
+  private readonly waiters: Waiter[] = [];
+  private discovery: Promise<void> | undefined;
+  private closed = false;
+  private createCount = 0;
+  /** The most boxes the account let the pool have, once instabox refused a create. */
+  private learned: { boxes: number; at: number } | undefined;
+
+  constructor(private readonly options: BoxPoolOptions) {
+    this.api = options.api;
+    this.maxPerInvite = options.maxPerInvite ?? DEFAULT_MAX_PER_INVITE;
+    if (!Number.isInteger(this.maxPerInvite) || this.maxPerInvite < 1 || this.maxPerInvite > 32) {
+      throw new Error('BoxPool: maxPerInvite must be an integer from 1 to 32');
+    }
+    this.waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
+    this.limitRecheckMs = options.limitRecheckMs ?? DEFAULT_LIMIT_RECHECK_MS;
+    this.now = options.now ?? Date.now;
+    this.timers = options.timers ?? {
+      setTimeout: (callback, ms) => {
+        const handle = setTimeout(callback, ms);
+        handle.unref();
+        return handle;
+      },
+      clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+    };
+  }
+
+  // -- SandboxProvider ---------------------------------------------------------------------------
+
+  async acquire(input: { tenantId: string; taskId: TaskId }): Promise<SandboxLease> {
+    this.assertOpen();
+    await this.discovered();
+    return this.lease(await this.take(input.tenantId, input.taskId));
+  }
+
+  /**
+   * A new box from `snapshotId` for a task whose box is gone. The task's old box is forgotten (the
+   * runner asks only after it found the box deleted or broken), and the new one takes a missing
+   * slot. With none missing it fails at once instead of waiting: nothing here would free one.
+   */
+  async restoreFromSnapshot(input: {
+    tenantId: string;
+    taskId: TaskId;
+    snapshotId: string;
+  }): Promise<SandboxLease> {
+    this.assertOpen();
+    await this.discovered();
+    await this.dropBoxOf(input.tenantId, input.taskId);
+    const plan = this.plan(input.tenantId, input.taskId, input.snapshotId);
+    if (plan.kind !== 'create') {
+      throw new NoFreeBoxError(
+        'no box slot is free to restore the task into (every slot of the invite is in use, or the account limit is reached)',
+      );
+    }
+    return this.lease(await this.finish(plan));
+  }
+
+  async knownMachines(): Promise<string[]> {
+    await this.discovered();
+    const ids: string[] = [];
+    for (const boxes of this.tenants.values()) {
+      for (const box of boxes.values()) if (box.machineId !== undefined) ids.push(box.machineId);
+    }
+    return ids;
+  }
+
+  // -- life --------------------------------------------------------------------------------------
+
+  /**
+   * Frees claims found after a restart whose task is no longer live. A claim held by a lease in this
+   * process is never touched here: its own run releases it.
+   */
+  async reconcile(): Promise<void> {
+    await this.discovered();
+    for (const boxes of this.tenants.values()) {
+      for (const box of boxes.values()) {
+        if (
+          box.holder === 'adopted' &&
+          box.taskId !== undefined &&
+          !this.options.isTaskLive(box.taskId)
+        ) {
+          this.free(box);
+        }
+      }
+    }
+  }
+
+  /** Rejects every waiting task and refuses new ones. Boxes and claims are left as they are. */
+  dispose(): void {
+    this.closed = true;
+    for (const waiter of this.waiters.splice(0)) {
+      this.timers.clearTimeout(waiter.timer);
+      waiter.fail(new Error('the box pool was shut down'));
+    }
+  }
+
+  /** How many tasks wait for a box, of one invite or of all. */
+  waiting(tenantId?: string): number {
+    return this.waiters.filter((w) => tenantId === undefined || w.tenantId === tenantId).length;
+  }
+
+  /** What the pool holds, for the operator and tests. */
+  state(): {
+    tenantId: string;
+    slot: number;
+    machineId?: string;
+    state: string;
+    taskId?: string;
+  }[] {
+    const rows = [];
+    for (const [tenantId, boxes] of this.tenants) {
+      for (const box of boxes.values()) {
+        rows.push({
+          tenantId,
+          slot: box.slot,
+          ...(box.machineId === undefined ? {} : { machineId: box.machineId }),
+          state: box.state,
+          ...(box.taskId === undefined ? {} : { taskId: box.taskId }),
+        });
+      }
+    }
+    return rows;
+  }
+
+  // -- taking a box ------------------------------------------------------------------------------
+
+  private async take(tenantId: string, taskId: TaskId): Promise<Box> {
+    const plan = this.plan(tenantId, taskId);
+    return plan.kind === 'none' ? await this.wait(tenantId, taskId) : await this.finish(plan);
+  }
+
+  /**
+   * Decides, in one synchronous step, which box this task gets, and marks it taken. Nothing
+   * awaits between the check and the mark.
+   */
+  private plan(tenantId: string, taskId: TaskId, snapshotId?: string): Plan {
+    const boxes = this.boxesOf(tenantId);
+    for (const box of boxes.values()) {
+      if (box.taskId === taskId && box.state !== 'lost') {
+        // The same task again (a resume, a repeated call): the same box, with a newer lease.
+        box.holder = Symbol('lease');
+        box.state = box.machineId === undefined ? 'creating' : 'claimed';
+        return { kind: 'have', box };
+      }
+    }
+    if (snapshotId === undefined) {
+      const conversationId = this.options.conversationOf?.(taskId);
+      const free = [...boxes.values()]
+        .filter((box) => box.state === 'ready')
+        .sort(
+          (a, b) =>
+            Number(conversationId !== undefined && b.conversationId === conversationId) -
+              Number(conversationId !== undefined && a.conversationId === conversationId) ||
+            a.slot - b.slot,
+        )[0];
+      if (free) {
+        this.claim(free, taskId);
+        return { kind: 'have', box: free };
+      }
+    }
+    if (this.atAccountLimit()) return { kind: 'none' };
+    for (let slot = 0; slot < this.maxPerInvite; slot++) {
+      if (boxes.has(slot)) continue;
+      const box = this.newBox(tenantId, slot);
+      boxes.set(slot, box);
+      this.claim(box, taskId);
+      box.state = 'creating';
+      return {
+        kind: 'create',
+        box,
+        why: snapshotId === undefined ? 'create' : 'restore',
+        ...(snapshotId === undefined ? {} : { snapshotId }),
+      };
+    }
+    return { kind: 'none' };
+  }
+
+  private claim(box: Box, taskId: TaskId): void {
+    box.state = box.machineId === undefined ? 'creating' : 'claimed';
+    box.taskId = taskId;
+    box.holder = Symbol('lease');
+    const conversationId = this.options.conversationOf?.(taskId);
+    if (conversationId !== undefined) box.conversationId = conversationId;
+  }
+
+  /** The async tail of a decision: write the label, or make the box. A failure gives the box back. */
+  private async finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Box> {
+    const { box } = plan;
+    const holder = box.holder;
+    const taskId = box.taskId as TaskId;
+    try {
+      if (plan.kind === 'create') {
+        box.creation = this.create(plan);
+        await box.creation;
+      } else {
+        // A task that asks again while its box is still being made waits for the same creation.
+        await box.creation;
+        await this.writeLabels(box);
+      }
+      return box;
+    } catch (error) {
+      if (plan.kind === 'create') this.forget(box);
+      else if (box.holder === holder) this.free(box);
+      // The account has no room for another box but the invite has boxes: wait for one of them.
+      if (error instanceof QuotaWait) {
+        if (plan.kind === 'create' && plan.why === 'restore') {
+          throw new NoFreeBoxError(
+            "the account's sandbox limit is reached, so the task cannot be restored into a new box",
+          );
+        }
+        return await this.wait(box.tenantId, taskId);
+      }
+      throw error;
+    } finally {
+      if (plan.kind === 'create') box.creation = undefined;
+    }
+  }
+
+  private async create(plan: Extract<Plan, { kind: 'create' }>): Promise<void> {
+    const { box } = plan;
+    const name = boxName(box.tenantId, box.slot);
+    const source =
+      plan.snapshotId === undefined
+        ? this.options.source(box.tenantId)
+        : { snapshotId: plan.snapshotId };
+    const generation = ++this.createCount;
+    let machine: InstaboxMachine;
+    let adopted = false;
+    try {
+      const operation = await this.api.createMachine(
+        { name, ...source, metadata: this.desiredLabels(box) },
+        { idempotencyKey: `maka-box-${name}-${generation}` },
+      );
+      await this.api.waitForOperation(operation.id);
+      machine = await this.api.getMachine(operation.machineId);
+    } catch (error) {
+      if (isQuotaExceeded(error)) {
+        this.learned = { boxes: this.countBoxes() - 1, at: this.now() };
+        if (this.hasOtherBox(box)) throw new QuotaWait();
+        throw new NoFreeBoxError(
+          `the account's sandbox limit is reached and this invite has no box of its own: ${(error as InstaboxApiError).message}`,
+        );
+      }
+      // A box of that name exists (made by an earlier attempt, or by another process): use it if it is ours.
+      if ((error as { status?: number }).status !== 409) throw error;
+      const found = await this.findNamed(box, name);
+      if (!found) throw error;
+      machine = found;
+      adopted = true;
+    }
+    const checked = checkBox(
+      machine,
+      { maxPerInvite: this.maxPerInvite },
+      {
+        tenantId: box.tenantId,
+        slot: box.slot,
+      },
+    );
+    if (!checked.ok) {
+      throw new BoxRefusedError(`the box ${machine.id} was refused: ${checked.reason}`);
+    }
+    if (machine.state === 'error' || machine.state === 'deleting' || machine.state === 'deleted') {
+      throw new BoxRefusedError(`the box ${machine.id} is ${machine.state}`);
+    }
+    if (checked.taskId !== undefined && checked.taskId !== box.taskId) {
+      throw new BoxRefusedError(`the box ${machine.id} already belongs to task ${checked.taskId}`);
+    }
+    box.machineId = machine.id;
+    box.setup = checked.setup;
+    try {
+      await this.options.beforeUse?.(machine.id, plan.why);
+    } catch (error) {
+      box.machineId = undefined;
+      // Our own box, made a moment ago and never used: delete it. An older one is left for the operator.
+      if (adopted)
+        this.options.onWarning?.(`box ${machine.id} failed its guard and was not used`, error);
+      else await this.deleteQuietly(machine.id);
+      throw error;
+    }
+    box.state = 'claimed';
+    if (adopted) await this.writeLabels(box);
+  }
+
+  private async findNamed(box: Box, name: string): Promise<InstaboxMachine | undefined> {
+    const found = await this.api.listMachines({
+      metadata: { [LABEL.pool]: '1', [LABEL.invite]: box.tenantId, [LABEL.slot]: String(box.slot) },
+    });
+    return found.find((machine) => machine.name === name);
+  }
+
+  // -- waiting -----------------------------------------------------------------------------------
+
+  private wait(tenantId: string, taskId: TaskId): Promise<Box> {
+    return new Promise<Box>((resolve, reject) => {
+      const waiter: Waiter = {
+        tenantId,
+        taskId,
+        timer: undefined,
+        settle: (finish) => {
+          this.timers.clearTimeout(waiter.timer);
+          finish().then(resolve, reject);
+        },
+        fail: (error) => {
+          this.timers.clearTimeout(waiter.timer);
+          reject(error);
+        },
+      };
+      waiter.timer = this.timers.setTimeout(() => {
+        const index = this.waiters.indexOf(waiter);
+        if (index === -1) return;
+        this.waiters.splice(index, 1);
+        reject(
+          new NoFreeBoxError(
+            `no box of this invite came free within ${Math.round(this.waitMs / 1000)} s (the invite may use ${this.maxPerInvite} boxes${this.limited() ? ', and the account allows no more' : ''})`,
+          ),
+        );
+      }, this.waitMs);
+      this.waiters.push(waiter);
+    });
+  }
+
+  /** Gives free boxes (or free slots) of the tenant to the tasks waiting for it, oldest first. */
+  private pump(tenantId: string): void {
+    for (let index = 0; index < this.waiters.length; ) {
+      const waiter = this.waiters[index] as Waiter;
+      if (waiter.tenantId !== tenantId) {
+        index++;
+        continue;
+      }
+      const plan = this.plan(tenantId, waiter.taskId);
+      if (plan.kind === 'none') return;
+      this.waiters.splice(index, 1);
+      waiter.settle(() => this.finish(plan));
+    }
+  }
+
+  // -- leases ------------------------------------------------------------------------------------
+
+  private lease(box: Box): SandboxLease {
+    const holder = box.holder;
+    return {
+      machineId: box.machineId as string,
+      release: async () => {
+        if (box.holder !== holder || holder === undefined) return;
+        this.free(box);
+        await box.labels;
+      },
+    };
+  }
+
+  /** Marks the box free, hands it on to a waiting task if there is one, and rewrites its label. */
+  private free(box: Box): void {
+    box.state = 'ready';
+    box.taskId = undefined;
+    box.holder = undefined;
+    void this.writeLabels(box).catch((error) =>
+      this.options.onWarning?.(
+        `could not clear the task label of box ${box.machineId ?? ''}`,
+        error,
+      ),
+    );
+    this.pump(box.tenantId);
+  }
+
+  private writeLabels(box: Box): Promise<void> {
+    const write = box.labels.then(async () => {
+      if (box.machineId === undefined) return;
+      await this.api.patchMachineMetadata(box.machineId, this.desiredLabels(box));
+    });
+    // The chain goes on after a failed write; the caller of this write still sees the failure.
+    box.labels = write.catch(() => undefined);
+    return write;
+  }
+
+  private desiredLabels(box: Box): Record<string, string> {
+    return {
+      ...boxLabels(box.tenantId, box.slot, box.setup === undefined ? {} : { setup: box.setup }),
+      ...(box.taskId === undefined ? {} : { [LABEL.task]: box.taskId }),
+    };
+  }
+
+  // -- registry ----------------------------------------------------------------------------------
+
+  private newBox(tenantId: string, slot: number): Box {
+    return {
+      tenantId,
+      slot,
+      machineId: undefined,
+      state: 'creating',
+      taskId: undefined,
+      holder: undefined,
+      conversationId: undefined,
+      setup: undefined,
+      creation: undefined,
+      labels: Promise.resolve(),
+    };
+  }
+
+  private boxesOf(tenantId: string): Map<number, Box> {
+    let boxes = this.tenants.get(tenantId);
+    if (!boxes) {
+      boxes = new Map();
+      this.tenants.set(tenantId, boxes);
+    }
+    return boxes;
+  }
+
+  /** Removes a box from the registry (it was never made, or is gone) and lets waiters try again. */
+  private forget(box: Box): void {
+    const boxes = this.tenants.get(box.tenantId);
+    if (boxes?.get(box.slot) === box) boxes.delete(box.slot);
+    this.pump(box.tenantId);
+  }
+
+  /**
+   * The runner asks for a restore after it found the task's box deleted or broken. A box that is
+   * gone leaves the registry; one that still exists (broken) stays in its slot as lost, so nothing
+   * is made over it.
+   */
+  private async dropBoxOf(tenantId: string, taskId: TaskId): Promise<void> {
+    for (const box of [...this.boxesOf(tenantId).values()]) {
+      if (box.taskId !== taskId) continue;
+      box.holder = undefined;
+      box.taskId = undefined;
+      let exists = false;
+      if (box.machineId !== undefined) {
+        try {
+          const machine = await this.api.getMachine(box.machineId);
+          exists = machine.state !== 'deleted' && machine.state !== 'deleting';
+        } catch (error) {
+          if ((error as { status?: number }).status !== 404) throw error;
+        }
+      }
+      if (exists) box.state = 'lost';
+      else this.forget(box);
+    }
+  }
+
+  /** Whether the invite has a box besides this one (which is still being made). */
+  private hasOtherBox(box: Box): boolean {
+    return [...this.boxesOf(box.tenantId).values()].some((other) => other !== box);
+  }
+
+  private countBoxes(): number {
+    let count = 0;
+    for (const boxes of this.tenants.values()) count += boxes.size;
+    return count;
+  }
+
+  private limited(): boolean {
+    return this.learned !== undefined && this.now() - this.learned.at < this.limitRecheckMs;
+  }
+
+  private atAccountLimit(): boolean {
+    return this.limited() && this.countBoxes() >= (this.learned as { boxes: number }).boxes;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error('the box pool was shut down');
+  }
+
+  private async deleteQuietly(machineId: string): Promise<void> {
+    try {
+      const operation = await this.api.deleteMachine(machineId);
+      await this.api.waitForOperation(operation.id);
+    } catch (error) {
+      this.options.onWarning?.(`could not delete box ${machineId}`, error);
+    }
+  }
+
+  // -- finding what is already there -------------------------------------------------------------
+
+  private discovered(): Promise<void> {
+    this.discovery ??= this.discover().catch((error) => {
+      // A failed listing is tried again by the next caller, not remembered.
+      this.discovery = undefined;
+      throw error;
+    });
+    return this.discovery;
+  }
+
+  private async discover(): Promise<void> {
+    const machines = await this.api.listMachines({ metadata: { [LABEL.pool]: '1' } });
+    for (const machine of machines) this.register(machine);
+  }
+
+  private register(machine: InstaboxMachine): void {
+    if (machine.state === 'deleting' || machine.state === 'deleted') return;
+    const checked = checkBox(machine, { maxPerInvite: this.maxPerInvite });
+    if (!checked.ok) {
+      this.options.onWarning?.(`refused box ${machine.id}: ${checked.reason}`);
+      return;
+    }
+    const boxes = this.boxesOf(checked.tenantId);
+    if (boxes.has(checked.slot)) {
+      this.options.onWarning?.(
+        `refused box ${machine.id}: slot ${checked.slot} of that invite is already box ${boxes.get(checked.slot)?.machineId}`,
+      );
+      return;
+    }
+    const box = this.newBox(checked.tenantId, checked.slot);
+    box.machineId = machine.id;
+    box.setup = checked.setup;
+    boxes.set(checked.slot, box);
+    if (machine.state === 'error') {
+      box.state = 'lost';
+      return;
+    }
+    box.state = 'ready';
+    if (checked.taskId === undefined) return;
+    if (this.options.isTaskLive(checked.taskId)) {
+      box.state = 'claimed';
+      box.taskId = checked.taskId;
+      box.holder = 'adopted';
+    } else {
+      box.taskId = checked.taskId;
+      this.free(box);
+    }
+  }
+}
+
+/** A create was refused for the account's limit while the invite has boxes: wait for one instead. */
+class QuotaWait extends Error {}
