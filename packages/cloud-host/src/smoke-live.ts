@@ -38,6 +38,10 @@ const STREAM_MAX_MS = 15_000;
 const STREAM_MAX_BYTES = 4_000_000;
 const MAX_TASK_PAGES = 20;
 const RESTART_TIMEOUT_MS = 60_000;
+/** How long a cancelled task may take to show that its stop is confirmed. */
+const STOP_CONFIRM_POLL_MS = 1_000;
+const STOP_CONFIRM_POLLS = 30;
+const ENDED_STATES = ['succeeded', 'failed', 'cancelled'];
 
 export interface LiveSmokeIo {
   fetch?: typeof fetch;
@@ -283,37 +287,56 @@ export function createLiveSmokeDeps(
     },
 
     /**
-     * Cancels every task of the smoke invite that is still going: what an earlier run left behind
-     * when this run took its budget over. Their credentials book nothing already; this stops the
-     * sandboxes too. Returns how many were cancelled. A task that cannot be cancelled and is still
-     * going afterwards, or a list that cannot be read, is an error: the run must not start beside
-     * work it could not stop.
+     * Stops every task of the smoke invite that is still going: what an earlier run left behind.
+     * A task counts as going until it has ended AND no stop of it or its tree is pending, so an
+     * ended task whose processes may still live is waited for, not skipped. A cancel that was
+     * accepted does not count either: the stop must be seen confirmed. Returns how many cancels
+     * took effect. A task that is not confirmed stopped, or a list that cannot be read, is an error:
+     * the run must not start beside work it could not stop.
      */
     async cancelLeftovers() {
       const listed = await request('GET', '/v1/conversations');
       const conversations =
         isRecord(listed) && Array.isArray(listed.conversations) ? listed.conversations : [];
       const going = (task: SmokeTask): boolean =>
-        !['succeeded', 'failed', 'cancelled'].includes(task.state);
-      let cancelled = 0;
-      const stuck: string[] = [];
+        !ENDED_STATES.includes(task.state) ||
+        task.stopPending === true ||
+        task.treeStopPending === true;
+      const sleep = io.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+      const open: Array<{ conversationId: string; taskId: string; sent: boolean }> = [];
       for (const conversation of conversations) {
         const id = isRecord(conversation) ? conversation.conversationId : undefined;
         if (typeof id !== 'string') continue;
         for (const task of await this.tasks(id)) {
           if (!going(task)) continue;
-          try {
-            await this.cancel(task.taskId);
-            cancelled += 1;
-          } catch {
-            // It may have ended in the meantime; if it is still going, it is not stopped.
-            const now = (await this.tasks(id)).find((other) => other.taskId === task.taskId);
-            if (!now || going(now)) stuck.push(task.taskId);
+          let sent = false;
+          if (!ENDED_STATES.includes(task.state)) {
+            try {
+              await this.cancel(task.taskId);
+              sent = true;
+            } catch {
+              // It may have ended in the meantime; whether it did is read below.
+            }
           }
+          open.push({ conversationId: id, taskId: task.taskId, sent });
         }
       }
+      let cancelled = 0;
+      const stuck: string[] = [];
+      for (const { conversationId, taskId, sent } of open) {
+        let confirmed = false;
+        for (let poll = 0; poll <= STOP_CONFIRM_POLLS && !confirmed; poll += 1) {
+          if (poll > 0) await sleep(STOP_CONFIRM_POLL_MS);
+          const now = (await this.tasks(conversationId)).find((other) => other.taskId === taskId);
+          confirmed = now !== undefined && !going(now);
+        }
+        if (!confirmed) stuck.push(taskId);
+        else if (sent) cancelled += 1;
+      }
       if (stuck.length > 0) {
-        throw new Error(`could not cancel ${stuck.length} task(s): ${stuck.join(', ')}`);
+        throw new Error(
+          `could not confirm the stop of ${stuck.length} task(s): ${stuck.join(', ')}`,
+        );
       }
       return cancelled;
     },
@@ -399,6 +422,7 @@ function toTask(raw: unknown): SmokeTask | undefined {
     ...(typeof raw.costUsd === 'number' ? { costUsd: raw.costUsd } : {}),
     ...(raw.budgetExceeded === true ? { budgetExceeded: true } : {}),
     ...(raw.stopPending === true ? { stopPending: true } : {}),
+    ...(raw.treeStopPending === true ? { treeStopPending: true } : {}),
     ...(typeof raw.failureReason === 'string' ? { failureReason: raw.failureReason } : {}),
   };
 }
@@ -556,19 +580,22 @@ export async function smokeCommand(
     const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
     if (fenced) {
       // The earlier run's gateway keys and conductor sessions book nothing from now on (the
-      // budget's generation moved); stop what it left running as well.
+      // budget's generation moved).
       print('took over the run budget of an earlier run: its credentials are fenced');
-      try {
-        const cancelled = await deps.cancelLeftovers();
-        if (cancelled > 0) print(`cancelled ${cancelled} task(s) the earlier run left running`);
-      } catch (error) {
-        // Their credentials book nothing, but they still hold sandboxes and may change the
-        // repository the run is about to use: nothing starts beside them.
-        print(
-          `could not stop what the earlier run left running (${error instanceof Error ? error.message : 'unknown error'}), so nothing was started: cancel those tasks, then run again`,
-        );
-        return 2;
-      }
+    }
+    // Whatever an earlier run left going is stopped before anything starts, every time: a run that
+    // could not stop it cleared its budget on the way out, so the next run no longer sees a takeover
+    // and the budget cannot be the memory of that debt.
+    try {
+      const cancelled = await deps.cancelLeftovers();
+      if (cancelled > 0) print(`cancelled ${cancelled} task(s) an earlier run left running`);
+    } catch (error) {
+      // They may still hold sandboxes and change the repository the run is about to use: nothing
+      // starts beside them.
+      print(
+        `could not stop what an earlier run left running (${error instanceof Error ? error.message : 'unknown error'}), so nothing was started: cancel those tasks, then run again`,
+      );
+      return 2;
     }
     const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
     for (const line of formatSmokeReport(report)) print(line);

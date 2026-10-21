@@ -640,10 +640,14 @@ Preparation:
    only holds that invite back; about two minutes after it stopped renewing it,
    the next smoke run takes it over. A takeover first fences the killed run:
    every model key and conductor session issued under it books nothing from then
-   on (the invite's generation in the journal moves up), the new run cancels the
-   tasks it left running (if it cannot cancel one, or cannot list them, it
-   starts nothing and exits 2: cancel them by hand and run again), and only then does the new run get a budget of its
-   own, starting empty. A run that ends clears its budget and fences its own
+   on (the invite's generation in the journal moves up), and only then does the
+   new run get a budget of its own, starting empty. Every run, takeover or not,
+   first stops what an earlier run left going: it cancels each task that has not
+   ended and waits for the stop of each ended task whose stop (or its tree's) is
+   still pending. A task not seen stopped, or a task list it cannot read, means
+   it starts nothing and exits 2: stop those tasks by hand and run again. The
+   cleanup is repeated by the next run even though the run that failed it has
+   cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
    sequence, books nothing until the next run reopens it. A server on code from
    before run generations can no longer book on the smoke invite once that invite
