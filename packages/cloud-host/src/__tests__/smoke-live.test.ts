@@ -756,7 +756,7 @@ test('a smoke run that takes over an abandoned budget fences the earlier run’s
   const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
   await smokeCommand(env, io);
 
-  assert.deepEqual(cancelled, ['tsk_running', 'tsk_paused']);
+  assert.deepEqual(cancelled, ['tsk_running', 'tsk_done', 'tsk_paused']);
   assert.match(printed.join('\n'), /took over the run budget of an earlier run/u);
   const refusal = old.reserve('old2', 0.01);
   assert.equal(refusal.ok, false, 'the earlier run’s credential books nothing');
@@ -976,14 +976,21 @@ test('only a stop the server confirms counts: the cancel answer, not the list, s
   );
   assert.equal(tree.code, 2, tree.printed);
 
-  // A task that ended long ago has no tree left to wait for: it is not asked about at all.
+  // A task that ended long ago is asked about like any other: the list shows no tree flag and the
+  // server's has no age limit, so a failed task whose stream still runs is not assumed stopped.
+  const longAgo = () => 10 * 60_000 * 10;
   const old = await run(
     () => [{ ...ended, finishedAt: 1 }],
-    undefined,
-    () => 10 * 60_000 * 10,
+    () => ({ ...ended, treeStopPending: true }),
+    longAgo,
   );
-  assert.deepEqual(old.server.cancelled, []);
-  assert.doesNotMatch(old.printed, /nothing was started/u, old.printed);
+  assert.deepEqual([...new Set(old.server.cancelled)], ['tsk_end']);
+  assert.equal(old.code, 2, old.printed);
+  assert.ok(!startedAScenario(old.server.requests));
+  // Once the server says nothing is pending, the same old task lets the run go on.
+  const calm = await run(() => [{ ...ended, finishedAt: 1 }], undefined, longAgo);
+  assert.deepEqual(calm.server.cancelled, ['tsk_end']);
+  assert.doesNotMatch(calm.printed, /nothing was started/u, calm.printed);
 });
 
 test('a refused cancel is not taken for a stop, even when the task list shows the task ended', async (t) => {
