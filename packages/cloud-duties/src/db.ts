@@ -13,12 +13,14 @@ export class DutiesDatabaseInUseError extends Error {
  * folded into one number) and chains that remember their newest failure. A database of any other
  * version was written by a build that ordered runs differently, and mixing the two encodings
  * would compare unlike numbers, so it is refused rather than migrated. No deployment holds one;
- * the file is left exactly as it was. Version 3 adds the cards of T30 to version 2, and a version 2
- * database is opened by adding them.
+ * the file is left exactly as it was. Version 3 adds the cards of T30 to version 2, and version 4
+ * adds what a finished card's task spent; a version 2 or 3 database is opened by adding them.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 /** Version 2 had no cards; opening it adds them (T30) and changes nothing else. */
 const CARDS_FROM_VERSION = 2;
+/** Version 3 had cards that did not record what their task spent. */
+const SETTLEMENT_FROM_VERSION = 3;
 
 /** The duties database was written by a build this one cannot read. It is not touched. */
 export class DutiesDatabaseVersionError extends Error {
@@ -179,12 +181,18 @@ CREATE TABLE cards (
   replaces TEXT,
   created_at INTEGER NOT NULL,
   decided_at INTEGER,
-  conversation_id TEXT
+  conversation_id TEXT,
+  typical INTEGER NOT NULL DEFAULT 0 CHECK (typical IN (0, 1)),
+  spent_micro INTEGER,
+  outcome TEXT CHECK (outcome IN ('completed', 'failed', 'stopped', 'abandoned')),
+  settled_at INTEGER
 );
 CREATE UNIQUE INDEX cards_one_open ON cards (project_id, kind, subject_key) WHERE state = 'open';
 CREATE INDEX cards_by_project ON cards (project_id, day);
 CREATE INDEX cards_by_subject ON cards (project_id, kind, subject_key);
 CREATE INDEX cards_by_owner ON cards (owner);
+
+CREATE INDEX cards_by_settlement ON cards (owner, kind, settled_at);
 
 CREATE TABLE card_kinds (
   project_id TEXT NOT NULL,
@@ -199,6 +207,15 @@ CREATE TABLE card_kinds (
 );
 `;
 
+/** Version 3 cards gain what the estimate was based on and what their task spent (T30). */
+const SETTLEMENT_UPGRADE = `
+ALTER TABLE cards ADD COLUMN typical INTEGER NOT NULL DEFAULT 0 CHECK (typical IN (0, 1));
+ALTER TABLE cards ADD COLUMN spent_micro INTEGER;
+ALTER TABLE cards ADD COLUMN outcome TEXT CHECK (outcome IN ('completed', 'failed', 'stopped', 'abandoned'));
+ALTER TABLE cards ADD COLUMN settled_at INTEGER;
+CREATE INDEX cards_by_settlement ON cards (owner, kind, settled_at);
+`;
+
 /**
  * Opens the duties database for this process alone: claims check the day's cap and write in one
  * transaction and assume nobody else writes, so a second opener fails at once.
@@ -208,7 +225,12 @@ export function openDatabase(path: string): DatabaseSync {
   try {
     // Before anything is changed in the file, not even its journal mode.
     const version = userVersion(db);
-    if (version !== 0 && version !== SCHEMA_VERSION && version !== CARDS_FROM_VERSION) {
+    if (
+      version !== 0 &&
+      version !== SCHEMA_VERSION &&
+      version !== CARDS_FROM_VERSION &&
+      version !== SETTLEMENT_FROM_VERSION
+    ) {
       throw new DutiesDatabaseVersionError(path, version);
     }
     db.exec('PRAGMA locking_mode = EXCLUSIVE');
@@ -239,14 +261,15 @@ function userVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
 }
 
-/** Makes the tables of a new database, or adds the cards to a version 2 one. Any other version was refused on open. */
+/** Makes the tables of a new database, or adds the cards (version 2) or their settlement columns (version 3). Any other version was refused on open. */
 function migrate(db: DatabaseSync): void {
   const version = userVersion(db);
   if (version === SCHEMA_VERSION) return;
   db.exec('BEGIN IMMEDIATE');
   try {
     if (version === 0) db.exec(SCHEMA);
-    db.exec(CARDS_SCHEMA);
+    if (version === SETTLEMENT_FROM_VERSION) db.exec(SETTLEMENT_UPGRADE);
+    else db.exec(CARDS_SCHEMA);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {

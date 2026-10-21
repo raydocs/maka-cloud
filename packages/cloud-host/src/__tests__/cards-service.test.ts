@@ -8,6 +8,7 @@ import {
   type RepoSignals,
   type SignalReader,
 } from '@maka-cloud/duties';
+import { EXPIRE_AFTER_MS } from '@maka-cloud/duties';
 import { DEFAULT_MODES, MODE_IDS } from '@maka-cloud/modes';
 import { CardsService, type CardsParts } from '../cards/service.js';
 
@@ -93,6 +94,7 @@ function rig(
   return {
     engine,
     service,
+    parts,
     scanner,
     projectId,
     starts,
@@ -416,5 +418,50 @@ test('the service refuses to be started twice, and to scan or accept before it i
   assert.throws(() => r.service.start({} as CardsParts), /already/);
   const fresh = new CardsService({ engine: r.engine, scanner: r.scanner, minRunUsd });
   await assert.rejects(fresh.scanProject(OWNER, r.projectId), /not started/);
+  r.engine.close();
+});
+
+test('maintenance finishes a tap that died before its task began, once, and takes down cards nobody answered', async () => {
+  const r = rig();
+  const tapped = await oneCard(r, FAILING_MAIN);
+  // The tap spent the card and the process died before the task started.
+  assert.ok(r.engine.cards.accept(OWNER, tapped.cardId).ok);
+  assert.equal(r.starts.length, 0);
+  assert.deepEqual(r.service.maintain(), { resumed: 1, expired: 0 });
+  assert.equal(r.starts.length, 1);
+  assert.equal(r.starts[0]?.key, `card:${tapped.cardId}`);
+  assert.equal(r.engine.cards.get(OWNER, tapped.cardId)?.conversationId, 'cnv_1');
+  assert.deepEqual(r.service.maintain(), { resumed: 0, expired: 0 }, 'nothing left to finish');
+  assert.equal(r.starts.length, 1);
+  // A card nobody answers in three days is taken down and counts as ignored.
+  r.setSignals(() => ({ ...EMPTY, ownPulls: [PULL] }));
+  const shown = await r.service.scanProject(OWNER, r.projectId);
+  assert.ok(shown.ok && shown.outcome.created.length === 1);
+  r.clock.t += EXPIRE_AFTER_MS;
+  r.closed.length = 0;
+  assert.deepEqual(r.service.maintain(), { resumed: 0, expired: 1 });
+  assert.deepEqual(r.closed, [`${r.projectId}:rebase_pr:pr:12`]);
+  assert.deepEqual(r.service.maintain(), { resumed: 0, expired: 0 }, 'expiry counts once');
+  r.engine.close();
+});
+
+test('a failed start in maintenance is warned about and tried again on the next pass', async () => {
+  const r = rig({
+    startFails: (n) => (n === 1 ? new Error('the server is restarting') : undefined),
+  });
+  const warned: string[] = [];
+  const service = new CardsService({
+    engine: r.engine,
+    scanner: r.scanner,
+    minRunUsd,
+    onWarning: (m) => warned.push(m),
+  });
+  const card = await oneCard(r, FAILING_MAIN);
+  assert.ok(r.engine.cards.accept(OWNER, card.cardId).ok);
+  service.start(r.parts);
+  assert.deepEqual(service.maintain(), { resumed: 0, expired: 0 });
+  assert.equal(warned.length, 1);
+  assert.deepEqual(service.maintain(), { resumed: 1, expired: 0 });
+  assert.equal(r.starts.length, 1);
   r.engine.close();
 });

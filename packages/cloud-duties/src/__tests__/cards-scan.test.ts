@@ -560,3 +560,45 @@ test('a kind the owner switched off takes its open card down when checked', asyn
   assert.ok(verdict.ok && verdict.state === 'gone');
   r.cleanup();
 });
+
+test('a card shows what finished tasks of its kind typically cost, and the table’s estimate until then', async () => {
+  const r = await rig();
+  const { reader } = githubReader(busyRoutes());
+  const scanner = new CardScanner(r.engine, { reader });
+  const first = await scanner.scan(OWNER, r.projectId);
+  assert.ok(first.ok);
+  const main = first.outcome.created.find((c) => c.kind === 'fix_main_ci');
+  assert.equal(main?.estimateUsd, 3);
+  assert.equal(main?.typical, false);
+  // Three finished tasks of the kind that spent 1, 2 and 6 dollars.
+  for (const [n, spent] of [1, 2, 6].entries()) {
+    r.clock.advance(DAY);
+    const made = r.engine.cards.propose(OWNER, r.projectId, {
+      kind: 'fix_main_ci',
+      subjectKey: `old${n}`,
+      title: `Fix old failure ${n}`,
+      detail: 'd',
+      brief: 'b',
+      estimateUsd: 3,
+      preconditionHash: 'a'.repeat(64),
+      external: false,
+    });
+    assert.ok(made.ok);
+    r.engine.cards.accept(OWNER, made.card.cardId);
+    r.engine.cards.attachConversation(OWNER, made.card.cardId, `cnv_${n}`);
+    assert.equal(r.engine.cards.settle(made.card.cardId, 'completed', spent), true);
+  }
+  // The open card keeps what it said; a card made after the history shows the typical cost.
+  r.clock.advance(DAY);
+  r.engine.cards.dismiss(OWNER, main?.cardId as string);
+  r.clock.advance(8 * DAY);
+  const later = await scanner.scan(OWNER, r.projectId);
+  assert.ok(later.ok);
+  const next = later.outcome.created.find((c) => c.kind === 'fix_main_ci');
+  assert.equal(next?.estimateUsd, 2);
+  assert.equal(next?.typical, true);
+  // Another kind has no history and keeps the table's number.
+  const other = later.outcome.created.find((c) => c.kind === 'update_dependencies');
+  assert.equal(other?.typical ?? false, false);
+  r.cleanup();
+});
