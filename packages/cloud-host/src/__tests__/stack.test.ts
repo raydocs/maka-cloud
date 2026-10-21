@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
-import { DEFAULT_MODES } from '@maka-cloud/modes';
+import { DEFAULT_MODES, withoutDeep } from '@maka-cloud/modes';
 import { BoxPool } from '@maka-cloud/boxes';
 import type { InstaboxClient } from '@maka-cloud/instabox';
 import { InviteStore } from '@maka-cloud/server';
@@ -468,7 +468,7 @@ test('coding tasks go to the coding runner, and the stack runs the coding playbo
   );
   assert.equal(STACK_PLAYBOOKS[1], codingPlaybook);
   // The coding runner reviews with the modes in force, so a change is never shown done unreviewed by accident.
-  assert.deepEqual(stack.coding.options.modes, DEFAULT_MODES);
+  assert.deepEqual(stack.coding.options.modes, withoutDeep(DEFAULT_MODES));
 });
 
 /** A VAPID key pair the way a deployment would generate one: a P-256 key, base64url. */
