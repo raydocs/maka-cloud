@@ -194,7 +194,8 @@ export class DutyEngine {
   /**
    * At start, runs that were waiting for a project the policy no longer names are ended without
    * a run (their reservations released), and the owner is told once. A run already started is
-   * left to settle.
+   * left to settle, and so is a request whose launch was attempted: its run may exist, and the
+   * dispatcher decides (finish it if it exists, end it if not).
    */
   private parkMismatchedProjects(): void {
     transaction(this.db, () => {
@@ -205,7 +206,7 @@ export class DutyEngine {
       for (const project of projects) {
         if (this.permitted(project)) continue;
         this.cancelWhere(
-          "project_id = ? AND state IN ('pending', 'launching')",
+          "project_id = ? AND state IN ('pending', 'launching') AND attempts = 0",
           [project.project_id],
           'project_not_allowed',
           at,
@@ -792,21 +793,35 @@ export class DutyEngine {
     return row.at ?? undefined;
   }
 
-  /** Claims a pending request for launching: pending -> launching, once. */
-  beginLaunch(requestId: string): RunRequest | undefined {
+  /** A request that is waiting to launch, as the launcher sees it. */
+  waiting(requestId: string): RunRequest | undefined {
+    const row = this.db
+      .prepare("SELECT 1 FROM run_requests WHERE request_id = ? AND state = 'pending'")
+      .get(requestId);
+    return row ? this.requestView(requestId) : undefined;
+  }
+
+  /**
+   * Claims a pending request for launching: pending -> launching, once. `begun` says an earlier
+   * attempt already created the request's run: it keeps the day it was booked on and is not
+   * turned away by the cap or by the project's policy, because the run exists and must settle.
+   */
+  beginLaunch(requestId: string, begun = false): RunRequest | undefined {
     return transaction(this.db, () => {
-      const owner = this.db
-        .prepare(
-          `SELECT p.* FROM run_requests r JOIN projects p ON p.project_id = r.project_id
-           WHERE r.request_id = ? AND r.state = 'pending'`,
-        )
-        .get(requestId) as unknown as ProjectRow | undefined;
-      if (!owner) return undefined;
-      if (!this.permitted(owner)) {
-        this.end(requestId, 'project_not_allowed', 0);
-        return undefined;
+      if (!begun) {
+        const owner = this.db
+          .prepare(
+            `SELECT p.* FROM run_requests r JOIN projects p ON p.project_id = r.project_id
+             WHERE r.request_id = ? AND r.state = 'pending'`,
+          )
+          .get(requestId) as unknown as ProjectRow | undefined;
+        if (!owner) return undefined;
+        if (!this.permitted(owner)) {
+          this.end(requestId, 'project_not_allowed', 0);
+          return undefined;
+        }
+        if (!this.rebookToToday(requestId)) return undefined;
       }
-      if (!this.rebookToToday(requestId)) return undefined;
       const changed = this.db
         .prepare(
           "UPDATE run_requests SET state = 'launching', attempts = attempts + 1 WHERE request_id = ? AND state = 'pending'",

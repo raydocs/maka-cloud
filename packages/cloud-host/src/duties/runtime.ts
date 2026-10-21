@@ -33,7 +33,7 @@ export interface DutiesSetup {
 
 /** What the duties need once the server and the conductor exist. */
 export interface DutiesParts {
-  server: Pick<CloudServer, 'startConversation' | 'createConversation'>;
+  server: Pick<CloudServer, 'startConversation' | 'startedConversation' | 'createConversation'>;
   runsOf(conversationId: string): DutyRunView[];
   /** Puts a notice in the conversation's feed. Durable once it resolves. */
   postNotice(conversationId: string, text: string): Promise<void>;

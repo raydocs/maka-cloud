@@ -9,8 +9,12 @@ const MAX_TITLE = 200;
  * nothing again. A start the server will never accept (the owner was revoked, the brief is not
  * valid) is refused for good instead of retried.
  */
-export function serverLauncher(server: Pick<CloudServer, 'startConversation'>): RunLauncher {
+export function serverLauncher(
+  server: Pick<CloudServer, 'startConversation' | 'startedConversation'>,
+): RunLauncher {
   return {
+    begun: (request) =>
+      server.startedConversation({ owner: request.owner, key: request.requestId }) !== undefined,
     async start(request) {
       const started = server.startConversation({
         owner: request.owner,
