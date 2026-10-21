@@ -129,6 +129,8 @@ function appendProcess(r: Rig, extra: Record<string, string>) {
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  // A script that refuses early exits without reading its input, so the write can hit a closed pipe.
+  child.stdin.on('error', () => undefined);
   let answer = '';
   child.stdout.on('data', (chunk: Buffer) => {
     answer += chunk.toString('utf8');
