@@ -433,3 +433,23 @@ test('a leftover run whose cancel fails, on a runner that cannot stop by id, kee
     'the cancel succeeded',
   );
 });
+
+test('the stop retried for an owed stop carries the attempt that owes it, never another', async (t) => {
+  const { store, dir, taskId } = await leftRunning(t);
+  const asked: Array<number | undefined> = [];
+  const second = await makeHarness(t, {
+    store,
+    dir,
+    orchestrator: FAST,
+    fake: {
+      stopOrphaned: async (_id, callOptions) => {
+        asked.push(callOptions.epoch);
+        if (asked.length < 4) throw new Error('sandbox unreachable');
+      },
+    },
+  });
+  t.after(() => second.orchestrator.close());
+  await eventually(() => store.stopPendingTaskIds().length === 0, 'the stop confirmed');
+  assert.deepEqual(asked, [2, 2, 2, 2], 'the restart and every retry are attempt 2 asking');
+  assert.ok(taskId);
+});

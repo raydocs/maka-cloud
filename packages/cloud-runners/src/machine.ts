@@ -51,6 +51,25 @@ const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 const TRANSCRIPT_ATTEMPTS = 3;
 
 /** Caps on what one task may copy from another's workspace. */
+export interface KillOptions {
+  signal?: AbortSignal;
+  graceTenths?: number;
+  cancelRuns?: string[];
+  runs?: string[];
+  /** Leave alone the runs of an attempt after this one. */
+  upToAttempt?: number;
+}
+
+function assertAttempt(attempt: number): number {
+  if (!Number.isInteger(attempt) || attempt < 0) throw new Error(`Unsafe attempt: ${attempt}`);
+  return attempt;
+}
+
+/** A run's name: the attempt that started it, when known, and its turn. Stops tell attempts apart by it. */
+export function runNameOf(attempt: number | undefined, turn: number): string {
+  return attempt === undefined ? `t${turn}` : `e${assertAttempt(attempt)}.t${turn}`;
+}
+
 export interface StageLimits {
   maxFiles: number;
   maxFileBytes: number;
@@ -399,15 +418,18 @@ export class RemoteMachine {
    * runs are touched (processes, lock, raw output): a run that is done uses this, because a later
    * turn of the same task may already be running.
    */
-  async kill(
+  async kill(dirName: string, options: KillOptions = {}): Promise<string[]> {
+    return (await this.killRuns(dirName, options)).killed;
+  }
+
+  /**
+   * `kill`, and also the runs it left alone: with `upToAttempt`, the runs of a later attempt are
+   * not touched (a stop that was slow must not reach the run of the attempt that took the task over).
+   */
+  async killRuns(
     dirName: string,
-    options: {
-      signal?: AbortSignal;
-      graceTenths?: number;
-      cancelRuns?: string[];
-      runs?: string[];
-    } = {},
-  ): Promise<string[]> {
+    options: KillOptions = {},
+  ): Promise<{ killed: string[]; left: string[] }> {
     const result = await this.exec(KILL_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
@@ -422,6 +444,9 @@ export class RemoteMachine {
               MAKA_CANCEL_RUNS: options.cancelRuns.map((run) => assertSafeId('run', run)).join(' '),
             }
           : {}),
+        ...(options.upToAttempt === undefined
+          ? {}
+          : { MAKA_UP_TO_ATTEMPT: String(assertAttempt(options.upToAttempt)) }),
       },
       timeoutSeconds: 15,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -438,9 +463,11 @@ export class RemoteMachine {
         `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
-    return lines
-      .filter((line) => line.startsWith('KILLED '))
-      .map((line) => line.slice('KILLED '.length).trim());
+    const named = (prefix: string) =>
+      lines
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => line.slice(prefix.length).trim());
+    return { killed: named('KILLED '), left: named('LEFT ') };
   }
 
   /** Names of task directories that still have a live run. */

@@ -272,8 +272,8 @@ class RecordingSandbox implements CodingSandbox {
     private readonly samples: (() => void)[],
   ) {}
 
-  async open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace> {
-    const ws = await this.inner.open(taskId, signal);
+  async open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace> {
+    const ws = await this.inner.open(taskId, signal, attempt);
     this.h.leases.acquired++;
     const { h, samples } = this;
     const record = async (
@@ -309,8 +309,8 @@ class RecordingSandbox implements CodingSandbox {
     };
   }
 
-  stopTask(taskId: string, signal?: AbortSignal): Promise<void> {
-    return this.inner.stopTask(taskId, signal);
+  stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void> {
+    return this.inner.stopTask(taskId, signal, upToAttempt);
   }
 }
 

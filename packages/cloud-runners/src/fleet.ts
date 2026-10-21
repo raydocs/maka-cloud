@@ -495,8 +495,12 @@ mkdir -p "$(dirname ${shq(marker)})"
 
   // -- leftovers after a restart ---------------------------------------------------------------
 
-  /** Stops whatever runs for `taskId`, found by id alone. Idempotent. */
-  async stopTask(taskId: TaskId, signal?: AbortSignal): Promise<boolean> {
+  /**
+   * Stops whatever runs for `taskId`, found by id alone, and revokes its model access. Idempotent.
+   * With `upToAttempt` (the attempt that asks) it stops and revokes only what that attempt or an
+   * earlier one started: the run and the access of a later attempt are not its to touch.
+   */
+  async stopTask(taskId: TaskId, signal?: AbortSignal, upToAttempt?: number): Promise<boolean> {
     const record = await this.sessions.get(taskId);
     const machineIds = record ? [record.machineId] : await this.sandboxes.knownMachines();
     let stopped = false;
@@ -504,16 +508,25 @@ mkdir -p "$(dirname ${shq(marker)})"
     for (const machineId of machineIds) {
       try {
         const machine = this.machine(machineId);
-        const runs = await machine.kill(taskId, signal ? { signal } : {});
-        if (runs.length > 0) stopped = true;
-        await this.client
-          .deleteActivityLease(machineId, this.leaseId(taskId), signal ? { signal } : {})
-          .catch(() => undefined);
+        const { killed, left } = await machine.killRuns(taskId, {
+          ...(signal ? { signal } : {}),
+          ...(upToAttempt === undefined ? {} : { upToAttempt }),
+        });
+        if (killed.length > 0) stopped = true;
+        // The lease belongs to the task: while a later attempt's run is on the machine it is kept.
+        if (left.length === 0) {
+          await this.client
+            .deleteActivityLease(machineId, this.leaseId(taskId), signal ? { signal } : {})
+            .catch(() => undefined);
+        }
       } catch (error) {
         failure ??= error;
       }
     }
-    await this.modelAccess.revokeForTask?.(taskId);
+    await this.modelAccess.revokeForTask?.(
+      taskId,
+      upToAttempt === undefined ? undefined : { upToAttempt },
+    );
     if (failure !== undefined) throw failure;
     return stopped;
   }
