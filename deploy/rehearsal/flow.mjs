@@ -439,11 +439,12 @@ const steps = [
         wrong.length === 0,
         `the agent account could not ${wrong.map((what) => `${what} (${code[what]})`).join(', ')}: ${ended}`,
       );
-      // The host read the repro.json the agent wrote (it says so before it runs the reproduction
-      // test), and the check namespace worked: the task went on past the agent's own run.
+      // The runner read the repro.json the agent wrote, and the reproduction test ran in its own user
+      // and PID namespace and exited 0 (only then does it say it runs the task's own test command),
+      // so a box that refuses those namespaces, or a repro.json that was not written, fails here.
       assert(
-        notes.some((note) => /running the reproduction test/u.test(note)),
-        `the runner never got as far as running the reproduction test: ${notes.join(' | ').slice(0, 600)}`,
+        notes.some((note) => note === 'running sh check.sh'),
+        `the runner never got past the reproduction test to the task's own tests: ${notes.join(' | ').slice(0, 600)}`,
       );
       console.log(`  the coding task: ${ended.slice(0, 300)}`);
     },

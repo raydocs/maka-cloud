@@ -53,7 +53,7 @@ review found that it could not: the checkout was cloned under `umask 077` with t
 refuses the checkout ("dubious ownership"; the sandbox user owns it). The rehearsal's `checkout` step runs
 a coding task through the server's own clone script and has the scripted agent, as the agent account, read
 its brief, edit a file of the checkout, run `git status` there and write the `repro.json` the brief names;
-it then needs the runner to read that file and start the reproduction test. It is a gate, not an expected
+it then needs the runner to read that file, run the reproduction test in its check namespace, and go on to the task's own tests. It is a gate, not an expected
 failure (it is not in `MAKA_REHEARSAL_XFAIL`): the `rehearsal` job is the launch check and stays red
 until the step passes, and **the first live run does not start until it does.**
 
