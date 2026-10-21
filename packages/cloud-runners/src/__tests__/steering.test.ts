@@ -282,6 +282,41 @@ test('a restarted run does not give the agent a message its kept transcript show
   );
 });
 
+test('a message holding a key shape is proved read by the scrubbed line the store keeps, and not given again after a restart', async (t) => {
+  const transcripts = new MemoryTranscriptStore();
+  const h = await sdkSetup(t, { transcripts });
+  const tools = [{ id: 'toolu_1', name: 'Read', input: { file_path: '/work/a.txt' } }];
+  const text = 'Use token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 for the API.';
+  const first = gatedSteps();
+  const one = await started(h, first.steps, tools);
+  one.handle.steer?.({ steerId: 'm1', text });
+  first.gate.resolve();
+  assert.equal(terminal(await one.done)?.type, 'finished');
+  assert.deepEqual(reads(one.events), ['m1'], 'the scrubbed line still proves the message');
+
+  // The server died before it wrote that down, and offers it again: the kept line shows it.
+  await fs.rm(fakeFile(h, 'hooks.log'));
+  const second = gatedSteps();
+  second.gate.resolve();
+  const spec = await h.spec('tsk_steer', { steps: second.steps });
+  const handle = (await h.runners.claude.recover({
+    ...spec,
+    recovery: { epoch: 2, resumes: 1, note: 'the server restarted' },
+  })) as RunHandle;
+  const events: RunnerEvent[] = [];
+  const done = (async () => {
+    for await (const event of handle.events) events.push(event);
+  })();
+  handle.steer?.({ steerId: 'm1', text });
+  await done;
+  const post = (await hookAnswers(h)).filter((entry) => entry.event === 'PostToolUse');
+  assert.doesNotMatch(
+    post.map((entry) => contextOf(entry.answer) ?? '').join('\n'),
+    /for the API/u,
+  );
+  assert.deepEqual(reads(events), ['m1']);
+});
+
 const TOOLS = [{ id: 'toolu_1', name: 'Read', input: { file_path: '/work/a.txt' } }];
 
 /** A run that ends having been given nothing; its conversation is kept in `transcripts`. */

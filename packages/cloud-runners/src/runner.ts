@@ -315,7 +315,8 @@ class Run implements RunHandle {
       const receipts = (record?.steerReceipts ?? []).filter((receipt) =>
         this.steersToVet.some(
           (message) =>
-            message.steerId === receipt.steerId && receiptIsFor(receipt, this.scrub(message.text)),
+            message.steerId === receipt.steerId &&
+            receiptIsFor(receipt, this.scrubForReader(message.text)),
         ),
       );
       const transcripts = this.fleet.options.transcripts;
@@ -397,7 +398,9 @@ class Run implements RunHandle {
     }
     if (picked.length === 0) return [];
     const receipts = this.mirror
-      ? picked.map((message) => newReceipt(message.steerId, this.scrub(message.text), fleet.now()))
+      ? picked.map((message) =>
+          newReceipt(message.steerId, this.scrubForReader(message.text), fleet.now()),
+        )
       : [];
     if (receipts.length > 0) {
       const ids = new Set(receipts.map((receipt) => receipt.steerId));
