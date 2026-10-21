@@ -99,6 +99,38 @@ test('a Codex run is metered per request and stopped inside its turn when the ga
   assert.equal(access.counts.unsubscribed, 1);
 });
 
+test('a run with a limit for its turn gets it in its access and stops at it, whichever of the turn and the tree has less', async (t) => {
+  for (const { budgetUsd, turnBudgetUsd, stops } of [
+    {
+      budgetUsd: 5,
+      turnBudgetUsd: 0.25,
+      stops: /this turn's model budget of \$0\.25 reached \(\$0\.20 spent\)/u,
+    },
+    { budgetUsd: 0.25, turnBudgetUsd: 1, stops: /budget of \$0\.25 reached \(\$0\.20 spent\)/u },
+  ]) {
+    const access = gatewayAccess();
+    const h = await setup({ cloud: { modelAccess: access.provider } });
+    t.after(() => h.cleanup());
+    await h.setMode('hang');
+    const taskId = `tsk_turn_${turnBudgetUsd}`;
+    const handle = await h.runners.codex.start(
+      await h.spec(taskId, { runner: 'codex', budgetUsd, turnBudgetUsd, budgetRootId: 'tsk_root' }),
+    );
+    const events = reader(handle);
+    await events.until(
+      (event) => event.type === 'progress' && event.note.includes('working on it'),
+    );
+    assert.deepEqual(access.issued, [
+      { taskId, runner: 'codex', budgetUsd, turnBudgetUsd, budgetRootId: 'tsk_root' },
+    ]);
+    access.settle({ spentUsd: 0.2, exhausted: true });
+    assert.notEqual(await settles(events.rest()), 'stuck');
+    const end = terminal(events.seen);
+    assert.equal(end?.type, 'failed');
+    assert.match(end?.type === 'failed' ? end.reason : '', stops);
+  }
+});
+
 test('with a metered access the CLI’s own usage lines do not count', async (t) => {
   const access = gatewayAccess();
   const h = await setup({ cloud: { modelAccess: access.provider } });

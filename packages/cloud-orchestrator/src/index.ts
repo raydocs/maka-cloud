@@ -21,6 +21,7 @@ export {
   DEFAULT_MAX_DEPTH,
   DEFAULT_ORPHAN_STOP_TIMEOUT_MS,
   DEFAULT_STOP_RETRY,
+  DEFAULT_TASK_LIMITS,
   DEFAULT_WAIT_MS,
   type DelegateInput,
   MAX_WAIT_MS,
@@ -29,6 +30,7 @@ export {
   type OrchestratorOptions,
   type RecoveredSpend,
   type OrchestratorStats,
+  type TaskLimits,
 } from './orchestrator.js';
 export {
   MAX_RECOVERY_NOTE_LENGTH,
@@ -37,7 +39,7 @@ export {
   resumesInARow,
 } from './recovery.js';
 export { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits } from './quota.js';
-export { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
+export { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
 export {
   claudeAgentSdkRunner,
   codexRunner,
