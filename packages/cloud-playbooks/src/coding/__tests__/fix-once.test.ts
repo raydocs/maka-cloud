@@ -457,3 +457,48 @@ test('the fix brief sends the first findings only, as data, with the checks the 
   assert.match(brief, /There is no further round/);
   assert.match(brief, /Plan: fix lib\/add\.sh\./);
 });
+
+test('between the files of a second delivery and its record, the first delivery still matches its files', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = implements_(fixesFindings);
+  h.codex.script = reviewsInRounds([[P1], []]);
+  // What a restart at the moment the fixed change's record is about to be written would find: the
+  // fixed change's files are on disk and the record still names the first change.
+  const record = h.deliveries.record.bind(h.deliveries);
+  let writes = 0;
+  let found: { onDisk: string; recorded: string; kept: unknown; fixedOnDisk: boolean } | undefined;
+  h.deliveries.record = async (delivery) => {
+    writes++;
+    if (writes === 2) {
+      const earlier = await h.deliveries.get('tsk_crash');
+      assert.ok(earlier);
+      const verification = JSON.parse(await fs.readFile(earlier.verificationPath, 'utf8'));
+      const changes = await fs.readFile(earlier.changesPath, 'utf8');
+      found = {
+        onDisk: createHash('sha256').update(changes).digest('hex'),
+        recorded: earlier.changesSha256,
+        kept: verification.kept,
+        fixedOnDisk: (await fs.readFile(delivery.changesPath, 'utf8')).includes(
+          Buffer.from(GUARDED).toString('base64'),
+        ),
+      };
+    }
+    return record(delivery);
+  };
+  const { events } = await run(h, 'tsk_crash');
+  assert.deepEqual(terminal(events), { type: 'finished' });
+
+  assert.ok(found, 'the fixed change was recorded after the first one');
+  assert.equal(found.onDisk, found.recorded, 'the change the record names is the change on disk');
+  assert.ok(found.kept, 'and it is still the kept record of that first change');
+  assert.equal(
+    found.fixedOnDisk,
+    true,
+    'while the fixed change is already on disk under its own name',
+  );
+  assert.equal(
+    await deliveredAddSh(h, 'tsk_crash'),
+    GUARDED,
+    'the record then moves to the fixed change',
+  );
+});
