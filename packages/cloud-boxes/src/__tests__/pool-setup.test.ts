@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { builderLabels, builderName, LABEL } from '../labels.js';
+import { BoxPool } from '../pool.js';
 import { BoxRefusedError, NoFreeBoxError } from '../types.js';
 import { repoKey, SetupSnapshots } from '../snapshots.js';
-import { flush, labelsOf, setup } from './support.js';
+import { AGENT, flush, labelsOf, setup } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
 const B = 'inv_bbbbbbbbbbbb';
@@ -156,6 +157,63 @@ describe('.agents/resume', () => {
     assert.equal(otherDone, false, 't2 still has no box');
     await lease2.release();
     assert.equal((await other).machineId, t.machineId, 't2 gets the box once t1 is done');
+  });
+
+  it('runs as the unprivileged agent account, after checking that account on this box once', async () => {
+    const t = await sleepingBox();
+    const first = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    const [run] = resumeRuns(t);
+    assert.match(run?.cmd ?? '', /^sudo -n -u 'maka-agent' --preserve-env -- /);
+    assert.match(run?.cmd ?? '', /\.agents\/resume/);
+    assert.deepEqual(t.fleet.agentChecks, [{ machineId: t.machineId, user: 'maka-agent' }]);
+    await first.release();
+    t.clock.now += 21 * MIN;
+    await t.pool.sweepIdle();
+    await t.pool.acquire({ tenantId: A, taskId: 't3' });
+    assert.equal(resumeRuns(t).length, 2, 'it runs again after the next wake');
+    assert.equal(t.fleet.agentChecks.length, 1, 'but the account is checked once per box');
+  });
+
+  it('does not run the repository script, and says so, when the account can use sudo or has capabilities', async () => {
+    for (const facts of [
+      'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=yes\nFACT agent_nocaps=yes\n',
+      'FACT dev_uid=1000\nFACT agent_uid=1001\nFACT agent_sudo=no\nFACT agent_nocaps=no\n',
+      'FACT dev_uid=1000\nFACT agent_uid=1000\nFACT agent_sudo=no\nFACT agent_nocaps=yes\n',
+      '',
+    ]) {
+      const failures: string[] = [];
+      const t = setup({
+        setupOf: async () => choice(),
+        onResumeFailure: (_id, reason) => failures.push(reason),
+      });
+      t.fleet.agentFacts = facts;
+      const lease = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+      assert.ok(lease.machineId, 'the box is still handed out');
+      assert.equal(resumeRuns(t).length, 0, 'but no repository code ran on it');
+      assert.match(failures[0] ?? '', /agent account/);
+    }
+  });
+
+  it('runs no repository script at all when no agent account is configured', async () => {
+    const failures: string[] = [];
+    const t = setup({
+      setupOf: async () => choice(),
+      onResumeFailure: (_id, reason) => failures.push(reason),
+    });
+    // A pool built without the account, over the same fleet.
+    const bare = new BoxPool({
+      api: t.fleet,
+      source: () => ({ templateId: 't_node' }),
+      isTaskLive: () => false,
+      setupOf: async () => choice(),
+      onResumeFailure: (_id, reason) => failures.push(reason),
+      timers: t.timers,
+      now: () => t.clock.now,
+    });
+    await bare.acquire({ tenantId: A, taskId: 't1' });
+    assert.equal(resumeRuns(t).length, 0);
+    assert.equal(t.fleet.agentChecks.length, 0);
+    assert.match(failures[0] ?? '', /no unprivileged agent account/);
   });
 
   it('runs on a box made from the setup snapshot, after the guard', async () => {
@@ -402,6 +460,7 @@ describe('boxes to build setup snapshots in', () => {
     const snapshots = new SetupSnapshots({
       api: t.fleet,
       boxes: t.pool.builderBoxes(),
+      agent: AGENT,
       guard: async () => {
         order.push('guard:snapshots');
       },

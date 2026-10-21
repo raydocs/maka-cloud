@@ -112,6 +112,14 @@ the pool label, invite, slot, name and machine id (and that no other live task h
 a restore check the same, without the task label. A box that fails is `refused`: it keeps its slot, is listed by
 `refusedBoxes()`, is never used, relabelled, slept or deleted by the pool, and the task takes another box.
 
+Repository scripts never run as the sandbox user. `.agents/resume` and a builder's `.agents/setup` run through
+`asAgent` as the unprivileged account of `agent` (the same `AgentChannel` the Agent SDK path uses), after a
+check on that box, run once, that the account is not the sandbox user or root, cannot `sudo -n`, and holds no
+capabilities. Without `agent`, or if the check finds anything, no repository script is run: a resume reports its
+failure and still hands the box out, and a repository with a setup script gets no snapshot. The checkout is
+given to the agent's group so the account can run in it; our own preparation (the pinned CLI installs) stays
+with the sandbox user, so those files are not writable by the account.
+
 ## Setup snapshots and `.agents/resume`
 
 - A task can name the setup snapshot of its repository (`setupOf(tenantId, taskId)`). A free box that

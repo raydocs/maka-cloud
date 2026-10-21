@@ -1,4 +1,5 @@
 import type { InstaboxClient } from '@maka-cloud/instabox';
+import type { AgentChannel } from '@maka-cloud/runners';
 
 /** The part of the instabox client the pool uses; tests pass a fake with the same methods. */
 export type BoxApi = Pick<
@@ -65,6 +66,12 @@ export interface BoxPoolOptions {
   setupOf?: (tenantId: string, taskId: string) => Promise<SetupChoice | undefined>;
   /** How long a box's `.agents/resume` may run, in seconds. Default 120. */
   resumeTimeoutSeconds?: number;
+  /**
+   * The unprivileged account repository scripts run as (`.agents/resume`). Without it no repository
+   * script is run: the sandbox user has passwordless sudo, so a script as that user could undo the
+   * egress guard. The account is checked on each box before its first script.
+   */
+  agent?: AgentChannel;
   /** Called when a box's `.agents/resume` failed. The box is still handed out: a failure is reported, not hidden. */
   onResumeFailure?: (machineId: string, reason: string) => void;
   /**
