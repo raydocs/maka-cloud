@@ -90,12 +90,6 @@ chmod 2770 claude-config
 `;
 
 /**
- * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
- * sandbox user, cannot become root, cannot list, enter, read or write the channel directory or add
- * files to the task directory, can read the brief and write the result in `handoff`, and can write
- * the workspace, in ways the sandbox user can clean up. Prints `FACT <name>=<yes|no|...>`.
- */
-/**
  * Whether any program the agent can run carries a file capability. `getcap -r` is asked for the
  * directories that exist and its exit status counts: a listing that failed is `unchecked`, never
  * `none`. Every capability on a program the agent can execute is `found`, except the few that the
@@ -125,6 +119,12 @@ else
   echo "FACT agent_filecaps=unchecked"
 fi`;
 
+/**
+ * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
+ * sandbox user, cannot become root, cannot list, enter, read or write the channel directory or add
+ * files to the task directory, can read the brief and write the result in `handoff`, and can write
+ * the workspace, in ways the sandbox user can clean up. Prints `FACT <name>=<yes|no|...>`.
+ */
 export const AGENT_PROBE_SCRIPT = `set -u
 umask 077
 mkdir -p "$MAKA_ROOT"
