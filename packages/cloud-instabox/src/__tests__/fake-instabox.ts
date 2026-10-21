@@ -140,6 +140,9 @@ export class FakeInstabox {
   readonly requests: RecordedRequest[] = [];
   readonly operations = new Map<string, Operation>();
   readonly spawnedPids: number[] = [];
+  /** Commands in flight, by pid, until their process has closed. */
+  private readonly running = new Map<number, Promise<void>>();
+  private closed = false;
   machineState = 'running';
   autoSuspendedAt: string | undefined;
   /** Polls an operation stays `running` before reaching its final state. */
@@ -219,8 +222,17 @@ export class FakeInstabox {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    // A command still running would find its stand-in tools gone and reach the real ones on this
+    // machine's PATH, the real firewall among them: stop them all before the directory goes.
+    for (const pid of this.running.keys()) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {}
+    }
+    await Promise.all(this.running.values());
     if (this.firewallDir) rmSync(this.firewallDir, { recursive: true, force: true });
   }
 
@@ -546,13 +558,29 @@ export class FakeInstabox {
       env.SHIM_STATE = join(this.firewallDir, 'state');
     }
     return new Promise((resolve) => {
+      if (this.closed) {
+        resolve({ stdout: '', stderr: 'closed', exitCode: 1, timedOut: false, truncated: false });
+        return;
+      }
       const child = spawn(BASH, ['-c', body.cmd], {
         cwd: body.cwd ?? '/',
         env,
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      if (child.pid) this.spawnedPids.push(child.pid);
+      if (child.pid) {
+        this.spawnedPids.push(child.pid);
+        const pid = child.pid;
+        this.running.set(
+          pid,
+          new Promise<void>((done) =>
+            child.once('close', () => {
+              this.running.delete(pid);
+              done();
+            }),
+          ),
+        );
+      }
       let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       let truncated = false;

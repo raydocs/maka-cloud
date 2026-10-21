@@ -30,6 +30,9 @@ export const EGRESS_ICMPV6_ALLOWED = [
 
 export const EGRESS_CHAIN = 'MAKA_EGRESS';
 
+/** Held while the rules are checked or rebuilt, so that two callers on one box do not trip over each other. */
+const EGRESS_LOCK = '/tmp/.maka-egress.lock';
+
 const HELPER_TIMEOUT_SECONDS = 60;
 
 /**
@@ -93,6 +96,12 @@ guard() {
   # Read it back.
   verify "$tool" "$@" || fail "$tool: $WHY"
 }
+# Several server processes can guard the same box at once; one at a time, so that no one reads
+# back the rules while another is refilling them.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$MAKA_LOCK"
+  flock -w 30 9 || fail "cannot take $MAKA_LOCK"
+fi
 FAMILY=4 guard iptables $MAKA_V4
 # procfs files report size 0, so [ -s ] cannot tell: read the content.
 if [ -n "$(cat "$MAKA_IF_INET6" 2>/dev/null)" ]; then FAMILY=6 guard ip6tables $MAKA_V6; fi
@@ -137,6 +146,7 @@ export async function applyEgressGuard(
         MAKA_V4: EGRESS_BLOCKED_V4.join(' '),
         MAKA_V6: EGRESS_BLOCKED_V6.join(' '),
         MAKA_ICMPV6: EGRESS_ICMPV6_ALLOWED.join(' '),
+        MAKA_LOCK: EGRESS_LOCK,
         MAKA_RESOLV_CONF: options.resolvConf ?? '/etc/resolv.conf',
         MAKA_IF_INET6: options.ifInet6 ?? '/proc/net/if_inet6',
       },
