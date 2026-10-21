@@ -93,27 +93,32 @@ async function started(clock: { t: number }, count: number) {
     assert.ok(engine.launched(request.requestId, `cnv_${n}`));
     requests.push(request);
   }
-  return { engine, dutyId, requests };
+  return { engine, projectId, dutyId, requests };
 }
 
 const run = (
   state: DutyRunView['state'],
   spentUsd = 0,
   dutyId: string | null = 'dty',
+  endReason: string | null = null,
 ): DutyRunView => ({
   runId: 'run_1',
   dutyId,
   state,
   spentUsd,
+  endReason,
 });
 
 test('a request is settled at what its run spent, on every way a run can end', async () => {
   const clock = { t: DAY0 };
-  const exits: Array<[DutyRunView['state'], number, string]> = [
-    ['done', 0.5, 'completed'],
-    ['failed', 0.75, 'failed'],
-    ['cancelled', 0.25, 'stopped'],
-    ['interrupted', 1.5, 'failed'],
+  const exits: Array<[DutyRunView['state'], number, string, string | null]> = [
+    ['done', 0.5, 'completed', 'delivered'],
+    ['failed', 0.75, 'failed', 'setup_failed'],
+    ['cancelled', 0.25, 'stopped', 'user_stop'],
+    ['cancelled', 0.3, 'stopped', 'paused'],
+    ['cancelled', 2, 'failed', 'budget_limit'],
+    ['cancelled', 0.1, 'failed', null],
+    ['interrupted', 1.5, 'failed', null],
   ];
   const { engine, dutyId, requests } = await started(clock, exits.length);
   assert.equal(
@@ -123,8 +128,8 @@ test('a request is settled at what its run spent, on every way a run can end', a
   );
   const runs = new Map<string, DutyRunView[]>(
     requests.map((request, index) => {
-      const [state, spent] = exits[index] as (typeof exits)[number];
-      return [`cnv_${index + 1}`, [run(state, spent)]];
+      const [state, spent, , endReason] = exits[index] as (typeof exits)[number];
+      return [`cnv_${index + 1}`, [run(state, spent, 'dty', endReason)]];
     }),
   );
   const settler = new RunSettler({
@@ -142,8 +147,44 @@ test('a request is settled at what its run spent, on every way a run can end', a
   });
   const usage = engine.dayUsage(dutyId);
   assert.equal(usage.reservedUsd, 0, 'no reservation is left behind');
-  assert.equal(usage.spentUsd, 0.5 + 0.75 + 0.25 + 1.5);
+  assert.equal(usage.spentUsd, 0.5 + 0.75 + 0.25 + 0.3 + 2 + 0.1 + 1.5);
   assert.equal(settler.settle(), 0, 'settling again changes nothing');
+  engine.close();
+});
+
+test('runs the conductor stopped on its own count as failures, and ten in a row turn the duty off', async () => {
+  const clock = { t: DAY0 };
+  const { engine, projectId, dutyId, requests } = await started(clock, 10);
+  const runs = new Map<string, DutyRunView[]>(
+    requests.map((_, index) => [`cnv_${index + 1}`, [run('cancelled', 2, 'dty', 'budget_limit')]]),
+  );
+  const settler = new RunSettler({
+    engine,
+    runsOf: (id) => runs.get(id) ?? [],
+    now: () => clock.t,
+  });
+  assert.equal(settler.settle(), 10);
+  const duty = engine.project(OWNER, projectId)?.duties.find((d) => d.dutyId === dutyId);
+  assert.equal(duty?.state, 'off');
+  assert.equal(duty?.offReason, 'failures');
+  engine.close();
+});
+
+test('runs a person stopped never count against the duty, however many', async () => {
+  const clock = { t: DAY0 };
+  const { engine, projectId, dutyId, requests } = await started(clock, 10);
+  const runs = new Map<string, DutyRunView[]>(
+    requests.map((_, index) => [`cnv_${index + 1}`, [run('cancelled', 0.1, 'dty', 'user_stop')]]),
+  );
+  const settler = new RunSettler({
+    engine,
+    runsOf: (id) => runs.get(id) ?? [],
+    now: () => clock.t,
+  });
+  assert.equal(settler.settle(), 10);
+  const duty = engine.project(OWNER, projectId)?.duties.find((d) => d.dutyId === dutyId);
+  assert.equal(duty?.state, 'active');
+  assert.equal(duty?.consecutiveFailures, 0);
   engine.close();
 });
 
@@ -482,7 +523,13 @@ async function failTenTimes(r: ReturnType<typeof runtimeRig>) {
       .project(OWNER, projectId)
       ?.duties.find((d) => d.trigger.kind === 'issue_opened' && d.activatedAt !== null);
   r.parts.runsOf = () => [
-    { runId: 'run_x', dutyId: duty()?.dutyId ?? null, state: 'failed', spentUsd: 0 },
+    {
+      runId: 'run_x',
+      dutyId: duty()?.dutyId ?? null,
+      state: 'failed',
+      spentUsd: 0,
+      endReason: null,
+    },
   ];
   r.runtime.start(r.parts as never);
   for (let n = 1; n <= 10; n += 1) {

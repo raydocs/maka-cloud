@@ -7,6 +7,8 @@ export interface DutyRunView {
   state: 'active' | 'waiting' | 'delivering' | 'done' | 'failed' | 'cancelled' | 'interrupted';
   /** What the run spent, reservations included. */
   spentUsd: number;
+  /** Why the conductor ended the run (`user_stop`, `budget_limit`, ...); null while it is open. */
+  endReason: string | null;
 }
 
 export interface SettlerOptions {
@@ -22,12 +24,26 @@ export interface SettlerOptions {
   onWarning?: (message: string, detail?: unknown) => void;
 }
 
-const OUTCOME: Record<'done' | 'failed' | 'cancelled' | 'interrupted', EndOutcome> = {
-  done: 'completed',
-  failed: 'failed',
-  cancelled: 'stopped',
-  interrupted: 'failed',
-};
+/** A person (or the operator's pause) ended the run; it says nothing against the duty. */
+const STOPPED_BY_PERSON: ReadonlySet<string> = new Set(['user_stop', 'paused']);
+
+/**
+ * Only a stop by a person is `stopped` and leaves the failure count alone. Any other way a run is
+ * cancelled (the hard budget, a reason this list does not know, none recorded) counts against the
+ * duty, so a duty that keeps hitting its budget turns itself off.
+ */
+function outcomeOf(
+  run: DutyRunView & { state: 'done' | 'failed' | 'cancelled' | 'interrupted' },
+): EndOutcome {
+  switch (run.state) {
+    case 'done':
+      return 'completed';
+    case 'cancelled':
+      return run.endReason !== null && STOPPED_BY_PERSON.has(run.endReason) ? 'stopped' : 'failed';
+    default:
+      return 'failed';
+  }
+}
 
 /**
  * Replaces the reservation of each started duty request with what its run really spent, once the
@@ -59,7 +75,13 @@ export class RunSettler {
         if (run.state === 'active' || run.state === 'waiting' || run.state === 'delivering') {
           continue;
         }
-        if (this.options.engine.finish(request.requestId, OUTCOME[run.state], run.spentUsd)) {
+        if (
+          this.options.engine.finish(
+            request.requestId,
+            outcomeOf({ ...run, state: run.state }),
+            run.spentUsd,
+          )
+        ) {
           ended += 1;
         }
       } catch (error) {
