@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildRunScript } from '../scripts.js';
 import { type Harness, isRunning, reader, setup, until } from './harness.js';
 
 const WORKING = (event: { type: string; note?: string }) =>
@@ -16,7 +15,9 @@ async function launch(h: Harness, dirName: string, run: string): Promise<number>
   await machine.launch({
     dirName,
     run,
-    script: buildRunScript({ preamble: '', command: HANG }),
+    preamble: '',
+    program: 'bash',
+    args: ['-c', HANG],
     envs: {},
     runToken: `token-${dirName}-${run}`,
     workdir: join(h.root, dirName, 'workspace'),
