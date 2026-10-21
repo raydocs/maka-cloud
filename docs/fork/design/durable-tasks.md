@@ -13,7 +13,7 @@ Status of the pieces (updated by each PR):
 | 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
 | 6 | Steering, `restart` event, catch-up, stream fence | merged (#208, #209), section 6 |
 | 7 | Run timeline | merged (#222), section 7 |
-| 8 | Drills, known gaps, bench | in review, section 8 |
+| 8 | Drills, known gaps, bench | merged (#224), section 8 |
 
 ## 1. Step log and epoch fencing
 
