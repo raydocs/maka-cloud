@@ -371,7 +371,10 @@ test("a turn's allowance that the implementer spends leaves nothing to deliver",
   await spent.promise;
   const end = terminal(events);
   assert.equal(end?.type, 'failed');
-  assert.match(end?.type === 'failed' ? end.reason : '', /budget of \$2\.50 reached \(\$3\.00 spent\)/);
+  assert.match(
+    end?.type === 'failed' ? end.reason : '',
+    /budget of \$2\.50 reached \(\$3\.00 spent\)/,
+  );
   assert.equal(h.codex.turns.length, 0, 'no review is started on an allowance that is gone');
   assert.equal(await h.deliveries.get('tsk_turn2'), undefined);
   zeroStats(h.runner);
