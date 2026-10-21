@@ -451,11 +451,6 @@ class CodingRun implements RunHandle {
         const outcome = await this.attempt(task, baseSha, brief, vendor, attempt, failureBrief);
         if (outcome.ok) {
           verification.result = 'verified';
-          verification.repro = outcome.repro;
-          verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-            path: file.path,
-            status: file.status,
-          }));
           const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
           // A change nobody could review is not delivered and the task does not succeed, whether the
           // reviewer was unavailable or none is configured at all: "verified" here means checked by
@@ -1411,6 +1406,13 @@ class CodingRun implements RunHandle {
     const reviewText = reviewMarkdown(review);
     await this.guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
+    // What was checked and what is delivered are the same change: after a fix that is the fixed one,
+    // not the first attempt the review looked at.
+    verification.repro = outcome.repro;
+    verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
+      path: file.path,
+      status: file.status,
+    }));
     await this.guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
     await this.guard(
       this.options.deliveries.record({
