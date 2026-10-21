@@ -95,6 +95,12 @@ const SECRETS = [
   'packages/cloud-host/service-account-prod.json',
   'packages/cloud-host/credentials.json',
   '.git/config',
+  // A repository nested in an allowed directory (a vendored checkout, a worktree's .git file) keeps
+  // its remote URLs, which can carry credentials, and its history.
+  'packages/cloud-host/.git/config',
+  'packages/cloud-host/.git/objects/ab/cdef0123',
+  'packages/cloud-host/.git',
+  'scripts/model-metadata/.git/config',
   '.claude/settings.local.json',
 ];
 

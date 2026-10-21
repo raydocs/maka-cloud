@@ -22,6 +22,12 @@ export interface PullRequestToolOptions {
 const parameters = z.object({
   taskId: z.string().min(1).max(100).describe('The coding task whose verified change to deliver'),
   title: z.string().trim().min(1).max(200).describe('The pull request title'),
+  publishUnreviewed: z
+    .boolean()
+    .optional()
+    .describe(
+      'Only when the user explicitly asked to open a change that was kept for them to look at: a change no independent review cleared is otherwise never pushed',
+    ),
 });
 
 type Args = z.infer<typeof parameters>;
@@ -60,7 +66,8 @@ export function openPullRequestTool(
       await readFile(delivery.verificationPath, 'utf8'),
     ) as VerificationView;
     // A change a second agent reviewed is opened as a pull request. One that was kept for the owner
-    // to look at is opened too, but only as a draft that says so; any other is not opened.
+    // to look at is not pushed at all, unless the owner asked for that as its own action; it then
+    // opens only as a draft that says so. Any other unreviewed change is not opened.
     const kept = verification.kept !== undefined;
     if (verification.review?.status !== 'reviewed' && !kept) {
       throw new ToolRefusal(
@@ -104,7 +111,11 @@ export function openPullRequestTool(
       ];
       const kept = await keptReasonOf(delivery);
       if (kept !== undefined) {
-        lines.push(`Opens as a draft, kept for you to look at: ${shownValue(kept)}`);
+        lines.push(
+          args.publishUnreviewed === true
+            ? `NOT REVIEWED. Opens as a draft because you asked to open a change kept for you to look at: ${shownValue(kept)}`
+            : `This cannot be opened: the change is kept for you to look at and nothing is pushed unless you ask to open it unreviewed: ${shownValue(kept)}`,
+        );
       }
       const problem = options.publisher.precheck();
       if (problem) lines.push(`This cannot be opened yet: ${problem}`);
@@ -125,6 +136,14 @@ export function openPullRequestTool(
         );
       }
       if (delivery.publishedPr) return { ...delivery.publishedPr, alreadyOpen: true };
+      // A change kept for the owner is not a delivery: pushing its branch would be one.
+      const kept = await keptReasonOf(delivery);
+      if (kept !== undefined && args.publishUnreviewed !== true) {
+        throw new ToolRefusal(
+          'kept_not_publishable',
+          `The change of ${args.taskId} is kept for the owner to look at (${kept}); nothing was pushed. It is opened only if the owner explicitly asks for it unreviewed.`,
+        );
+      }
       const problem = options.publisher.precheck();
       if (problem) throw new ToolRefusal('github_token', problem);
       let pending = inFlight.get(args.taskId);

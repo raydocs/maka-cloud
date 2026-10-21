@@ -3,9 +3,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { buildRunScript } from '../scripts.js';
-import { asAgent } from '../agent-user.js';
-import { shq } from '../shell.js';
-import { exists, HARNESS_AGENT, isRunning, setup, until, type Harness } from './harness.js';
+import { exists, isRunning, setup, until, type Harness } from './harness.js';
 
 const STUBBORN_CHILD = `bash -c 'trap "" TERM; echo $$ > "$MAKA_DIR/child.pid"; while :; do sleep 1; done' > /dev/null 2>&1 &`;
 
@@ -20,10 +18,9 @@ async function runScript(
   return await machine.launch({
     dirName,
     run,
-    script: buildRunScript({
-      preamble: '',
-      command: asAgent(`bash -c ${shq(command)}`, HARNESS_AGENT),
-    }),
+    preamble: '',
+    program: 'bash',
+    args: ['-c', command],
     envs: {},
     runToken: `token-${dirName}-${run}`,
     workdir: join(h.root, dirName, 'workspace'),

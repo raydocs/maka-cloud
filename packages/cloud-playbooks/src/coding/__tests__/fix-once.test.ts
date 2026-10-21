@@ -348,7 +348,7 @@ test('cancel while the fix runs: its run is cancelled, the first verified change
   zeroStats(h.runner);
 });
 
-test('cancel while the fixed change is reviewed again: the first verified change is kept and everything is released', async (t) => {
+test('cancel while the fixed change is reviewed again: the fixed change, not the first one, is kept, and everything is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   const running = gate();
@@ -369,6 +369,16 @@ test('cancel while the fixed change is reviewed again: the first verified change
   assert.equal(h.claude.open, 0);
   assert.equal(h.codex.open, 0);
   await keptAfterStop(h, 'tsk_crev2');
+  const dir = join(h.handoff, 'tsk_crev2');
+  assert.match(
+    await fs.readFile(join(dir, 'change.patch'), 'utf8'),
+    /negative numbers are handled by the shell arithmetic/,
+    'the change the fix made and the checks passed, not the first attempt',
+  );
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.match(record.kept?.reason ?? '', /the fix passed/);
+  assert.deepEqual(record.review?.fix, { sent: 1, result: 'applied' });
+  assert.equal(record.review?.counts.P1, 1, 'the review so far is kept with it');
   zeroStats(h.runner);
 });
 

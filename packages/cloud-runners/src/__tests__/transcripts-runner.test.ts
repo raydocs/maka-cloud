@@ -93,6 +93,18 @@ test('every line the CLI writes is kept in the store, scrubbed of the run’s se
   assert.equal((await r.h.sessions.get('tsk_tr_mirror'))?.sessionId, SESSION);
 });
 
+test('a key the run was never given is scrubbed from the kept conversation too', async (t) => {
+  const r = await rig(t);
+  await r.h.setMode('shape');
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_shape')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(terminal(events)));
+  const text = (await r.stored('tsk_tr_shape')).join('\n');
+  assert.ok(!text.includes('sk-ant-api03-AbCd'), 'an API key reached the store');
+  assert.ok(!text.includes('ghp_AbCd'), 'a token reached the store');
+  assert.match(text, /the user pasted \[secret\] and \[secret\]/);
+  for (const line of await r.stored('tsk_tr_shape')) JSON.parse(line);
+});
+
 test('without a transcript store the CLI is not asked to mirror anything and keeps its own configuration directory', async (t) => {
   const h = await sdkSetup(t);
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_tr_off')));
@@ -102,7 +114,7 @@ test('without a transcript store the CLI is not asked to mirror anything and kee
   assert.ok(!env.includes('CLAUDE_CONFIG_DIR'));
 });
 
-test('a resumed turn on the same sandbox reads the conversation it left there, and the store keeps growing', async (t) => {
+test('a resumed turn on the same sandbox reads the server’s copy of the conversation, and the store keeps growing', async (t) => {
   const r = await rig(t);
   const spec = await r.h.spec('tsk_tr_same');
   assert.equal(terminal(await collect(await r.h.runners.claude.start(spec)))?.type, 'finished');
@@ -117,10 +129,8 @@ test('a resumed turn on the same sandbox reads the conversation it left there, a
   assert.ok(argv.includes(`--resume=${SESSION}`));
   assert.equal(await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'), before);
   assert.equal((await r.stored('tsk_tr_same')).length, 6);
-  assert.ok(
-    !notes(events).some((note) => /put back on the sandbox/.test(note)),
-    'nothing to put back',
-  );
+  // The sandbox's own file is never trusted: the server's copy is put there every turn.
+  assert.ok(notes(events).some((note) => /\(3 lines\) was put back on the sandbox/.test(note)));
 });
 
 test('a sandbox that lost the conversation gets it back from the store before the CLI resumes', async (t) => {

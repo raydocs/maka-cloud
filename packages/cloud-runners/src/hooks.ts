@@ -8,6 +8,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { ReplayClass, StepLog } from '@maka-cloud/orchestrator';
 import { errorMessage } from './shell.js';
+import { STEER_CLOSING, steerOpening } from './steer-receipts.js';
 
 /** How long the CLI waits for a hook to answer, in seconds. A step is one small append. */
 const HOOK_TIMEOUT_SECONDS = 30;
@@ -211,32 +212,11 @@ export const STEER_CONTEXT_CHARS = 16_000;
 
 /** Where messages for the agent wait until a step ends. */
 export interface SteerInbox {
-  /** Takes the messages that fit in `maxChars` (the first always does), oldest first. */
-  take(maxChars: number): Array<{ steerId: string; text: string }>;
-}
-
-const STEER_ID = /^[A-Za-z0-9_.:-]{1,64}$/u;
-
-/**
- * The tag that opens a message. It carries the message's key, so the transcript of the
- * conversation shows which messages the agent was given: a restart reads it to tell a message the
- * agent has from one it never got.
- */
-export const steerOpening = (steerId?: string): string =>
-  steerId !== undefined && STEER_ID.test(steerId)
-    ? `<user_message id="${steerId}">`
-    : '<user_message>';
-
-/**
- * The keys of the messages a piece of transcript shows the agent was given: the opening tag as it
- * stands in a line's JSON (quotes escaped) or in plain text.
- */
-export function steerKeysIn(text: string): string[] {
-  const keys: string[] = [];
-  for (const match of text.matchAll(/<user_message id=\\?"([A-Za-z0-9_.:-]{1,64})\\?">/gu)) {
-    keys.push(match[1] as string);
-  }
-  return keys;
+  /**
+   * Takes the messages that fit in `maxChars` (the first always does), oldest first. `ref` is the
+   * reference of the receipt kept for the handing, which the opening tag carries.
+   */
+  take(maxChars: number): Promise<Array<{ steerId: string; text: string; ref?: string }>>;
 }
 
 /**
@@ -244,7 +224,7 @@ export function steerKeysIn(text: string): string[] {
  * marked as such so they are not mistaken for the output of the tool that just ran.
  */
 export function steerContext(
-  messages: ReadonlyArray<{ steerId?: string; text: string }>,
+  messages: ReadonlyArray<{ steerId?: string; text: string; ref?: string }>,
   redact: (text: string) => string,
 ): string {
   const many = messages.length > 1;
@@ -255,7 +235,8 @@ export function steerContext(
       many ? 'them' : 'it'
     } into account from your next step on:`,
     ...messages.map(
-      (message) => `${steerOpening(message.steerId)}\n${redact(message.text)}\n</user_message>`,
+      (message) =>
+        `${steerOpening(message.steerId, message.ref)}\n${redact(message.text)}\n${STEER_CLOSING}`,
     ),
   ].join('\n');
 }
@@ -336,10 +317,10 @@ export function stepHooks(
    * What the owner sent while the agent worked, put in front of it after the step that just ended.
    * A broken inbox never breaks the step: the messages stay where they are for the next one.
    */
-  function waiting(event: 'PostToolUse' | 'PostToolUseFailure') {
+  async function waiting(event: 'PostToolUse' | 'PostToolUseFailure') {
     if (!inbox) return ALLOW;
     try {
-      const messages = inbox.take(STEER_CONTEXT_CHARS);
+      const messages = await inbox.take(STEER_CONTEXT_CHARS);
       if (messages.length === 0) return ALLOW;
       return {
         hookSpecificOutput: {

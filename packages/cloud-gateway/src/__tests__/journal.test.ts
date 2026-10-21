@@ -193,3 +193,83 @@ test('a call settled twice is charged once, and a process that was replaced cann
   t.after(() => third.close());
   assert.deepEqual(third.unrecorded(), []);
 });
+
+test('spend is kept by the attempt of the task that spent it, and a journal made before attempts moves over', async (t) => {
+  const path = await journalPath(t);
+  const before = new SqliteSpendJournal(path);
+  before.hold('tsk_a', 'k1', 1, 1);
+  before.settle('tsk_a', 'k1', 0.75);
+  before.hold('tsk_a', 'k2', 2, 2);
+  before.settle('tsk_a', 'k2', 1.5);
+  before.hold('tsk_a', 'k3', 0.5, 2);
+  before.hold('tsk_a', 'k4', 0.25);
+  before.settle('tsk_a', 'k4', 0.25);
+  const after = new SqliteSpendJournal(path);
+  t.after(() => after.close());
+  assert.deepEqual(
+    after.unrecorded().map(({ taskId, attempt, usd, cutOffCalls }) => ({
+      taskId,
+      attempt,
+      usd,
+      cutOffCalls,
+    })),
+    [
+      { taskId: 'tsk_a', attempt: undefined, usd: 0.25, cutOffCalls: 0 },
+      { taskId: 'tsk_a', attempt: 1, usd: 0.75, cutOffCalls: 0 },
+      { taskId: 'tsk_a', attempt: 2, usd: 2, cutOffCalls: 1 },
+    ],
+  );
+  before.close();
+});
+
+test('a journal made before spend was kept by attempt is read as spend of an unknown attempt', async (t) => {
+  const path = await journalPath(t);
+  const { DatabaseSync } = await import('node:sqlite');
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE spent (
+      epoch TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      usd REAL NOT NULL,
+      PRIMARY KEY (epoch, task_id)
+    );
+    INSERT INTO spent (epoch, task_id, usd) VALUES ('dead-process', 'tsk_old', 3.4);
+  `);
+  old.close();
+  const journal = new SqliteSpendJournal(path);
+  t.after(() => journal.close());
+  assert.deepEqual(
+    journal.unrecorded().map(({ taskId, attempt, usd }) => ({ taskId, attempt, usd })),
+    [{ taskId: 'tsk_old', attempt: undefined, usd: 3.4 }],
+  );
+  journal.hold('tsk_old', 'k', 1, 3);
+  journal.settle('tsk_old', 'k', 1);
+  const again = new SqliteSpendJournal(path);
+  t.after(() => again.close());
+  assert.equal(again.unrecorded().length, 2, 'opening it again does not move it twice');
+});
+
+test('a grant issued with an attempt writes it down with every reservation', async (t) => {
+  const path = await journalPath(t);
+  const before = new SqliteSpendJournal(path);
+  const { gateway, upstream } = rig(before);
+  const grant = gateway.issue({
+    vendor: 'anthropic',
+    subject: 'tsk_att',
+    taskId: 'tsk_att',
+    attempt: 4,
+    budget: { limitUsd: 1 },
+  });
+  const found = gateway.authenticate(grant.token);
+  assert.ok(found);
+  upstream.next(() => anthropicStream(100, 10));
+  await (await gateway.handle(found.grant, 'messages', new Headers(), encoded)).text();
+  const after = new SqliteSpendJournal(path);
+  t.after(() => after.close());
+  assert.deepEqual(
+    after.unrecorded().map(({ taskId, attempt }) => ({ taskId, attempt })),
+    [{ taskId: 'tsk_att', attempt: 4 }],
+  );
+  gateway.close();
+  before.close();
+});

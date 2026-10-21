@@ -10,8 +10,11 @@ import type { BudgetPort, CapHit, ReserveResult } from './budget.js';
  * a settle when the request is done.
  */
 export interface SpendJournal {
-  /** Writes down a reservation. Throws if it cannot: the request is then refused. */
-  hold(taskId: string, key: string, usd: number): void;
+  /**
+   * Writes down a reservation. Throws if it cannot: the request is then refused. `attempt` is the
+   * attempt (epoch) of the task that issued the grant, so spend can be told apart by attempt later.
+   */
+  hold(taskId: string, key: string, usd: number, attempt?: number): void;
   /** Replaces the reservation under `key` with what the request cost. */
   settle(taskId: string, key: string, usd: number): void;
 }
@@ -19,6 +22,12 @@ export interface SpendJournal {
 /** What one task's grants spent in an earlier process: every settle, and every hold left open. */
 export interface UnrecordedSpend {
   taskId: string;
+  /**
+   * The attempt of the task whose grants spent it, when the grant was issued with one. Rows are
+   * per task and attempt: the same attempt is the same row however often it is read, so booking
+   * it again replaces it. Spend written before attempts were kept has none.
+   */
+  attempt?: number;
   usd: number;
   /** Reservations the earlier process left open: model calls it died in, at their reserved amount. */
   cutOffCalls?: number;
@@ -30,13 +39,18 @@ export interface UnrecordedSpend {
  * A grant's port that writes every reservation and settle to `journal` too. A reservation the
  * journal cannot take is released and refused, so nothing is sent that a restart could forget.
  */
-export function journaledPort(port: BudgetPort, journal: SpendJournal, taskId: string): BudgetPort {
+export function journaledPort(
+  port: BudgetPort,
+  journal: SpendJournal,
+  taskId: string,
+  attempt?: number,
+): BudgetPort {
   return {
     reserve(key, usd) {
       const result = port.reserve(key, usd);
       if (!result.ok) return result;
       try {
-        journal.hold(taskId, key, usd);
+        journal.hold(taskId, key, usd, attempt);
       } catch {
         port.settle(key, 0);
         return { ok: false, unavailable: true, reason: 'the spend could not be recorded' };
@@ -87,8 +101,9 @@ function openJournal(path: string): DatabaseSync {
       CREATE TABLE IF NOT EXISTS spent (
         epoch TEXT NOT NULL,
         task_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT -1,
         usd REAL NOT NULL,
-        PRIMARY KEY (epoch, task_id)
+        PRIMARY KEY (epoch, task_id, attempt)
       );
       CREATE TABLE IF NOT EXISTS daily (
         key TEXT PRIMARY KEY,
@@ -135,6 +150,8 @@ function openJournal(path: string): DatabaseSync {
         PRIMARY KEY (invite_id, key)
       );
       `);
+      addColumn(db, 'holds', 'attempt', 'INTEGER');
+      addAttemptToSpent(db);
       addColumn(db, 'account_spend', 'booked_at', 'INTEGER NOT NULL DEFAULT 0');
       addColumn(db, 'account_spend', 'generation', 'INTEGER');
       addColumn(db, 'run_budget', 'run_id', "TEXT NOT NULL DEFAULT ''");
@@ -154,6 +171,40 @@ function openJournal(path: string): DatabaseSync {
       }
       sleepSync(5 + Math.random() * 20);
     }
+  }
+}
+
+/**
+ * `spent` is keyed by attempt too. A journal made before that has it keyed by process and task:
+ * its rows move over with an unknown attempt (-1), in one transaction another process cannot cut in on.
+ */
+function addAttemptToSpent(db: DatabaseSync): void {
+  const has = () =>
+    (db.prepare('PRAGMA table_info(spent)').all() as Array<{ name: string }>).some(
+      (column) => column.name === 'attempt',
+    );
+  if (has()) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!has()) {
+      db.exec(`
+        CREATE TABLE spent_by_attempt (
+          epoch TEXT NOT NULL,
+          task_id TEXT NOT NULL,
+          attempt INTEGER NOT NULL DEFAULT -1,
+          usd REAL NOT NULL,
+          PRIMARY KEY (epoch, task_id, attempt)
+        );
+        INSERT INTO spent_by_attempt (epoch, task_id, attempt, usd)
+          SELECT epoch, task_id, -1, usd FROM spent;
+        DROP TABLE spent;
+        ALTER TABLE spent_by_attempt RENAME TO spent;
+      `);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
 }
 
@@ -560,26 +611,27 @@ export class SqliteSpendJournal implements SpendJournal {
       .run(inviteId, key);
   }
 
-  hold(taskId: string, key: string, usd: number): void {
+  hold(taskId: string, key: string, usd: number, attempt?: number): void {
     this.db
-      .prepare('INSERT INTO holds (key, epoch, task_id, usd) VALUES (?, ?, ?, ?)')
-      .run(key, this.epoch, taskId, usd);
+      .prepare('INSERT INTO holds (key, epoch, task_id, usd, attempt) VALUES (?, ?, ?, ?, ?)')
+      .run(key, this.epoch, taskId, usd, attempt ?? null);
   }
 
   settle(taskId: string, key: string, usd: number): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const held = this.db
-        .prepare('DELETE FROM holds WHERE key = ? AND epoch = ?')
-        .run(key, this.epoch);
+      const row = this.db
+        .prepare('SELECT attempt FROM holds WHERE key = ? AND epoch = ?')
+        .get(key, this.epoch) as { attempt: number | null } | undefined;
+      this.db.prepare('DELETE FROM holds WHERE key = ? AND epoch = ?').run(key, this.epoch);
       // A key that holds nothing here was never reserved through the journal: nothing to add.
-      if (Number(held.changes) > 0) {
+      if (row !== undefined) {
         this.db
           .prepare(
-            `INSERT INTO spent (epoch, task_id, usd) VALUES (?, ?, ?)
-             ON CONFLICT (epoch, task_id) DO UPDATE SET usd = usd + excluded.usd`,
+            `INSERT INTO spent (epoch, task_id, attempt, usd) VALUES (?, ?, ?, ?)
+             ON CONFLICT (epoch, task_id, attempt) DO UPDATE SET usd = usd + excluded.usd`,
           )
-          .run(this.epoch, taskId, usd);
+          .run(this.epoch, taskId, row.attempt ?? -1, usd);
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -595,15 +647,16 @@ export class SqliteSpendJournal implements SpendJournal {
   unrecorded(): UnrecordedSpend[] {
     const rows = this.db
       .prepare(
-        `SELECT task_id AS taskId, SUM(usd) AS usd, SUM(open) AS cutOffCalls, SUM(open_usd) AS cutOffUsd FROM (
-           SELECT task_id, usd, 1 AS open, usd AS open_usd FROM holds WHERE epoch != ?
+        `SELECT task_id AS taskId, attempt, SUM(usd) AS usd, SUM(open) AS cutOffCalls, SUM(open_usd) AS cutOffUsd FROM (
+           SELECT task_id, COALESCE(attempt, -1) AS attempt, usd, 1 AS open, usd AS open_usd FROM holds WHERE epoch != ?
            UNION ALL
-           SELECT task_id, usd, 0 AS open, 0 AS open_usd FROM spent WHERE epoch != ?
-         ) GROUP BY task_id ORDER BY task_id`,
+           SELECT task_id, attempt, usd, 0 AS open, 0 AS open_usd FROM spent WHERE epoch != ?
+         ) GROUP BY task_id, attempt ORDER BY task_id, attempt`,
       )
-      .all(this.epoch, this.epoch) as unknown as UnrecordedSpend[];
+      .all(this.epoch, this.epoch) as unknown as Array<UnrecordedSpend & { attempt: number }>;
     return rows.map((row) => ({
       taskId: row.taskId,
+      ...(row.attempt >= 0 ? { attempt: row.attempt } : {}),
       usd: row.usd,
       cutOffCalls: row.cutOffCalls,
       cutOffUsd: row.cutOffUsd,

@@ -479,7 +479,14 @@ class CodingRun implements RunHandle {
           // The verified change is on the host from here on: a stop, a crash or an error during the
           // review cannot lose it. The delivery below replaces this record.
           await this.keepUntilReviewed(task, verification, outcome);
-          const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
+          const reviewed = await this.reviewAndFix(
+            task,
+            baseSha,
+            brief,
+            vendor,
+            outcome,
+            verification,
+          );
           // A change nobody could review, or one with a serious problem left after the one fix, is
           // not delivered: it is kept for the owner to look at, with the reason. The task is not
           // failed, because its work is not lost: the change, its branch and its review are kept.
@@ -655,6 +662,7 @@ class CodingRun implements RunHandle {
       ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
+      ...(this.spec.epoch === undefined ? {} : { epoch: this.spec.epoch }),
     };
     // Every run reads its brief, a resume included.
     await this.guard(writeHostFile(spec.briefPath, brief()));
@@ -996,6 +1004,7 @@ class CodingRun implements RunHandle {
     conductorBrief: string,
     implementer: Vendor,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    verification: Verification,
   ): Promise<{
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected };
     review: ReviewRecord;
@@ -1069,6 +1078,12 @@ class CodingRun implements RunHandle {
       const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
       // The fix's own spend may have used the cap: the second review then cannot start, and says so.
       this.budgetStop = undefined;
+      // The fixed change has passed the checks: it, not the first one, is what a stop during the
+      // second review must leave kept.
+      await this.keepUntilReviewed(task, verification, fixed, {
+        ...first,
+        fix: { sent, result: 'applied' },
+      });
       const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
       if (second.status !== 'reviewed') {
         return {
@@ -1421,10 +1436,13 @@ class CodingRun implements RunHandle {
     task: CodingTask,
     verification: Verification,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    earlier?: ReviewRecord,
   ): Promise<void> {
-    const reason =
-      "the change passed the repository's checks, but the task ended before its independent review finished";
-    const pending: ReviewRecord = {
+    const reason = earlier
+      ? "the fix passed the repository's checks, but the task ended before the independent review of the fixed change finished"
+      : "the change passed the repository's checks, but the task ended before its independent review finished";
+    // After a fix, the review so far (what it found and that the fix was applied) is kept with it.
+    const pending: ReviewRecord = earlier ?? {
       mode: this.mode,
       modesVersion: this.options.modes?.version ?? 0,
       status: 'unavailable',
