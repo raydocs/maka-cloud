@@ -313,3 +313,31 @@ test('claude: a page counts as opened when its fetch was answered, and only then
     [],
   );
 });
+
+test('claude: calls waiting for an answer are bounded, so an agent cannot grow the parser’s memory', () => {
+  const lines: unknown[] = [];
+  for (let i = 0; i < 40; i++) {
+    lines.push({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: `f${i}`,
+            name: 'WebFetch',
+            input: { url: `https://x.example/${i}` },
+          },
+        ],
+      },
+    });
+  }
+  const answer = (id: string) => ({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'x' }] },
+  });
+  const opened = feed(claudeAdapter, [...lines, answer('f0'), answer('f39')]).filter(
+    (event) => event.kind === 'opened',
+  );
+  // The oldest were dropped when the bound was hit; the newest still count.
+  assert.deepEqual(opened, [{ kind: 'opened', url: 'https://x.example/39' }]);
+});
