@@ -37,6 +37,7 @@ import {
   scrubErrorText,
 } from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
+import { type CardsRuntime, createCards } from './cards/runtime.js';
 import { createDuties, type DutiesRuntime } from './duties/runtime.js';
 import {
   conductorGateway,
@@ -77,6 +78,8 @@ export interface StackDependencies {
   ownerOfTask?: (taskId: string) => string | undefined;
   /** Replaces the GitHub reader that proposals inspect repositories with, for tests. */
   dutyInspector?: import('@maka-cloud/duties').RepoInspector;
+  /** Replaces the GitHub reader and the timing of the card scans, for tests. */
+  cards?: Pick<NonNullable<Parameters<typeof createCards>[0]>, 'reader' | 'schedule'>;
   /** How often schedules are looked at and finished duty runs settled, in milliseconds. Default 60000. */
   dutyTickMs?: number;
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
@@ -106,6 +109,8 @@ export interface Stack {
   pause: PauseSwitch;
   /** The standing duties; absent while `MAKA_GITHUB_WEBHOOK_SECRET` is not set. */
   duties?: DutiesRuntime;
+  /** Proposed cards; absent while `MAKA_CLOUD_CARDS` is not set. */
+  cards?: CardsRuntime;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -146,6 +151,8 @@ export async function startStack(
     | {
         backupTo(destination: string): Promise<void>;
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
+        raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
+        closeSuggestion(lineage: string): boolean;
       }
     | undefined;
   let raiseCapHit:
@@ -217,6 +224,8 @@ export async function startStack(
   // has no duties: there is no webhook route and no project route.
   const webhookSecret = config.dutiesSet ? env.MAKA_GITHUB_WEBHOOK_SECRET?.trim() : undefined;
   let duties: DutiesRuntime | undefined;
+  // Proposed cards (T30): only when asked for, on top of the duties' database.
+  let cards: CardsRuntime | undefined;
   // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
   // the Agent SDK, which needs the agent's account.
   let transcripts: SqliteTranscriptStore | undefined;
@@ -238,6 +247,18 @@ export async function startStack(
             ...(dependencies.dutyTickMs === undefined ? {} : { tickMs: dependencies.dutyTickMs }),
             onWarning: warn,
           });
+    if (duties !== undefined && config.cardsSet) {
+      const modes = config.modes;
+      cards = createCards({
+        engine: duties.engine,
+        minRunUsd: (mode) => modes.modes[mode].budget.minRunUsd,
+        ...(dependencies.cards?.reader === undefined ? {} : { reader: dependencies.cards.reader }),
+        ...(dependencies.cards?.schedule === undefined
+          ? {}
+          : { schedule: dependencies.cards.schedule }),
+        onWarning: warn,
+      });
+    }
     const publicUrl = config.mcp.publicUrl;
     const runnerOptions: Partial<CloudRunnersOptions> = {
       modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) => {
@@ -345,6 +366,7 @@ export async function startStack(
               return inviteId === undefined ? undefined : { inviteId };
             },
             ...(duties === undefined ? {} : { proposals: duties.proposals }),
+            ...(cards === undefined ? {} : { suggestions: cards.suggestions }),
             onStarted: (supervisor) => {
               supervisorRef = supervisor;
               raiseCapHit = (input) => supervisor.raiseCapHit(input);
@@ -366,22 +388,30 @@ export async function startStack(
     // They are written only once this process holds the server's database, which keeps a second
     // server out: a start that fails on the way never changes what the running server published.
     journal.setSpendPolicy(config.spend);
+    const runsOf = (conversationId: string) => {
+      const conductorState = cloud.conductor.state;
+      return conductorState.runsOfConversation(conversationId).map((run) => ({
+        runId: run.runId,
+        dutyId: run.dutyId,
+        state: run.state,
+        spentUsd: conductorState.budget(run.runId).spentUsd,
+        endReason: run.endReason,
+      }));
+    };
     duties?.start({
       server: cloud.server,
-      runsOf: (conversationId) => {
-        const conductorState = cloud.conductor.state;
-        return conductorState.runsOfConversation(conversationId).map((run) => ({
-          runId: run.runId,
-          dutyId: run.dutyId,
-          state: run.state,
-          spentUsd: conductorState.budget(run.runId).spentUsd,
-          endReason: run.endReason,
-        }));
-      },
+      runsOf,
       postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
       raiseProposal: (input) => supervisorRef?.raiseProposal(input) ?? false,
     });
+    cards?.start({
+      server: cloud.server,
+      runsOf,
+      raiseSuggestion: (input) => supervisorRef?.raiseSuggestion(input) ?? false,
+      closeSuggestion: (lineage) => supervisorRef?.closeSuggestion(lineage) ?? false,
+    });
   } catch (error) {
+    await cards?.stop();
     await duties?.stop();
     duties?.close();
     transcripts?.close();
@@ -504,6 +534,7 @@ export async function startStack(
     gateway,
     pause,
     ...(duties === undefined ? {} : { duties }),
+    ...(cards === undefined ? {} : { cards }),
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
@@ -518,6 +549,7 @@ export async function startStack(
           try {
             // The timer and the launches stop first; the database closes once the server no
             // longer answers webhook requests.
+            await cards?.stop();
             await duties?.stop();
             await cloud.close();
           } finally {

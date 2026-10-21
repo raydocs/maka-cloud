@@ -1,4 +1,4 @@
-import type { CardOutcome, DutyEngine } from '@maka-cloud/duties';
+import type { Card, CardOutcome, DutyEngine } from '@maka-cloud/duties';
 import type { DutyRunView } from '../duties/settle.js';
 
 export interface CardSettlerOptions {
@@ -11,6 +11,8 @@ export interface CardSettlerOptions {
    * long, spent nothing. Default 24 hours.
    */
   abandonAfterMs?: number;
+  /** Called once for each card this pass settled: the project can be scanned again. */
+  onSettled?: (card: Card) => void;
   onWarning?: (message: string, detail?: unknown) => void;
 }
 
@@ -56,7 +58,10 @@ export class CardSettler {
           .find((r) => r.dutyId === `card:${card.cardId}`);
         if (run === undefined) {
           if (this.now() - (card.decidedAt ?? this.now()) >= this.abandonAfterMs) {
-            if (cards.settle(card.cardId, 'abandoned', 0)) settled += 1;
+            if (cards.settle(card.cardId, 'abandoned', 0)) {
+              settled += 1;
+              this.options.onSettled?.(card);
+            }
           }
           continue;
         }
@@ -65,6 +70,7 @@ export class CardSettler {
         }
         if (cards.settle(card.cardId, outcomeOf({ ...run, state: run.state }), run.spentUsd)) {
           settled += 1;
+          this.options.onSettled?.(card);
         }
       } catch (error) {
         // One card that cannot be read does not hold up the others; it is tried again next pass.

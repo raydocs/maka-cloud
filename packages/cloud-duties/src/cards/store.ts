@@ -309,6 +309,23 @@ export class CardStore {
     return Number(result.changes) === 1;
   }
 
+  /** When this project was last scanned for cards, or undefined if never. */
+  lastScan(projectId: string): number | undefined {
+    const row = this.db
+      .prepare('SELECT scanned_at FROM card_scans WHERE project_id = ?')
+      .get(projectId) as { scanned_at: number } | undefined;
+    return row?.scanned_at;
+  }
+
+  /** Remembers that the project was scanned now. */
+  markScanned(projectId: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO card_scans (project_id, scanned_at) VALUES (?, ?) ON CONFLICT (project_id) DO UPDATE SET scanned_at = excluded.scanned_at',
+      )
+      .run(projectId, this.now());
+  }
+
   /** Accepted cards whose task started and has not been settled yet, oldest first. */
   unsettled(): Card[] {
     return (

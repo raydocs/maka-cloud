@@ -194,6 +194,11 @@ CREATE INDEX cards_by_owner ON cards (owner);
 
 CREATE INDEX cards_by_settlement ON cards (owner, kind, settled_at);
 
+CREATE TABLE card_scans (
+  project_id TEXT PRIMARY KEY,
+  scanned_at INTEGER NOT NULL
+);
+
 CREATE TABLE card_kinds (
   project_id TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -214,6 +219,10 @@ ALTER TABLE cards ADD COLUMN spent_micro INTEGER;
 ALTER TABLE cards ADD COLUMN outcome TEXT CHECK (outcome IN ('completed', 'failed', 'stopped', 'abandoned'));
 ALTER TABLE cards ADD COLUMN settled_at INTEGER;
 CREATE INDEX cards_by_settlement ON cards (owner, kind, settled_at);
+CREATE TABLE card_scans (
+  project_id TEXT PRIMARY KEY,
+  scanned_at INTEGER NOT NULL
+);
 `;
 
 /**

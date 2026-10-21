@@ -70,6 +70,7 @@ test('a version 2 database gets the cards added and keeps everything else', () =
     const first = openDatabase(path);
     first.exec('DROP TABLE cards');
     first.exec('DROP TABLE card_kinds');
+    first.exec('DROP TABLE card_scans');
     first.prepare('INSERT INTO person_events (event_key, seen_at) VALUES (?, ?)').run('kept', 7);
     first.exec('PRAGMA user_version = 2');
     first.close();
@@ -97,6 +98,7 @@ test('a version 3 database gets the settlement columns and keeps its cards', () 
     const first = openDatabase(path);
     // What version 3 wrote: cards without the estimate basis or the settlement columns.
     first.exec('DROP TABLE cards');
+    first.exec('DROP TABLE card_scans');
     first.exec(`CREATE TABLE cards (
       card_id TEXT PRIMARY KEY, owner TEXT NOT NULL, project_id TEXT NOT NULL, kind TEXT NOT NULL,
       subject_key TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, brief TEXT NOT NULL,
@@ -138,6 +140,11 @@ test('a version 3 database gets the settlement columns and keeps its cards', () 
         outcome: null,
         settled_at: null,
       },
+    );
+    assert.equal(
+      (again.prepare('SELECT COUNT(*) AS n FROM card_scans').get() as { n: number }).n,
+      0,
+      'and the table of scans exists',
     );
     again.close();
   });
