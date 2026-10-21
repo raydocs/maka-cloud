@@ -1,4 +1,4 @@
-import { isQuotaExceeded } from '@maka-cloud/instabox';
+import { InstaboxOperationError, isQuotaExceeded } from '@maka-cloud/instabox';
 import type { InstaboxApiError, InstaboxMachine } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
 import type { SandboxLease, SandboxProvider } from '@maka-cloud/runners';
@@ -490,8 +490,11 @@ export class BoxPool implements SandboxProvider {
       }
       return { box, holder };
     } catch (error) {
-      if (plan.kind === 'create') this.forget(box);
-      else if (box.holder === holder) this.free(box);
+      if (plan.kind === 'create') {
+        // A box that was accepted but could not be read back stays, as lost.
+        if (box.state !== 'lost') this.forget(box);
+        else this.pump(box.tenantId);
+      } else if (box.holder === holder) this.free(box);
       // The account has no room for another box but the invite has boxes: wait for one of them.
       if (error instanceof QuotaWait) {
         if (plan.kind === 'create' && plan.why === 'restore') {
@@ -522,12 +525,17 @@ export class BoxPool implements SandboxProvider {
     }
     let machine: InstaboxMachine;
     let adopted = false;
+    // The machine instabox accepted to make, once it has said so: from then on it may exist even if
+    // waiting for it or reading it back fails.
+    let accepted: string | undefined;
     try {
       const make = async (): Promise<InstaboxMachine> => {
+        accepted = undefined;
         const operation = await this.api.createMachine(
           { name, ...source, metadata: this.desiredLabels(box) },
           { idempotencyKey: `maka-box-${name}-${++this.createCount}` },
         );
+        accepted = operation.machineId;
         await this.api.waitForOperation(operation.id);
         return await this.api.getMachine(operation.machineId);
       };
@@ -553,7 +561,13 @@ export class BoxPool implements SandboxProvider {
         );
       }
       // A box of that name exists (made by an earlier attempt, or by another process): use it if it is ours.
-      if ((error as { status?: number }).status !== 409) throw error;
+      if ((error as { status?: number }).status !== 409) {
+        // An operation that instabox reports as failed left no machine; anything else may have.
+        if (accepted !== undefined && !(error instanceof InstaboxOperationError)) {
+          this.keepAccepted(box, accepted, error);
+        }
+        throw error;
+      }
       const found = await this.findNamed(box, name);
       if (!found) throw error;
       machine = found;
@@ -593,6 +607,24 @@ export class BoxPool implements SandboxProvider {
     if (adopted) await this.writeLabels(box);
     // A box made from a setup snapshot starts without the programs a running box had: the same as after a wake.
     if (box.repo !== undefined) await this.resume(box);
+  }
+
+  /**
+   * A create that instabox accepted but whose box could not be waited for or read back: the machine
+   * may exist, carrying this task's label. Dropping the slot would make every later create of it meet
+   * a box named the same and refuse it, so the slot keeps the machine as lost and the next cleanup
+   * run looks at it (woken and guarded, or deleted if it never came to be).
+   */
+  private keepAccepted(box: Box, machineId: string, error: unknown): void {
+    this.options.onWarning?.(
+      `box ${machineId} was accepted but could not be read back: ${errorText(error)}`,
+    );
+    box.machineId = machineId;
+    box.state = 'lost';
+    box.lostAt = this.now() - this.lostGraceMs;
+    box.taskId = undefined;
+    box.holder = undefined;
+    box.sleepPhase = undefined;
   }
 
   /**
