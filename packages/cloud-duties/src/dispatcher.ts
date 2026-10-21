@@ -16,6 +16,13 @@ export interface RunLauncher {
    * request that can never start; any other error is retried.
    */
   start(request: RunRequest, signal: AbortSignal): Promise<{ conversationId: string }>;
+  /**
+   * Whether an earlier attempt already created this request's run (its conversation exists), as
+   * far as the launcher can tell from the same key `start` uses. Reads only; it creates nothing.
+   * A run that exists must be finished and settled whatever day it is by now, so such a request
+   * skips the checks that would turn a request away.
+   */
+  begun?(request: RunRequest): boolean;
 }
 
 export interface DispatcherOptions {
@@ -117,7 +124,12 @@ export class Dispatcher {
 
   private async launch(requestId: string): Promise<void> {
     const { engine, launcher } = this.options;
-    const request = engine.beginLaunch(requestId);
+    const waiting = engine.waiting(requestId);
+    if (!waiting) return;
+    // An attempt that got as far as creating the run (a crash, or a failure after it) left a run
+    // that costs money: it is finished, not re-booked or turned away.
+    const begun = waiting.attempts > 0 && (launcher.begun?.(waiting) ?? false);
+    const request = engine.beginLaunch(requestId, begun);
     if (!request) return;
     try {
       const { conversationId } = await launcher.start(request, this.abort.signal);

@@ -98,6 +98,18 @@ export class ConversationStore {
     return { conversationId, title: title ?? null, createdAt };
   }
 
+  /** The conversation `owner` started with `startKey`, if any. Reads only. */
+  startedBy(owner: string, startKey: string): string | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT s.conversation_id FROM system_starts s
+         JOIN conversations c ON c.conversation_id = s.conversation_id
+         WHERE s.start_key = ? AND c.owner = ?`,
+      )
+      .get(`${owner}\u0000${startKey}`, owner) as { conversation_id: string } | undefined;
+    return row?.conversation_id;
+  }
+
   /** The conversations of one owner, oldest first. */
   list(owner: string): ConversationInfo[] {
     const rows = this.db

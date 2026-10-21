@@ -792,21 +792,35 @@ export class DutyEngine {
     return row.at ?? undefined;
   }
 
-  /** Claims a pending request for launching: pending -> launching, once. */
-  beginLaunch(requestId: string): RunRequest | undefined {
+  /** A request that is waiting to launch, as the launcher sees it. */
+  waiting(requestId: string): RunRequest | undefined {
+    const row = this.db
+      .prepare("SELECT 1 FROM run_requests WHERE request_id = ? AND state = 'pending'")
+      .get(requestId);
+    return row ? this.requestView(requestId) : undefined;
+  }
+
+  /**
+   * Claims a pending request for launching: pending -> launching, once. `begun` says an earlier
+   * attempt already created the request's run: it keeps the day it was booked on and is not
+   * turned away by the cap or by the project's policy, because the run exists and must settle.
+   */
+  beginLaunch(requestId: string, begun = false): RunRequest | undefined {
     return transaction(this.db, () => {
-      const owner = this.db
-        .prepare(
-          `SELECT p.* FROM run_requests r JOIN projects p ON p.project_id = r.project_id
-           WHERE r.request_id = ? AND r.state = 'pending'`,
-        )
-        .get(requestId) as unknown as ProjectRow | undefined;
-      if (!owner) return undefined;
-      if (!this.permitted(owner)) {
-        this.end(requestId, 'project_not_allowed', 0);
-        return undefined;
+      if (!begun) {
+        const owner = this.db
+          .prepare(
+            `SELECT p.* FROM run_requests r JOIN projects p ON p.project_id = r.project_id
+             WHERE r.request_id = ? AND r.state = 'pending'`,
+          )
+          .get(requestId) as unknown as ProjectRow | undefined;
+        if (!owner) return undefined;
+        if (!this.permitted(owner)) {
+          this.end(requestId, 'project_not_allowed', 0);
+          return undefined;
+        }
+        if (!this.rebookToToday(requestId)) return undefined;
       }
-      if (!this.rebookToToday(requestId)) return undefined;
       const changed = this.db
         .prepare(
           "UPDATE run_requests SET state = 'launching', attempts = attempts + 1 WHERE request_id = ? AND state = 'pending'",

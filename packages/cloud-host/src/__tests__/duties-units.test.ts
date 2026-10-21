@@ -290,6 +290,21 @@ test('the launcher starts the conversation keyed by the request, with the taint 
   ]);
 });
 
+test('the launcher can tell, without starting anything, whether the request already made its conversation', () => {
+  const asked: unknown[] = [];
+  let exists = false;
+  const launcher = serverLauncher({
+    startedConversation: (input: unknown) => {
+      asked.push(input);
+      return exists ? { conversationId: 'cnv_9' } : undefined;
+    },
+  } as never);
+  assert.equal(launcher.begun?.(REQUEST), false);
+  exists = true;
+  assert.equal(launcher.begun?.(REQUEST), true);
+  assert.deepEqual(asked[0], { owner: OWNER, key: 'req_1' });
+});
+
 test('a start the server refuses is refused for good, not retried', async () => {
   for (const reason of ['owner_inactive', 'invalid'] as const) {
     const launcher = serverLauncher({
@@ -327,6 +342,7 @@ function runtimeRig(over: Partial<Parameters<typeof createDuties>[0]> = {}) {
   const posted: Array<{ conversationId: string; text: string }> = [];
   const parts = {
     server: {
+      startedConversation: () => undefined,
       startConversation: (input: { key: string }) => {
         started.push(input);
         return {
