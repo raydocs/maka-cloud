@@ -156,3 +156,12 @@ test('sources are listed by the server and their images come through it, in the 
   await expect(client.sourceImage('tsk/1', 0)).rejects.toThrow();
   expect(paths).toEqual(['/v1/tasks/tsk%2F1/sources', '/v1/tasks/tsk%2F1/sources/0/image']);
 });
+
+test('a fetch that refuses a foreign `this` (as a browser’s does) still works', async () => {
+  const platformFetch = function (this: unknown) {
+    if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+    return Promise.resolve(Response.json({ conversations: [] }));
+  } as unknown as typeof fetch;
+  const client = new CloudClient('fake', { fetcher: platformFetch });
+  await expect(client.listConversations()).resolves.toEqual({ conversations: [] });
+});

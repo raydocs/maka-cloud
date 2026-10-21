@@ -1,0 +1,16 @@
+# Signs in with the server address and invite token passed as -e SERVER=... -e TOKEN=...
+appId: cloud.maka.app
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Enter your workspace"
+- tapOn:
+    id: "field-Server address"
+- inputText: ${SERVER}
+- tapOn:
+    id: "field-Invite token"
+- inputText: ${TOKEN}
+- hideKeyboard
+- takeScreenshot: sign-in
+- tapOn:
+    id: "button-Enter your workspace"

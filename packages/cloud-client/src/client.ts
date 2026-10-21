@@ -116,7 +116,9 @@ export class CloudClient {
     options: ClientOptions | typeof fetch = {},
   ) {
     const resolved = typeof options === 'function' ? { fetcher: options } : options;
-    this.fetcher = resolved.fetcher ?? globalThis.fetch.bind(globalThis);
+    // Called bare, never as a method of the client: a platform `fetch` refuses a foreign `this`.
+    const given = resolved.fetcher;
+    this.fetcher = given ? (input, init) => given(input, init) : globalThis.fetch.bind(globalThis);
     this.baseUrl = resolved.baseUrl ?? '';
     this.onRevoked = resolved.onRevoked;
   }
