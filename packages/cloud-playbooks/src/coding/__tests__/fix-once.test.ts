@@ -43,7 +43,10 @@ const fixesFindings: AgentScript = async (turn) => {
 function reviewsInRounds(rounds: unknown[][]): AgentScript {
   return async (turn) => {
     const findings = rounds[Math.min(turn.n, rounds.length) - 1] ?? [];
-    await fs.writeFile(join(turn.dir, 'review.json'), JSON.stringify({ summary: 'ok', findings }));
+    await fs.writeFile(
+      join(turn.dir, 'handoff', 'review.json'),
+      JSON.stringify({ summary: 'ok', findings }),
+    );
     return 'ok';
   };
 }
@@ -129,7 +132,7 @@ test('after a fix, verification.json and the pull request describe the delivered
       'source lib/add.sh\n[ "$(add -1 3)" = 2 ]\n',
     );
     await fs.writeFile(
-      join(turn.dir, 'repro.json'),
+      join(turn.dir, 'handoff', 'repro.json'),
       JSON.stringify({
         command: 'bash tests/test_add.sh && bash tests/test_neg.sh',
         files: ['tests/test_add.sh', 'tests/test_neg.sh'],

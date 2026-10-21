@@ -24,7 +24,7 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
    (`git fetch --depth=1`, URL built from the validated `owner/name`). Public repositories only: no token enters a
    sandbox.
 3. A vendor agent (T6 `SandboxCliRunner`, Claude first unless the brief says otherwise) writes a reproduction test,
-   records it in `repro.json`, and makes the change.
+   records it in `handoff/repro.json` (the agent can write only `handoff/` and `workspace/` of its task directory), and makes the change.
 4. The runner checks the work itself, as the agent's account (never the sandbox user: a repository's test command is
    the agent's code, and a box with no agent account runs no check), with detached processes it polls:
    the reproduction test passes; `testCommand` passes; the reproduction test **fails** with every change outside its

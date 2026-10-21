@@ -52,6 +52,7 @@ import {
   PATCH_CHUNK_SCRIPT,
   READ_SMALL_SCRIPT,
   SAMPLE_SCRIPT,
+  PUBLISH_FILE_SCRIPT,
   WRITE_FILE_SCRIPT,
 } from './scripts.js';
 import {
@@ -59,8 +60,10 @@ import {
   isRepoPath,
   otherVendor,
   parseCodingBrief,
+  REPRO_FILE,
   type Repro,
   ReproSchema,
+  REVIEW_FILE,
   type Vendor,
 } from './task.js';
 
@@ -959,7 +962,8 @@ class CodingRun implements RunHandle {
     }
     try {
       this.progress('a second agent reviews the change');
-      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- review.json\n`, {});
+      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${REVIEW_FILE}\n`, {});
+      await this.publishForAgent('change.patch');
       const turn = await this.agentTurn(
         reviewer.vendor,
         new LoopDetector(this.runner.loopLimits),
@@ -984,7 +988,7 @@ class CodingRun implements RunHandle {
             : `the reviewer's run failed: ${turn.reason}`,
         );
       }
-      const text = await this.readTaskFile('review.json', MAX_REVIEW_BYTES);
+      const text = await this.readTaskFile(REVIEW_FILE, MAX_REVIEW_BYTES);
       if (!text.ok) return unavailable(text.reason);
       const parsed = parseReviewFile(text.text);
       if (!parsed.ok) return unavailable(parsed.reason);
@@ -1229,7 +1233,7 @@ class CodingRun implements RunHandle {
   private async readRepro(): Promise<Repro | CheckProblem> {
     const out = (
       await this.exec(READ_SMALL_SCRIPT, {
-        MAKA_FILE: 'repro.json',
+        MAKA_FILE: REPRO_FILE,
         MAKA_MAX: String(MAX_REPRO_BYTES),
       })
     ).stdout.trim();
@@ -1615,7 +1619,9 @@ class CodingRun implements RunHandle {
     const json = JSON.stringify(failure, null, 2);
     await this.guard(writeHostFile(join(this.hostDir, 'failure_brief.json'), json));
     await this.writeSandboxFile('failure_brief.json', json);
-    await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- repro.json\n`, {});
+    await this.publishForAgent('failure_brief.json');
+    await this.publishForAgent('attempt-1.patch');
+    await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${REPRO_FILE}\n`, {});
     const sha = await this.clone(task, baseSha);
     if (sha !== baseSha) throw new Error(`the base commit changed from ${baseSha} to ${sha}`);
   }
@@ -1631,6 +1637,15 @@ class CodingRun implements RunHandle {
       );
     }
     return base[1] as string;
+  }
+
+  /** A file of the task directory, copied where the agent's account can read it. */
+  private async publishForAgent(name: string): Promise<void> {
+    const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
+      envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
+      signal: this.signal,
+    });
+    if (out.exitCode !== 0) throw new Error(`could not make ${name} readable for the agent`);
   }
 
   private async writeSandboxFile(name: string, content: string): Promise<void> {

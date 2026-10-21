@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { verifyCodingManifest } from '../playbook.js';
 import {
+  type AgentScript,
   BUGGY_ADD,
   collect,
   FIXED_ADD,
@@ -130,8 +131,10 @@ test('after two failures the task goes to the other vendor once, from the base c
         () => false,
       ),
       brief: await fs.readFile(turn.spec.briefPath, 'utf8'),
-      failure: JSON.parse(await fs.readFile(join(turn.dir, 'failure_brief.json'), 'utf8')),
-      reproLeft: await fs.stat(join(turn.dir, 'repro.json')).then(
+      failure: JSON.parse(
+        await fs.readFile(join(turn.dir, 'handoff', 'failure_brief.json'), 'utf8'),
+      ),
+      reproLeft: await fs.stat(join(turn.dir, 'handoff', 'repro.json')).then(
         () => true,
         () => false,
       ),
@@ -164,8 +167,16 @@ test('after two failures the task goes to the other vendor once, from the base c
   assert.equal(seen.failure.baseSha, h.baseSha);
   assert.equal(seen.failure.runs.length, 2);
   assert.match(seen.failure.runs[0].outcome, /fails with your change/);
-  const attemptPatch = await fs.readFile(join(h.root, 'tsk_handoff', 'attempt-1.patch'), 'utf8');
+  const attemptPatch = await fs.readFile(
+    join(h.root, 'tsk_handoff', 'handoff', 'attempt-1.patch'),
+    'utf8',
+  );
   assert.match(attemptPatch, /tests\/test_add.sh/);
+  assert.match(
+    seen.brief,
+    /handoff\/failure_brief\.json/,
+    'the brief points where the agent can read',
+  );
 
   const manifest = await readJson(spec.resultPath);
   assert.ok(
@@ -267,5 +278,22 @@ test('a check that runs past its timeout is stopped and counts as a failure', as
     (check: { name: string }) => check.name === 'tests',
   );
   assert.equal(tests.exitCode, 124);
+  zeroStats(h.runner);
+});
+
+test('a repro.json at the task directory is not read: the agent can only write handoff/', async (t) => {
+  const h = await setup(t);
+  // The task directory is closed to the agent's account, so a record there can only be a stale or
+  // planted one; the one in handoff/ is the agent's.
+  const misplaced: AgentScript = async (turn) => {
+    const result = await fixes(turn);
+    await fs.rename(join(turn.dir, 'handoff', 'repro.json'), join(turn.dir, 'repro.json'));
+    return result;
+  };
+  h.claude.script = misplaced;
+  h.codex.script = misplaced;
+  const events = await collect(await h.runner.start(await h.spec('tsk_oldrepro')));
+  assert.ok(terminal(events), 'the task ends');
+  assert.equal(await h.deliveries.get('tsk_oldrepro'), undefined);
   zeroStats(h.runner);
 });

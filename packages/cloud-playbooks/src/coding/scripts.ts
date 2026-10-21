@@ -159,6 +159,22 @@ if [ "$(printf '%s' "$data" | base64 -d | wc -c)" -gt "$MAKA_MAX" ]; then echo T
 echo "OK $data"
 `;
 
+/**
+ * Copies a file of the task directory into `handoff/`, where the agent's account can read it: the
+ * task directory only lets that account pass through it, and the runner's files there are private.
+ * The copy is group-readable and replaces any earlier one atomically. `handoff/` is made by the
+ * runner that starts the agent, and made here if the agent has not run yet.
+ */
+export const PUBLISH_FILE_SCRIPT = `set -eu
+umask 077
+cd "$MAKA_DIR"
+mkdir -p handoff
+tmp=$(mktemp handoff/.publish.XXXXXX)
+cat -- "$MAKA_FILE" > "$tmp"
+chmod 640 "$tmp"
+mv -f -- "$tmp" "handoff/$MAKA_FILE"
+`;
+
 /** Writes stdin to a file in the task directory (the failure brief), replacing it atomically. */
 export const WRITE_FILE_SCRIPT = `set -eu
 umask 077
