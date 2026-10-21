@@ -1,6 +1,13 @@
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
-import { type JournalTotals, readJournalTotals } from '@maka-cloud/gateway';
+import {
+  clearRunBudget,
+  type JournalTotals,
+  journalEnforcesRunBudgets,
+  type RunBudget,
+  readJournalTotals,
+  setRunBudget,
+} from '@maka-cloud/gateway';
 import { InviteStore } from '@maka-cloud/server';
 import {
   formatSmokeReport,
@@ -31,6 +38,12 @@ const RESTART_TIMEOUT_MS = 60_000;
 export interface LiveSmokeIo {
   fetch?: typeof fetch;
   readTotals?: (path: string, at: number) => JournalTotals;
+  /** The run budget kept in the gateway's journal file; the real one by default. */
+  runBudget?: {
+    enforced: (journalPath: string) => boolean;
+    set: (journalPath: string, inviteId: string, budget: RunBudget) => void;
+    clear: (journalPath: string, inviteId: string) => void;
+  };
   openInvites?: (path: string) => Pick<InviteStore, 'limits' | 'setLimits' | 'resolve' | 'close'>;
   run?: (command: readonly string[]) => Promise<void>;
   now?: () => number;
@@ -425,9 +438,44 @@ export async function smokeCommand(
     print(problem);
     return 2;
   }
-  print(`smoke test of ${settings.url} as ${settings.inviteId}, budget $${settings.maxUsd}`);
-  const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
-  const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
-  for (const line of formatSmokeReport(report)) print(line);
-  return report.ok ? 0 : 1;
+  const budgets = io.runBudget ?? {
+    enforced: journalEnforcesRunBudgets,
+    set: setRunBudget,
+    clear: clearRunBudget,
+  };
+  const journalPath = join(settings.dataDir, 'gateway-spend.db');
+  let enforced = false;
+  try {
+    enforced = budgets.enforced(journalPath);
+  } catch {
+    // Unreadable is as good as not enforced.
+  }
+  if (!enforced) {
+    print(
+      'the server has not been started on a version that enforces the run budget at the gateway: restart it on this version, then run the smoke test again',
+    );
+    return 2;
+  }
+  // From here the gateway refuses the smoke invite's reservations once what it has booked since now
+  // reaches the budget, whatever the UTC day and whether or not the server restarts in between.
+  try {
+    budgets.set(journalPath, settings.inviteId, { limitUsd: settings.maxUsd, sinceMs: Date.now() });
+  } catch {
+    print('the run budget could not be set in the gateway journal, so nothing was started');
+    return 2;
+  }
+  try {
+    print(`smoke test of ${settings.url} as ${settings.inviteId}, budget $${settings.maxUsd}`);
+    const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
+    const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
+    for (const line of formatSmokeReport(report)) print(line);
+    return report.ok ? 0 : 1;
+  } finally {
+    try {
+      budgets.clear(journalPath, settings.inviteId);
+    } catch {
+      // A run that is killed leaves the budget too: the invite stays capped until the next run replaces it.
+      print('the run budget could not be cleared; it stays until the next smoke run replaces it');
+    }
+  }
 }

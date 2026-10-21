@@ -85,11 +85,16 @@ sudo -u maka-cloud bash -c 'set -a; . /etc/maka-cloud-smoke.env; set +a; \
   exec node /opt/maka-cloud/packages/cloud-host/dist/cli.js smoke'
 ```
 
-The hard cap is the smoke invite's daily limit, which the gateway enforces; the
-budget is also the amount at which the run stops starting new scenarios. The
-run refuses without `MAKA_CLOUD_LIVE=1`, so nothing happens by accident. If a
-model key is wrong, the research and coding scenarios say so within seconds
-instead of waiting out their timeouts.
+The hard cap is the run budget: from the moment the command starts, the gateway
+refuses any model request of the smoke invite that would take what the invite
+has booked since then (held and settled, every scenario together) above
+`MAKA_CLOUD_SMOKE_MAX_USD`, across UTC midnight and across the restart scenario.
+The command refuses to start unless the server was started on a version that
+enforces it, so restart the server after you update the checkout. The budget is
+also the amount at which the run stops starting new scenarios. The run refuses
+without `MAKA_CLOUD_LIVE=1`, so nothing happens by accident. If a model key is
+wrong, the research and coding scenarios say so within seconds instead of
+waiting out their timeouts.
 
 ## What runs
 
@@ -587,14 +592,17 @@ Preparation:
    on (the sandbox clones it without a token), with at least one commit.
 2. An invite for the smoke test alone, with its own sandbox machine, **and a
    daily limit of its own that is at most `MAKA_CLOUD_SMOKE_MAX_USD`**
-   (`invite limits ... --daily`). That limit is the hard cap: the gateway refuses
-   every model request past it, whereas the budget alone only keeps another
-   scenario from starting once the server has spent it. The command refuses
-   (exit 2, before any request) when `MAKA_CLOUD_SMOKE_TOKEN` is not that
-   invite's own token, or when the invite has no limit of its own or one above
-   the budget. The budget-stop step lowers that limit for a few minutes and
-   puts it back. If the run is killed in that window, set the limit back by
-   hand: the line printed at the start of the step says what it was.
+   (`invite limits ... --daily`). The run budget (see above) is what bounds the
+   whole run; the daily limit is a second ceiling per UTC day, and the
+   budget-stop step needs a limit of its own to lower and put back. The command
+   refuses (exit 2, before any request) when `MAKA_CLOUD_SMOKE_TOKEN` is not
+   that invite's own token, when the invite has no limit of its own or one
+   above the budget, or when the server does not enforce the run budget. The
+   budget-stop step lowers the daily limit for a few minutes and puts it back.
+   If the run is killed in that window, set the limit back by hand: the line
+   printed at the start of the step says what it was. A run that is killed also
+   leaves its run budget in place, which only holds that invite back; the next
+   smoke run replaces it.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 

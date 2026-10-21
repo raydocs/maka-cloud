@@ -88,6 +88,18 @@ test('the monthly limit keys on the month and says when it resets', async () => 
   assert.match(r.notices[0]?.text ?? '', /first of next month/u);
 });
 
+test('the limit of a test run is told as that, not as a daily or monthly limit', async () => {
+  const r = rig();
+  r.report({
+    ...daily('cnv_1'),
+    cap: { scope: 'invite_run', inviteId: 'inv_a', limitUsd: 5 },
+  });
+  await settled();
+  assert.equal(r.raised[0]?.key, 'invite_run:inv_a:2026-10-20');
+  assert.match(r.notices[0]?.text ?? '', /limit of \$5\.00 set for this test run is used up/u);
+  assert.doesNotMatch(r.notices[0]?.text ?? '', /midnight|next month/u);
+});
+
 test('the server-wide limit tells each conversation and gives each its own item', async () => {
   const r = rig();
   const server = (conversationId: string, inviteId: string): CapEvent => ({

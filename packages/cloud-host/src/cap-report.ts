@@ -17,6 +17,8 @@ function words(cap: CapEvent['cap']): string {
       return `Your daily spending limit of ${money(cap.limitUsd)} is used up, so work that needs the model has stopped. It starts again at midnight UTC.`;
     case 'invite_monthly':
       return `Your monthly spending limit of ${money(cap.limitUsd)} is used up, so work that needs the model has stopped. It starts again on the first of next month (UTC).`;
+    case 'invite_run':
+      return `The spending limit of ${money(cap.limitUsd)} set for this test run is used up, so work that needs the model has stopped.`;
     case 'server_daily':
       return `The daily spending limit of the whole service is used up, so work that needs the model has stopped. It starts again at midnight UTC.`;
   }

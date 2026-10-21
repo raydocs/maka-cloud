@@ -32,12 +32,16 @@ export {
 export {
   type AccountLedgerOptions,
   type AccountLimits,
+  clearRunBudget,
   type JournalTotals,
+  journalEnforcesRunBudgets,
   type PendingAlert,
   journaledPort,
   readJournalTotals,
+  type RunBudget,
   type SpendJournal,
   type SpendPolicy,
+  setRunBudget,
   SqliteSpendJournal,
   type UnrecordedSpend,
 } from './journal.js';
