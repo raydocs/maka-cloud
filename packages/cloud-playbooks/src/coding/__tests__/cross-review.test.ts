@@ -357,6 +357,10 @@ test('the implementer may spend the work share, the review has a limit of its ow
   assert.equal(h.claude.turns[0]?.spec.budgetUsd, 8);
   assert.equal(h.codex.turns[0]?.spec.budgetUsd, 2);
   assert.equal(h.codex.turns[0]?.spec.budgetRootId, 'tsk_root');
+  // The gateway pool is the whole $10 for the work and the review alike, so the work's $8 share
+  // is not the pool the review's $2 is taken from.
+  assert.equal(h.claude.turns[0]?.spec.poolUsd, 10);
+  assert.equal(h.codex.turns[0]?.spec.poolUsd, 10);
   assert.deepEqual(terminal(events), { type: 'finished' });
   const line = (await readJson(spec.resultPath)).done.find((l: string) => l.startsWith('review:'));
   assert.match(

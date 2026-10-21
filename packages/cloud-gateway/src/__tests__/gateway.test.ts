@@ -327,6 +327,63 @@ test('grants in one tree pool share its limit', async () => {
   await text(first);
 });
 
+test('a task run in phases holds its grants to the whole budget, not to the first phase’s share', async () => {
+  const { gateway, upstream } = rig();
+  const value = body();
+  const w = worst(value);
+  // The work grant may hold 2.2 requests' worth of its own phase; the pool is the whole, 3.2.
+  const work = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'work',
+    budget: { limitUsd: 2.2 * w, poolId: 'tree-phased', poolLimitUsd: 3.2 * w },
+  });
+  const review = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'review',
+    budget: { limitUsd: 1.2 * w, poolId: 'tree-phased', poolLimitUsd: 3.2 * w },
+  });
+  const held: ControlledBody[] = [];
+  const hold = () =>
+    upstream.next((request) => {
+      const open = new ControlledBody(request.signal);
+      held.push(open);
+      return new Response(open.stream, { headers: { 'content-type': 'text/event-stream' } });
+    });
+  hold();
+  const first = await post(work, value);
+  hold();
+  const second = await post(work, value);
+  upstream.next(() => json({ input_tokens: 50 }));
+  assert.equal((await post(work, value)).status, 402, 'the work phase stops at its own limit');
+  // With the pool at the first grant's limit (2.2) nothing would be left here; the whole is 3.2.
+  hold();
+  const third = await post(review, value);
+  assert.equal(third.status, 200, 'the review phase has its share of the whole budget');
+  upstream.next(() => json({ input_tokens: 50 }));
+  assert.equal((await post(review, value)).status, 402, 'the pool still holds all of them to 3.2');
+  for (const open of held) open.end();
+  await Promise.all([text(first), text(second), text(third)]);
+});
+
+test('a pool limit needs a pool and a positive number, and a refused grant leaves nothing open', () => {
+  const { gateway } = rig();
+  const bad = [
+    { limitUsd: 1, poolLimitUsd: 2 },
+    { limitUsd: 1, poolId: 'p', poolLimitUsd: 0 },
+    { limitUsd: 1, poolId: 'p', poolLimitUsd: -1 },
+    { limitUsd: 1, poolId: 'p', poolLimitUsd: Number.NaN },
+    { limitUsd: 1, poolId: 'p', poolLimitUsd: Number.POSITIVE_INFINITY },
+  ];
+  for (const budget of bad) {
+    assert.throws(
+      () => gateway.inProcess({ vendor: 'anthropic', subject: 'x', budget }),
+      /pool/u,
+      JSON.stringify(budget),
+    );
+  }
+  assert.equal(gateway.openGrants, 0);
+});
+
 test('revoking cuts an open stream mid-way and refuses the token from then on', async () => {
   const { gateway, upstream } = rig();
   const grant = gateway.issue({

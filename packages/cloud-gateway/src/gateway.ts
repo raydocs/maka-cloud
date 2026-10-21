@@ -110,9 +110,11 @@ export interface IssueInput {
   /**
    * What the grant's requests are charged to: a port over an existing ledger, or a dollar limit
    * in memory. With `poolId`, every grant of that pool also shares the pool's limit (set by the
-   * first grant of the pool), so grants issued side by side cannot together exceed it.
+   * first grant of the pool, from `poolLimitUsd` when given, else from its own `limitUsd`), so
+   * grants issued side by side cannot together exceed it. A grant for one phase of a task has a
+   * `limitUsd` of the phase and a `poolLimitUsd` of the whole.
    */
-  budget: BudgetPort | { limitUsd: number; poolId?: string };
+  budget: BudgetPort | { limitUsd: number; poolId?: string; poolLimitUsd?: number };
   /** Whose caps the grant's spend counts against. Required when the gateway has `accounts`. */
   account?: Account;
   /** The conversation to tell if a cap stops the grant. Informational: it grants nothing. */
@@ -731,8 +733,16 @@ export class Gateway {
       if (!Number.isFinite(budget.limitUsd) || budget.limitUsd <= 0) {
         throw new Error('A grant needs a positive budget.');
       }
+      if (budget.poolLimitUsd !== undefined) {
+        if (budget.poolId === undefined) throw new Error('A pool limit needs a pool.');
+        if (!Number.isFinite(budget.poolLimitUsd) || budget.poolLimitUsd <= 0) {
+          throw new Error('A pool needs a positive limit.');
+        }
+      }
       const own = new Allowance(budget.limitUsd);
-      if (budget.poolId !== undefined) pool = this.pool(budget.poolId, budget.limitUsd);
+      if (budget.poolId !== undefined) {
+        pool = this.pool(budget.poolId, budget.poolLimitUsd ?? budget.limitUsd);
+      }
       port = new LimitPort(pool ? [own, pool.allowance] : [own]);
     }
     if (this.options.accounts) {

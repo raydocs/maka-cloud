@@ -40,6 +40,8 @@ export interface ModelAccessProvider {
     budgetUsd?: number;
     /** The top-level task of the run's tree (`RunSpec.budgetRootId`). */
     budgetRootId?: TaskId;
+    /** The cap of the tree's pool when it is more than this run's own budget (`RunSpec.poolUsd`). */
+    poolUsd?: number;
   }): Promise<ModelAccess>;
   /**
    * Revokes whatever was issued for `taskId`, from a process that no longer holds the

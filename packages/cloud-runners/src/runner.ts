@@ -389,6 +389,7 @@ class Run implements RunHandle {
       runner: vendor.name,
       ...(spec.budgetUsd === undefined ? {} : { budgetUsd: spec.budgetUsd }),
       ...(spec.budgetRootId === undefined ? {} : { budgetRootId: spec.budgetRootId }),
+      ...(spec.poolUsd === undefined ? {} : { poolUsd: spec.poolUsd }),
     });
     this.adoptAccess(access);
     this.checkCancelled();

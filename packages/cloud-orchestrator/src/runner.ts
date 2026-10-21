@@ -20,6 +20,12 @@ export interface RunSpec {
    * model gateway can hold them to it together.
    */
   budgetRootId?: TaskId;
+  /**
+   * The cap of the whole tree's pool, for a runner that runs the task in phases: each run's own
+   * `budgetUsd` is then only its phase's share, but the gateway pool must hold the runs together
+   * to the whole. Set with `budgetRootId`; absent: the pool takes `budgetUsd`.
+   */
+  poolUsd?: number;
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
   /**

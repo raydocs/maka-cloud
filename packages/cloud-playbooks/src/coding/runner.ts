@@ -597,6 +597,11 @@ class CodingRun implements RunHandle {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
+      // The phases (work, review, fix) have limits of their own; the gateway pool holds them to
+      // the whole budget together, so the review's share is not taken from the pool by the work.
+      ...(this.spec.budgetRootId === undefined || this.spec.budgetUsd === undefined
+        ? {}
+        : { poolUsd: this.spec.budgetUsd }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
     };
     // Every run reads its brief, a resume included.

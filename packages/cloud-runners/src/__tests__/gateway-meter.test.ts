@@ -99,6 +99,33 @@ test('a Codex run is metered per request and stopped inside its turn when the ga
   assert.equal(access.counts.unsubscribed, 1);
 });
 
+test('the pool limit of a phased task goes to the gateway with the run’s own budget', async (t) => {
+  const access = gatewayAccess();
+  const h = await setup({ cloud: { modelAccess: access.provider } });
+  t.after(() => h.cleanup());
+  await h.setMode('hang');
+  const spec = await h.spec('tsk_gateway_pool', {
+    runner: 'codex',
+    budgetUsd: 2,
+    budgetRootId: 'tsk_root',
+    poolUsd: 10,
+  });
+  const handle = await h.runners.codex.start(spec);
+  const events = reader(handle);
+  await events.until((event) => event.type === 'progress' && event.note.includes('working on it'));
+  assert.deepEqual(access.issued, [
+    {
+      taskId: 'tsk_gateway_pool',
+      runner: 'codex',
+      budgetUsd: 2,
+      budgetRootId: 'tsk_root',
+      poolUsd: 10,
+    },
+  ]);
+  access.settle({ spentUsd: 2, exhausted: true });
+  assert.notEqual(await settles(events.rest()), 'stuck');
+});
+
 test('with a metered access the CLI’s own usage lines do not count', async (t) => {
   const access = gatewayAccess();
   const h = await setup({ cloud: { modelAccess: access.provider } });

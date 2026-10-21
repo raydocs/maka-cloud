@@ -40,7 +40,7 @@ export function gatewayModelAccess(
   ownerOfTask: (taskId: string) => Owner | undefined,
 ): ModelAccessProvider {
   return {
-    async issue({ taskId, runner, budgetUsd, budgetRootId }) {
+    async issue({ taskId, runner, budgetUsd, budgetRootId, poolUsd }) {
       if (budgetUsd === undefined) {
         throw new Error('The task has no budget, so it gets no model access.');
       }
@@ -57,7 +57,9 @@ export function gatewayModelAccess(
         ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
         budget: {
           limitUsd: budgetUsd,
-          ...(budgetRootId === undefined ? {} : { poolId: budgetRootId }),
+          ...(budgetRootId === undefined
+            ? {}
+            : { poolId: budgetRootId, ...(poolUsd === undefined ? {} : { poolLimitUsd: poolUsd }) }),
         },
       });
       return {
