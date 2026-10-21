@@ -3,7 +3,13 @@
  * from them is shown as quoted data: one line, no control characters, bounded.
  */
 
-const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+/** Control, direction, zero-width and other format characters, and invisible letters and marks (T15). */
+const CONTROL =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+
+/** Everything that reads as a double quote, so quoted text cannot seem to close its quotes (T15). */
+const QUOTES =
+  /["\u02BA\u02DD\u02EE\u05F4\u1CD3\u201C-\u201F\u2033\u2036\u275D\u275E\u2760\u3003\u301D-\u301F\uFF02]/gu;
 
 export function clip(text: string, max: number): string {
   const flat = text.replace(CONTROL, ' ').replace(/\s+/gu, ' ').trim();
@@ -11,8 +17,28 @@ export function clip(text: string, max: number): string {
   return chars.length <= max ? flat : `${chars.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
+/** What a held call's arguments keep only as a visible `\uXXXX` escape: hidden characters, other line breaks and spaces, quote look-alikes. */
+const ESCAPED =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}\u02BA\u02DD\u02EE\u05F4\u1CD3\u201C-\u201F\u2033\u2036\u275D\u275E\u2760\u3003\u301D-\u301F\uFF02]/gu;
+
+/**
+ * A held call's arguments for the owner to approve: JSON with every hidden character as a visible
+ * escape (the conductor's `shownValue` rule), so nothing is dropped from what will run; then cut.
+ */
+export function shownJson(value: unknown, max: number): string {
+  const json = (JSON.stringify(value) ?? 'null').replace(ESCAPED, (char) =>
+    char === ' '
+      ? char
+      : Array.from(
+          { length: char.length },
+          (_, i) => `\\u${char.charCodeAt(i).toString(16).padStart(4, '0')}`,
+        ).join(''),
+  );
+  return json.length <= max ? json : `${json.slice(0, Math.max(0, max - 1))}…`;
+}
+
 export function quoted(text: string | undefined | null, max = 80): string {
-  const flat = clip(text ?? '', max).replace(/[“”"]/gu, "'");
+  const flat = clip(text ?? '', max).replace(QUOTES, "'");
   return flat === '' ? '(untitled)' : `“${flat}”`;
 }
 

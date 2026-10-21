@@ -21,5 +21,6 @@ export * from './outbox.js';
 export * from './playbooks.js';
 export { callCostUsd } from './pricing.js';
 export { conductorSystemPrompt, PLANNER_SYSTEM_PROMPT } from './prompts.js';
+export { printable, shownValue } from './shown.js';
 export * from './state.js';
 export { type ActiveTurn, type ConductorToolSpec, ToolRefusal } from './tools.js';

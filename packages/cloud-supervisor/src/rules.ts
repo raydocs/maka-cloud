@@ -3,7 +3,7 @@ import type { Signal, SignalManifest, SignalTaskEvent } from './events.js';
 import { stableHash } from './hash.js';
 import type { Settings } from './settings.js';
 import type { ItemRecord, ItemSpec, Store, TaskRecord, VerificationRecord } from './store.js';
-import { clip, quoted } from './text.js';
+import { clip, quoted, shownJson } from './text.js';
 import type { CloseReason, EvidenceLink, ItemContext, ItemOption } from './types.js';
 import { verificationKindOf } from './verification/kind.js';
 
@@ -408,7 +408,7 @@ function questionSpec(store: Store, signal: Extract<Signal, { type: 'question' }
         {
           kind: 'action',
           tool: clip(question.action.tool, 80),
-          args: clip(JSON.stringify(question.action.args ?? null), 1500),
+          args: shownJson(question.action.args ?? null, 1500),
         },
       ]
     : [];

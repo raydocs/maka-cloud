@@ -63,6 +63,48 @@ test('R1: the held action behind an irreversible question is shown as evidence',
   await r.stop();
 });
 
+test('an approval item shows hidden characters of the held call as escapes, and its ask loses them (T15)', async () => {
+  const r = await rig();
+  const title = 'Fix \u202Etxt.terces\u2066\u3164\u200B';
+  r.host.feed.append(
+    'conductor.question',
+    CONVERSATION,
+    {
+      questionId: 'q_bidi',
+      reason: 'irreversible',
+      question: 'Open the \u202Ekcol\u202C pull request?\u2028\uFE0FIt is safe.',
+      options: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'reject', label: 'Reject' },
+      ],
+      recommended: 'reject',
+      action: { tool: 'open_pull_request', args: { taskId: 'tsk_1', title } },
+    },
+    r.clock.t,
+  );
+  await r.supervisor.settled();
+  const [item] = await active(r);
+  assert.equal(item?.ask, 'Open the kcol pull request? It is safe.');
+  assert.deepEqual(item?.evidence, [
+    {
+      kind: 'action',
+      tool: 'open_pull_request',
+      args: '{"taskId":"tsk_1","title":"Fix \\u202etxt.terces\\u2066\\u3164\\u200b"}',
+    },
+  ]);
+  const evidence = item?.evidence[0];
+  assert.equal(evidence?.kind === 'action' ? JSON.parse(evidence.args).title : undefined, title);
+  await r.stop();
+});
+
+test('quoted text cannot seem to close its quotes with a look-alike', async () => {
+  const { quoted } = await import('../text.js');
+  assert.equal(
+    quoted('a\u201D b \uFF02 c \u301E d \u2033 e " f \u3164g'),
+    "\u201Ca' b ' c ' d ' e ' f g\u201D",
+  );
+});
+
 test('R1: a repeated question entry makes one item', async () => {
   const r = await rig();
   await r.question('q1');

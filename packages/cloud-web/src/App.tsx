@@ -14,7 +14,7 @@ import {
 import { InboxPanel } from './Inbox';
 import { Computer } from './Computer';
 import { MemoryPanel } from './Memory';
-import { displayText, dollars, publicLink } from './presentation';
+import { displayJson, displayText, dollars, publicLink } from './presentation';
 import { disablePush, enablePush } from './push';
 import {
   applyEvent,
@@ -97,7 +97,7 @@ export function QuestionCard({
       {question.action && !answered && (
         <p className="muted held-action">
           Held until you answer: {displayText(question.action.tool)}{' '}
-          <code>{displayText(JSON.stringify(question.action.args) ?? '')}</code>
+          <code>{displayText(displayJson(question.action.args))}</code>
         </p>
       )}
       {answered ? (

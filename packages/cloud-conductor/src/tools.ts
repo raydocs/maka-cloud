@@ -12,6 +12,7 @@ import {
 } from './guard.js';
 import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook } from './playbooks.js';
+import { printable, shownValue } from './shown.js';
 import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
 
 /** A tool call the conductor refuses. The model sees `code: message` as the tool error. */
@@ -469,16 +470,19 @@ export function conductorTools(
           break;
         }
       }
+      // The owner sees the card: what came from outside them (the model's words, other people's
+      // text inside a held call's details) loses control, direction and invisible characters (T15).
+      const shownOptions = options.map((option) => ({ ...option, label: printable(option.label) }));
       const opened = state.openQuestionIf(
         turn.runId,
         {
           reason: args.reason,
-          question,
-          note,
+          question: printable(question),
+          note: note === null ? null : printable(note),
           action,
           options: [
-            ...options.filter((option) => option.id === recommended),
-            ...options.filter((option) => option.id !== recommended),
+            ...shownOptions.filter((option) => option.id === recommended),
+            ...shownOptions.filter((option) => option.id !== recommended),
           ],
           recommended,
           raiseToUsd,
@@ -506,7 +510,7 @@ export function conductorTools(
       if (!host.state.takeNotice(turn.runId, host.limits.maxNoticesPerRun)) {
         throw new ToolRefusal('notice_limit', 'This run has posted all the notes it may.');
       }
-      host.postNotice(turn, args.text);
+      host.postNotice(turn, printable(args.text));
       return { posted: true };
     },
   };
@@ -645,13 +649,15 @@ export type HoldCause = 'irreversible' | 'tainted';
 
 /**
  * The approval question for a held call: the tool and every argument it will
- * run with, from the held row. Long values are cut, and the cut is marked.
+ * run with, from the held row, each shown with `shownValue` so a hidden or
+ * reordering character is a visible escape. Long values are cut, and the cut is
+ * marked.
  */
 export function approvalQuestion(call: HeldCall, cause: HoldCause = 'irreversible'): string {
   const parts = Object.keys(call.args)
     .sort()
     .map((name) => {
-      const value = JSON.stringify(call.args[name]) ?? 'undefined';
+      const value = shownValue(call.args[name]);
       return `${name}: ${value.length > MAX_ARG_CHARS ? `${value.slice(0, MAX_ARG_CHARS)}… (cut)` : value}`;
     });
   let shown = parts.join(', ');

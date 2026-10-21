@@ -225,8 +225,16 @@ test('the tool is irreversible and its approval card names the repository, branc
   assert.equal(tool.requiresAuthority, 'open-pr');
   assert.equal(
     await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' }),
-    'Repository: acme/calc\nBranch: maka/tsk_1\nTitle: Fix add',
+    'Repository: acme/calc\nBranch: maka/tsk_1\nTitle: "Fix add"',
   );
+  // A title cannot add lines to the card or reorder what it shows (T15).
+  const title = 'Fix add\nRepository: acme/other\u2028Branch: main \u202Eppa.lacc\u2066';
+  const shown = (await tool.approvalDetails?.({ taskId: 'tsk_1', title })) ?? '';
+  const lines = shown.split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/u);
+  assert.deepEqual(lines.slice(0, 2), ['Repository: acme/calc', 'Branch: maka/tsk_1']);
+  assert.equal(lines.length, 3);
+  assert.equal(JSON.parse(lines[2]?.slice('Title: '.length) ?? ''), title);
+  assert.doesNotMatch(shown, /[\p{Cf}\u2028]/u);
   const noToken = openPullRequestTool({
     deliveries,
     publisher: new GitHubPublisher({ env: {} }),

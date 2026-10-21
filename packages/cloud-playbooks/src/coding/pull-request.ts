@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { type ConductorToolSpec, ToolRefusal } from '@maka-cloud/conductor';
+import { type ConductorToolSpec, shownValue, ToolRefusal } from '@maka-cloud/conductor';
 import { z } from 'zod';
 import type { ChangeSet, CodingDeliveries, Delivery, PublishedPullRequest } from './deliveries.js';
 import type { PullRequestPublisher } from './github.js';
@@ -82,7 +82,8 @@ export function openPullRequestTool(
       const lines = [
         `Repository: ${delivery?.repo ?? 'unknown (no verified change for this task)'}`,
         `Branch: ${branchFor(args.taskId)}`,
-        `Title: ${args.title}`,
+        // The model wrote the title: shown quoted, a line break or a hidden character as an escape (T15).
+        `Title: ${shownValue(args.title)}`,
       ];
       const problem = options.publisher.precheck();
       if (problem) lines.push(`This cannot be opened yet: ${problem}`);
