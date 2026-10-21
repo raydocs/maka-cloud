@@ -9,19 +9,26 @@ export class DutiesDatabaseInUseError extends Error {
 }
 
 /**
- * Steps in order; a database at version N has run the first N. A step only ever adds, so a
- * database from an earlier build opens and keeps what it holds.
+ * The version this build writes. Version 2 is the current CI ordering ((run number, attempt)
+ * folded into one number) and chains that remember their newest failure. A database of any other
+ * version was written by a build that ordered runs differently, and mixing the two encodings
+ * would compare unlike numbers, so it is refused rather than migrated. No deployment holds one;
+ * the file is left exactly as it was.
  */
-const MIGRATIONS: readonly string[] = [
-  // 2: a chain remembers the newest failure it counted, so only a later success ends it; and the
-  // review events seen are remembered, so a replay does not count as a person acting again.
-  `ALTER TABLE chains ADD COLUMN last_failure_seq INTEGER NOT NULL DEFAULT 0;
-CREATE TABLE person_events (
-  event_key TEXT PRIMARY KEY,
-  seen_at INTEGER NOT NULL
-);
-CREATE INDEX person_events_by_time ON person_events (seen_at);`,
-];
+const SCHEMA_VERSION = 2;
+
+/** The duties database was written by a build this one cannot read. It is not touched. */
+export class DutiesDatabaseVersionError extends Error {
+  constructor(
+    readonly path: string,
+    readonly version: number,
+  ) {
+    super(
+      `The duties database ${path} is schema version ${version}, written by a different build; this build reads version ${SCHEMA_VERSION}. It was left as it is: move it aside to start a new one.`,
+    );
+    this.name = 'DutiesDatabaseVersionError';
+  }
+}
 
 /**
  * Money columns are whole micro-dollars. `run_requests` is the ledger of a duty's runs: its
@@ -92,9 +99,18 @@ CREATE TABLE chains (
   chain_key TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   depth INTEGER NOT NULL,
-  started_at INTEGER NOT NULL
+  started_at INTEGER NOT NULL,
+  -- The newest failure (in run order) the chain counted: only a later pass ends it.
+  last_failure_seq INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX chains_by_project ON chains (project_id);
+
+-- Review and comment events seen, so a replay of one is not a person acting again.
+CREATE TABLE person_events (
+  event_key TEXT PRIMARY KEY,
+  seen_at INTEGER NOT NULL
+);
+CREATE INDEX person_events_by_time ON person_events (seen_at);
 
 -- Things the owner must be told that no run says: delivered at least once by the host.
 CREATE TABLE notices (
@@ -143,6 +159,11 @@ CREATE INDEX run_requests_day ON run_requests (duty_id, day);
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   try {
+    // Before anything is changed in the file, not even its journal mode.
+    const version = userVersion(db);
+    if (version !== 0 && version !== SCHEMA_VERSION) {
+      throw new DutiesDatabaseVersionError(path, version);
+    }
     db.exec('PRAGMA locking_mode = EXCLUSIVE');
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('BEGIN IMMEDIATE');
@@ -167,17 +188,17 @@ function isBusy(error: unknown): boolean {
   return code !== undefined && [5, 6].includes(code & 0xff);
 }
 
+function userVersion(db: DatabaseSync): number {
+  return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+}
+
+/** Makes the tables of a new database. An existing one has the current version (checked on open). */
 function migrate(db: DatabaseSync): void {
-  const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
-  const steps = [SCHEMA, ...MIGRATIONS];
-  if (row.user_version === steps.length) return;
-  if (row.user_version > steps.length) {
-    throw new Error(`Unsupported duties database schema version ${row.user_version}`);
-  }
+  if (userVersion(db) === SCHEMA_VERSION) return;
   db.exec('BEGIN IMMEDIATE');
   try {
-    for (const step of steps.slice(row.user_version)) db.exec(step);
-    db.exec(`PRAGMA user_version = ${steps.length}`);
+    db.exec(SCHEMA);
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');

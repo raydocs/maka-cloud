@@ -170,6 +170,56 @@ export class DutyEngine {
     this.db = openDatabase(options.dbPath);
     // A launch a crash cut short: the launcher is idempotent per request, so it runs again.
     this.db.exec("UPDATE run_requests SET state = 'pending' WHERE state = 'launching'");
+    this.parkMismatchedProjects();
+  }
+
+  /**
+   * A project is served only while the operator's policy still names its owner, repository and
+   * installation. The policy is read each time, not once at registration: when the operator
+   * changes who a repository belongs to, a project stored for the old owner stops receiving its
+   * events and runs. A project that is not permitted keeps its rows and comes back if the policy
+   * names it again.
+   */
+  private permitted(project: ProjectRow): boolean {
+    return (
+      project.removed === 0 &&
+      this.allowProject({
+        owner: project.owner,
+        repo: project.repo,
+        installationId: project.installation_id,
+      })
+    );
+  }
+
+  /**
+   * At start, runs that were waiting for a project the policy no longer names are ended without
+   * a run (their reservations released), and the owner is told once. A run already started is
+   * left to settle, and so is a request whose launch was attempted: its run may exist, and the
+   * dispatcher decides (finish it if it exists, end it if not).
+   */
+  private parkMismatchedProjects(): void {
+    transaction(this.db, () => {
+      const at = this.now();
+      const projects = this.db
+        .prepare('SELECT * FROM projects WHERE removed = 0')
+        .all() as unknown as ProjectRow[];
+      for (const project of projects) {
+        if (this.permitted(project)) continue;
+        this.cancelWhere(
+          "project_id = ? AND state IN ('pending', 'launching') AND attempts = 0",
+          [project.project_id],
+          'project_not_allowed',
+          at,
+        );
+        this.notice(
+          project,
+          '',
+          `parked:${project.project_id}`,
+          `Standing duties for ${project.repo} are paused: this server's operator settings no longer name your invite and installation for it. Nothing runs for it until that is put back.`,
+          at,
+        );
+      }
+    });
   }
 
   /** Called after work for the launcher appears. Returns the unsubscribe function. */
@@ -220,6 +270,11 @@ export class DutyEngine {
       if (!project) return { status: 200, body: { ok: true, ignored: 'unknown_project' } };
       if (project.installation_id !== parsed.installationId) {
         return { status: 200, body: { ok: true, ignored: 'installation_mismatch' } };
+      }
+      // Before the delivery is recorded: once the policy names the project again, a redelivery
+      // is still new.
+      if (!this.permitted(project)) {
+        return { status: 200, body: { ok: true, ignored: 'project_not_allowed' } };
       }
       const at = this.now();
       const seen = this.db
@@ -445,6 +500,7 @@ export class DutyEngine {
         if (trigger.kind !== 'schedule' || duty.activated_at === null) continue;
         const every = trigger.everyMinutes * MINUTE_MS;
         if (at < duty.activated_at + every) continue;
+        if (!this.permitted(this.projectById(duty.project_id) as ProjectRow)) continue;
         const slot = duty.activated_at + Math.floor((at - duty.activated_at) / every) * every;
         if (duty.last_slot !== null && duty.last_slot >= slot) continue;
         const missed = Math.max(0, (slot - (duty.last_slot ?? duty.activated_at)) / every - 1);
@@ -737,10 +793,35 @@ export class DutyEngine {
     return row.at ?? undefined;
   }
 
-  /** Claims a pending request for launching: pending -> launching, once. */
-  beginLaunch(requestId: string): RunRequest | undefined {
+  /** A request that is waiting to launch, as the launcher sees it. */
+  waiting(requestId: string): RunRequest | undefined {
+    const row = this.db
+      .prepare("SELECT 1 FROM run_requests WHERE request_id = ? AND state = 'pending'")
+      .get(requestId);
+    return row ? this.requestView(requestId) : undefined;
+  }
+
+  /**
+   * Claims a pending request for launching: pending -> launching, once. `begun` says an earlier
+   * attempt already created the request's run: it keeps the day it was booked on and is not
+   * turned away by the cap or by the project's policy, because the run exists and must settle.
+   */
+  beginLaunch(requestId: string, begun = false): RunRequest | undefined {
     return transaction(this.db, () => {
-      if (!this.rebookToToday(requestId)) return undefined;
+      if (!begun) {
+        const owner = this.db
+          .prepare(
+            `SELECT p.* FROM run_requests r JOIN projects p ON p.project_id = r.project_id
+             WHERE r.request_id = ? AND r.state = 'pending'`,
+          )
+          .get(requestId) as unknown as ProjectRow | undefined;
+        if (!owner) return undefined;
+        if (!this.permitted(owner)) {
+          this.end(requestId, 'project_not_allowed', 0);
+          return undefined;
+        }
+        if (!this.rebookToToday(requestId)) return undefined;
+      }
       const changed = this.db
         .prepare(
           "UPDATE run_requests SET state = 'launching', attempts = attempts + 1 WHERE request_id = ? AND state = 'pending'",

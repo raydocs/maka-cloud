@@ -51,8 +51,17 @@ function untouchable(): {
           touched.push('runBudget');
           throw new Error('no journal may be opened');
         },
-        set: () => touched.push('runBudget'),
-        clear: () => touched.push('runBudget'),
+        set: () => {
+          touched.push('runBudget');
+        },
+        renew: () => {
+          touched.push('runBudget');
+          return true;
+        },
+        clear: () => {
+          touched.push('runBudget');
+          return true;
+        },
       },
       openInvites: () => {
         touched.push('openInvites');
@@ -604,7 +613,7 @@ test('the run budget of the smoke command holds across UTC midnight, where the d
   assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
 });
 
-test('the smoke command refuses before any request when the server does not enforce run budgets, and sets and clears the budget around a run', async (t) => {
+test('the smoke command starts nothing when the journal does not enforce the run budget it set, and sets and clears the budget around a run', async (t) => {
   const { io, touched, printed } = untouchable();
   const invites = fakeInvites({ dailyUsd: 5, monthlyUsd: 50 });
   io.openInvites = invites.open_ as never;
@@ -614,28 +623,69 @@ test('the smoke command refuses before any request when the server does not enfo
       calls.push('enforced');
       return false;
     },
-    set: () => calls.push('set'),
-    clear: () => calls.push('clear'),
+    set: () => {
+      calls.push('set');
+    },
+    renew: () => true,
+    clear: () => {
+      calls.push('clear');
+      return true;
+    },
   };
   assert.equal(await smokeCommand(LIVE_ENV, io), 2);
-  assert.deepEqual(calls, ['enforced'], 'nothing is set for a server that would ignore it');
+  assert.deepEqual(
+    calls,
+    ['set', 'enforced', 'clear'],
+    'the budget is checked once set, and taken away again when it would not hold',
+  );
   assert.deepEqual(touched, [], 'and nothing is sent');
-  assert.match(printed.join('\n'), /enforces the run budget/u);
+  assert.match(printed.join('\n'), /does not enforce the run budget/u);
 
   // A run that ends, however it ends, takes its budget with it.
   const down = downServer(() => {});
   const seen: string[] = [];
   down.runBudget = {
     enforced: () => true,
-    set: (_path, inviteId, budget) => {
-      seen.push(`set ${inviteId} ${budget.limitUsd}`);
+    set: (_path, inviteId, budget, runId) => {
+      seen.push(`set ${inviteId} ${budget.limitUsd} ${runId}`);
     },
-    clear: (_path, inviteId) => {
-      seen.push(`clear ${inviteId}`);
+    renew: () => true,
+    clear: (_path, inviteId, runId) => {
+      seen.push(`clear ${inviteId} ${runId}`);
+      return true;
     },
   };
+  down.runId = 'run_one';
   await smokeCommand(LIVE_ENV, down);
-  assert.deepEqual(seen, [`set ${INVITE} 5`, `clear ${INVITE}`]);
+  assert.deepEqual(seen, [`set ${INVITE} 5 run_one`, `clear ${INVITE} run_one`]);
+});
+
+test('a second smoke run is refused while the first holds the invite’s run budget, and the first run’s cleanup leaves only its own', async (t) => {
+  const clock = { now: Date.now() };
+  const { dir, ledger } = await serverLedger(t, clock);
+  const account = { inviteId: INVITE };
+  const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+  const printedB: string[] = [];
+  let codeB: number | undefined;
+  const first = downServer(() => {
+    // While run A is going, run B is started against the same journal and invite.
+    clock.now = Date.now();
+    const second = downServer(() => {});
+    second.print = (line) => printedB.push(line);
+    second.runId = 'run_b';
+    void smokeCommand(env, second).then((code) => {
+      codeB = code;
+    });
+  });
+  first.runId = 'run_a';
+  // The two share the process, so B's whole (synchronous up to its first await) start is done by
+  // the time A's request returns; wait one turn for its result.
+  assert.equal(await smokeCommand(env, first), 1);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(codeB, 2, 'the second run is refused before any request');
+  assert.match(printedB.join('\n'), /another smoke run holds the run budget/u);
+  // B did not replace A's budget and did not clear it either: A's own cleanup ended it.
+  assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {

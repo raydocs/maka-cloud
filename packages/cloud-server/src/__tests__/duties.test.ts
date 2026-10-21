@@ -392,3 +392,27 @@ test('a proposal the engine cannot offer answers 503, and a failed inspection 50
   assert.equal((await h.api('/v1/projects/prj_down/proposal', { method: 'POST' })).status, 503);
   assert.equal((await h.api('/v1/projects/prj_x/proposal', { method: 'POST' })).status, 502);
 });
+
+test('startedConversation finds the conversation a key made for its owner, and nothing for anyone else', async (t) => {
+  const h = await startHarness(t, { handler: { onUserMessage: () => undefined } });
+  const meta = {
+    external: false,
+    run: { dutyId: 'dty_1', authority: 'read-only' as const, budgetUsd: 1 },
+  };
+  assert.equal(h.server.startedConversation({ owner: h.inviteId, key: 'run_9' }), undefined);
+  const started = h.server.startConversation({
+    owner: h.inviteId,
+    key: 'run_9',
+    text: 'go',
+    meta,
+  });
+  assert.ok(started.ok);
+  assert.deepEqual(h.server.startedConversation({ owner: h.inviteId, key: 'run_9' }), {
+    conversationId: started.ok ? started.conversationId : '',
+  });
+  assert.equal(
+    h.server.startedConversation({ owner: 'inv_somebody_else', key: 'run_9' }),
+    undefined,
+  );
+  assert.equal(h.server.startedConversation({ owner: h.inviteId, key: 'run_10' }), undefined);
+});

@@ -941,6 +941,91 @@ test('an alert that was never delivered in a day becomes a budget item in the ow
   assert.equal((await items(owner.token)).items.length, 1, 'asking again adds nothing');
 });
 
+/** A stack with a spend alert whose owner may or may not have a conversation, and an owed alert a day old. */
+async function staleAlertStack(t: TestContext, ownerConversation: boolean) {
+  const vapid = vapidKeys();
+  let owner: { inviteId: string; token: string } | undefined;
+  const started = await start(
+    t,
+    undefined,
+    {
+      CLOUD_PUSH_VAPID_PUBLIC: vapid.publicKey,
+      CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
+      CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
+      MAKA_CLOUD_SPEND_ALERT_USD: '1',
+    },
+    true,
+    { spendAlertTiming: { pollMs: 3_600_000 } },
+    (dir) => {
+      const store = new InviteStore(join(dir, 'invites.db'));
+      owner = store.create('owner');
+      store.close();
+      return { MAKA_CLOUD_OWNER_INVITE: owner.inviteId };
+    },
+  );
+  assert.ok(owner);
+  const ownerInvite = owner;
+  const api = (path: string, body?: unknown): Promise<Response> =>
+    fetch(`${started.stack.cloud.server.url}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { authorization: `Bearer ${ownerInvite.token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  if (ownerConversation) await api('/v1/conversations', {});
+  const journal = new SqliteSpendJournal(join(started.dataDir, 'gateway-spend.db'));
+  t.after(() => journal.close());
+  const owe = (): void =>
+    journal.savePendingAlert({
+      inviteId: ownerInvite.inviteId,
+      key: 'spend:2026-10-19',
+      firstAt: Date.now() - 25 * 3_600_000,
+      failures: 9,
+      retryAt: 0,
+    });
+  type Item = { itemId: string; kind: string; preconditionHash: string; conversationId: string };
+  const items = async (state: string): Promise<Item[]> =>
+    ((await (await api(`/v1/inbox/items?state=${state}`)).json()) as { items: Item[] }).items;
+  return { started, api, journal, owe, items, owner: ownerInvite };
+}
+
+test('an owner with no conversation still gets the budget item for an alert that was never delivered', async (t) => {
+  const { started, journal, owe, items, owner } = await staleAlertStack(t, false);
+  owe();
+  await started.stack.checkSpendAlert();
+
+  const mine = await items('open');
+  assert.equal(mine.length, 1, 'the item exists although the owner had no conversation');
+  assert.equal(mine[0]?.kind, 'budget');
+  assert.deepEqual(started.stack.cloud.server.conversationsOf(owner.inviteId), [
+    mine[0]?.conversationId,
+  ]);
+  assert.deepEqual(journal.pendingAlerts(), [], 'and the alert is no longer owed');
+  owe();
+  await started.stack.checkSpendAlert();
+  assert.equal((await items('open')).length, 1, 'asking again adds neither an item nor a chat');
+  assert.equal(started.stack.cloud.server.conversationsOf(owner.inviteId).length, 1);
+});
+
+test('an alert given up on is raised once, even when it is owed again after the item was answered', async (t) => {
+  const { started, api, owe, items } = await staleAlertStack(t, true);
+  owe();
+  await started.stack.checkSpendAlert();
+  const [item] = await items('open');
+  assert.ok(item);
+  const answered = await api(`/v1/inbox/items/${item.itemId}/answer`, {
+    answerId: 'ans_1',
+    optionId: 'ok',
+    preconditionHash: item.preconditionHash,
+  });
+  assert.equal(answered.status, 200);
+  assert.deepEqual(await items('open'), [], 'the owner acknowledged it');
+
+  // A restart after the clearing of the owed alert failed finds it owed again.
+  owe();
+  await started.stack.checkSpendAlert();
+  assert.deepEqual(await items('open'), [], 'no second item for the same alert');
+});
+
 test('without a spend alert set the check does nothing', async (t) => {
   const started = await start(t);
   await started.stack.checkSpendAlert();

@@ -287,6 +287,14 @@ export interface CloudServer {
    */
   startConversation(input: StartConversationInput): StartConversationResult;
   /**
+   * The conversation `startConversation` made for `owner` and `key`, if one exists. Reads only:
+   * a launch that must know whether an earlier attempt got as far as making the run asks here.
+   */
+  startedConversation(input: {
+    owner: string;
+    key: string;
+  }): { conversationId: string } | undefined;
+  /**
    * Creates an empty conversation owned by `owner`, which nothing runs in: a place for an inbox
    * item that belongs to no chat yet. Idempotent on `key`.
    */
@@ -627,6 +635,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         if (!ownInviteStore.active(input.owner)) return { ok: false, reason: 'owner_inactive' };
         const conversation = conversations.create(input.owner, input.title, input.key);
         return { ok: true, conversationId: conversation.conversationId };
+      },
+      startedConversation: (input) => {
+        const conversationId = conversations.startedBy(input.owner, input.key);
+        return conversationId === undefined ? undefined : { conversationId };
       },
       startConversation: (input) => {
         const meta = MessageMetaSchema.safeParse(input.meta);

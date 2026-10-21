@@ -89,8 +89,9 @@ The hard cap is the run budget: from the moment the command starts, the gateway
 refuses any model request of the smoke invite that would take what the invite
 has booked since then (held and settled, every scenario together) above
 `MAKA_CLOUD_SMOKE_MAX_USD`, across UTC midnight and across the restart scenario.
-The command refuses to start unless the server was started on a version that
-enforces it, so restart the server after you update the checkout. The budget is
+The cap is kept in the gateway journal file itself, so it binds every process
+that books into it, even a server still running an older version, and the
+command refuses to start if the file does not carry it. The budget is
 also the amount at which the run stops starting new scenarios. The run refuses
 without `MAKA_CLOUD_LIVE=1`, so nothing happens by accident. If a model key is
 wrong, the research and coding scenarios say so within seconds instead of
@@ -607,9 +608,11 @@ Preparation:
    above the budget, or when the server does not enforce the run budget. The
    budget-stop step lowers the daily limit for a few minutes and puts it back.
    If the run is killed in that window, set the limit back by hand: the line
-   printed at the start of the step says what it was. A run that is killed also
-   leaves its run budget in place, which only holds that invite back; the next
-   smoke run replaces it.
+   printed at the start of the step says what it was. One smoke run holds an
+   invite's run budget at a time: a second run is refused (exit 2) while the
+   first is going. A run that is killed leaves its run budget in place, which
+   only holds that invite back; about two minutes after it stopped renewing it,
+   the next smoke run takes it over.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 

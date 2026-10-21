@@ -1,11 +1,15 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   clearRunBudget,
   type JournalTotals,
   journalEnforcesRunBudgets,
   type RunBudget,
+  RUN_LEASE_MS,
+  RunBudgetHeld,
   readJournalTotals,
+  renewRunBudget,
   setRunBudget,
 } from '@maka-cloud/gateway';
 import { InviteStore } from '@maka-cloud/server';
@@ -41,9 +45,15 @@ export interface LiveSmokeIo {
   /** The run budget kept in the gateway's journal file; the real one by default. */
   runBudget?: {
     enforced: (journalPath: string) => boolean;
-    set: (journalPath: string, inviteId: string, budget: RunBudget) => void;
-    clear: (journalPath: string, inviteId: string) => void;
+    set: (journalPath: string, inviteId: string, budget: RunBudget, runId: string) => void;
+    /** False when the run no longer holds the budget. */
+    renew: (journalPath: string, inviteId: string, runId: string) => boolean;
+    clear: (journalPath: string, inviteId: string, runId: string) => boolean;
   };
+  /** How often the run renews its hold on the budget. */
+  heartbeatMs?: number;
+  /** The id of this run; a fresh one by default. */
+  runId?: string;
   openInvites?: (path: string) => Pick<InviteStore, 'limits' | 'setLimits' | 'resolve' | 'close'>;
   run?: (command: readonly string[]) => Promise<void>;
   now?: () => number;
@@ -441,9 +451,31 @@ export async function smokeCommand(
   const budgets = io.runBudget ?? {
     enforced: journalEnforcesRunBudgets,
     set: setRunBudget,
+    renew: renewRunBudget,
     clear: clearRunBudget,
   };
   const journalPath = join(settings.dataDir, 'gateway-spend.db');
+  const runId = io.runId ?? randomUUID();
+  // From here the gateway journal refuses the smoke invite's bookings, from any process, once what it
+  // has booked since now reaches the budget, whatever the UTC day and whether or not the server
+  // restarts in between. One run holds an invite's budget at a time, so two runs cannot overwrite
+  // each other's cap.
+  try {
+    budgets.set(
+      journalPath,
+      settings.inviteId,
+      { limitUsd: settings.maxUsd, sinceMs: Date.now() },
+      runId,
+    );
+  } catch (error) {
+    print(
+      error instanceof RunBudgetHeld
+        ? 'another smoke run holds the run budget of this invite: wait for it to end (or about two minutes after it was killed), then run again'
+        : 'the run budget could not be set in the gateway journal, so nothing was started',
+    );
+    return 2;
+  }
+  // The budget is only a cap if the journal file itself enforces it; if that cannot be seen, nothing starts.
   let enforced = false;
   try {
     enforced = budgets.enforced(journalPath);
@@ -451,31 +483,48 @@ export async function smokeCommand(
     // Unreadable is as good as not enforced.
   }
   if (!enforced) {
+    try {
+      budgets.clear(journalPath, settings.inviteId, runId);
+    } catch {
+      // The budget stays and limits the invite until the next run takes it over.
+    }
     print(
-      'the server has not been started on a version that enforces the run budget at the gateway: restart it on this version, then run the smoke test again',
+      'the gateway journal does not enforce the run budget, so nothing was started: check that the server and this command run the same version',
     );
     return 2;
   }
-  // From here the gateway refuses the smoke invite's reservations once what it has booked since now
-  // reaches the budget, whatever the UTC day and whether or not the server restarts in between.
-  try {
-    budgets.set(journalPath, settings.inviteId, { limitUsd: settings.maxUsd, sinceMs: Date.now() });
-  } catch {
-    print('the run budget could not be set in the gateway journal, so nothing was started');
-    return 2;
-  }
+  let lost = false;
+  const heartbeat = setInterval(
+    () => {
+      try {
+        if (!budgets.renew(journalPath, settings.inviteId, runId)) lost = true;
+      } catch {
+        // A renewal that could not be written is tried again; the lease outlasts a few misses.
+      }
+    },
+    io.heartbeatMs ?? RUN_LEASE_MS / 4,
+  );
+  heartbeat.unref();
   try {
     print(`smoke test of ${settings.url} as ${settings.inviteId}, budget $${settings.maxUsd}`);
     const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
     const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
     for (const line of formatSmokeReport(report)) print(line);
+    if (lost) {
+      print(
+        'the run budget was taken over by another run while this one was going, so its cap did not hold for the whole run: treat this result as not valid',
+      );
+      return 1;
+    }
     return report.ok ? 0 : 1;
   } finally {
+    clearInterval(heartbeat);
     try {
-      budgets.clear(journalPath, settings.inviteId);
+      // Only this run's own budget: another run's is never touched.
+      budgets.clear(journalPath, settings.inviteId, runId);
     } catch {
-      // A run that is killed leaves the budget too: the invite stays capped until the next run replaces it.
-      print('the run budget could not be cleared; it stays until the next smoke run replaces it');
+      // A run that is killed leaves the budget too: the invite stays capped until the next run takes it over.
+      print('the run budget could not be cleared; it stays until the next smoke run takes it over');
     }
   }
 }
