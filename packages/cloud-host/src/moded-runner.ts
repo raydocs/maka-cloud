@@ -52,12 +52,17 @@ export function withModes(runner: Runner, modes: ModesConfig): Runner {
     };
   };
 
-  // Every optional method of the inner runner is forwarded, and only those it has: a runner
+  // Every optional member of the inner runner is forwarded (`steerable` too), and only those it has: a runner
   // without `recover` must stay one the orchestrator ends as orphaned at restart, and one with it
   // must stay resumable, with the same model and effort it started with.
   const { recover, stopOrphaned } = runner;
   return {
     name: runner.name,
+    // The orchestrator refuses messages to a runner that does not say it takes them, so the
+    // wrapper says what the runner under it says, when it is asked.
+    get steerable() {
+      return runner.steerable;
+    },
     start: async (spec: RunSpec): Promise<RunHandle> => runner.start(await moded(spec)),
     ...(stopOrphaned ? { stopOrphaned: stopOrphaned.bind(runner) } : {}),
     ...(recover
