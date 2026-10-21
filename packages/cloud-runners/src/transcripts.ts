@@ -230,8 +230,15 @@ export interface MirrorOptions {
   onKept?(lines: readonly TranscriptLine[]): void;
 }
 
-/** The SDK's store for a task, with a way to wait until everything it was given is kept or has failed. */
-export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
+/**
+ * The SDK's store for a task, with a way to wait until everything it was given is kept or has
+ * failed, and the first batch that is still not kept (the SDK offers a refused batch again, so a
+ * refusal that a retry then kept is not a failure).
+ */
+export type TranscriptMirror = SessionStore & {
+  drain(): Promise<void>;
+  unkept(): string | undefined;
+};
 
 /**
  * The SDK's `SessionStore` for one task. The SDK hands it every line the CLI writes to its
@@ -247,20 +254,27 @@ export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
 export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror {
   const { taskId, store, redact } = options;
   let chain: Promise<unknown> = Promise.resolve();
+  // Refused batches by content, until the same batch is kept.
+  const refused = new Map<string, string>();
   return {
     drain: async () => {
       await chain;
     },
+    unkept: () => refused.values().next().value,
     append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
       const run = async (): Promise<void> => {
         const lines = entries.map((entry) => scrubbed(entry, redact));
         const committed = await store.append(taskId, key, lines);
+        refused.delete(batch);
         options.onKept?.(committed);
       };
+      const batch = JSON.stringify([key, entries]);
       const next = chain.then(run, run);
       chain = next.catch(() => undefined);
       return next.catch((error) => {
-        options.onProblem?.(`a transcript batch was not kept: ${errorMessage(error)}`);
+        const message = `a transcript batch was not kept: ${errorMessage(error)}`;
+        if (!refused.has(batch)) refused.set(batch, message);
+        options.onProblem?.(message);
         throw error;
       });
     },
