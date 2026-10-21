@@ -187,7 +187,15 @@ export class BoxPool implements SandboxProvider {
 
   private async setupChoice(tenantId: string, taskId: TaskId): Promise<SetupChoice | undefined> {
     try {
-      return await this.options.setupOf?.(tenantId, taskId);
+      const choice = await this.options.setupOf?.(tenantId, taskId);
+      if (choice !== undefined && choice.tenantId !== tenantId) {
+        // A snapshot of another invite is never a start for this one, whatever the lookup said.
+        this.options.onWarning?.(
+          `the setup snapshot ${choice.snapshotId} is not this invite's; starting from the template`,
+        );
+        return undefined;
+      }
+      return choice;
     } catch (error) {
       // No setup snapshot is not a reason to keep the task from a box.
       this.options.onWarning?.(`could not look up the setup snapshot for task ${taskId}`, error);

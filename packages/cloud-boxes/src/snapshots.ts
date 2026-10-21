@@ -11,6 +11,8 @@ const DEFAULT_SETUP_TIMEOUT_SECONDS = 1_200;
 const STEP_TIMEOUT_SECONDS = 300;
 const OUTPUT_TAIL = 2_000;
 
+type SnapshotRecord = Awaited<ReturnType<InstaboxClient['listSnapshots']>>[number];
+
 /** The part of the instabox client the builder uses. */
 export type SnapshotApi = Pick<
   InstaboxClient,
@@ -43,6 +45,8 @@ export interface SetupRecipe {
 
 export interface SetupSnapshot {
   snapshotId: string;
+  /** Whose snapshot this is; the pool checks it against the task's invite. */
+  tenantId: string;
   /** The hash of the setup this snapshot holds; boxes made from it carry it as `maka.setup`. */
   setupHash: string;
   /** `repoKey` of the repository, for the `maka.repo` label and the checkout directory. */
@@ -99,11 +103,27 @@ export function setupHash(
  * racing end with one snapshot. It carries the invite, the repository and the setup hash.
  */
 export function snapshotName(tenantId: string, repoUrl: string, hash: string): string {
-  return `mk-${sha(tenantId).slice(0, 8)}-${sha(repoUrl).slice(0, 8)}-${hash.slice(0, 16)}`;
+  return `${repoPrefix(tenantId, repoUrl)}${hash.slice(0, 16)}`;
 }
 
+// 96 bits of the invite and 48 of the repository: a short prefix is not a proof of ownership (two
+// invites were found to share 8 hex digits), so the name is long and the description is checked too.
 const repoPrefix = (tenantId: string, repoUrl: string): string =>
-  `mk-${sha(tenantId).slice(0, 8)}-${sha(repoUrl).slice(0, 8)}-`;
+  `mk-${sha(tenantId).slice(0, 24)}-${sha(repoUrl).slice(0, 12)}-`;
+
+/**
+ * What the snapshot's description says it is, with the full digests. A snapshot found by name is used,
+ * or deleted, only when this matches (and when the API returns no description, the long name stands).
+ */
+function ownerRecord(tenantId: string, repoUrl: string, hash: string): string {
+  return `maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=${hash}`;
+}
+
+const ownsPrefix = (description: string | undefined, tenantId: string, repoUrl: string): boolean =>
+  description === undefined ||
+  description.startsWith(`maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=`);
+
+export class SnapshotOwnerError extends Error {}
 
 /** The directory of a repository's checkout in a box. */
 export function repoDir(repoUrl: string): string {
@@ -164,9 +184,11 @@ export class SetupSnapshots {
     const { api } = this.options;
     const existing = (await api.listSnapshots()).find((snapshot) => snapshot.name === name);
     if (existing) {
+      this.assertOwned(existing, recipe, hash);
       if (existing.status === 'ready')
         return {
           snapshotId: existing.id,
+          tenantId: recipe.tenantId,
           setupHash: hash,
           repo: repoKey(recipe.repoUrl),
           name,
@@ -177,6 +199,7 @@ export class SetupSnapshots {
         const done = await api.waitForSnapshot(existing.id);
         return {
           snapshotId: done.id,
+          tenantId: recipe.tenantId,
           setupHash: hash,
           repo: repoKey(recipe.repoUrl),
           name,
@@ -225,7 +248,7 @@ export class SetupSnapshots {
       try {
         const snapshot = await api.createSnapshot(box.machineId, {
           name,
-          description: `setup ${hash.slice(0, 12)} of ${recipe.repoUrl}`,
+          description: ownerRecord(recipe.tenantId, recipe.repoUrl, hash),
         });
         snapshotId = snapshot.id;
       } catch (error) {
@@ -233,9 +256,11 @@ export class SetupSnapshots {
         if ((error as { status?: number }).status !== 409) throw error;
         const winner = (await api.listSnapshots()).find((snapshot) => snapshot.name === name);
         if (!winner) throw error;
+        this.assertOwned(winner, recipe, hash);
         const done = await api.waitForSnapshot(winner.id);
         return {
           snapshotId: done.id,
+          tenantId: recipe.tenantId,
           setupHash: hash,
           repo: repoKey(recipe.repoUrl),
           name,
@@ -245,6 +270,7 @@ export class SetupSnapshots {
       const ready = await api.waitForSnapshot(snapshotId);
       return {
         snapshotId: ready.id,
+        tenantId: recipe.tenantId,
         setupHash: hash,
         repo: repoKey(recipe.repoUrl),
         name,
@@ -253,6 +279,17 @@ export class SetupSnapshots {
     } finally {
       await Promise.resolve(box.release()).catch((error) =>
         this.options.onWarning?.(`could not give back builder box ${box.machineId}`, error),
+      );
+    }
+  }
+
+  private assertOwned(snapshot: SnapshotRecord, recipe: SetupRecipe, hash: string): void {
+    if (
+      snapshot.description !== undefined &&
+      snapshot.description !== ownerRecord(recipe.tenantId, recipe.repoUrl, hash)
+    ) {
+      throw new SnapshotOwnerError(
+        `snapshot ${snapshot.name} belongs to another invite, repository or setup`,
       );
     }
   }
@@ -282,7 +319,11 @@ export class SetupSnapshots {
   private async expire(recipe: SetupRecipe): Promise<void> {
     const prefix = repoPrefix(recipe.tenantId, recipe.repoUrl);
     const mine = (await this.options.api.listSnapshots())
-      .filter((snapshot) => snapshot.name.startsWith(prefix))
+      .filter(
+        (snapshot) =>
+          snapshot.name.startsWith(prefix) &&
+          ownsPrefix(snapshot.description, recipe.tenantId, recipe.repoUrl),
+      )
       .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
     const keep = Math.max(1, this.options.keep ?? 2);
     for (const old of mine.slice(0, Math.max(0, mine.length - keep))) {

@@ -106,6 +106,11 @@ Not here: `.agents/resume` after a wake (with the setup snapshots).
   awake-over-asleep. With none, a new box is made from the snapshot and labelled with the setup and the
   repository (`maka.repo`). If instabox says the snapshot is gone (400/404/422) the box is made from the
   template instead, with no setup labels, and a warning is raised. A failing lookup is a warning, not a failure.
+- Whose snapshot is whose: the name is `mk-<24 hex of sha256(invite)>-<12 hex of sha256(repo URL)>-<16 hex of
+  the setup hash>` (an 8-digit prefix collided for two real ids), and the description holds the full
+  digests. A snapshot found by name is reused or deleted only when its description, if the API returns
+  one, is exactly this invite's, repository's and setup's; otherwise the build refuses. The pool also
+  refuses a `SetupChoice` whose `tenantId` is not the task's invite and starts from the template.
 - `.agents/resume` of the checkout (`/data/maka/repos/<repo>`) runs after the guard, on every wake and on
   every box made from a setup snapshot, with a limit (default 120 s). If it fails, times out or cannot run,
   `onWarning` and `onResumeFailure` hear of it and the box is still handed out: the task starts without the

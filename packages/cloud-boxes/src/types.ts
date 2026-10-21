@@ -19,6 +19,8 @@ export type BoxUseReason = 'create' | 'restore' | 'wake';
 
 /** A built setup snapshot a task's repository can start boxes from (see `SetupSnapshots`). */
 export interface SetupChoice {
+  /** Whose snapshot this is. The pool refuses a choice that names another invite than the task's. */
+  tenantId: string;
   setupHash: string;
   /** `repoKey` of the repository: names the checkout directory in the box. */
   repo: string;

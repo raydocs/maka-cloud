@@ -10,7 +10,8 @@ const B = 'inv_bbbbbbbbbbbb';
 const MIN = 60_000;
 const REPO = 'https://github.com/example/app.git';
 const SHA = 'a'.repeat(40);
-const choice = (hash = 'h1'.padEnd(16, '0'), snapshotId = 'sn_setup') => ({
+const choice = (hash = 'h1'.padEnd(16, '0'), snapshotId = 'sn_setup', tenantId = A) => ({
+  tenantId,
   setupHash: hash,
   repo: repoKey(REPO),
   snapshotId,
@@ -27,6 +28,18 @@ describe('boxes and setup snapshots', () => {
     assert.equal(request.templateId, undefined);
     assert.equal(labelsOf(t.fleet, lease.machineId)?.[LABEL.setup], choice().setupHash);
     assert.equal(labelsOf(t.fleet, lease.machineId)?.[LABEL.repo], repoKey(REPO));
+  });
+
+  it('never starts a box from another invite’s setup snapshot, whatever the lookup returned', async () => {
+    const t = setup({ setupOf: async () => choice('h1'.padEnd(16, '0'), 'sn_of_b', B) });
+    const lease = await t.pool.acquire({ tenantId: A, taskId: 't1' });
+    const [request] = t.fleet.callsTo('createMachine')[0] as [
+      { snapshotId?: string; templateId?: string },
+    ];
+    assert.equal(request.snapshotId, undefined);
+    assert.equal(request.templateId, 't_node');
+    assert.equal(labelsOf(t.fleet, lease.machineId)?.[LABEL.setup], undefined);
+    assert.ok(t.warnings.some((w) => w.includes('sn_of_b')));
   });
 
   it('starts from the template, without setup labels, when the setup snapshot is gone', async () => {
