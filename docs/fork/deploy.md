@@ -493,6 +493,12 @@ sandbox user), a group the sandbox user shares with it, a `claude` binary it can
 passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
 that fails the check refuses the turn with the reason.
 
+The check also tries the firewall as that account: it may not run anything through sudo (`sudo -n -l`
+must fail) and must not be able to create an iptables or ip6tables chain, so code the agent runs
+cannot take the egress rules away. The server itself starts nothing as the sandbox user either: a run
+whose command is not handed to the agent account is refused before the box is touched (the pinned
+CLI install, which writes the sandbox user's own `~/.maka-cli`, is the one exception).
+
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
 itself off; and at most 3 runs in a row are woken by the checks of their own

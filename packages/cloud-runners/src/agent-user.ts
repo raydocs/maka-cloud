@@ -42,7 +42,12 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
  */
 export function asAgent(commandLine: string, channel: AgentChannel): string {
   const { user } = assertAgentChannel(channel);
-  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
+  return `${agentPrefix(user)}sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
+}
+
+/** What every command of `asAgent` starts with; `RemoteMachine.launch` looks for it in a task's script. */
+export function agentPrefix(user: string): string {
+  return `sudo -n -u ${shq(user)} --preserve-env -- `;
 }
 
 /**
@@ -84,6 +89,24 @@ yes_no() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 echo "FACT dev_uid=$(id -u)"
 echo "FACT agent_uid=$(as_agent id -u 2>/dev/null || echo none)"
 echo "FACT agent_sudo=$(yes_no as_agent sudo -n true)"
+# A sudo rule for one command (iptables) still lets \`sudo -n true\` fail; \`-l\` says whether the account may run anything.
+echo "FACT agent_sudo_list=$(yes_no as_agent sudo -n -l)"
+# The firewall: can this account change network policy at all (a capability, a setuid tool)? A scratch
+# chain is made and taken away again, so a box that fails the probe is left as it was.
+chain="MAKA_PROBE_$$"
+for tool in iptables ip6tables; do
+  bin=$(PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" command -v "$tool" 2>/dev/null || true)
+  if [ -n "$bin" ]; then
+    if as_agent "$bin" -w -N "$chain" >/dev/null 2>&1; then
+      "$bin" -w -X "$chain" >/dev/null 2>&1 || sudo -n "$bin" -w -X "$chain" >/dev/null 2>&1 || true
+      echo "FACT agent_$tool=yes"
+    else
+      echo "FACT agent_$tool=no"
+    fi
+  else
+    echo "FACT agent_$tool=absent"
+  fi
+done
 echo "FACT chan_enter=$(yes_no as_agent sh -c 'cd "$1"' sh "$scratch/chan")"
 echo "FACT chan_list=$(yes_no as_agent ls "$scratch/chan")"
 echo "FACT chan_read=$(yes_no as_agent cat "$scratch/chan/probe.in")"
@@ -98,7 +121,7 @@ echo "FACT workspace_cleanup=$(yes_no rm "$scratch/workspace/f")"
 export function agentIsolationProblems(output: string): string[] {
   const facts = new Map<string, string>();
   for (const line of output.split('\n')) {
-    const match = /^FACT ([a-z_]+)=(.*)$/u.exec(line.trim());
+    const match = /^FACT ([a-z0-9_]+)=(.*)$/u.exec(line.trim());
     if (match) facts.set(match[1] as string, match[2] as string);
   }
   const problems: string[] = [];
@@ -115,6 +138,13 @@ export function agentIsolationProblems(output: string): string[] {
     if (facts.get(fact) !== expected) problems.push(problem);
   };
   mustBe('agent_sudo', 'no', 'the agent account can use sudo');
+  mustBe('agent_sudo_list', 'no', 'the agent account may run commands through sudo');
+  // Absent is fine (no such tool, no such rules); an answer that is missing or "yes" is not.
+  for (const tool of ['iptables', 'ip6tables']) {
+    if (facts.get(`agent_${tool}`) !== 'no' && facts.get(`agent_${tool}`) !== 'absent') {
+      problems.push(`the agent account can change the firewall (${tool})`);
+    }
+  }
   mustBe('chan_enter', 'no', 'the agent account can enter the channel directory');
   mustBe('chan_list', 'no', 'the agent account can list the channel directory');
   mustBe('chan_read', 'no', 'the agent account can read the channel');

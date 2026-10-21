@@ -12,6 +12,9 @@ import { MemorySessionStore } from '../session-store.js';
 import type { ModelAccess, ModelAccessProvider } from '../types.js';
 import { CLAUDE_CLI, CODEX_CLI } from './fake-cli.js';
 
+/** The account the harness's runners run CLIs as; the sudo double only records it. */
+export const HARNESS_AGENT = { user: 'maka-agent', group: 'maka' };
+
 export const API_KEY = 'sk-test-api-key-1234567890';
 export const MCP_TOKEN = 'mko_test_token_abcdefghijkl';
 
