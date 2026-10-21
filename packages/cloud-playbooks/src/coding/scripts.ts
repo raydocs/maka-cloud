@@ -268,9 +268,10 @@ while IFS= read -r -d '' p; do
   fi
 done < "$bk/reverted"
 # A test that cannot read a file of the checkout fails with an ordinary exit status, which would be
-# taken for "the test fails on the base": refuse the base check when the agent cannot read all of it.
+# taken for "the test fails on the base": refuse the base check when a file of the sandbox user's
+# making is not the agent group's to read (the agent's own files are its own).
 if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
-  bad=$(find "$ws" -xdev ! -type l \\( ! -group "$MAKA_AGENT_GROUP" -o ! -perm -g+rw \\) -print -quit)
+  bad=$(find "$ws" -xdev ! -type l -user "$(id -u)" \\( ! -group "$MAKA_AGENT_GROUP" -o \\( -type d ! -perm -g+rx \\) -o \\( ! -type d ! -perm -g+r \\) \\) -print -quit)
   [ -z "$bad" ] || { echo "UNREADABLE_FOR_AGENT $bad"; exit 0; }
 fi
 echo "REVERTED $count"
