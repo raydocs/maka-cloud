@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,7 @@ import { DEFAULT_MODES } from '@maka-cloud/modes';
 import type { RunHandle, RunnerEvent, RunSpec } from '@maka-cloud/orchestrator';
 import { Fleet, FixedMachineProvider } from '@maka-cloud/runners';
 import { MemoryCodingDeliveries } from '../deliveries.js';
+import { verifyCodingManifest } from '../playbook.js';
 import { type AgentRunner, CodingRunner, type CodingRunnerOptions } from '../runner.js';
 import {
   type CodingSandbox,
@@ -491,4 +493,23 @@ export function zeroStats(runner: CodingRunner): void {
   for (const [key, value] of Object.entries(stats)) {
     if (value !== 0) throw new Error(`${key} is ${value}, not 0: ${JSON.stringify(stats)}`);
   }
+}
+
+/**
+ * The task was stopped (or ended) while the review was not done: the change that passed the checks
+ * is already on the host, kept for the owner, with the reason and without a verdict of its own.
+ */
+export async function keptAfterStop(h: Harness, id: string) {
+  const dir = join(h.handoff, id);
+  const delivery = await h.deliveries.get(id);
+  assert.ok(delivery, 'the verified change is kept, not lost');
+  assert.equal(delivery.publishedPr, undefined);
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.equal(record.result, 'verified');
+  assert.match(record.kept?.reason ?? '', /ended before its independent review finished/);
+  assert.ok(await fs.readFile(delivery.changesPath, 'utf8'), 'the change set is on disk');
+  assert.ok(await fs.readFile(join(dir, 'change.patch'), 'utf8'), 'the patch is on disk');
+  const manifest = await readJson(join(dir, 'result.json'));
+  assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
+  assert.equal(verifyCodingManifest(manifest).ok, false, 'never taken for a delivery');
 }

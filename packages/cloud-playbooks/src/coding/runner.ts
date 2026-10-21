@@ -350,6 +350,8 @@ class CodingRun implements RunHandle {
   private ended = false;
   private terminal: RunnerEvent | undefined;
   private cleanupPromise: Promise<void> | undefined;
+  /** The write that keeps the verified change before its review starts, while it runs. */
+  private keeping: Promise<void> | undefined;
   private workspace: SandboxWorkspace | undefined;
   private agentHandle: RunHandle | undefined;
   private readonly agentReleases = new WeakMap<RunHandle, Promise<void>>();
@@ -396,6 +398,9 @@ class CodingRun implements RunHandle {
       this.cancelled = true;
       this.abort.abort();
     }
+    // A change being kept is written from memory, not from the workspace: the stop waits for it
+    // so that the cancel, once it returns, leaves the change on disk.
+    await this.keeping?.catch(() => undefined);
     await this.cleanup();
     // A cancel that returns says everything the task started is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
@@ -472,6 +477,9 @@ class CodingRun implements RunHandle {
         const outcome = await this.attempt(task, baseSha, brief, vendor, attempt, failureBrief);
         if (outcome.ok) {
           verification.result = 'verified';
+          // The verified change is on the host from here on: a stop, a crash or an error during the
+          // review cannot lose it. The delivery below replaces this record.
+          await this.keepUntilReviewed(task, verification, outcome);
           const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
           // A change nobody could review, or one with a serious problem left after the one fix, is
           // not delivered: it is kept for the owner to look at, with the reason. The task is not
@@ -1394,24 +1402,54 @@ class CodingRun implements RunHandle {
     return Buffer.concat(parts);
   }
 
-  /** Writes the verified change and its record next to the result, and records the delivery. */
+  /**
+   * Keeps the change that passed the checks, as one the owner is to look at, before anything
+   * else happens to it. Its reason is the one that stands if the task ends in the review: a stop, a
+   * crash or an error. The write needs no workspace and no agent, and a stop that arrives during it
+   * does not cut it short (`cancel` waits for it).
+   */
+  private keepUntilReviewed(
+    task: CodingTask,
+    verification: Verification,
+    outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+  ): Promise<void> {
+    const reason =
+      "the change passed the repository's checks, but the task ended before its independent review finished";
+    const pending: ReviewRecord = {
+      mode: this.mode,
+      modesVersion: this.options.modes?.version ?? 0,
+      status: 'unavailable',
+      reason,
+    };
+    this.keeping = this.deliver(task, verification, outcome, pending, reason, false);
+    return this.keeping;
+  }
+
+  /**
+   * Writes the verified change and its record next to the result, and records the delivery.
+   * `cancellable: false` finishes the writes even when the task is stopped meanwhile.
+   */
   private async deliver(
     task: CodingTask,
     verification: Verification,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
     review: ReviewRecord,
     kept?: string,
+    cancellable = true,
   ): Promise<void> {
+    const guard = <T>(promise: Promise<T>): Promise<T> =>
+      cancellable ? this.guard(promise) : promise;
     const changesPath = join(this.hostDir, 'changes.json');
     const verificationPath = join(this.hostDir, 'verification.json');
     const changes = JSON.stringify(outcome.collected.changeSet);
-    await this.guard(writeHostFile(changesPath, changes));
-    await this.guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
+    await guard(writeHostFile(changesPath, changes));
+    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
     // review.md first: verification.json holds its hash, and the supervisor holds the two together.
     const reviewText = reviewMarkdown(review);
-    await this.guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
+    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
+    else delete verification.kept;
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
     verification.repro = outcome.repro;
@@ -1419,8 +1457,8 @@ class CodingRun implements RunHandle {
       path: file.path,
       status: file.status,
     }));
-    await this.guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
-    await this.guard(
+    await guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
+    await guard(
       this.options.deliveries.record({
         taskId: this.spec.taskId,
         repo: task.repo,
@@ -1457,7 +1495,7 @@ class CodingRun implements RunHandle {
         kept === undefined ? agent.knownIssues : [plain(kept, 300), ...agent.knownIssues],
       artifacts: ['change.patch', 'changes.json', 'verification.json', 'review.md'],
     };
-    await this.guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));
+    await guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));
   }
 
   /** Both vendors failed: an honest manifest of what was tried. */
