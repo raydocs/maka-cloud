@@ -59,6 +59,7 @@ const ANSWER_FAILURE: Record<string, number> = {
   closed: 409,
   already_answered: 409,
   question_open: 409,
+  unavailable: 503,
   stopped: 503,
 };
 
