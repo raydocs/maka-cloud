@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { InstaboxOperationError, isQuotaExceeded } from '@maka-cloud/instabox';
 import type { InstaboxApiError, InstaboxMachine } from '@maka-cloud/instabox';
 import type { TaskId } from '@maka-cloud/orchestrator';
@@ -165,7 +166,6 @@ export class BoxPool implements SandboxProvider {
   /** Invites with a builder box in this process. */
   private readonly builders = new Set<string>();
   private closed = false;
-  private createCount = 0;
   /** The most boxes the account let the pool have, once instabox refused a create. */
   private learned: { boxes: number; at: number } | undefined;
 
@@ -310,7 +310,7 @@ export class BoxPool implements SandboxProvider {
                 ...this.options.source(tenantId),
                 metadata: builderLabels(tenantId, job),
               },
-              { idempotencyKey: `maka-box-${name}-${++this.createCount}` },
+              { idempotencyKey: `maka-box-${name}-${randomUUID()}` },
             );
             machineId = operation.machineId;
             await this.api.waitForOperation(operation.id);
@@ -533,7 +533,7 @@ export class BoxPool implements SandboxProvider {
         accepted = undefined;
         const operation = await this.api.createMachine(
           { name, ...source, metadata: this.desiredLabels(box) },
-          { idempotencyKey: `maka-box-${name}-${++this.createCount}` },
+          { idempotencyKey: `maka-box-${name}-${randomUUID()}` },
         );
         accepted = operation.machineId;
         await this.api.waitForOperation(operation.id);
