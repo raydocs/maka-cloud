@@ -12,7 +12,13 @@ import type { SessionId, StoredEvent, TaskEvent, TaskId } from './types.js';
  * change in the same step as the append that caused it.
  */
 export interface TaskStore {
-  append(event: TaskEvent, at: number): Promise<StoredEvent>;
+  /**
+   * With a `fence`, the append is refused with `StaleEpochError` when the fenced task's latest
+   * epoch is not the fence's; a `task_attempt` is refused unless its epoch is the latest plus
+   * one. Both checks and the append are one atomic step, so of two writers racing for the same
+   * epoch exactly one wins, and a writer that lost the task is refused at its first write.
+   */
+  append(event: TaskEvent, at: number, fence?: Fence): Promise<StoredEvent>;
   /** Entries with `seq` greater than `afterSeq` (all of them when omitted), in order. */
   read(afterSeq?: number): Promise<StoredEvent[]>;
   /** The log entries of one task in order; empty for an id that was never created. */
@@ -29,6 +35,47 @@ export interface TaskStore {
   countCreatedSince(rootSessionId: SessionId, sinceMs: number): number;
 }
 
+/** The epoch a write was made under, for the task whose driver made it. */
+export interface Fence {
+  taskId: TaskId;
+  epoch: number;
+}
+
+/** A write was refused because a newer attempt drives the task (or, for an attempt, another won the epoch). */
+export class StaleEpochError extends Error {
+  constructor(
+    readonly taskId: TaskId,
+    readonly writerEpoch: number,
+    readonly currentEpoch: number,
+  ) {
+    super(
+      `Task ${taskId} is at epoch ${currentEpoch}; a write under epoch ${writerEpoch} is stale`,
+    );
+    this.name = 'StaleEpochError';
+  }
+}
+
+/** The check every store makes before it appends; `current` is the fenced task's latest epoch. */
+export function assertEpoch(
+  event: TaskEvent,
+  fence: Fence | undefined,
+  current: (id: TaskId) => number | undefined,
+): void {
+  if (event.type === 'task_attempt') {
+    const latest = current(event.taskId);
+    if (latest === undefined || event.epoch !== latest + 1) {
+      throw new StaleEpochError(event.taskId, event.epoch, latest ?? 0);
+    }
+  }
+  if (fence !== undefined) {
+    const latest = current(fence.taskId);
+    // A task the store does not know cannot be written under.
+    if (latest === undefined || fence.epoch !== latest) {
+      throw new StaleEpochError(fence.taskId, fence.epoch, latest ?? 0);
+    }
+  }
+}
+
 const TERMINAL_EVENTS: ReadonlySet<TaskEvent['type']> = new Set([
   'task_succeeded',
   'task_failed',
@@ -38,6 +85,7 @@ const TERMINAL_EVENTS: ReadonlySet<TaskEvent['type']> = new Set([
 interface TaskRow {
   events: StoredEvent[];
   terminal: boolean;
+  epoch: number;
 }
 
 export class MemoryTaskStore implements TaskStore {
@@ -48,7 +96,8 @@ export class MemoryTaskStore implements TaskStore {
   private readonly stopPending = new Set<TaskId>();
   private readonly createdByRoot = new Map<SessionId, number[]>();
 
-  async append(event: TaskEvent, at: number): Promise<StoredEvent> {
+  async append(event: TaskEvent, at: number, fence?: Fence): Promise<StoredEvent> {
+    assertEpoch(event, fence, (id) => this.rows.get(id)?.epoch);
     const stored: StoredEvent = deepFreeze({
       seq: this.log.length + 1,
       at,
@@ -92,7 +141,7 @@ export class MemoryTaskStore implements TaskStore {
     if (event.type === 'task_created') {
       if (this.rows.has(event.taskId)) return;
       const root = event.rootSessionId ?? event.sessionId;
-      this.rows.set(event.taskId, { events: [stored], terminal: false });
+      this.rows.set(event.taskId, { events: [stored], terminal: false, epoch: 1 });
       this.active.add(event.taskId);
       if (event.parentTaskId !== undefined) {
         const siblings = this.children.get(event.parentTaskId) ?? [];
@@ -107,6 +156,7 @@ export class MemoryTaskStore implements TaskStore {
     const row = this.rows.get(event.taskId);
     if (!row) return;
     row.events.push(stored);
+    if (event.type === 'task_attempt') row.epoch = event.epoch;
     if (event.type === 'task_stop_pending') this.stopPending.add(event.taskId);
     if (event.type === 'task_stopped') this.stopPending.delete(event.taskId);
     if (!row.terminal && TERMINAL_EVENTS.has(event.type)) {

@@ -11,11 +11,20 @@ import { Handoff, type HandoffPaths } from './handoff.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
 import { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
 import type { RunHandle, RunnerRegistry } from './runner.js';
-import type { TaskStore } from './store.js';
 import {
+  cleanIntent,
+  clipOutput,
+  MAX_STEPS_PER_TASK,
+  type StepIntentResult,
+  type StepLog,
+} from './steps.js';
+import { type Fence, StaleEpochError, type TaskStore } from './store.js';
+import {
+  type AttemptCause,
   isTerminal,
   OrchestratorError,
   type SessionId,
+  type StepId,
   type StopPendingCause,
   type StoredEvent,
   type TaskEvent,
@@ -37,6 +46,8 @@ const MAX_TITLE_LENGTH = 200;
 const MAX_KEY_LENGTH = 200;
 /** Keys cancelled before their task existed, remembered so a late delegation is refused. */
 const MAX_TOMBSTONES = 10_000;
+/** Tasks this process was fenced out of, remembered so it writes nothing more for them. */
+const MAX_FENCED = 10_000;
 export const DEFAULT_ARCHIVE_CACHE: CacheLimits = { maxEntries: 512, maxBytes: 4 * 1024 * 1024 };
 
 export interface OrchestratorOptions {
@@ -174,6 +185,8 @@ export class Orchestrator {
   /** Keyed delegations being created, so a repeat waits for the first instead of writing twice. */
   private readonly keyed = new Map<TaskId, Promise<void>>();
   private readonly tombstones = new Set<TaskId>();
+  /** Tasks a newer attempt (another process) took over: this process writes nothing for them. */
+  private readonly fenced = new Set<TaskId>();
   private restoring = false;
   private writeChain: Promise<unknown> = Promise.resolve();
   private endpoint: string | undefined;
@@ -658,6 +671,13 @@ export class Orchestrator {
       this.tasks.set(taskId, task);
       this.activeByRoot.add(task.rootSessionId);
     }
+    // Take every unfinished task over before anything else: from here a process that still
+    // drives one of them (a restart that raced its predecessor) is refused at its next write. A
+    // task another process took first is let go of, and is not ended below.
+    for (const taskId of [...this.tasks.keys()]) {
+      const epoch = await this.beginAttempt(taskId, 'restart');
+      if (epoch !== undefined) await this.interruptOpenSteps({ taskId, epoch });
+    }
     await this.recordRecoveredSpend();
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
@@ -881,6 +901,8 @@ export class Orchestrator {
       this.overBudget(taskId)
     )
       return;
+    // Every write for the run carries this epoch, and a newer attempt refuses them.
+    const fence: Fence = { taskId, epoch: task.epoch };
     const left = this.budgetLeft(taskId);
     const executor = this.auth.issue({ parentTaskId: taskId });
     this.executorSessions.set(taskId, executor.sessionId);
@@ -893,6 +915,7 @@ export class Orchestrator {
         runner: runnerName,
         briefPath: paths.briefPath,
         resultPath: paths.resultPath,
+        steps: this.stepLog(fence),
         ...(left === undefined
           ? {}
           : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),
@@ -902,11 +925,14 @@ export class Orchestrator {
       });
     } catch (error) {
       this.starting.delete(taskId);
-      await this.recordRunnerOutcome({
-        type: 'task_failed',
-        taskId,
-        reason: `runner failed to start: ${errorMessage(error)}`,
-      });
+      await this.recordRunnerOutcome(
+        {
+          type: 'task_failed',
+          taskId,
+          reason: `runner failed to start: ${errorMessage(error)}`,
+        },
+        fence,
+      );
       return;
     }
     // One reader per handle, started the moment the handle exists and living as long as its
@@ -920,6 +946,7 @@ export class Orchestrator {
       new Promise<boolean>((resolve) => {
         reports = resolve;
       }),
+      fence,
     ).catch(() => undefined);
     this.readers.set(taskId, reading);
     void reading.finally(() => {
@@ -941,10 +968,14 @@ export class Orchestrator {
       this.handles.set(taskId, handle);
       this.starting.delete(taskId);
       try {
-        const started = await this.record({ type: 'task_started', taskId }, () => {
-          if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
-            throw new Superseded();
-        });
+        const started = await this.record(
+          { type: 'task_started', taskId },
+          () => {
+            if (this.isStopping(taskId) || this.ancestorStopped(taskId) || this.overBudget(taskId))
+              throw new Superseded();
+          },
+          fence,
+        );
         // Dropped: whatever is stopping the task also holds the handle now and ends its stream;
         // the reader still records the spend the run reports until then.
         recorded = started !== undefined;
@@ -956,15 +987,137 @@ export class Orchestrator {
         this.handles.delete(taskId);
         this.starting.add(taskId);
         await this.cancelUnrecorded(taskId, handle, reading);
-        await this.recordRunnerOutcome({
-          type: 'task_failed',
-          taskId,
-          reason: `the run's start could not be recorded: ${errorMessage(error)}`,
-        });
+        await this.recordRunnerOutcome(
+          {
+            type: 'task_failed',
+            taskId,
+            reason: `the run's start could not be recorded: ${errorMessage(error)}`,
+          },
+          fence,
+        );
       }
     } finally {
       reports(recorded);
     }
+  }
+
+  /**
+   * Starts a new attempt to drive the task: the next epoch, written in the write chain and
+   * refused by the store when another process got there first (then this process lets go of the
+   * task). Returns the epoch, or undefined when the attempt was not recorded. The first attempt is
+   * the task's creation (epoch 1); this takes over a task another attempt drove, whatever its state.
+   */
+  private async beginAttempt(taskId: TaskId, cause: AttemptCause): Promise<number | undefined> {
+    const epoch = (this.tasks.get(taskId)?.epoch ?? 0) + 1;
+    const stored = await this.record({ type: 'task_attempt', taskId, epoch, cause }, () => {
+      const task = this.tasks.get(taskId);
+      if (!task || task.epoch + 1 !== epoch) throw new Superseded();
+    });
+    return stored === undefined ? undefined : epoch;
+  }
+
+  /**
+   * Marks every step the previous attempt left running as interrupted, in the log, under the
+   * new epoch: its driver is gone, so whether the step finished is unknown.
+   */
+  private async interruptOpenSteps(fence: Fence): Promise<void> {
+    const open = [...(this.tasks.get(fence.taskId)?.steps.values() ?? [])].filter(
+      (step) => step.state === 'running' && step.epoch < fence.epoch,
+    );
+    for (const step of open) {
+      await this.record(
+        {
+          type: 'step_interrupted',
+          taskId: fence.taskId,
+          epoch: fence.epoch,
+          stepId: step.stepId,
+        },
+        undefined,
+        fence,
+      );
+    }
+  }
+
+  /** The step log one attempt's runner writes to; see `StepLog`. */
+  private stepLog(fence: Fence): StepLog {
+    const { taskId, epoch } = fence;
+    return {
+      intent: async (step) => {
+        const clean = cleanIntent(step);
+        if (!clean) return { status: 'refused', reason: 'not a usable step' };
+        // Set by the guard, which TypeScript cannot see from here.
+        let result = {
+          status: 'refused',
+          reason: 'the task is ending, or a newer attempt drives it',
+        } as StepIntentResult;
+        const stored = await this.record(
+          { type: 'step_intent', taskId, epoch, ...clean },
+          () => {
+            const task = this.tasks.get(taskId);
+            if (!task || this.isStopping(taskId)) throw new Superseded();
+            const known = task.steps.get(clean.stepId);
+            if (known?.state === 'running') {
+              result = { status: 'running' };
+              throw new Superseded();
+            }
+            if (known?.state === 'done' || known?.state === 'failed') {
+              const output = this.stepOutput(taskId, clean.stepId);
+              result = {
+                status: 'completed',
+                ok: known.state === 'done',
+                ...(output === undefined ? {} : { output }),
+              };
+              throw new Superseded();
+            }
+            if (known?.state === 'interrupted' && known.replay === 'never') {
+              result = { status: 'interrupted' };
+              throw new Superseded();
+            }
+            if (!known && task.steps.size >= MAX_STEPS_PER_TASK) {
+              result = { status: 'refused', reason: 'the task logged too many steps' };
+              throw new Superseded();
+            }
+            result = { status: 'recorded' };
+          },
+          fence,
+        );
+        // Dropped without a verdict from the guard: the attempt was replaced or fenced out.
+        if (stored === undefined && result.status === 'recorded') {
+          return { status: 'refused', reason: 'a newer attempt drives this task' };
+        }
+        return result;
+      },
+      outcome: async (stepId, outcome) => {
+        const output = outcome.output === undefined ? undefined : clipOutput(outcome.output);
+        const stored = await this.record(
+          {
+            type: 'step_outcome',
+            taskId,
+            epoch,
+            stepId,
+            status: outcome.status,
+            ...(output === undefined || outcome.status !== 'done' ? {} : { output }),
+          },
+          () => {
+            const step = this.tasks.get(taskId)?.steps.get(stepId);
+            // Only a step this attempt started and nobody settled; a cancel does not stop its report.
+            if (step?.state !== 'running' || step.epoch !== epoch) throw new Superseded();
+          },
+          fence,
+        );
+        return stored === undefined ? 'ignored' : 'recorded';
+      },
+    };
+  }
+
+  /** What a finished step recorded as its output, read back from the log. */
+  private stepOutput(taskId: TaskId, stepId: StepId): string | undefined {
+    for (const { event } of this.store.readTask(taskId).reverse()) {
+      if (event.type === 'step_outcome' && event.stepId === stepId && event.status === 'done') {
+        return event.output;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -991,12 +1144,17 @@ export class Orchestrator {
    * Reads a run's stream to its end. Spend is recorded as it comes; everything else waits for
    * `reports`, and counts only if the run's start was recorded.
    */
-  private async pump(taskId: TaskId, handle: RunHandle, reports: Promise<boolean>): Promise<void> {
+  private async pump(
+    taskId: TaskId,
+    handle: RunHandle,
+    reports: Promise<boolean>,
+    fence: Fence,
+  ): Promise<void> {
     try {
       for await (const event of handle.events) {
         if (event.type === 'usage') {
           if (!Number.isFinite(event.costUsd) || event.costUsd < 0) continue;
-          await this.recordSpend(taskId, event.costUsd);
+          await this.recordSpend(taskId, event.costUsd, fence);
           continue;
         }
         if (!(await reports)) continue;
@@ -1004,10 +1162,16 @@ export class Orchestrator {
         // the run reports what settled while it stopped.
         if (this.isStopping(taskId)) continue;
         if (event.type === 'progress') {
-          await this.recordRunnerOutcome({ type: 'task_progress', taskId, note: event.note });
+          await this.recordRunnerOutcome(
+            { type: 'task_progress', taskId, note: event.note },
+            fence,
+          );
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
-          await this.recordRunnerOutcome({ type: 'task_failed', taskId, reason: event.reason });
+          await this.recordRunnerOutcome(
+            { type: 'task_failed', taskId, reason: event.reason },
+            fence,
+          );
           return;
         } else {
           this.runnerOver(taskId, handle);
@@ -1016,6 +1180,7 @@ export class Orchestrator {
             result.ok
               ? { type: 'task_succeeded', taskId, manifest: result.manifest }
               : { type: 'task_failed', taskId, reason: result.reason },
+            fence,
           );
           return;
         }
@@ -1025,22 +1190,28 @@ export class Orchestrator {
       // The stream broke; the remote run may still be alive, so the handle
       // stays registered and is cancelled when the task ends.
       this.readers.delete(taskId);
-      await this.recordRunnerOutcome({
-        type: 'task_failed',
-        taskId,
-        reason: `runner error: ${errorMessage(error)}`,
-      });
+      await this.recordRunnerOutcome(
+        {
+          type: 'task_failed',
+          taskId,
+          reason: `runner error: ${errorMessage(error)}`,
+        },
+        fence,
+      );
       return;
     }
     if (!(await reports)) return;
     // A clean end of the stream does not prove the remote run stopped, so the
     // handle stays registered and is cancelled when the task ends.
     this.readers.delete(taskId);
-    await this.recordRunnerOutcome({
-      type: 'task_failed',
-      taskId,
-      reason: 'runner exited without reporting a result',
-    });
+    await this.recordRunnerOutcome(
+      {
+        type: 'task_failed',
+        taskId,
+        reason: 'runner exited without reporting a result',
+      },
+      fence,
+    );
   }
 
   /** The runner reported its own end, so there is nothing left to cancel. */
@@ -1109,10 +1280,15 @@ export class Orchestrator {
    */
   private recordRunnerOutcome(
     event: TaskEvent & { taskId: TaskId },
+    fence: Fence,
   ): Promise<StoredEvent | undefined> {
-    return this.record(event, () => {
-      if (this.isStopping(event.taskId)) throw new Superseded();
-    });
+    return this.record(
+      event,
+      () => {
+        if (this.isStopping(event.taskId)) throw new Superseded();
+      },
+      fence,
+    );
   }
 
   /**
@@ -1120,15 +1296,19 @@ export class Orchestrator {
    * tree when that reaches its cap. Spend is never dropped: what settles after
    * a cancel or after the top-level task ended was still paid for.
    */
-  private async recordSpend(taskId: TaskId, costUsd: number): Promise<void> {
+  private async recordSpend(taskId: TaskId, costUsd: number, fence?: Fence): Promise<void> {
     const root = this.treeRoot(taskId);
     if (!root) return;
-    const recorded = await this.record({
-      type: 'task_cost',
-      taskId: root.taskId,
-      fromTaskId: taskId,
-      costUsd,
-    });
+    const recorded = await this.record(
+      {
+        type: 'task_cost',
+        taskId: root.taskId,
+        fromTaskId: taskId,
+        costUsd,
+      },
+      undefined,
+      fence,
+    );
     if (recorded && this.overBudget(root.taskId)) {
       this.track(this.cancelTree(root.taskId, 'system'));
     }
@@ -1147,10 +1327,15 @@ export class Orchestrator {
    * A terminal event for a task that already ended is always dropped, so the log
    * holds exactly one per task.
    */
-  private record(event: TaskEvent, guard?: () => void): Promise<StoredEvent | undefined> {
+  private record(
+    event: TaskEvent,
+    guard?: () => void,
+    fence?: Fence,
+  ): Promise<StoredEvent | undefined> {
     const written = this.writeChain.then(async () => {
       try {
         if (isTerminalEvent(event) && this.isDone(event.taskId)) throw new Superseded();
+        if (fence !== undefined && this.fencedOut(fence)) throw new Superseded();
         guard?.();
       } catch (error) {
         if (error instanceof Superseded) return undefined;
@@ -1158,20 +1343,75 @@ export class Orchestrator {
       }
       // An end with a run still registered or starting does not stop that run.
       if (isTerminalEvent(event) && this.mayStillRun(event.taskId)) {
-        await this.commit({ type: 'task_stop_pending', taskId: event.taskId, cause: 'run_live' });
+        const stop = await this.commit(
+          { type: 'task_stop_pending', taskId: event.taskId, cause: 'run_live' },
+          fence,
+        );
+        if (stop === undefined) return undefined;
       }
-      return this.commit(event);
+      return this.commit(event, fence);
     });
     this.writeChain = written.catch(() => undefined);
     return written;
   }
 
-  /** Appends and applies one event. Only `record` calls it, inside the write chain. */
-  private async commit(event: TaskEvent): Promise<StoredEvent> {
-    const stored = await this.store.append(event, this.now());
+  /**
+   * True when a write under `fence` must not go out: this process was fenced out of the task, or
+   * a newer attempt of this very process replaced the one that is writing (its late events are
+   * dropped, and the task is not fenced out for them).
+   */
+  private fencedOut(fence: Fence): boolean {
+    if (this.fenced.has(fence.taskId)) return true;
+    const task = this.tasks.get(fence.taskId);
+    return task !== undefined && task.epoch !== fence.epoch;
+  }
+
+  /**
+   * Appends and applies one event; `undefined` when the store refused it because a newer attempt
+   * drives the task, after this process let go of the task. Only `record` calls it, inside the
+   * write chain.
+   */
+  private async commit(event: TaskEvent, fence?: Fence): Promise<StoredEvent | undefined> {
+    let stored: StoredEvent;
+    try {
+      stored = await this.store.append(event, this.now(), fence);
+    } catch (error) {
+      if (!(error instanceof StaleEpochError)) throw error;
+      this.fenceOut(error.taskId);
+      return undefined;
+    }
     applyEvent(this.tasks, stored);
     this.afterApply(stored.event);
     return stored;
+  }
+
+  /**
+   * Another process drives the task now. This one writes nothing more for it, stops its own run
+   * (a handle only ever stops the run it started) and forgets it; the log is the other process's.
+   */
+  private fenceOut(taskId: TaskId): void {
+    if (this.fenced.has(taskId)) return;
+    this.fenced.add(taskId);
+    if (this.fenced.size > MAX_FENCED) {
+      const oldest = this.fenced.values().next().value;
+      if (oldest !== undefined) this.fenced.delete(oldest);
+    }
+    const handle = this.handles.get(taskId);
+    this.handles.delete(taskId);
+    this.starting.delete(taskId);
+    if (handle) this.track(cancelHandle(handle));
+    const executor = this.executorSessions.get(taskId);
+    if (executor !== undefined) {
+      this.auth.revoke(executor);
+      this.executorSessions.delete(taskId);
+    }
+    this.auth.revokeForTask(taskId);
+    const task = this.tasks.get(taskId);
+    if (task) {
+      this.activeByRoot.release(task.rootSessionId);
+      this.tasks.delete(taskId);
+    }
+    this.readers.delete(taskId);
   }
 
   private afterApply(event: TaskEvent): void {

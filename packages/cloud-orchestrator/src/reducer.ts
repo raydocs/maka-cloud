@@ -27,6 +27,8 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       state: 'queued',
       createdAt: at,
       progress: [],
+      epoch: 1,
+      steps: new Map(),
     });
     return;
   }
@@ -98,6 +100,38 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
         delete task.resumeRequested;
       }
       return;
+    case 'task_attempt':
+      // The store lets only the next epoch in; a log that somehow holds another is not followed.
+      if (event.epoch === task.epoch + 1) task.epoch = event.epoch;
+      return;
+    case 'step_intent': {
+      if (event.epoch !== task.epoch) return;
+      const known = task.steps.get(event.stepId);
+      // The first intent per memo key wins. Only a `safe` step that an attempt found running
+      // (interrupted) runs again, by the attempt after it.
+      if (known && !(known.state === 'interrupted' && known.replay === 'safe')) return;
+      task.steps.set(event.stepId, {
+        stepId: event.stepId,
+        kind: event.kind,
+        replay: known?.replay ?? event.replay,
+        label: event.label,
+        state: 'running',
+        epoch: event.epoch,
+      });
+      return;
+    }
+    case 'step_outcome': {
+      const step = task.steps.get(event.stepId);
+      // An outcome applies only to a step still running, from the epoch that started it.
+      if (step?.state !== 'running' || step.epoch !== event.epoch) return;
+      step.state = event.status;
+      return;
+    }
+    case 'step_interrupted': {
+      const step = task.steps.get(event.stepId);
+      if (step?.state === 'running' && step.epoch < event.epoch) step.state = 'interrupted';
+      return;
+    }
   }
 }
 

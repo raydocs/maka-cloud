@@ -1,10 +1,12 @@
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
-import type {
-  SessionId,
-  StoredEvent,
-  TaskEvent,
-  TaskId,
-  TaskStore,
+import {
+  assertEpoch,
+  type Fence,
+  type SessionId,
+  type StoredEvent,
+  type TaskEvent,
+  type TaskId,
+  type TaskStore,
 } from '@maka-cloud/orchestrator';
 import { transaction } from './db.js';
 import { appendFeed, type FeedHub } from './feed.js';
@@ -16,6 +18,17 @@ const TERMINAL: Partial<Record<TaskEvent['type'], string>> = {
 };
 
 const ID_PAGE = 1000;
+
+/**
+ * Events that belong to the driver and the orchestrator, not to the people watching: a client's feed
+ * carries none of them (every tool call is a step).
+ */
+const NOT_IN_FEED: ReadonlySet<TaskEvent['type']> = new Set([
+  'task_attempt',
+  'step_intent',
+  'step_outcome',
+  'step_interrupted',
+]);
 
 interface LogRow {
   seq: number;
@@ -38,6 +51,8 @@ export class SqliteTaskStore implements TaskStore {
   private readonly markStop: StatementSync;
   private readonly rootOfTask: StatementSync;
   private readonly conversationOfSession: StatementSync;
+  private readonly epochOfTask: StatementSync;
+  private readonly setEpoch: StatementSync;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -65,14 +80,23 @@ export class SqliteTaskStore implements TaskStore {
     this.conversationOfSession = db.prepare(
       'SELECT conversation_id AS id FROM conversations WHERE session_id = ?',
     );
+    this.epochOfTask = db.prepare('SELECT epoch FROM task_index WHERE task_id = ?');
+    this.setEpoch = db.prepare('UPDATE task_index SET epoch = ? WHERE task_id = ?');
   }
 
-  async append(event: TaskEvent, at: number): Promise<StoredEvent> {
+  async append(event: TaskEvent, at: number, fence?: Fence): Promise<StoredEvent> {
     const stored = transaction(this.db, () => {
+      // Checked in the transaction that appends, so two writers racing for a task cannot both win.
+      assertEpoch(event, fence, (id) => {
+        const row = this.epochOfTask.get(id) as { epoch: number } | undefined;
+        return row?.epoch;
+      });
       const { seq } = this.nextSeq.get() as { seq: number };
       this.insertLog.run(seq, at, event.taskId, JSON.stringify(event));
       this.index(event, at);
-      appendFeed(this.db, 'task.event', this.conversationOf(event), seq, at);
+      if (!NOT_IN_FEED.has(event.type)) {
+        appendFeed(this.db, 'task.event', this.conversationOf(event), seq, at);
+      }
       return freeze<StoredEvent>({ seq, at, event: structuredClone(event) });
     });
     this.hub.notify();
@@ -169,6 +193,8 @@ export class SqliteTaskStore implements TaskStore {
         event.parentTaskId ?? null,
         at,
       );
+    } else if (event.type === 'task_attempt') {
+      this.setEpoch.run(event.epoch, event.taskId);
     } else if (event.type === 'task_started') {
       this.startTask.run(event.taskId);
     } else if (event.type === 'task_stop_pending' || event.type === 'task_stopped') {

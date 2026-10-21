@@ -490,13 +490,13 @@ export class FuzzWorld {
   private storeFor(epoch: number): TaskStore {
     const inner = this.store;
     return {
-      append: (event, at) => {
+      append: (event, at, fence) => {
         // The append is decided here, after the guard ran; the gate is the write's I/O.
         this.checkCommit(event, at, requestContext.getStore());
         return new Promise<StoredEvent>((resolve) =>
           this.gate(epoch, 'append', this.describeEvent(event), () => {
             this.apply(event, at);
-            resolve(inner.append(event, at));
+            resolve(inner.append(event, at, fence));
             return 'written';
           }),
         );

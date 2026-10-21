@@ -71,6 +71,9 @@ for it. A finished task never changes, so the small LRU in front of those reads
 - The lookups are synchronous because an indexed point read in an embedded
   database is, and `status` must stay synchronous.
 
+Each task also has an epoch (1 from creation, raised by `task_attempt`) and a step log (`step_intent`, `step_outcome`,
+`step_interrupted`); the store refuses a write fenced with an older epoch. See `durable-tasks.md`.
+
 ## Sessions and tokens
 
 Each agent session holds a bearer token. The server keeps only its SHA-256 and

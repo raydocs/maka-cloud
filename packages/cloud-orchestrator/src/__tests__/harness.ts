@@ -6,7 +6,7 @@ import type { SessionInfo } from '../auth.js';
 import { FakeRunner, type FakeRunnerOptions } from '../fake-runner.js';
 import { Orchestrator, type OrchestratorOptions } from '../orchestrator.js';
 import { RunnerRegistry } from '../runner.js';
-import { MemoryTaskStore, type TaskStore } from '../store.js';
+import { type Fence, MemoryTaskStore, type TaskStore } from '../store.js';
 import type { StoredEvent, TaskEvent, TaskId } from '../types.js';
 
 export interface Harness {
@@ -92,7 +92,7 @@ export class GatedStore extends MemoryTaskStore {
     return this.waitingAtGate;
   }
 
-  override async append(event: TaskEvent, at: number): Promise<StoredEvent> {
+  override async append(event: TaskEvent, at: number, fence?: Fence): Promise<StoredEvent> {
     const gate = this.gate;
     if (gate && gate.type === event.type) {
       this.gate = undefined;
@@ -100,7 +100,7 @@ export class GatedStore extends MemoryTaskStore {
       await gate.open;
       this.waitingAtGate = false;
     }
-    return super.append(event, at);
+    return super.append(event, at, fence);
   }
 }
 
@@ -117,13 +117,13 @@ export function pendingWaits(h: Harness): number {
  */
 export function eventQueued(h: Harness, type: TaskEvent['type']): Promise<void> {
   const target = h.orchestrator as unknown as {
-    record: (event: TaskEvent, guard?: () => void) => Promise<unknown>;
+    record: (event: TaskEvent, guard?: () => void, fence?: Fence) => Promise<unknown>;
   };
   const original = target.record.bind(target);
   return new Promise<void>((resolve) => {
-    target.record = (event, guard) => {
+    target.record = (event, guard, fence) => {
       if (event.type === type) resolve();
-      return original(event, guard);
+      return original(event, guard, fence);
     };
   });
 }

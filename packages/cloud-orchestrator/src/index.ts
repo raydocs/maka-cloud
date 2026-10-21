@@ -47,5 +47,22 @@ export {
   OrchestratorServer,
   type OrchestratorServerOptions,
 } from './server.js';
-export { MemoryTaskStore, type TaskStore } from './store.js';
+export {
+  cleanIntent,
+  MAX_STEP_ID_LENGTH,
+  MAX_STEP_KIND_LENGTH,
+  MAX_STEP_LABEL_LENGTH,
+  MAX_STEP_OUTPUT_LENGTH,
+  MAX_STEPS_PER_TASK,
+  oneLine,
+  type StepIntentResult,
+  type StepLog,
+} from './steps.js';
+export {
+  assertEpoch,
+  type Fence,
+  MemoryTaskStore,
+  StaleEpochError,
+  type TaskStore,
+} from './store.js';
 export * from './types.js';
