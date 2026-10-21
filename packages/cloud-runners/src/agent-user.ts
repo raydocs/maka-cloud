@@ -90,30 +90,41 @@ chmod 2770 claude-config
 `;
 
 /**
- * Whether any program the agent can run carries a file capability. `getcap -r` is asked for the
- * directories that exist and its exit status counts: a listing that failed is `unchecked`, never
- * `none`. Every capability on a program the agent can execute is `found`, except the few that the
- * stock tools of a distribution carry and that cannot reach the firewall or the control user
- * (raw sockets for ping, the id-mapping helpers). `as_agent` is defined by the probe around it.
+ * Whether any program the agent can run carries a file capability. `getcap -r` is asked for every
+ * directory a program can live in that exists (not `/`, which would walk `/proc`), and its exit
+ * status counts: a listing that failed is `unchecked`, never `none`. Every capability on a program
+ * the agent can execute is `found`, except the few that the stock tools of a distribution carry
+ * under their own paths and that cannot reach the firewall or the control user (raw sockets for
+ * ping, the id-mapping helpers). Whether the agent can execute a file is asked of the agent
+ * account and must be answered: a refusal of the account itself is `unchecked`, not "no".
+ * `as_agent` and `tool_bin` are defined by the probe around it.
  */
-export const FILE_CAPS_PROBE = `if command -v getcap >/dev/null 2>&1; then
+export const FILE_CAPS_PROBE = `getcap_bin=$(tool_bin getcap)
+if [ -n "$getcap_bin" ]; then
   capdirs=""
-  for dir in /usr/sbin /usr/bin /sbin /bin /usr/local/bin /usr/local/sbin; do
+  for dir in /usr /opt /etc /var /srv /home /snap; do
     if [ -d "$dir" ]; then capdirs="$capdirs $dir"; fi
   done
   rc=0
-  listing=$(getcap -r $capdirs 2>/dev/null) || rc=$?
+  listing=$("$getcap_bin" -r $capdirs 2>/dev/null) || rc=$?
   if [ "$rc" != 0 ]; then
     echo "FACT agent_filecaps=unchecked"
   else
-    found=$(printf '%s\\n' "$listing" | while IFS= read -r line; do
+    found=$(printf '%s\n' "$listing" | while IFS= read -r line; do
       [ -n "$line" ] || continue
-      path=\${line%% *}
-      if printf '%s\\n' "$line" | grep -Eq '^[^ ]*/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
-      if printf '%s\\n' "$line" | grep -Eq '^[^ ]*/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
-      if as_agent test -x "$path" >/dev/null 2>&1; then echo yes; fi
+      if printf '%s\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
+      if printf '%s\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
+      path=$(printf '%s\n' "$line" | sed -E 's/ (cap_|=).*$//')
+      can=$(as_agent sh -c '[ -x "$1" ] && echo x || echo -' sh "$path" 2>/dev/null) || can=""
+      case "$can" in
+        x) echo yes ;;
+        -) ;;
+        *) echo unchecked ;;
+      esac
     done)
-    if [ -n "$found" ]; then echo "FACT agent_filecaps=found"; else echo "FACT agent_filecaps=none"; fi
+    if printf '%s\n' "$found" | grep -q unchecked; then echo "FACT agent_filecaps=unchecked"
+    elif [ -n "$found" ]; then echo "FACT agent_filecaps=found"
+    else echo "FACT agent_filecaps=none"; fi
   fi
 else
   echo "FACT agent_filecaps=unchecked"
