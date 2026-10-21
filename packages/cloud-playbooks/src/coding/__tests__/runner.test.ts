@@ -26,7 +26,10 @@ test('a change that passes the checks on the first run is delivered with a runne
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
 
   const manifest = await readJson(spec.resultPath);
-  assert.deepEqual(verifyCodingManifest(manifest), { ok: true, problems: [] });
+  // Nothing but the missing review is wrong with it: without a reviewer it is not a verified change.
+  const verdict = verifyCodingManifest(manifest);
+  assert.equal(verdict.problems.length, 1);
+  assert.match(verdict.problems[0] ?? '', /^the change was not independently reviewed: not done/);
   assert.match(
     manifest.done[0],
     /^verified: `bash tests\/run.sh` passed; the reproduction test `bash tests\/test_add.sh` failed on base [0-9a-f]{12} and passes/,
@@ -168,7 +171,9 @@ test('after two failures the task goes to the other vendor once, from the base c
   assert.ok(
     manifest.done.includes('claude-agent-sdk failed (2 failed runs); codex made the change'),
   );
-  assert.equal(verifyCodingManifest(manifest).ok, true);
+  const problems = verifyCodingManifest(manifest).problems;
+  assert.equal(problems.length, 1);
+  assert.match(problems[0] ?? '', /^the change was not independently reviewed/);
   zeroStats(h.runner);
 });
 

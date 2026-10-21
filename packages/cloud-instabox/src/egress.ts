@@ -3,8 +3,11 @@ import { newMarker, parseFramed } from './scripts.js';
 
 /**
  * What a box may not reach. The cloud metadata address (169.254.169.254) answers with the host's
- * credentials, and the private ranges are the host's own network. Loopback stays open: the box's
- * own tools talk to each other over it.
+ * credentials, the private ranges are the host's own network, and loopback is where the sandbox's
+ * own services listen (the agent runs as a user of the machine, not in a box of its own). Replies,
+ * the box's name servers and IPv6 neighbour discovery are let through first; nothing else is.
+ * A program that serves itself on loopback (a dev server, a test that binds a port) cannot reach
+ * it either, until an explicit exception is made.
  */
 export const EGRESS_BLOCKED_V4 = [
   '169.254.0.0/16',
@@ -12,10 +15,18 @@ export const EGRESS_BLOCKED_V4 = [
   '172.16.0.0/12',
   '192.168.0.0/16',
   '100.64.0.0/10',
+  '127.0.0.0/8',
 ] as const;
 
-/** Unique local addresses, where IPv6 metadata services live (AWS: fd00:ec2::254). */
-export const EGRESS_BLOCKED_V6 = ['fc00::/7'] as const;
+/** Unique local addresses (AWS keeps its IPv6 metadata service at fd00:ec2::254), link local and loopback. */
+export const EGRESS_BLOCKED_V6 = ['fc00::/7', 'fe80::/10', '::1/128'] as const;
+
+/** ICMPv6 that IPv6 itself needs to find the router and its neighbours: all link-local, all allowed. */
+export const EGRESS_ICMPV6_ALLOWED = [
+  'neighbour-solicitation',
+  'neighbour-advertisement',
+  'router-solicitation',
+] as const;
 
 export const EGRESS_CHAIN = 'MAKA_EGRESS';
 
@@ -25,8 +36,9 @@ const HELPER_TIMEOUT_SECONDS = 60;
  * Installs the egress rules in a box and checks that they are there. Parameters travel in `envs`.
  *
  * - One chain of our own, flushed and refilled on every run, so running it twice leaves one copy.
- * - Replies to connections the box did not start (the instabox control plane reaching in) and the
- *   box's own name servers are let through first; without them the box would cut itself off.
+ * - Replies to connections the box did not start (the instabox control plane reaching in), the
+ *   box's own name servers and, for IPv6, neighbour discovery are let through first; without them
+ *   the box would cut itself off.
  * - Anything it cannot do is an error, never a skipped rule: the box is not used unguarded.
  * - IPv6 is guarded only when the box has IPv6 at all.
  */
@@ -49,6 +61,12 @@ guard() {
         || fail "$tool: cannot add the name server rule"
     done
   done
+  if [ "$FAMILY" = 6 ]; then
+    for kind in $MAKA_ICMPV6; do
+      as_root "$tool" -w -A "$MAKA_CHAIN" -p ipv6-icmp --icmpv6-type "$kind" -j RETURN \\
+        || fail "$tool: cannot add the $kind rule"
+    done
+  fi
   for net in "$@"; do
     as_root "$tool" -w -A "$MAKA_CHAIN" -d "$net" -j REJECT || fail "$tool: cannot block $net"
   done
@@ -63,7 +81,8 @@ guard() {
   done
 }
 FAMILY=4 guard iptables $MAKA_V4
-if [ -e "$MAKA_IF_INET6" ] && [ -s "$MAKA_IF_INET6" ]; then FAMILY=6 guard ip6tables $MAKA_V6; fi
+# procfs files report size 0, so [ -s ] cannot tell: read the content.
+if [ -n "$(cat "$MAKA_IF_INET6" 2>/dev/null)" ]; then FAMILY=6 guard ip6tables $MAKA_V6; fi
 printf '%s' "$M"; printf 'OK\\0'; printf '%s' "$M"
 `;
 
@@ -77,7 +96,7 @@ export class EgressGuardError extends Error {
 export interface EgressGuardOptions {
   /** Where the box lists its name servers. Tests point it elsewhere. */
   resolvConf?: string;
-  /** The file that is non-empty when the box has IPv6. Tests point it elsewhere. */
+  /** The file whose content is empty when the box has no IPv6. Tests point it elsewhere. */
   ifInet6?: string;
   signal?: AbortSignal;
 }
@@ -104,6 +123,7 @@ export async function applyEgressGuard(
         MAKA_CHAIN: EGRESS_CHAIN,
         MAKA_V4: EGRESS_BLOCKED_V4.join(' '),
         MAKA_V6: EGRESS_BLOCKED_V6.join(' '),
+        MAKA_ICMPV6: EGRESS_ICMPV6_ALLOWED.join(' '),
         MAKA_RESOLV_CONF: options.resolvConf ?? '/etc/resolv.conf',
         MAKA_IF_INET6: options.ifInet6 ?? '/proc/net/if_inet6',
       },
