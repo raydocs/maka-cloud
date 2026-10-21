@@ -47,6 +47,11 @@ export interface RunSpec {
   effort?: string;
   /** Set when the run continues a task an earlier attempt was driving; see `Runner.recover`. */
   recovery?: Recovery;
+  /**
+   * The attempt (epoch) that drives this run: the one its usage reports and its model access are
+   * booked under, so spend that a restart recovers lands on the same figure as the live report.
+   */
+  epoch?: number;
 }
 
 /** Why and how a task is being driven again after its previous attempt ended without an outcome. */

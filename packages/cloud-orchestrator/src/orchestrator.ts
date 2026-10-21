@@ -9,7 +9,7 @@ import {
 import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
-import { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
+import { applyEvent, reduce, runTimeMs, spendKey, type TaskMap, toView } from './reducer.js';
 import { MAX_RESUMES_IN_A_ROW, recoveryNote, resumesInARow } from './recovery.js';
 import type { Recovery, RunHandle, RunnerRegistry, RunSpec } from './runner.js';
 import {
@@ -130,6 +130,11 @@ export interface RecoveredSpend {
    */
   unrecorded(): ReadonlyArray<{
     taskId: TaskId;
+    /**
+     * The attempt (epoch) whose grants spent it: its figure replaces what that attempt's live
+     * reports gave, however often it is read. Absent for spend written before attempts were kept.
+     */
+    attempt?: number;
     usd: number;
     cutOffCalls?: number;
     cutOffUsd?: number;
@@ -1060,24 +1065,32 @@ export class Orchestrator {
   }
 
   /**
-   * Records what runs of an earlier process spent, before any task here ends or settles. It is
-   * recorded as the total of the attempt that process drove (`task_cost` keeps the highest per
-   * task and attempt, and attempts add up), so it replaces the figure the run reported live rather
-   * than adding to it. A crash after the records and before `recorded()` hands the same rows to
-   * the next process, which counts them once more under the attempt before its own: spend is
-   * never lost, and in that one window it is counted twice (the safe side of a cap). The tree is
-   * not cancelled for it here: every task still running is ended just below.
+   * Records what runs of an earlier process spent, before any task here ends or settles. Each row
+   * is the total of one attempt of one task, and is recorded under that attempt (`task_cost` keeps
+   * the highest per task and attempt, and attempts add up): it replaces the figure the run
+   * reported live rather than adding to it, and recording it again (a crash after the records and
+   * before `recorded()` hands the same rows to the next process) changes nothing. Spend written
+   * before the journal kept attempts has none: it is booked under the attempt before the one just
+   * begun, or, when the task's log holds figures from before attempts were keyed (epoch 0), under
+   * that, so it replaces those too. The tree is not cancelled for it here: every task still
+   * running is ended just below.
    */
   private async recordRecoveredSpend(begun: ReadonlyMap<TaskId, number>): Promise<void> {
     const recovered = this.recoveredSpend?.unrecorded() ?? [];
-    for (const { taskId, usd, cutOffCalls, cutOffUsd } of recovered) {
+    for (const { taskId, attempt: spentIn, usd, cutOffCalls, cutOffUsd } of recovered) {
       if (!Number.isFinite(usd) || usd <= 0) continue;
       const root = this.treeRoot(taskId);
       if (!root) continue;
-      // The earlier process drove the attempt before the one this process just began.
-      const epoch = begun.has(taskId)
-        ? (begun.get(taskId) as number) - 1
-        : (this.lookup(taskId)?.epoch ?? 0);
+      let epoch: number;
+      if (spentIn !== undefined && Number.isInteger(spentIn) && spentIn >= 1) {
+        epoch = spentIn;
+      } else if (root.spendByRun?.[spendKey({ fromTaskId: taskId })] !== undefined) {
+        epoch = 0;
+      } else {
+        epoch = begun.has(taskId)
+          ? (begun.get(taskId) as number) - 1
+          : (this.lookup(taskId)?.epoch ?? 0);
+      }
       await this.record({
         type: 'task_cost',
         taskId: root.taskId,
@@ -1291,6 +1304,7 @@ export class Orchestrator {
         briefPath: paths.briefPath,
         resultPath: paths.resultPath,
         steps: this.stepLog(fence),
+        epoch: fence.epoch,
         ...(left === undefined
           ? {}
           : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),

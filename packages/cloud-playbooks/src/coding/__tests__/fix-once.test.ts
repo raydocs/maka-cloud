@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -212,7 +213,42 @@ for (const [name, fix, reason] of NOT_APPLIED) {
   });
 }
 
-test('a fixed change that cannot be reviewed again is not delivered, and the first change still has its P1 so it is kept for the owner', async (t) => {
+/** The fixed change passed the checks but its second review did not finish: it is kept, unreviewed. */
+async function fixedAndKept(h: Harness, id: string, events: RunnerEvent[], why: RegExp) {
+  assert.deepEqual(terminal(events), { type: 'finished' }, 'a kept change is not a failed task');
+  const dir = join(h.handoff, id);
+  const manifest = await readJson(join(dir, 'result.json'));
+  assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
+  assert.equal(verifyCodingManifest(manifest).ok, false);
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.match(record.kept?.reason ?? '', /could not be independently reviewed/);
+  assert.match(record.kept?.reason ?? '', why);
+  assert.equal(record.review.status, 'unavailable');
+  assert.equal(record.review.fix.result, 'applied');
+  // The P1 the first review found is still said, with the fact that its fix was never checked.
+  assert.match(
+    record.review.reason,
+    /first review found 1 serious problem\(s\); the fix was not checked/,
+  );
+  assert.match(
+    await fs.readFile(join(dir, 'review.md'), 'utf8'),
+    /first review found 1 serious problem/,
+  );
+  // The fixed change is what was checked, kept and published; the first change is not.
+  assert.equal(await deliveredAddSh(h, id), GUARDED);
+  assert.match(await fs.readFile(join(dir, 'change.patch'), 'utf8'), /negative numbers/);
+  const delivery = await h.deliveries.get(id);
+  assert.ok(delivery);
+  assert.equal(
+    delivery.changesSha256,
+    createHash('sha256')
+      .update(await fs.readFile(join(dir, 'changes.json')))
+      .digest('hex'),
+  );
+  assert.equal(delivery.publishedPr, undefined);
+}
+
+test('a fixed change that cannot be reviewed again is kept unreviewed: the fixed change, not the first one', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -220,11 +256,11 @@ test('a fixed change that cannot be reviewed again is not delivered, and the fir
     return { failed: 'the reviewer is down' };
   };
   const { events } = await run(h, 'tsk_na2');
-  await failedWithP1(h, 'tsk_na2', events, /could not be reviewed again/);
+  await fixedAndKept(h, 'tsk_na2', events, /could not be reviewed again/);
   zeroStats(h.runner);
 });
 
-test('a fixed change on which the reviewer touched the repository is not delivered, and the first change is kept with its P1', async (t) => {
+test('a fixed change on which the reviewer touched the repository is kept unreviewed, as the fixed change', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -232,7 +268,7 @@ test('a fixed change on which the reviewer touched the repository is not deliver
     return reviewsInRounds([[P1], []])(turn);
   };
   const { events } = await run(h, 'tsk_na3');
-  await failedWithP1(h, 'tsk_na3', events, /the fix was not used/);
+  await fixedAndKept(h, 'tsk_na3', events, /could not be reviewed again/);
   zeroStats(h.runner);
 });
 
@@ -348,7 +384,7 @@ test('cancel while the fix runs: its run is cancelled, the first verified change
   zeroStats(h.runner);
 });
 
-test('cancel while the fixed change is reviewed again: the first verified change is kept and everything is released', async (t) => {
+test('cancel while the fixed change is reviewed again: the fixed change, not the first one, is kept, and everything is released', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   const running = gate();
@@ -369,6 +405,16 @@ test('cancel while the fixed change is reviewed again: the first verified change
   assert.equal(h.claude.open, 0);
   assert.equal(h.codex.open, 0);
   await keptAfterStop(h, 'tsk_crev2');
+  const dir = join(h.handoff, 'tsk_crev2');
+  assert.match(
+    await fs.readFile(join(dir, 'change.patch'), 'utf8'),
+    /negative numbers are handled by the shell arithmetic/,
+    'the change the fix made and the checks passed, not the first attempt',
+  );
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.match(record.kept?.reason ?? '', /the fix passed/);
+  assert.deepEqual(record.review?.fix, { sent: 1, result: 'applied' });
+  assert.equal(record.review?.counts.P1, 1, 'the review so far is kept with it');
   zeroStats(h.runner);
 });
 

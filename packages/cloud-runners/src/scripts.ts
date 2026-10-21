@@ -162,14 +162,6 @@ exit "$rc"
 `;
 }
 
-const RUN_COMMAND =
-  /\ncd "\$MAKA_WORKDIR" \|\| [^\n]*\n([\s\S]*)\nrc=\$\?\nfinish "\$rc"\nexit "\$rc"\n$/u;
-
-/** The command line `buildRunScript` put in `script`, or undefined for a script it did not build. */
-export function commandOfRunScript(script: string): string | undefined {
-  return RUN_COMMAND.exec(script)?.[1];
-}
-
 /**
  * One exec for every watched run on a machine. stdin: lines `<dir> <run> <offset> <cap>`.
  * Per line: `T <dir> <run> <state> <size> <base64 bytes from offset>`. The state is read before

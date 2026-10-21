@@ -159,7 +159,7 @@ async function start(
   t.after(async () => {
     await stack.close();
     await new Promise<void>((resolve) => model.close(() => resolve()));
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   return {
     stack,
@@ -352,7 +352,7 @@ test('the conductor’s model requests go through the gateway, which adds the ve
 
 test('a stack that fails to start closes its gateway', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const config = readStackConfig({
     MAKA_CLOUD_DATA_DIR: dir,
     ANTHROPIC_API_KEY: 'sk-test-not-a-key',
@@ -509,7 +509,7 @@ test('the Web Push routes answer 404 without CLOUD_PUSH_* and serve the public k
 
 test('Web Push settings that cannot sign stop the start, without the key in the message', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const vapid = vapidKeys();
   const env = {
     ANTHROPIC_API_KEY: 'sk-test-not-a-key',
@@ -1228,7 +1228,7 @@ test('a second start that fails never changes the caps the running server publis
 
 test('a data directory whose server never wrote its caps down is not booked to', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-nopolicy-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const config = readStackConfig(
     {
       MAKA_CLOUD_DATA_DIR: dir,

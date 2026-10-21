@@ -50,10 +50,10 @@ async function rig(t: { after(fn: () => Promise<void>): void }, dir: string): Pr
         machine.launch({
           dirName: dir,
           run,
-          script: buildRunScript({
-            preamble: FEED_FUNCTION,
-            command: fedCommand(asAgent(`sh -c ${shq(command)}`, HARNESS_AGENT)),
-          }),
+          preamble: '',
+          program: 'sh',
+          args: ['-c', command],
+          fed: true,
           envs: {},
           runToken: token,
           workdir: `${machine.taskDir(dir)}/workspace`,

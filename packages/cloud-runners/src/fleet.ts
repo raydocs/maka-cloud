@@ -249,7 +249,9 @@ export class Fleet {
       vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
     const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
+    // The check runs the CLI itself (`--version`), so the box is guarded first like for any task code.
     const check = await machine.exec(cliCheckScript(vendor.binary), {
+      taskCode: true,
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
     });
     if (check.exitCode === 0) return;
@@ -258,25 +260,17 @@ export class Fleet {
       this.options.installCommands?.[vendor.name] ??
       `command -v npm >/dev/null 2>&1 || { echo "npm is not installed in the sandbox image"; exit 1; }
 npm install -g --prefix "$HOME/.maka-cli" --no-audit --no-fund ${shq(`${vendor.npmPackage}@${version}`)}`;
-    const script = buildRunScript({
-      preamble: '',
-      command: `( set -e
+    const dirName = `.setup-${vendor.binary}`;
+    const run = `i-${version}`;
+    await machine.launchInstall({
+      dirName,
+      run,
+      install: `( set -e
 ${install}
 mkdir -p "$(dirname ${shq(marker)})"
 : > ${shq(marker)}
 )`,
-    });
-    const dirName = `.setup-${vendor.binary}`;
-    const run = `i-${version}`;
-    await machine.launch({
-      dirName,
-      run,
-      script,
-      envs: {},
       runToken: randomUUID(),
-      workdir: machine.taskDir(dirName),
-      rawLogs: false,
-      runsAs: 'sandbox-user',
     });
 
     const watch = this.poller.watch(machine, { dir: dirName, run });

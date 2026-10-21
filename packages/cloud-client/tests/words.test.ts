@@ -1,6 +1,8 @@
 import { expect, test } from 'vitest';
 import {
   budgetWords,
+  inboxCardModel,
+  questionCardModel,
   type DutyView,
   type InboxItem,
   type SourceListing,
@@ -101,4 +103,67 @@ test('an open item that repeats a question the conversation is asking is shown o
   expect(visibleInbox([asked, other], new Set()).live).toHaveLength(2);
   // A closed item is kept apart, under "Done".
   expect(visibleInbox([{ ...asked, state: 'closed' }], new Set()).closed).toHaveLength(1);
+});
+
+test('an approval is shown exactly as sent, and cannot be approved when it cannot be shown exactly', () => {
+  const approval = inboxItem({
+    kind: 'approval',
+    state: 'open',
+    ask: 'Run "git push" on the repo?',
+    options: [
+      { id: 'deny', label: 'Deny', recommended: false },
+      { id: 'approve', label: 'Approve', recommended: true },
+    ],
+    evidence: [{ kind: 'action', tool: 'Bash', args: '{"command":"git push"}' }],
+  });
+  const exact = inboxCardModel(approval);
+  expect(exact.text).toBe('Run "git push" on the repo?');
+  expect(exact.cannotApproveHere).toBe(false);
+  expect(exact.options.map((o) => o.id)).toEqual(['approve', 'deny']);
+  expect(exact.evidence).toEqual([
+    { kind: 'action', tool: 'Bash', args: '{"command":"git push"}' },
+  ]);
+
+  // A hidden character: the text cannot be shown word for word, so approving is not offered.
+  const hidden = inboxCardModel({ ...approval, ask: 'Run "git push"\u202E on the repo?' });
+  expect(hidden.cannotApproveHere).toBe(true);
+  expect(hidden.options.map((o) => o.id)).toEqual(['deny']);
+
+  // Other kinds are filtered like any server text and keep every option.
+  const decision = inboxCardModel(
+    inboxItem({ kind: 'decision', state: 'open', ask: 'Ask GPT-5?', options: approval.options }),
+  );
+  expect(decision.text).toBe('Ask assistant-5?');
+  expect(decision.options).toHaveLength(2);
+  expect(
+    inboxCardModel({ ...approval, state: 'answering', delivery: 'retrying' }).answering,
+  ).toMatch(/keep trying/u);
+});
+
+test('a question that holds a call is shown exactly, and cannot be approved when it cannot be', () => {
+  const question = {
+    questionId: 'q1',
+    question: 'Push to main?',
+    reason: 'irreversible' as const,
+    options: [
+      { id: 'no', label: 'No' },
+      { id: 'approve', label: 'Approve' },
+    ],
+    recommended: 'approve',
+    action: { tool: 'Bash', args: { command: 'git push' } },
+  };
+  const shown = questionCardModel(question as never);
+  expect(shown.heading).toBe('Needs your approval');
+  expect(shown.held).toEqual({ tool: 'Bash', args: '{"command":"git push"}' });
+  expect(shown.options.map((o) => o.id)).toEqual(['approve', 'no']);
+  expect(shown.firstOption).toBe('approve');
+  const hidden = questionCardModel({ ...question, question: 'Push\u202E to main?' } as never);
+  expect(hidden.cannotApproveHere).toBe(true);
+  expect(hidden.options.map((o) => o.id)).toEqual(['no']);
+  const done = questionCardModel(question as never, 'no');
+  expect([done.heading, done.answeredLabel, done.held]).toEqual([
+    'Decision recorded',
+    'No',
+    undefined,
+  ]);
 });

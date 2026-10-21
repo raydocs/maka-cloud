@@ -27,6 +27,7 @@ import {
   MAX_REVIEW_BYTES,
   parseReviewFile,
   plain,
+  type FixRecord,
   type ReviewRecord,
   fixBrief,
   MAX_FIX_FINDINGS,
@@ -313,6 +314,19 @@ function p1Of(review: ReviewRecord): number {
  * independent review could be made, or the review still has a serious (P1) problem after the one
  * fix. Undefined: nothing stands in the way of delivering it.
  */
+/**
+ * Why a fixed change has no second review. The first review's P1 findings were the reason for the
+ * fix, so the record says they were found and that their fix was never checked by a reviewer.
+ */
+function notReviewedAgain(first: ReviewRecord, why: string): string {
+  const found = first.status === 'reviewed' ? p1Of(first) : 0;
+  const earlier =
+    found > 0
+      ? `the first review found ${found} serious problem(s); the fix was not checked: `
+      : '';
+  return `${earlier}the fixed change could not be reviewed again (${why})`;
+}
+
 function keptReason(review: ReviewRecord): string | undefined {
   if (review.status !== 'reviewed') {
     return `the change passed the repository's checks but could not be independently reviewed (${plain(review.reason, 200)})`;
@@ -479,7 +493,14 @@ class CodingRun implements RunHandle {
           // The verified change is on the host from here on: a stop, a crash or an error during the
           // review cannot lose it. The delivery below replaces this record.
           await this.keepUntilReviewed(task, verification, outcome);
-          const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
+          const reviewed = await this.reviewAndFix(
+            task,
+            baseSha,
+            brief,
+            vendor,
+            outcome,
+            verification,
+          );
           // A change nobody could review, or one with a serious problem left after the one fix, is
           // not delivered: it is kept for the owner to look at, with the reason. The task is not
           // failed, because its work is not lost: the change, its branch and its review are kept.
@@ -666,6 +687,7 @@ class CodingRun implements RunHandle {
       ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
+      ...(this.spec.epoch === undefined ? {} : { epoch: this.spec.epoch }),
     };
     // Every run reads its brief, a resume included.
     await this.guard(writeHostFile(spec.briefPath, brief()));
@@ -997,8 +1019,9 @@ class CodingRun implements RunHandle {
   /**
    * The review, and, when it found P1 problems, the one fix. The implementer's vendor gets the P1
    * findings once, in a fresh run (the task's session record is the reviewer's by now); the runner
-   * checks the result as it checked the first change, and the other vendor reviews it again. If any
-   * part of that fails, the first verified change is the one delivered, with its P1 findings. There
+   * checks the result as it checked the first change, and the other vendor reviews it again. If the
+   * fix does not run or fails the checks, the first verified change is the one delivered, with its P1
+   * findings; if only the second review fails, the fixed change is kept unreviewed. There
    * is no loop: this method runs `fix` at most once, and nothing calls it again.
    */
   private async reviewAndFix(
@@ -1007,6 +1030,7 @@ class CodingRun implements RunHandle {
     conductorBrief: string,
     implementer: Vendor,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    verification: Verification,
   ): Promise<{
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected };
     review: ReviewRecord;
@@ -1033,6 +1057,9 @@ class CodingRun implements RunHandle {
         };
       }
     }
+    // Set once the fixed change has passed the checks and is kept on the host: from then on a
+    // second review that fails ends with it, not with the first change (which the fix replaced).
+    let kept: { outcome: typeof outcome; applied: FixRecord } | undefined;
     try {
       this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
       const turn = await this.agentTurn(
@@ -1080,16 +1107,41 @@ class CodingRun implements RunHandle {
       const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
       // The fix's own spend may have used the cap: the second review then cannot start, and says so.
       this.budgetStop = undefined;
+      // The fixed change has passed the checks: it, not the first one, is what a stop during the
+      // second review must leave kept.
+      const applied: FixRecord = { sent, result: 'applied' };
+      await this.keepUntilReviewed(task, verification, fixed, { ...first, fix: applied });
+      kept = { outcome: fixed, applied };
       const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
       if (second.status !== 'reviewed') {
         return {
-          outcome,
-          review: notApplied(`the fixed change could not be reviewed again (${second.reason})`),
+          outcome: fixed,
+          review: {
+            ...second,
+            reason: plain(notReviewedAgain(first, second.reason), 300),
+            fix: applied,
+          },
         };
       }
-      return { outcome: fixed, review: { ...second, fix: { sent, result: 'applied' } } };
+      return { outcome: fixed, review: { ...second, fix: applied } };
     } catch (error) {
       if (this.cancelled || error instanceof CancelledError) throw error;
+      if (kept) {
+        // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
+        return {
+          outcome: kept.outcome,
+          review: {
+            ...first,
+            status: 'unavailable',
+            reviewer: first.reviewer,
+            reason: plain(
+              `the fixed change could not be reviewed again (${errorMessage(error)})`,
+              300,
+            ),
+            fix: kept.applied,
+          },
+        };
+      }
       return { outcome, review: notApplied(errorMessage(error)) };
     } finally {
       this.budgetStop = undefined;
@@ -1432,10 +1484,13 @@ class CodingRun implements RunHandle {
     task: CodingTask,
     verification: Verification,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    earlier?: ReviewRecord,
   ): Promise<void> {
-    const reason =
-      "the change passed the repository's checks, but the task ended before its independent review finished";
-    const pending: ReviewRecord = {
+    const reason = earlier
+      ? "the fix passed the repository's checks, but the task ended before the independent review of the fixed change finished"
+      : "the change passed the repository's checks, but the task ended before its independent review finished";
+    // After a fix, the review so far (what it found and that the fix was applied) is kept with it.
+    const pending: ReviewRecord = earlier ?? {
       mode: this.mode,
       modesVersion: this.options.modes?.version ?? 0,
       status: 'unavailable',

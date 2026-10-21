@@ -93,6 +93,18 @@ test('every line the CLI writes is kept in the store, scrubbed of the run’s se
   assert.equal((await r.h.sessions.get('tsk_tr_mirror'))?.sessionId, SESSION);
 });
 
+test('a key the run was never given is scrubbed from the kept conversation too', async (t) => {
+  const r = await rig(t);
+  await r.h.setMode('shape');
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_shape')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(terminal(events)));
+  const text = (await r.stored('tsk_tr_shape')).join('\n');
+  assert.ok(!text.includes('sk-ant-api03-AbCd'), 'an API key reached the store');
+  assert.ok(!text.includes('ghp_AbCd'), 'a token reached the store');
+  assert.match(text, /the user pasted \[secret\] and \[secret\]/);
+  for (const line of await r.stored('tsk_tr_shape')) JSON.parse(line);
+});
+
 test('without a transcript store the CLI is not asked to mirror anything and keeps its own configuration directory', async (t) => {
   const h = await sdkSetup(t);
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_tr_off')));
@@ -102,7 +114,7 @@ test('without a transcript store the CLI is not asked to mirror anything and kee
   assert.ok(!env.includes('CLAUDE_CONFIG_DIR'));
 });
 
-test('a resumed turn on the same sandbox reads the conversation it left there, and the store keeps growing', async (t) => {
+test('a resumed turn on the same sandbox reads the server’s copy of the conversation, and the store keeps growing', async (t) => {
   const r = await rig(t);
   const spec = await r.h.spec('tsk_tr_same');
   assert.equal(terminal(await collect(await r.h.runners.claude.start(spec)))?.type, 'finished');
@@ -117,10 +129,8 @@ test('a resumed turn on the same sandbox reads the conversation it left there, a
   assert.ok(argv.includes(`--resume=${SESSION}`));
   assert.equal(await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'), before);
   assert.equal((await r.stored('tsk_tr_same')).length, 6);
-  assert.ok(
-    !notes(events).some((note) => /put back on the sandbox/.test(note)),
-    'nothing to put back',
-  );
+  // The sandbox's own file is never trusted: the server's copy is put there every turn.
+  assert.ok(notes(events).some((note) => /\(3 lines\) was put back on the sandbox/.test(note)));
 });
 
 test('a sandbox that lost the conversation gets it back from the store before the CLI resumes', async (t) => {
@@ -245,20 +255,59 @@ test('a conversation that began before transcripts were kept goes on as it is, u
   assert.equal(await store.locate('tsk_tr_legacy', 'sess-1'), undefined);
 });
 
-test('a store that refuses lines is reported, and the task still finishes', async (t) => {
+test('a store that refuses lines stops the turn: a conversation that is not all kept is not carried on', async (t) => {
   const down = new MemoryTranscriptStore();
   down.append = async () => {
     throw new Error('the transcript database is full');
   };
   const r = await rig(t, { store: down });
   const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_down')));
-  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', JSON.stringify(notes(events)));
+  assert.match(
+    end?.type === 'failed' ? end.reason : '',
+    /conversation could not be kept.*the transcript database is full/u,
+  );
   assert.ok(
     notes(events).some((note) =>
       /a transcript batch was not kept: the transcript database is full/.test(note),
     ),
     JSON.stringify(notes(events)),
   );
+});
+
+test('a store that fails only on the last lines still ends the turn as a failure', async (t) => {
+  const late = new MemoryTranscriptStore();
+  const append = late.append.bind(late);
+  late.append = async (taskId, key, lines) => {
+    if (lines.some((line) => line.json.includes('all done'))) {
+      throw new Error('the transcript database went away');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: late });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_late')));
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', JSON.stringify(notes(events)));
+  assert.match(end?.type === 'failed' ? end.reason : '', /the transcript database went away/u);
+});
+
+test('a refusal that the SDK retries and the store then keeps does not fail the turn', async (t) => {
+  const busy = new MemoryTranscriptStore();
+  const append = busy.append.bind(busy);
+  const refusedOnce = new Set<string>();
+  busy.append = async (taskId, key, lines) => {
+    const batch = lines.map((line) => line.json).join('\n');
+    if (!refusedOnce.has(batch)) {
+      refusedOnce.add(batch);
+      throw new Error('the transcript database is busy');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: busy });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_busy')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  assert.ok(refusedOnce.size > 0);
 });
 
 test('a conversation that cannot be put on the sandbox fails the turn before the CLI starts', async (t) => {

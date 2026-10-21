@@ -383,18 +383,22 @@ const SCHEMA_V7 = `
 ALTER TABLE delegations ADD COLUMN mode TEXT;
 `;
 
-/**
- * Whether a run has called a tool. A run that exists when this column is added may already have
- * called one (its history was not recorded), so it counts as having: it is never retried as if
- * nothing had happened.
- */
 const SCHEMA_V8 = `
 ALTER TABLE runs ADD COLUMN tool_called INTEGER NOT NULL DEFAULT 0;
-UPDATE runs SET tool_called = 1;
 `;
 
 const SCHEMA_V9 = `
 ALTER TABLE delegations ADD COLUMN other_runner_input INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
+ * A run that was open before tool history was recorded may already have called a tool: its
+ * history was not kept. It counts as having, so a later capacity error does not retry it as if
+ * nothing had happened. (A closed run is never retried.) A separate step, because databases
+ * already at v8 or v9 did not get this from the step that added the column.
+ */
+const SCHEMA_V10 = `
+UPDATE runs SET tool_called = 1 WHERE tool_called = 0 AND state IN ('active', 'waiting');
 `;
 
 type Migration = string | ((db: DatabaseSync) => void);
@@ -410,6 +414,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V7,
   SCHEMA_V8,
   SCHEMA_V9,
+  SCHEMA_V10,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {

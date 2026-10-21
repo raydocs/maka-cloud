@@ -496,11 +496,23 @@ sandbox user), a group the sandbox user shares with it, a `claude` binary it can
 passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
 that fails the check refuses the turn with the reason.
 
-The check also tries the firewall as that account: it may not run anything through sudo (`sudo -n -l`
-must fail) and must not be able to create an iptables or ip6tables chain, so code the agent runs
-cannot take the egress rules away. The server itself starts nothing as the sandbox user either: a run
-whose command is not handed to the agent account is refused before the box is touched (the pinned
-CLI install, which writes the sandbox user's own `~/.maka-cli`, is the one exception).
+The check also looks at what the account could do to the egress rules, so code the agent runs
+cannot take them away. The sandbox user (it needs `sudo -n`, which the egress guard needs too) reads
+the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
+account is not allowed to run anything; a query that fails is a failed check. The account must hold no
+Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), no program under `/usr/sbin`, `/usr/bin`,
+`/sbin`, `/bin` or `/usr/local` may carry a capability such as `cap_net_admin` or `cap_setuid`
+(the box needs `getcap`, from `libcap2-bin`; without it the check fails), it must not be in a group that
+is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
+socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
+not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
+out of the check.
+
+The server starts nothing as the sandbox user either. A run is a program and its arguments; the
+server quotes them and hands the whole command to the agent account itself, so no argument can add a
+command that runs as the sandbox user. The pinned CLI install, which writes the sandbox user's own
+`~/.maka-cli`, is its own method and the only run that stays the sandbox user.
+
 Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
 test commands run as the agent account (the stop that ends them runs as root, since the processes are
 the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
@@ -645,10 +657,19 @@ Preparation:
    only holds that invite back; about two minutes after it stopped renewing it,
    the next smoke run takes it over. A takeover first fences the killed run:
    every model key and conductor session issued under it books nothing from then
-   on (the invite's generation in the journal moves up), the new run cancels the
-   tasks it left running (if it cannot cancel one, or cannot list them, it
-   starts nothing and exits 2: cancel them by hand and run again), and only then does the new run get a budget of its
-   own, starting empty. A run that ends clears its budget and fences its own
+   on (the invite's generation in the journal moves up), and only then does the
+   new run get a budget of its own, starting empty. Every run, takeover or not,
+   first stops what an earlier run left going: it cancels each task that has not
+   ended, and asks again about each task that ended in the last ten minutes,
+   because only the server's answer to a cancel says whether the task's run or
+   its tree is still being stopped. It sends the cancel again every 5 seconds,
+   for up to 3 minutes a task (the server itself retries a stop that failed with
+   a growing delay), until the answer says the task ended with nothing pending.
+   A task not seen stopped, or a task list it cannot read, means it starts
+   nothing and exits 2, naming the last error: stop those tasks by hand and run
+   again. A task that started after the list was read is not seen. The
+   cleanup is repeated by the next run even though the run that failed it has
+   cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
    sequence, books nothing until the next run reopens it. A server on code from
    before run generations can no longer book on the smoke invite once that invite
