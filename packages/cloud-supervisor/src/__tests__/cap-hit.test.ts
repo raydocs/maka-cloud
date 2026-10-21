@@ -108,3 +108,50 @@ test('a limit item survives a restart of the supervisor, and is not raised or to
   assert.equal(host.interrupts.length, 1, 'one notice in all');
   await second.stop();
 });
+
+test('a limit raised once is never raised again, not after the human answered it and not after a restart', async () => {
+  const dbPath = tmpDb();
+  const host = new FakeHost();
+  const first = await rig({ host, dbPath });
+  const hit = { conversationId: CONVERSATION, key: 'spend_alert:inv_a:2026-10-20', ask: ASK };
+  assert.equal(first.supervisor.raiseCapHit({ ...hit, once: true }), true);
+  await first.supervisor.settled();
+  const item = await firstItem(first);
+  const answered = await first.supervisor.answer({
+    itemId: item.itemId,
+    answerId: `ans_${randomUUID().replaceAll('-', '')}`,
+    optionId: 'ok',
+    preconditionHash: item.preconditionHash,
+  });
+  assert.equal(answered.ok && answered.item.state, 'closed');
+
+  // The same alert is raised again (its owed record was not cleared): nothing new for the human.
+  assert.equal(first.supervisor.raiseCapHit({ ...hit, once: true }), true);
+  await first.supervisor.settled();
+  assert.equal(first.supervisor.listItems({ state: 'open' }).items.length, 0);
+  await first.stop();
+
+  const second = await rig({ host, dbPath, clock: first.clock });
+  assert.equal(second.supervisor.raiseCapHit({ ...hit, once: true }), true);
+  await second.supervisor.settled();
+  assert.equal(
+    second.supervisor.listItems({ state: 'open' }).items.length,
+    0,
+    'nor after a restart',
+  );
+
+  // A limit hit that is not `once` is a new item once the old one was answered, as before.
+  second.supervisor.raiseCapHit(hit);
+  await second.supervisor.settled();
+  assert.equal(second.supervisor.listItems({ state: 'open' }).items.length, 1);
+  await second.stop();
+});
+
+test('raising a limit after the supervisor stopped says it raised nothing', async () => {
+  const r = await rig();
+  await r.stop();
+  assert.equal(
+    r.supervisor.raiseCapHit({ conversationId: CONVERSATION, key: 'k', ask: ASK, once: true }),
+    false,
+  );
+});

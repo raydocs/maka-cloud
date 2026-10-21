@@ -352,6 +352,13 @@ export class Store {
     return row ? toItem(row) : undefined;
   }
 
+  /** Whether an item with this dedupe key was ever raised, open or closed. */
+  itemEverRaised(dedupeKey: string): boolean {
+    return (
+      this.get('SELECT 1 AS found FROM items WHERE dedupe_key = ? LIMIT 1', dedupeKey) !== undefined
+    );
+  }
+
   /** Active items of a task, or of a question, by dedupe-key prefix. */
   activeItemsByKeyPrefix(prefix: string): ItemRecord[] {
     return this.all(
