@@ -1,4 +1,5 @@
 import type { TaskId } from '@maka-cloud/orchestrator';
+import type { SteerReceipt } from './steer-receipts.js';
 
 /** Spend the model gateway settled for one access, request by request. */
 export interface AccessMeter {
@@ -94,6 +95,12 @@ export interface RunnerSessionRecord {
    * when it became ready). Orders a machine's snapshots.
    */
   snapshotAt?: Record<string, number>;
+  /**
+   * What was written down for each message handed to the agent in a hook's answer, before the
+   * answer went out: the proof, with the kept transcript, that a message was given (see
+   * `steer-receipts.ts`).
+   */
+  steerReceipts?: SteerReceipt[];
   updatedAt: number;
 }
 

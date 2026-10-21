@@ -371,7 +371,7 @@ test('a link where the configuration directory should be is not followed', async
   assert.deepEqual(await fs.readdir(outside), [`${SESSION}.jsonl`]);
 });
 
-test('a sandbox is brought up to the store’s transcript only when it is behind it', async (t) => {
+test('a sandbox always gets the store’s copy of the transcript, whatever the one it has holds', async (t) => {
   const r = await rig(t, 'tsk_restore');
   const store = new MemoryTranscriptStore();
   await store.append('tsk_restore', KEY, [line(1), line(2), line(3)]);
@@ -383,18 +383,23 @@ test('a sandbox is brought up to the store’s transcript only when it is behind
     lines: 3,
   });
   assert.equal((await fs.readFile(r.file, 'utf8')).split('\n').filter(Boolean).length, 3);
-  assert.deepEqual(await restoreTranscript(input), {
-    status: 'present',
-    projectKey: KEY.projectKey,
-  });
-
-  // A copy that is behind is replaced; one that is ahead (a mirror batch was lost) is left alone.
-  await fs.writeFile(r.file, `${(await store.read('tsk_restore', SESSION)).lines[0]}\n`);
+  // The server's copy is always the one put on the sandbox: a copy that has the same lines, fewer,
+  // more, or the same count with other words (the agent's to write) is replaced.
+  const kept = (await store.read('tsk_restore', SESSION)).lines;
+  const rewrites = [
+    `${kept[0]}\n`,
+    `${kept.join('\n')}\n{"type":"user","uuid":"later"}\n`,
+    `${kept.map((text) => text.replace('"type":"user"', '"type":"assistant"')).join('\n')}\n`,
+  ];
+  for (const text of rewrites) {
+    await fs.writeFile(r.file, text);
+    assert.equal((await restoreTranscript(input)).status, 'restored');
+    assert.equal(await fs.readFile(r.file, 'utf8'), `${kept.join('\n')}\n`);
+  }
+  // Same count of lines, same lengths: only the words differ.
+  await fs.writeFile(r.file, `${kept.join('\n').replaceAll('"n":', '"m":')}\n`);
   assert.equal((await restoreTranscript(input)).status, 'restored');
-  const ahead = `${(await store.read('tsk_restore', SESSION)).lines.join('\n')}\n{"type":"user","uuid":"later"}\n`;
-  await fs.writeFile(r.file, ahead);
-  assert.equal((await restoreTranscript(input)).status, 'present');
-  assert.equal(await fs.readFile(r.file, 'utf8'), ahead);
+  assert.equal(await fs.readFile(r.file, 'utf8'), `${kept.join('\n')}\n`);
 
   // Nothing stored, or a session id that is not one: nothing is put on the sandbox.
   assert.deepEqual(await restoreTranscript({ ...input, sessionId: OTHER_SESSION }), {

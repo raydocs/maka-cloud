@@ -18,10 +18,9 @@ test('a start sent twice launches one process: the second finds the lock', async
   const input = {
     dirName: 'tsk_once',
     run: 't1',
-    script: buildRunScript({
-      preamble: '',
-      command: asAgent(`sh -c ${shq('echo started >> "$MAKA_DIR/counter"')}`, HARNESS_AGENT),
-    }),
+    preamble: '',
+    program: 'sh',
+    args: ['-c', 'echo started >> "$MAKA_DIR/counter"'],
     envs: {},
     runToken: 'token-once',
     workdir: join(h.root, 'tsk_once', 'workspace'),
