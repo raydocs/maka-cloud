@@ -77,3 +77,10 @@ export {
   type TaskStore,
 } from './store.js';
 export * from './types.js';
+export {
+  buildTimeline,
+  type RunTimeline,
+  type TimelineCost,
+  type TimelineStep,
+  type TimelineTurn,
+} from './timeline.js';

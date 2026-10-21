@@ -307,6 +307,7 @@ export async function startStack(
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
       orchestrator: { recoveredSpend: journal, limits: config.taskLimits },
+      timelineContent: config.timelineContent,
       conductorRoot: config.conductorRoot,
       conductor: {
         // The vendor key stays in the gateway: the conductor's requests go through it in process.
