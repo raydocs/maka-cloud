@@ -660,8 +660,8 @@ Preparation:
    on (the invite's generation in the journal moves up), and only then does the
    new run get a budget of its own, starting empty. Every run, takeover or not,
    first stops what an earlier run left going: it cancels each task that has not
-   ended, and asks again about each task that ended in the last ten minutes,
-   because only the server's answer to a cancel says whether the task's run or
+   ended, and asks about every task that has (however long ago, since the task
+   list cannot show a pending stop and the server's flag has no age limit), because only the server's answer to a cancel says whether the task's run or
    its tree is still being stopped. It sends the cancel again every 5 seconds,
    for up to 3 minutes a task (the server itself retries a stop that failed with
    a growing delay), until the answer says the task ended with nothing pending.

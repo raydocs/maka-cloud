@@ -16,7 +16,6 @@ export interface SmokeTask {
   budgetExceeded?: boolean;
   stopPending?: boolean;
   treeStopPending?: boolean;
-  finishedAt?: number;
   failureReason?: string;
 }
 

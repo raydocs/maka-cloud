@@ -45,11 +45,6 @@ const RESTART_TIMEOUT_MS = 60_000;
  */
 const STOP_CONFIRM_POLL_MS = 5_000;
 const STOP_CONFIRM_POLLS = 36;
-/**
- * An ended task is asked about again only when it ended this recently: the tree flag lives in the
- * server's memory, so a task that ended long ago, or before a restart, has nothing left to wait for.
- */
-const RECENT_END_MS = 10 * 60_000;
 const ENDED_STATES = ['succeeded', 'failed', 'cancelled'];
 
 export interface LiveSmokeIo {
@@ -314,8 +309,8 @@ export function createLiveSmokeDeps(
     /**
      * Stops every task of the smoke invite that is still going: what an earlier run left behind.
      * A task counts as stopped only when the server's own answer to a cancel says it ended and that
-     * neither its stop nor its tree's is pending: a task that ended a moment ago is asked about
-     * again, not skipped, and a cancel that failed (whatever the answer) is sent again at the next poll. Returns how many
+     * neither its stop nor its tree's is pending: every task of the invite is asked, even one that
+     * ended long ago, never skipped on the list's say-so, and a cancel that failed (whatever the answer) is sent again at the next poll. Returns how many
      * tasks were running when this started. A task not confirmed stopped, or a list that cannot be
      * read, is an error: the run must not start beside work it could not stop.
      */
@@ -333,10 +328,9 @@ export function createLiveSmokeDeps(
         const id = isRecord(conversation) ? conversation.conversationId : undefined;
         if (typeof id !== 'string') continue;
         for (const task of await this.tasks(id)) {
-          const recent = task.finishedAt === undefined || task.finishedAt >= now() - RECENT_END_MS;
-          if (!ENDED_STATES.includes(task.state) || task.stopPending === true || recent) {
-            open.push({ ...task, conversationId: id });
-          }
+          // Every task is asked, however long ago it ended: the list cannot show a tree that is still
+          // stopping, and the server's flag has no age limit.
+          open.push({ ...task, conversationId: id });
         }
       }
       let cancelled = 0;
@@ -454,7 +448,6 @@ function toTask(raw: unknown): SmokeTask | undefined {
     ...(raw.budgetExceeded === true ? { budgetExceeded: true } : {}),
     ...(raw.stopPending === true ? { stopPending: true } : {}),
     ...(raw.treeStopPending === true ? { treeStopPending: true } : {}),
-    ...(typeof raw.finishedAt === 'number' ? { finishedAt: raw.finishedAt } : {}),
     ...(typeof raw.failureReason === 'string' ? { failureReason: raw.failureReason } : {}),
   };
 }
