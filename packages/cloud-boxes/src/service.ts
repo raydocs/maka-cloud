@@ -44,7 +44,7 @@ export interface BoxService {
 
 /**
  * The pool of an instabox account with its two loops: `sweepIdle` puts idle boxes to sleep, `cleanup`
- * retries lost boxes, frees claims of tasks that are no longer live and removes long-idle boxes. A loop that fails reports and goes on; neither
+ * retries lost boxes and removes long-idle ones. A loop that fails reports and goes on; neither
  * loop ever overlaps itself (the next run is set after the last one ends).
  */
 export function startBoxService(options: BoxServiceOptions): BoxService {
@@ -90,11 +90,7 @@ export function startBoxService(options: BoxServiceOptions): BoxService {
     schedule();
   };
   loop('sweep', options.sweepEveryMs ?? DEFAULT_SWEEP_EVERY_MS, () => pool.sweepIdle());
-  loop('cleanup', options.cleanupEveryMs ?? DEFAULT_CLEANUP_EVERY_MS, async () => {
-    // A box claimed by a task that ended while the server was down is freed first.
-    await pool.reconcile();
-    return await pool.cleanup();
-  });
+  loop('cleanup', options.cleanupEveryMs ?? DEFAULT_CLEANUP_EVERY_MS, () => pool.cleanup());
 
   return {
     pool,

@@ -11,8 +11,6 @@ import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { DEFAULT_MODES } from '@maka-cloud/modes';
-import { BoxPool } from '@maka-cloud/boxes';
-import type { InstaboxClient } from '@maka-cloud/instabox';
 import { InviteStore } from '@maka-cloud/server';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
@@ -92,15 +90,13 @@ async function start(
       ANTHROPIC_API_KEY: 'sk-test-not-a-key',
       ANTHROPIC_BASE_URL: modelUrl,
       INSTABOX_API_KEY: 'ibx-test-not-a-key',
-      ...(env.MAKA_CLOUD_BOXES === undefined ? { MAKA_CLOUD_SANDBOXES: SANDBOXES } : {}),
+      MAKA_CLOUD_SANDBOXES: SANDBOXES,
       ...(publicUrl === undefined ? {} : { MAKA_CLOUD_MCP_PUBLIC_URL: publicUrl }),
       ...Object.fromEntries(
         Object.entries(env).filter(
           ([name]) =>
             name.startsWith('CLOUD_PUSH_') ||
             name === 'MAKA_CLOUD_SANDBOXES' ||
-            name === 'MAKA_CLOUD_BOXES' ||
-            name === 'MAKA_CLOUD_BOX_TEMPLATE' ||
             name === 'MAKA_CLOUD_BACKUP_DIR' ||
             name === 'MAKA_CLOUD_SPEND_ALERT_USD' ||
             name === 'MAKA_CLOUD_OWNER_INVITE' ||
@@ -1553,62 +1549,4 @@ test('a page the agent fetched goes to the server’s sources of that task, and 
   // A task the server does not know keeps nothing, and says so by recording zero.
   server.recordOpenedPages = original;
   assert.doesNotThrow(() => options.onOpenedPage?.('tsk_unknown', 'https://docs.example/b'));
-});
-
-/** A sandbox account with no machines, whose create always fails, and the calls it saw. */
-function emptyAccount(): { client: InstaboxClient; calls: string[] } {
-  const calls: string[] = [];
-  const client = {
-    listMachines: async () => {
-      calls.push('listMachines');
-      return [];
-    },
-    createMachine: async () => {
-      calls.push('createMachine');
-      throw new Error('stub account: no machines');
-    },
-  } as unknown as InstaboxClient;
-  return { client, calls };
-}
-
-test('with MAKA_CLOUD_BOXES=1 the fleet runs on the box pool with the pinned CLIs, and closing stops its loops', async (t) => {
-  const account = emptyAccount();
-  const pending = new Set<number>();
-  let handles = 0;
-  const timers = {
-    setTimeout: () => {
-      handles += 1;
-      pending.add(handles);
-      return handles;
-    },
-    clearTimeout: (handle: unknown) => {
-      pending.delete(handle as number);
-    },
-  };
-  const { stack, options } = await start(
-    t,
-    undefined,
-    { MAKA_CLOUD_BOXES: '1', MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' },
-    true,
-    { boxes: { client: account.client, guard: async () => undefined, timers } },
-  );
-  const { sandboxes, installCommands, versions } = options;
-  assert.ok(sandboxes instanceof BoxPool, 'tasks get their boxes from the pool');
-  assert.ok(
-    installCommands && Object.keys(installCommands).length > 0,
-    'the CLIs are the pinned, checked ones',
-  );
-  assert.ok(versions && Object.keys(versions).length > 0, 'the fleet marks the pinned versions');
-  assert.ok(account.calls.includes('listMachines'), 'the start looks at the boxes that exist');
-  assert.equal(pending.size, 2, 'the sleep sweep and the cleanup are scheduled');
-  await assert.rejects(
-    sandboxes.acquire({
-      tenantId: stack.cloud.server.invites.list()[0]?.inviteId ?? 'inv',
-      taskId: 't1',
-    }),
-    /no machines/u,
-    'a task asks the pool, which asks the account',
-  );
-  await stack.close();
-  assert.equal(pending.size, 0, 'closing the stack stops both loops');
 });
