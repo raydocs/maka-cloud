@@ -314,6 +314,51 @@ export function suggestionSpec(store: Store, input: SuggestionChoice): ItemSpec 
   };
 }
 
+/** The offer to stop suggesting a kind of card in a project after several went unanswered. */
+export interface SuggestionOfferChoice {
+  conversationId: string;
+  projectId: string;
+  /** The card kind, a value of the fixed kind table. */
+  kind: string;
+  /** Our own words for the kind, from the kind table. */
+  label: string;
+  repo: string;
+  ignored: number;
+}
+
+/** What the host's cards service gets as the `cardId` of an offer: it is not a card, and cannot be taken for one. */
+export const offerRef = (projectId: string, kind: string): string => `offer:${projectId}:${kind}`;
+
+/** A non-interrupting item asking whether to keep suggesting a kind: "Turn off" or "Keep". */
+export function suggestionOfferSpec(store: Store, input: SuggestionOfferChoice): ItemSpec {
+  const ref = offerRef(input.projectId, input.kind);
+  const context: ItemContext = { subject: 'suggestion', detail: ref };
+  return {
+    kind: 'suggestion',
+    conversationId: input.conversationId,
+    taskId: null,
+    dedupeKey: `suggestion-offer:${input.projectId}:${input.kind}`,
+    ask: clip(
+      `${input.ignored} suggestions in a row to ${input.label.toLowerCase()} on ${input.repo} went unanswered. Stop suggesting them?`,
+      MAX_ASK,
+    ),
+    options: [
+      {
+        id: 'turn-off',
+        label: 'Turn off',
+        recommended: true,
+        effect: 'card',
+        cardAction: 'turn_off',
+      },
+      { id: 'keep', label: 'Keep', recommended: false, effect: 'card', cardAction: 'keep' },
+    ],
+    allowText: false,
+    evidence: [],
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
+
 export function stallSpec(store: Store, task: TaskRecord, at: number): ItemSpec {
   const context: ItemContext = {
     subject: 'stall',

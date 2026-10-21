@@ -35,7 +35,7 @@ export type OptionEffect =
   | 'local'
   /** Tells the duties engine which set of standing duties the owner chose (`proposalSetId`). */
   | 'proposal'
-  /** Accepts or dismisses a proposed card (T30); the host's cards service does it. */
+  /** Accepts or dismisses a proposed card, or answers the offer to turn a kind off (T30); the host's cards service does it. */
   | 'card';
 
 export interface ItemOption {
@@ -52,7 +52,7 @@ export interface ItemOption {
   /** For `proposal` options: which set of the proposal this option chooses. */
   proposalSetId?: string;
   /** For `card` options: what the answer does to the card. */
-  cardAction?: 'accept' | 'dismiss';
+  cardAction?: 'accept' | 'dismiss' | 'turn_off' | 'keep';
 }
 
 export type EvidenceLink =

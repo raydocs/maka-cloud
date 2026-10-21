@@ -62,6 +62,7 @@ function rig(
   const conversations = new Map<string, string>();
   const raised: Array<Parameters<CardsParts['raiseSuggestion']>[0]> = [];
   const closed: string[] = [];
+  const offers: Array<Parameters<CardsParts['raiseOffer']>[0]> = [];
   let attempts = 0;
   const parts: CardsParts = {
     server: {
@@ -84,6 +85,10 @@ function rig(
       raised.push(choice);
       return true;
     },
+    raiseOffer: (offer) => {
+      offers.push(offer);
+      return true;
+    },
     closeSuggestion: (lineage) => {
       closed.push(lineage);
       return true;
@@ -99,6 +104,7 @@ function rig(
     projectId,
     starts,
     raised,
+    offers,
     closed,
     clock,
     setSignals: (next: () => RepoSignals) => {
@@ -463,5 +469,100 @@ test('a failed start in maintenance is warned about and tried again on the next 
   assert.equal(warned.length, 1);
   assert.deepEqual(service.maintain(), { resumed: 1, expired: 0 });
   assert.equal(r.starts.length, 1);
+  r.engine.close();
+});
+
+function ignoreThree(r: ReturnType<typeof rig>, kind = 'fix_main_ci') {
+  for (let n = 0; n < 3; n += 1) {
+    const made = r.engine.cards.propose(OWNER, r.projectId, {
+      kind,
+      subjectKey: `old${n}`,
+      title: `Fix an old failure ${n}`,
+      detail: 'd',
+      brief: 'b',
+      estimateUsd: 3,
+      preconditionHash: 'a'.repeat(64),
+      external: false,
+    });
+    assert.ok(made.ok);
+    assert.ok(r.engine.cards.dismiss(OWNER, made.card.cardId).ok);
+  }
+}
+
+test('after three unanswered cards of a kind the owner is offered to turn it off, once, and the answer is theirs', async () => {
+  const r = rig();
+  ignoreThree(r);
+  await r.service.scanProject(OWNER, r.projectId);
+  assert.equal(r.offers.length, 1);
+  assert.deepEqual(r.offers[0], {
+    conversationId: `place_cards:${r.projectId}`,
+    projectId: r.projectId,
+    kind: 'fix_main_ci',
+    label: 'Fix failing tests on the default branch',
+    repo: 'acme/widgets',
+    ignored: 3,
+  });
+  // Raised again by the next scan (one item per kind), taken from the store only once.
+  await r.service.scanProject(OWNER, r.projectId);
+  assert.equal(r.offers.length, 2);
+  const ref = `offer:${r.projectId}:fix_main_ci`;
+  assert.deepEqual(await r.service.decide({ cardId: ref, action: 'turn_off', caller: OWNER }), {
+    accepted: true,
+    duplicate: false,
+  });
+  assert.deepEqual(await r.service.decide({ cardId: ref, action: 'turn_off', caller: OWNER }), {
+    accepted: true,
+    duplicate: true,
+  });
+  assert.equal(
+    r.engine.cards.stats(OWNER, r.projectId).find((k) => k.kind === 'fix_main_ci')?.enabled,
+    false,
+  );
+  r.offers.length = 0;
+  await r.service.scanProject(OWNER, r.projectId);
+  assert.equal(r.offers.length, 0, 'a kind that is off is not offered again');
+  assert.equal(r.starts.length, 0);
+  r.engine.close();
+});
+
+test('keeping a kind ends its back-off, and an offer reference that is not one starts nothing', async () => {
+  const r = rig();
+  ignoreThree(r);
+  await r.service.scanProject(OWNER, r.projectId);
+  const ref = `offer:${r.projectId}:fix_main_ci`;
+  assert.deepEqual(await r.service.decide({ cardId: ref, action: 'keep', caller: OWNER }), {
+    accepted: true,
+    duplicate: false,
+  });
+  const stat = r.engine.cards.stats(OWNER, r.projectId).find((k) => k.kind === 'fix_main_ci');
+  assert.equal(stat?.enabled, true);
+  assert.equal(stat?.ignoredInARow, 0);
+  // Not the owner, not an offer that exists, not a reference at all.
+  assert.deepEqual(
+    await r.service.decide({ cardId: ref, action: 'turn_off', caller: 'inv_other' }),
+    { accepted: false, reason: 'not_found' },
+  );
+  assert.deepEqual(await r.service.decide({ cardId: ref, action: 'turn_off' }), {
+    accepted: false,
+    reason: 'forbidden',
+  });
+  assert.deepEqual(
+    await r.service.decide({ cardId: 'offer:x:nonsense', action: 'turn_off', caller: OWNER }),
+    { accepted: false, reason: 'not_found' },
+  );
+  assert.deepEqual(await r.service.decide({ cardId: 'card_1', action: 'keep', caller: OWNER }), {
+    accepted: false,
+    reason: 'not_found',
+  });
+  assert.deepEqual(
+    await r.service.decide({
+      cardId: `offer:${r.projectId}:rebase_pr`,
+      action: 'turn_off',
+      caller: OWNER,
+    }),
+    { accepted: false, reason: 'not_found' },
+    'a kind that was never offered',
+  );
+  assert.equal(r.starts.length, 0);
   r.engine.close();
 });

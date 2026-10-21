@@ -1538,6 +1538,7 @@ test('with cards on, a scan shows a card in the inbox and one tap starts one lim
     }),
   });
   assert.equal(added.status, 201);
+  const { project } = (await added.json()) as { project: { projectId: string } };
   await stack.cards.pass();
   type Item = {
     itemId: string;
@@ -1558,6 +1559,22 @@ test('with cards on, a scan shows a card in the inbox and one tap starts one lim
   // A second pass the same day finds the project scanned: still one card.
   await stack.cards.pass();
   assert.equal((await open()).filter((item) => item.kind === 'suggestion').length, 1);
+
+  const shown = (await (await api(`/v1/projects/${project.projectId}/suggestions`)).json()) as {
+    suggestions: {
+      kinds: Array<{ kind: string; enabled: boolean }>;
+      cards: Array<{ kind: string; title: string }>;
+    };
+  };
+  assert.deepEqual(
+    shown.suggestions.cards.map((c) => c.title),
+    ['Fix the failing test on main'],
+  );
+  assert.equal(shown.suggestions.kinds.find((k) => k.kind === 'fix_main_ci')?.enabled, true);
+  assert.ok(
+    !shown.suggestions.kinds.some((k) => k.kind === 'merge_pr' || k.kind === 'close_issues'),
+    'gated kinds are not shown',
+  );
 
   const tap = (answerId: string) =>
     api(`/v1/inbox/items/${card.itemId}/answer`, {
@@ -1583,6 +1600,25 @@ test('with cards on, a scan shows a card in the inbox and one tap starts one lim
   assert.equal(runs[0]?.authority, 'open-pr');
   assert.equal(runs[0]?.hardBudget, true, 'a card run’s budget cannot be raised');
   assert.equal(runs[0]?.budgetUsd, 6);
+
+  // The owner can turn the kind off for this project; nobody else can.
+  const off = await api(`/v1/projects/${project.projectId}/suggestions`, {
+    method: 'PATCH',
+    body: JSON.stringify({ kind: 'fix_main_ci', enabled: false }),
+  });
+  assert.equal(off.status, 200);
+  const after = (await (await api(`/v1/projects/${project.projectId}/suggestions`)).json()) as {
+    suggestions: { kinds: Array<{ kind: string; enabled: boolean }> };
+  };
+  assert.equal(after.suggestions.kinds.find((k) => k.kind === 'fix_main_ci')?.enabled, false);
+  const stranger = stack.cloud.server.invites.create('stranger');
+  const peek = await fetch(
+    `${stack.cloud.server.url}/v1/projects/${project.projectId}/suggestions`,
+    {
+      headers: { authorization: `Bearer ${stranger.token}` },
+    },
+  );
+  assert.equal(peek.status, 404);
 });
 
 test('cards need duties and a GitHub token, and are off by default', async (t) => {

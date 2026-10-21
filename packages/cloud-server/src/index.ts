@@ -27,7 +27,7 @@ export {
   type HttpLimits,
   MAX_ANSWER_TEXT_LENGTH,
 } from './http.js';
-export { type DutyOwners, type DutyService } from './duties.js';
+export { type DutyOwners, type DutyService, type SuggestionsOverview } from './duties.js';
 export { type InboxAnswerResult, type InboxService } from './inbox.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
 export { scrubErrorText } from './public-view.js';

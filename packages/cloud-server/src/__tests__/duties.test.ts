@@ -478,3 +478,121 @@ test('a conversation made for a key but never posted to is not a started one, un
     conversationId: made.ok ? made.conversationId : '',
   });
 });
+
+function fakeSuggestions(mine: () => string) {
+  const calls: Call[] = [];
+  const suggestions: NonNullable<DutyService['suggestions']> = {
+    overview: (owner, projectId) => {
+      calls.push({ name: 'overview', args: [owner, projectId] });
+      if (owner !== mine() || projectId !== 'prj_1') return undefined;
+      return {
+        kinds: [
+          {
+            kind: 'fix_main_ci',
+            label: 'Fix failing tests on the default branch',
+            enabled: true,
+            accepted: 1,
+            dismissed: 0,
+            ignored: 0,
+            ignoredInARow: 0,
+            backedOff: false,
+            offer: 'none',
+          },
+        ],
+        cards: [
+          {
+            cardId: 'card_1',
+            kind: 'fix_main_ci',
+            title: 'Fix the failing test on main',
+            detail:
+              'CI failed with key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 in the log',
+            mode: 'standard',
+            estimateUsd: 3,
+            typical: false,
+            external: true,
+          },
+        ],
+      };
+    },
+    setKind: (owner, projectId, kind, enabled) => {
+      calls.push({ name: 'setKind', args: [owner, projectId, kind, enabled] });
+      if (owner !== mine() || projectId !== 'prj_1') return 'not_found';
+      return kind === 'fix_main_ci' ? 'ok' : 'invalid_kind';
+    },
+  };
+  return { suggestions, calls };
+}
+
+test('the suggestions of a project are shown to its owner only, with outside text scrubbed', async (t) => {
+  let me = '';
+  const fake = fakeSuggestions(() => me);
+  const { h } = await setup(t, { suggestions: fake.suggestions });
+  me = h.inviteId;
+  const res = await h.api('/v1/projects/prj_1/suggestions');
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    suggestions: { kinds: unknown[]; cards: Array<{ title: string; detail: string }> };
+  };
+  assert.equal(body.suggestions.kinds.length, 1);
+  assert.equal(body.suggestions.cards[0]?.title, 'Fix the failing test on main');
+  assert.ok(
+    !JSON.stringify(body).includes('sk-ant-api03'),
+    'a key in a log never reaches a client',
+  );
+  // Another project, or another owner's: the same 404.
+  assert.equal((await h.api('/v1/projects/prj_2/suggestions')).status, 404);
+  me = 'someone_else';
+  assert.equal((await h.api('/v1/projects/prj_1/suggestions')).status, 404);
+});
+
+test('a kind is switched by its owner with a strict body, and a project that is not theirs answers 404', async (t) => {
+  let me = '';
+  const fake = fakeSuggestions(() => me);
+  const { h } = await setup(t, { suggestions: fake.suggestions });
+  me = h.inviteId;
+  const patch = (body: unknown, path = '/v1/projects/prj_1/suggestions') =>
+    h.api(path, { method: 'PATCH', body: JSON.stringify(body) });
+  const ok = await patch({ kind: 'fix_main_ci', enabled: false });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { kind: 'fix_main_ci', enabled: false });
+  assert.deepEqual(fake.calls.find((c) => c.name === 'setKind')?.args, [
+    me,
+    'prj_1',
+    'fix_main_ci',
+    false,
+  ]);
+  assert.equal(
+    (await patch({ kind: 'merge_pr', enabled: true })).status,
+    400,
+    'a kind that does not exist',
+  );
+  assert.equal((await patch({ kind: 'fix_main_ci' })).status, 400);
+  assert.equal((await patch({ kind: 'fix_main_ci', enabled: 'yes' })).status, 400);
+  assert.equal((await patch({ kind: 'fix_main_ci', enabled: true, owner: 'x' })).status, 400);
+  assert.equal(
+    (await patch({ kind: 'fix_main_ci', enabled: true }, '/v1/projects/prj_2/suggestions')).status,
+    404,
+  );
+  assert.equal(
+    (await h.api('/v1/projects/prj_1/suggestions', { method: 'POST', body: '{}' })).status,
+    405,
+  );
+  assert.equal(
+    (await h.api('/v1/projects/prj_1/suggestions', { method: 'GET', token: null })).status,
+    401,
+  );
+});
+
+test('without cards the suggestion routes do not exist', async (t) => {
+  const { h } = await setup(t);
+  assert.equal((await h.api('/v1/projects/prj_1/suggestions')).status, 404);
+  assert.equal(
+    (
+      await h.api('/v1/projects/prj_1/suggestions', {
+        method: 'PATCH',
+        body: '{"kind":"x","enabled":true}',
+      })
+    ).status,
+    404,
+  );
+});
