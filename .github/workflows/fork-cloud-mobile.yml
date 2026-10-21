@@ -109,7 +109,13 @@ jobs:
         working-directory: packages/cloud-mobile
         run: |
           npx expo prebuild --platform android --no-install
-          (cd android && ./gradlew --no-daemon assembleRelease)
+          # Gradle fetches its plugins from the public repositories; a reset connection is retried.
+          for attempt in 1 2 3; do
+            (cd android && ./gradlew --no-daemon assembleRelease) && exit 0
+            echo "Gradle attempt $attempt failed" >&2
+            sleep 15
+          done
+          exit 1
         env:
           CI: '1'
           MAKA_E2E: '1'
