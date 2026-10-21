@@ -405,6 +405,38 @@ const steps = [
     },
   ],
   [
+    'checkout',
+    async () => {
+      // The gate for the first live run: a coding task clones a repository (the real clone script),
+      // and the agent account edits a file of the checkout and writes the repro.json its brief names.
+      // The scripted claude does that as the account it runs as and records what each write did.
+      await control('POST', '/mode?mode=code');
+      const id = await startConversation('rehearsal: code a change');
+      let ended = '';
+      try {
+        const events = await settle(
+          id,
+          (seen) =>
+            ['task_succeeded', 'task_failed', 'task_cancelled'].some(
+              (kind) => taskEvents(seen, kind).length > 0,
+            ),
+          240_000,
+        );
+        ended = summary(events);
+      } catch (error) {
+        ended = String(error.message);
+      }
+      const { code } = await control('GET', '/state');
+      assert(code, `the scripted claude never ran as a coding agent: ${ended}`);
+      const wrong = ['brief', 'edit', 'repro'].filter((what) => code[what] !== 'ok');
+      assert(
+        wrong.length === 0,
+        `the agent account could not ${wrong.map((what) => `${what} (${code[what]})`).join(', ')}: ${ended}`,
+      );
+      console.log(`  the coding task: ${ended.slice(0, 300)}`);
+    },
+  ],
+  [
     'approval',
     async () => {
       await control('POST', '/mode?mode=ok');
