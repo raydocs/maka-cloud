@@ -130,6 +130,7 @@ function openJournal(path: string): DatabaseSync {
       addColumn(db, 'account_spend', 'booked_at', 'INTEGER NOT NULL DEFAULT 0');
       addColumn(db, 'run_budget', 'run_id', "TEXT NOT NULL DEFAULT ''");
       addColumn(db, 'run_budget', 'heartbeat_at', 'INTEGER NOT NULL DEFAULT 0');
+      db.exec(RUN_BUDGET_TRIGGERS);
       return db;
     } catch (error) {
       try {
@@ -158,12 +159,41 @@ function addColumn(db: DatabaseSync, table: string, column: string, definition: 
   }
 }
 
+const TRIGGER_GUARD = 'run_budget_guard_v1';
+const TRIGGER_STAMP = 'run_budget_stamp_v1';
+
 /**
- * The journal's `user_version` once an account ledger that enforces run budgets has been opened on
- * it. A process that sets a run budget refuses unless the server that books against the file has
- * been started on code that reads it: an older server would ignore the budget.
+ * A run budget is enforced by the journal file itself, so it binds every process that books into
+ * it, whatever code that process runs: a server on an older version, or one that is still running
+ * while a newer one fails to start, books through the same `account_spend` table.
+ *
+ * `run_budget_guard_v1` aborts an insert that would take what the account booked since the budget
+ * began above its limit, and `run_budget_stamp_v1` gives a row inserted without a time (by a
+ * process that does not know the column) the time of its insert, so its spend counts from then on.
+ * Both are in the file once any process on this code has opened it, and a connection that is open
+ * already sees them at its next statement.
  */
-const RUN_BUDGET_LEDGER_VERSION = 1;
+const RUN_BUDGET_TRIGGERS = `
+  CREATE TRIGGER IF NOT EXISTS ${TRIGGER_GUARD} BEFORE INSERT ON account_spend
+  WHEN EXISTS (
+    SELECT 1 FROM run_budget AS run
+    WHERE run.account = NEW.account
+      AND (
+        SELECT COALESCE(SUM(usd), 0) FROM account_spend
+        WHERE account = NEW.account AND booked_at >= run.since_ms
+      ) + NEW.usd > run.limit_usd + 1e-9
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'the run budget of this account is used up');
+  END;
+  CREATE TRIGGER IF NOT EXISTS ${TRIGGER_STAMP} AFTER INSERT ON account_spend
+  WHEN NEW.booked_at = 0
+  BEGIN
+    UPDATE account_spend
+    SET booked_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    WHERE key = NEW.key;
+  END;
+`;
 
 /**
  * What an invite may spend in one run, wherever the run falls: a budget that starts at `sinceMs`
@@ -176,12 +206,17 @@ export interface RunBudget {
   sinceMs: number;
 }
 
-/** Whether the server that books against this journal file enforces run budgets (see `setRunBudget`). */
+/**
+ * Whether the journal file itself refuses a booking past a run budget, from whichever process it
+ * comes (see `RUN_BUDGET_TRIGGERS`). Read-only.
+ */
 export function journalEnforcesRunBudgets(path: string): boolean {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
-    return row.user_version >= RUN_BUDGET_LEDGER_VERSION;
+    const found = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (?, ?)")
+      .all(TRIGGER_GUARD, TRIGGER_STAMP);
+    return found.length === 2;
   } finally {
     db.close();
   }
@@ -518,14 +553,6 @@ export class SqliteSpendJournal implements SpendJournal {
     this.db
       .prepare('DELETE FROM account_spend WHERE day < ?')
       .run(new Date(now() - 62 * 86_400_000).toISOString().slice(0, 10));
-    // Reservations made before this opened cannot be told from later ones by a run budget that
-    // an older server ignored; only a server on this code makes the marker, see the constant.
-    const { user_version: version } = this.db.prepare('PRAGMA user_version').get() as {
-      user_version: number;
-    };
-    if (version < RUN_BUDGET_LEDGER_VERSION) {
-      this.db.exec(`PRAGMA user_version = ${RUN_BUDGET_LEDGER_VERSION}`);
-    }
     const sum = (where: string, ...args: Array<string | number>): number =>
       (
         this.db

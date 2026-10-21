@@ -89,8 +89,9 @@ The hard cap is the run budget: from the moment the command starts, the gateway
 refuses any model request of the smoke invite that would take what the invite
 has booked since then (held and settled, every scenario together) above
 `MAKA_CLOUD_SMOKE_MAX_USD`, across UTC midnight and across the restart scenario.
-The command refuses to start unless the server was started on a version that
-enforces it, so restart the server after you update the checkout. The budget is
+The cap is kept in the gateway journal file itself, so it binds every process
+that books into it, even a server still running an older version, and the
+command refuses to start if the file does not carry it. The budget is
 also the amount at which the run stops starting new scenarios. The run refuses
 without `MAKA_CLOUD_LIVE=1`, so nothing happens by accident. If a model key is
 wrong, the research and coding scenarios say so within seconds instead of
