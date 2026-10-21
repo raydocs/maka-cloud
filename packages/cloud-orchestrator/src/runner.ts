@@ -25,6 +25,12 @@ export interface RunSpec {
    * limit). A run is one start or one resume after a restart. The smaller of the two binds.
    */
   turnBudgetUsd?: number;
+  /**
+   * File names in the handoff directory that an artifact this run exports may not replace, besides
+   * its own brief and result. A playbook whose agents share the task's directory lists the files
+   * its own code writes there.
+   */
+  reserved?: string[];
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
   /**
