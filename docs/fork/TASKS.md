@@ -379,6 +379,12 @@ Depends on: T5, T15, T20, T21. Replaces T12.
   enforced, budget and daily cap stop a run, schedule catch-up, a proposal
   runs nothing until approved, injected instructions in an issue cannot
   trigger a guarded tool.
+- Status: `merge-when-green` is an authority level the gate knows and a duty
+  can be given, but nothing in production uses it yet. The only tool that
+  declares an authority is the pull-request tool (`open-pr`), so no duty
+  can merge. The exact-SHA green check (merge only the commit whose checks
+  passed, and refuse if the head moved) belongs to the merge tool and ships
+  with it in T26; until then a `merge-when-green` duty behaves like `open-pr`.
 
 ## T24: Home, Chat and Projects in the Hark style
 
