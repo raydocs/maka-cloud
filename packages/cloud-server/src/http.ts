@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { MemoryError, type MemoryStore } from '@maka-cloud/memory';
 import {
   KeyedCounter,
+  MAX_STEER_CHARS,
   type Orchestrator,
   OrchestratorError,
   type OperatorAccess,
@@ -127,7 +128,10 @@ export interface PublicApiDeps {
   hub: FeedHub;
   messageLimiter: RateLimiter;
   controlLimiter: RateLimiter;
-  orchestrator: Pick<Orchestrator, 'cancelAs' | 'pauseAs' | 'resumeAs' | 'rootSessionOfTask'>;
+  orchestrator: Pick<
+    Orchestrator,
+    'cancelAs' | 'pauseAs' | 'resumeAs' | 'rootSessionOfTask' | 'steerAs' | 'withdrawSteerAs'
+  >;
   /** Absent when Web Push is not configured; its routes are then 404. */
   push?: PushApi;
   artifacts: ArtifactSource;
@@ -169,6 +173,15 @@ const postMessage = z
   .object({
     text: z.string().min(1),
     clientMessageId: z.string().min(1).max(128).optional(),
+  })
+  .strict();
+const taskMessage = z
+  .object({
+    text: z.string().min(1).max(MAX_STEER_CHARS),
+    messageId: z
+      .string()
+      .regex(/^[A-Za-z0-9_.:-]{1,64}$/u)
+      .optional(),
   })
   .strict();
 const postAnswer = z
@@ -453,6 +466,22 @@ export class PublicApi {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
       const action = control[2] as ControlAction;
       return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
+    }
+    const taskMessages = /^\/v1\/tasks\/([^/]+)\/messages(?:\/([^/]+))?$/u.exec(path);
+    if (taskMessages) {
+      const taskId = decodeURIComponent(taskMessages[1] ?? '');
+      if (taskMessages[2] === undefined) {
+        if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
+        return this.sendTaskMessage(req, res, invite, taskId);
+      }
+      if (method !== 'DELETE') throw new HttpError(405, 'method_not_allowed', { allow: 'DELETE' });
+      return this.withdrawTaskMessage(
+        req,
+        res,
+        invite,
+        taskId,
+        decodeURIComponent(taskMessages[2]),
+      );
     }
     const computer =
       /^\/v1\/tasks\/([^/]+)\/computer(?:\/(stream|takeover|handback|input))?$/u.exec(path);
@@ -821,6 +850,71 @@ export class PublicApi {
       respond(res, 200, { task: toPublicView(view) });
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
+    }
+  }
+
+  /** The owner as the orchestrator checks them, in its write chain, so a revoke in between stops it. */
+  private operatorOf(req: IncomingMessage, invite: InviteInfo, taskId: string): OperatorAccess {
+    const { conversations } = this.deps;
+    const sessionId = this.ownTaskSession(invite, taskId);
+    const token = bearerToken(req);
+    return {
+      sessionId,
+      authorize: () => {
+        const current = token === undefined ? undefined : this.deps.invites.resolve(token);
+        if (!current || current.inviteId !== invite.inviteId) {
+          throw new OrchestratorError('unauthorized', 'The invite is no longer valid');
+        }
+        const conversationId = conversations.conversationOf(sessionId);
+        if (conversationId === undefined || !conversations.owns(invite.inviteId, conversationId)) {
+          throw new OrchestratorError('not_found', 'The conversation no longer exists');
+        }
+      },
+    };
+  }
+
+  /**
+   * The owner's own words to the agent working on a task. The text is theirs, not model output,
+   * so it goes in as it is. `messageId` makes a resend safe; without one the request is its own.
+   */
+  private async sendTaskMessage(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+  ): Promise<void> {
+    take(this.deps.controlLimiter, invite);
+    const body = taskMessage.safeParse(await readJson(req, false));
+    if (!body.success) throw new HttpError(400, 'invalid_request');
+    this.reauthenticate(invite);
+    const access = this.operatorOf(req, invite, taskId);
+    try {
+      const sent = await this.deps.orchestrator.steerAs(access, taskId, {
+        steerId: body.data.messageId ?? randomUUID(),
+        text: body.data.text,
+      });
+      respond(res, 200, { message: { messageId: sent.steerId, state: sent.state } });
+    } catch (error) {
+      throw error instanceof OrchestratorError ? controlError(error, 'steer_unsupported') : error;
+    }
+  }
+
+  private async withdrawTaskMessage(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    taskId: string,
+    messageId: string,
+  ): Promise<void> {
+    take(this.deps.controlLimiter, invite);
+    await discard(req);
+    this.reauthenticate(invite);
+    const access = this.operatorOf(req, invite, taskId);
+    try {
+      const result = await this.deps.orchestrator.withdrawSteerAs(access, taskId, messageId);
+      respond(res, 200, { message: { messageId: result.steerId, state: result.state } });
+    } catch (error) {
+      throw error instanceof OrchestratorError ? controlError(error, 'steer_unsupported') : error;
     }
   }
 
@@ -1196,7 +1290,7 @@ function bearerToken(req: IncomingMessage): string | undefined {
   return /^Bearer\s+(\S+)$/iu.exec(req.headers.authorization ?? '')?.[1];
 }
 
-function controlError(error: OrchestratorError): HttpError {
+function controlError(error: OrchestratorError, unsupported = 'pause_unsupported'): HttpError {
   switch (error.code) {
     case 'not_found':
       return new HttpError(404, 'not_found');
@@ -1205,7 +1299,7 @@ function controlError(error: OrchestratorError): HttpError {
     case 'quota_exceeded':
       return new HttpError(429, 'quota_exceeded', { 'retry-after': '1' });
     case 'unsupported':
-      return new HttpError(409, 'pause_unsupported');
+      return new HttpError(409, unsupported);
     case 'invalid_state':
       return new HttpError(409, 'invalid_state');
     default:

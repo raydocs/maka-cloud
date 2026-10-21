@@ -24,6 +24,8 @@ export {
   DEFAULT_TASK_LIMITS,
   DEFAULT_WAIT_MS,
   type DelegateInput,
+  MAX_PENDING_STEERS,
+  MAX_STEER_CHARS,
   MAX_WAIT_MS,
   Orchestrator,
   type OperatorAccess,

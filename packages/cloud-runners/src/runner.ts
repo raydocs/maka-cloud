@@ -111,6 +111,11 @@ export class SandboxCliRunner implements Runner {
     return this.vendor.name;
   }
 
+  /** The Claude runs the SDK drives take messages for the agent, read after each of its steps. */
+  get steerable(): boolean {
+    return this.vendor.name === 'claude-agent-sdk' && this.fleet.options.agentSdk !== undefined;
+  }
+
   async start(spec: RunSpec): Promise<RunHandle> {
     return new Run(this.fleet, this.vendor, spec, undefined).begin();
   }
@@ -189,6 +194,9 @@ class Run implements RunHandle {
    */
   private stopFailure: Error | undefined;
   private readonly secrets = new Set<string>();
+  /** Messages for the agent not yet read, and the keys of those it has (an offer repeated is ignored). */
+  private readonly waitingSteers: Array<{ steerId: string; text: string }> = [];
+  private readonly readSteers = new Set<string>();
   /** Paths the brief says the task must hand back. */
   private requiredArtifacts: string[] = [];
   private machine: RemoteMachine | undefined;
@@ -244,6 +252,43 @@ class Run implements RunHandle {
 
   private get signal(): AbortSignal {
     return this.abort.signal;
+  }
+
+  /**
+   * A message for the agent, read after its next step. Offering a key again changes nothing, and a
+   * run that is over takes none: the orchestrator marks what it never read.
+   */
+  steer(message: { steerId: string; text: string }): void {
+    if (this.ended || this.cancelled || this.readSteers.has(message.steerId)) return;
+    if (this.waitingSteers.some((waiting) => waiting.steerId === message.steerId)) return;
+    this.waitingSteers.push(message);
+  }
+
+  /** Drops a message the agent has not been given. False when it has been (or never was here). */
+  unsteer(steerId: string): boolean {
+    const at = this.waitingSteers.findIndex((waiting) => waiting.steerId === steerId);
+    if (at < 0) return false;
+    this.waitingSteers.splice(at, 1);
+    return true;
+  }
+
+  /**
+   * Hands the hook the messages that fit and reports each as read, as the hook returns them to the
+   * agent. The first always goes, whatever its size; the rest wait for the next step.
+   */
+  private takeSteers(maxChars: number): Array<{ steerId: string; text: string }> {
+    const taken: Array<{ steerId: string; text: string }> = [];
+    let chars = 0;
+    while (this.waitingSteers.length > 0) {
+      const next = this.waitingSteers[0] as { steerId: string; text: string };
+      if (taken.length > 0 && chars + next.text.length > maxChars) break;
+      this.waitingSteers.shift();
+      chars += next.text.length;
+      taken.push(next);
+      this.readSteers.add(next.steerId);
+      this.events.push({ type: 'steered', steerId: next.steerId });
+    }
+    return taken;
   }
 
   // -- the run ---------------------------------------------------------------------------------
@@ -934,6 +979,7 @@ class Run implements RunHandle {
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
       ...(spec.steps ? { steps: spec.steps } : {}),
+      steer: { take: (maxChars) => this.takeSteers(maxChars) },
       ...(input.mirror ? { mirror: input.mirror } : {}),
       redact: (text) => this.scrub(text),
       onProblem: (message) => this.progress(message),
