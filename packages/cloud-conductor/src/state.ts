@@ -383,8 +383,14 @@ const SCHEMA_V7 = `
 ALTER TABLE delegations ADD COLUMN mode TEXT;
 `;
 
+/**
+ * Whether a run has called a tool. A run that exists when this column is added may already have
+ * called one (its history was not recorded), so it counts as having: it is never retried as if
+ * nothing had happened.
+ */
 const SCHEMA_V8 = `
 ALTER TABLE runs ADD COLUMN tool_called INTEGER NOT NULL DEFAULT 0;
+UPDATE runs SET tool_called = 1;
 `;
 
 const SCHEMA_V9 = `
