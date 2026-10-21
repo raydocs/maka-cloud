@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { FakeRunnerOptions } from '../fake-runner.js';
 import { reduce } from '../reducer.js';
+import { MemorySessionStore } from '../auth.js';
 import { MemoryTaskStore } from '../store.js';
 import type { TaskId } from '../types.js';
 import { eventually, makeHarness } from './harness.js';
@@ -85,4 +86,78 @@ test('a takeover that lands while the run is starting cancels the late run at on
   assert.ok(late, 'the run was started');
   await eventually(() => late.cancelCalls > 0, 'the late run to be cancelled');
   assert.equal(a.orchestrator.stats().activeTasks, 0);
+});
+
+/**
+ * A restart (A, epoch 2) whose stop of the leftover run is slow, and a second restart (B,
+ * epoch 3) that takes the task over and runs it meanwhile. `finish` lets A's stop come back.
+ */
+async function slowStop(
+  t: Test,
+  stop: 'fails' | 'works',
+  options: { recoverable: boolean } = { recoverable: false },
+) {
+  const { store, first, taskId } = await running(t);
+  const sessions = new MemorySessionStore();
+  let finish!: () => void;
+  const stopReturns = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let stopping!: () => void;
+  const stopStarted = new Promise<void>((resolve) => {
+    stopping = resolve;
+  });
+  const asked: Array<number | undefined> = [];
+  const aStarting = makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: {
+      recover: options.recoverable,
+      stopOrphaned: async (_id, callOptions) => {
+        asked.push(callOptions.epoch);
+        stopping();
+        await stopReturns;
+        if (stop === 'fails') throw new Error('the sandbox did not answer');
+      },
+    },
+    orchestrator: { sessions, orphanStopTimeoutMs: 60_000 },
+  });
+  await stopStarted;
+  assert.equal(epochOf(store, taskId), 2);
+  const b = await makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: { recover: true },
+    orchestrator: { sessions, resume: 'manual' },
+  });
+  b.orchestrator.setEndpoint('http://orchestrator.test/mcp');
+  b.orchestrator.startRestored();
+  await eventually(() => b.fake.recoveries.length === 1, 'the newer attempt to run the task');
+  assert.equal(epochOf(store, taskId), 3);
+  const token = b.fake.recoveries[0]?.mcp?.token ?? '';
+  assert.ok(b.orchestrator.authenticate(token), 'the newer attempt holds a session');
+  const before = (await store.read()).length;
+  finish();
+  const a = await aStarting;
+  await a.orchestrator.settled();
+  return { store, taskId, a, b, before, token, asked };
+}
+
+test('a restart whose stop of the old run comes back after a newer attempt took over writes nothing, ends nothing and revokes nothing of the new attempt', async (t) => {
+  const { store, taskId, a, b, before, token, asked } = await slowStop(t, 'fails');
+  const added = (await store.read()).slice(before).map((entry) => entry.event.type);
+  assert.deepEqual(added, [], 'no note, owed stop or outcome from the stale restart');
+  assert.equal(reduce(store.readTask(taskId)).get(taskId)?.state, 'running');
+  assert.equal(b.orchestrator.taskStateOf(taskId), 'running');
+  assert.ok(b.orchestrator.authenticate(token), "the newer attempt's session survived");
+  assert.equal(a.orchestrator.stats().activeTasks, 0, 'it let go of the task');
+  assert.deepEqual(asked, [2], 'the stop was asked for the attempt that wanted it');
+});
+
+test('the same when the stop worked and the task would have been ended as an orphan', async (t) => {
+  const { store, taskId, b, before, token } = await slowStop(t, 'works');
+  const added = (await store.read()).slice(before).map((entry) => entry.event.type);
+  assert.deepEqual(added, []);
+  assert.equal(b.orchestrator.taskStateOf(taskId), 'running');
+  assert.ok(b.orchestrator.authenticate(token));
 });
