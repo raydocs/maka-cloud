@@ -232,6 +232,8 @@ export class Orchestrator {
    */
   private readonly readers = new Map<TaskId, Promise<void>>();
   private closed = false;
+  /** Set when the process is closing: runs are let go, and what they still report is not recorded. */
+  private detaching = false;
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
   private readonly background = new Set<Promise<void>>();
@@ -364,6 +366,17 @@ export class Orchestrator {
   /** Tasks the last `create` found unfinished and started driving again (their runner has `recover`). */
   get resumedTaskIds(): readonly TaskId[] {
     return this.resumed;
+  }
+
+  /**
+   * Lets go of every run this process holds, for a process that is closing: the runs stop working
+   * (their timers and pollers end at once) but nothing is cancelled and no task is ended. The task
+   * logs still say `running`, and the next process resumes them as it does after a crash, only
+   * without the minute of waiting to be killed. What a run reports after this is not recorded.
+   */
+  detachRuns(): void {
+    this.detaching = true;
+    for (const handle of this.handles.values()) handle.detach?.();
   }
 
   /**
@@ -1369,6 +1382,7 @@ export class Orchestrator {
       }
       this.handles.set(taskId, handle);
       this.starting.delete(taskId);
+      if (this.detaching) handle.detach?.();
       try {
         if (recovery !== undefined && this.tasks.get(taskId)?.state === 'running') {
           // A task a restart resumed started long ago: its start is in the log already. What is
@@ -1585,6 +1599,7 @@ export class Orchestrator {
           await this.recordSpend(taskId, event.costUsd, fence);
           continue;
         }
+        if (this.detaching) continue;
         if (!(await reports)) continue;
         // The outcome of a stopping task no longer counts, but its stream is read to the end:
         // the run reports what settled while it stopped.
@@ -1622,7 +1637,7 @@ export class Orchestrator {
         }
       }
     } catch (error) {
-      if (!(await reports)) return;
+      if (this.detaching || !(await reports)) return;
       // The stream broke; the remote run may still be alive, so the handle
       // stays registered and is cancelled when the task ends.
       this.readers.delete(taskId);
@@ -1636,7 +1651,7 @@ export class Orchestrator {
       );
       return;
     }
-    if (!(await reports)) return;
+    if (this.detaching || !(await reports)) return;
     // A clean end of the stream does not prove the remote run stopped, so the
     // handle stays registered and is cancelled when the task ends.
     this.readers.delete(taskId);
