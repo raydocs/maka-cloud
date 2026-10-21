@@ -428,3 +428,135 @@ test('a project removed while its scan is reading gets no card', async () => {
   assert.ok(result.outcome.skipped.every((s) => s.reason === 'not_found'));
   r.cleanup();
 });
+
+// ---- the check before a tap acts
+
+test('a card whose project did not change is fresh, and checking writes nothing', async () => {
+  const r = await rig();
+  const { reader, calls } = githubReader(busyRoutes());
+  const scanner = new CardScanner(r.engine, { reader });
+  const first = await scanner.scan(OWNER, r.projectId);
+  assert.ok(first.ok);
+  const [card] = first.outcome.created;
+  assert.ok(card);
+  const before = r.engine.cards.list(OWNER, r.projectId);
+  const seen = calls.length;
+  const verdict = await scanner.verify(OWNER, card.cardId);
+  assert.ok(verdict.ok && verdict.state === 'fresh');
+  assert.ok(calls.length > seen && calls.every((c) => c.method === 'GET'));
+  assert.deepEqual(r.engine.cards.list(OWNER, r.projectId), before);
+  r.cleanup();
+});
+
+test('a card whose state moved is replaced when checked, and the old one cannot be accepted', async () => {
+  const r = await rig();
+  const routes = busyRoutes();
+  const { reader } = githubReader(routes);
+  const scanner = new CardScanner(r.engine, { reader });
+  const first = await scanner.scan(OWNER, r.projectId);
+  assert.ok(first.ok);
+  const main = first.outcome.created.find((c) => c.kind === 'fix_main_ci');
+  assert.ok(main);
+  // CI failed again on a newer run.
+  routes['/actions/runs'] = {
+    workflow_runs: [
+      {
+        id: 901,
+        workflow_id: 1,
+        name: 'CI',
+        head_sha: 'd'.repeat(40),
+        conclusion: 'failure',
+        run_attempt: 1,
+      },
+    ],
+  };
+  const verdict = await scanner.verify(OWNER, main.cardId);
+  assert.ok(verdict.ok && verdict.state === 'refreshed');
+  assert.equal(verdict.card.replaces, main.cardId);
+  assert.equal(r.engine.cards.get(OWNER, main.cardId)?.state, 'stale');
+  assert.deepEqual(r.engine.cards.accept(OWNER, main.cardId), { ok: false, reason: 'stale' });
+  // Asking again about the old card points at the fresh one; about the fresh one, that it is fresh.
+  const again = await scanner.verify(OWNER, main.cardId);
+  assert.ok(again.ok && again.state === 'refreshed' && again.card.cardId === verdict.card.cardId);
+  const fresh = await scanner.verify(OWNER, verdict.card.cardId);
+  assert.ok(fresh.ok && fresh.state === 'fresh');
+  r.cleanup();
+});
+
+test('a card whose work is gone is taken down when checked', async () => {
+  const r = await rig();
+  const routes = busyRoutes();
+  const { reader } = githubReader(routes);
+  const scanner = new CardScanner(r.engine, { reader });
+  const first = await scanner.scan(OWNER, r.projectId);
+  assert.ok(first.ok);
+  const main = first.outcome.created.find((c) => c.kind === 'fix_main_ci');
+  assert.ok(main);
+  routes['/actions/runs'] = {
+    workflow_runs: [
+      { id: 902, workflow_id: 1, name: 'CI', head_sha: 'e'.repeat(40), conclusion: 'success' },
+    ],
+  };
+  const verdict = await scanner.verify(OWNER, main.cardId);
+  assert.ok(verdict.ok && verdict.state === 'gone');
+  assert.equal(r.engine.cards.get(OWNER, main.cardId)?.state, 'stale');
+  // Checked again, it is still gone, not an error.
+  const again = await scanner.verify(OWNER, main.cardId);
+  assert.ok(again.ok && again.state === 'gone');
+  r.cleanup();
+});
+
+test('a check of a card that is not the owner’s, is answered already, or cannot be read changes nothing', async () => {
+  const r = await rig();
+  const { reader } = githubReader(busyRoutes());
+  const scanner = new CardScanner(r.engine, { reader });
+  const first = await scanner.scan(OWNER, r.projectId);
+  assert.ok(first.ok);
+  const [card, other] = first.outcome.created;
+  assert.ok(card && other);
+  assert.deepEqual(await scanner.verify('inv_other', card.cardId), {
+    ok: false,
+    reason: 'not_found',
+  });
+  assert.deepEqual(await scanner.verify(OWNER, 'card_missing'), { ok: false, reason: 'not_found' });
+  r.engine.cards.accept(OWNER, card.cardId);
+  assert.deepEqual(await scanner.verify(OWNER, card.cardId), { ok: false, reason: 'closed' });
+  r.engine.cards.dismiss(OWNER, other.cardId);
+  assert.deepEqual(await scanner.verify(OWNER, other.cardId), { ok: false, reason: 'closed' });
+  const third = r.engine.cards.list(OWNER, r.projectId, ['open'])[0];
+  assert.ok(third);
+  const down = new CardScanner(r.engine, {
+    reader: {
+      read: async () => {
+        throw new Error('down');
+      },
+    },
+    onWarning: () => undefined,
+  });
+  assert.deepEqual(await down.verify(OWNER, third.cardId), { ok: false, reason: 'read_failed' });
+  assert.equal(r.engine.cards.get(OWNER, third.cardId)?.state, 'open');
+  const hang = new CardScanner(r.engine, {
+    reader: { read: () => new Promise(() => undefined) },
+    timeoutMs: 20,
+  });
+  assert.deepEqual(await hang.verify(OWNER, third.cardId), { ok: false, reason: 'aborted' });
+  assert.deepEqual(await scanner.verify(OWNER, third.cardId, AbortSignal.abort()), {
+    ok: false,
+    reason: 'aborted',
+  });
+  r.cleanup();
+});
+
+test('a kind the owner switched off takes its open card down when checked', async () => {
+  const r = await rig();
+  const { reader } = githubReader(busyRoutes());
+  const scanner = new CardScanner(r.engine, { reader });
+  const first = await scanner.scan(OWNER, r.projectId);
+  assert.ok(first.ok);
+  const main = first.outcome.created.find((c) => c.kind === 'fix_main_ci');
+  assert.ok(main);
+  r.engine.cards.setKindEnabled(OWNER, r.projectId, 'fix_main_ci', false);
+  const verdict = await scanner.verify(OWNER, main.cardId);
+  assert.ok(verdict.ok && verdict.state === 'gone');
+  r.cleanup();
+});

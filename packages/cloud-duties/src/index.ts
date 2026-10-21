@@ -41,6 +41,7 @@ export {
   type ScanOptions,
   type ScanOutcome,
   type ScanResult,
+  type VerifyResult,
 } from './cards/scan.js';
 export {
   GitHubSignalReader,

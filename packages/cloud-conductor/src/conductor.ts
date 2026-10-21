@@ -133,9 +133,10 @@ export interface UserMessage {
   /**
    * Set only by a standing duty (T23): the run this message starts has this authority and this
    * hard budget, which it cannot raise or ask to raise. It applies when the message starts a run;
-   * a message that joins a run already open changes nothing about it.
+   * a message that joins a run already open changes nothing about it. `mode` is the mode the
+   * system started it in (a card's); the user's pick on the message never applies to such a run.
    */
-  run?: { dutyId: string; authority: RunAuthority; budgetUsd: number };
+  run?: { dutyId: string; authority: RunAuthority; budgetUsd: number; mode?: string };
 }
 
 export interface UserAnswer {
@@ -374,7 +375,8 @@ export class Conductor {
         limits.dutyId !== '' &&
         isRunAuthority(limits.authority) &&
         Number.isFinite(limits.budgetUsd) &&
-        limits.budgetUsd > 0
+        limits.budgetUsd > 0 &&
+        (limits.mode === undefined || isModeId(limits.mode))
       )
     ) {
       // Fail closed: limits that cannot be read start no run, instead of a run with the defaults.
@@ -400,7 +402,7 @@ export class Conductor {
       this.sendOutbox(message.conversationId);
       return;
     }
-    const picked = this.modes && limits === undefined ? message.mode : undefined;
+    const picked = this.modes ? (limits === undefined ? message.mode : limits.mode) : undefined;
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,

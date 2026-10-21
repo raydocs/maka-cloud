@@ -166,6 +166,42 @@ test('a duty’s run keeps its own budget, and a mode on its message changes not
   assert.equal(run?.mode, null);
 });
 
+test('a run the system starts in a mode (a card) takes that mode and keeps its own budget; the user’s pick on the message still changes nothing', async (t) => {
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  h.model.script('conductor', text('Nothing to do.'));
+  await h.conductor.onUserMessage(
+    {
+      conversationId: 'cnv_1',
+      messageId: 'msg_card',
+      text: 'Rebase PR #12.',
+      mode: 'deep',
+      run: { dutyId: 'card:card_1', authority: 'open-pr', budgetUsd: 2.5, mode: 'quick' },
+    },
+    h.access('cnv_1'),
+  );
+  await h.conductor.idle();
+  const run = h.conductor.state.runsOfConversation('cnv_1').at(-1);
+  assert.equal(run?.budgetUsd, 2.5);
+  assert.equal(run?.mode, 'quick');
+  assert.equal(run?.authority, 'open-pr');
+});
+
+test('run limits that name a mode that is not one start no run', async (t) => {
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  await h.conductor.onUserMessage(
+    {
+      conversationId: 'cnv_1',
+      messageId: 'msg_bad_card',
+      text: 'Rebase PR #12.',
+      run: { dutyId: 'card:card_1', authority: 'open-pr', budgetUsd: 2.5, mode: 'turbo' },
+    },
+    h.access('cnv_1'),
+  );
+  await h.conductor.idle();
+  assert.deepEqual(h.conductor.state.runsOfConversation('cnv_1'), []);
+  assert.match(h.outbox.notices.at(-1)?.text ?? '', /limits were not valid/);
+});
+
 test('without modes nothing is added to a brief and the result names no mode', async (t) => {
   const h = await makeHarness(t);
   const { runId, result } = await runWith(h, { mode: 'deep' }, delegate({ workMode: 'deep' }));
