@@ -493,6 +493,20 @@ test('private, loopback, link-local and unspecified addresses are not public', (
     'fd00::1',
     '::ffff:127.0.0.1',
     '::ffff:10.0.0.1',
+    // The same addresses in the spellings that carry an IPv4 address inside an IPv6 one.
+    '::ffff:a9fe:a9fe',
+    '::ffff:7f00:1',
+    '64:ff9b::a9fe:a9fe',
+    '64:ff9b::7f00:1',
+    '2002:a9fe:a9fe::1',
+    '2002:7f00:1::1',
+    '::169.254.169.254',
+    '0:0:0:0:0:ffff:a9fe:a9fe',
+    // Reserved and documentation ranges are no push service either.
+    '240.0.0.1',
+    '255.255.255.255',
+    '192.0.2.1',
+    '2001:db8::1',
     'not-an-ip',
   ]) {
     assert.equal(isNonPublicAddress(address), true, address);
