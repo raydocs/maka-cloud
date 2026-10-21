@@ -18,5 +18,11 @@ appId: cloud.maka.app
 - inputText: ${TOKEN}
 - hideKeyboard
 - takeScreenshot: sign-in
-- tapOn:
-    id: "button-Enter your workspace"
+# On iOS the keyboard's own dismissal can already have submitted the form.
+- runFlow:
+    when:
+      visible:
+        id: "button-Enter your workspace"
+    commands:
+      - tapOn:
+          id: "button-Enter your workspace"
