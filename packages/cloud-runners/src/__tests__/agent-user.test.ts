@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -100,8 +101,15 @@ function canSeparate(): string | undefined {
 }
 const skip = canSeparate();
 
-async function boxes(t: { after(fn: () => Promise<void>): void }, channel = CHANNEL) {
-  const h = await setup({ cloud: { agentChannel: channel } });
+async function boxes(
+  t: { after(fn: () => Promise<void>): void },
+  channel = CHANNEL,
+  execPath?: string,
+) {
+  const h = await setup({
+    cloud: { agentChannel: channel },
+    ...(execPath === undefined ? {} : { fake: { execPath } }),
+  });
   t.after(() => h.cleanup());
   // The account must be able to walk down to the work root: the box image's job.
   for (let dir = h.root; dir !== '/' && dir !== dirname(dir); dir = dirname(dir)) {
@@ -115,7 +123,12 @@ async function boxes(t: { after(fn: () => Promise<void>): void }, channel = CHAN
 test('on a box with a second account the probe passes and nothing is left behind', {
   skip,
 }, async (t) => {
-  const { machine, h } = await boxes(t);
+  // The machine running the test may carry capabilities of its own (a media helper, say); what is
+  // tested here is the probe's layout, so its capability scan reads an empty listing.
+  const bin = await fs.mkdtemp(join(tmpdir(), 'no-caps-'));
+  t.after(() => fs.rm(bin, { recursive: true, force: true }));
+  await fs.writeFile(join(bin, 'getcap'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const { machine, h } = await boxes(t, CHANNEL, `${bin}:${process.env.PATH ?? ''}`);
   await checkAgentIsolation(machine, CHANNEL);
   assert.deepEqual(
     (await fs.readdir(h.root)).filter((name) => name.startsWith('.probe')),
