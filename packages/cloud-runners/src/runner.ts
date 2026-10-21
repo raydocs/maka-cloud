@@ -92,6 +92,21 @@ class EventQueue implements AsyncIterable<RunnerEvent> {
   }
 }
 
+/** What a run starts: host shell before it, then the program, which always runs as the agent account. */
+interface RunProgram {
+  preamble: string;
+  program: string;
+  args: readonly string[];
+  fed?: boolean;
+}
+
+/** The program and arguments of an argv. */
+function splitProgram(argv: string[]): { program: string; args: string[] } {
+  const [program, ...args] = argv;
+  if (program === undefined) throw new Error('a run needs a program');
+  return { program, args };
+}
+
 function manifestShape(): string {
   return [
     'a JSON object with exactly these fields:',
@@ -105,6 +120,10 @@ export interface ResumeInput {
   /** What the agent is told in the resumed session. */
   prompt: string;
   spec: RunSpec;
+}
+
+function noAgentChannelReason(vendor: VendorAdapter): string {
+  return `the ${vendor.binary} CLI needs an agent channel (a separate account for the agent) and none is configured`;
 }
 
 /** Runs one vendor's CLI inside a sandbox for each task, as the orchestrator's `Runner`. */
@@ -385,6 +404,10 @@ class Run implements RunHandle {
       let record = (this.record = acquired.record);
       this.startActivityLease(machine);
 
+      // No account, or a box that does not keep it out, means nothing of the CLI runs: not its
+      // version check, not its install, not the tools it is handed.
+      const refused = await this.requireAgentAccount(fleet, machine, vendor);
+      if (refused !== undefined) return this.fail(refused);
       await this.guard(fleet.ensureCli(machine, vendor));
       await this.guard(fleet.ensureTools(machine));
       this.checkCancelled();
@@ -398,9 +421,14 @@ class Run implements RunHandle {
       this.requiredArtifacts = header.artifacts;
       if (resumed) {
         // A new sandbox has no brief: the conversation refers to it.
-        await machine.prepare(spec.taskId, this.freshBox ? brief : undefined, this.signal);
+        await machine.prepare(
+          spec.taskId,
+          this.freshBox ? brief : undefined,
+          this.signal,
+          fleet.options.agentChannel?.group,
+        );
       } else {
-        await machine.prepare(spec.taskId, brief, this.signal);
+        await machine.prepare(spec.taskId, brief, this.signal, fleet.options.agentChannel?.group);
         if (header.requests.length > 0) {
           const copied = await this.guard(this.stageInputs(machine, header.requests));
           if (!copied.ok) return this.fail(copied.reason);
@@ -679,7 +707,9 @@ class Run implements RunHandle {
     const kept = transcriptSessionStore({
       taskId: spec.taskId,
       store: transcripts,
-      redact: (text) => this.scrub(text),
+      // A key the run was never given, pasted by the user or read from a file, is shaped like one:
+      // the kept conversation is read by people and by later sandboxes, and holds none.
+      redact: (text) => this.scrubForReader(text),
       onProblem: (message) => this.progress(message),
       onKept: (lines) => this.mirrorKept(lines),
     });
@@ -817,11 +847,11 @@ class Run implements RunHandle {
         ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
         : {}),
     };
-    const launchRun = (script: string, extraEnvs: Record<string, string> = {}) =>
+    const launchRun = (task: RunProgram, extraEnvs: Record<string, string> = {}) =>
       machine.launch({
         dirName: spec.taskId,
         run,
-        script,
+        ...task,
         envs: { ...extraEnvs, ...envs },
         runToken,
         workdir: `${dir}/workspace`,
@@ -834,10 +864,7 @@ class Run implements RunHandle {
     // without that account, or one that does not keep it out, runs nothing.
     const channel = fleet.options.agentChannel;
     if (channel === undefined) {
-      return {
-        ok: false,
-        reason: `the ${vendor.binary} CLI needs an agent channel (a separate account for the agent) and none is configured`,
-      };
+      return { ok: false, reason: noAgentChannelReason(vendor) };
     }
     try {
       await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
@@ -863,22 +890,19 @@ class Run implements RunHandle {
             ...(spec.effort ? { effort: spec.effort } : {}),
           })
         : await this.drivePolled(reader, run, () =>
-            launchRun(
-              buildRunScript({
-                preamble: preambleFor(vendor),
-                command: asAgent(
-                  vendor.command({
-                    prompt,
-                    ...(resumeSessionId ? { resumeSessionId } : {}),
-                    ...(mcpUrl ? { mcpUrl } : {}),
-                    ...(model ? { model } : {}),
-                    ...(spec.effort ? { effort: spec.effort } : {}),
-                    ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
-                  }),
-                  channel,
-                ),
-              }),
-            ),
+            launchRun({
+              preamble: preambleFor(vendor),
+              ...splitProgram(
+                vendor.argv({
+                  prompt,
+                  ...(resumeSessionId ? { resumeSessionId } : {}),
+                  ...(mcpUrl ? { mcpUrl } : {}),
+                  ...(model ? { model } : {}),
+                  ...(spec.effort ? { effort: spec.effort } : {}),
+                  ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
+                }),
+              ),
+            }),
           );
     } finally {
       this.stopWatch = undefined;
@@ -1038,7 +1062,7 @@ class Run implements RunHandle {
       effort?: string;
       mirror?: { store: SessionStore; configDir: string };
       launchRun(
-        script: string,
+        task: RunProgram,
         extraEnvs?: Record<string, string>,
       ): Promise<'started' | 'already' | 'cancelled'>;
     },
@@ -1077,10 +1101,12 @@ class Run implements RunHandle {
           watch,
           launch: () =>
             input.launchRun(
-              buildRunScript({
-                preamble: `${preambleFor(vendor)}\n${FEED_FUNCTION}`,
-                command: fedCommand(asAgent([vendor.binary, ...args.map(shq)].join(' '), channel)),
-              }),
+              {
+                preamble: preambleFor(vendor),
+                program: vendor.binary,
+                args,
+                fed: true,
+              },
               env,
             ),
           onOutput: (bytes) => reader.push(bytes),
@@ -1469,6 +1495,22 @@ class Run implements RunHandle {
     if (this.cancelled) throw new CancelledError();
   }
 
+  /** Why this run may not start the CLI, or undefined when its account is set and the box keeps it out. */
+  private async requireAgentAccount(
+    fleet: Fleet,
+    machine: RemoteMachine,
+    vendor: VendorAdapter,
+  ): Promise<string | undefined> {
+    if (fleet.options.agentChannel === undefined) return noAgentChannelReason(vendor);
+    try {
+      await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
+    } catch (error) {
+      if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
+      return this.scrubForReader(errorMessage(error));
+    }
+    return undefined;
+  }
+
   private fail(reason: string): void {
     this.terminal ??= { type: 'failed', reason: this.redact(reason, MAX_REASON_CHARS) };
   }
@@ -1504,8 +1546,7 @@ class Run implements RunHandle {
   /**
    * Text a person will read (a failure, a note, a quote of the CLI): the run's own secrets, then
    * anything shaped like a key or a credential header, which also catches a key this run was
-   * never given. The transcript the conversation resumes from keeps `scrub` alone, so history is
-   * not rewritten.
+   * never given. The kept transcript goes through it too, so no key shape is ever stored.
    */
   private scrubForReader(text: string): string {
     return scrubSecretShapes(this.scrub(text));

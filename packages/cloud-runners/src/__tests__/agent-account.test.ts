@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { test } from 'node:test';
 import { collect, setup, terminal } from './harness.js';
 
@@ -48,4 +49,35 @@ test('a resumed Codex turn runs as the agent account too', async (t) => {
   // The first turn wrote no result; the repair turn is a second CLI call.
   assert.equal(await h.cliCalls('codex'), 2);
   assert.deepEqual(await h.sudoUsers(), ['maka-agent', 'maka-agent']);
+});
+
+const INSTALL_RAN = 'touch "$HOME/install-ran"';
+const installRan = (home: string): boolean => existsSync(`${home}/install-ran`);
+
+test('without an agent account the CLI is neither checked nor installed', async (t) => {
+  const h = await setup({
+    noAgentChannel: true,
+    installClis: false,
+    cloud: { installCommands: { codex: INSTALL_RAN } },
+  });
+  t.after(() => h.cleanup());
+  const spec = await h.spec('tsk_codex_noinstall', { runner: 'codex' });
+  const reason = reasonOf(await collect(await h.runners.codex.start(spec)));
+  assert.match(reason, /needs an agent channel/u);
+  assert.equal(installRan(h.home), false);
+});
+
+test('a box that fails the isolation check has no CLI installed on it either', async (t) => {
+  const h = await setup({
+    installClis: false,
+    cloud: { installCommands: { codex: INSTALL_RAN } },
+  });
+  t.after(() => h.cleanup());
+  h.runners.fleet.ensureAgentIsolation = async () => {
+    throw new Error('the sandbox does not keep the agent channel private: the agent can use sudo');
+  };
+  const spec = await h.spec('tsk_codex_noinstall2', { runner: 'codex' });
+  const reason = reasonOf(await collect(await h.runners.codex.start(spec)));
+  assert.match(reason, /can use sudo/u);
+  assert.equal(installRan(h.home), false);
 });

@@ -11,8 +11,9 @@ import { collect, setup, terminal } from './harness.js';
 
 const MUTATING = /(^| )(-N|-F|-A|-I|-D|-X) /u;
 // The scratch chain the policy is built in is not live: nothing routes to it.
+const SCRATCH = new RegExp(`-(N|F|X|A) ${EGRESS_CHAIN}_NEW`, 'u');
 const mutations = (calls: string[]) =>
-  calls.filter((call) => MUTATING.test(call) && !call.includes(`${EGRESS_CHAIN}_NEW`));
+  calls.filter((call) => MUTATING.test(call) && !SCRATCH.test(call));
 
 test('the box is closed and read back before the CLI starts', async (t) => {
   const h = await setup();

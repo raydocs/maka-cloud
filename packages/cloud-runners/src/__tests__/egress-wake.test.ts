@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { asAgent } from '../agent-user.js';
-import { buildRunScript } from '../scripts.js';
-import { HARNESS_AGENT, setup } from './harness.js';
+import { setup } from './harness.js';
 
 // The rules of a box that was restored or resumed: nothing, and the guard cannot put them back.
 const REFUSED = new Error('egress guard: the rules cannot be built');
@@ -44,10 +42,9 @@ test('a guard that fails after the box was woken is final: no retry reaches the 
     machine.launch({
       dirName: 'tsk_wake_final',
       run: 't1',
-      script: buildRunScript({
-        preamble: '',
-        command: asAgent('echo task-code-marker', HARNESS_AGENT),
-      }),
+      preamble: '',
+      program: 'echo',
+      args: ['task-code-marker'],
       envs: {},
       runToken: 'token-wake-final',
       workdir: `${h.root}/tsk_wake_final`,

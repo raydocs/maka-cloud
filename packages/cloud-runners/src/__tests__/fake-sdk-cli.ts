@@ -20,6 +20,7 @@
  *   hang     report progress, then run until killed
  *   slowexit like ok, but leave 600 ms after its input ended
  *   leak     like ok, but its transcript also holds the run's API key and MCP token
+ *   shape    like ok, but its transcript also holds a key the run was never given
  *
  * With `--session-mirror` it keeps a transcript like the real CLI: lines in
  * `$CLAUDE_CONFIG_DIR/projects/<cwd with non-letters as dashes>/<session>.jsonl`, each also sent as
@@ -119,6 +120,7 @@ async function run(prompt) {
   send({ type: 'system', subtype: 'init', session_id: sid });
   keep('user', { content: prompt });
   if (mode === 'leak') keep('assistant', { content: 'key ' + process.env.ANTHROPIC_API_KEY + ' token ' + process.env.MAKA_MCP_TOKEN });
+  if (mode === 'shape') keep('assistant', { content: 'the user pasted sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh and ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' });
   if (mode === 'noise') { console.log('some warning text'); console.error('stderr text'); console.log('{"level":"warn"}'); }
   send({ type: 'assistant', message: { id: 'm0', content: [{ type: 'text', text: 'working on it' }] } });
   keep('assistant', { content: 'working on it' });

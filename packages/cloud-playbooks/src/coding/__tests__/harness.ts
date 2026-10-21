@@ -14,6 +14,7 @@ import { verifyCodingManifest } from '../playbook.js';
 import { type AgentRunner, CodingRunner, type CodingRunnerOptions } from '../runner.js';
 import {
   type CodingSandbox,
+  type ExecOptions,
   type ExecResult,
   FleetCodingSandbox,
   type SandboxWorkspace,
@@ -235,6 +236,8 @@ export interface Harness {
   hook: ExecHook | undefined;
   replace: ExecReplace | undefined;
   leases: { acquired: number; released: number };
+  /** The accounts the sandbox's `sudo` double was asked to run something as, one entry per use. */
+  sudoUsers(): Promise<string[]>;
   /** Resolves after the next workspace sample finishes. */
   nextSample(): Promise<void>;
   /** `lead` is written before the brief, as the conductor's code writes the `maka-mode:` line. */
@@ -249,6 +252,18 @@ function git(cwd: string, ...args: string[]): string {
   }).trim();
 }
 
+const SUDO_DOUBLE = `#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--preserve-env|-H) shift ;;
+    -u) echo "$2" >> "$(dirname "$0")/sudo-users"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+`;
+
 /** A sandbox that records every exec and lets a test hold one. */
 class RecordingSandbox implements CodingSandbox {
   constructor(
@@ -261,18 +276,29 @@ class RecordingSandbox implements CodingSandbox {
     const ws = await this.inner.open(taskId, signal);
     this.h.leases.acquired++;
     const { h, samples } = this;
+    const record = async (
+      script: string,
+      options: ExecOptions,
+      run: () => Promise<ExecResult>,
+    ): Promise<ExecResult> => {
+      const call = { script, envs: options.envs ?? {} };
+      h.calls.push(call);
+      await h.hook?.(call, 'before');
+      const result = (await h.replace?.(call, run)) ?? (await run());
+      await h.hook?.(call, 'after');
+      if (script.includes('hash-object --no-filters')) samples.splice(0).forEach((fn) => fn());
+      return result;
+    };
     return {
       dir: ws.dir,
       async exec(script, options = {}) {
-        const call = { script, envs: options.envs ?? {} };
-        h.calls.push(call);
-        await h.hook?.(call, 'before');
-        const result =
-          (await h.replace?.(call, () => ws.exec(script, options))) ??
-          (await ws.exec(script, options));
-        await h.hook?.(call, 'after');
-        if (script.includes('hash-object --no-filters')) samples.splice(0).forEach((fn) => fn());
-        return result;
+        return record(script, options, () => ws.exec(script, options));
+      },
+      async execCheck(script, options = {}) {
+        return record(script, options, () => ws.execCheck(script, options));
+      },
+      async execCheckStop(script, options = {}) {
+        return record(script, options, () => ws.execCheckStop(script, options));
       },
       stopAll: (s) => ws.stopAll(s),
       agentOnSameMachine: () => ws.agentOnSameMachine(),
@@ -291,7 +317,7 @@ class RecordingSandbox implements CodingSandbox {
 export async function setup(
   t: TestContext,
   options: Partial<CodingRunnerOptions> = {},
-  sandbox: { execPath?: string } = {},
+  sandbox: { execPath?: string; noAgentChannel?: boolean } = {},
 ): Promise<Harness> {
   const tmp = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'coding-test-')));
   const home = join(tmp, 'home');
@@ -323,10 +349,15 @@ export async function setup(
 
   const pids = join(tmp, 'pids');
   await fs.mkdir(pids);
+  // Checks run as the agent's account, so the fleet has one; the fake sandbox has a single user,
+  // and its `sudo` runs the command as that user (the real second account has its own tests).
+  const shim = join(tmp, 'sudo-double');
+  await fs.mkdir(shim);
+  await fs.writeFile(join(shim, 'sudo'), SUDO_DOUBLE, { mode: 0o755 });
   const fake = await new FakeInstabox({
     home,
     env: { MAKA_TEST_PIDS: pids },
-    ...(sandbox.execPath ? { execPath: sandbox.execPath } : {}),
+    execPath: `${shim}:${sandbox.execPath ?? process.env.PATH ?? ''}`,
   }).start();
   const client = new InstaboxClient({
     apiKey: fake.apiKey,
@@ -340,7 +371,16 @@ export async function setup(
     workRoot: root,
     logRoot,
     pollIntervalMs: 5,
+    ...(sandbox.noAgentChannel
+      ? {}
+      : {
+          agentChannel: {
+            user: 'maka-agent',
+            group: execFileSync('id', ['-gn']).toString().trim(),
+          },
+        }),
   });
+  fleet.ensureAgentIsolation = async () => undefined;
   const samples: (() => void)[] = [];
   const h = {
     fake,
@@ -355,6 +395,10 @@ export async function setup(
     replace: undefined,
     leases: { acquired: 0, released: 0 },
     nextSample: () => new Promise<void>((resolve) => samples.push(resolve)),
+    async sudoUsers() {
+      const text = await fs.readFile(join(shim, 'sudo-users'), 'utf8').catch(() => '');
+      return text.split('\n').filter(Boolean);
+    },
   } as unknown as Harness;
   h.deliveries = new MemoryCodingDeliveries();
   h.claude = new FakeAgent('claude-agent-sdk', h);

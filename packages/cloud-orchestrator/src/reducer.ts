@@ -49,9 +49,14 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
   if (event.type === 'task_cost') {
     const spend = (task.spendByRun ??= {});
     const run = spendKey(event);
-    spend[run] = Math.max(spend[run] ?? 0, event.costUsd);
-    const total = Object.values(spend).reduce((sum, usd) => sum + usd, 0);
-    task.costUsd = Math.round(total * 1e9) / 1e9;
+    // The total moves by what this run's figure rose, so a report costs the same however many runs
+    // the task has had (a sum over all of them made replaying a long log quadratic).
+    task.spendSum ??= Object.values(spend).reduce((sum, usd) => sum + usd, 0);
+    const before = spend[run] ?? 0;
+    const after = Math.max(before, event.costUsd);
+    spend[run] = after;
+    task.spendSum += after - before;
+    task.costUsd = Math.round(task.spendSum * 1e9) / 1e9;
     return;
   }
   if (isTerminal(task.state)) return;

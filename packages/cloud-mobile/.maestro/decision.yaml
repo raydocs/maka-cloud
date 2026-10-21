@@ -1,0 +1,14 @@
+# Someone with conversations lands in the latest one. A decision waiting on Home is answered with one tap,
+# and the card is gone afterwards.
+appId: cloud.maka.app
+---
+- runFlow: subflows/sign-in.yaml
+- assertVisible:
+    id: "field-Keep the conversation going"
+- tapOn: "Home"
+- assertVisible: "Waiting on you (1)"
+- takeScreenshot: home-decision
+- tapOn:
+    id: "button-Got it"
+- assertNotVisible: "Waiting on you (1)"
+- takeScreenshot: home-answered

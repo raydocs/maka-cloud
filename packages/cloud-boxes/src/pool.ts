@@ -650,8 +650,10 @@ export class BoxPool implements SandboxProvider {
       }
       // A box of that name exists (made by an earlier attempt, or by another process): use it if it is ours.
       if ((error as { status?: number }).status !== 409) {
-        // An operation that instabox reports as failed left no machine; anything else may have.
-        if (accepted !== undefined && !(error instanceof InstaboxOperationError)) {
+        // An operation that instabox reports as failed left no machine; anything else may have,
+        // including one that was still running when the wait ran out.
+        const failed = error instanceof InstaboxOperationError && error.outcome === 'failed';
+        if (accepted !== undefined && !failed) {
           this.keepAccepted(box, accepted, error);
         }
         throw error;

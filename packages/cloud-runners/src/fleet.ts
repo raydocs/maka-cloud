@@ -259,25 +259,17 @@ export class Fleet {
       this.options.installCommands?.[vendor.name] ??
       `command -v npm >/dev/null 2>&1 || { echo "npm is not installed in the sandbox image"; exit 1; }
 npm install -g --prefix "$HOME/.maka-cli" --no-audit --no-fund ${shq(`${vendor.npmPackage}@${version}`)}`;
-    const script = buildRunScript({
-      preamble: '',
-      command: `( set -e
+    const dirName = `.setup-${vendor.binary}`;
+    const run = `i-${version}`;
+    await machine.launchInstall({
+      dirName,
+      run,
+      install: `( set -e
 ${install}
 mkdir -p "$(dirname ${shq(marker)})"
 : > ${shq(marker)}
 )`,
-    });
-    const dirName = `.setup-${vendor.binary}`;
-    const run = `i-${version}`;
-    await machine.launch({
-      dirName,
-      run,
-      script,
-      envs: {},
       runToken: randomUUID(),
-      workdir: machine.taskDir(dirName),
-      rawLogs: false,
-      runsAs: 'sandbox-user',
     });
 
     const watch = this.poller.watch(machine, { dir: dirName, run });

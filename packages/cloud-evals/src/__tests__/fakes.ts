@@ -128,6 +128,14 @@ class FakeWorkspace implements SandboxWorkspace {
     throw new Error('unexpected script');
   }
 
+  execCheck(script: string, options: ExecOptions = {}): Promise<ExecResult> {
+    return this.exec(script, options);
+  }
+
+  execCheckStop(script: string, options: ExecOptions = {}): Promise<ExecResult> {
+    return this.exec(script, options);
+  }
+
   async stopAll(): Promise<void> {
     const o = this.sandbox.options;
     this.sandbox.stopAlls += 1;

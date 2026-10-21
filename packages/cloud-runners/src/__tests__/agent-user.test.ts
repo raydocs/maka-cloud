@@ -20,6 +20,12 @@ const GOOD = [
   'FACT agent_uid=65534',
   'FACT agent_sudo=no',
   'FACT agent_sudo_list=no',
+  'FACT agent_sudo_policy=none',
+  'FACT agent_caps=none',
+  'FACT agent_filecaps=none',
+  'FACT agent_groups=maka-agent maka',
+  'FACT agent_sockets=none',
+  'FACT agent_control_write=none',
   'FACT agent_iptables=no',
   'FACT agent_ip6tables=absent',
   'FACT chan_enter=no',
@@ -175,7 +181,7 @@ test('the agent account reads the brief and writes the result in the handoff dir
 }, async (t) => {
   const { machine, h } = await boxes(t);
   const dir = 'tsk_agent_handoff';
-  await machine.prepare(dir, '# the brief\n');
+  await machine.prepare(dir, '# the brief\n', undefined, CHANNEL.group);
   await machine.prepareAgent(dir, CHANNEL.group);
   const taskDir = machine.taskDir(dir);
   const asAgentRun = (script: string) =>
@@ -201,13 +207,44 @@ test('the agent account reads the brief and writes the result in the handoff dir
   await machine.launch({
     dirName: dir,
     run: 't2',
-    script: buildRunScript({ preamble: '', command: asAgent('true', CHANNEL) }),
+    preamble: '',
+    program: 'true',
+    args: [],
     envs: {},
     runToken: 'tok',
     workdir: join(taskDir, 'workspace'),
   });
   await assert.rejects(fs.stat(join(taskDir, 'handoff', 'result.json')));
   assert.ok(h.root);
+});
+
+test('links the agent plants in handoff/ are not followed when the next brief is written', {
+  skip,
+}, async (t) => {
+  const { machine, h } = await boxes(t);
+  const dir = 'tsk_agent_links';
+  await machine.prepare(dir, 'first\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  const taskDir = machine.taskDir(dir);
+  const victim = join(h.tmp, 'victim.txt');
+  await fs.writeFile(victim, "the sandbox user's file\n", { mode: 0o600 });
+  const asAgentRun = (script: string) =>
+    spawnSync('bash', ['-c', asAgent(`sh -c ${JSON.stringify(script)}`, CHANNEL)], {
+      env: { PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+    });
+  // Another account's links, aimed at a file only the sandbox user owns.
+  assert.equal(
+    asAgentRun(
+      `ln -s ${victim} ${taskDir}/handoff/brief.md.tmp && rm -f ${taskDir}/handoff/brief.md && ln -s ${victim} ${taskDir}/handoff/brief.md`,
+    ).status,
+    0,
+  );
+  await machine.prepare(dir, 'second\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  assert.equal(await fs.readFile(victim, 'utf8'), "the sandbox user's file\n");
+  assert.equal((await fs.stat(victim)).mode & 0o777, 0o600);
+  assert.equal(asAgentRun(`cat ${taskDir}/handoff/brief.md`).stdout, 'second\n');
 });
 
 test('a conversation put back by the sandbox user is read and extended by the agent, and read again by the sandbox user', {
@@ -248,7 +285,9 @@ test('a run of the agent account is stopped like any other, with its processes',
   const started = await machine.launch({
     dirName: dir,
     run: 't1',
-    script: buildRunScript({ preamble: '', command: asAgent('sleep 300', CHANNEL) }),
+    preamble: '',
+    program: 'sleep',
+    args: ['300'],
     envs: {},
     runToken: token,
     workdir: join(machine.taskDir(dir), 'workspace'),

@@ -70,12 +70,16 @@ test('the settings check accepts exactly the plain model ids and the four levels
   assert.match(runSettingsProblem({ model: 'a b' }) ?? '', /model/);
 });
 
-test('both adapters quote the settings and leave them out when absent', () => {
-  assert.ok(!claudeAdapter.command({ prompt: 'x' }).includes('--effort'));
-  assert.ok(!codexAdapter.command({ prompt: 'x' }).includes('model_reasoning_effort'));
-  assert.match(claudeAdapter.command({ prompt: 'x', effort: 'low' }), /--effort 'low'/);
-  assert.match(
-    codexAdapter.command({ prompt: 'x', effort: 'low' }),
-    /-c 'model_reasoning_effort="low"'/,
+test('both adapters pass the settings as they are and leave them out when absent', () => {
+  assert.ok(!claudeAdapter.argv({ prompt: 'x' }).includes('--effort'));
+  assert.ok(
+    !codexAdapter.argv({ prompt: 'x' }).some((word) => word.includes('model_reasoning_effort')),
+  );
+  assert.deepEqual(claudeAdapter.argv({ prompt: 'x', effort: 'low' }).slice(-2), [
+    '--effort',
+    'low',
+  ]);
+  assert.ok(
+    codexAdapter.argv({ prompt: 'x', effort: 'low' }).includes('model_reasoning_effort="low"'),
   );
 });

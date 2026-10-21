@@ -42,7 +42,8 @@ const HELPER_TIMEOUT_SECONDS = 60;
  * Installs the egress rules in a box and checks that they are there. Parameters travel in `envs`.
  *
  * - One chain of our own. Rules that read back right are left alone, so running it again changes
- *   nothing and opens no gap; otherwise the chain is flushed and refilled, never added to.
+ *   nothing and opens no gap; otherwise a new chain is built under a name of its own, hooked in
+ *   first and only then are the old chains (and any a stopped run left) unhooked and removed.
  * - Replies to connections the box did not start (the instabox control plane reaching in), the
  *   box's own name servers and, for IPv6, neighbour discovery are let through first; without them
  *   the box would cut itself off.
@@ -115,14 +116,30 @@ unhook() {
     n=$((n + 1))
   done
 }
+# Every chain of ours there is: the live one and any left by a run that was interrupted.
+chains() {
+  as_root "$tool" -w -S 2>/dev/null | awk -v p="$MAKA_CHAIN" '$1 == "-N" && ($2 == p || index($2, p "_") == 1) { print $2 }'
+}
 guard() {
   tool="$1"; shift
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
-  # The policy as it should be now is built in a chain nothing uses, and the live chain is compared
-  # with it as the tool prints both: a name server that changed (a box restored elsewhere) or a rule
-  # added or lost shows as a difference, whatever the order or form the tool prints.
-  next="$MAKA_CHAIN"_NEW
-  unhook "$next"
+  # A run that stopped half way can leave a chain behind. One that nothing hooks is rubbish and goes;
+  # one that is hooked may be the only guard the box has, and stays until a complete chain is hooked.
+  for old in $(chains); do
+    [ "$old" = "$MAKA_CHAIN" ] && continue
+    as_root "$tool" -w -C OUTPUT -j "$old" 2>/dev/null && continue
+    as_root "$tool" -w -F "$old" 2>/dev/null
+    as_root "$tool" -w -X "$old" 2>/dev/null
+  done
+  # The policy as it should be now is built in a chain with a name of its own that nothing uses, and
+  # the live chain is compared with it as the tool prints both: a name server that changed (a box
+  # restored elsewhere) or a rule added or lost shows as a difference, whatever the order or form
+  # the tool prints.
+  i=0
+  next="$MAKA_CHAIN"_NEW$$
+  while [ "$i" -lt 5 ] && as_root "$tool" -w -S "$next" >/dev/null 2>&1; do
+    i=$((i + 1)); next="$MAKA_CHAIN"_NEW$$_$i
+  done
   build "$next" "$@"
   want=$(render "$next")
   [ -n "$want" ] || fail "$tool: cannot read $next back"
@@ -132,11 +149,15 @@ guard() {
     as_root "$tool" -w -F "$next"; as_root "$tool" -w -X "$next"
     return 0
   fi
-  # Otherwise the new chain takes over before the old one goes: the box is never without a hook.
+  # Otherwise the new chain takes over before any old one goes: the box is never without a hook,
+  # whichever chain (this one's, or one a stopped run left) is the live one when this starts.
   as_root "$tool" -w -I OUTPUT 1 -j "$next" || fail "$tool: cannot hook $next into OUTPUT"
-  unhook "$MAKA_CHAIN"
-  as_root "$tool" -w -F "$MAKA_CHAIN" 2>/dev/null
-  as_root "$tool" -w -X "$MAKA_CHAIN" 2>/dev/null
+  for old in $(chains); do
+    [ "$old" = "$next" ] && continue
+    unhook "$old"
+    as_root "$tool" -w -F "$old" 2>/dev/null
+    as_root "$tool" -w -X "$old" 2>/dev/null
+  done
   as_root "$tool" -w -E "$next" "$MAKA_CHAIN" || fail "$tool: cannot put $MAKA_CHAIN in place"
   [ "$(first_output_rule)" = "-A OUTPUT -j $MAKA_CHAIN" ] || fail "$tool: $MAKA_CHAIN is not the first OUTPUT rule"
   [ "$(render "$MAKA_CHAIN")" = "$want" ] || fail "$tool: $MAKA_CHAIN does not read back as written"
