@@ -67,7 +67,7 @@ const SECRET_PAIRS: readonly [RegExp, string][] = Array.from(
   const { quote: q, value } = escapedParts(depth);
   const literal = q.replaceAll('\\\\', '\\');
   // Any other field may sit between the two that give the pair away, before or after.
-  const between = '[^{}]*?';
+  const between = '[^{}]{0,512}?';
   return [
     // {"scheme":"Basic", ..., "value":"..."}
     [

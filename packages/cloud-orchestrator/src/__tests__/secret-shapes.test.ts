@@ -275,6 +275,39 @@ test('a long run of backslashes or of escaped quotes is scrubbed in linear time'
   }
 });
 
+test('a long text of credential-like pairs without a brace is scrubbed in linear time', () => {
+  for (const unit of [
+    '"value":"x",',
+    '"token":"[secret]",',
+    '"scheme":"Basic",',
+    '"name":"Authorization",',
+  ]) {
+    const text = unit.repeat(Math.ceil(240_000 / unit.length));
+    for (const scrub of [scrubSecretShapes, scrubSecretText]) {
+      const started = Date.now();
+      scrub(text);
+      assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms for ${unit}`);
+    }
+  }
+});
+
+test('a scheme and its credential are found when other fields sit between them, up to a bound', () => {
+  const gap = (n: number) => `"x":"${'a'.repeat(n)}",`;
+  // Not a JSON text as a whole (a log line with a piece of one), so only the patterns read it.
+  const pair = (n: number) => `sent "scheme":"Basic",${gap(n)}"value":"dXNlcjpwYXNzd29yZA==" ok`;
+  assert.ok(!scrubSecretShapes(pair(100)).includes('dXNlcjpwYXNzd29yZA'));
+  assert.ok(!scrubSecretShapes(pair(400)).includes('dXNlcjpwYXNzd29yZA'));
+  // Known limit: with more than 512 characters of other fields between the two, the pair is not
+  // recognised by its shape (a JSON text that parses is read field by field instead, and a registered secret is still found).
+  assert.ok(scrubSecretShapes(pair(2000)).includes('dXNlcjpwYXNzd29yZA'));
+});
+
+test('known limit: a secret field whose quote follows a lone backslash is no longer read as one', () => {
+  // Well-formed JSON never writes a key right after a backslash; text that does (a Windows path
+  // printed before a field) was matched before the pattern started only at the start of a run.
+  assert.ok(scrubSecretShapes('C:\\"token":"abc12345"').includes('abc12345'));
+});
+
 test('JSON nested past the stack is not read as JSON and does not throw', () => {
   const deep = `${'['.repeat(6000)}${']'.repeat(6000)}`;
   assert.doesNotThrow(() => scrubSecretShapes(deep));
