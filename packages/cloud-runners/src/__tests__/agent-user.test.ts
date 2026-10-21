@@ -201,7 +201,7 @@ test('the agent account reads the brief and writes the result in the handoff dir
   await machine.launch({
     dirName: dir,
     run: 't2',
-    script: 'exit 0\n',
+    script: buildRunScript({ preamble: '', command: asAgent('true', CHANNEL) }),
     envs: {},
     runToken: 'tok',
     workdir: join(taskDir, 'workspace'),

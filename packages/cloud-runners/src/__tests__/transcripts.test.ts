@@ -51,6 +51,35 @@ for (const [name, make] of STORES) {
     assert.equal((await store.locate('tsk_a', SESSION))?.lines, 5);
   });
 
+  test(`${name}: append answers with the lines it committed, not those it skipped as stored already`, async () => {
+    const store = make();
+    assert.deepEqual(await store.append('tsk_a', KEY, [line(1), line(2), line(2)]), [
+      line(1),
+      line(2),
+    ]);
+    assert.deepEqual(await store.append('tsk_a', KEY, [line(2), line(3)]), [line(3)]);
+    assert.deepEqual(await store.append('tsk_a', KEY, [line(1), line(3)]), []);
+    const bare: TranscriptLine = { json: '{"type":"title","title":"x"}' };
+    assert.deepEqual(await store.append('tsk_a', KEY, [bare, bare]), [bare, bare]);
+  });
+
+  test(`${name}: the mirror reports as kept only the lines the store committed`, async () => {
+    const store = make();
+    const kept: string[][] = [];
+    const mirror = transcriptSessionStore({
+      taskId: 'tsk_a',
+      store,
+      redact: (text) => text,
+      onKept: (lines) => kept.push(lines.map((entry) => entry.uuid ?? '')),
+    });
+    const entry = (n: number) => JSON.parse(line(n).json);
+    await mirror.append(KEY, [entry(1), entry(2)]);
+    // A batch sent again, with one new line among the old.
+    await mirror.append(KEY, [entry(2), entry(3)]);
+    await mirror.append(KEY, [entry(1)]);
+    assert.deepEqual(kept, [['u1', 'u2'], ['u3'], []]);
+  });
+
   test(`${name}: a transcript is read in pages that cover it once`, async () => {
     const store = make();
     await store.append(
