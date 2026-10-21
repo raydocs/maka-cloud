@@ -29,6 +29,20 @@ function manifest(overrides: Partial<Manifest> = {}): Manifest {
 }
 
 describe('verifyResearchManifest', () => {
+  test('a deep task whose claims no reviewer judged fails; judged, or any other mode, is as before', () => {
+    const unjudged = manifest({
+      done: ['wrote the report', formatCiteCheckLine({ ...summary, judged: 0 }), EXPORTED],
+    });
+    for (const mode of ['quick', 'standard', undefined] as const) {
+      const verdict = verifyResearchManifest(unjudged, mode ? { mode } : {});
+      assert.equal(verdict.ok, true, String(mode));
+    }
+    const deep = verifyResearchManifest(unjudged, { mode: 'deep' });
+    assert.equal(deep.ok, false);
+    assert.match(deep.problems.join('\n'), /deep task needs a reviewer from the other runner/);
+    assert.equal(verifyResearchManifest(manifest(), { mode: 'deep' }).ok, true);
+  });
+
   test('a complete manifest passes, and is labelled runner-reported', () => {
     const verdict = verifyResearchManifest(manifest());
     assert.equal(verdict.ok, true);

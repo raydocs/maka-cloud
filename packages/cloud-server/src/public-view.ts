@@ -1,5 +1,5 @@
 import type { TaskEvent, TaskView } from '@maka-cloud/orchestrator';
-import { scrubSecretShapes } from './secret-shapes.js';
+import { scrubSecretFields, scrubSecretShapes } from './secret-shapes.js';
 
 /**
  * What the public API shows of a task. The runner id names the vendor behind a
@@ -39,9 +39,43 @@ export function toPublicItem(item: unknown): unknown {
 
 export function toPublicView(view: TaskView): PublicTaskView {
   const { runner: _runner, ...rest } = view;
-  return rest.failureReason === undefined
-    ? rest
-    : { ...rest, failureReason: scrubErrorText(rest.failureReason) };
+  return {
+    ...rest,
+    // The runner's progress notes carry whatever its tools printed.
+    ...(Array.isArray(rest.progress) ? { progress: rest.progress.map(scrubErrorText) } : {}),
+    ...(rest.failureReason === undefined
+      ? {}
+      : { failureReason: scrubErrorText(rest.failureReason) }),
+  };
+}
+
+/**
+ * What the conductor published into a conversation, as clients see it. A notice is the conductor's
+ * own words about a run, which can quote what a tool printed; a question's note is the model's.
+ * The held call of an irreversible question is the one thing shown as it is, because the approval
+ * binds it word for word (T15).
+ */
+export function toPublicConductorData(kind: string, data: unknown): unknown {
+  if (typeof data !== 'object' || data === null) return data;
+  const record = data as Record<string, unknown>;
+  const text = (value: unknown): unknown =>
+    typeof value === 'string' ? scrubErrorText(value) : value;
+  if (kind === 'conductor.notice') return { ...record, text: text(record.text) };
+  if (kind === 'conductor.question') {
+    return {
+      ...record,
+      question: text(record.question),
+      note: text(record.note),
+      options: Array.isArray(record.options)
+        ? record.options.map((option) =>
+            typeof option === 'object' && option !== null
+              ? { ...option, label: text((option as { label?: unknown }).label) }
+              : option,
+          )
+        : record.options,
+    };
+  }
+  return record;
 }
 
 /** A logged event as clients see it: without the runner id, and with error text scrubbed. */
@@ -55,6 +89,12 @@ export function toPublicEvent(event: TaskEvent): unknown {
     case 'task_pause_failed':
     case 'task_resume_failed':
       return { ...event, reason: scrubErrorText(event.reason) };
+    case 'task_progress':
+      return { ...event, note: scrubErrorText(event.note) };
+    case 'step_intent':
+    case 'step_outcome':
+      // A step's label and output are one line of what a tool did or printed.
+      return scrubSecretFields(event);
     default:
       return event;
   }

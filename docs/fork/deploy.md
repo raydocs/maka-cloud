@@ -353,6 +353,8 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | --- | --- |
 | `MAKA_CLOUD_DATA_DIR` | required: directory for the databases, handoff files and conductor storage |
 | `MAKA_CLOUD_BACKUP_DIR` | directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups |
+| `MAKA_CLOUD_TASK_TURN_USD` | the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit |
+| `MAKA_CLOUD_TASK_RUN_HOURS` | how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168) |
 | `MAKA_CLOUD_AGENT_USER` | the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly |
 | `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
 | `MAKA_CLOUD_SPEND_ALERT_USD` | send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push |

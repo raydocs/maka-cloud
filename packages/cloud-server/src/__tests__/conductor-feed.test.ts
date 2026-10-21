@@ -322,3 +322,20 @@ test("createHandler can reach a conversation's orchestrator session before any m
   const session = h.server.orchestrator.authenticate(access?.rotateToken() ?? '');
   assert.ok(session, 'the token acts as the conversation');
 });
+
+test('a notice in the conversation feed shows no secret to the client', async (t) => {
+  const h = await startHarness(t);
+  const conversationId = await newConversation(h);
+  h.server.publisher.publish({
+    kind: 'notice',
+    eventId: 'evt_secret',
+    conversationId,
+    text: 'The push failed: GET https://git.test/r?access_token=abc123DEF456 {"Authorization":["Bearer","tok-0123456789"]}',
+  });
+  const stream = await openStream(t, h, `?conversation=${conversationId}`);
+  const [, notice] = await stream.until(2);
+  assert.equal(notice?.event, 'conductor.notice');
+  const text = String(notice?.data.text);
+  assert.ok(!text.includes('abc123DEF456') && !text.includes('tok-0123456789'), text);
+  assert.match(text, /^The push failed: /u);
+});

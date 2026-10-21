@@ -156,7 +156,7 @@ export interface CloudServerOptions {
   http?: Partial<HttpLimits>;
   orchestrator?: Pick<
     OrchestratorOptions,
-    'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend'
+    'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend' | 'limits'
   >;
   handler?: ConversationHandler;
   /**

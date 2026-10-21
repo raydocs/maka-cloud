@@ -1,4 +1,4 @@
-import { scrubErrorText, scrubSecretShapes } from '@maka-cloud/server';
+import { scrubErrorText, scrubSecretShapes, setKnownSecrets } from '@maka-cloud/server';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 /** Scalars are the norm; anything else (an object, a list) is scrubbed value by value before it prints. */
@@ -97,6 +97,9 @@ export interface LoggerOptions {
 
 /** One JSON object per line, with every value scrubbed before it is written. */
 export function createLogger(options: LoggerOptions): Logger {
+  // The process has one logger, made once at start: its secrets are also the ones the server's
+  // client-facing text (events, notices, errors) must never show.
+  setKnownSecrets(secretValuesOf(options.env ?? process.env));
   const scrub = createScrubber(options.env ?? process.env);
   const now = options.now ?? Date.now;
   const clip = (text: string): string => {

@@ -9,7 +9,7 @@ import {
 import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
-import { applyEvent, reduce, type TaskMap, toView } from './reducer.js';
+import { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
 import { MAX_RESUMES_IN_A_ROW, recoveryNote, resumesInARow } from './recovery.js';
 import type { Recovery, RunHandle, RunnerRegistry, RunSpec } from './runner.js';
 import {
@@ -88,11 +88,38 @@ export interface OrchestratorOptions {
    * needs is wired (the MCP endpoint, the tenant of each task); until then the tasks read as running.
    */
   resume?: 'automatic' | 'manual';
+  /** Limits on one task on top of the budget of its tree; see `TaskLimits`. */
+  limits?: Partial<TaskLimits>;
 }
 
+/**
+ * Limits of one task, each stopping it with a note for the user.
+ * - `turnUsd`: what one run (a start, or a resume after a restart) may spend. The budget of the
+ *   whole tree still applies; this is the smaller of the two for a run. Absent: no turn limit.
+ * - `runMs`: how long the task may run in all, over every attempt. A restart does not give it a
+ *   fresh start, and time spent paused does not count. Default 4 hours.
+ */
+export interface TaskLimits {
+  turnUsd?: number;
+  runMs: number;
+}
+
+export const DEFAULT_TASK_LIMITS: TaskLimits = { runMs: 4 * 60 * 60_000 };
+/** The longest delay a timer takes; a task with more time left than this arms again when it fires. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 export interface RecoveredSpend {
-  /** Per task, everything its runs spent in earlier processes, open reservations in full. */
-  unrecorded(): ReadonlyArray<{ taskId: TaskId; usd: number }>;
+  /**
+   * Per task, everything its runs spent in earlier processes, open reservations in full. A
+   * reservation still open is a model call the process died in: `cutOffCalls` of them, charged in
+   * full as `cutOffUsd` (included in `usd`) because whether the vendor billed them is unknown.
+   */
+  unrecorded(): ReadonlyArray<{
+    taskId: TaskId;
+    usd: number;
+    cutOffCalls?: number;
+    cutOffUsd?: number;
+  }>;
   /** Called once all of it is in the task log. */
   recorded(): void;
 }
@@ -127,6 +154,8 @@ export interface OrchestratorStats {
   connectionSessions: number;
   /** Tasks whose owed stop, or the cancel of a run that cannot be stopped by id, is being retried. */
   stopRetries: number;
+  /** Running tasks with a run-time timer set. */
+  runClocks: number;
 }
 
 export interface DelegateInput {
@@ -204,6 +233,9 @@ export class Orchestrator {
   /** Runs `restore` decided to start again, held until `startRestored`. */
   private pendingResumes: PendingResume[] = [];
   private readonly resumeMode: 'automatic' | 'manual';
+  private readonly limits: TaskLimits;
+  /** The timer of each running task that ends it when its run time is used up. */
+  private readonly runClocks = new Map<TaskId, NodeJS.Timeout>();
 
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
@@ -223,6 +255,14 @@ export class Orchestrator {
     this.orphanStopTimeoutMs = options.orphanStopTimeoutMs ?? DEFAULT_ORPHAN_STOP_TIMEOUT_MS;
     this.recoveredSpend = options.recoveredSpend;
     this.resumeMode = options.resume ?? 'automatic';
+    this.limits = { ...DEFAULT_TASK_LIMITS, ...options.limits };
+    if (
+      !(Number.isFinite(this.limits.runMs) && this.limits.runMs > 0) ||
+      (this.limits.turnUsd !== undefined &&
+        !(Number.isFinite(this.limits.turnUsd) && this.limits.turnUsd > 0))
+    ) {
+      throw new RangeError('Task limits are positive numbers');
+    }
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
@@ -317,6 +357,8 @@ export class Orchestrator {
     this.stopRetries.clear();
     for (const retry of this.cancelRetries.values()) retry.abort();
     this.cancelRetries.clear();
+    for (const clock of this.runClocks.values()) clearTimeout(clock);
+    this.runClocks.clear();
   }
 
   stats(): OrchestratorStats {
@@ -330,6 +372,7 @@ export class Orchestrator {
       treesCounted: this.activeByRoot.keys,
       connectionSessions: this.connectionsBySession.keys,
       stopRetries: this.stopRetries.size + this.cancelRetries.size,
+      runClocks: this.runClocks.size,
     };
   }
 
@@ -844,6 +887,12 @@ export class Orchestrator {
     ) {
       return undefined;
     }
+    if (this.overRunTime(task)) {
+      return {
+        kind: 'give_up',
+        reason: `needs you: this task had used its ${formatSpan(this.limits.runMs)} of run time by the time the server came back, so it was not resumed; open it and decide whether to start it again`,
+      };
+    }
     const root = this.treeRoot(task.taskId);
     const costSeqs = (root ? this.store.readTask(root.taskId) : [])
       .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
@@ -869,7 +918,7 @@ export class Orchestrator {
    */
   private async recordRecoveredSpend(begun: ReadonlyMap<TaskId, number>): Promise<void> {
     const recovered = this.recoveredSpend?.unrecorded() ?? [];
-    for (const { taskId, usd } of recovered) {
+    for (const { taskId, usd, cutOffCalls, cutOffUsd } of recovered) {
       if (!Number.isFinite(usd) || usd <= 0) continue;
       const root = this.treeRoot(taskId);
       if (!root) continue;
@@ -884,6 +933,20 @@ export class Orchestrator {
         costUsd: usd,
         epoch,
       });
+      // The calls the restart cut off are charged in full and may be made again by the run that
+      // resumes; the task's log says so, under the attempt that now drives it.
+      const attempt = begun.get(taskId);
+      if (attempt !== undefined && cutOffCalls !== undefined && cutOffCalls > 0) {
+        await this.record(
+          {
+            type: 'task_progress',
+            taskId,
+            note: `${cutOffCalls} call${cutOffCalls === 1 ? '' : 's'} to the model gateway cut off by the restart ${cutOffCalls === 1 ? 'was' : 'were'} charged in full ($${(cutOffUsd ?? 0).toFixed(2)}) because the vendor may have billed ${cutOffCalls === 1 ? 'it' : 'them'}`,
+          },
+          undefined,
+          { taskId, epoch: attempt },
+        );
+      }
     }
     if (recovered.length > 0) this.recoveredSpend?.recorded();
   }
@@ -1057,7 +1120,8 @@ export class Orchestrator {
       !runner ||
       this.isStopping(taskId) ||
       this.ancestorStopped(taskId) ||
-      this.overBudget(taskId)
+      this.overBudget(taskId) ||
+      this.overRunTime(task)
     )
       return;
     // Every write for the run carries this epoch, and a newer attempt refuses them.
@@ -1078,6 +1142,9 @@ export class Orchestrator {
         ...(left === undefined
           ? {}
           : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),
+        ...(left === undefined || this.limits.turnUsd === undefined
+          ? {}
+          : { turnBudgetUsd: this.limits.turnUsd }),
         ...(this.endpoint === undefined
           ? {}
           : { mcp: { url: this.endpoint, token: executor.token } }),
@@ -1152,6 +1219,7 @@ export class Orchestrator {
             fence,
           );
           recorded = back !== undefined;
+          if (recorded) this.armRunClock(taskId);
         } else {
           const started = await this.record(
             { type: 'task_started', taskId },
@@ -1602,6 +1670,7 @@ export class Orchestrator {
       const oldest = this.fenced.values().next().value;
       if (oldest !== undefined) this.fenced.delete(oldest);
     }
+    this.disarmRunClock(taskId);
     const handle = this.handles.get(taskId);
     this.handles.delete(taskId);
     this.starting.delete(taskId);
@@ -1639,7 +1708,13 @@ export class Orchestrator {
       this.activeByRoot.add(task.rootSessionId);
       return;
     }
+    if (event.type === 'task_started' || event.type === 'task_resumed') {
+      this.armRunClock(task.taskId);
+    } else if (event.type === 'task_paused') {
+      this.disarmRunClock(task.taskId);
+    }
     if (!isTerminal(task.state)) return;
+    this.disarmRunClock(task.taskId);
     // A handle still registered when the task ends belongs to a run nobody
     // stopped (its stream broke, say). The task owes its stop until this cancel
     // or a retry confirms it.
@@ -1746,6 +1821,57 @@ export class Orchestrator {
       level = next;
     }
     return false;
+  }
+
+  // Run time. A running task has a timer for the time it has left; when it fires the task is
+  // stopped with a note. The time is read from the log (`runMs`), so a restart does not reset it.
+
+  private overRunTime(task: TaskRecord): boolean {
+    return runTimeMs(task, this.now()) >= this.limits.runMs;
+  }
+
+  /** (Re)sets the timer of a running task for the run time it has left. */
+  private armRunClock(taskId: TaskId): void {
+    this.disarmRunClock(taskId);
+    const task = this.tasks.get(taskId);
+    if (this.closed || this.restoring || !task || task.state !== 'running') return;
+    const left = Math.max(0, this.limits.runMs - runTimeMs(task, this.now()));
+    const timer = setTimeout(
+      () => this.track(this.stopForRunTime(taskId)),
+      Math.min(left, MAX_TIMER_MS),
+    );
+    timer.unref();
+    this.runClocks.set(taskId, timer);
+  }
+
+  private disarmRunClock(taskId: TaskId): void {
+    const timer = this.runClocks.get(taskId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.runClocks.delete(taskId);
+  }
+
+  private async stopForRunTime(taskId: TaskId): Promise<void> {
+    this.runClocks.delete(taskId);
+    const task = this.tasks.get(taskId);
+    if (!task || task.state !== 'running' || this.isStopping(taskId)) return;
+    if (!this.overRunTime(task)) {
+      this.armRunClock(taskId);
+      return;
+    }
+    // Written under this attempt's epoch: a process that lost the task stops nothing of it.
+    const noted = await this.record(
+      {
+        type: 'task_progress',
+        taskId,
+        note: `stopped: the task used its ${formatSpan(this.limits.runMs)} of run time`,
+      },
+      () => {
+        if (this.isStopping(taskId)) throw new Superseded();
+      },
+      { taskId, epoch: task.epoch },
+    );
+    if (noted !== undefined) await this.cancelTree(taskId, 'system');
   }
 
   // Budgets. A top-level task delegated with `budgetUsd` caps the spend its
@@ -2002,6 +2128,14 @@ function cancelHandle(handle: RunHandle): Promise<boolean> {
       () => true,
       () => false,
     );
+}
+
+/** A span for a note to the user: whole hours when it is, else minutes. */
+function formatSpan(ms: number): string {
+  const hours = ms / 3_600_000;
+  if (Number.isInteger(hours)) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 /** Resolves after `ms`, or at once when `signal` aborts. The timer never holds the process open. */
