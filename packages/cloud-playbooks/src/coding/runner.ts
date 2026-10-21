@@ -303,6 +303,19 @@ interface Collected {
   patch: string;
 }
 
+/**
+ * The sandbox cuts output to its last bytes before the host sees it, which can split a key at the
+ * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted, the host scrubs the
+ * whole of it, and only then keeps the last `max` characters, so a key the cut split is either
+ * whole and scrubbed or in the margin that is dropped.
+ */
+export const TAIL_MARGIN = 512;
+
+export function scrubbedTail(text: string, max: number): string {
+  const shown = scrubSecretText(text);
+  return shown.length <= max ? shown : shown.slice(shown.length - max);
+}
+
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
   const shown = scrubSecretText(text);
@@ -609,8 +622,14 @@ class CodingRun implements RunHandle {
       }
       let problem: CheckProblem;
       if (!turn.ok) {
-        record.turns.push({ run, kind, outcome: 'agent_failed', detail: turn.reason, checks: [] });
-        runs.push({ run, outcome: `the agent's run failed: ${turn.reason}` });
+        record.turns.push({
+          run,
+          kind,
+          outcome: 'agent_failed',
+          detail: scrubSecretText(turn.reason),
+          checks: [],
+        });
+        runs.push({ run, outcome: scrubSecretText(`the agent's run failed: ${turn.reason}`) });
         problem = { problem: `your last run failed: ${turn.reason}` };
       } else {
         const checks: CheckResult[] = [];
@@ -627,7 +646,7 @@ class CodingRun implements RunHandle {
           outcome: checked.ok ? 'verified' : 'check_failed',
           checks: checks.map(({ output: _output, ...rest }) => rest),
         };
-        if (!checked.ok) turnRecord.detail = checked.problem;
+        if (!checked.ok) turnRecord.detail = scrubSecretText(checked.problem);
         record.turns.push(turnRecord);
         if (checked.ok && collected) {
           return { ok: true, repro: checked.repro, manifest: turn.manifest, collected };
@@ -635,7 +654,7 @@ class CodingRun implements RunHandle {
         if (checked.ok) throw new Error('unreachable: verified without a change set');
         runs.push({
           run,
-          outcome: `check failed: ${checked.problem}`,
+          outcome: scrubSecretText(`check failed: ${checked.problem}`),
           ...(checked.output ? { output: checked.output } : {}),
         });
         problem = checked;
@@ -1325,7 +1344,7 @@ class CodingRun implements RunHandle {
             MAKA_CHECK_TAG: tag,
             MAKA_CMD: command,
             MAKA_TIMEOUT: String(timeoutSeconds),
-            MAKA_TAIL: String(this.limits.outputTailBytes),
+            MAKA_TAIL: String(this.limits.outputTailBytes + TAIL_MARGIN),
           },
           timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
         );
@@ -1337,7 +1356,12 @@ class CodingRun implements RunHandle {
       const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
       if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
-      const result = { name, command, outputBytes: Number(bytes?.[1] ?? 0), output: out.stdout };
+      const result = {
+        name,
+        command,
+        outputBytes: Number(bytes?.[1] ?? 0),
+        output: scrubbedTail(out.stdout, this.limits.outputTailBytes),
+      };
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
@@ -1370,7 +1394,8 @@ class CodingRun implements RunHandle {
     if (out.truncated) return { reason: 'the change is too large to read' };
     const lines = out.stdout.split('\n');
     const err = lines.find((line) => line.startsWith('ERR '));
-    if (err) return { reason: `git could not list the change (${err.slice(4)})` };
+    if (err)
+      return { reason: `git could not list the change (${scrubbedTail(err.slice(4), 300)})` };
     const raw = lines.find((line) => line.startsWith('RAW '));
     const patchLine = lines.find((line) => line.startsWith('PATCH '));
     if (raw === undefined || patchLine === undefined)
@@ -1627,7 +1652,7 @@ class CodingRun implements RunHandle {
     if (!base) {
       const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${clipText(detail, 500)}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500)}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;

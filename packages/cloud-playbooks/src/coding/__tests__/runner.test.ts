@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { verifyCodingManifest } from '../playbook.js';
 import {
+  type AgentScript,
   BUGGY_ADD,
   collect,
   FIXED_ADD,
@@ -192,6 +193,35 @@ test('when both vendors fail, the task finishes with an honest manifest and neve
   assert.deepEqual(manifest.artifacts, ['failure_brief.json', 'verification.json']);
   assert.equal(verifyCodingManifest(manifest).ok, false);
   assert.equal(await h.deliveries.get('tsk_giveup'), undefined, 'nothing to deliver');
+  zeroStats(h.runner);
+});
+
+test('a key in a check’s output is scrubbed before the sandbox’s cut, in the failure brief and the verification record', async (t) => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  // One key is cut in two by the old 200-byte tail, one lies whole inside it.
+  const leak = [
+    `echo A=${key}`,
+    `echo ${'b'.repeat(115)}`,
+    `echo B=${key}`,
+    'echo END',
+    'exit 1',
+  ].join('\n');
+  const h = await setup(t, { limits: { outputTailBytes: 200 } });
+  const leaks: AgentScript = async (turn) => {
+    await writeRepro(turn, `${leak}\n`);
+    return 'ok';
+  };
+  h.claude.script = leaks;
+  h.codex.script = leaks;
+  const spec = await h.spec('tsk_leak');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const dir = join(h.handoff, 'tsk_leak');
+  const brief = await fs.readFile(join(dir, 'failure_brief.json'), 'utf8');
+  const record = await fs.readFile(join(dir, 'verification.json'), 'utf8');
+  assert.match(brief, /END/, 'the check output is in the brief');
+  for (const text of [brief, record]) {
+    assert.doesNotMatch(text, /ghp_|0123456789abcdef/);
+  }
   zeroStats(h.runner);
 });
 
