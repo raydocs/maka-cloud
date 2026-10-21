@@ -59,7 +59,10 @@ export function gatewayModelAccess(
           limitUsd: budgetUsd,
           ...(budgetRootId === undefined
             ? {}
-            : { poolId: budgetRootId, ...(poolUsd === undefined ? {} : { poolLimitUsd: poolUsd }) }),
+            : {
+                poolId: budgetRootId,
+                ...(poolUsd === undefined ? {} : { poolLimitUsd: poolUsd }),
+              }),
         },
       });
       return {
