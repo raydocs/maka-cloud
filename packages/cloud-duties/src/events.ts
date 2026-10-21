@@ -140,6 +140,18 @@ export interface Parsed {
 
 const lower = (text: string) => text.toLowerCase();
 
+const MAX_ATTEMPT = 999;
+
+/**
+ * Where a run attempt stands in its workflow's history: by run number, then by attempt. A re-run
+ * keeps its run number, so the number alone cannot tell a failed first attempt from the passing
+ * second one.
+ */
+export function runOrder(runNumber: number, attempt: number | undefined): number {
+  const n = Math.min(Math.max(Math.trunc(attempt ?? 1), 1), MAX_ATTEMPT);
+  return runNumber * (MAX_ATTEMPT + 1) + n;
+}
+
 /** Whether the sender is the employee itself or any bot: those never wake a duty (no loops). */
 function isSelfOrBot(sender: z.infer<typeof Account>, project: ProjectView): boolean {
   return (
@@ -200,7 +212,8 @@ function classifyWorkflowRun(data: z.infer<typeof WorkflowRun>, project: Project
   if (data.action !== 'completed') return { kind: 'ignored', reason: 'action' };
   const branch = run.head_branch ?? '';
   const scope = `${project.repo}:${run.workflow_id}:${branch}`;
-  if (run.conclusion === 'success') return { kind: 'ci_success', scope, seq: run.run_number };
+  const order = runOrder(run.run_number, run.run_attempt);
+  if (run.conclusion === 'success') return { kind: 'ci_success', scope, seq: order };
   if (run.conclusion !== 'failure' && run.conclusion !== 'timed_out') {
     return { kind: 'ignored', reason: 'not_a_failure' };
   }
@@ -224,8 +237,8 @@ function classifyWorkflowRun(data: z.infer<typeof WorkflowRun>, project: Project
       ...(run.html_url === undefined ? {} : { url: run.html_url }),
       fields,
     },
-    staleIf: { scope, seq: run.run_number },
-    supersede: { scope, seq: run.run_number },
+    staleIf: { scope, seq: order },
+    supersede: { scope, seq: order },
     ...(own ? { chain: { key: scope } } : {}),
   };
 }
