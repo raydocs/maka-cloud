@@ -434,7 +434,7 @@ export async function startStack(
             const day = alert.key.slice('spend:'.length);
             raiseCapHit({
               conversationId,
-              key: `spend_alert:${day}`,
+              key: `spend_alert:${alert.inviteId}:${day}`,
               ask: `The alert that the server's spend reached its limit on ${day} was never delivered to your devices, so you may not have been told. Check the day's spend.`,
             });
             journal.markAlertRaised(alert.inviteId, alert.key, Date.now());
