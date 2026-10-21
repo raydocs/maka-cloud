@@ -422,7 +422,7 @@ class CodingRun implements RunHandle {
           ? budgetProblem(modes, this.mode, this.spec.budgetUsd)
           : undefined;
       if (tooSmall) return this.setTerminal({ type: 'failed', reason: tooSmall });
-      this.limitUsd = this.workLimit();
+      this.limitUsd = this.underTurnLimit(this.workLimit());
 
       this.adoptWorkspace(
         await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal)),
@@ -838,6 +838,17 @@ class CodingRun implements RunHandle {
 
   // -- the review ----------------------------------------------------------------------------------
 
+  /**
+   * One run of this task is one turn of the orchestrator, and that turn has its own limit. The
+   * implementer, the review, the fix and every retry of this run spend from that one allowance, so
+   * no phase's limit may be above it.
+   */
+  private underTurnLimit(limit: number | undefined): number | undefined {
+    const turn = this.spec.turnBudgetUsd;
+    if (turn === undefined || limit === undefined) return limit;
+    return Math.min(limit, turn);
+  }
+
   /** What the work may spend in all: the budget less the share the review keeps. */
   private workLimit(): number | undefined {
     const budget = this.spec.budgetUsd;
@@ -900,7 +911,7 @@ class CodingRun implements RunHandle {
           `the budget leaves $${Math.max(0, reviewLimit - this.spentBefore).toFixed(2)} for a review, too little to start one`,
         );
       }
-      this.limitUsd = reviewLimit;
+      this.limitUsd = this.underTurnLimit(reviewLimit);
     }
     try {
       this.progress('a second agent reviews the change');
@@ -985,7 +996,8 @@ class CodingRun implements RunHandle {
     });
     const budget = this.spec.budgetUsd;
     if (budget !== undefined && this.reviewCap !== undefined) {
-      const left = this.reviewCap - this.spentBefore;
+      // The review's limit, below the turn's allowance when that is the smaller.
+      const left = (this.limitUsd ?? this.reviewCap) - this.spentBefore;
       if (left < 2 * MIN_REVIEW_USD) {
         return {
           outcome,
