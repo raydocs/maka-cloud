@@ -162,9 +162,15 @@ test('a restarted task shows the restart text as its latest note, once, and keep
   const frame = (id: number, event: unknown, at = id): FeedEvent =>
     ({ id, kind: 'task.event', data: { conversationId: 'c', seq: id, at, event } }) as FeedEvent;
   let state = emptyState();
-  state = applyEvent(state, frame(1, { type: 'task_created', taskId: 't', sessionId: 's', mode: 'async' }));
+  state = applyEvent(
+    state,
+    frame(1, { type: 'task_created', taskId: 't', sessionId: 's', mode: 'async' }),
+  );
   state = applyEvent(state, frame(2, { type: 'task_started', taskId: 't' }));
-  state = applyEvent(state, frame(3, { type: 'task_progress', taskId: 't', note: 'reading the repo' }));
+  state = applyEvent(
+    state,
+    frame(3, { type: 'task_progress', taskId: 't', note: 'reading the repo' }),
+  );
   state = applyEvent(
     state,
     frame(4, { type: 'task_restarted', taskId: 't', epoch: 2, text: 'The server restarted.' }),
