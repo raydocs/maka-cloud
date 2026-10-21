@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { StepLog, StepIntentResult } from '@maka-cloud/orchestrator';
@@ -20,12 +22,39 @@ import {
   until,
 } from './harness.js';
 
+/**
+ * A `sudo` that runs the command as the current user. The fake sandbox has one user, so the agent's
+ * separate account is only a name here; `agent-user.test.ts` checks the real thing where a second
+ * account exists.
+ */
+const SUDO_DOUBLE = `#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--preserve-env|-H) shift ;;
+    -u) shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+`;
+
 /** The real Agent SDK, driving a scripted stand-in for `claude` that runs in the fake sandbox. */
 async function sdkSetup(t: { after(fn: () => Promise<void>): void }): Promise<Harness> {
+  const shim = await fs.mkdtemp(join(tmpdir(), 'sudo-double-'));
+  t.after(() => fs.rm(shim, { recursive: true, force: true }));
+  await fs.writeFile(join(shim, 'sudo'), SUDO_DOUBLE, { mode: 0o755 });
   const h = await setup({
-    cloud: { agentSdk: await loadAgentSdk(), agentSdkPollMs: { minMs: 5, maxMs: 20 } },
+    fake: { execPath: `${shim}:${process.env.PATH ?? ''}` },
+    cloud: {
+      agentSdk: await loadAgentSdk(),
+      agentSdkPollMs: { minMs: 5, maxMs: 20 },
+      agentChannel: { user: 'maka-agent', group: execFileSync('id', ['-gn']).toString().trim() },
+    },
   });
   t.after(() => h.cleanup());
+  // The box check needs a second account; it has its own tests.
+  h.runners.fleet.ensureAgentIsolation = async () => undefined;
   await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
   return h;
 }
@@ -117,10 +146,13 @@ test('the SDK runs the sandbox CLI with the flags of the CLI path, an explicit e
   assert.ok(!env.includes('oauth-host-token'), 'a login of the host reached the sandbox');
 
   // The first message and the SDK's setup went in through the input file, on the sandbox.
-  const input = await fs.readFile(join(h.root, 'tsk_sdk_ok', 't1.in'), 'utf8');
+  const input = await fs.readFile(join(h.root, 'tsk_sdk_ok', 'chan', 't1.in'), 'utf8');
   assert.match(input, /"subtype":"initialize"/);
   assert.match(input, /Brief for tsk_sdk_ok|result\.json/);
-  assert.ok(await exists(join(h.root, 'tsk_sdk_ok', 't1.in.eof')), 'the end of the input was sent');
+  assert.ok(
+    await exists(join(h.root, 'tsk_sdk_ok', 'chan', 't1.in.eof')),
+    'the end of the input was sent',
+  );
   assert.equal((await h.sessions.get('tsk_sdk_ok'))?.sessionId, 'sess-1');
   assert.equal(h.fake.requestsTo('GET', /\/files$/).length, 0);
   assertClean(h);
@@ -272,6 +304,35 @@ test('a step the log already holds as finished or running is not run again', asy
   assert.deepEqual(await lines(fakeFile(h, 'ran.log')), ['toolu_3']);
 });
 
+test('without an agent channel the SDK path refuses to run, and the CLI is never started', async (t) => {
+  const h = await setup({ cloud: { agentSdk: await loadAgentSdk() } });
+  t.after(() => h.cleanup());
+  await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
+  await tools(h, [{ id: 'toolu_1', name: 'Bash', input: { command: 'gh pr create' } }]);
+  const events = await collect(await h.runners.claude.start(await h.spec('tsk_sdk_nochan')));
+
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed');
+  assert.match(end?.type === 'failed' ? end.reason : '', /needs an agent channel/u);
+  assert.deepEqual(await lines(fakeFile(h, 'ran.log')), []);
+});
+
+test('a box that does not keep the channel private is refused before the CLI starts', async (t) => {
+  const h = await sdkSetup(t);
+  h.runners.fleet.ensureAgentIsolation = async () => {
+    throw new Error(
+      'the sandbox does not keep the agent channel private: the agent account can write the channel',
+    );
+  };
+  await tools(h, [{ id: 'toolu_1', name: 'Bash', input: { command: 'gh pr create' } }]);
+  const events = await collect(await h.runners.claude.start(await h.spec('tsk_sdk_open')));
+
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed');
+  assert.match(end?.type === 'failed' ? end.reason : '', /can write the channel/u);
+  assert.deepEqual(await lines(fakeFile(h, 'ran.log')), []);
+});
+
 test('a secret in a tool call is not written to the step log', async (t) => {
   const h = await sdkSetup(t);
   const steps = recorder();
@@ -378,7 +439,7 @@ test('after a restart the SDK continues the recorded session with the recovery n
   const prompts = await lines(fakeFile(h, 'prompts.log'));
   assert.match(prompts.at(-1) ?? '', /NOTE: the server restarted/);
   // Its input is a file of its own: the first run's was not touched.
-  assert.ok(await exists(join(h.root, 'tsk_sdk_recover', 't2.in')));
+  assert.ok(await exists(join(h.root, 'tsk_sdk_recover', 'chan', 't2.in')));
   assertClean(h);
 });
 

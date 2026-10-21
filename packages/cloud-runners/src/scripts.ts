@@ -16,6 +16,13 @@
  * zombie (killed, not yet reaped) is not alive.
  */
 const ALIVE_FN = `
+# With a separate agent account the agent's processes are not the sandbox user's: signalling and
+# reading them goes through sudo, which the sandbox user is assumed to have (see agent-user.ts).
+sig() { kill "$@" 2>/dev/null && return 0; [ -n "\${MAKA_AGENT_USER:-}" ] && sudo -n kill "$@" 2>/dev/null; }
+environ_of() {
+  cat "/proc/$1/environ" 2>/dev/null && return 0
+  [ -n "\${MAKA_AGENT_USER:-}" ] && sudo -n cat "/proc/$1/environ" 2>/dev/null
+}
 pstate() {
   local line
   IFS= read -r line < "/proc/$1/stat" 2>/dev/null || return 1
@@ -30,7 +37,7 @@ alive() {
   [ "$st" = Z ] && return 1
   if [ -r "/proc/$pid/environ" ] && [ -r "$1.token" ]; then
     tok=$(cat "$1.token")
-    tr '\\0' '\\n' < "/proc/$pid/environ" | grep -qxF "MAKA_RUN_TOKEN=$tok" || return 1
+    environ_of "$pid" | tr '\\0' '\\n' | grep -qxF "MAKA_RUN_TOKEN=$tok" || return 1
   fi
   return 0
 }
@@ -61,7 +68,7 @@ group_is_run() {
   tok=$(cat "$1.token" 2>/dev/null) || return 1
   [ -n "$tok" ] || return 1
   for pid in $(group_pids "$2"); do
-    if [ -r "/proc/$pid/environ" ] && tr '\\0' '\\n' < "/proc/$pid/environ" | grep -qxF "MAKA_RUN_TOKEN=$tok"; then return 0; fi
+    if environ_of "$pid" | tr '\\0' '\\n' | grep -qxF "MAKA_RUN_TOKEN=$tok"; then return 0; fi
   done
   return 1
 }
@@ -220,15 +227,15 @@ for pidf in $pids; do
   members=$(group_pids "$pid")
   [ -n "$members" ] || continue
   found=1
-  kill -TERM -- "-$pid" 2>/dev/null
-  for m in $members; do kill -TERM "$m" 2>/dev/null; done
+  sig -TERM -- "-$pid"
+  for m in $members; do sig -TERM "$m"; done
   waited=0
   while [ "$waited" -lt "\${MAKA_GRACE_TENTHS:-30}" ] && [ -n "$(group_pids "$pid")" ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
-  kill -KILL -- "-$pid" 2>/dev/null
-  for m in $(group_pids "$pid"); do kill -KILL "$m" 2>/dev/null; done
+  sig -KILL -- "-$pid"
+  for m in $(group_pids "$pid"); do sig -KILL "$m"; done
   waited=0
   while [ "$waited" -lt 30 ] && [ -n "$(group_pids "$pid")" ]; do
     sleep 0.1

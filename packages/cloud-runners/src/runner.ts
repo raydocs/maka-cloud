@@ -16,6 +16,7 @@ import type { Fleet } from './fleet.js';
 import type { RemoteMachine } from './machine.js';
 import { type InputRequest, parseBriefHeader } from './inputs.js';
 import { LineSplitter } from './lines.js';
+import { type AgentChannel, asAgent } from './agent-user.js';
 import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
 import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
 import { buildRunScript } from './scripts.js';
@@ -611,12 +612,31 @@ class Run implements RunHandle {
         signal: this.signal,
       });
 
-    const reader = this.openReader();
     const sdk = vendor.name === 'claude-agent-sdk' ? fleet.options.agentSdk : undefined;
+    const channel = fleet.options.agentChannel;
+    if (sdk) {
+      // The SDK trusts what arrives on the CLI's stdin, so it is used only on a box that keeps
+      // that channel from the agent's own processes.
+      if (channel === undefined) {
+        return {
+          ok: false,
+          reason:
+            'the agent SDK needs an agent channel (a separate account for the agent) and none is configured',
+        };
+      }
+      try {
+        await this.guard(fleet.ensureAgentIsolation(machine, this.signal));
+        await this.guard(machine.prepareAgent(spec.taskId, channel.group, this.signal));
+      } catch (error) {
+        if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
+        return { ok: false, reason: this.scrub(errorMessage(error)) };
+      }
+    }
+    const reader = this.openReader();
     let drive: Drive;
     try {
       drive = sdk
-        ? await this.driveAgentSdk(sdk, reader, {
+        ? await this.driveAgentSdk(sdk, reader, channel as AgentChannel, {
             prompt,
             run,
             dir,
@@ -788,6 +808,7 @@ class Run implements RunHandle {
   private async driveAgentSdk(
     sdk: AgentSdk,
     reader: TurnReader,
+    channel: AgentChannel,
     input: {
       prompt: string;
       run: string;
@@ -836,7 +857,7 @@ class Run implements RunHandle {
             input.launchRun(
               buildRunScript({
                 preamble: `${preambleFor(vendor)}\n${FEED_FUNCTION}`,
-                command: fedCommand([vendor.binary, ...args.map(shq)].join(' ')),
+                command: fedCommand(asAgent([vendor.binary, ...args.map(shq)].join(' '), channel)),
               }),
               env,
             ),

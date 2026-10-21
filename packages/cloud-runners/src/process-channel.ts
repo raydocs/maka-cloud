@@ -14,9 +14,15 @@ import { assertSafeId, errorMessage } from './shell.js';
  *
  * - The process runs detached, as every run of this package does (`launch`), and its output is read
  *   the way the CLI path reads it: the machine poller asks for the bytes after an offset.
- * - Its stdin is a file, `<run>.in`, that the process reads as it grows (`maka_feed`, below). Each
+ * - Its stdin is a file, `chan/<run>.in`, that the process reads as it grows (`maka_feed`, below). Each
  *   write is one exec that appends to the file at the offset the host believes it is at, so a
  *   request whose answer got lost can be sent again without writing twice.
+ *
+ * The channel is the trusted path between the SDK and the CLI: whoever can append to the input file
+ * can answer the CLI's permission questions. So it lives in `chan/`, a directory only the sandbox
+ * user can enter (mode 700), outside everything the agent may write, and the CLI runs as another
+ * user (`agent-user.ts`). The scripts below refuse a channel that is a symlink, is owned by someone
+ * else, or is not private.
  *
  * The design is durable-harness's process channel (Apache-2.0; its file tail, not its code). The
  * terminal WebSocket of the sandbox stays free for the user's handoff (T14).
@@ -30,7 +36,25 @@ const APPEND_ATTEMPTS = 3;
 const APPEND_TIMEOUT_SECONDS = 30;
 
 /**
- * Appends stdin to `<run>.in`, at most once for a given offset. `MAKA_OFFSET` is where the file must
+ * Enters the channel directory `$MAKA_DIR/chan`, creating it private (mode 700) when it is not
+ * there yet, and answers `UNSAFE <why>` instead when it, or a file of this run in it, is a symlink
+ * or belongs to someone else. Nothing is written through a link.
+ */
+const CHANNEL_DIR_CHECK = `[ -L chan ] || [ -d chan ] || mkdir -m 700 chan 2>/dev/null || true
+if [ -L chan ] || [ ! -d chan ] || [ ! -O chan ] || [ "$(stat -c %a chan)" != 700 ]; then
+  echo "UNSAFE the channel directory is a link, is not ours or is not private"
+  exit 0
+fi
+cd chan
+for name in "$MAKA_RUN.in" "$MAKA_RUN.in.lock" "$MAKA_RUN.in.eof"; do
+  if [ -L "$name" ] || { [ -e "$name" ] && [ ! -O "$name" ]; }; then
+    echo "UNSAFE $name is a link or is not ours"
+    exit 0
+  fi
+done`;
+
+/**
+ * Appends stdin to `chan/<run>.in`, at most once for a given offset. `MAKA_OFFSET` is where the file must
  * end before the append; `MAKA_LEN` is the length of the payload in bytes. The payload is read
  * whole into a private file first (`SHORT <n>` and nothing written when it did not all arrive),
  * and the check of the file's size and the append are one step under a lock, so a slow original
@@ -39,11 +63,12 @@ const APPEND_TIMEOUT_SECONDS = 30;
  * of it means an earlier try was cut off and the rest is appended; anything else means the host
  * and the file disagree, and nothing is written. With `MAKA_EOF` it ends the input instead: the
  * feeder stops once it has passed on everything written before the marker. Prints `OK`,
- * `MISMATCH <size>`, `SHORT <n>` or `BUSY`.
+ * `MISMATCH <size>`, `SHORT <n>`, `BUSY` or `UNSAFE <why>`.
  */
 export const INPUT_APPEND_SCRIPT = `set -eu
 umask 077
 cd "$MAKA_DIR"
+${CHANNEL_DIR_CHECK}
 f="$MAKA_RUN.in"
 if [ -n "\${MAKA_EOF:-}" ]; then
   : >> "$f"
@@ -80,12 +105,13 @@ fi
 `;
 
 /**
- * Shell function for a run script's preamble: copies `<run>.in` to its stdout as the file grows. It
+ * Shell function for a run script's preamble: copies `chan/<run>.in` to its stdout as the file grows. It
  * ends when the end marker is there and everything before it has been copied (the marker is read
  * first, so the size read after it is final), or when the run script that started it is gone.
  */
 export const FEED_FUNCTION = `maka_feed() {
-  local f="$MAKA_DIR/$MAKA_RUN.in" eof="$MAKA_DIR/$MAKA_RUN.in.eof" off=0 size done_
+  local f="$MAKA_DIR/chan/$MAKA_RUN.in" eof="$MAKA_DIR/chan/$MAKA_RUN.in.eof" off=0 size done_
+  [ -L "$MAKA_DIR/chan" ] && return 0
   while :; do
     done_=0
     [ -e "$eof" ] && done_=1
