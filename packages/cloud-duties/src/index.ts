@@ -25,7 +25,21 @@ export {
   KIND_SPECS,
   type KindSpec,
 } from './cards/kinds.js';
+export {
+  type Candidate,
+  type CandidateInput,
+  buildCandidates,
+  type OwnResult,
+} from './cards/candidates.js';
 export { stableHash } from './cards/hash.js';
+export {
+  GitHubSignalReader,
+  type GitHubSignalReaderOptions,
+  type RepoSignals,
+  type ScanTarget,
+  SignalReadError,
+  type SignalReader,
+} from './cards/signals.js';
 export { DutiesDatabaseInUseError, DutiesDatabaseVersionError } from './db.js';
 export {
   Dispatcher,

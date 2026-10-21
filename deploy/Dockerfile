@@ -9,7 +9,12 @@
 
 FROM node:24-slim AS build
 WORKDIR /app
-COPY . .
+# The context is an allowlist (.dockerignore); the copy names what the build reads, so a file the
+# context lets through that this does not name is still not in an image.
+COPY package.json package-lock.json tsconfig.base.json tsconfig.lib.json ./
+COPY packages ./packages
+COPY scripts/sync-model-metadata.mjs ./scripts/
+COPY scripts/model-metadata ./scripts/model-metadata
 
 # Only what the server needs: the host package, the workspaces it depends on, and the root.
 RUN npm ci -w @maka-cloud/host --include-workspace-root --ignore-scripts --no-audit --no-fund
