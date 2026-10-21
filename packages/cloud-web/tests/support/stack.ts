@@ -62,7 +62,7 @@ export interface Stack {
   /** The fake run of a task, once the orchestrator has started it. */
   run(taskId: string): Promise<FakeRun>;
   /** Puts a file where the artifact route reads this task's results. */
-  writeArtifact(taskId: string, ref: string, content: string): Promise<void>;
+  writeArtifact(taskId: string, ref: string, content: string | Uint8Array): Promise<void>;
   close(): Promise<void>;
 }
 

@@ -12,9 +12,18 @@ import {
   type InboxAnswerRequest,
   type InboxAnswerResult,
   type MemoryProfile,
+  type SourceListing,
+  type SourcePreview,
   type TaskControl,
   type TaskView,
 } from './contract';
+
+const PICTURE_TYPES: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+]);
 
 /** A refused request. `code` is the server's error code, when it sent one. */
 export class ApiError extends Error {
@@ -235,7 +244,27 @@ export class CloudClient {
       return { kind: 'link', url: link.url };
     }
     const name = /filename="([^"]*)"/u.exec(disposition)?.[1] ?? 'result';
+    const type = (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase();
+    // Only these four are ever shown as pictures, and never SVG: anything else is inert text.
+    if (type !== undefined && PICTURE_TYPES.has(type)) {
+      return { kind: 'image', name, blob: await response.blob() };
+    }
     return { kind: 'text', name, text: await response.text() };
+  }
+  /** The pages the task opened; nothing is fetched from them to answer. */
+  listSources(task: string) {
+    return this.request<{ sources: SourceListing[]; total: number }>(routes.sources(task));
+  }
+  sourcePreview(task: string, index: number) {
+    return this.request<SourcePreview>(routes.sourcePreview(task, index));
+  }
+  /** The page's own preview image, fetched by the server; the browser never asks the site. */
+  async sourceImage(task: string, index: number): Promise<Blob> {
+    const response = await this.send(routes.sourceImage(task, index));
+    const type = (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase();
+    if (type === undefined || !PICTURE_TYPES.has(type))
+      throw new Error('Unexpected image response');
+    return response.blob();
   }
 
   async subscribe(

@@ -107,7 +107,7 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `POST /v1/conversations/:id/messages` | `{text, clientMessageId?}` -> 202 `{messageId}`. Stores the message with a pending delivery, emits, then hands it to the handler. A repeated `clientMessageId` returns the first message's id, emits nothing, and retries a delivery still pending. |
 | `GET /v1/conversations/:id/tasks?after=&limit=` | Task views for the conversation's trees, in creation order, paged. |
 | `POST /v1/tasks/:taskId/{cancel,pause,resume}` | Acts on a task as its conversation, after checking the invite. 200 `{task}` (the public view). 404 unknown task; 409 `invalid_state` (finished, not paused, pause still under way) or `pause_unsupported`; 429 over the control limit. Cancel of a finished task is a 200 no-op. Pause and resume wait for the runner's answer (15 s at most). |
-| `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`. |
+| `GET /v1/tasks/:taskId/artifacts` | `{artifacts: [{index, name, kind, url?}], total}` from the task's manifest (first 500). `kind` is `file` or `link`; `image: true` marks a file named like a picture (png, jpg, jpeg, webp, gif; never svg). |
 | `GET /v1/tasks/:taskId/artifacts/:index` | A file's bytes as an attachment, or `{url}` for a link. 404 for anything that is not readable (one answer for every reason), 413 over 2 MiB, 429 over the download limit. |
 | `GET /v1/tasks/:taskId/sources` | `{sources: [{index, url, site, label}], total}`: the pages the task opened (first 20), from the server's own log. Nothing is fetched to answer. `label` is one of `source`, `docs`, `alternative`, `pull_request`, `preview`, `test_report`. |
 | `GET /v1/tasks/:taskId/sources/:index/preview` | `{site, title?, image}` for one page of that list, fetched by the server. `image` says whether the next route has bytes. 404 for an index not in the list; 429 over the preview limit (60 a minute per invite) or when the server is already fetching as much as it allows (`retry-after: 2`). |
@@ -142,7 +142,11 @@ through instabox `GET /files`, which reads as root. Content for runs inside a
 sandbox plugs in later through the same port, using exec as the dev user with
 symlinks refused and a size cap.
 
-Bytes are sent as `text/plain` (`application/json` for `.json`) with
+A file named like a picture is sent as `image/png`, `image/jpeg`, `image/webp` or `image/gif`
+only when its own first bytes say the same type (this is what a delivery card shows as its visual
+proof, a screenshot taken in the box). A name that claims a picture over other bytes, and picture
+bytes under another name, are sent as text like any other file. Otherwise bytes are sent as
+`text/plain` (`application/json` for `.json`) with
 `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and a
 sandboxing CSP, so a browser never renders them. At most 8 reads run at once
 (429 beyond), and each invite gets 60 downloads a minute.

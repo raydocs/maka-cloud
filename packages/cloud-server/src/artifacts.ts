@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
+import { type ImageType, sniffImage } from './image-type.js';
 
 export const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
 const MAX_REF_LENGTH = 512;
@@ -26,6 +27,8 @@ export interface ArtifactListing {
   index: number;
   name: string;
   kind: ArtifactKind;
+  /** The name says it is a picture (png, jpeg, webp or gif); the bytes are checked when it is read. */
+  image?: true;
   /** Only for a link. It is shown to the client and never fetched by the server. */
   url?: string;
 }
@@ -47,7 +50,31 @@ export function listArtifact(ref: string, index: number): ArtifactListing {
   if (link !== undefined) {
     return { index, name: displayName(new URL(link).host), kind: 'link', url: link };
   }
-  return { index, name: displayName(ref.split('/').at(-1) ?? ''), kind: 'file' };
+  const name = displayName(ref.split('/').at(-1) ?? '');
+  return { index, name, kind: 'file', ...(imageTypeOfName(name) ? { image: true as const } : {}) };
+}
+
+const IMAGE_EXTENSIONS: Readonly<Record<string, ImageType>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+};
+
+/** The picture type a file name claims, by its extension (never svg). */
+export function imageTypeOfName(name: string): ImageType | undefined {
+  return IMAGE_EXTENSIONS[/\.([A-Za-z0-9]{1,5})$/u.exec(name)?.[1]?.toLowerCase() ?? ''];
+}
+
+/**
+ * The type to send a file's bytes as when they are a picture: the name and the bytes must agree
+ * (`shot.png` holding png bytes). A name that claims a picture over other bytes, and picture bytes
+ * under another name, stay plain text attachments.
+ */
+export function imageTypeOf(name: string, bytes: Uint8Array): ImageType | undefined {
+  const claimed = imageTypeOfName(name);
+  return claimed !== undefined && sniffImage(bytes) === claimed ? claimed : undefined;
 }
 
 /** A name safe to show and to put in a header: no control characters, no path, bounded. */

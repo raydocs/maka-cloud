@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
-import { ConversationView, QuestionCard } from '../src/App';
+import { ConversationView, Picture, QuestionCard } from '../src/App';
 import { CloudClient } from '../src/client';
 import type { Conversation, InboxItem, Question, TaskView } from '../src/contract';
 import { Computer } from '../src/Computer';
@@ -417,4 +417,23 @@ test('computer output is inert and name-filtered; unsupported pause never enable
     ),
   );
   expect((screen.getByLabelText('Terminal input') as HTMLInputElement).disabled).toBe(true);
+});
+
+test('a picture is shown from a local object URL that is released when it goes away', () => {
+  const made: string[] = [];
+  const freed: string[] = [];
+  URL.createObjectURL = (blob: Blob | MediaSource) => {
+    made.push(`blob:local/${(blob as Blob).size}`);
+    return made.at(-1) ?? '';
+  };
+  URL.revokeObjectURL = (url: string) => {
+    freed.push(url);
+  };
+  const { unmount } = render(
+    <Picture name="proof.png" blob={new Blob([new Uint8Array(9)], { type: 'image/png' })} />,
+  );
+  const image = screen.getByRole('img', { name: 'proof.png' });
+  expect(image.getAttribute('src')).toBe('blob:local/9');
+  unmount();
+  expect(freed).toEqual(['blob:local/9']);
 });

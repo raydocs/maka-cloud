@@ -657,3 +657,10 @@ textarea {
     background: #f4f6fa;
   }
 }
+
+.picture {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
+}
