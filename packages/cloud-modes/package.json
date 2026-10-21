@@ -1,0 +1,21 @@
+{
+  "name": "@maka-cloud/modes",
+  "version": "0.1.0",
+  "description": "Modes (quick, standard, deep): one versioned config that maps each mode's roles to models and effort, and the budget each mode runs under.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  }
+}
