@@ -353,8 +353,12 @@ test('the implementer may spend the work share, the review has a limit of its ow
   const events = await collect(await h.runner.start(spec));
   await spent.promise;
   // Standard mode keeps 20%: the implementer's runs stop at $8, the review's at $1 + $2.
-  assert.equal(h.claude.turns[0]?.spec.budgetUsd, 8);
-  assert.equal(h.codex.turns[0]?.spec.budgetUsd, 2);
+  assert.equal(h.claude.turns[0]?.spec.turnBudgetUsd, 8);
+  assert.equal(h.codex.turns[0]?.spec.turnBudgetUsd, 2);
+  // The whole $10 is the budget of both runs, so the gateway pool is $10 and the work's $8 share
+  // is not the pool the review's $2 is taken from.
+  assert.equal(h.claude.turns[0]?.spec.budgetUsd, 10);
+  assert.equal(h.codex.turns[0]?.spec.budgetUsd, 10);
   assert.equal(h.codex.turns[0]?.spec.budgetRootId, 'tsk_root');
   await notDelivered(
     h,
