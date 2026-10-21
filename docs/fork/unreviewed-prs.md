@@ -95,10 +95,10 @@ Where a different outside reviewer ran instead, the line says so. Such a PR stil
 
 ## Merged after the list above was built (22:28Z onward)
 
-- #310 22:37 Egress guard: refuse a box where the lock cannot be taken (Codex limit notice only; no outside review)
+- #310 22:37 Egress guard: refuse a box where the lock cannot be taken (outside Claude review, per the Egress lane)
 - #301 22:38 Rehearsal: the stand-in sandbox has a real agent account, so the task steps run for real (outside Claude review, per the coordinator)
 - #311 22:43 docs: list PRs merged since Codex hit its usage limit (docs only; no outside review)
-- #316 22:53 fix(cloud-playbooks): scrub, then clip, text that enters the coding manifest (recheck A8) (Codex limit notice only; no outside review)
+- #316 22:53 fix(cloud-playbooks): scrub, then clip, text that enters the coding manifest (recheck A8) (outside Claude review, submitted 22:53:44Z; it raised one P2 outside its own lines, a check's output is cut before it is scrubbed, in `failure_brief.json` and `verification.json`, which its own review says belongs to the next push of this lane)
 - #317 22:54 Smoke cleanup: ask the live state of every task of the invite, however long ago it ended (outside Claude review, per the coordinator)
 
 ## Not in the list
