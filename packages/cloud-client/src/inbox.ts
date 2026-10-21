@@ -64,6 +64,24 @@ function evidenceLine(evidence: InboxEvidence, exact: boolean): EvidenceLine {
 }
 
 /**
+ * A finished-task card's sentence split into its parts, when it has the supervisor's usual shape
+ * (`“Title” finished (not independently checked): “Outcome”`). The words are the supervisor's own,
+ * cut apart and never rewritten; any other shape is not split and is shown whole.
+ */
+export function finishedParts(
+  item: InboxItem,
+): { title: string; check: string; outcome: string } | undefined {
+  if (item.kind !== 'finished') return undefined;
+  const match =
+    /^[“"](.{1,200})[”"] finished \(((?:not )?independently checked)\): [“"](.*)[”"]$/su.exec(
+      displayText(item.ask).trim(),
+    );
+  if (!match) return undefined;
+  const [, title, check, outcome] = match;
+  return { title: title ?? '', check: check ?? '', outcome: outcome ?? '' };
+}
+
+/**
  * What a decision card shows, worked out once for every client. An approval binds the card's exact
  * text: it is shown as sent, with the held call's arguments, and a card that cannot be shown exactly
  * cannot be approved (the approve option is left out). Other cards are filtered like any server

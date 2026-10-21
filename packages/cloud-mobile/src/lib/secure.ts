@@ -10,9 +10,9 @@ let available: Promise<boolean> | undefined;
 const hasStore = () => (available ??= SecureStore.isAvailableAsync().catch(() => false));
 
 export async function readSecure(key: string): Promise<string | null> {
-  if (!(await hasStore())) return memory.get(key) ?? null;
+  if (!(await hasStore())) return memory.get(key) || null;
   try {
-    return await SecureStore.getItemAsync(key);
+    return (await SecureStore.getItemAsync(key)) || null;
   } catch {
     return null;
   }
@@ -28,12 +28,28 @@ export async function writeSecure(key: string, value: string): Promise<void> {
   });
 }
 
+/**
+ * Removes a value, or fails. A value that could not be deleted is overwritten with an empty one (which
+ * reads back as absent); only if that fails too does this throw, so a caller never reports access as
+ * removed while the secret is still on the device.
+ */
 export async function removeSecure(key: string): Promise<void> {
   memory.delete(key);
   if (!(await hasStore())) return;
+  let failure: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await SecureStore.deleteItemAsync(key);
+      return;
+    } catch (e) {
+      failure = e;
+    }
+  }
   try {
-    await SecureStore.deleteItemAsync(key);
+    await SecureStore.setItemAsync(key, '', {
+      keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    });
   } catch {
-    // Then the value is gone from this session at least; a later sign-in overwrites it.
+    throw failure instanceof Error ? failure : new Error('The saved access could not be removed.');
   }
 }

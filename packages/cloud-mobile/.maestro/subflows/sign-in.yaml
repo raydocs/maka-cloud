@@ -10,14 +10,16 @@ appId: cloud.maka.app
     commands:
       - tapOn: "Wait"
 - assertVisible: "Enter your workspace"
+- takeScreenshot: sign-in-empty
 - tapOn:
     id: "field-Server address"
 - inputText: ${SERVER}
 - tapOn:
     id: "field-Invite token"
 - inputText: ${TOKEN}
+# With the keyboard up, as a person sees it while typing.
+- takeScreenshot: sign-in-typing
 - hideKeyboard
-- takeScreenshot: sign-in
 # On iOS the keyboard's own dismissal can already have submitted the form.
 - runFlow:
     when:

@@ -30,6 +30,7 @@ export default function SignIn() {
           <Card label="Sign in">
             <Field
               label="Server address"
+              showLabel
               placeholder="maka.example.com"
               value={server}
               onChangeText={setServer}
@@ -41,6 +42,7 @@ export default function SignIn() {
             />
             <Field
               label="Invite token"
+              showLabel
               placeholder="Invite token"
               value={token}
               onChangeText={setToken}

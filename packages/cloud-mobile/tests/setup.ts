@@ -1,6 +1,7 @@
 // A secure store that lives in memory: the tests never touch a real Keychain.
 const mockStore = new Map<string, string>();
 jest.mock('expo-secure-store', () => ({
+  __esModule: true,
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'when-unlocked-this-device-only',
   isAvailableAsync: async () => true,
   getItemAsync: async (key: string) => mockStore.get(key) ?? null,

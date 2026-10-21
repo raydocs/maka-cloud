@@ -181,6 +181,25 @@ test('Home fills in as data arrives: a card is answered once, a stale card refre
   feed.stop();
 });
 
+test('Home tells "nothing waits" from "not read yet" and from "could not be read"', async () => {
+  let fail = true;
+  const { client } = served({
+    '/v1/inbox/items': () =>
+      fail ? new Response('{}', { status: 500 }) : Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  expect(feed.getSnapshot().inboxLoaded).toBe(false);
+  feed.start([]);
+  await until(() => feed.getSnapshot().inboxFailed, 'the failed read');
+  expect(feed.getSnapshot().inboxLoaded).toBe(false);
+  fail = false;
+  feed.refresh();
+  await until(() => feed.getSnapshot().inboxLoaded, 'the empty list');
+  expect(feed.getSnapshot().inboxFailed).toBe(false);
+  feed.stop();
+});
+
 test('Home remembers the visit when the person leaves, under the invite fingerprint, never the token', async () => {
   const { client } = served({
     '/v1/inbox/items': () => Response.json({ items: [] }),

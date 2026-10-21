@@ -14,13 +14,34 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { readSecure, removeSecure, writeSecure } from './secure';
 import { normalizeServer } from './server';
 
+/** The server and its token are one record, so a token can never be read back with another server. */
+const ACCOUNT_KEY = 'maka.account';
+/** Only a hint for the next sign-in screen; it holds no secret and outlives a sign-out. */
 const SERVER_KEY = 'maka.server';
-const TOKEN_KEY = 'maka.token';
+
+interface Account {
+  server: string;
+  token: string;
+}
+
+async function readAccount(): Promise<Account | undefined> {
+  const raw = await readSecure(ACCOUNT_KEY);
+  if (!raw) return undefined;
+  try {
+    const account = JSON.parse(raw) as Partial<Account>;
+    return typeof account.server === 'string' && typeof account.token === 'string'
+      ? { server: account.server, token: account.token }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export type Session =
   | { status: 'loading' }
@@ -64,14 +85,27 @@ const visits: VisitStore = {
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session>({ status: 'loading' });
+  /** Bumped by every sign-in, sign-out and revocation; an older operation never publishes or undoes a newer one. */
+  const generation = useRef(0);
+  /** Sign-in and sign-out run one after another, so a late write can never undo a sign-out. */
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const serialise = useCallback(<T,>(run: () => Promise<T>): Promise<T> => {
+    const next = queue.current.then(run, run);
+    queue.current = next.catch(() => {});
+    return next;
+  }, []);
 
-  const connect = useCallback(async (server: string, token: string) => {
+  /** Opens the workspace without publishing it: the caller saves the account first. */
+  const connect = useCallback(async (server: string, token: string, mine: number) => {
     const workspace = await openWorkspace(token, {
       baseUrl: server,
       fetcher,
       onRevoked: () => {
-        // The invite is gone: leave the workspace and keep nothing of it.
-        void removeSecure(TOKEN_KEY);
+        // The invite is gone: leave the workspace and keep nothing of it. A client of an older
+        // session says nothing about the current one.
+        if (generation.current !== mine) return;
+        generation.current += 1;
+        void removeSecure(ACCOUNT_KEY).catch(() => {});
         setSession({
           status: 'out',
           server,
@@ -79,29 +113,33 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         });
       },
     });
-    setSession({
+    return {
       status: 'in',
       server,
       client: workspace.client,
       conversations: workspace.conversations,
       chosen: workspace.chosen,
       landing: workspace.landing,
-    });
+    } satisfies Session;
   }, []);
 
   useEffect(() => {
     let current = true;
+    const mine = ++generation.current;
     void (async () => {
-      const server = (await readSecure(SERVER_KEY)) ?? '';
-      const token = await readSecure(TOKEN_KEY);
-      if (!current) return;
-      if (!server || !token) return setSession({ status: 'out', server, error: '' });
+      const account = await readAccount();
+      const hint = account?.server ?? (await readSecure(SERVER_KEY)) ?? '';
+      if (!current || generation.current !== mine) return;
+      if (!account) return setSession({ status: 'out', server: hint, error: '' });
       try {
-        await connect(server, token);
+        const next = await connect(account.server, account.token, mine);
+        if (current && generation.current === mine) setSession(next);
       } catch (e) {
         // A refused invite is forgotten; any other failure keeps it for the next try.
-        if (e instanceof ApiError && e.status === 401) await removeSecure(TOKEN_KEY);
-        if (current) setSession({ status: 'out', server, error: errorText(e) });
+        if (e instanceof ApiError && e.status === 401)
+          await removeSecure(ACCOUNT_KEY).catch(() => {});
+        if (current && generation.current === mine)
+          setSession({ status: 'out', server: account.server, error: errorText(e) });
       }
     })();
     return () => {
@@ -114,17 +152,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       session,
       async signIn(address, token) {
         const server = normalizeServer(address);
-        await connect(server, token.trim());
-        await writeSecure(SERVER_KEY, server);
-        await writeSecure(TOKEN_KEY, token.trim());
+        const secret = token.trim();
+        const mine = ++generation.current;
+        await serialise(async () => {
+          const next = await connect(server, secret, mine);
+          if (generation.current !== mine) return;
+          // The session is published only once it is saved, so a failed save is a failed sign-in.
+          await writeSecure(ACCOUNT_KEY, JSON.stringify({ server, token: secret }));
+          await writeSecure(SERVER_KEY, server).catch(() => {});
+          if (generation.current === mine) setSession(next);
+        });
       },
       async signOut() {
-        await removeSecure(TOKEN_KEY);
-        setSession((previous) => ({
-          status: 'out',
-          server: previous.status === 'loading' ? '' : previous.server,
-          error: '',
-        }));
+        generation.current += 1;
+        await serialise(async () => {
+          // Access is reported removed only once the secret is gone; a failure is thrown to the caller.
+          await removeSecure(ACCOUNT_KEY);
+          setSession((previous) => ({
+            status: 'out',
+            server: previous.status === 'loading' ? '' : previous.server,
+            error: '',
+          }));
+        });
       },
       started(conversation) {
         setSession((previous) =>
@@ -144,7 +193,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
       visits,
     }),
-    [session, connect],
+    [session, connect, serialise],
   );
   return <Context.Provider value={api}>{children}</Context.Provider>;
 }
