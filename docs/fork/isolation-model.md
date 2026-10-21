@@ -142,12 +142,18 @@ real-account tests still skip on hosted runners (section 7, F9).
 file the agent can write, and never runs a program whose behaviour is configured by a file the
 agent can write. That includes the CLI (`--version` included), git on the workspace (its
 `.git/config` filters, hooks, fsmonitor, `.gitattributes`), `npm` in the workspace, and any test
-command.
+command. The control user runs git only against a repository it owns (`control.git` in the task
+directory, #312), over a work tree with no nested repository: git spawns a child for every
+populated gitlink of the index (`git status` runs `git status --porcelain=2` inside
+`workspace/<sub>` with the agent's `<sub>/.git`, whose clean filters then run as the control
+user), so a nested repository is a repository configuration the agent writes.
 *Enforced*: `RemoteMachine.launch` wraps the program in `asAgentUser` (#290); checks go through
-`SandboxWorkspace.execCheck` → `asAgentScript` (#289).
+`SandboxWorkspace.execCheck` → `asAgentScript` (#289); `control.git` with `GIT_CONFIG_GLOBAL=/dev/null`,
+no attributes or excludes file and the redirecting `GIT_*` variables unset (#312, open).
 *Tested*: `firewall-account.test.ts` (argv reaches the agent as words, not shell; a machine with no
-agent account starts nothing), `check-real-account.test.ts` (real account).
-*Still violated*: F1 (git in the workspace as the control user), F3 (`--version` as the control user).
+agent account starts nothing), `check-real-account.test.ts` (real account), `control-git.test.ts`
+(#312: planted filter, diff driver, textconv, fsmonitor and hooksPath do not run).
+*Still violated*: F1 (nested repositories), F3 (`--version` as the control user).
 
 **I2. Identity is decided by structure, never by parsing shell text.** `launch` takes a program and
 arguments and builds the account boundary itself; the only control-user run is `launchInstall`,
@@ -159,25 +165,36 @@ prefix.
 **I3. The control user's own files are closed to the agent.** Its home, `~/.maka-cli`, the work
 root, every task directory (entries cannot be created, the directory cannot be listed) and `chan/`
 (cannot be entered). The agent reaches `handoff/`, `workspace/` and `claude-config/` by path only.
+Every `exec` is `bash -lc` (instabox), so the control user's login files (`~/.bash_profile`,
+`~/.bash_login`, `~/.profile`, `~/.bashrc`, `/etc/profile`, `/etc/profile.d/*`, `/etc/bash.bashrc`)
+are code the control user runs on every exec: a write into any of them is root in the box, and
+they must not be writable by the agent's account or group.
 *Enforced*: modes in `PREPARE_SCRIPT`, `PREPARE_AGENT_SCRIPT`, `CHANNEL_DIR_CHECK`; probe facts
 `agent_control_write`, `chan_*`, `task_list`, `task_file_write`.
 *Tested*: `agent-user.test.ts` (real account: channel, handoff, task directory), probe fixture in
 `firewall-account.test.ts`.
+*Still violated*: F13 (the probe checks the home directory, not the login files in it).
 
-**I4. The control user never follows a path through an agent-writable directory except in three
+**I4. The control user never follows a path through an agent-writable directory except in four
 ways**: (a) a read with every component checked for links, the last open `O_NOFOLLOW`, and a size
 cap; (b) a file built in a directory the agent cannot write and renamed into place; (c) running the
-whole operation as the agent account. No `>`, `>>`, `cat >`, `cp`, `mkdir -p`, `rm -rf`, `chgrp` or
-`chmod` by the control user on a path under `workspace/`, `handoff/` or `claude-config/` otherwise.
-Also: no file the control user opens for writing lives in a directory the agent can write
-(`/tmp` included).
+whole operation as the agent account; (d) a write (the restore after a base check: `rm -rf`,
+`mkdir -p`, a file-by-file copy) with every path component verified not a link at write time, while
+no agent process is alive (the run stopped with no survivors, the check namespace confirmed gone),
+so nothing can swap a component between the check and the write. No `>`, `>>`, `cat >`, `cp`,
+`mkdir -p`, `rm -rf`, `chgrp` or `chmod` by the control user on a path under `workspace/`,
+`handoff/` or `claude-config/` otherwise. Also: no file the control user opens for writing lives in
+a directory the agent can write (`/tmp` included). Why this is P1 and not a nuisance: every exec is
+`bash -lc`, so one write through a link into the control user's login files (I3) is code as the
+control user on the next exec.
 *Enforced*: `PREPARE_SCRIPT` (brief by rename, #289), `RESULT_STAGE_SCRIPT`, `FILE_STAGE_SCRIPT`,
 `STAGE_INPUTS_SCRIPT`, `READ_SMALL_SCRIPT`, `TRANSCRIPT_CHUNK_SCRIPT` (`set -C` create),
 `export.ts` `writeHandoffFile` (host side).
 *Tested*: `handoff-links.test.ts`, `agent-user.test.ts` ("links the agent plants in handoff/ are not
 followed"), `result.test.ts`, `stage.test.ts`, `export.test.ts`.
-*Still violated*: F1 (`BASE_REVERT_SCRIPT` writes through unchecked workspace paths), F6 (the egress
-lock is opened in `/tmp`), F10 (transcript chunks appended by name in a group-writable directory).
+*Still violated*: F1 (`BASE_REVERT_SCRIPT` and the restore write through workspace paths without
+the per-component check of (d)), F6 (the egress lock is opened in `/tmp`), F10 (transcript chunks
+appended by name in a group-writable directory).
 
 **I5. Nothing the agent account can reach lets it change the firewall, the accounts or the control
 user's processes.** No sudo rule at all (read from the trusted side), no process capabilities, no
@@ -189,13 +206,16 @@ tool that failed is a failed check, never a pass.
 once per machine per process, before any run or check.
 *Tested*: `firewall-account.test.ts` (every fact, missing and wrong), `agent-user.test.ts` (real
 account: a box where the agent could become the sandbox user is refused).
-*Still violated*: F4 (file-capability scan fails open and is a partial list; no setuid scan).
+*Still violated*: F4 (file-capability scan fails open and is a partial list; no setuid scan; #313,
+open, takes most of it).
 
 **I6. The egress rules are verified in place before task code runs, after every wake, and the box is
 never left without a hook while they change; two guards on one box serialise.** A guard that cannot
 take its lock, cannot read the rules back, or finds them wrong refuses the box.
 *Enforced*: `egress.ts` (verify-first, hook-first swap, `sane`, `flock` required since #310),
-`machine.ts` (`guardEgress`, `unguarded`, `refusals`, wake handling).
+`machine.ts` (`guardEgress`, `unguarded`, `refusals`, wake handling). Whether ip6tables is guarded
+at all is decided by the content of `/proc/net/if_inet6` at guard time only: a box that gets an
+IPv6 address after the guard ran is unguarded on IPv6 until the next launch guards it again.
 *Tested*: `cloud-runners egress.test.ts`, `egress-wake.test.ts`, `cloud-instabox egress.test.ts`
 (scripted iptables), `egress.real.test.ts` (real iptables in a network namespace),
 `egress.live.test.ts` (by hand, `MAKA_CLOUD_LIVE=1`).
@@ -282,11 +302,13 @@ a finding that fits none means this section is incomplete.
 
 | Class | Invariant | Instances so far |
 | --- | --- | --- |
-| Control user runs repo-steerable code | I1 | repo tests as the control user (#289 fixed); CLI `--version` (open, F3); git filters/attributes on `git add -A` (open, F1); fsmonitor and hooks (scrubbed by `GIT_FN`, not enough) |
+| Control user runs repo-steerable code | I1 | repo tests as the control user (#289 fixed); CLI `--version` (open, F3); git filters/attributes on `git add -A` (#312, open, `control.git`); fsmonitor and hooks (scrubbed by `GIT_FN`, not enough) |
+| Git child processes in nested repositories | I1 | `git status` inside a populated gitlink with that repository's config (open, F1) |
 | Fail-open probe | I5, I6 | sudo probe by trying commands (#290 fixed with `sudo -l -U`); `getcap` failure and partial cap list (open, F4); optional `flock` (#310 fixed) |
 | Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
-| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` (open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10) |
+| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` and the restore (open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10) |
+| Control user's login files | I3 | `bash -lc` on every exec; not probed (open, F13) |
 | Whole environment handed to the agent | I9 | `--preserve-env` (open, F8) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
 
@@ -296,40 +318,42 @@ Ordered as they should be done. Each is one pull request with a test that fails 
 passes on the branch; "real-account" tests are in addition to a unit test that CI runs. Owner of the
 implementation: the "Egress and secret hardening" thread. F1 and F2 are one change.
 
-**F1 (P1, I1 + I4): every git on the workspace runs as the agent account.**
-*Where*: `cloud-playbooks/src/coding/scripts.ts` (`CLONE_SCRIPT`, `SAMPLE_SCRIPT`, `CHANGES_SCRIPT`,
-`BASE_REVERT_SCRIPT`, `BASE_RESTORE_SCRIPT`, `BLOB_CHUNK_SCRIPT`), `sandbox.ts`, `runner.ts`
-(`exec` callers of those scripts).
-*Why*: `g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false ... }` runs as the control user
-in the agent-writable workspace. `git add -A` (in `CHANGES_SCRIPT` and `changed_paths`) runs
-`filter.<x>.clean` from `.git/config` + `.gitattributes`, which the agent writes: control-user
-execution. `BASE_REVERT_SCRIPT` also writes `g cat-file blob > "$p"`, `mkdir -p`, `rm -rf` and
-`cp -a` through paths it never checked for links, and skips `$MAKA_KEEP` entries (agent-named), so a
-kept path that is a link to a directory makes the control user write a base blob outside the
-workspace.
-*Change*: add `SandboxWorkspace.execAgent(script, options)` (like `execCheck` without the namespace:
-`asAgentScript` after `ensureAgentIsolation` + `prepareAgent`). Run all six scripts through it. The
-clone then happens after `prepareAgent`, with `umask 002` (which `asAgentUser` sets), so every file
-is group-readable: this closes F2. Files the control user reads afterwards must be where the agent
-may write: `change.patch` and `changes.index` move from `$MAKA_DIR` to `$MAKA_DIR/handoff/` and are
-read with the existing link-checked chunk reads (`PATCH_CHUNK_SCRIPT` already refuses a link and a
-non-file, and gets the per-component check of `FILE_STAGE_SCRIPT`; the base-check backup `base-check/` moves into `handoff/` too, or the revert
-runs entirely as the agent and the backup is the agent's). The control user keeps only: the parse of
-the scripts' stdout, `READ_SMALL_SCRIPT`, `WRITE_FILE_SCRIPT` (task directory, agent cannot write).
-*Test that fails on main*: `coding/__tests__/check-account.test.ts`: with the harness that records
-sudo users, every exec whose script contains `git ` is wrapped by `sudo -n -u <agent>`; today
-`CHANGES_SCRIPT` and `CLONE_SCRIPT` are not. Real-account (`check-real-account.test.ts`): a
-repository whose `.git/config` sets `filter.p.clean` to `touch "$HOME/pwned-$(id -u)"` with
-`* filter=p` in `.gitattributes`; after `collect`, no file owned by uid 0 was created; a kept path
-that is a symlink to a directory outside the workspace receives no file after a base revert.
+**F1 (P1, I1 + I4): the control user's git never enters a nested repository, and its writes into
+the workspace check every component.**
+*Where*: `cloud-playbooks/src/coding/scripts.ts` (`SAMPLE_SCRIPT`, `CHANGES_SCRIPT`,
+`BASE_REVERT_SCRIPT`, `BASE_RESTORE_SCRIPT`, `CLONE_SCRIPT`), `runner.ts`.
+*Why*: #312 (open) stops the agent's `.git` from configuring the control user's git by running every
+git against `control.git` in the task directory with the workspace as the work tree. Two things stay
+open. (1) Nested repositories: for every populated gitlink in the index git spawns a child inside
+`workspace/<sub>` that uses `<sub>/.git`, which the agent writes; `git status` does this
+(`is_submodule_modified`), so a `filter.<x>.clean` in the nested repository's config runs as the
+control user through `SAMPLE_SCRIPT`. (2) The restore after a base check keeps `rm -rf`, `mkdir -p`
+and a file-by-file copy by the control user on workspace paths: I4 (d) needs each component checked
+for links at write time, and the write done only while no agent process is alive.
+*Change*: before any control-user git runs, refuse a workspace with a nested repository (`find
+workspace -mindepth 2 -name .git -print -quit` non-empty → `ERR nested repository`, the task fails
+with that reason; the agent is told in the brief that nested repositories are not supported) and pass
+`--ignore-submodules=all` to every `status` and `diff`, so a gitlink that slips past is never
+entered. In `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT`, walk each path component with `[ -L ]`
+checks (as `FILE_STAGE_SCRIPT` does) before `rm -rf`, `mkdir -p` and the copy, refuse on a link, and
+assert in `runner.ts` that the agent run was released and the check namespace stopped before either
+script runs. The alternative, running those scripts as the agent (`SandboxWorkspace.execAgent`),
+stays open if #312's design changes.
+*Test that fails on main (and on #312)*: `control-git.test.ts`: a workspace with `sub/.git` whose
+config sets `filter.p.clean` to `touch "$MAKA_DIR/pwned"` and `sub/.gitattributes` `* filter=p`;
+`SAMPLE_SCRIPT` and `CHANGES_SCRIPT` must refuse with `ERR nested repository` and the marker must not
+exist (today the sample creates it). Revert and restore: a workspace path whose directory component
+is a symlink to the task directory receives no file and the script refuses.
 
-**F2 (P1, I1, A6): files the control user makes in the workspace are readable by the agent.**
-Closed by F1 (clone and revert run as the agent with `umask 002`). If F1 lands in pieces, the interim
-is `chmod -R g+rX` after `CLONE_SCRIPT` and after a revert, as the control user, on a workspace it
-has just created (no agent process alive yet, so no link race).
-*Test that fails on main*: real-account: after `clone`, `sudo -u <agent> cat workspace/<nested file>`
-succeeds; a baseline revert that exits 1 with `EACCES` is not accepted as "fails on base"
-(`notATestFailure` must treat a permission error as a runner error).
+**F2 (P1, I1, A6): files the control user makes in the workspace are readable and writable by the
+agent's group.** After the clone, after every base revert and after every restore: a `0644` file
+the control user restored is read-only for the agent, and the repair and review-fix turns edit after
+a base check. #312 (open) hands the clone to the group and reverts with `umask 007`; the restore's
+file-by-file copy must give the same modes, and a baseline-check exit that comes from `EACCES` is a
+runner error, never "fails on base" (`notATestFailure`).
+*Test that fails on main*: `checkout-real-account.test.ts` (#312): after a base revert and a restore
+the agent reads and writes a nested tracked file; add: after the restore the agent appends to a file
+the control user restored (fails where the mode is `0644`).
 
 **F3 (P1, I1, A2): the CLI's version check does not run the CLI as the control user.**
 *Where*: `cloud-runners/src/scripts.ts` `cliCheckScript`, `fleet.ts` `installCli`.
@@ -351,17 +375,21 @@ agent for the check exec. Update the deploy.md paragraph that describes the chec
 `agent_filecaps=none` and the box passes. The grep names eight capabilities; `cap_chown`,
 `cap_fowner`, `cap_setfcap`, `cap_dac_read_search` and others are as good as root for this model.
 Setuid-root binaries are not listed at all; a setuid `nft` or a custom tool would pass every probe.
-*Change*: run `getcap -r` with its exit status checked (`rc=$?`, any non-zero → `agent_filecaps=unknown`,
-refused); treat *any* capability on *any* binary as a finding unless the pair is on an explicit
-allowlist (`/usr/bin/ping` `cap_net_raw`, `/usr/bin/ping6` the same); add `agent_setuid` from
-`find / -xdev \( -perm -4000 -o -perm -2000 \) -type f` run as root, refused unless every path is on
-the distribution allowlist (`sudo`, `su`, `passwd`, `chfn`, `chsh`, `gpasswd`, `newgrp`, `mount`,
-`umount`, `fusermount3`, `ssh-keysign`, `unix_chkpwd`, `chage`, `expiry`, `wall`, `write`); add
-rootless container sockets (`/run/user/*/docker.sock`, `/run/user/*/podman/podman.sock`).
-*Test that fails on main*: `firewall-account.test.ts` probe fixture: `agent_filecaps=unknown` and a
-missing `agent_setuid` are refused; a script-level test (`agent-user.test.ts` style, FakeInstabox)
-with a `getcap` stand-in that exits 2 must produce `agent_filecaps=unknown`, and one that prints
-`/usr/bin/x cap_chown=ep` must produce `found`.
+*Change*: #313 (open) checks `getcap`'s exit status, counts any capability on a file the agent can
+execute, and allowlists stock helpers. Still needed on top of it: an `as_agent` that fails for any
+reason (sudo refused, `test -x` not runnable) reads as `unchecked`, never as "cannot execute";
+the scan covers `/usr/lib`, `/usr/libexec` and `/opt` as well as the six `bin` directories; the
+allowlist pins the full path, not the name, and says why: `cap_net_raw` opens `AF_PACKET` sockets,
+which leave the box below netfilter, so the egress chain does not apply to a non-stock raw-socket
+binary. Add `agent_setuid` from `find / -xdev \( -perm -4000 -o -perm -2000 \) -type f` run as
+root, refused unless every path is on the distribution allowlist (`sudo`, `su`, `passwd`, `chfn`,
+`chsh`, `gpasswd`, `newgrp`, `mount`, `umount`, `fusermount3`, `ssh-keysign`, `unix_chkpwd`,
+`chage`, `expiry`, `wall`, `write`); add rootless container sockets (`/run/user/*/docker.sock`,
+`/run/user/*/podman/podman.sock`).
+*Test that fails on main*: `file-caps.test.ts` (#313): an `as_agent` stand-in that exits 1 for every
+call must yield `unchecked`; `/usr/lib/x cap_chown=ep` must yield `found`; `/opt/ping cap_net_raw=ep`
+(allowlisted name, wrong path) must yield `found`. `firewall-account.test.ts` fixture: a missing
+`agent_setuid` is refused.
 
 **F5 (closed by #310, I6, A4): the guard refuses to run without its lock.** `flock` is required, the
 open and the `flock -w 30` each fail the guard, and the lock is opened for append so a link at its
@@ -428,6 +456,13 @@ task directory, not under `claude-config/`.
 **F12 (P3, I14 + I15): a test that greps.** One test in `cloud-runners` that fails if `getFile(`
 appears in `cloud-runners` or `cloud-playbooks` sources, or if any `*_SCRIPT` constant lacks
 `set -u`, or if `asAgentUser` is called with a string built by concatenation outside `machine.ts`.
+
+**F13 (P2, I3): the probe checks the control user's login files.** `AGENT_PROBE_SCRIPT` adds
+`agent_login_files`: for `$HOME/.bash_profile`, `.bash_login`, `.profile`, `.bashrc`, `/etc/profile`,
+every file in `/etc/profile.d`, `/etc/bash.bashrc` and `$HOME` itself, the file exists only as a
+regular file or not at all, is owned by the control user or root, and `as_agent test -w` is false;
+any other answer is a finding. *Test that fails on main*: fixture without the fact is refused; a
+script-level test with a group-writable `.bashrc` in a scratch `HOME` yields `found`.
 
 **Docs to change with the fixes**: `docs/fork/deploy.md` "The agent account" (the paragraph on the
 CLI version check and on git; add `flock` and `getcap` to the box image requirements; the lock's
