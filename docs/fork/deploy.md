@@ -630,7 +630,9 @@ Preparation:
    invite's run budget at a time: a second run is refused (exit 2) while the
    first is going. A run that is killed leaves its run budget in place, which
    only holds that invite back; about two minutes after it stopped renewing it,
-   the next smoke run takes it over.
+   the next smoke run takes it over. The new run counts what the killed run
+   spent toward its own budget, because that run's tasks may still be on the
+   server, so a run killed late leaves the next one little to spend.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 
