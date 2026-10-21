@@ -28,7 +28,10 @@ const SECRET_PARAM = new RegExp(
 );
 
 /** The start of a JSON (or JS object) field with a secret name: `"Authorization":`, also inside an escaped string. */
-const SECRET_JSON_FIELD = new RegExp(`(\\\\*)(["'])(?:${SECRET_FIELD})\\1\\2\\s*:\\s*`, 'giu');
+const SECRET_JSON_FIELD = new RegExp(
+  `(?<!\\\\)(\\\\*)(["'])(?:${SECRET_FIELD})\\1\\2\\s*:\\s*`,
+  'giu',
+);
 
 /**
  * Header and credential pairs written as data rather than as `name: value`:

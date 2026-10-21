@@ -250,6 +250,31 @@ test('a long token followed by a lone percent sign or backslash is scrubbed in l
   }
 });
 
+test('a long run of backslashes or of escaped quotes is scrubbed in linear time', () => {
+  const runs = [
+    '\\'.repeat(200_000),
+    '\\"'.repeat(100_000),
+    '"\\'.repeat(100_000),
+    `'${'\\'.repeat(200_000)}`,
+    `${'\\'.repeat(100_000)}"password`,
+    `${'\\'.repeat(100_000)}"password"`,
+    `${'\\\\"'.repeat(50_000)}x`,
+  ];
+  for (const text of runs) {
+    for (const scrub of [scrubSecretShapes, scrubSecretText]) {
+      const started = Date.now();
+      scrub(text);
+      assert.ok(
+        Date.now() - started < 1500,
+        `took ${Date.now() - started} ms for ${text.slice(0, 12)}`,
+      );
+    }
+    const started = Date.now();
+    containsSecret(text);
+    assert.ok(Date.now() - started < 1500, `containsSecret took ${Date.now() - started} ms`);
+  }
+});
+
 test('JSON nested past the stack is not read as JSON and does not throw', () => {
   const deep = `${'['.repeat(6000)}${']'.repeat(6000)}`;
   assert.doesNotThrow(() => scrubSecretShapes(deep));
