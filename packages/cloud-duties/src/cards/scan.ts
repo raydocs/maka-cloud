@@ -194,7 +194,7 @@ export class CardScanner {
     const enabled = new Set<CardKind>(
       [...defaultEnabledKinds()].filter((kind) => !switchedOff.has(kind)),
     );
-    return buildCandidates({
+    const built = buildCandidates({
       repo: project.repo,
       defaultBranch: project.defaultBranch,
       signals,
@@ -203,6 +203,13 @@ export class CardScanner {
         (duty) => duty.state === 'active' && duty.trigger.kind === 'issue_opened',
       ),
       enabled,
+    });
+    // What the owner's finished tasks of the kind really cost replaces the table's estimate.
+    return built.map((candidate) => {
+      const typical = this.engine.cards.typicalUsd(owner, candidate.card.kind);
+      return typical === undefined
+        ? candidate
+        : { ...candidate, card: { ...candidate.card, estimateUsd: typical, typical: true } };
     });
   }
 

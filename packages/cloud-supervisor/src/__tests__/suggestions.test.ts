@@ -14,6 +14,7 @@ const choice = (over: Partial<SuggestionChoice> = {}): SuggestionChoice => ({
     kind: 'rebase_pr',
     mode: 'quick',
     estimateUsd: 1,
+    typical: false,
     repo: 'acme/widgets',
     detail: 'PR #12 "Add retries" cannot be merged as it is.',
     external: true,

@@ -128,11 +128,20 @@ export class CardsService {
     // the task under the same key, which starts nothing twice.
     const accepted = cards.accept(caller, decision.cardId);
     if (!accepted.ok) return { accepted: false, reason: accepted.reason };
-    const { card } = accepted;
+    const started = this.startTask(accepted.card);
+    if (started === 'forbidden') return { accepted: false, reason: 'forbidden' };
+    return { accepted: true, duplicate: accepted.duplicate };
+  }
+
+  /**
+   * Starts the task of an accepted card under the card's key, or finds it started already. Throws
+   * when the server did not take it, so the tap or the sweep is tried again.
+   */
+  private startTask(card: Card): 'started' | 'forbidden' {
     const parts = this.parts;
     if (!parts) throw new Error('The cards are not started.');
     const budgetUsd = this.budgetFor(card);
-    const project = this.options.engine.project(caller, card.projectId);
+    const project = this.options.engine.project(card.owner, card.projectId);
     const started = parts.server.startConversation({
       owner: card.owner,
       key: `card:${card.cardId}`,
@@ -149,11 +158,33 @@ export class CardsService {
       },
     });
     if (!started.ok) {
-      if (started.reason === 'owner_inactive') return { accepted: false, reason: 'forbidden' };
+      if (started.reason === 'owner_inactive') return 'forbidden';
       throw new Error(`The server did not start the task: ${started.reason}`);
     }
-    cards.attachConversation(caller, card.cardId, started.conversationId);
-    return { accepted: true, duplicate: accepted.duplicate };
+    this.options.engine.cards.attachConversation(card.owner, card.cardId, started.conversationId);
+    return 'started';
+  }
+
+  /**
+   * Housekeeping, safe to repeat: finishes the start of cards that were spent but whose task never
+   * began (the process died between the two; the key makes a second start a no-op), and takes
+   * down the items of open cards nobody answered in time.
+   */
+  maintain(): { resumed: number; expired: number } {
+    const parts = this.parts;
+    if (!parts) throw new Error('The cards are not started.');
+    const cards = this.options.engine.cards;
+    let resumed = 0;
+    for (const card of cards.unstarted()) {
+      try {
+        if (this.startTask(card) === 'started') resumed += 1;
+      } catch (error) {
+        this.options.onWarning?.('A tapped card could not be started again', error);
+      }
+    }
+    const expired = cards.expire();
+    for (const card of expired) parts.closeSuggestion(lineageOf(card));
+    return { resumed, expired: expired.length };
   }
 
   /**
@@ -202,6 +233,7 @@ export class CardsService {
         kind: card.kind,
         mode: card.mode,
         estimateUsd: card.estimateUsd,
+        typical: card.typical,
         repo: project?.repo ?? '',
         detail: card.detail,
         external: card.external,

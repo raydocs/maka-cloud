@@ -109,6 +109,8 @@ export interface SuggestionFacts {
   kind: string;
   mode: string;
   estimateUsd: number;
+  /** The estimate is what finished tasks of this kind typically cost, not a default. */
+  typical: boolean;
   repo: string;
   detail: string;
   /** Text from outside the owner shaped the card: the task it starts runs tainted. */
