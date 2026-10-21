@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { control, conversationsOf, noHorizontalScroll, signIn } from './support';
+import { control, conversationsOf, noHorizontalScroll, openSettings, signIn } from './support';
 
 const NAMES = /Claude|Codex|GPT|Anthropic|OpenAI/i;
 
@@ -97,10 +97,16 @@ test('one sentence in, a watched piece of work and a reviewable result out', asy
   await expect(page.locator('.report-content')).toContainText(
     'Solid-state cells <script>alert(1)</script> are close.',
   );
-  await expect(page.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
-    'href',
-    'https://github.com/example/repo/pull/7',
-  );
+  // The pull request is one tap on the result card and listed with the other results.
+  for (const where of [
+    page.getByRole('article', { name: 'Result: Write the report' }),
+    page.getByRole('region', { name: 'Artifacts' }),
+  ]) {
+    await expect(where.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
+      'href',
+      'https://github.com/example/repo/pull/7',
+    );
+  }
   expect(await page.locator('body').innerText()).not.toMatch(NAMES);
   await noHorizontalScroll(page);
 });
@@ -150,11 +156,12 @@ test('another invite starts from a clean slate and never sees the first one’s 
   await page.getByRole('button', { name: 'Start' }).click();
   await expect(page.getByRole('log')).toContainText('secret plan');
   expect(await conversationsOf(request, first.token)).toHaveLength(1);
+  await openSettings(page);
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await signIn(page, request);
   await expect(page.getByLabel('What would you like to get done?')).toBeVisible();
   await expect(page.getByText('secret plan')).toHaveCount(0);
-  await expect(page.getByRole('combobox').locator('option')).toHaveCount(1);
+  await expect(page.getByRole('region', { name: 'Recent conversations' })).toHaveCount(0);
 });
 
 test('a runner’s failure text and names are never shown', async ({ page, request }) => {

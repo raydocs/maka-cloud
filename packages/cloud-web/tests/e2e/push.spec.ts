@@ -1,5 +1,5 @@
 import { type APIRequestContext, expect, type Page, test } from '@playwright/test';
-import { API, control, conversationsOf, signIn } from './support';
+import { API, control, conversationsOf, openSettings, signIn } from './support';
 
 // One endpoint per test: the stack (and what it pushed) is shared by every test.
 const device = () => `https://push.example.test/device-${crypto.randomUUID()}`;
@@ -75,8 +75,11 @@ async function finishTopLevel(
 async function startConversation(page: Page, request: APIRequestContext, token: string) {
   await page.getByLabel('What would you like to get done?').fill('Hello');
   await page.getByRole('button', { name: 'Start' }).click();
-  await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
+  await expect(page.getByRole('log')).toBeVisible();
   const [{ conversationId }] = await conversationsOf(request, token);
+  // Notifications are a setting, not part of the chat.
+  await openSettings(page);
+  await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
   return conversationId;
 }
 

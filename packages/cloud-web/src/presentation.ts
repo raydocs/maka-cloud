@@ -1,3 +1,5 @@
+import { TERMINAL, type TaskView } from './contract';
+
 // One presentation boundary for every untrusted string, including URLs and a11y.
 const hiddenNames =
   /claude|codex|gpt|anthropic|open[\s_-]*ai|gemini|deepseek|grok|llama|mistral|qwen|google|meta\b|xai|cohere|sonnet|haiku|opus|instabox/giu;
@@ -59,4 +61,61 @@ export function dollars(value: number | undefined): string {
         maximumFractionDigits: 2,
       }).format(value)
     : 'Not reported';
+}
+
+/** What the runner puts in front of a progress note that is the agent's own step line. */
+export const STEP_PREFIX = 'step: ';
+
+/**
+ * A task's progress notes as the one updating line and the steps behind it. The step line is read
+ * from what the agent records anyway; notes without the prefix (the conductor's own) still count
+ * when no step was ever recorded.
+ */
+export function stepsOf(notes: readonly string[]): {
+  current?: string;
+  steps: string[];
+} {
+  const steps = notes.map((note) =>
+    note.startsWith(STEP_PREFIX) ? note.slice(STEP_PREFIX.length) : note,
+  );
+  let recorded = notes.length - 1;
+  while (recorded >= 0 && !notes[recorded]?.startsWith(STEP_PREFIX)) recorded -= 1;
+  const current = recorded >= 0 ? steps[recorded] : steps.at(-1);
+  return current === undefined ? { steps } : { current, steps };
+}
+
+const OUTCOME_MAX = 160;
+
+/** The first sentence of a result summary, as the one-sentence outcome of a delivery card. */
+export function firstSentence(text: string): string {
+  const flat = text.replace(/\s+/gu, ' ').trim();
+  const end = /[.!?](?=\s|$)/u.exec(flat);
+  const sentence = end && end.index >= 7 ? flat.slice(0, end.index + 1) : flat;
+  if (sentence.length <= OUTCOME_MAX) return sentence;
+  const cut = sentence.slice(0, OUTCOME_MAX - 1);
+  return `${cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : cut.length).trimEnd()}…`;
+}
+
+/** A file name said as a short caption: no extension, words not separators. */
+export function captionOf(name: string): string {
+  const words = name
+    .replace(/\.[a-z0-9]{1,5}$/iu, '')
+    .replace(/[-_]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const caption = words.length > 60 ? `${words.slice(0, 59).trimEnd()}…` : words;
+  return caption === '' ? caption : caption[0]?.toUpperCase() + caption.slice(1);
+}
+
+export function taskLabel(task: TaskView): string {
+  if (task.cancelRequested && !TERMINAL.has(task.state)) return 'Cancelling…';
+  if (task.state === 'running' && task.pauseRequested) return 'Pausing…';
+  return {
+    queued: 'Queued',
+    running: 'In progress',
+    paused: 'Paused',
+    succeeded: 'Finished',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+  }[task.state];
 }

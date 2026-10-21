@@ -130,11 +130,7 @@ test('controls follow the task state: pause and cancel while running, resume whi
     taskEvent(9, { type: 'task_cancelled', taskId: 't_done' }),
   ]);
   render(
-    <ConversationView
-      client={new CloudClient('fake', api.fetcher)}
-      conversation={conversation}
-      onDisconnect={() => {}}
-    />,
+    <ConversationView client={new CloudClient('fake', api.fetcher)} conversation={conversation} />,
   );
   const running = await screen.findByRole('article', { name: 'Running job' });
   const paused = screen.getByRole('article', { name: 'Paused job' });
@@ -168,11 +164,7 @@ test('a refused pause says why and hides the pause button for that task only', a
         : undefined,
   );
   render(
-    <ConversationView
-      client={new CloudClient('fake', api.fetcher)}
-      conversation={conversation}
-      onDisconnect={() => {}}
-    />,
+    <ConversationView client={new CloudClient('fake', api.fetcher)} conversation={conversation} />,
   );
   const first = await screen.findByRole('article', { name: 'First' });
   fireEvent.click(within(first).getByRole('button', { name: 'Pause task' }));
@@ -199,11 +191,7 @@ test('cost is only what the server reported: absent stays "Not reported", a part
     ),
   ]);
   render(
-    <ConversationView
-      client={new CloudClient('fake', api.fetcher)}
-      conversation={conversation}
-      onDisconnect={() => {}}
-    />,
+    <ConversationView client={new CloudClient('fake', api.fetcher)} conversation={conversation} />,
   );
   const reported = await screen.findByRole('article', { name: 'Reported job' });
   await waitFor(() => expect(within(reported).getByText(/Cost so far: \$0\.40/)).toBeTruthy());
@@ -238,7 +226,6 @@ test('all server text is presentation-filtered', async () => {
     <ConversationView
       client={new CloudClient('fake', api.fetcher)}
       conversation={{ ...conversation, title: names }}
-      onDisconnect={() => {}}
     />,
   );
   await screen.findByRole('article', {

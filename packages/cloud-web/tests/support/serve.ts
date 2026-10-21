@@ -52,8 +52,20 @@ async function run(body: Body): Promise<unknown> {
       });
     case 'fail':
       return (await stack.run(text('taskId'))).fail(text('reason'));
+    case 'opened':
+      // The pages a task opened, as trusted code would record them; returns how many were new.
+      return {
+        recorded: stack.server.recordOpenedPages(
+          text('taskId'),
+          body.pages as { url: string; label?: never }[],
+        ),
+      };
     case 'artifact':
-      return stack.writeArtifact(text('taskId'), text('ref'), text('content'));
+      return stack.writeArtifact(
+        text('taskId'),
+        text('ref'),
+        typeof body.base64 === 'string' ? Buffer.from(body.base64, 'base64') : text('content'),
+      );
     default:
       throw new Error(`Unknown op ${body.op}`);
   }

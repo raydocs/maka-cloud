@@ -25,7 +25,7 @@ test('a finished task asks for one answer with the supervisor’s own words, the
   const invite = await signIn(page, request);
   await page.getByLabel('What would you like to get done?').fill('Hello');
   await page.getByRole('button', { name: 'Start' }).click();
-  await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
+  await expect(page.getByRole('log')).toBeVisible();
   const [{ conversationId }] = await conversationsOf(request, invite.token);
 
   await finishedTask(request, conversationId, 'Weekly report');
@@ -53,7 +53,7 @@ test('another invite’s finished task never shows up in this workspace', async 
   const invite = await signIn(page, request);
   await page.getByLabel('What would you like to get done?').fill('Hello');
   await page.getByRole('button', { name: 'Start' }).click();
-  await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
+  await expect(page.getByRole('log')).toBeVisible();
 
   const other = await control<{ token: string }>(request, 'invite');
   const created = await request.post(`${API}/v1/conversations`, {
