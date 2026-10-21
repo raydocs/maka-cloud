@@ -20,7 +20,9 @@ export interface Logger {
 }
 
 const SECRET_NAME = /key|token|secret|password|passphrase|private|credential|auth/iu;
-const MIN_SECRET_LENGTH = 6;
+/** Settings whose value is registered as a secret. `auth` alone is not enough (AUTH_PROVIDER=google, AUTH_MODE=invite). */
+const SECRET_ENV_NAME = /key|token|secret|password|passphrase|private|credential|authoriz/iu;
+const MIN_SECRET_LENGTH = 4;
 const MAX_FIELD_LENGTH = 1_000;
 const NAME = /^[a-z][a-z0-9_.]{0,63}$/u;
 const RESERVED = new Set(['ts', 'level', 'event']);
@@ -38,7 +40,7 @@ export function secretValuesOf(env: NodeJS.ProcessEnv): string[] {
   return Object.entries(env)
     .filter(
       (entry): entry is [string, string] =>
-        SECRET_NAME.test(entry[0]) && (entry[1]?.trim().length ?? 0) >= MIN_SECRET_LENGTH,
+        SECRET_ENV_NAME.test(entry[0]) && (entry[1]?.trim().length ?? 0) >= MIN_SECRET_LENGTH,
     )
     .map(([, value]) => value.trim())
     .sort((a, b) => b.length - a.length);
