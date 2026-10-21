@@ -412,14 +412,8 @@ export class Conductor {
       return;
     }
     let picked = this.modes ? (limits === undefined ? message.mode : limits.mode) : undefined;
-    if (picked === 'deep' && !this.deepMode) {
-      picked = LAUNCH_FALLBACK_MODE;
-      this.state.enqueueNotice(
-        { conversationId: message.conversationId },
-        `Deep mode is not available yet, so this request runs in ${LAUNCH_FALLBACK_MODE} mode.`,
-      );
-      this.sendOutbox(message.conversationId);
-    }
+    const fellBack = picked === 'deep' && !this.deepMode;
+    if (fellBack) picked = LAUNCH_FALLBACK_MODE;
     if (message.external) this.state.taint(message.conversationId, 'message');
     const admitted = this.state.admitMessage(
       message.conversationId,
@@ -434,6 +428,14 @@ export class Conductor {
       picked as ModeId | undefined,
     );
     if (admitted.duplicate) return;
+    if (fellBack) {
+      // Told once the request is admitted, so a duplicate or refused message leaves no notice.
+      this.state.enqueueNotice(
+        { conversationId: message.conversationId },
+        `Deep mode is not available yet, so this request runs in ${LAUNCH_FALLBACK_MODE} mode.`,
+      );
+      this.sendOutbox(message.conversationId);
+    }
     this.enqueue(lane, { kind: 'turn', runId: admitted.run.runId, text: message.text });
   }
 

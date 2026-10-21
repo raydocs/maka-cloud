@@ -483,3 +483,16 @@ test('deep mode off: the user’s pick of it runs the request as standard, with 
     'the user was told',
   );
 });
+
+test('deep mode off: a duplicate message leaves one notice, not two', async (t) => {
+  const h = await makeHarness(t, { conductor: { modes: DEFAULT_MODES } });
+  h.model.script('conductor', text('Nothing to do.'));
+  const message = { conversationId: 'cnv_1', messageId: 'msg_dup', text: 'Fix it.', mode: 'deep' };
+  await h.conductor.onUserMessage(message, h.access('cnv_1'));
+  await h.conductor.onUserMessage(message, h.access('cnv_1'));
+  await h.conductor.idle();
+  const told = h.outbox.notices.filter((notice) =>
+    /Deep mode is not available yet/.test(notice.text),
+  );
+  assert.equal(told.length, 1);
+});
