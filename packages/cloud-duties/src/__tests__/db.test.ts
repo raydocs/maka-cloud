@@ -21,11 +21,11 @@ const versionOf = (db: DatabaseSync) =>
 test('a new database is made at the current version and opens again', () => {
   withDir((path) => {
     const first = openDatabase(path);
-    assert.equal(versionOf(first), 2);
+    assert.equal(versionOf(first), 3);
     first.prepare('INSERT INTO person_events (event_key, seen_at) VALUES (?, ?)').run('e', 1);
     first.close();
     const again = openDatabase(path);
-    assert.equal(versionOf(again), 2);
+    assert.equal(versionOf(again), 3);
     again.close();
   });
 });
@@ -59,8 +59,35 @@ test('a database written by the older CI ordering is refused and left exactly as
 test('a database from a newer build is refused too', () => {
   withDir((path) => {
     const first = openDatabase(path);
-    first.exec('PRAGMA user_version = 3');
+    first.exec('PRAGMA user_version = 4');
     first.close();
     assert.throws(() => openDatabase(path), DutiesDatabaseVersionError);
+  });
+});
+
+test('a version 2 database gets the cards added and keeps everything else', () => {
+  withDir((path) => {
+    const first = openDatabase(path);
+    first.exec('DROP TABLE cards');
+    first.exec('DROP TABLE card_kinds');
+    first.prepare('INSERT INTO person_events (event_key, seen_at) VALUES (?, ?)').run('kept', 7);
+    first.exec('PRAGMA user_version = 2');
+    first.close();
+
+    const again = openDatabase(path);
+    assert.equal(versionOf(again), 3);
+    assert.deepEqual(
+      again
+        .prepare('SELECT event_key, seen_at FROM person_events')
+        .all()
+        .map((r) => ({ ...r })),
+      [{ event_key: 'kept', seen_at: 7 }],
+    );
+    assert.equal((again.prepare('SELECT COUNT(*) AS n FROM cards').get() as { n: number }).n, 0);
+    assert.equal(
+      (again.prepare('SELECT COUNT(*) AS n FROM card_kinds').get() as { n: number }).n,
+      0,
+    );
+    again.close();
   });
 });
