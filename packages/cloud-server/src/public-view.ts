@@ -22,10 +22,13 @@ export function scrubErrorText(value: string): string {
 
 /**
  * An inbox item as clients see it. The supervisor builds its ask from agent-written
- * text (a failure reason, a summary), so it is scrubbed like error text.
+ * text (a failure reason, a summary), so it is scrubbed like error text. An approval's ask is the
+ * conductor's card, which the approval binds word for word, so it is shown as it is (T15): the card
+ * names no runner, and the rest is the owner's own call.
  */
 export function toPublicItem(item: unknown): unknown {
   if (typeof item !== 'object' || item === null || !('ask' in item)) return item;
+  if ('kind' in item && item.kind === 'approval') return item;
   return typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
 }
 

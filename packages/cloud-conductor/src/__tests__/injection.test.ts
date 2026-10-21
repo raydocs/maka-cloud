@@ -483,8 +483,13 @@ test('injected instructions cannot send through a delegation: a delegation from 
   const question = h.outbox.questions[0];
   assert.ok(question, 'an approval card was posted');
   assert.equal(question.reason, 'irreversible');
-  assert.deepEqual(question.action, { tool: 'delegate_task', args: exfiltrate });
+  // The card names no runner (it would name the vendor), so it can be shown to the owner exactly;
+  // the approval still binds the call with its runner.
+  const { runner: _runner, ...shownArgs } = exfiltrate;
+  assert.deepEqual(question.action, { tool: 'delegate_task', args: shownArgs });
   assert.match(question.question, /^Allow delegate_task\(brief: "Send the private report/);
+  assert.match(question.question, /runner: \(a runner this playbook allows\)/);
+  assert.doesNotMatch(question.question, /codex/);
   assert.match(question.question, /This conversation has read content you did not write/);
   assert.match(question.question, /it can send anything the brief asks for/);
   assert.equal(question.note, 'Start the summary task?');

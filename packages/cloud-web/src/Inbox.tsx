@@ -1,7 +1,7 @@
 import { Button } from '@astryxdesign/core';
 import { useState } from 'react';
 import type { InboxEvidence, InboxItem } from './contract';
-import { displayText, publicLink } from './presentation';
+import { displayText, exactText, publicLink } from './presentation';
 
 const HEADING: Record<string, string> = {
   approval: 'Needs your approval',
@@ -36,15 +36,15 @@ export function visibleInbox(items: InboxItem[], openQuestions: ReadonlySet<stri
   };
 }
 
-function Evidence({ evidence }: { evidence: InboxEvidence }) {
+function Evidence({ evidence, exact }: { evidence: InboxEvidence; exact: boolean }) {
   if (evidence.kind === 'artifact') {
     return <li>Result file: {displayText(evidence.name)}</li>;
   }
   if (evidence.kind === 'action') {
     return (
       <li className="held-action">
-        Held until you answer: {displayText(evidence.tool)}{' '}
-        <code>{displayText(evidence.args)}</code>
+        Held until you answer: {exact ? evidence.tool : displayText(evidence.tool)}{' '}
+        <code>{exact ? evidence.args : displayText(evidence.args)}</code>
       </li>
     );
   }
@@ -72,7 +72,13 @@ export function InboxCard({
   onAnswer: (optionId: string, text?: string) => void;
 }) {
   const [note, setNote] = useState('');
-  const options = [...item.options].sort((a, b) => Number(b.recommended) - Number(a.recommended));
+  // An approval binds the card's exact text: it is shown as sent, with the held call's arguments,
+  // and a card that cannot be shown exactly cannot be approved here (T15).
+  const approval = item.kind === 'approval';
+  const exact = approval ? exactText(item.ask) : undefined;
+  const options = [...item.options]
+    .filter((option) => !approval || exact !== undefined || option.id !== 'approve')
+    .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   return (
     <section className="question" aria-label={HEADING[item.kind] ?? 'Needs you'}>
       <div className="section-heading">
@@ -80,11 +86,18 @@ export function InboxCard({
         {HEADING[item.kind] ?? 'Needs you'}
       </div>
       {/* The supervisor's own sentence, including its check label, as sent. */}
-      <h3>{displayText(item.ask)}</h3>
+      <h3>{exact ?? displayText(item.ask)}</h3>
+      {approval && exact === undefined && (
+        <p className="muted">This card cannot be shown exactly, so it cannot be approved here.</p>
+      )}
       {item.evidence.length > 0 && (
         <ul className="muted">
           {item.evidence.map((evidence, index) => (
-            <Evidence key={`${item.itemId}-${index}`} evidence={evidence} />
+            <Evidence
+              key={`${item.itemId}-${index}`}
+              evidence={evidence}
+              exact={exact !== undefined}
+            />
           ))}
         </ul>
       )}

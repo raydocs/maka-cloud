@@ -3,7 +3,7 @@ import type { Signal, SignalManifest, SignalTaskEvent } from './events.js';
 import { stableHash } from './hash.js';
 import type { Settings } from './settings.js';
 import type { ItemRecord, ItemSpec, Store, TaskRecord, VerificationRecord } from './store.js';
-import { clip, quoted, shownJson } from './text.js';
+import { clip, exactText, quoted, shownJson } from './text.js';
 import type { CloseReason, EvidenceLink, ItemContext, ItemOption } from './types.js';
 import { verificationKindOf } from './verification/kind.js';
 
@@ -417,7 +417,11 @@ function questionSpec(store: Store, signal: Extract<Signal, { type: 'question' }
     conversationId: signal.conversationId,
     taskId: null,
     dedupeKey: `question:${question.questionId}`,
-    ask: clip(question.question, MAX_ASK),
+    // An approval binds the conductor's card text as it is, so the item shows exactly that (T15).
+    ask:
+      question.reason === 'irreversible'
+        ? exactText(question.question)
+        : clip(question.question, MAX_ASK),
     options,
     // Approval and budget answers are an explicit option, never words the model could read as consent.
     allowText: question.reason === 'taste',

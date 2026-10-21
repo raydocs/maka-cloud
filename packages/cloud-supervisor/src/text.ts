@@ -37,6 +37,14 @@ export function shownJson(value: unknown, max: number): string {
   return json.length <= max ? json : `${json.slice(0, Math.max(0, max - 1))}…`;
 }
 
+/**
+ * Text the owner approves, as it is: the conductor builds a card with no hidden characters (only
+ * newlines), so it is kept whole. One that holds any other is flattened like any agent text.
+ */
+export function exactText(text: string): string {
+  return text.replaceAll('\n', '').search(CONTROL) === -1 ? text : clip(text, 600);
+}
+
 export function quoted(text: string | undefined | null, max = 80): string {
   const flat = clip(text ?? '', max).replace(QUOTES, "'");
   return flat === '' ? '(untitled)' : `“${flat}”`;

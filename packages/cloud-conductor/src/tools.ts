@@ -441,7 +441,7 @@ export function conductorTools(
           // model's words are only a note under it.
           const held = state.heldCall(ref);
           if (held && held.runId === turn.runId) {
-            action = { tool: held.tool, args: held.args };
+            action = ownerCall(held);
             const spec = extra.find((tool) => tool.name === held.tool);
             question = await approvalCard(spec, held.tool, held.args);
             note = args.question;
@@ -665,15 +665,38 @@ const MAX_CALL_CHARS = 1500;
 export type HoldCause = 'irreversible' | 'tainted';
 
 /**
+ * Arguments a card names by a fixed phrase instead of their value: a runner id names the vendor
+ * behind a run, which never reaches the owner. The approval still binds the exact call, runner
+ * included; the card is shown exactly as built, with no name filter (T15).
+ */
+const OWNER_HIDDEN_ARGS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  delegate_task: { runner: '(a runner this playbook allows)' },
+};
+
+/** The held call as the owner is shown it, without the arguments the card names by a phrase. */
+function ownerCall(call: HeldCall): HeldCall {
+  const hidden = OWNER_HIDDEN_ARGS[call.tool];
+  if (!hidden) return { tool: call.tool, args: call.args };
+  return {
+    tool: call.tool,
+    args: Object.fromEntries(
+      Object.entries(call.args).filter(([name]) => !Object.hasOwn(hidden, name)),
+    ),
+  };
+}
+
+/**
  * The approval question for a held call: the tool and every argument it will
  * run with, from the held row, each shown with `shownValue` so a hidden or
  * reordering character is a visible escape. Long values are cut, and the cut is
  * marked.
  */
 export function approvalQuestion(call: HeldCall, cause: HoldCause = 'irreversible'): string {
+  const hidden = OWNER_HIDDEN_ARGS[call.tool] ?? {};
   const parts = Object.keys(call.args)
     .sort()
     .map((name) => {
+      if (Object.hasOwn(hidden, name)) return `${name}: ${hidden[name]}`;
       const value = shownValue(call.args[name]);
       return `${name}: ${value.length > MAX_ARG_CHARS ? `${value.slice(0, MAX_ARG_CHARS)}… (cut)` : value}`;
     });
