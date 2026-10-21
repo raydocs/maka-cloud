@@ -3,13 +3,15 @@ import { backup as sqliteBackup } from 'node:sqlite';
 import { openDatabase } from './db.js';
 import { buildDigest, type Digest } from './digest.js';
 import { signalOf } from './events.js';
-import type { Interrupt, SummaryModel, SupervisorHost } from './host.js';
+import type { Interrupt, SuggestionCheck, SummaryModel, SupervisorHost } from './host.js';
 import {
   applySignal,
   capSpec,
   openItem,
   type ProposalChoice,
   proposalSpec,
+  type SuggestionChoice,
+  suggestionSpec,
   type Reassessment,
   reassess,
   stallPass,
@@ -84,6 +86,7 @@ export type AnswerResult =
         | 'closed'
         | 'already_answered'
         | 'question_open'
+        | 'unavailable'
         | 'stopped';
       item?: ItemView;
     };
@@ -496,6 +499,7 @@ export class Supervisor {
       ...this.store.itemsCreatedSince(since),
     ];
     for (const item of items) {
+      if (item.kind === 'suggestion') continue;
       const owner = ownerOf(item.conversationId);
       if (owner !== undefined) owners.add(owner);
     }
@@ -517,8 +521,10 @@ export class Supervisor {
   private async compose(digestId: string, at: number, owner?: string): Promise<Digest> {
     const since = this.store.lastDigestAt(owner);
     const ownerOf = this.host.ownerOf;
+    // A proposed card is an offer, not something that needs the owner: the digest leaves it out.
     const belongs = (item: ItemRecord): boolean =>
-      ownerOf === undefined ? owner === undefined : ownerOf(item.conversationId) === owner;
+      item.kind !== 'suggestion' &&
+      (ownerOf === undefined ? owner === undefined : ownerOf(item.conversationId) === owner);
     return buildDigest({
       digestId,
       at,
@@ -639,6 +645,29 @@ export class Supervisor {
     return true;
   }
 
+  /**
+   * Shows a proposed card as a non-interrupting item. One open item for each suggestion, however
+   * many times it is refreshed: a new card for the same suggestion updates the item in place, so a
+   * screen showing the old one is told it is stale instead of acting. Returns false, and raises
+   * nothing, when the host cannot take the tap (no cards service): an item nobody can act on is noise.
+   */
+  raiseSuggestion(input: SuggestionChoice): boolean {
+    if (this.stopped || !this.host.suggestions) return false;
+    this.store.tx(() => openItem(this.store, suggestionSpec(this.store, input), this.now()));
+    this.kick();
+    return true;
+  }
+
+  /** Takes down the open item of a suggestion whose card ended without an answer (retired, expired). */
+  closeSuggestion(lineage: string): boolean {
+    if (this.stopped) return false;
+    return this.store.tx(() => {
+      const open = this.store.openItemByDedupe(`suggestion:${lineage}`);
+      if (!open || open.state === 'answering') return false;
+      return this.store.closeItem(open.itemId, 'condition_cleared', this.now());
+    });
+  }
+
   getItem(itemId: string): ItemView | undefined {
     const item = this.store.item(itemId);
     return item ? toView(item, this.store.answerOfItem(itemId)) : undefined;
@@ -683,6 +712,8 @@ export class Supervisor {
   async answer(request: AnswerRequest): Promise<AnswerResult> {
     if (this.stopped) return { ok: false, reason: 'stopped' };
     if (!ANSWER_ID.test(request.answerId)) return { ok: false, reason: 'invalid_request' };
+    const early = await this.track(this.precheckSuggestion(request));
+    if (early) return early;
     const claim = this.claim(request);
     if (!claim.ok) return claim.result;
     if (claim.duplicate || claim.local) {
@@ -692,6 +723,67 @@ export class Supervisor {
     const answer = claim.answer as AnswerRecord;
     await this.track(this.attemptDelivery(answer.answerId));
     return this.reply(claim.item.itemId, false);
+  }
+
+  /**
+   * "Do it" on a proposed card acts on the repository as it is now, not as it was when the card
+   * was made, so the card is checked against GitHub first (a read, which takes a request and so
+   * cannot sit inside the claim's transaction). A card that moved is replaced in the item and the
+   * tap is refused as stale; one whose work is gone closes the item. A check that cannot be made
+   * refuses the tap as unavailable and changes nothing. Dismissing needs no check. What the check
+   * saw can change again before the claim; the claim checks the item's own state, and the card's
+   * accept is once, so the worst case is a card a moment older than the tap, never a second task.
+   */
+  private async precheckSuggestion(request: AnswerRequest): Promise<AnswerResult | undefined> {
+    const item = this.store.item(request.itemId);
+    if (!item || item.state !== 'open' || item.context.subject !== 'suggestion') return undefined;
+    if (request.conversations && !request.conversations.includes(item.conversationId)) {
+      return undefined;
+    }
+    const option = item.options.find((candidate) => candidate.id === request.optionId);
+    if (option?.cardAction !== 'accept' || item.precondition !== request.preconditionHash) {
+      return undefined;
+    }
+    const suggestions = this.host.suggestions;
+    if (!suggestions) return { ok: false, reason: 'unavailable' };
+    let check: SuggestionCheck;
+    try {
+      check = await suggestions.verify(
+        {
+          cardId: item.context.detail ?? '',
+          ...(request.caller === undefined ? {} : { caller: request.caller }),
+        },
+        this.abort.signal,
+      );
+    } catch (error) {
+      if (!this.stopped)
+        this.warn('Checking a proposed card failed; the tap was not applied', error);
+      return { ok: false, reason: this.stopped ? 'stopped' : 'unavailable' };
+    }
+    if (check.state === 'fresh') return undefined;
+    return this.store.tx((): AnswerResult | undefined => {
+      const at = this.now();
+      const current = this.store.item(item.itemId) as ItemRecord;
+      // Another tap or a refresh got here first: the claim decides what that means.
+      if (current.state !== 'open' || current.precondition !== item.precondition) return undefined;
+      if (check.state === 'gone') {
+        this.store.closeItem(item.itemId, 'condition_cleared', at);
+      } else {
+        openItem(
+          this.store,
+          suggestionSpec(this.store, { ...check.card, conversationId: item.conversationId }),
+          at,
+        );
+      }
+      return {
+        ok: false,
+        reason: 'stale',
+        item: toView(
+          this.store.item(item.itemId) as ItemRecord,
+          this.store.answerOfItem(item.itemId),
+        ),
+      };
+    });
   }
 
   private reply(itemId: string, duplicate: boolean): AnswerResult {
@@ -847,6 +939,36 @@ export class Supervisor {
           this.store.closeItem(
             item.itemId,
             outcome.reason === 'conflict' ? 'handled_elsewhere' : 'condition_cleared',
+            at,
+          );
+        });
+        return;
+      }
+      if (option.effect === 'card') {
+        const suggestions = this.host.suggestions;
+        if (!suggestions) throw new Error('No cards service is running to take this decision');
+        const outcome = await suggestions.decide(
+          {
+            cardId: item.context.detail ?? '',
+            action: option.cardAction ?? 'dismiss',
+            ...(answer.caller === null ? {} : { caller: answer.caller }),
+          },
+          this.abort.signal,
+        );
+        this.store.tx(() => {
+          const at = this.now();
+          if (outcome.accepted) {
+            this.store.finishAnswer(answerId, 'delivered', at);
+            this.store.closeItem(item.itemId, 'answered', at);
+            return;
+          }
+          this.store.finishAnswer(answerId, 'closed_without_delivery', at);
+          this.store.logAnswer(answerId, `refused:${outcome.reason}`, at);
+          this.store.closeItem(
+            item.itemId,
+            outcome.reason === 'stale' || outcome.reason === 'closed'
+              ? 'condition_cleared'
+              : 'handled_elsewhere',
             at,
           );
         });

@@ -4,7 +4,13 @@ import { stableHash } from './hash.js';
 import type { Settings } from './settings.js';
 import type { ItemRecord, ItemSpec, Store, TaskRecord, VerificationRecord } from './store.js';
 import { clip, exactText, quoted, shownJson } from './text.js';
-import type { CloseReason, EvidenceLink, ItemContext, ItemOption } from './types.js';
+import type {
+  CloseReason,
+  EvidenceLink,
+  ItemContext,
+  ItemOption,
+  SuggestionFacts,
+} from './types.js';
 import { verificationKindOf } from './verification/kind.js';
 
 /**
@@ -130,6 +136,9 @@ export function fingerprint(store: Store, context: ItemContext): unknown {
     // A proposal stays true until it is decided; deciding closes the item.
     case 'proposal':
       return { subject: 'proposal', id: context.detail ?? null };
+    // A suggestion is a proposed card; a refreshed card is a new id, so the item's hash moves with it.
+    case 'suggestion':
+      return { subject: 'suggestion', id: context.detail ?? null };
     case 'verification': {
       const verification = store.verification(context.taskId ?? '');
       return {
@@ -264,6 +273,40 @@ export function proposalSpec(
     dedupeKey: `proposal:${input.proposalId}`,
     ask: clip(input.ask, MAX_ASK),
     options,
+    allowText: false,
+    evidence: [],
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
+
+/** What a proposed card is shown as: its title as the ask, and what it will do as facts. */
+export interface SuggestionChoice {
+  /** One item for each suggestion across its refreshes: project, kind and subject. */
+  lineage: string;
+  conversationId: string;
+  cardId: string;
+  title: string;
+  facts: SuggestionFacts;
+}
+
+/** A non-interrupting item for a proposed card: "Do it" or "Not now". */
+export function suggestionSpec(store: Store, input: SuggestionChoice): ItemSpec {
+  const context: ItemContext = {
+    subject: 'suggestion',
+    detail: input.cardId,
+    suggestion: input.facts,
+  };
+  return {
+    kind: 'suggestion',
+    conversationId: input.conversationId,
+    taskId: null,
+    dedupeKey: `suggestion:${input.lineage}`,
+    ask: clip(input.title, MAX_ASK),
+    options: [
+      { id: 'do', label: 'Do it', recommended: true, effect: 'card', cardAction: 'accept' },
+      { id: 'later', label: 'Not now', recommended: false, effect: 'card', cardAction: 'dismiss' },
+    ],
     allowText: false,
     evidence: [],
     context,
@@ -685,6 +728,9 @@ export function reassess(store: Store, item: ItemRecord, at: number): Reassessme
     case 'result':
     case 'cap':
     case 'proposal':
+    // Whether the card still holds is read from GitHub, which takes a request: the supervisor asks
+    // the host before it takes an answer (`precheckSuggestion`), not here.
+    case 'suggestion':
       return { action: 'keep' };
     case 'verification':
       // Checked again, or settled differently, since the human looked.

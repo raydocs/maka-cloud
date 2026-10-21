@@ -146,6 +146,9 @@ export class FakeHost implements SupervisorHost {
   /** Set by a test that has a duties engine: where `proposal` options are delivered. */
   proposals?: SupervisorHost['proposals'];
 
+  /** Set by a test that has a cards service: where proposed cards are checked and decided. */
+  suggestions?: SupervisorHost['suggestions'];
+
   /** Set by a test that knows owners: the host then builds a digest per owner. */
   ownerOf?: (conversationId: string) => string | undefined;
 

@@ -59,7 +59,23 @@ function toPublicManifest(manifest: ResultManifest): ResultManifest {
 export function toPublicItem(item: unknown): unknown {
   if (typeof item !== 'object' || item === null || !('ask' in item)) return item;
   if ('kind' in item && item.kind === 'approval') return toPublicApproval(item);
-  return typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
+  const scrubbed = typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
+  return 'suggestion' in scrubbed ? toPublicSuggestion(scrubbed) : scrubbed;
+}
+
+/** A proposed card's facts: its detail quotes a pull request or an issue, so it is scrubbed like the ask. */
+function toPublicSuggestion(item: object): unknown {
+  const suggestion = (item as { suggestion?: unknown }).suggestion;
+  if (typeof suggestion !== 'object' || suggestion === null) return item;
+  const facts = suggestion as Record<string, unknown>;
+  return {
+    ...item,
+    suggestion: {
+      ...facts,
+      ...(typeof facts.detail === 'string' ? { detail: scrubErrorText(facts.detail) } : {}),
+      ...(typeof facts.repo === 'string' ? { repo: scrubErrorText(facts.repo) } : {}),
+    },
+  };
 }
 
 /** What an approval shows when its card carries a secret: the owner cannot approve what they were not shown. */
