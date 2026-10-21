@@ -23,6 +23,30 @@ describe('BoxPool', () => {
     assert.deepEqual(guarded, [{ machineId: lease.machineId, reason: 'create' }]);
   });
 
+  it('gives two overlapping acquires of one task each its own claim: releasing the older lease frees nothing', async () => {
+    const { pool, fleet } = setup({ maxPerInvite: 1 });
+    const creating = fleet.hold('createMachine');
+    const first = pool.acquire({ tenantId: A, taskId: 't1' });
+    await creating.reached;
+    const second = pool.acquire({ tenantId: A, taskId: 't1' });
+    creating.release();
+    const [lease1, lease2] = await Promise.all([first, second]);
+    assert.equal(lease1.machineId, lease2.machineId);
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    let otherDone = false;
+    void other.then(
+      () => {
+        otherDone = true;
+      },
+      () => undefined,
+    );
+    await lease1.release();
+    await flush();
+    assert.equal(otherDone, false, 'the second claim still holds the box');
+    await lease2.release();
+    assert.equal((await other).machineId, lease1.machineId);
+  });
+
   it('gives each task its own box, makes the next slot only when none is free, and queues the rest first come first served', async () => {
     const { pool, fleet } = setup();
     const leases = [];

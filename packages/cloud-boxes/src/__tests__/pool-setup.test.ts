@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { builderLabels, builderName, LABEL } from '../labels.js';
 import { BoxRefusedError, NoFreeBoxError } from '../types.js';
 import { repoKey, SetupSnapshots } from '../snapshots.js';
-import { labelsOf, setup } from './support.js';
+import { flush, labelsOf, setup } from './support.js';
 
 const A = 'inv_aaaaaaaaaaaa';
 const B = 'inv_bbbbbbbbbbbb';
@@ -115,6 +115,47 @@ describe('.agents/resume', () => {
     assert.deepEqual(t.guarded, [{ machineId: t.machineId, reason: 'wake' }]);
     assert.deepEqual(events, ['resume']);
     assert.equal(resumeRuns(t)[0]?.envs.MAKA_REPO_DIR, `/data/maka/repos/${repoKey(REPO)}`);
+  });
+
+  it('stays waking through the resume: a second ask of the same task waits for it, and a stale lease frees nothing', async () => {
+    const t = await sleepingBox({ maxPerInvite: 1 });
+    const resume = t.fleet.hold('exec');
+    const settled = { first: false, second: false };
+    const first = t.pool.acquire({ tenantId: A, taskId: 't1' }).then((lease) => {
+      settled.first = true;
+      return lease;
+    });
+    await resume.reached;
+    assert.equal(t.pool.state()[0]?.state, 'waking');
+    const second = t.pool.acquire({ tenantId: A, taskId: 't1' }).then((lease) => {
+      settled.second = true;
+      return lease;
+    });
+    await flush();
+    assert.deepEqual(
+      settled,
+      { first: false, second: false },
+      'neither returns before the resume ends',
+    );
+    // Another task wants the only box: it must wait, the box is still being woken for t1.
+    const other = t.pool.acquire({ tenantId: A, taskId: 't2' });
+    let otherDone = false;
+    void other.then(
+      () => {
+        otherDone = true;
+      },
+      () => undefined,
+    );
+    resume.release();
+    const [lease1, lease2] = await Promise.all([first, second]);
+    await flush();
+    assert.equal(t.pool.state()[0]?.taskId, 't1');
+    await lease1.release();
+    await flush();
+    assert.equal(t.pool.state()[0]?.taskId, 't1', 'the older lease no longer matches the claim');
+    assert.equal(otherDone, false, 't2 still has no box');
+    await lease2.release();
+    assert.equal((await other).machineId, t.machineId, 't2 gets the box once t1 is done');
   });
 
   it('runs on a box made from the setup snapshot, after the guard', async () => {
