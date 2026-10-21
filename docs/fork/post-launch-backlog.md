@@ -93,8 +93,9 @@ Still missing before it can merge:
    this; keep the entry until that merges.
 3. Running the flow against the owner's host after every merge and daily (needs a stand-in instance
    there and an ops script for systemd).
-4. The smoke test's 30 second window to confirm a stop (`smoke-live.ts`) is a guess; a slower real
-   stop makes a run refuse, which is safe but should be tuned after the first live run.
+4. The smoke test's window to confirm a stop (`smoke-live.ts`, 36 polls 5 seconds apart, so 3 minutes)
+   is a guess; a slower real stop makes a run refuse, which is safe but should be tuned after the
+   first live run.
 5. Smoke cleanup cost grows with the invite's history, because it asks the live state of every task
    of the invite (#317, P3 in its review). Fix by honouring retry-after on a 429, or by pruning old
    smoke conversations after a good run.
