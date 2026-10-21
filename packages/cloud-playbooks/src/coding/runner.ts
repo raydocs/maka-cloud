@@ -443,10 +443,9 @@ class CodingRun implements RunHandle {
             }).mode
           : 'standard');
       // A task whose budget is below what its mode needs is refused before anything is acquired.
+      const allowance = this.allowance();
       const tooSmall =
-        modes && this.spec.budgetUsd !== undefined
-          ? budgetProblem(modes, this.mode, this.spec.budgetUsd)
-          : undefined;
+        modes && allowance !== undefined ? budgetProblem(modes, this.mode, allowance) : undefined;
       if (tooSmall) return this.setTerminal({ type: 'failed', reason: tooSmall });
       this.limitUsd = this.underTurnLimit(this.workLimit());
 
@@ -857,9 +856,17 @@ class CodingRun implements RunHandle {
     return Math.min(limit, turn);
   }
 
-  /** What the work may spend in all: the budget less the share the review keeps. */
+  /**
+   * What this run may spend in all: the task's budget, or this turn's allowance when that is
+   * smaller. The work/review split is made of this, so the review keeps its share of the turn.
+   */
+  private allowance(): number | undefined {
+    return this.underTurnLimit(this.spec.budgetUsd);
+  }
+
+  /** What the work may spend in all: the allowance less the share the review keeps. */
   private workLimit(): number | undefined {
-    const budget = this.spec.budgetUsd;
+    const budget = this.allowance();
     if (budget === undefined) return undefined;
     const { modes } = this.options;
     return modes ? splitBudget(modes, this.mode, budget).workUsd : budget;
@@ -906,7 +913,7 @@ class CodingRun implements RunHandle {
       reviewer: reviewer.vendor,
       reason: plain(reason, 300),
     });
-    const budget = this.spec.budgetUsd;
+    const budget = this.allowance();
     if (budget !== undefined) {
       // One limit for the review, the fix and the second review together: it is set when the first
       // review starts and never grows, and it is below the task's budget.
