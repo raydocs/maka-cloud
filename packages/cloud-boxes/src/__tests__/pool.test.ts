@@ -318,6 +318,41 @@ describe('BoxPool', () => {
       assert.equal(labelsOf(fleet, b.machineId)?.[LABEL.invite], B);
     });
 
+    it('keeps a paused box suspended when its stale task label is cleared, so the next task wakes and guards it', async () => {
+      const { pool, fleet, guarded } = setup();
+      const paused = fleet.seed({
+        name: boxName(A, 0),
+        state: 'suspended',
+        metadata: { [LABEL.pool]: '1', [LABEL.invite]: A, [LABEL.slot]: '0', [LABEL.task]: 'dead' },
+      });
+      await pool.knownMachines();
+      assert.equal(pool.state()[0]?.state, 'suspended');
+      await flush();
+      assert.equal(
+        labelsOf(fleet, paused.id)?.[LABEL.task],
+        undefined,
+        'the stale label is cleared',
+      );
+      const lease = await pool.acquire({ tenantId: A, taskId: 't1' });
+      assert.equal(lease.machineId, paused.id);
+      assert.equal(fleet.callsTo('ensureRunning').length, 1, 'it was woken');
+      assert.deepEqual(guarded, [{ machineId: paused.id, reason: 'wake' }]);
+
+      // The same through reconcile: a paused box adopted for a task that has since ended.
+      const other = setup();
+      other.live.add('old');
+      const adoptedFleet = other.fleet;
+      adoptedFleet.seed({
+        name: boxName(A, 1),
+        state: 'suspended',
+        metadata: { [LABEL.pool]: '1', [LABEL.invite]: A, [LABEL.slot]: '1', [LABEL.task]: 'old' },
+      });
+      await other.pool.knownMachines();
+      other.live.clear();
+      await other.pool.reconcile();
+      assert.equal(other.pool.state()[0]?.state, 'suspended');
+    });
+
     it('adopts the box a repeated create finds by name, and guards it before use', async () => {
       const { pool, fleet, guarded } = setup();
       await pool.knownMachines();
