@@ -56,6 +56,33 @@ test('raw CLI output is deleted when the run ends, whichever way it ends', async
   assert.deepEqual(await filesUnder(h.logRoot), []);
 });
 
+test('a key or header of the CLI’s output that is none of the run’s own is scrubbed by its shape', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  await h.setMode('leakshape');
+  const events = await collect(await h.runners.claude.start(await h.spec('tsk_secret_shape')));
+  const last = terminal(events);
+  assert.equal(last?.type, 'failed');
+  const text = JSON.stringify(events);
+  assert.ok(!text.includes('ghp_AAAABBBB'), text);
+  assert.ok(!text.includes('sk-live-ZZZZ'), text);
+  assert.match(last?.type === 'failed' ? last.reason : '', /\[secret\]/u);
+});
+
+test('the error of a sandbox command that failed shows its output without the keys in it', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const machine = h.runners.fleet.machine(h.fake.machineId);
+  const failure = await machine
+    .execOk('echo "denied: Authorization: Bearer abcdef0123456789abcdef" >&2; exit 2')
+    .then(
+      () => undefined,
+      (error: unknown) => (error as Error).message,
+    );
+  assert.match(failure ?? '', /sandbox command failed \(exit 2\): denied: /u);
+  assert.ok(!(failure ?? '').includes('abcdef0123456789'), failure ?? '');
+});
+
 test('raw output is not written to a disk-backed directory: the run refuses to start', async (t) => {
   const h = await setup();
   t.after(() => h.cleanup());

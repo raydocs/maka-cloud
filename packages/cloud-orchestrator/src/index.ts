@@ -69,6 +69,7 @@ export {
   type StepIntentResult,
   type StepLog,
 } from './steps.js';
+export { scrubSecretFields, scrubSecretShapes, setKnownSecrets } from './secret-shapes.js';
 export {
   assertEpoch,
   type Fence,
@@ -77,3 +78,10 @@ export {
   type TaskStore,
 } from './store.js';
 export * from './types.js';
+export {
+  buildTimeline,
+  type RunTimeline,
+  type TimelineCost,
+  type TimelineStep,
+  type TimelineTurn,
+} from './timeline.js';

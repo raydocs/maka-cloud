@@ -11,9 +11,9 @@ Status of the pieces (updated by each PR):
 | 3 | Process channel and Agent SDK runner | merged (#166), section 3 (off until a deployment passes `agentSdk`) |
 | 4 | Transcript mirror and fresh-box resume | merged (#200), section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
 | 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
-| 6 | Steering, `restart` event, catch-up, stream fence | steering merged (#208); `restart`, catch-up and fence in review, section 6 |
-| 7 | Run timeline | not built |
-| 8 | Drills, known gaps, bench | not built |
+| 6 | Steering, `restart` event, catch-up, stream fence | merged (#208, #209), section 6 |
+| 7 | Run timeline | merged (#222), section 7 |
+| 8 | Drills, known gaps, bench | merged (#224), section 8 |
 
 ## 1. Step log and epoch fencing
 
@@ -78,7 +78,7 @@ If `recover` throws or its run reports it cannot resume (no recorded session), t
 
 **Spend across attempts.** A run reports its own cumulative total, and a resumed run starts counting from zero. `task_cost` therefore carries the attempt's `epoch`: within one attempt the highest report stands, and the attempts of a task add up (key `<epoch>:<taskId>`; an event without `epoch` counts as epoch 0). Without this a resumed task got its spent budget back, because the reducer kept the maximum per task. What an earlier process wrote in the gateway's journal is recorded as the total of the attempt that process drove (the one before the attempt this process begins), so it replaces the figure the run reported live instead of adding to it. A crash between recording those rows and forgetting them counts them once more under the next attempt: never lost, counted twice in that one window (the safe side of a cap). The server feed's `totalCostUsd` groups the same way.
 
-**The conductor across a restart.** A task the conductor delegated used to be cancelled by it at every shutdown and every start, so a resumed task found itself cancelled before it ran. With `ConductorOptions.tasksSurviveRestart` (the stack sets it) the three causes are separate. A *user's stop* and the *operator's pause* cancel as before (a pause also covers tasks no open run supervises). A *shutdown* cancels only what was already owed a cancel. A *crash or restart* marks cancel-pending only a delegation whose task the conductor never learned of (the answer was lost, so it has no id; it is cancelled by its key). Every other unsettled delegation is followed: its reservation stays against its run's budget, and a `follow_tasks` job asks the orchestrator (`task_status`) every `stopCheckMs` until the task has ended, then settles it at what its tree spent. A task the orchestrator could not resume is ended `orphaned` and settled the same way. Without the option the old behavior stays.
+**The conductor across a restart.** A task the conductor delegated used to be cancelled by it at every shutdown and every start, so a resumed task found itself cancelled before it ran. With `ConductorOptions.tasksSurviveRestart` (the stack sets it) the three causes are separate. A *user's stop* and the *operator's pause* cancel as before (a pause also covers tasks no open run supervises). A *shutdown* cancels only what was already owed a cancel. A *crash or restart* marks cancel-pending only a delegation whose task the conductor never learned of (the answer was lost, so it has no id; it is cancelled by its key). Every other unsettled delegation is followed: its reservation stays against its run's budget, and a `follow_tasks` job asks the orchestrator (`task_status`) until the task has ended, then settles it at what its tree spent: at once after the start, then every second, doubling to ten (never past `stopCheckMs`). When the run that delegated it ended for a restart or a shutdown, no turn is left to say the task is done, so settling also queues one message to the user, in the same transaction: fixed wording around the task's own title and summary or failure reason, which go through `scrubTaskText` (the stack passes the shared secret scrubber; without it the message carries none of the task's words). The go-live rehearsal's `restart-reply` step checks it. A task the orchestrator could not resume is ended `orphaned` and settled the same way. Without the option the old behavior stays.
 
 **Fuzzer.** Half of the schedule fuzzer's seeds give the fake runner a `recover`; restarts then resume started tasks, and the restore check requires every unfinished task to be either ended or resumed (never both), resumed tasks to have no terminal event, the active count to equal the resumed count, and old executor tokens to be dead.
 
@@ -297,3 +297,58 @@ No real CLI: the hook answer is checked against the stand-in CLI that speaks the
 - **Restart event.** When a restart resumes a task, the attempt that proves it still owns the task writes `task_restarted {epoch, text}` where the run comes back (it replaces the former "the run is back" note). `text` is fixed ("The server restarted. The task goes on from its last finished step; the cut-off turn is not repeated here."): a viewer shows it in place of what it had of the cut-off turn, so the same answer is not shown twice. Today's clients keep only the notes of a task, so the client appends it as the latest note; a client that streams partial replies replaces them with it. The reducer also keeps it as the latest progress note. `task_attempt` and the steps stay out of the feed.
 - **Catch-up.** The feed cursor was already exact: `Last-Event-ID` or `?after=` returns what was missed, once, in order, and a row is written in the transaction that appends the event, announced only after it committed. A test now covers a viewer that was connected across a server restart: with its cursor it gets the claim note, the restart event once and the end, with strictly increasing ids and no driver-only event.
 - **Fence.** The stream serves only events already in the log, and a write by a driver that lost the task is refused inside the append transaction, so it has no log row, no feed row, no gap in `seq` (`epoch.test.ts`) and, new, wakes no open stream.
+
+## 7. Run timeline
+
+One view of what a task did, drawn from the step log and nothing else.
+
+- **Source.** `buildTimeline(events, {content?, now?})` in `@maka-cloud/orchestrator` folds a task's events through the same reducer that computes the task view and adds only the times. States, kinds, epochs and order come from the reducer, so the timeline and the task cannot disagree (a test compares them). It reads, never writes: no write path means a tracing failure cannot fail a task, by construction.
+- **Shape.** `turns` (one per attempt: the task's start, then each restart or resume, with when it began and ended and how many steps began in it), `steps` (one row per step id: kind, replay class, state, the epoch that holds it, how many attempts recorded its intent, start, end and duration; a `safe` step that ran again after a restart is one row, the latest run, with `attempts` 2), `cost` (the tree's spend over time, one point per report), `messages` (counts of sent, read, unseen and withdrawn, never their text), `runMs`, `state`.
+- **Metadata only.** Kinds, states and times. A step's `label` (it holds the command or the file) is included only when the owner sets `MAKA_CLOUD_TIMELINE_CONTENT=1`; message text and step outputs are never in it.
+- **Route.** `GET /v1/tasks/:id/timeline` answers `{timeline}`, owner-scoped (404 for another owner's task, 401 for a wrong token), under the control rate limit. `CloudClient.timeline(task)` reads it.
+- **Cost.** Spend is recorded on the top-level task of a tree, so a child's timeline has none.
+
+### Not built
+
+- **Tokens** (cached input too). The log holds dollars only; the gateway's journal does too. Tokens would need the runner to report them with its usage; they are listed as a known gap in section 8.
+- **A web or phone view.** The data and the client call exist; drawing them is the apps' lane.
+
+## 8. Drills, known gaps and the bench
+
+### The scripted CLI
+
+`cloud-runners/src/__tests__/fake-sdk-cli.ts` is a stand-in for `claude` that the real Agent SDK drives. In `tools` mode it makes the tool calls listed in `tools.json` (`call <tool> <input>`), asking the SDK's hooks before and after each one; anything else it says is echoed. A tool can also `fail`, `hang` (the CLI stays inside the tool) or `spawn` a shell command as a child in a process group and session of its own, which is what a stop of the run's group does not reach.
+
+### The kill-inside-a-`never`-step drill
+
+`drill.test.ts` (set up in `drill.ts`). The CLI makes a safe call (`Read`), then a `never` one (`Bash: deploy --now`) whose child lives on in a group of its own. A second orchestrator takes over the same log and sandbox while the first is still alive, as a driver that lost its lease would be. It checks, with the real SDK, hooks, step log and process groups:
+
+- the second process stops the old run by task id and resumes the task in its recorded session;
+- the `never` step ends as `interrupted` and the CLI is never asked to run it again (`ran.log` holds each call once); the safe step stays `done`;
+- the recovery note names the finished step and the cut-off one in words;
+- the first process, still holding its epoch-1 step log, can neither settle the step nor start another, and writes nothing.
+
+The drill fails if the takeover stops marking open steps interrupted (checked by removing it).
+
+### Known gaps
+
+Each is a test in `known-gaps.test.ts` that states what should hold and is expected to fail. When the owner closes the gap the test fails with "the gap is closed" until its entry and its row here are removed.
+
+| Gap | Owner |
+|---|---|
+| A child that left the run's process group (its own `setsid`) outlives the stop of its task, and its late write lands in the workspace. The step log fences the log, not the files; workspace files are not transactional. | T27 (stopping or replacing the whole box) |
+| A turn that makes no tool call never reads a message sent to it. The owner is told it was not seen (`task_steer_unseen`). | T28, agent side |
+| The Codex runner takes no messages for a running task. | T27 |
+| A runner's usage report carries dollars only: no input, output or cached tokens, so neither the log nor the timeline can show them. | T28 follow-up |
+
+### The bench
+
+Measured once, offline, with a fake runner: what durability adds (the SQLite log, the step log, the takeover), not a sandbox or a model. The method is durable-harness's: the median of per-round differences, warm-up rounds (5) left out, 25 rounds counted. Both are tests, so a regression fails them (`bench.test.ts` in `cloud-server`, and the drill in `cloud-runners`).
+
+| Gate | Limit | Measured (this machine) |
+|---|---|---|
+| First token of a durable task (delegate until the first progress note is in the log), over a plain run | 150 ms | 12.9 ms (plain 0.03 ms, durable 12.9 ms) |
+| A restart to a run going again, server stop and start included, SQLite log, fake runner | 12 s | 23 ms |
+| The drill's takeover to the resumed CLI having its message (real SDK, real stop of the old run by task id) | 12 s | 305 ms |
+
+The real figure for a box adds what a box costs (stopping the old run, waking a suspended machine, a fresh box for a lost one); T26 and T27 own those. The first-token gate does not include the model's own latency, which is the same with and without the log.

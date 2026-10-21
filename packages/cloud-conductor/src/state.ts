@@ -840,7 +840,7 @@ export class ConductorState {
    * the task is seen ended, or with 0 when the orchestrator refused the call
    * or a cancel by key found that it was never created.
    */
-  settleDelegation(key: string, actualUsd: number): SettleResult {
+  settleDelegation(key: string, actualUsd: number, closing?: string): SettleResult {
     return this.transaction((): SettleResult => {
       const delegation = this.delegation(key);
       if (!delegation || delegation.state === 'settled') return { settled: false, overrunUsd: 0 };
@@ -860,6 +860,14 @@ export class ConductorState {
           "UPDATE delegations SET state = 'settled', actual_usd = ?, cancel_pending = 0 WHERE key = ?",
         )
         .run(actualUsd, key);
+      // Settling and telling the user are one step: the message goes out once, whoever settled it.
+      if (closing !== undefined) {
+        this.enqueueOutbox('message', delegation.conversationId, {
+          conversationId: delegation.conversationId,
+          runId: delegation.runId,
+          text: closing,
+        });
+      }
       return { settled: true, overrunUsd };
     });
   }

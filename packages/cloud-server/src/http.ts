@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { MemoryError, type MemoryStore } from '@maka-cloud/memory';
 import { MODE_IDS } from '@maka-cloud/modes';
 import {
+  buildTimeline,
   KeyedCounter,
   MAX_STEER_CHARS,
   type Orchestrator,
@@ -31,6 +32,7 @@ import type { InboxRoutes } from './inbox.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import type { PushApi } from './push.js';
 import { toPublicView } from './public-view.js';
+import { scrubSecretFields } from './secret-shapes.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
 
@@ -144,6 +146,8 @@ export interface PublicApiDeps {
   previews: PreviewService;
   previewLimiter: RateLimiter;
   limits: HttpLimits;
+  /** The owner turned content on: a task's timeline includes what each step did, not only its kind. */
+  timelineContent?: boolean;
   /**
    * Called after a post, a retried one included: the message is stored with a
    * pending delivery, and this asks for an attempt now.
@@ -469,6 +473,11 @@ export class PublicApi {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
       const action = control[2] as ControlAction;
       return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
+    }
+    const timeline = /^\/v1\/tasks\/([^/]+)\/timeline$/u.exec(path);
+    if (timeline) {
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      return this.taskTimeline(res, invite, decodeURIComponent(timeline[1] ?? ''));
     }
     const taskMessages = /^\/v1\/tasks\/([^/]+)\/messages(?:\/([^/]+))?$/u.exec(path);
     if (taskMessages) {
@@ -856,6 +865,22 @@ export class PublicApi {
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
     }
+  }
+
+  /**
+   * The run of a task as its log has it: turns, steps, cost over time. Read from the log alone, so
+   * nothing here can fail a task, and metadata only unless the owner turned content on.
+   */
+  private taskTimeline(res: ServerResponse, invite: InviteInfo, taskId: string): void {
+    take(this.deps.controlLimiter, invite);
+    this.reauthenticate(invite);
+    this.ownTaskSession(invite, taskId);
+    const timeline = buildTimeline(this.deps.tasks.readTask(taskId), {
+      content: this.deps.timelineContent === true,
+      now: Date.now(),
+    });
+    if (!timeline) throw new HttpError(404, 'not_found');
+    respond(res, 200, { timeline: scrubSecretFields(timeline) });
   }
 
   /** The owner as the orchestrator checks them, in its write chain, so a revoke in between stops it. */

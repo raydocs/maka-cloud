@@ -7,8 +7,11 @@
  *
  *   ok       report the session, write result.json, report success
  *   tools    first make the tool calls listed in `$HOME/fake-cli/tools.json` ([{id, name, input,
- *            fail?}]): ask the SDK's hooks before each one and after it, run it (append its id to
- *            `ran.log`) unless the pre hook denied it, then behave like ok
+ *            fail?, hang?, spawn?}]): ask the SDK's hooks before each one and after it, run it
+ *            (append its id to `ran.log`) unless the pre hook denied it, then behave like ok. A
+ *            tool with `spawn` starts that shell command as a child in a process group and
+ *            session of its own, which is not the CLI's (its pid goes to `child.pid`): a stop of
+ *            the run's group does not reach it. `hang` leaves the CLI running inside the tool.
  *   spend    report token usage and a total cost, then like ok
  *   spendhang report the token usage of one model call, then run until killed
  *   fail     report an error result and exit 1
@@ -130,6 +133,11 @@ async function run(prompt) {
       if (denied) continue;
       fs.appendFileSync(path.join(ctl, 'ran.log'), tool.id + '\\n');
       send({ type: 'assistant', message: { id: 'm-' + tool.id, content: [{ type: 'tool_use', id: tool.id, name: tool.name, input: tool.input }] } });
+      if (tool.spawn) {
+        const child = require('node:child_process').spawn('sh', ['-c', tool.spawn], { detached: true, stdio: 'ignore' });
+        child.unref();
+        fs.writeFileSync(path.join(ctl, 'child.pid'), String(child.pid));
+      }
       if (tool.hang) { setInterval(() => {}, 1000); return; }
       if (tool.fail) await callHook('PostToolUseFailure', tool, { error: 'boom' });
       else await callHook('PostToolUse', tool, { tool_response: 'fine' });

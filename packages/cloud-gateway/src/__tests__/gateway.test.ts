@@ -501,6 +501,59 @@ test('a request with an image or a file is refused and never sent', async () => 
   assert.equal(upstream.requests.length, 0);
 });
 
+test('an error the vendor answers with is passed on without the keys it echoes', async () => {
+  const { gateway, upstream } = rig();
+  const anthropic = gateway.inProcess({
+    vendor: 'anthropic',
+    subject: 'x',
+    budget: { limitUsd: 1 },
+  });
+  upstream.next(() =>
+    json(
+      {
+        type: 'error',
+        error: { type: 'authentication_error', message: `invalid x-api-key: ${MASTER}` },
+      },
+      401,
+    ),
+  );
+  const refused = await post(anthropic, body());
+  assert.equal(refused.status, 401);
+  const refusedText = await text(refused);
+  assert.ok(!refusedText.includes(MASTER), refusedText);
+  assert.match(refusedText, /authentication_error/u, 'the rest of the error is still there');
+
+  upstream.next(() =>
+    json(
+      { type: 'error', error: { type: 'authentication_error', message: `bad key ${MASTER}` } },
+      401,
+    ),
+  );
+  const counted = await post(anthropic, body(), { path: '/v1/messages/count_tokens' });
+  assert.equal(counted.status, 401);
+  assert.ok(!(await text(counted)).includes(MASTER));
+
+  const codex = gateway.inProcess({ vendor: 'openai', subject: 'y', budget: { limitUsd: 1 } });
+  upstream.next(() =>
+    json(
+      {
+        error: {
+          message: `Incorrect API key provided: ${OPENAI_MASTER}.`,
+          code: 'invalid_api_key',
+        },
+      },
+      401,
+    ),
+  );
+  const openai = await post(
+    codex,
+    { model: 'codex-test', input: 'hi', max_output_tokens: 10 },
+    { path: '/responses' },
+  );
+  assert.equal(openai.status, 401);
+  assert.ok(!(await text(openai)).includes(OPENAI_MASTER));
+});
+
 test('a failed count refuses a request whose byte bound does not fit', async () => {
   const { gateway, upstream } = rig();
   const client = gateway.inProcess({

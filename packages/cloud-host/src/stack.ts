@@ -25,7 +25,12 @@ import {
   TenantMachineProvider,
 } from '@maka-cloud/runners';
 import type { Supervisor } from '@maka-cloud/supervisor';
-import { InviteStore, type PushTransport, pushConfigFromEnv } from '@maka-cloud/server';
+import {
+  InviteStore,
+  type PushTransport,
+  pushConfigFromEnv,
+  scrubErrorText,
+} from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
 import { createDuties, type DutiesRuntime } from './duties/runtime.js';
 import {
@@ -302,6 +307,7 @@ export async function startStack(
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
       orchestrator: { recoveredSpend: journal, limits: config.taskLimits },
+      timelineContent: config.timelineContent,
       conductorRoot: config.conductorRoot,
       conductor: {
         // The vendor key stays in the gateway: the conductor's requests go through it in process.
@@ -318,6 +324,7 @@ export async function startStack(
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
+        scrubTaskText: scrubErrorText,
       },
       supervisor: (context) =>
         startInbox(

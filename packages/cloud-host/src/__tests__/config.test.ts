@@ -587,3 +587,19 @@ test('the limits of one task default to no turn limit and 4 hours, and take only
     /task limits: +no limit per turn, 4 h of run time/u,
   );
 });
+
+test('timeline content is off unless the owner sets 1, and anything else but 0 is refused', () => {
+  assert.equal(readStackConfig(ENV).timelineContent, false);
+  assert.equal(
+    readStackConfig({ ...ENV, MAKA_CLOUD_TIMELINE_CONTENT: '0' }).timelineContent,
+    false,
+  );
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_TIMELINE_CONTENT: '1' }).timelineContent, true);
+  for (const bad of ['true', 'yes', '2', 'on']) {
+    assert.match(
+      problemsOf({ ...ENV, MAKA_CLOUD_TIMELINE_CONTENT: bad }).join(' | '),
+      /TIMELINE_CONTENT must be 1 or 0/u,
+      bad,
+    );
+  }
+});

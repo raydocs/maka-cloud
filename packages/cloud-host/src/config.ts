@@ -99,6 +99,8 @@ export interface StackConfig {
    * restart) may spend, and how long the task may run in all.
    */
   taskLimits: { turnUsd?: number; runMs: number };
+  /** Task timelines show what each step did, not only its kind. */
+  timelineContent: boolean;
   /** The codex runner needs it when a task starts; the stack starts without it. */
   openAiKeySet: boolean;
   /** With it, research runs get a `web-search` command, paid per call from their budget. */
@@ -303,6 +305,10 @@ export const ENV_VARIABLES = [
     'how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168)',
   ],
   [
+    'MAKA_CLOUD_TIMELINE_CONTENT',
+    'set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing',
+  ],
+  [
     'MAKA_CLOUD_AGENT_USER',
     'the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly',
   ],
@@ -442,6 +448,13 @@ export function readStackConfig(
     }
     return parsed;
   };
+  const flag = (name: string): boolean => {
+    const raw = value(name);
+    if (raw === undefined || raw === '0') return false;
+    if (raw === '1') return true;
+    problems.push(`${name} must be 1 or 0`);
+    return false;
+  };
   const dollars = (name: string, fallback: number): number => {
     const raw = value(name);
     if (raw === undefined) return fallback;
@@ -503,6 +516,7 @@ export function readStackConfig(
       serverDailyUsd: dollars('MAKA_CLOUD_SERVER_DAILY_USD', DEFAULT_SPEND_CAPS.serverDailyUsd),
     },
     taskLimits: taskLimits(value, problems),
+    timelineContent: flag('MAKA_CLOUD_TIMELINE_CONTENT'),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,

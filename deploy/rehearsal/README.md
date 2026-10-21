@@ -39,9 +39,8 @@ deploy/rehearsal/down.sh
    answers are recorded and tasks run.
 5. `restart`: the server restarts while a task is running in the sandbox; the task resumes and
    finishes once, with one result card.
-6. `restart-reply` (expected to fail for now): the conductor, whose turn the restart cut, says the
-   task is done. It does not yet; the step is in `MAKA_REHEARSAL_XFAIL`. When the fix lands the step
-   passes, the flow fails with "unexpected pass", and the mark comes off.
+6. `restart-reply`: the conductor, whose turn the restart cut, follows the resumed task and, when it
+   ends, says so in the conversation, once.
 7. `backup-restore`: the server is stopped and backed up, something new happens, the backup is
    restored, and the conversations and the inbox are as they were; a new task still runs.
 

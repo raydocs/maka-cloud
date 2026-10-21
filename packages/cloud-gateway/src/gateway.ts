@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import {
   type BoundLimits,
   type Bounded,
@@ -167,6 +168,9 @@ const NOT_SENT = new Set([
   'ENETUNREACH',
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
+
+/** Shorter upstream keys are not replaced by value: they would eat ordinary words. */
+const MIN_UPSTREAM_KEY_CHARS = 8;
 
 const PASSED_HEADERS = ['content-type', 'request-id', 'x-request-id', 'retry-after'];
 
@@ -571,7 +575,10 @@ export class Gateway {
       this.settle(grant, key, response.ok ? reservedUsd : 0);
       const body = await response.arrayBuffer().catch(() => new ArrayBuffer(0));
       release();
-      return new Response(body, { status: response.status, headers: passedHeaders(response) });
+      return new Response(this.passedBody(response, body), {
+        status: response.status,
+        headers: passedHeaders(response),
+      });
     }
     return this.metered(grant, key, bounded, reservedUsd, response, flight, release);
   }
@@ -678,7 +685,10 @@ export class Gateway {
         signal: flight.controller.signal,
       });
       const body = await response.arrayBuffer();
-      return new Response(body, { status: response.status, headers: passedHeaders(response) });
+      return new Response(this.passedBody(response, body), {
+        status: response.status,
+        headers: passedHeaders(response),
+      });
     } catch {
       return refusalResponse(
         'anthropic',
@@ -688,6 +698,27 @@ export class Gateway {
     } finally {
       release();
     }
+  }
+
+  /**
+   * What the vendor answered with, on its way to the caller. An error body is the vendor's text and
+   * can echo the key it was called with ("Incorrect API key provided: ..."), so it goes out
+   * scrubbed: this gateway's own upstream keys by value, anything shaped like a key by shape. The
+   * caller must never learn a key it was not given.
+   */
+  private passedBody(response: Response, body: ArrayBuffer): ArrayBuffer {
+    if (response.ok) return body;
+    let text = new TextDecoder().decode(body);
+    for (const upstream of Object.values(this.options.upstreams)) {
+      const key = upstream?.apiKey;
+      if (key !== undefined && key.length >= MIN_UPSTREAM_KEY_CHARS)
+        text = text.split(key).join('[secret]');
+    }
+    const scrubbed = new TextEncoder().encode(scrubSecretShapes(text));
+    return scrubbed.buffer.slice(
+      scrubbed.byteOffset,
+      scrubbed.byteOffset + scrubbed.byteLength,
+    ) as ArrayBuffer;
   }
 
   private async count(
