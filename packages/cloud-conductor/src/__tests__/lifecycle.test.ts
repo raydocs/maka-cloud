@@ -185,6 +185,59 @@ test('exit by a model error: the run fails with a notice and everything is relea
   assertReleased(h.conductor);
 });
 
+const overloaded = {
+  error: {
+    status: 529,
+    body: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+  },
+};
+
+test('a model that is overloaded before the run did anything ends it as model_transient', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  h.model.script('conductor', overloaded);
+  await h.send('cnv_1', 'Go.');
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.runsInState('failed')[0]?.endReason, 'model_transient');
+  assertReleased(h.conductor);
+});
+
+test('a refused key, a billing refusal or a bad request is model_error, never model_transient', async (t) => {
+  for (const [status, type] of [
+    [401, 'authentication_error'],
+    [402, 'billing_error'],
+    [400, 'invalid_request_error'],
+  ] as const) {
+    const h = await makeHarness(t, { autoComplete: false });
+    h.model.script('conductor', {
+      error: { status, body: { type: 'error', error: { type, message: 'no' } } },
+    });
+    await h.send('cnv_1', 'Go.');
+    await h.conductor.idle();
+    assert.equal(
+      h.conductor.state.runsInState('failed')[0]?.endReason,
+      'model_error',
+      String(status),
+    );
+    assertReleased(h.conductor);
+  }
+});
+
+test('an overloaded model after the run started a task is model_error: running it again would repeat the task', async (t) => {
+  const h = await makeHarness(t, { autoComplete: false });
+  h.model.script('planner', text('1. Do it.'));
+  h.model.script(
+    'conductor',
+    calls(tool('start_playbook', { playbook: 'free', goal: 'g' })),
+    calls(tool('delegate_task', { runner: 'codex', brief: 'b', budgetUsd: 1 })),
+    overloaded,
+  );
+  await h.send('cnv_1', 'Go.');
+  await h.conductor.idle();
+  assert.equal(h.conductor.state.runsInState('failed')[0]?.endReason, 'model_error');
+  assert.equal(h.codex.runs[0]?.cancelled, true);
+  assertReleased(h.conductor);
+});
+
 test('exit by a throw before the turn is sent: the run fails and everything is released', async (t) => {
   const h = await makeHarness(t, {
     conductor: {

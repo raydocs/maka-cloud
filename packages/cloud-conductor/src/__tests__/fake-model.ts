@@ -195,7 +195,8 @@ export async function startFakeModel(): Promise<FakeModel> {
 }
 
 function writeError(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { 'content-type': 'application/json' });
+  // The runtime waits out a retryable status by the server's word: 1 ms keeps a test fast.
+  response.writeHead(status, { 'content-type': 'application/json', 'retry-after-ms': '1' });
   response.end(JSON.stringify(body));
 }
 

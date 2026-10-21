@@ -162,6 +162,10 @@ interface Turn extends ActiveTurn {
   /** Text since the last tool call: the delivery. */
   finalText: string[];
   errors: string[];
+  /** The model adapter's machine-readable kind for the last error (`rate_limit`, `auth`, ...); unset when the error was thrown. */
+  errorKind?: string;
+  /** Whether the turn called any tool: a failed run that did is never retried by a duty. */
+  sawTool: boolean;
   completeReason?: string;
   /**
    * Whether the conversation was tainted when this turn's last conductor model request was sent:
@@ -621,6 +625,7 @@ export class Conductor {
         planners: new Set(),
         finalText: [],
         errors: [],
+        sawTool: false,
       };
       const active: Turn = turn;
       lane.current = active;
@@ -659,8 +664,10 @@ export class Conductor {
         }
       }
     } catch (error) {
-      if (turn) turn.errors.push(errorMessage(error));
-      else setupError = error;
+      if (turn) {
+        turn.errors.push(errorMessage(error));
+        delete turn.errorKind;
+      } else setupError = error;
     } finally {
       if (timer) {
         clearTimeout(timer);
@@ -706,6 +713,9 @@ export class Conductor {
   private onEvent(turn: Turn, event: SessionEvent): void {
     switch (event.type) {
       case 'tool_start':
+        turn.sawTool = true;
+        turn.finalText = [];
+        break;
       case 'tool_result':
         turn.finalText = [];
         break;
@@ -713,7 +723,11 @@ export class Conductor {
         if (!event.interrupted && event.text.trim()) turn.finalText.push(event.text);
         break;
       case 'error':
-        if (!event.recoverable) turn.errors.push(event.message);
+        if (!event.recoverable) {
+          turn.errors.push(event.message);
+          if (event.reason === undefined) delete turn.errorKind;
+          else turn.errorKind = event.reason;
+        }
         break;
       case 'complete':
         turn.completeReason = event.stopReason;
@@ -744,7 +758,7 @@ export class Conductor {
       await this.cancelRunTasks(runId, link);
       return;
     }
-    const failure = this.failureOf(turn, setupError);
+    const failure = this.failureOf(turn, setupError, runId);
     if (failure) {
       this.state.endRun(runId, 'failed', failure.reason, failure.text);
       this.sendOutbox(run.conversationId);
@@ -800,6 +814,7 @@ export class Conductor {
   private failureOf(
     turn: Turn | undefined,
     setupError: unknown,
+    runId: string,
   ): { reason: string; text: string } | undefined {
     if (setupError !== undefined) {
       return {
@@ -825,7 +840,10 @@ export class Conductor {
             reason: 'context_full',
             text: 'This conversation is too long to continue. Start a new conversation for the next request.',
           }
-        : { reason: 'model_error', text: `The run failed: ${message}` };
+        : {
+            reason: this.retryable(turn, runId) ? 'model_transient' : 'model_error',
+            text: `The run failed: ${message}`,
+          };
     }
     if (turn.completeReason === 'step_limit' || turn.completeReason === 'max_tokens') {
       return {
@@ -834,6 +852,21 @@ export class Conductor {
       };
     }
     return undefined;
+  }
+
+  /**
+   * Whether a failed run ended on a capacity or network error and did nothing else yet: its last
+   * error was classified by the model adapter as one that goes away on its own, and the run called
+   * no tool and started no task, so running it again repeats nothing. Anything else, and anything
+   * unclassified, is `model_error` and fails closed.
+   */
+  private retryable(turn: Turn, runId: string): boolean {
+    return (
+      turn.errorKind !== undefined &&
+      TRANSIENT_MODEL_ERRORS.has(turn.errorKind) &&
+      !turn.sawTool &&
+      this.state.tasksOf(runId).length === 0
+    );
   }
 
   private requestStop(turn: Turn, reason: StopReason): void {
@@ -1325,6 +1358,16 @@ export class Conductor {
     }
   }
 }
+
+/** The adapter's error kinds that pass by themselves; `auth`, billing, a rejected request and `unknown` are not among them. */
+const TRANSIENT_MODEL_ERRORS: ReadonlySet<string> = new Set([
+  'network',
+  'provider_capacity',
+  'provider_unavailable',
+  'rate_limit',
+  'stream_truncated',
+  'timeout',
+]);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
