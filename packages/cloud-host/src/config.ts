@@ -203,8 +203,10 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
           if (!/no such table/iu.test(String((error as Error).message))) throw error;
         }
       },
-      // The runs' own secrets were taken out when each line was kept. What a task read in a
-      // repository was not, and the backup scan refuses a copy that holds a key.
+      // The lines are kept exactly as the CLI wrote them (the model checks them on a resume), so a
+      // run's own keys are still in them. The backup scan refuses a copy that holds a key: the
+      // lines that carry one are scrubbed in the copy, and a conversation restored from it loses
+      // only those lines' thinking signatures, never the live database's.
       [rel(paths.transcriptsDbPath)]: (copy) => {
         const lines = copy
           .prepare(

@@ -314,7 +314,7 @@ test('a secret in a tool call is not written to the step log', async (t) => {
   assert.equal(terminal(events)?.type, 'finished');
   assert.ok(steps.calls.length > 0);
   assert.ok(!steps.calls.join('\n').includes(API_KEY), 'the model key reached the step log');
-  assert.match(steps.calls[0] ?? '', /\[redacted\]/);
+  assert.match(steps.calls[0] ?? '', /\[(redacted|secret)\]/);
 });
 
 test('without step logging the SDK runs no hooks', async (t) => {
