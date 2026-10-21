@@ -267,3 +267,49 @@ test('ids are unique and well-formed with and without crypto.randomUUID', () => 
     Object.defineProperty(globalThis, 'crypto', { value: original, configurable: true });
   }
 });
+
+test('a message to a running task carries a key so a retry applies once, and a withdrawal is a DELETE on that key', async () => {
+  const seen: Array<{ url: string; method?: string; body?: unknown }> = [];
+  const { client } = served({
+    '/v1/tasks/tsk_1/messages': (url, init) => {
+      seen.push({
+        url,
+        ...(init.method ? { method: init.method } : {}),
+        ...(init.body ? { body: JSON.parse(String(init.body)) } : {}),
+      });
+      const key = url.split('/').at(-1) ?? '';
+      return Response.json({
+        message: {
+          messageId: key === 'messages' ? 'sent' : key,
+          state: init.method === 'DELETE' ? 'withdrawn' : 'pending',
+        },
+      });
+    },
+  });
+  const sent = await client.sendTaskMessage('tsk_1', 'Use the v2 API.', 'm1');
+  expect(sent.message.state).toBe('pending');
+  const withdrawn = await client.withdrawTaskMessage('tsk_1', 'm1');
+  expect(withdrawn.message).toEqual({ messageId: 'm1', state: 'withdrawn' });
+  expect(seen).toEqual([
+    {
+      url: '/v1/tasks/tsk_1/messages',
+      method: 'POST',
+      body: { text: 'Use the v2 API.', messageId: 'm1' },
+    },
+    { url: '/v1/tasks/tsk_1/messages/m1', method: 'DELETE' },
+  ]);
+  // Without a key one is made, and it is in the body: the retry sends the same one.
+  await client.sendTaskMessage('tsk_1', 'x');
+  expect(typeof (seen[2]?.body as { messageId?: unknown } | undefined)?.messageId).toBe('string');
+});
+
+test('the timeline is read from the task’s timeline route', async () => {
+  const { client, calls } = served({
+    '/v1/tasks/tsk_1/timeline': () =>
+      Response.json({
+        timeline: { taskId: 'tsk_1', state: 'running', steps: [], turns: [], cost: [] },
+      }),
+  });
+  expect((await client.timeline('tsk_1')).timeline.taskId).toBe('tsk_1');
+  expect(calls[0]?.url).toBe('/v1/tasks/tsk_1/timeline');
+});

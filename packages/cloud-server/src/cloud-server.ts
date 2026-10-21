@@ -199,6 +199,11 @@ export interface CloudServerOptions {
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
+  /**
+   * Task timelines include what each step did (its command or file), not only its kind. Default
+   * false: a timeline is metadata.
+   */
+  timelineContent?: boolean;
   /** Computer routes are absent without a trusted desktop/terminal adapter. */
   computer?: ComputerSource;
   /** The preview proxy for pages a task opened. Tests give it a fetcher that touches no network. */
@@ -561,6 +566,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       previews: previewService,
       previewLimiter: new RateLimiter(limits.previewsPerMinute),
       limits,
+      ...(options.timelineContent === true ? { timelineContent: true } : {}),
       onMessage: deliverMessage,
       ...(deliverAnswer ? { onAnswer: deliverAnswer } : {}),
       ...(options.duties
