@@ -124,7 +124,7 @@ test('files and directories of another task arrive under inputs/<task>/ before t
   );
   // The brief reached the sandbox unchanged, request lines included.
   assert.match(
-    await fs.readFile(join(h.root, TARGET, 'brief.md'), 'utf8'),
+    await fs.readFile(join(h.root, TARGET, 'handoff', 'brief.md'), 'utf8'),
     /^maka-inputs: tsk_src report\.json sources\n/,
   );
   // The sandbox user did all of it.
