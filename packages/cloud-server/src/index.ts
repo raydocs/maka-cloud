@@ -31,7 +31,7 @@ export { type DutyOwners, type DutyService } from './duties.js';
 export { type InboxAnswerResult, type InboxService } from './inbox.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
 export { scrubErrorText } from './public-view.js';
-export { scrubSecretShapes } from './secret-shapes.js';
+export { scrubSecretFields, scrubSecretShapes, setKnownSecrets } from './secret-shapes.js';
 export { SqliteSessionStore } from './sqlite-session-store.js';
 export { SqliteTaskStore } from './sqlite-task-store.js';
 export { type PushConfig, pushConfigFromEnv } from './push.js';

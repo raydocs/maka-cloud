@@ -37,6 +37,12 @@ export function verifyCodingManifest(manifest: Manifest): Verdict {
         : 'done has more than one review line',
     );
   }
+  // A change nobody reviewed is not a verified one: the runner says "not done" and the conductor
+  // must not take that for success.
+  const unreviewed = reviews.find((line) => /^review:\s*not done\b/u.test(line.trim()));
+  if (unreviewed) {
+    problems.push(`the change was not independently reviewed: ${unreviewed.trim().slice(8)}`);
+  }
   const names = new Set((manifest.artifacts ?? []).map(artifactName));
   const absent = CODING_ARTIFACTS.filter((name) => !names.has(name));
   if (absent.length > 0) problems.push(`artifacts do not list: ${absent.join(', ')}`);

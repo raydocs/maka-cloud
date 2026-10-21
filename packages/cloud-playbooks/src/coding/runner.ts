@@ -5,6 +5,8 @@ import {
   implementerFor,
   type ModeId,
   type ModesConfig,
+  budgetProblem,
+  chooseMode,
   parseModeBrief,
   reviewerFor,
   splitBudget,
@@ -297,6 +299,13 @@ function clipText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+/** How many serious (P1) findings a finished review still carries. */
+function p1Of(review: ReviewRecord): number {
+  return review.status === 'reviewed'
+    ? review.findings.filter((finding) => finding.severity === 'P1').length
+    : 0;
+}
+
 function roundUsd(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
@@ -398,7 +407,21 @@ class CodingRun implements RunHandle {
       const parsed = parseCodingBrief(brief);
       if (!parsed.ok) return this.setTerminal({ type: 'failed', reason: parsed.reason });
       const task = parsed.task;
-      this.mode = modeBrief.mode ?? 'standard';
+      // A brief with no mode line is a task whose budget alone decides (never above standard).
+      const { modes } = this.options;
+      this.mode =
+        modeBrief.mode ??
+        (modes
+          ? chooseMode(modes, {
+              ...(this.spec.budgetUsd === undefined ? {} : { budgetUsd: this.spec.budgetUsd }),
+            }).mode
+          : 'standard');
+      // A task whose budget is below what its mode needs is refused before anything is acquired.
+      const tooSmall =
+        modes && this.spec.budgetUsd !== undefined
+          ? budgetProblem(modes, this.mode, this.spec.budgetUsd)
+          : undefined;
+      if (tooSmall) return this.setTerminal({ type: 'failed', reason: tooSmall });
       this.limitUsd = this.workLimit();
 
       this.adoptWorkspace(
@@ -434,6 +457,26 @@ class CodingRun implements RunHandle {
             status: file.status,
           }));
           const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
+          // With a reviewer configured, a change nobody could review is not delivered and the task
+          // does not succeed: "verified" here means checked by the runner and by the other vendor.
+          if (this.options.modes && reviewed.review.status !== 'reviewed') {
+            throw new Error(
+              `The change passed the repository's checks but could not be independently reviewed (${reviewed.review.reason}), so it was not delivered.`,
+            );
+          }
+          // A serious problem the review still finds after the one fix is not delivered either: the
+          // task fails with the reason, instead of finishing with a change known to be wrong.
+          const left = this.options.modes ? p1Of(reviewed.review) : 0;
+          if (left > 0) {
+            const fix = reviewed.review.status === 'reviewed' ? reviewed.review.fix : undefined;
+            const unused =
+              fix?.result === 'not_applied'
+                ? ` (the fix was not used: ${fix.reason ?? 'no reason given'})`
+                : '';
+            throw new Error(
+              `The independent review still found ${left} serious problem(s) after the one fix it allows${unused}, so the change was not delivered.`,
+            );
+          }
           await this.deliver(task, verification, reviewed.outcome, reviewed.review);
           return this.setTerminal({ type: 'finished' });
         }

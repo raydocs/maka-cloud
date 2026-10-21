@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TaskEvent, TaskView } from '@maka-cloud/orchestrator';
-import { scrubErrorText, toPublicEvent, toPublicItem, toPublicView } from '../public-view.js';
+import {
+  scrubErrorText,
+  toPublicConductorData,
+  toPublicEvent,
+  toPublicItem,
+  toPublicView,
+} from '../public-view.js';
 
 test("an approval item's ask reaches the client exactly as the approval binds it; other asks are scrubbed (T15)", () => {
   const card =
@@ -64,4 +70,67 @@ test('a task view, its failure events and an inbox ask carry no secret', () => {
     kind: 'blocked',
     ask: 'Failed: [secret]',
   });
+});
+
+test("progress notes, step lines and a view's progress carry no secret", () => {
+  const note =
+    'snapshot skipped: Bearer sk-live-0123456789abcdef at https://x.test/?access_token=abc123DEF456';
+  const clean = (text: string) => {
+    assert.ok(!text.includes('sk-live-0123'), text);
+    assert.ok(!text.includes('abc123DEF456'), text);
+    assert.match(text, /\[secret\]/u);
+  };
+  clean(
+    (
+      toPublicEvent({ type: 'task_progress', taskId: 'tsk_1', note } as TaskEvent) as {
+        note: string;
+      }
+    ).note,
+  );
+  const intent = toPublicEvent({
+    type: 'step_intent',
+    taskId: 'tsk_1',
+    epoch: 1,
+    stepId: 's1',
+    kind: 'tool',
+    replay: 'never',
+    label: note,
+  } as TaskEvent) as { label: string };
+  clean(intent.label);
+  const outcome = toPublicEvent({
+    type: 'step_outcome',
+    taskId: 'tsk_1',
+    epoch: 1,
+    stepId: 's1',
+    status: 'done',
+    output: note,
+  } as TaskEvent) as { output: string };
+  clean(outcome.output);
+  const view = toPublicView({
+    taskId: 'tsk_1',
+    runner: 'claude',
+    progress: ['working', note],
+  } as unknown as TaskView);
+  assert.equal(view.progress[0], 'working');
+  clean(view.progress[1] ?? '');
+});
+
+test('conductor notices and the note of a question carry no secret; the held call of an approval stays as it is', () => {
+  const text = 'the push failed: {"Authorization":["Bearer","tok-0123456789-abcdef"]}';
+  const notice = toPublicConductorData('conductor.notice', { noticeId: 'n1', text }) as {
+    text: string;
+  };
+  assert.ok(!notice.text.includes('tok-0123456789'), notice.text);
+  const action = { tool: 'open_pull_request', args: { title: 'Fix ｃodex login' } };
+  const asked = toPublicConductorData('conductor.question', {
+    questionId: 'q1',
+    question: 'Open the PR?',
+    note: `it said access_token=abc ?access_token=abc123DEF456`,
+    options: [{ id: 'yes', label: 'Yes' }],
+    action,
+  }) as { note: string; action: unknown };
+  assert.ok(!asked.note.includes('abc123DEF456'), asked.note);
+  assert.deepEqual(asked.action, action);
+  const answered = { questionId: 'q1', optionId: 'yes', text: 'my own words' };
+  assert.deepEqual(toPublicConductorData('conductor.answered', answered), answered);
 });

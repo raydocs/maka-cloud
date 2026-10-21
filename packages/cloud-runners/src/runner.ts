@@ -389,6 +389,7 @@ class Run implements RunHandle {
       runner: vendor.name,
       ...(spec.budgetUsd === undefined ? {} : { budgetUsd: spec.budgetUsd }),
       ...(spec.budgetRootId === undefined ? {} : { budgetRootId: spec.budgetRootId }),
+      ...(spec.turnBudgetUsd === undefined ? {} : { turnBudgetUsd: spec.turnBudgetUsd }),
     });
     this.adoptAccess(access);
     this.checkCancelled();
@@ -414,10 +415,10 @@ class Run implements RunHandle {
       this.stopMetering = meter.subscribe((state) => {
         this.meteredUsd = state.spentUsd;
         if (state.exhausted && !this.budgetStop) {
-          this.budgetStop =
-            this.spec.budgetUsd === undefined
-              ? 'the model budget is used up'
-              : `budget of ${usd(this.spec.budgetUsd)} reached (${usd(state.spentUsd)} spent)`;
+          const limit = this.binding();
+          this.budgetStop = limit
+            ? `${limit.what} of ${usd(limit.usd)} reached (${usd(state.spentUsd)} spent)`
+            : 'the model budget is used up';
         }
         this.meter();
       });
@@ -1060,10 +1061,22 @@ class Run implements RunHandle {
     ) {
       this.publishedUsd = spent;
     }
-    const budget = this.spec.budgetUsd;
-    if (budget !== undefined && spent >= budget && !this.budgetStop) {
-      this.budgetStop = `budget of ${usd(budget)} reached (${usd(spent)} spent)`;
+    const limit = this.binding();
+    if (limit !== undefined && spent >= limit.usd && !this.budgetStop) {
+      this.budgetStop = `${limit.what} of ${usd(limit.usd)} reached (${usd(spent)} spent)`;
     }
+  }
+
+  /**
+   * The limit this run is held to: its turn's, when that is the smaller of the two (a run is one
+   * turn), else what its tree has left.
+   */
+  private binding(): { usd: number; what: string } | undefined {
+    const { budgetUsd, turnBudgetUsd } = this.spec;
+    if (turnBudgetUsd !== undefined && (budgetUsd === undefined || turnBudgetUsd <= budgetUsd)) {
+      return { usd: turnBudgetUsd, what: "this turn's model budget" };
+    }
+    return budgetUsd === undefined ? undefined : { usd: budgetUsd, what: 'budget' };
   }
 
   private async rememberSession(id: string): Promise<void> {

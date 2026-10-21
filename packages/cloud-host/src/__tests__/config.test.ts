@@ -564,3 +564,26 @@ test('Claude runs through the Agent SDK only when its account and group are both
   assert.ok(ENV_VARIABLES.some(([name]) => name === 'MAKA_CLOUD_AGENT_USER'));
   assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /Claude runs: +directly/u);
 });
+
+test('the limits of one task default to no turn limit and 4 hours, and take only plain positive numbers', () => {
+  assert.deepEqual(readStackConfig(ENV).taskLimits, { runMs: 4 * 3_600_000 });
+  assert.deepEqual(
+    readStackConfig({ ...ENV, MAKA_CLOUD_TASK_TURN_USD: '1.5', MAKA_CLOUD_TASK_RUN_HOURS: '0.5' })
+      .taskLimits,
+    { turnUsd: 1.5, runMs: 1_800_000 },
+  );
+  const problem = (env: NodeJS.ProcessEnv): string =>
+    problemsOf({ ...ENV, ...env })
+      .filter((text) => /TASK_/u.test(text))
+      .join(' | ');
+  for (const bad of ['0', '-1', 'ten', '1e3', '100001']) {
+    assert.match(problem({ MAKA_CLOUD_TASK_TURN_USD: bad }), /TURN_USD must be/u, bad);
+  }
+  for (const bad of ['0', '-1', 'four', '169']) {
+    assert.match(problem({ MAKA_CLOUD_TASK_RUN_HOURS: bad }), /RUN_HOURS must be/u, bad);
+  }
+  assert.match(
+    describeConfig(readStackConfig(ENV)).join('\n'),
+    /task limits: +no limit per turn, 4 h of run time/u,
+  );
+});
