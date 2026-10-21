@@ -225,6 +225,15 @@ async function fixedAndKept(h: Harness, id: string, events: RunnerEvent[], why: 
   assert.match(record.kept?.reason ?? '', why);
   assert.equal(record.review.status, 'unavailable');
   assert.equal(record.review.fix.result, 'applied');
+  // The P1 the first review found is still said, with the fact that its fix was never checked.
+  assert.match(
+    record.review.reason,
+    /first review found 1 serious problem\(s\); the fix was not checked/,
+  );
+  assert.match(
+    await fs.readFile(join(dir, 'review.md'), 'utf8'),
+    /first review found 1 serious problem/,
+  );
   // The fixed change is what was checked, kept and published; the first change is not.
   assert.equal(await deliveredAddSh(h, id), GUARDED);
   assert.match(await fs.readFile(join(dir, 'change.patch'), 'utf8'), /negative numbers/);

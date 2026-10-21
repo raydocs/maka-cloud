@@ -314,6 +314,19 @@ function p1Of(review: ReviewRecord): number {
  * independent review could be made, or the review still has a serious (P1) problem after the one
  * fix. Undefined: nothing stands in the way of delivering it.
  */
+/**
+ * Why a fixed change has no second review. The first review's P1 findings were the reason for the
+ * fix, so the record says they were found and that their fix was never checked by a reviewer.
+ */
+function notReviewedAgain(first: ReviewRecord, why: string): string {
+  const found = first.status === 'reviewed' ? p1Of(first) : 0;
+  const earlier =
+    found > 0
+      ? `the first review found ${found} serious problem(s); the fix was not checked: `
+      : '';
+  return `${earlier}the fixed change could not be reviewed again (${why})`;
+}
+
 function keptReason(review: ReviewRecord): string | undefined {
   if (review.status !== 'reviewed') {
     return `the change passed the repository's checks but could not be independently reviewed (${plain(review.reason, 200)})`;
@@ -995,8 +1008,9 @@ class CodingRun implements RunHandle {
   /**
    * The review, and, when it found P1 problems, the one fix. The implementer's vendor gets the P1
    * findings once, in a fresh run (the task's session record is the reviewer's by now); the runner
-   * checks the result as it checked the first change, and the other vendor reviews it again. If any
-   * part of that fails, the first verified change is the one delivered, with its P1 findings. There
+   * checks the result as it checked the first change, and the other vendor reviews it again. If the
+   * fix does not run or fails the checks, the first verified change is the one delivered, with its P1
+   * findings; if only the second review fails, the fixed change is kept unreviewed. There
    * is no loop: this method runs `fix` at most once, and nothing calls it again.
    */
   private async reviewAndFix(
@@ -1093,7 +1107,7 @@ class CodingRun implements RunHandle {
           outcome: fixed,
           review: {
             ...second,
-            reason: plain(`the fixed change could not be reviewed again (${second.reason})`, 300),
+            reason: plain(notReviewedAgain(first, second.reason), 300),
             fix: applied,
           },
         };
