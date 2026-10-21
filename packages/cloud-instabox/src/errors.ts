@@ -33,10 +33,16 @@ export class InstaboxTransportError extends Error {
   }
 }
 
+/**
+ * An operation that did not succeed. `outcome` says what is known: 'failed' means instabox reported the
+ * operation failed (a create left no machine); 'unknown' means the wait ran out while it was still
+ * running, so it may yet finish and the machine may exist.
+ */
 export class InstaboxOperationError extends Error {
   constructor(
     readonly operationId: string,
     message: string,
+    readonly outcome: 'failed' | 'unknown' = 'failed',
   ) {
     super(message);
     this.name = 'InstaboxOperationError';
