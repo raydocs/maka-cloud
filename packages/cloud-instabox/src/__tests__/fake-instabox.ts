@@ -76,7 +76,17 @@ case "$op" in
   *) exit 2 ;;
 esac
 `;
-const SUDO_SHIM = '#!/bin/bash\n[ "$1" = -n ] && shift\nexec "$@"\n';
+
+/**
+ * `sudo -n tool ...` runs the tool as this user. `sudo -u account ...` (the agent's account, which
+ * the runners switch to) is a real change of user, so it goes to the real `sudo`, found behind the
+ * stand-ins' own directory, which is first on PATH.
+ */
+const SUDO_SHIM = `#!/bin/bash
+for arg in "$@"; do [ "$arg" = -u ] && PATH="\${PATH#*:}" exec sudo "$@"; done
+[ "$1" = -n ] && shift
+exec "$@"
+`;
 
 /** What the firewall stand-ins did, for a test to read. */
 export interface FakeFirewall {
