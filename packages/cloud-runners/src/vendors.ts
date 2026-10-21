@@ -68,7 +68,32 @@ export interface CommandInput {
   /** Orchestrator MCP endpoint as the sandbox reaches it. The token travels in MAKA_MCP_TOKEN. */
   mcpUrl?: string;
   model?: string;
+  /** One of `EFFORT_LEVELS`; the CLI's own default when absent. */
+  effort?: string;
   baseUrl?: string;
+}
+
+/** Reasoning levels both CLIs take. Anything else is refused before a sandbox is touched. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+
+/** A model id as a CLI argument: a short, plain name. */
+export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u;
+
+/** Why a run's model or effort cannot be used, or undefined. */
+export function runSettingsProblem(settings: {
+  model?: string;
+  effort?: string;
+}): string | undefined {
+  if (settings.model !== undefined && !MODEL_ID.test(settings.model)) {
+    return 'the run names a model id with characters a model id does not have';
+  }
+  if (
+    settings.effort !== undefined &&
+    !(EFFORT_LEVELS as readonly string[]).includes(settings.effort)
+  ) {
+    return `the run names an effort that is not one of ${EFFORT_LEVELS.join(', ')}`;
+  }
+  return undefined;
 }
 
 export interface VendorAdapter {
@@ -283,6 +308,7 @@ export const claudeAdapter: VendorAdapter = {
     ];
     if (input.resumeSessionId) args.push('--resume', shq(input.resumeSessionId));
     if (input.model) args.push('--model', shq(input.model));
+    if (input.effort) args.push('--effort', shq(input.effort));
     if (input.mcpUrl) {
       const config = {
         mcpServers: {
@@ -417,6 +443,7 @@ export const codexAdapter: VendorAdapter = {
       );
     }
     if (input.model) configs.push(`model=${tomlString(input.model)}`);
+    if (input.effort) configs.push(`model_reasoning_effort=${tomlString(input.effort)}`);
     const args = ['codex', 'exec'];
     if (input.resumeSessionId) args.push('resume', shq(input.resumeSessionId));
     args.push('--json', '--skip-git-repo-check');

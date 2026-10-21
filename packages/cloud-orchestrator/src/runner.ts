@@ -27,6 +27,13 @@ export interface RunSpec {
    * here before it runs the step and its outcome after. Every write carries the attempt's epoch.
    */
   steps?: StepLog;
+  /**
+   * The model this run uses, instead of the runner's default. A runner that cannot validate it
+   * refuses the run. Set by whoever applies a mode's roles (the coding runner today).
+   */
+  model?: string;
+  /** How hard the model thinks (`low`, `medium`, `high` or `xhigh`); absent: the CLI's default. */
+  effort?: string;
 }
 
 export type RunnerEvent =
