@@ -152,6 +152,8 @@ export interface DelegationRow {
   actualUsd: number | null;
   /** A cancel was asked for and has not succeeded yet; retried on start and when access returns. */
   cancelPending: boolean;
+  /** The mode the task was sent in; absent when no modes were configured. */
+  mode?: ModeId;
 }
 
 export interface SettleResult {
@@ -373,6 +375,10 @@ const SCHEMA_V6 = `
 ALTER TABLE runs ADD COLUMN mode TEXT;
 `;
 
+const SCHEMA_V7 = `
+ALTER TABLE delegations ADD COLUMN mode TEXT;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -383,6 +389,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V4,
   SCHEMA_V5,
   SCHEMA_V6,
+  SCHEMA_V7,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -805,16 +812,16 @@ export class ConductorState {
    * Reserves `usd` for a delegation and stores it under `key` before the call
    * is sent, in one transaction.
    */
-  reserveDelegation(runId: string, usd: number, key: string): ReserveResult {
+  reserveDelegation(runId: string, usd: number, key: string, mode?: ModeId): ReserveResult {
     return this.transaction((): ReserveResult => {
       const reserved = this.tryReserve(runId, usd, `delegate:${key}`);
       if (!reserved.ok) return reserved;
       const run = this.run(runId) as RunRow;
       this.db
         .prepare(
-          "INSERT INTO delegations (key, run_id, conversation_id, reservation, state, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+          "INSERT INTO delegations (key, run_id, conversation_id, reservation, state, mode, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
         )
-        .run(key, runId, run.conversationId, reserved.reservation, this.now());
+        .run(key, runId, run.conversationId, reserved.reservation, mode ?? null, this.now());
       return reserved;
     });
   }
@@ -1557,6 +1564,7 @@ function toDelegation(row: Row): DelegationRow {
     state: row.state as DelegationRow['state'],
     actualUsd: row.actual_usd === null ? null : Number(row.actual_usd),
     cancelPending: Number(row.cancel_pending) === 1,
+    ...(isModeId(row.mode) ? { mode: row.mode } : {}),
   };
 }
 
