@@ -99,7 +99,7 @@ test('an append lands once however often its request is sent, and a file out of 
       envs: { MAKA_DIR: r.machine.taskDir(r.dir), MAKA_RUN: r.run, ...extra },
       stdin,
     });
-  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  const file = join(r.machine.taskDir(r.dir), 'chan', 't1.in');
 
   assert.equal((await send({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n')).trim(), 'OK');
   // The answer was lost and the same request comes again: nothing is written twice.
@@ -150,7 +150,7 @@ function appendProcess(r: Rig, extra: Record<string, string>) {
 
 test('two requests for the same bytes racing each other write them once', async (t) => {
   const r = await rig(t, 'tsk_pc_race');
-  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  const file = join(r.machine.taskDir(r.dir), 'chan', 't1.in');
   const request = { MAKA_OFFSET: '0', MAKA_LEN: '5' };
   const original = appendProcess(r, request);
   const retry = appendProcess(r, request);
@@ -166,8 +166,9 @@ test('two requests for the same bytes racing each other write them once', async 
 
 test('a request cut off part way is completed by its retry instead of leaving the file out of step', async (t) => {
   const r = await rig(t, 'tsk_pc_partial');
-  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  const file = join(r.machine.taskDir(r.dir), 'chan', 't1.in');
   // The first try appended two bytes of five before it was killed.
+  await fs.mkdir(join(r.machine.taskDir(r.dir), 'chan'), { mode: 0o700 });
   await fs.writeFile(file, 'ab');
   const retry = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '5' });
   retry.child.stdin.end('abcd\n');
@@ -184,16 +185,55 @@ test('a request cut off part way is completed by its retry instead of leaving th
 
 test('a request whose input did not arrive whole writes nothing', async (t) => {
   const r = await rig(t, 'tsk_pc_short');
-  const file = join(r.machine.taskDir(r.dir), 't1.in');
+  const file = join(r.machine.taskDir(r.dir), 'chan', 't1.in');
   const short = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '5' });
   short.child.stdin.end('ab');
   assert.match(await short.done, /^SHORT 2/u);
   await assert.rejects(fs.stat(file));
   // Nothing was left behind next to it either.
-  const left = (await fs.readdir(r.machine.taskDir(r.dir))).filter((name) =>
+  const left = (await fs.readdir(join(r.machine.taskDir(r.dir), 'chan'))).filter((name) =>
     name.startsWith('t1.in'),
   );
   assert.deepEqual(left, []);
+});
+
+test('the channel directory is private, and a link in its place or at the input file is refused without writing through it', async (t) => {
+  const r = await rig(t, 'tsk_pc_links');
+  const taskDir = r.machine.taskDir(r.dir);
+  const victim = join(taskDir, 'victim.txt');
+  await fs.writeFile(victim, 'keep');
+
+  const ok = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '2' });
+  ok.child.stdin.end('a\n');
+  assert.equal(await ok.done, 'OK');
+  assert.equal((await fs.stat(join(taskDir, 'chan'))).mode & 0o777, 0o700);
+
+  // The input file replaced by a link to a file outside the channel.
+  const input = join(taskDir, 'chan', 't1.in');
+  await fs.rm(input);
+  await fs.symlink(victim, input);
+  const viaFile = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '2' });
+  viaFile.child.stdin.end('x\n');
+  assert.match(await viaFile.done, /^UNSAFE /u);
+  assert.equal(await fs.readFile(victim, 'utf8'), 'keep');
+
+  // The channel directory itself replaced by a link to another directory.
+  await fs.rm(join(taskDir, 'chan'), { recursive: true });
+  const elsewhere = join(taskDir, 'elsewhere');
+  await fs.mkdir(elsewhere);
+  await fs.symlink(elsewhere, join(taskDir, 'chan'));
+  const viaDir = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '2' });
+  viaDir.child.stdin.end('x\n');
+  assert.match(await viaDir.done, /^UNSAFE /u);
+  assert.deepEqual(await fs.readdir(elsewhere), []);
+
+  // A channel directory other users could enter is not private.
+  await fs.rm(join(taskDir, 'chan'));
+  await fs.mkdir(join(taskDir, 'chan'), { mode: 0o755 });
+  await fs.chmod(join(taskDir, 'chan'), 0o755);
+  const open = appendProcess(r, { MAKA_OFFSET: '0', MAKA_LEN: '2' });
+  open.child.stdin.end('x\n');
+  assert.match(await open.done, /^UNSAFE /u);
 });
 
 test('what the host writes to stdin reaches the process, its output comes back, and the end of input ends it', async (t) => {

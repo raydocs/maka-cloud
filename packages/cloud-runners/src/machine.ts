@@ -4,6 +4,7 @@ import {
   type InstaboxClient,
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
+import { PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
   FILE_CLEAN_SCRIPT,
@@ -65,6 +66,8 @@ export class RemoteMachine {
     readonly root: string,
     /** Memory-backed directory in the sandbox that holds each task's raw CLI output. */
     readonly logRoot: string = DEFAULT_LOG_ROOT,
+    /** The account the CLI runs as when it is not the sandbox user; its processes are stopped through sudo. */
+    readonly agentUser?: string,
   ) {}
 
   /** Where the raw output of a task's runs lives while they run. */
@@ -121,6 +124,14 @@ export class RemoteMachine {
         ...(brief === undefined ? {} : { MAKA_WRITE_BRIEF: '1' }),
       },
       ...(brief === undefined ? {} : { stdin: brief }),
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /** Gives a task's directory to the agent's group; see `PREPARE_AGENT_SCRIPT`. */
+  async prepareAgent(dirName: string, group: string, signal?: AbortSignal): Promise<void> {
+    await this.execOk(PREPARE_AGENT_SCRIPT, {
+      envs: { MAKA_DIR: this.taskDir(dirName), MAKA_AGENT_GROUP: assertSafeId('group', group) },
       ...(signal ? { signal } : {}),
     });
   }
@@ -189,6 +200,7 @@ export class RemoteMachine {
         MAKA_DIR: this.taskDir(dirName),
         MAKA_LOG_DIR: this.logDir(dirName),
         MAKA_GRACE_TENTHS: String(options.graceTenths ?? 30),
+        ...(this.agentUser === undefined ? {} : { MAKA_AGENT_USER: this.agentUser }),
         ...(options.runs
           ? { MAKA_ONLY_RUNS: options.runs.map((run) => assertSafeId('run', run)).join(' ') }
           : {}),
@@ -221,7 +233,10 @@ export class RemoteMachine {
   /** Names of task directories that still have a live run. */
   async liveTaskDirs(signal?: AbortSignal): Promise<string[]> {
     const out = await this.execOk(SWEEP_SCRIPT, {
-      envs: { MAKA_ROOT: this.root },
+      envs: {
+        MAKA_ROOT: this.root,
+        ...(this.agentUser === undefined ? {} : { MAKA_AGENT_USER: this.agentUser }),
+      },
       timeoutSeconds: 15,
       ...(signal ? { signal } : {}),
     });
