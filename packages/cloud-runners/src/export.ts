@@ -54,7 +54,7 @@ export async function writeHandoffFile(
 ): Promise<void> {
   if (!isPlainPath(ref)) throw new Error('not a plain relative path');
   const parts = ref.split('/');
-  if (parts.length === 1 && reserved.includes(ref)) throw new Error('that name is reserved');
+  if (reserved.includes(parts[0] as string)) throw new Error('that name is reserved');
   await requireDirectory(handoffDir, 'the task directory');
   let dir = handoffDir;
   for (const part of parts.slice(0, -1)) {

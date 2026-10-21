@@ -646,6 +646,7 @@ class CodingRun implements RunHandle {
       // exported artifact must not replace them, or it could forge what the owner is shown.
       reserved: [
         basename(this.spec.resultPath),
+        basename(this.spec.briefPath),
         'changes.json',
         'change.patch',
         'review.md',

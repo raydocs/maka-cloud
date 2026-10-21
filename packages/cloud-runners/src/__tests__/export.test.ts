@@ -138,6 +138,17 @@ test('names the spec reserves are not replaced by an exported artifact', async (
   );
 });
 
+test('a reserved name is not made a directory either', async (t) => {
+  const h = await withHarness(t);
+  await workspaceFile(h, TASK, 'review.md/inside.txt', 'agent text');
+  await fakeManifest(h, { artifacts: ['review.md/inside.txt'] });
+  const spec = { ...(await h.spec(TASK)), reserved: ['review.md'] };
+  const events = await collect(await h.runners.claude.start(spec));
+  assert.equal(terminal(events)?.type, 'finished');
+  await assert.rejects(fs.stat(handoff(h, 'review.md')));
+  assert.ok(notes(events).some((x) => /was not exported: that name is reserved/.test(x)));
+});
+
 test('a manifest that needs no change reaches the orchestrator byte for byte', async (t) => {
   const h = await withHarness(t);
   const text = '{"summary":"s","done":["d"],"notDone":[],"confidence":"high","knownIssues":[]}';
