@@ -25,6 +25,11 @@ const parameters = z.object({
 
 type Args = z.infer<typeof parameters>;
 
+/** The title of a pull request for a change that is kept for the owner to look at. */
+export function keptTitle(title: string): string {
+  return `[Kept for your review] ${title}`.slice(0, 250);
+}
+
 /** The branch a task's change goes to. */
 export function branchFor(taskId: string): string {
   return `maka/${taskId}`;
@@ -53,8 +58,10 @@ export function openPullRequestTool(
     const verification = JSON.parse(
       await readFile(delivery.verificationPath, 'utf8'),
     ) as VerificationView;
-    // Only a change a second agent reviewed is opened as a pull request.
-    if (verification.review?.status !== 'reviewed') {
+    // A change a second agent reviewed is opened as a pull request. One that was kept for the owner
+    // to look at is opened too, but only as a draft that says so; any other is not opened.
+    const kept = verification.kept !== undefined;
+    if (verification.review?.status !== 'reviewed' && !kept) {
       throw new ToolRefusal(
         'not_reviewed',
         `The change of ${delivery.taskId} was not independently reviewed, so no pull request was opened.`,
@@ -65,8 +72,9 @@ export function openPullRequestTool(
         changeSet,
         branch: branchFor(delivery.taskId),
         baseRef: delivery.baseRef,
-        title,
+        title: kept ? keptTitle(title) : title,
         body: pullRequestBody(verification),
+        ...(kept ? { draft: true } : {}),
       },
       signal,
     );
@@ -93,6 +101,10 @@ export function openPullRequestTool(
         // The model wrote the title: shown quoted, a line break or a hidden character as an escape (T15).
         `Title: ${shownValue(args.title)}`,
       ];
+      const kept = await keptReasonOf(delivery);
+      if (kept !== undefined) {
+        lines.push(`Opens as a draft, kept for you to look at: ${shownValue(kept)}`);
+      }
       const problem = options.publisher.precheck();
       if (problem) lines.push(`This cannot be opened yet: ${problem}`);
       return lines.join('\n');
@@ -126,11 +138,26 @@ export function openPullRequestTool(
   };
 }
 
+/** The reason a task's change is kept for the owner, read from the runner's record; undefined if it is not kept. */
+async function keptReasonOf(delivery: Delivery | undefined): Promise<string | undefined> {
+  if (!delivery) return undefined;
+  try {
+    const record = JSON.parse(await readFile(delivery.verificationPath, 'utf8')) as {
+      kept?: { reason?: unknown };
+    };
+    return typeof record.kept?.reason === 'string' ? record.kept.reason : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 interface VerificationView {
   testCommand: string;
   baseSha: string;
   repro?: { command: string; files: string[] };
   attempts: { vendor: string; end?: string }[];
+  /** Set when the change is kept for the owner to look at, not delivered. */
+  kept?: { reason: string };
   changedFiles?: { path: string; status: string }[];
   review?: ReviewSummary;
 }
@@ -150,6 +177,12 @@ const code = (text: string) => `\`${text.replaceAll('`', "'")}\``;
 /** The pull request description, built from the runner's verification record. */
 export function pullRequestBody(verification: VerificationView): string {
   const lines = [
+    ...(verification.kept
+      ? [
+          `**Kept for you to look at. Do not merge this before you have read the review.** ${code(verification.kept.reason)}`,
+          '',
+        ]
+      : []),
     'Opened by the Maka Cloud coding runner after the user approved it.',
     '',
     "**Checked by the runner itself** (not taken from the agent's report):",

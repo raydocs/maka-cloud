@@ -37,11 +37,21 @@ export function verifyCodingManifest(manifest: Manifest): Verdict {
         : 'done has more than one review line',
     );
   }
-  // A change nobody reviewed is not a verified one: the runner says "not done" and the conductor
-  // must not take that for success.
-  const unreviewed = reviews.find((line) => /^review:\s*not done\b/u.test(line.trim()));
-  if (unreviewed) {
-    problems.push(`the change was not independently reviewed: ${unreviewed.trim().slice(8)}`);
+  // A change nobody could review, or one with a serious problem left, is kept for the owner to look
+  // at: the runner says so on a `kept:` line, and the conductor must not take it for a delivery.
+  const kept = manifest.done.filter((line) => line.trim().startsWith('kept:'));
+  if (kept.length > 1) problems.push('done has more than one kept line');
+  if (kept.length === 1) {
+    problems.push(
+      `kept for you to look at, not delivered: ${(kept[0] as string).trim().slice(5).trim()}`,
+    );
+  } else {
+    // A change nobody reviewed is not a verified one: the runner says "not done" and the conductor
+    // must not take that for success.
+    const unreviewed = reviews.find((line) => /^review:\s*not done\b/u.test(line.trim()));
+    if (unreviewed) {
+      problems.push(`the change was not independently reviewed: ${unreviewed.trim().slice(8)}`);
+    }
   }
   const names = new Set((manifest.artifacts ?? []).map(artifactName));
   const absent = CODING_ARTIFACTS.filter((name) => !names.has(name));
@@ -68,8 +78,8 @@ export const codingPlaybook: Playbook = {
   steps: [
     `Delegate one task to the "${CODING_RUNNER}" runner. Its brief is the plan followed by one block:\n${BLOCK_EXAMPLE}\nAdd "runner": "codex" only if the user asked for it. One task per change: the runner already repairs and hands a failing task to the other agent once, so never start a second attempt yourself.`,
     'Wait for the task and read its verdict. A verified result lists the changed files and the checks the runner ran itself.',
-    `If it is verified, call ${OPEN_PULL_REQUEST_TOOL} with the task id and a short title. It is held for approval: ask the user with ask_user (reason "irreversible") and the actionRef it returns, then call it again with that actionRef after they approve.`,
-    'Deliver the pull request link and what was and was not verified, including the `review:` line of the manifest: say what the independent review found, or plainly that the change was not reviewed. Never call a change reviewed when that line says it was not done. If the task was not verified, say what failed from its manifest and stop.',
+    `If it is verified, or kept for the user to look at, call ${OPEN_PULL_REQUEST_TOOL} with the task id and a short title. It is held for approval: ask the user with ask_user (reason "irreversible") and the actionRef it returns, then call it again with that actionRef after they approve.`,
+    `Deliver the pull request link and what was and was not verified, including the \`review:\` line of the manifest: say what the independent review found, or plainly that the change was not reviewed. Never call a change reviewed when that line says it was not done. If the manifest has a \`kept:\` line, the change passed the repository's checks but was not delivered: say plainly that it is kept for the user to look at, with that reason, and that nothing was merged. Its pull request is still opened with ${OPEN_PULL_REQUEST_TOOL}, held for approval like any other, but only as a draft marked for their review. If the task was not verified and was not kept, say what failed from its manifest and stop.`,
   ],
   verify: verifyCodingManifest,
 };

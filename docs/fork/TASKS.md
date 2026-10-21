@@ -480,7 +480,14 @@ Depends on: T5, T8, the model gateway.
 - The reviewer is always a different vendor from the implementer. Before a
   coding task is shown as done, the reviewer checks the diff against the
   brief and the repo's invariants; P1 findings go back to the implementer
-  once, and whatever remains is shown on the task page. In `deep`, research
+  once, and whatever remains is shown on the task page. A change the other
+  vendor could not review, or one with a P1 left after its one fix, is never
+  delivered and the task does not fail: it is **kept for the owner to look
+  at** (owner decision 2026-10-21). The task finishes with a summary that
+  says so and the reason, `verification.json` carries `kept`, the manifest
+  has a `kept:` line (the conductor's check reports it as not delivered),
+  and its pull request, if the owner approves opening one, is a draft
+  marked for their review. Nothing merges it. In `deep`, research
   claims get the same cross-vendor review (the optional reviewer in T7).
 - Helpers (search, summaries, titles, briefs) use the cheapest adequate model.
 - Every call goes through the gateway with its reservation.

@@ -269,6 +269,8 @@ interface Verification {
   baseSha: string;
   testCommand: string;
   result: 'verified' | 'failed';
+  /** Set when the change passed its checks but is not delivered: it is kept for the owner to look at. */
+  kept?: { reason: string };
   repro?: Repro;
   review?: ReviewSummary;
   attempts: AttemptRecord[];
@@ -304,6 +306,25 @@ function p1Of(review: ReviewRecord): number {
   return review.status === 'reviewed'
     ? review.findings.filter((finding) => finding.severity === 'P1').length
     : 0;
+}
+
+/**
+ * Why a change that passed its checks is kept for the owner to look at instead of delivered: no
+ * independent review could be made, or the review still has a serious (P1) problem after the one
+ * fix. Undefined: nothing stands in the way of delivering it.
+ */
+function keptReason(review: ReviewRecord): string | undefined {
+  if (review.status !== 'reviewed') {
+    return `the change passed the repository's checks but could not be independently reviewed (${plain(review.reason, 200)})`;
+  }
+  const left = p1Of(review);
+  if (left === 0) return undefined;
+  const fix = review.fix;
+  const unused =
+    fix?.result === 'not_applied'
+      ? ` (the fix was not used: ${fix.reason ?? 'no reason given'})`
+      : '';
+  return `the independent review still found ${left} serious problem(s) after the one fix it allows${unused}`;
 }
 
 function roundUsd(value: number): number {
@@ -452,28 +473,11 @@ class CodingRun implements RunHandle {
         if (outcome.ok) {
           verification.result = 'verified';
           const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
-          // A change nobody could review is not delivered and the task does not succeed, whether the
-          // reviewer was unavailable or none is configured at all: "verified" here means checked by
-          // the runner and by the other vendor.
-          if (reviewed.review.status !== 'reviewed') {
-            throw new Error(
-              `The change passed the repository's checks but could not be independently reviewed (${reviewed.review.reason}), so it was not delivered.`,
-            );
-          }
-          // A serious problem the review still finds after the one fix is not delivered either: the
-          // task fails with the reason, instead of finishing with a change known to be wrong.
-          const left = p1Of(reviewed.review);
-          if (left > 0) {
-            const fix = reviewed.review.status === 'reviewed' ? reviewed.review.fix : undefined;
-            const unused =
-              fix?.result === 'not_applied'
-                ? ` (the fix was not used: ${fix.reason ?? 'no reason given'})`
-                : '';
-            throw new Error(
-              `The independent review still found ${left} serious problem(s) after the one fix it allows${unused}, so the change was not delivered.`,
-            );
-          }
-          await this.deliver(task, verification, reviewed.outcome, reviewed.review);
+          // A change nobody could review, or one with a serious problem left after the one fix, is
+          // not delivered: it is kept for the owner to look at, with the reason. The task is not
+          // failed, because its work is not lost: the change, its branch and its review are kept.
+          const kept = keptReason(reviewed.review);
+          await this.deliver(task, verification, reviewed.outcome, reviewed.review, kept);
           return this.setTerminal({ type: 'finished' });
         }
         attempt.end = outcome.reason;
@@ -1396,6 +1400,7 @@ class CodingRun implements RunHandle {
     verification: Verification,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
     review: ReviewRecord,
+    kept?: string,
   ): Promise<void> {
     const changesPath = join(this.hostDir, 'changes.json');
     const verificationPath = join(this.hostDir, 'verification.json');
@@ -1406,6 +1411,7 @@ class CodingRun implements RunHandle {
     const reviewText = reviewMarkdown(review);
     await this.guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
+    if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
     verification.repro = outcome.repro;
@@ -1429,10 +1435,14 @@ class CodingRun implements RunHandle {
     const files = outcome.collected.changeSet.files;
     const vendors = verification.attempts.map((attempt) => attempt.vendor);
     const manifest: ResultManifest = {
-      summary: `Verified change to ${task.repo}: ${agent.summary}`,
+      summary:
+        kept === undefined
+          ? `Verified change to ${task.repo}: ${agent.summary}`
+          : `Kept for you to look at, not delivered: ${plain(kept, 300)}.`,
       done: [
         verifiedLine(task, outcome.repro, verification.baseSha),
         reviewLine(review),
+        ...(kept === undefined ? [] : [`kept: ${plain(kept, 300)}`]),
         `${files.length} file(s) changed: ${clipText(files.map((file) => file.path).join(', '), 500)}`,
         ...(vendors.length > 1
           ? [
@@ -1442,8 +1452,9 @@ class CodingRun implements RunHandle {
         ...agent.done.map((line) => `agent: ${line}`),
       ],
       notDone: agent.notDone,
-      confidence: agent.confidence,
-      knownIssues: agent.knownIssues,
+      confidence: kept === undefined ? agent.confidence : 'low',
+      knownIssues:
+        kept === undefined ? agent.knownIssues : [plain(kept, 300), ...agent.knownIssues],
       artifacts: ['change.patch', 'changes.json', 'verification.json', 'review.md'],
     };
     await this.guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));

@@ -31,6 +31,7 @@ export class FakeGitHub {
     base: string;
     title: string;
     body: string;
+    draft: boolean;
     html_url: string;
   }[] = [];
   branches = new Set(['main']);
@@ -156,6 +157,7 @@ export class FakeGitHub {
         base: body.base,
         title: body.title,
         body: body.body,
+        draft: body.draft === true,
         html_url: `https://github.com/${this.repo}/pull/${number}`,
       };
       this.pulls.push(pull);

@@ -10,6 +10,8 @@ export interface PublishInput {
   baseRef: string;
   title: string;
   body: string;
+  /** Open the pull request as a draft: a change that is kept for the owner to look at. */
+  draft?: boolean;
 }
 
 /** Turns a verified change set into a pull request. Must be idempotent per branch. */
@@ -156,6 +158,7 @@ export class GitHubPublisher implements PullRequestPublisher {
       head: input.branch,
       base: target,
       body: input.body,
+      ...(input.draft ? { draft: true } : {}),
     });
     return { url: pr.html_url, number: pr.number, branch: input.branch };
   }
