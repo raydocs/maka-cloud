@@ -9,6 +9,8 @@ import {
   EGRESS_BLOCKED_V6,
   EGRESS_CHAIN,
   EGRESS_ICMPV6_ALLOWED,
+  EGRESS_LOOPBACK_V4,
+  EGRESS_LOOPBACK_V6,
   EgressGuardError,
 } from '../egress.js';
 import { type FakeInstaboxOptions, isAlive } from './fake-instabox.js';
@@ -34,6 +36,8 @@ describe('applyEgressGuard', () => {
   const replies = `-A ${EGRESS_CHAIN} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN`;
   const reject4 = (net: string) =>
     `-A ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp-port-unreachable`;
+  // The box talking to itself: the one exception to the loopback range, out of lo only.
+  const loopback = (net: string) => `-A ${EGRESS_CHAIN} -d ${net} -o lo -j RETURN`;
   const reject6 = (net: string) =>
     `-A ${EGRESS_CHAIN} -d ${net} -j REJECT --reject-with icmp6-port-unreachable`;
   const ICMPV6_TYPE = {
@@ -61,6 +65,7 @@ describe('applyEgressGuard', () => {
       replies,
       `-A ${EGRESS_CHAIN} -d 127.0.0.53/32 -p udp -m udp --dport 53 -j RETURN`,
       `-A ${EGRESS_CHAIN} -d 127.0.0.53/32 -p tcp -m tcp --dport 53 -j RETURN`,
+      loopback(EGRESS_LOOPBACK_V4),
       ...EGRESS_BLOCKED_V4.map(reject4),
     ]);
     for (const net of ['169.254.0.0/16', '127.0.0.0/8', '10.0.0.0/8']) {
@@ -83,6 +88,7 @@ describe('applyEgressGuard', () => {
         (kind) =>
           `-A ${EGRESS_CHAIN} -p ipv6-icmp -m icmp6 --icmpv6-type ${ICMPV6_TYPE[kind]} -j RETURN`,
       ),
+      loopback(EGRESS_LOOPBACK_V6),
       ...EGRESS_BLOCKED_V6.map(reject6),
     ]);
     for (const net of ['::1/128', 'fe80::/10', 'fc00::/7']) {
@@ -242,8 +248,51 @@ describe('applyEgressGuard', () => {
   });
 
   it('refuses when loopback cannot be blocked', async () => {
-    await make({ env: { SHIM_FAIL: '127\\.0\\.0\\.0/8' } });
+    await make({ env: { SHIM_FAIL: '127\\.0\\.0\\.0/8 -j REJECT' } });
     await assert.rejects(run(), /cannot block 127\.0\.0\.0\/8/u);
+  });
+
+  it('lets the box reach itself through lo, before the reject of the loopback range, and nothing wider', async () => {
+    await make();
+    await run();
+    for (const [rules, net, reject] of [
+      [v4(), EGRESS_LOOPBACK_V4, reject4],
+      [v6(), EGRESS_LOOPBACK_V6, reject6],
+    ] as const) {
+      const pass = rules.indexOf(loopback(net));
+      assert.ok(pass >= 0, `${net} is allowed to the box itself`);
+      assert.ok(pass < rules.indexOf(reject(net)), 'and the reject of the range stays behind it');
+      assert.equal(
+        rules.filter((rule) => rule.includes('-j RETURN') && rule.includes(net)).length,
+        1,
+        'one exception',
+      );
+    }
+  });
+
+  it('puts the loopback rule back when it was lost, and narrows one that is wider than lo', async () => {
+    await make();
+    await run();
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -D ${EGRESS_CHAIN} -d ${EGRESS_LOOPBACK_V4} -o lo -j RETURN`,
+    });
+    assert.ok(!v4().includes(loopback(EGRESS_LOOPBACK_V4)));
+    await run();
+    assert.ok(v4().includes(loopback(EGRESS_LOOPBACK_V4)));
+    // An exception for the range that is not tied to lo is not the rule the owner agreed to.
+    await h.client.exec(h.fake.machineId, {
+      cmd: `iptables -w -I ${EGRESS_CHAIN} 1 -d ${EGRESS_LOOPBACK_V4} -j RETURN`,
+    });
+    await run();
+    assert.deepEqual(
+      v4().filter((rule) => rule.includes(EGRESS_LOOPBACK_V4) && rule.includes('RETURN')),
+      [loopback(EGRESS_LOOPBACK_V4)],
+    );
+  });
+
+  it('refuses when the loopback exception cannot be installed', async () => {
+    await make({ env: { SHIM_FAIL: '-o lo' } });
+    await assert.rejects(run(), /cannot add the loopback rule/u);
   });
 
   it('refuses when the hook cannot be installed', async () => {

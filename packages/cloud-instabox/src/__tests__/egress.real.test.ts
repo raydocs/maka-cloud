@@ -4,7 +4,14 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { applyEgressGuard, EGRESS_BLOCKED_V4, EGRESS_BLOCKED_V6, EGRESS_CHAIN } from '../egress.js';
+import {
+  applyEgressGuard,
+  EGRESS_BLOCKED_V4,
+  EGRESS_BLOCKED_V6,
+  EGRESS_CHAIN,
+  EGRESS_LOOPBACK_V4,
+  EGRESS_LOOPBACK_V6,
+} from '../egress.js';
 import { setup, type Harness } from './harness.js';
 
 /**
@@ -33,6 +40,20 @@ function namespaceHolder(): { child: ChildProcess; pid: number } | undefined {
     return undefined;
   }
 }
+
+/** Brings lo up and gives it a private alias, with ioctls (the machine may have no `ip`). */
+const LO_SETUP = `
+import fcntl, socket, struct
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def ifreq(name, tail):
+    return struct.pack('16s', name.encode()) + tail
+flags = struct.unpack('16sH', fcntl.ioctl(s, 0x8913, ifreq('lo', b'\\0' * 24))[:18])[1]
+fcntl.ioctl(s, 0x8914, ifreq('lo', struct.pack('H', flags | 1 | 0x40) + b'\\0' * 22))
+def addr(ip):
+    return struct.pack('H', socket.AF_INET) + b'\\0\\0' + socket.inet_aton(ip) + b'\\0' * 8
+fcntl.ioctl(s, 0x8916, ifreq('lo:1', addr('10.9.9.9')))
+fcntl.ioctl(s, 0x891c, ifreq('lo:1', addr('255.255.255.255')))
+`;
 
 describe('applyEgressGuard against the real iptables', () => {
   const holder = process.platform === 'linux' ? namespaceHolder() : undefined;
@@ -123,5 +144,45 @@ describe('applyEgressGuard against the real iptables', () => {
     assert.ok(iptables('iptables', '-S', EGRESS_CHAIN).includes('-s 192.0.2.7/32'));
     await run();
     assert.equal(iptables('iptables', '-S', EGRESS_CHAIN), clean);
+  });
+
+  it('lets the box connect to itself on loopback while a private address on the same interface stays refused', async (t) => {
+    if (!holder) return t.skip('no network namespace to try it in');
+    const ns = `--net=/proc/${holder.pid}/ns/net`;
+    // lo is down in a fresh namespace. A private address the box owns sits on it: without the
+    // guard a connection to it would succeed too.
+    execFileSync('nsenter', [ns, 'python3', '-I', '-c', LO_SETUP]);
+    await run();
+    const rules = iptables('iptables', '-S', EGRESS_CHAIN);
+    assert.ok(rules.includes(`-d ${EGRESS_LOOPBACK_V4} -o lo -j RETURN`), rules);
+    assert.ok(
+      iptables('ip6tables', '-S', EGRESS_CHAIN).includes(
+        `-d ${EGRESS_LOOPBACK_V6} -o lo -j RETURN`,
+      ),
+    );
+    const script = `
+      const net = require('node:net');
+      const reach = (host) => new Promise((resolve) => {
+        const server = net.createServer((socket) => socket.end());
+        server.on('error', () => resolve('unavailable'));
+        server.listen(0, host, () => {
+          const socket = net.connect(server.address().port, host);
+          socket.on('connect', () => { socket.destroy(); server.close(); resolve('connected'); });
+          socket.on('error', (error) => { server.close(); resolve(error.code); });
+        });
+      });
+      (async () => {
+        const out = {};
+        for (const host of ['127.0.0.1', '::1', '10.9.9.9']) out[host] = await reach(host);
+        console.log(JSON.stringify(out));
+      })();
+    `;
+    const outcome = JSON.parse(
+      execFileSync('nsenter', [ns, process.execPath, '-e', script]).toString(),
+    ) as Record<string, string>;
+    assert.equal(outcome['127.0.0.1'], 'connected');
+    // A namespace without IPv6 has no ::1 to try.
+    assert.ok(['connected', 'unavailable'].includes(outcome['::1'] ?? ''), JSON.stringify(outcome));
+    assert.equal(outcome['10.9.9.9'], 'ECONNREFUSED', 'a private range is refused even on lo');
   });
 });

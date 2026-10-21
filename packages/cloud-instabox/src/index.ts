@@ -33,6 +33,8 @@ export {
   EGRESS_CHAIN,
   EGRESS_BLOCKED_V6,
   EGRESS_ICMPV6_ALLOWED,
+  EGRESS_LOOPBACK_V4,
+  EGRESS_LOOPBACK_V6,
   EgressGuardError,
   type EgressGuardOptions,
 } from './egress.js';
