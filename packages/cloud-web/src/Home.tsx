@@ -159,7 +159,7 @@ export function Home({
       {suggested.length > 0 && (
         <section className="card section-card" aria-label="Suggestions">
           <h2>Noticed for you ({suggested.length})</h2>
-          <p className="muted">Nothing starts until you tap Do it.</p>
+          <p className="muted">Nothing starts until you tap its first word.</p>
           {suggested.map((item) => (
             <div key={item.itemId} className="decision">
               <SuggestionCard

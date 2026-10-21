@@ -137,7 +137,7 @@ function Suggestions({ client, projectId }: { client: CloudClient; projectId: st
     <>
       <h3>Suggestions</h3>
       <p className="muted">
-        Things it may notice and offer to do. Nothing starts until you tap Do it.
+        Things it may notice and offer to do. Nothing starts until you tap its first word.
       </p>
       {error && (
         <p role="alert" className="error">

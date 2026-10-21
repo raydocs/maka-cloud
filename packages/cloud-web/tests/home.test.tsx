@@ -426,8 +426,13 @@ test('a suggestion is a card of its own with its cost in words, and does not cou
   expect(within(region).getByText('CI has failed on main since this morning.')).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Decisions waiting' })).toBeNull();
   expect(screen.queryByText(/Part of this was written by someone else/u)).toBeNull();
+  // An action sentence: the verb is the recommended answer's button, the other answer is quiet.
   const buttons = within(region).getAllByRole('button');
-  expect(buttons.map((b) => b.textContent)).toEqual(['Do it', 'Not now']);
+  expect(buttons.map((b) => b.textContent)).toEqual(['Fix', 'Not now']);
+  expect(buttons.map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual([
+    'Do it: Fix the failing test on main',
+    'Not now',
+  ]);
   fireEvent.click(buttons[0] as HTMLElement);
   fireEvent.click(buttons[0] as HTMLElement);
   await waitFor(() => expect(screen.queryByRole('region', { name: 'Suggestions' })).toBeNull());
@@ -446,12 +451,13 @@ test('a suggestion that moved is replaced by the new one and nothing is started'
     answer: () => Response.json({ error: 'stale', item: fresh }, { status: 409 }),
   });
   const region = await screen.findByRole('region', { name: 'Suggestions' });
-  fireEvent.click(within(region).getByRole('button', { name: 'Do it' }));
-  await screen.findByText('Fix the 2 failing tests on main');
+  fireEvent.click(within(region).getByRole('button', { name: /^Do it:/u }));
+  // The verb is a button inside the title, so the card is found by its name.
+  await screen.findByRole('article', { name: 'Fix the 2 failing tests on main' });
   expect(screen.getByRole('alert').textContent).toContain('changed while you were looking');
   expect(answers).toHaveLength(1);
   answers.length = 0;
-  fireEvent.click(screen.getByRole('button', { name: 'Do it' }));
+  fireEvent.click(screen.getByRole('button', { name: /^Do it:/u }));
   await waitFor(() => expect(answers).toHaveLength(1));
   expect(answers[0]?.preconditionHash).toBe('hs2');
 });

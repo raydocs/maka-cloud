@@ -18,9 +18,29 @@ export function SuggestionCard({
 }) {
   const facts = item.suggestion;
   const options = [...item.options].sort((a, b) => Number(b.recommended) - Number(a.recommended));
+  const title = displayText(item.ask);
+  // An action sentence: the title's first word (titles are verb-first) is the recommended answer's
+  // button, as in "[Fix] the failing test on main". Its name still says what it does ("Do it: …").
+  const act = facts && item.state !== 'answering' ? options.find((o) => o.recommended) : undefined;
+  const [verb = '', ...rest] = title.split(' ');
   return (
-    <article className="suggestion" aria-label={displayText(item.ask)}>
-      <h3>{displayText(item.ask)}</h3>
+    <article className="suggestion" aria-label={title}>
+      {act ? (
+        <h3 className="action-sentence">
+          <button
+            type="button"
+            className="verb-chip"
+            aria-label={`${displayText(act.label)}: ${title}`}
+            disabled={disabled}
+            onClick={() => onAnswer(act.id)}
+          >
+            {verb}
+          </button>{' '}
+          {rest.join(' ')}
+        </h3>
+      ) : (
+        <h3>{title}</h3>
+      )}
       {facts ? (
         <>
           <p className="muted">{suggestionLine(facts)}</p>
@@ -39,15 +59,29 @@ export function SuggestionCard({
         </p>
       ) : (
         <div className="inbox-options">
-          {options.map((option) => (
-            <Button
-              key={option.id}
-              label={displayText(option.label)}
-              variant={option.recommended ? 'primary' : 'secondary'}
-              isDisabled={disabled}
-              onClick={() => onAnswer(option.id)}
-            />
-          ))}
+          {options
+            .filter((option) => option !== act)
+            .map((option) =>
+              act ? (
+                <button
+                  key={option.id}
+                  type="button"
+                  className="quiet-action"
+                  disabled={disabled}
+                  onClick={() => onAnswer(option.id)}
+                >
+                  {displayText(option.label)}
+                </button>
+              ) : (
+                <Button
+                  key={option.id}
+                  label={displayText(option.label)}
+                  variant={option.recommended ? 'primary' : 'secondary'}
+                  isDisabled={disabled}
+                  onClick={() => onAnswer(option.id)}
+                />
+              ),
+            )}
         </div>
       )}
     </article>
