@@ -113,14 +113,15 @@ const repoPrefix = (tenantId: string, repoUrl: string): string =>
 
 /**
  * What the snapshot's description says it is, with the full digests. A snapshot found by name is used,
- * or deleted, only when this matches (and when the API returns no description, the long name stands).
+ * or deleted, only when this matches. A snapshot with no description, or another one, is not ours: a name
+ * is not proof, so there is no fallback to it.
  */
-function ownerRecord(tenantId: string, repoUrl: string, hash: string): string {
+export function ownerRecord(tenantId: string, repoUrl: string, hash: string): string {
   return `maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=${hash}`;
 }
 
 const ownsPrefix = (description: string | undefined, tenantId: string, repoUrl: string): boolean =>
-  description === undefined ||
+  description !== undefined &&
   description.startsWith(`maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=`);
 
 export class SnapshotOwnerError extends Error {}
@@ -284,10 +285,7 @@ export class SetupSnapshots {
   }
 
   private assertOwned(snapshot: SnapshotRecord, recipe: SetupRecipe, hash: string): void {
-    if (
-      snapshot.description !== undefined &&
-      snapshot.description !== ownerRecord(recipe.tenantId, recipe.repoUrl, hash)
-    ) {
+    if (snapshot.description !== ownerRecord(recipe.tenantId, recipe.repoUrl, hash)) {
       throw new SnapshotOwnerError(
         `snapshot ${snapshot.name} belongs to another invite, repository or setup`,
       );
