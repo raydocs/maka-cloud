@@ -45,7 +45,12 @@ export interface LiveSmokeIo {
   /** The run budget kept in the gateway's journal file; the real one by default. */
   runBudget?: {
     enforced: (journalPath: string) => boolean;
-    set: (journalPath: string, inviteId: string, budget: RunBudget, runId: string) => void;
+    set: (
+      journalPath: string,
+      inviteId: string,
+      budget: RunBudget,
+      runId: string,
+    ) => { fenced: boolean } | undefined;
     /** False when the run no longer holds the budget. */
     renew: (journalPath: string, inviteId: string, runId: string) => boolean;
     clear: (journalPath: string, inviteId: string, runId: string) => boolean;
@@ -94,7 +99,10 @@ function runCommand(command: readonly string[]): Promise<void> {
   });
 }
 
-export function createLiveSmokeDeps(settings: SmokeSettings, io: LiveSmokeIo = {}): SmokeDeps {
+export function createLiveSmokeDeps(
+  settings: SmokeSettings,
+  io: LiveSmokeIo = {},
+): SmokeDeps & { cancelLeftovers(): Promise<number> } {
   const doFetch = io.fetch ?? fetch;
   const readTotals = io.readTotals ?? readJournalTotals;
   const openInvites = io.openInvites ?? ((path: string) => new InviteStore(path));
@@ -272,6 +280,32 @@ export function createLiveSmokeDeps(settings: SmokeSettings, io: LiveSmokeIo = {
 
     async restart() {
       await run(settings.restartCommand);
+    },
+
+    /**
+     * Cancels every task of the smoke invite that is still going: what an earlier run left behind
+     * when this run took its budget over. Their credentials book nothing already; this stops the
+     * sandboxes too. Returns how many were cancelled; a task that cannot be is skipped.
+     */
+    async cancelLeftovers() {
+      const listed = await request('GET', '/v1/conversations');
+      const conversations =
+        isRecord(listed) && Array.isArray(listed.conversations) ? listed.conversations : [];
+      let cancelled = 0;
+      for (const conversation of conversations) {
+        const id = isRecord(conversation) ? conversation.conversationId : undefined;
+        if (typeof id !== 'string') continue;
+        for (const task of await this.tasks(id)) {
+          if (['succeeded', 'failed', 'cancelled'].includes(task.state)) continue;
+          try {
+            await this.cancel(task.taskId);
+            cancelled += 1;
+          } catch {
+            // It may have ended in the meantime.
+          }
+        }
+      }
+      return cancelled;
     },
 
     async healthy() {
@@ -460,13 +494,15 @@ export async function smokeCommand(
   // has booked since now reaches the budget, whatever the UTC day and whether or not the server
   // restarts in between. One run holds an invite's budget at a time, so two runs cannot overwrite
   // each other's cap.
+  let fenced = false;
   try {
-    budgets.set(
-      journalPath,
-      settings.inviteId,
-      { limitUsd: settings.maxUsd, sinceMs: Date.now() },
-      runId,
-    );
+    fenced =
+      budgets.set(
+        journalPath,
+        settings.inviteId,
+        { limitUsd: settings.maxUsd, sinceMs: Date.now() },
+        runId,
+      )?.fenced === true;
   } catch (error) {
     print(
       error instanceof RunBudgetHeld
@@ -508,6 +544,17 @@ export async function smokeCommand(
   try {
     print(`smoke test of ${settings.url} as ${settings.inviteId}, budget $${settings.maxUsd}`);
     const deps = createLiveSmokeDeps(settings, { ...io, log: io.log ?? print });
+    if (fenced) {
+      // The earlier run's gateway keys and conductor sessions book nothing from now on (the
+      // budget's generation moved); stop what it left running as well.
+      print('took over the run budget of an earlier run: its credentials are fenced');
+      try {
+        const cancelled = await deps.cancelLeftovers();
+        if (cancelled > 0) print(`cancelled ${cancelled} task(s) the earlier run left running`);
+      } catch {
+        print('could not list the earlier run’s tasks to cancel them; they can book nothing');
+      }
+    }
     const report = await runSmoke(deps, { repo: settings.repo, maxUsd: settings.maxUsd });
     for (const line of formatSmokeReport(report)) print(line);
     if (lost) {

@@ -630,9 +630,13 @@ Preparation:
    invite's run budget at a time: a second run is refused (exit 2) while the
    first is going. A run that is killed leaves its run budget in place, which
    only holds that invite back; about two minutes after it stopped renewing it,
-   the next smoke run takes it over. The new run counts what the killed run
-   spent toward its own budget, because that run's tasks may still be on the
-   server, so a run killed late leaves the next one little to spend.
+   the next smoke run takes it over. A takeover first fences the killed run:
+   every model key and conductor session issued under it books nothing from then
+   on (the invite's generation in the journal moves up), the new run cancels the
+   tasks it left running, and only then does the new run get a budget of its
+   own, starting empty. A run that ends clears its budget and fences its own
+   keys the same way. A budget left by an older version, without a row
+   sequence, books nothing until the next run reopens it.
 3. A command that restarts the server, as a JSON array (no shell is used). The
    service user cannot restart its own unit, so allow exactly that command:
 
