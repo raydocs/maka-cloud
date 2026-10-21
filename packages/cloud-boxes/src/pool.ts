@@ -820,8 +820,12 @@ export class BoxPool implements SandboxProvider {
           if ((error as { status?: number }).status !== 404) throw error;
         }
       }
-      if (exists) box.state = 'lost';
-      else this.forget(box);
+      if (exists) {
+        // Dated, so cleanup looks at it later: retried after the grace, deleted after the long limit.
+        box.state = 'lost';
+        box.lostAt = this.now();
+        box.sleepPhase = undefined;
+      } else this.forget(box);
     }
   }
 
