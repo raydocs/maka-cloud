@@ -39,8 +39,9 @@ not code. We combine the two:
 
 Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
 T28, T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
-T23 and T24. T29 (iOS and Android) runs in a second lane from now on, in
-parallel with the main order.
+T23, T24 and T30. T29 (iOS and Android) runs in a second lane from now on, in
+parallel with the main order. After T25 and T28: T27, T26, T14b, then T30;
+T31 joins the T29 lane. See "Direction (2026-10-21)" below T29.
 
 Borrow before building (2026-10-20). The owner wants to start testing as
 soon as possible, so a task takes a working piece from these projects before
@@ -808,6 +809,80 @@ needs a server change, that goes in its own small PR on the main lane.
   5 release profiles, ready for the owner's first TestFlight and internal
   track build.
 
+## Direction (2026-10-21): a software employee that feels like Hark
+
+The owner compared Maka Cloud with Hark Pro (hark.com, launched
+2026-10-06: web, iOS and Android; one chat, Home with one-tap Action
+Buttons, Projects, memory, Handoff, a cloud computer with its own browser
+per user; it does errands, not code). Decision: keep Maka Cloud a
+software employee, which Hark does not do, and match Hark's experience.
+Hark's errands, email and calendar, payments and the password vault are
+out of scope. What closes the experience gap, in order:
+
+1. Go live: the first deploy and smoke run on the owner's server, with the
+   open review fixes merged.
+2. Phone apps (T29), in their own lane.
+3. Boxes that feel like Hark's computer: the pool and sleep (T27, T26),
+   then live handoff (T14b), so the user can watch the employee's screen
+   and take over. T26's merge tool is what lets a one-tap card finish a job
+   end to end ("Merge PR #12").
+4. The employee notices work by itself (T30).
+5. Sign-in like Hark's (T31), before the apps go beyond TestFlight and
+   internal testing.
+
+## T30: the employee notices work by itself
+
+Depends on: T23, T24, T26 (merge tool). Takes the parts of T16 that T24
+did not.
+
+- Hark's Action Buttons, for a software employee: once a day per project,
+  and after each finished task, a read-only scan proposes up to three
+  verb-first cards on Home, each finished end to end with one tap: "Fix
+  the failing test on main", "Update 2 vulnerable dependencies", "Rebase
+  PR #12, it conflicts with main", "Close 4 issues the last release
+  fixed", "Finish what task #31 left out (2 skipped tests)".
+- Signals: CI on the default branch, flaky tests across recent runs,
+  Dependabot and security advisories, open PRs (conflicts, failing
+  checks, waiting on review comments), new issues the project's duties
+  do not cover, and the employee's own results (skipped tests, follow-ups
+  it offered). A cheap model ranks them. Scanning never writes or runs
+  code.
+- Each card shows what it will do, the mode and an estimated cost from
+  similar past tasks, and keeps T24's precondition hash: if the state
+  changed, the card refreshes instead of acting. A tap starts one task
+  within the project's budget; the result arrives as T24's result card
+  with at most two actions ("Merge PR #14", "Open preview").
+- Noise limits: at most three new cards a day per project; the same
+  suggestion is not shown again for a week after a dismissal; after three
+  ignored cards of one kind, show it less often and offer to turn that
+  kind off. Accept and dismiss counts are kept per kind.
+- Issue, comment and advisory text is tainted under T15: it can shape a
+  card's wording, never the tools a task may use or its authority, and a
+  card whose instruction comes from outside text goes through T15's
+  approval like any other.
+- Tests: a scan with fixture repositories proposes the expected cards and
+  writes nothing; a stale card refreshes; one tap starts exactly one task;
+  caps and backoff; injected text in an issue cannot raise a card's
+  authority.
+
+## T31: sign-in like Hark's
+
+Depends on: T29. Takes the sign-in part of T17; plans and payments stay
+in T17.
+
+- Sign in with Apple, Google and an email link, on the web and both
+  apps (the App Store requires Sign in with Apple when Google is
+  offered). An account maps to one invite; invites still gate who gets
+  in during the beta.
+- Sessions are revocable per device, the app keeps its token in the
+  Keychain or Keystore (T29), and sign-out drops the device's push
+  token.
+- Only identity scopes: no Gmail, Drive or calendar access.
+- Provider client ids and keys are entered by the owner.
+- Tests with fake providers: a new account without an invite is refused,
+  a second provider links to the same account only after a signed-in
+  confirmation, a revoked session cannot use its token.
+
 ---
 
 # Batch 3: personal assistant feel
@@ -892,9 +967,9 @@ Gmail scopes.
 
 ## T16: proactive suggestion cards
 
-Folded into T23 (duty proposals) and T24 (Home cards). Do not start it
-separately; what is left (accept and dismiss tracking, backoff after three
-ignored cards, a daily cap) goes into T24.
+Folded into T23 (duty proposals), T24 (Home cards) and T30 (cards the
+employee proposes by itself, with accept and dismiss tracking, backoff
+and a daily cap). Do not start it separately.
 
 Depends on: T11, T12, T13, T20 (cards reuse its item store, delivery and
 noise limits).
@@ -912,7 +987,7 @@ noise limits).
 
 Depends on: T4.
 
-- Sign-in (GitHub and Google identity only, no Gmail scopes), per-user plans
+- Sign-in moved to T31. Per-user plans
   with monthly and per-task spend limits, and a usage ledger fed by the model
   gateway's per-key usage.
 - Concurrent tasks reserve budget before each model request and stop at the
