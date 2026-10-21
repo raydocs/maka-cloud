@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { scrubErrorText, setKnownSecrets } from '@maka-cloud/server';
 import { createLogger, createScrubber } from '../log.js';
 
 const ENV = {
@@ -328,4 +329,13 @@ test('an error whose properties throw does not make warning throw', () => {
   assert.equal(lines.length, 2, 'both lines were written');
   assert.ok(!lines.join('').includes('private text'));
   assert.ok(!lines.join('').includes('getter'));
+});
+
+test('the secrets the process was given are removed from the text the server shows clients, not only from logs', (t) => {
+  t.after(() => setKnownSecrets([]));
+  const probe = `the gateway refused ${ENV.CUSTOM_PASSWORD}`;
+  setKnownSecrets([]);
+  assert.equal(scrubErrorText(probe), probe, 'nothing is known before the logger starts');
+  logger();
+  assert.equal(scrubErrorText(probe), 'the gateway refused [secret]');
 });
