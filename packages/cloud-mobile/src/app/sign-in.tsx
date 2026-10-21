@@ -19,7 +19,8 @@ export default function SignIn() {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: 20, gap: 16, flexGrow: 1, justifyContent: 'center' }}
+          // Top-aligned, so the form does not slide when the keyboard opens.
+          contentContainerStyle={{ padding: 20, paddingTop: 56, gap: 20 }}
           keyboardShouldPersistTaps="handled"
         >
           <View style={{ gap: 8 }}>
