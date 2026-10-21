@@ -89,28 +89,35 @@ test('long notes are clipped to one line', () => {
   assert.ok(!note.includes('\n'));
 });
 
-test('claude command: resume, model and MCP only when asked for', () => {
-  const plain = claudeAdapter.command({ prompt: 'go' });
+test('claude argv: resume, model and MCP only when asked for', () => {
+  const plain = claudeAdapter.argv({ prompt: 'go' });
   assert.ok(
     !plain.includes('--resume') && !plain.includes('--model') && !plain.includes('--mcp-config'),
   );
-  const full = claudeAdapter.command({
+  const full = claudeAdapter.argv({
     prompt: "it's",
     resumeSessionId: 's-1',
     model: 'm-1',
     mcpUrl: 'http://x/mcp',
   });
-  assert.match(full, /--resume 's-1'/);
-  assert.match(full, /--model 'm-1'/);
-  assert.match(full, /--strict-mcp-config/);
-  assert.ok(full.includes(`-p ${shq("it's")}`));
+  assert.equal(full[0], 'claude');
+  assert.equal(full[full.indexOf('--resume') + 1], 's-1');
+  assert.equal(full[full.indexOf('--model') + 1], 'm-1');
+  assert.ok(full.includes('--strict-mcp-config'));
+  // Nothing is quoted here: the machine does that, once.
+  assert.equal(full[full.indexOf('-p') + 1], "it's");
 });
 
-test('codex command: resume subcommand and config overrides', () => {
-  assert.match(codexAdapter.command({ prompt: 'go' }), /^codex exec --json --skip-git-repo-check /);
-  const resumed = codexAdapter.command({ prompt: 'go', resumeSessionId: 'th-1', model: 'gpt-x' });
-  assert.match(resumed, /^codex exec resume 'th-1' --json /);
-  assert.match(resumed, /-c 'model="gpt-x"'/);
+test('codex argv: resume subcommand and config overrides', () => {
+  assert.deepEqual(codexAdapter.argv({ prompt: 'go' }).slice(0, 4), [
+    'codex',
+    'exec',
+    '--json',
+    '--skip-git-repo-check',
+  ]);
+  const resumed = codexAdapter.argv({ prompt: 'go', resumeSessionId: 'th-1', model: 'gpt-x' });
+  assert.deepEqual(resumed.slice(0, 5), ['codex', 'exec', 'resume', 'th-1', '--json']);
+  assert.ok(resumed.includes('model="gpt-x"'));
 });
 
 test('neither command nor environment can select a subscription login', () => {
@@ -124,9 +131,9 @@ test('neither command nor environment can select a subscription login', () => {
   ]);
   assert.match(preambleFor(claudeAdapter), /unset CLAUDE_CODE_OAUTH_TOKEN/);
   assert.match(preambleFor(claudeAdapter), /\.credentials\.json/);
-  assert.match(codexAdapter.command({ prompt: 'x' }), /forced_login_method="api"/);
+  assert.ok(codexAdapter.argv({ prompt: 'x' }).includes('forced_login_method="api"'));
   assert.match(preambleFor(codexAdapter), /chatgpt/);
-  const text = `${claudeAdapter.command({ prompt: 'x' })}${codexAdapter.command({ prompt: 'x' })}`;
+  const text = `${claudeAdapter.argv({ prompt: 'x' }).join(' ')}${codexAdapter.argv({ prompt: 'x' }).join(' ')}`;
   assert.ok(
     !/claude code/i.test(text),
     'no product branding in anything the agent or user is shown',

@@ -106,7 +106,8 @@ export interface VendorAdapter {
   readonly unsetVars: readonly string[];
   /** Shell lines that refuse to start when a subscription login is present in the sandbox. */
   readonly guard: string;
-  command(input: CommandInput): string;
+  /** The program and its arguments, as they are, with no shell quoting: the machine quotes them. */
+  argv(input: CommandInput): string[];
   env(access: ModelAccess, mcpToken: string | undefined): Record<string, string>;
   parser(redact?: Redact): LineParser;
 }
@@ -293,11 +294,11 @@ export const claudeAdapter: VendorAdapter = {
     `  ${guardLine('a subscription login is present in the sandbox; only API keys are allowed')}`,
     'fi',
   ].join('\n'),
-  command(input) {
+  argv(input) {
     const args = [
       'claude',
       '-p',
-      shq(input.prompt),
+      input.prompt,
       '--output-format',
       'stream-json',
       '--verbose',
@@ -306,9 +307,9 @@ export const claudeAdapter: VendorAdapter = {
       '--setting-sources',
       'project,local',
     ];
-    if (input.resumeSessionId) args.push('--resume', shq(input.resumeSessionId));
-    if (input.model) args.push('--model', shq(input.model));
-    if (input.effort) args.push('--effort', shq(input.effort));
+    if (input.resumeSessionId) args.push('--resume', input.resumeSessionId);
+    if (input.model) args.push('--model', input.model);
+    if (input.effort) args.push('--effort', input.effort);
     if (input.mcpUrl) {
       const config = {
         mcpServers: {
@@ -320,9 +321,9 @@ export const claudeAdapter: VendorAdapter = {
           },
         },
       };
-      args.push('--mcp-config', shq(JSON.stringify(config)), '--strict-mcp-config');
+      args.push('--mcp-config', JSON.stringify(config), '--strict-mcp-config');
     }
-    return args.join(' ');
+    return args;
   },
   env(access, mcpToken) {
     return {
@@ -428,7 +429,7 @@ export const codexAdapter: VendorAdapter = {
     `  ${guardLine('a subscription login is present in the sandbox; only API keys are allowed')}`,
     'fi',
   ].join('\n'),
-  command(input) {
+  argv(input) {
     // Everything goes through -c so the same options work for `exec` and `exec resume`.
     const configs = [
       'sandbox_mode="danger-full-access"',
@@ -445,11 +446,11 @@ export const codexAdapter: VendorAdapter = {
     if (input.model) configs.push(`model=${tomlString(input.model)}`);
     if (input.effort) configs.push(`model_reasoning_effort=${tomlString(input.effort)}`);
     const args = ['codex', 'exec'];
-    if (input.resumeSessionId) args.push('resume', shq(input.resumeSessionId));
+    if (input.resumeSessionId) args.push('resume', input.resumeSessionId);
     args.push('--json', '--skip-git-repo-check');
-    for (const config of configs) args.push('-c', shq(config));
-    args.push(shq(input.prompt));
-    return args.join(' ');
+    for (const config of configs) args.push('-c', config);
+    args.push(input.prompt);
+    return args;
   },
   env(access, mcpToken) {
     return {

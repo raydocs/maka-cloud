@@ -1,69 +1,67 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { agentIsolationProblems, asAgent } from '../agent-user.js';
-import { buildRunScript } from '../scripts.js';
-import { exists, HARNESS_AGENT, setup, until } from './harness.js';
+import { promises as fs } from 'node:fs';
+import { agentIsolationProblems } from '../agent-user.js';
+import { exists, setup, until } from './harness.js';
 
-const launchInput = (h: { root: string }, dirName: string, command: string) => ({
+const launchInput = (h: { root: string }, dirName: string, program: string, args: string[]) => ({
   dirName,
   run: 't1',
-  script: buildRunScript({ preamble: '', command }),
+  preamble: '',
+  program,
+  args,
   envs: {},
   runToken: `token-${dirName}`,
   workdir: join(h.root, dirName),
 });
 
-test('task code is never started as the sandbox user, who may change the firewall', async (t) => {
+// Everything a caller could put in a word to run something else as the sandbox user.
+const HOSTILE = [
+  '; touch "$MAKA_DIR/ran"',
+  '&& touch "$MAKA_DIR/ran"',
+  'x\ntouch "$MAKA_DIR/ran"',
+  '$(touch "$MAKA_DIR/ran")',
+  '`touch "$MAKA_DIR/ran"`',
+  '\'; touch "$MAKA_DIR/ran"; \'',
+  '| touch "$MAKA_DIR/ran"',
+  'EOF\ntouch "$MAKA_DIR/ran"\nEOF',
+];
+
+test('a program and its arguments reach the agent account as the words they are, never as shell', async (t) => {
   const h = await setup();
   t.after(() => h.cleanup());
   const machine = h.runners.fleet.machine(h.fake.machineId);
-  await machine.prepare('tsk_fw_plain');
-  await assert.rejects(
-    machine.launch(launchInput(h, 'tsk_fw_plain', 'touch "$MAKA_DIR/ran"')),
-    /would start as the sandbox user/u,
+  for (const [i, word] of HOSTILE.entries()) {
+    const dir = `tsk_fw_word${i}`;
+    await machine.prepare(dir);
+    const started = await machine.launch(
+      launchInput(h, dir, 'sh', ['-c', 'printf %s "$1" > "$MAKA_DIR/arg"', 'sh', word]),
+    );
+    assert.equal(started, 'started');
+    await until(() => exists(join(h.root, dir, 't1.exit')));
+    assert.equal(await fs.readFile(join(h.root, dir, 'arg'), 'utf8'), word);
+    assert.equal(
+      await exists(join(h.root, dir, 'ran')),
+      false,
+      `shell ran: ${JSON.stringify(word)}`,
+    );
+  }
+  // One account switch per run, and it is the agent's.
+  assert.deepEqual(
+    await h.sudoUsers(),
+    HOSTILE.map(() => 'maka-agent'),
   );
-  // Nothing started: no run was written, and the box was not even asked to close its firewall.
-  assert.equal(await exists(join(h.root, 'tsk_fw_plain', 't1.pid')), false);
-  assert.equal(await exists(join(h.root, 'tsk_fw_plain', 'ran')), false);
 });
 
-test('a run handed to another account than the configured agent is refused', async (t) => {
+test('a program named like shell does not start a second command', async (t) => {
   const h = await setup();
   t.after(() => h.cleanup());
   const machine = h.runners.fleet.machine(h.fake.machineId);
-  await machine.prepare('tsk_fw_other');
-  const other = asAgent('true', { user: 'root', group: 'maka' });
-  await assert.rejects(
-    machine.launch(launchInput(h, 'tsk_fw_other', other)),
-    /would start as the sandbox user/u,
-  );
-});
-
-test('the agent account being named in a comment does not make a plain command pass', async (t) => {
-  const h = await setup();
-  t.after(() => h.cleanup());
-  const machine = h.runners.fleet.machine(h.fake.machineId);
-  await machine.prepare('tsk_fw_comment');
-  const wrapper = asAgent('true', HARNESS_AGENT);
-  await assert.rejects(
-    machine.launch(launchInput(h, 'tsk_fw_comment', `touch "$MAKA_DIR/ran" # ${wrapper}`)),
-    /would start as the sandbox user/u,
-  );
-  assert.equal(await exists(join(h.root, 'tsk_fw_comment', 'ran')), false);
-});
-
-test('the agent wrapper on a later line does not cover the command before it', async (t) => {
-  const h = await setup();
-  t.after(() => h.cleanup());
-  const machine = h.runners.fleet.machine(h.fake.machineId);
-  await machine.prepare('tsk_fw_later');
-  const command = `touch "$MAKA_DIR/ran"\n${asAgent('true', HARNESS_AGENT)}`;
-  await assert.rejects(
-    machine.launch(launchInput(h, 'tsk_fw_later', command)),
-    /would start as the sandbox user/u,
-  );
-  assert.equal(await exists(join(h.root, 'tsk_fw_later', 'ran')), false);
+  await machine.prepare('tsk_fw_prog');
+  await machine.launch(launchInput(h, 'tsk_fw_prog', 'true; touch "$MAKA_DIR/ran"', []));
+  await until(() => exists(join(h.root, 'tsk_fw_prog', 't1.exit')));
+  assert.equal(await exists(join(h.root, 'tsk_fw_prog', 'ran')), false);
 });
 
 test('a machine with no agent account starts no task code at all', async (t) => {
@@ -72,32 +70,32 @@ test('a machine with no agent account starts no task code at all', async (t) => 
   const machine = h.runners.fleet.machine(h.fake.machineId);
   await machine.prepare('tsk_fw_none');
   await assert.rejects(
-    machine.launch(launchInput(h, 'tsk_fw_none', asAgent('true', HARNESS_AGENT))),
+    machine.launch(launchInput(h, 'tsk_fw_none', 'true', [])),
     /no agent account/u,
   );
+  assert.equal(await exists(join(h.root, 'tsk_fw_none', 't1.pid')), false);
 });
 
-test('a run wrapped for the agent account starts', async (t) => {
-  const h = await setup();
-  t.after(() => h.cleanup());
-  const machine = h.runners.fleet.machine(h.fake.machineId);
-  await machine.prepare('tsk_fw_ok');
-  const command = asAgent('sh -c \'echo ok > "$MAKA_DIR/ran"\'', HARNESS_AGENT);
-  assert.equal(await machine.launch(launchInput(h, 'tsk_fw_ok', command)), 'started');
-  await until(async () => (await h.sudoUsers()).length > 0);
-  assert.deepEqual(await h.sudoUsers(), ['maka-agent']);
-  await until(() => exists(join(h.root, 'tsk_fw_ok', 't1.exit')));
-});
-
-test('the CLI install is the one run that stays the sandbox user, and it still works', async (t) => {
+test('the CLI install is its own closed method: it needs an install directory and does not switch account', async (t) => {
   const h = await setup({ installClis: false });
   t.after(() => h.cleanup());
   const machine = h.runners.fleet.machine(h.fake.machineId);
+  await assert.rejects(
+    machine.launchInstall({ dirName: 'tsk_fw_task', run: 'i-1', install: 'true', runToken: 'x' }),
+    /not an install directory/u,
+  );
   await machine.prepare('.setup-claude');
-  const input = launchInput(h, '.setup-claude', 'true');
-  await assert.rejects(machine.launch(input), /would start as the sandbox user/u);
-  assert.equal(await machine.launch({ ...input, runsAs: 'sandbox-user' }), 'started');
-  await until(() => exists(join(h.root, '.setup-claude', 't1.exit')));
+  assert.equal(
+    await machine.launchInstall({
+      dirName: '.setup-claude',
+      run: 'i-1',
+      install: 'true',
+      runToken: 'tok-install',
+    }),
+    'started',
+  );
+  await until(() => exists(join(h.root, '.setup-claude', 'i-1.exit')));
+  assert.deepEqual(await h.sudoUsers(), []);
 });
 
 const FACTS = [

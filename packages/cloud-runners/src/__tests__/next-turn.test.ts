@@ -60,13 +60,9 @@ test('a kill that names runs leaves the other runs of the task, and their output
     await machine.launch({
       dirName: 'tsk_two',
       run,
-      script: buildRunScript({
-        preamble: '',
-        command: asAgent(
-          `sh -c ${shq('echo out-$MAKA_RUN; while :; do sleep 1; done')}`,
-          HARNESS_AGENT,
-        ),
-      }),
+      preamble: '',
+      program: 'sh',
+      args: ['-c', 'echo out-$MAKA_RUN; while :; do sleep 1; done'],
       envs: {},
       runToken: `token-${run}`,
       workdir: join(h.root, 'tsk_two'),

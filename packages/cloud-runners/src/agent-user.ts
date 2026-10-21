@@ -41,13 +41,13 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
  * remove what the agent writes in the workspace.
  */
 export function asAgent(commandLine: string, channel: AgentChannel): string {
-  const { user } = assertAgentChannel(channel);
-  return `${agentPrefix(user)}sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
+  return asAgentUser(commandLine, assertAgentChannel(channel).user);
 }
 
-/** What every command of `asAgent` starts with; `RemoteMachine.launch` looks for it in a task's script. */
-export function agentPrefix(user: string): string {
-  return `sudo -n -u ${shq(user)} --preserve-env -- `;
+/** `asAgent` for a caller that knows the account's name only. */
+export function asAgentUser(commandLine: string, user: string): string {
+  assertAgentChannel({ user, group: 'x' });
+  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
 }
 
 /**
