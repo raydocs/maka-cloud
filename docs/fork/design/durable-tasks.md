@@ -12,8 +12,8 @@ Status of the pieces (updated by each PR):
 | 4 | Transcript mirror and fresh-box resume | merged (#200), section 4 (on when the host sets `MAKA_CLOUD_AGENT_USER` and `_GROUP`) |
 | 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
 | 6 | Steering, `restart` event, catch-up, stream fence | merged (#208, #209), section 6 |
-| 7 | Run timeline | in review, section 7 |
-| 8 | Drills, known gaps, bench | not built |
+| 7 | Run timeline | merged (#222), section 7 |
+| 8 | Drills, known gaps, bench | in review, section 8 |
 
 ## 1. Step log and epoch fencing
 
@@ -310,5 +310,45 @@ One view of what a task did, drawn from the step log and nothing else.
 
 ### Not built
 
-- **Tokens** (cached input too). The log holds dollars only; the gateway's journal does too. Tokens would need the runner to report them with its usage; they are listed as a known gap for piece 8.
+- **Tokens** (cached input too). The log holds dollars only; the gateway's journal does too. Tokens would need the runner to report them with its usage; they are listed as a known gap in section 8.
 - **A web or phone view.** The data and the client call exist; drawing them is the apps' lane.
+
+## 8. Drills, known gaps and the bench
+
+### The scripted CLI
+
+`cloud-runners/src/__tests__/fake-sdk-cli.ts` is a stand-in for `claude` that the real Agent SDK drives. In `tools` mode it makes the tool calls listed in `tools.json` (`call <tool> <input>`), asking the SDK's hooks before and after each one; anything else it says is echoed. A tool can also `fail`, `hang` (the CLI stays inside the tool) or `spawn` a shell command as a child in a process group and session of its own, which is what a stop of the run's group does not reach.
+
+### The kill-inside-a-`never`-step drill
+
+`drill.test.ts` (set up in `drill.ts`). The CLI makes a safe call (`Read`), then a `never` one (`Bash: deploy --now`) whose child lives on in a group of its own. A second orchestrator takes over the same log and sandbox while the first is still alive, as a driver that lost its lease would be. It checks, with the real SDK, hooks, step log and process groups:
+
+- the second process stops the old run by task id and resumes the task in its recorded session;
+- the `never` step ends as `interrupted` and the CLI is never asked to run it again (`ran.log` holds each call once); the safe step stays `done`;
+- the recovery note names the finished step and the cut-off one in words;
+- the first process, still holding its epoch-1 step log, can neither settle the step nor start another, and writes nothing.
+
+The drill fails if the takeover stops marking open steps interrupted (checked by removing it).
+
+### Known gaps
+
+Each is a test in `known-gaps.test.ts` that states what should hold and is expected to fail. When the owner closes the gap the test fails with "the gap is closed" until its entry and its row here are removed.
+
+| Gap | Owner |
+|---|---|
+| A child that left the run's process group (its own `setsid`) outlives the stop of its task, and its late write lands in the workspace. The step log fences the log, not the files; workspace files are not transactional. | T27 (stopping or replacing the whole box) |
+| A turn that makes no tool call never reads a message sent to it. The owner is told it was not seen (`task_steer_unseen`). | T28, agent side |
+| The Codex runner takes no messages for a running task. | T27 |
+| A runner's usage report carries dollars only: no input, output or cached tokens, so neither the log nor the timeline can show them. | T28 follow-up |
+
+### The bench
+
+Measured once, offline, with a fake runner: what durability adds (the SQLite log, the step log, the takeover), not a sandbox or a model. The method is durable-harness's: the median of per-round differences, warm-up rounds (5) left out, 25 rounds counted. Both are tests, so a regression fails them (`bench.test.ts` in `cloud-server`, and the drill in `cloud-runners`).
+
+| Gate | Limit | Measured (this machine) |
+|---|---|---|
+| First token of a durable task (delegate until the first progress note is in the log), over a plain run | 150 ms | 12.9 ms (plain 0.03 ms, durable 12.9 ms) |
+| A restart to a run going again, server stop and start included, SQLite log, fake runner | 12 s | 23 ms |
+| The drill's takeover to the resumed CLI having its message (real SDK, real stop of the old run by task id) | 12 s | 305 ms |
+
+The real figure for a box adds what a box costs (stopping the old run, waking a suspended machine, a fresh box for a lost one); T26 and T27 own those. The first-token gate does not include the model's own latency, which is the same with and without the log.
