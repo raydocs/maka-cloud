@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
   containsSecret,
+  scrubReading,
   scrubSecretFields,
   scrubSecretShapes,
   scrubSecretText,
@@ -291,4 +292,29 @@ test('a key split by a character that shows nothing is still found, whichever th
     scrubSecretText('na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}'),
     'na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}',
   );
+});
+
+test('text of scripts that are written with combining marks is shown as written, with or without a secret in it', () => {
+  const hindi = 'किताब में पुस्तक है';
+  const thai = 'สวัสดีครับ';
+  const arabic = 'مُحَمَّد';
+  const emoji = '❤️ 1️⃣';
+  for (const text of [hindi, thai, arabic, emoji]) {
+    assert.equal(scrubReading(text, scrubSecretShapes), text);
+    assert.equal(scrubSecretText(text), text);
+  }
+  setKnownSecrets(['abc12345SECRETkey']);
+  assert.equal(scrubSecretText(`${hindi} abc12345́SECRETkey ${thai}`), `${hindi} [secret] ${thai}`);
+  // A secret with marks of its own script inside it is found too, at the price of those marks.
+  setKnownSecrets(['पुस्तक-secret-9']);
+  assert.equal(scrubSecretText('x पुस्‍तक-secret-9 y'), 'x [secret] y');
+});
+
+test('a short registered value that is a number or a version is left alone, a mixed one is a key', () => {
+  setKnownSecrets(['1.0.0', '604800', '123456', 'en-US']);
+  assert.equal(
+    scrubSecretShapes('Node 1.0.0, ttl 604800, 123456'),
+    'Node 1.0.0, ttl 604800, 123456',
+  );
+  assert.equal(scrubSecretShapes('locale en-US'), 'locale [secret]');
 });

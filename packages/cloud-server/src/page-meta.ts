@@ -1,5 +1,6 @@
 import { publicHttpsUrl } from './safe-fetch.js';
 import { scrubErrorText } from './public-view.js';
+import { withoutHidden } from './secret-shapes.js';
 
 /**
  * What a card needs from a page it was given: a title and the address of its preview image.
@@ -42,7 +43,7 @@ function decodeEntities(text: string): string {
 
 /** One short printable line, with no model or vendor names (the rule every outside string follows). */
 export function plainLine(text: string, max = MAX_TITLE_CHARS): string | undefined {
-  const line = scrubErrorText(decodeEntities(text))
+  const line = scrubErrorText(withoutHidden(decodeEntities(text)))
     .replace(UNPRINTABLE, ' ')
     .replace(/\s+/gu, ' ')
     .trim();

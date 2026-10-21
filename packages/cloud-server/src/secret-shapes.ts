@@ -6,7 +6,9 @@ export {
   linkedSecretPair,
   scrubSecretFields,
   scrubSecretShapes,
+  scrubReading,
   scrubSecretText,
   setKnownSecrets,
+  withoutHidden,
   withoutInvisible,
 } from '@maka-cloud/orchestrator';

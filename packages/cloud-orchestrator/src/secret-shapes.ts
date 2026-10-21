@@ -119,8 +119,9 @@ export function setKnownSecrets(values: readonly string[]): void {
   const forms = new Set<string>();
   for (const value of values) {
     const secret = value.trim();
-    // A short value that is only letters is a word (a provider, a mode): it would eat ordinary text.
-    if (secret.length < 8 && /^\p{L}*$/u.test(secret)) continue;
+    // A short value that is only letters is a word (a provider, a mode), one with no letter at all a number
+    // (a port, a version, a ttl): either would eat ordinary text.
+    if (secret.length < 8 && /^(?:\p{L}*|[\d.\-_]*)$/u.test(secret)) continue;
     if (secret === '') continue;
     for (const form of secretForms(secret)) forms.add(form);
   }
@@ -377,10 +378,39 @@ function scrubShapes(text: string): string {
  */
 const INVISIBLE =
   /[\p{Cf}\p{Mn}\p{Me}\u115f\u1160\u2800\u3164\uffa0\u180b-\u180d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+/** The same without the combining marks, which are part of how Indic, Thai and Arabic text is written. */
+const INVISIBLE_NOT_MARKS =
+  /[\p{Cf}\u115f\u1160\u2800\u3164\uffa0\u034f\u180b-\u180d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+/** A combining mark after an ASCII character: Latin text has no use for one that NFKC could not compose. */
+const MARK_AFTER_ASCII = /([\x21-\x7e])[\p{Mn}\p{Me}]+/gu;
 
 /** `value` as it reads: compatibility forms folded, invisible characters gone. For finding secrets, not for showing. */
 export function withoutInvisible(value: string): string {
   return value.normalize('NFKC').replace(INVISIBLE, '');
+}
+
+/** Like `withoutInvisible`, but the combining marks of other scripts stay, so it can be shown: the text of an outside page, or of a message with a secret cut out of it. */
+export function withoutHidden(value: string): string {
+  return value.normalize('NFKC').replace(INVISIBLE_NOT_MARKS, '').replace(MARK_AFTER_ASCII, '$1');
+}
+
+/**
+ * Runs `scrub` over `value` as it reads, so a token split by characters that show nothing is found
+ * by patterns that know nothing of them. When nothing is found, the text comes back exactly as it
+ * was written (an emoji joined by a zero-width joiner, a Hindi sentence); when something is, the
+ * text comes back with the invisible characters gone, and the marks of other scripts kept where
+ * the secret allowed.
+ */
+export function scrubReading(value: string, scrub: (text: string) => string): string {
+  const shown = withoutHidden(value);
+  const scrubbedShown = scrub(shown);
+  if (scrubbedShown !== shown) return scrubbedShown;
+  const plain = withoutInvisible(value);
+  if (plain !== shown) {
+    const scrubbedPlain = scrub(plain);
+    if (scrubbedPlain !== plain) return scrubbedPlain;
+  }
+  return scrub(value);
 }
 
 /**
@@ -389,9 +419,7 @@ export function withoutInvisible(value: string): string {
  * comes back untouched, so an emoji joined by a zero-width joiner survives.
  */
 export function scrubSecretText(value: string): string {
-  const plain = withoutInvisible(value);
-  const scrubbed = scrubSecretShapes(plain);
-  return scrubbed === plain ? scrubSecretShapes(value) : scrubbed;
+  return scrubReading(value, scrubSecretShapes);
 }
 
 /**
@@ -402,8 +430,7 @@ export function scrubSecretText(value: string): string {
  */
 export function containsSecret(value: unknown, depth = 0): boolean {
   if (typeof value === 'string') {
-    const plain = withoutInvisible(value);
-    return scrubSecretShapes(plain) !== plain || scrubSecretShapes(value) !== value;
+    return scrubReading(value, scrubSecretShapes) !== value;
   }
   if (depth > 12 || typeof value !== 'object' || value === null) return false;
   if (JSON.stringify(scrubSecretFields(value)) !== JSON.stringify(value)) return true;

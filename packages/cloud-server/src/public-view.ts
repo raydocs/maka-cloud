@@ -4,7 +4,7 @@ import {
   scrubSecretFields,
   scrubSecretShapes,
   scrubSecretText,
-  withoutInvisible,
+  scrubReading,
 } from './secret-shapes.js';
 
 export { scrubSecretText };
@@ -27,7 +27,7 @@ const HIDDEN_NAMES =
  * first so one cannot split a token past the patterns.
  */
 export function scrubErrorText(value: string): string {
-  return scrubSecretShapes(withoutInvisible(value)).replace(HIDDEN_NAMES, 'assistant');
+  return scrubReading(value, (text) => scrubSecretShapes(text).replace(HIDDEN_NAMES, 'assistant'));
 }
 
 /** A result manifest as clients see it. Every line of it is the runner's own words. */
