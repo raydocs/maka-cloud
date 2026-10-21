@@ -162,7 +162,10 @@ export interface FakeRunnerOptions {
   /** Whether runs offer `pause` and `resume`. Default true. */
   pausable?: boolean;
   /** Gives the runner a `stopOrphaned` that calls this. Without it the runner has none. */
-  stopOrphaned?: (taskId: string, options: { signal?: AbortSignal }) => Promise<void>;
+  stopOrphaned?: (
+    taskId: string,
+    options: { signal?: AbortSignal; epoch?: number },
+  ) => Promise<void>;
   /**
    * Gives the runner a `recover`, so a restart resumes its tasks instead of ending them: it
    * returns a new run, after `onStart`. `error` makes it reject.
@@ -176,7 +179,10 @@ export class FakeRunner implements Runner {
   readonly runs: FakeRun[] = [];
   /** Task ids `stopOrphaned` was called for. Only filled when the runner has the method. */
   readonly orphanStops: string[] = [];
-  stopOrphaned?: (taskId: string, options?: { signal?: AbortSignal }) => Promise<void>;
+  stopOrphaned?: (
+    taskId: string,
+    options?: { signal?: AbortSignal; epoch?: number },
+  ) => Promise<void>;
   /** Present only when the runner was built with the `recover` option. */
   recover?: (spec: RunSpec & { recovery: Recovery }) => Promise<RunHandle>;
   /** The specs `recover` was called with. */

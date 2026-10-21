@@ -136,7 +136,8 @@ test('a restart loads only unfinished tasks from the store', async (t) => {
   store.readTaskCalls = [];
 
   const second = await makeHarness(t, { store, dir: first.dir });
-  assert.deepEqual(store.readTaskCalls.sort(), [running.taskId]);
+  // Only the unfinished task is read (more than once: restore also asks the store who drives it).
+  assert.deepEqual([...new Set(store.readTaskCalls)], [running.taskId]);
   assert.deepEqual(second.orchestrator.orphanedTaskIds, [running.taskId]);
   assert.equal(second.orchestrator.stats().activeTasks, 0);
   assert.equal(second.orchestrator.stats().treesCounted, 0);
