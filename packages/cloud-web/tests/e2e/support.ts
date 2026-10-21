@@ -23,6 +23,18 @@ export async function signIn(page: Page, request: APIRequestContext) {
   return invite;
 }
 
+/** The segmented navigation at the top of every signed-in screen. */
+export async function openSection(page: Page, name: 'Home' | 'Chat' | 'Settings') {
+  await page
+    .getByRole('navigation', { name: 'Sections' })
+    .getByRole('button', { name, exact: true })
+    .click();
+}
+
+export async function openSettings(page: Page) {
+  await openSection(page, 'Settings');
+}
+
 export async function conversationsOf(request: APIRequestContext, token: string) {
   const response = await request.get(`${API}/v1/conversations`, {
     headers: { authorization: `Bearer ${token}` },

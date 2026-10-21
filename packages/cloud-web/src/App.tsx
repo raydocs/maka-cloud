@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
 import { ChoicePanel } from '@maka/ui';
+import { useMode } from './theme';
 import { ApiError, CloudClient, Unsupported } from './client';
 import {
   type ArtifactContent,
@@ -307,7 +308,7 @@ function ArtifactList({
         const link = publicLink(loaded?.kind === 'link' ? loaded.url : listing.url);
         const kind = artifactKind(listing, link);
         return (
-          <article className="artifact" key={`${taskId}-${listing.index}`}>
+          <article className="artifact card" key={`${taskId}-${listing.index}`}>
             <div className="artifact-heading">
               <span className="file-symbol" aria-hidden="true">
                 ▤
@@ -366,11 +367,12 @@ const REFRESH_AFTER = new Set([
 export function ConversationView({
   client,
   conversation,
-  onDisconnect,
+  picker,
 }: {
   client: CloudClient;
   conversation: Conversation;
-  onDisconnect: () => void;
+  /** The conversation chooser, shown in the heading (the app owns which conversation is open). */
+  picker?: ReactNode;
 }) {
   const [state, setState] = useState<ConversationState>(emptyState);
   const [status, setStatus] = useState('Connecting…');
@@ -381,8 +383,6 @@ export function ConversationView({
   const messageId = useRef<string | null>(null);
   const [artifacts, setArtifacts] = useState<Record<string, TaskArtifacts>>({});
   const [noPause, setNoPause] = useState<ReadonlySet<string>>(new Set());
-  const [notifications, setNotifications] = useState(false);
-  const [notificationHint, setNotificationHint] = useState('');
   useEffect(() => {
     const controller = new AbortController();
     let refresh: ReturnType<typeof setTimeout> | undefined;
@@ -513,96 +513,89 @@ export function ConversationView({
   );
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="/">
-          maka<span>Personal workspace</span>
-        </a>
-        <div className="header-actions">
+    <div className="chat">
+      <section className="conversation card" aria-label="Conversation">
+        <div className="conversation-heading">
+          <h1>{displayText(conversation.title ?? 'A fresh start')}</h1>
           <span className="connection" role="status">
             <span className={`status-mark ${status === 'Live' ? 'succeeded' : 'attention'}`} />
             {status}
           </span>
-          <Button label="Disconnect" variant="secondary" onClick={onDisconnect} />
+          {picker}
         </div>
-      </header>
-      <main className="workspace">
-        <section className="conversation" aria-label="Conversation">
-          <div className="conversation-heading">
-            <span className="muted">Your workspace / Conversation</span>
-            <h1>{displayText(conversation.title ?? 'A fresh start')}</h1>
-            <p className="muted">One place for the plan, the work, and the result.</p>
-          </div>
-          <div className="messages" role="log" aria-label="Messages">
-            {state.messages.length === 0 && (
-              <div className="empty">
-                <h2>What would you like to get done?</h2>
-                <p>Bring a question, a project, or a plan. We’ll keep the work here.</p>
-              </div>
-            )}
-            {state.messages.map((message) => (
-              <article key={message.id} className={`message ${message.role}`}>
-                <span className="message-author">
-                  {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : 'Maka'}
-                </span>
-                <p>{displayText(message.text)}</p>
-              </article>
-            ))}
-          </div>
-          {questions.map((question) => (
-            <QuestionCard
-              key={question.questionId}
-              question={question}
-              answered={state.answers[question.questionId]}
-              disabled={Boolean(busy)}
-              onAnswer={(optionId, text) =>
-                void act('answer', async () => {
-                  // 200 means the server recorded it (a repeat of the same answer is a duplicate).
-                  await client.answer(conversation.conversationId, {
-                    questionId: question.questionId,
-                    optionId,
-                    ...(text ? { text } : {}),
-                  });
-                  setState((previous) => ({
-                    ...previous,
-                    answers: { ...previous.answers, [question.questionId]: optionId },
-                  }));
-                })
-              }
-            />
-          ))}
-          <InboxPanel
-            items={Object.values(state.inbox)}
-            openQuestions={openQuestions}
-            disabled={Boolean(busy)}
-            onAnswer={answerItem}
-          />
-          {error && (
-            <p role="alert" className="error">
-              {error}
-            </p>
+        <div className="messages" role="log" aria-label="Messages">
+          {state.messages.length === 0 && (
+            <div className="empty">
+              <h2>What would you like to get done?</h2>
+              <p>Bring a question, a project, or a plan. We’ll keep the work here.</p>
+            </div>
           )}
-          <form
-            className="composer"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!draft.trim()) return;
-              void act('message', async () => {
-                messageId.current ??= crypto.randomUUID();
-                await client.postMessage(
-                  conversation.conversationId,
-                  draft.trim(),
-                  messageId.current,
-                );
-                setDraft('');
-                messageId.current = null;
-              });
-            }}
-          >
-            <label htmlFor="message">Keep the conversation going</label>
+          {state.messages.map((message) => (
+            <article key={message.id} className={`message ${message.role}`}>
+              <span className="message-author">
+                {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : 'Maka'}
+              </span>
+              <p>{displayText(message.text)}</p>
+            </article>
+          ))}
+        </div>
+        {questions.map((question) => (
+          <QuestionCard
+            key={question.questionId}
+            question={question}
+            answered={state.answers[question.questionId]}
+            disabled={Boolean(busy)}
+            onAnswer={(optionId, text) =>
+              void act('answer', async () => {
+                // 200 means the server recorded it (a repeat of the same answer is a duplicate).
+                await client.answer(conversation.conversationId, {
+                  questionId: question.questionId,
+                  optionId,
+                  ...(text ? { text } : {}),
+                });
+                setState((previous) => ({
+                  ...previous,
+                  answers: { ...previous.answers, [question.questionId]: optionId },
+                }));
+              })
+            }
+          />
+        ))}
+        <InboxPanel
+          items={Object.values(state.inbox)}
+          openQuestions={openQuestions}
+          disabled={Boolean(busy)}
+          onAnswer={answerItem}
+        />
+        {error && (
+          <p role="alert" className="error">
+            {error}
+          </p>
+        )}
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!draft.trim()) return;
+            void act('message', async () => {
+              messageId.current ??= crypto.randomUUID();
+              await client.postMessage(
+                conversation.conversationId,
+                draft.trim(),
+                messageId.current,
+              );
+              setDraft('');
+              messageId.current = null;
+            });
+          }}
+        >
+          <label htmlFor="message" className="sr-only">
+            Keep the conversation going
+          </label>
+          <div className="pill-field">
             <textarea
               id="message"
-              rows={3}
+              rows={1}
               maxLength={16000}
               value={draft}
               onChange={(e) => {
@@ -611,188 +604,332 @@ export function ConversationView({
               }}
               placeholder="What would you like to do next?"
             />
-            <div className="composer-footer">
-              <span className="muted">You’re in control, at every step.</span>
-              <Button
-                label={busy === 'message' ? 'Sending…' : 'Send message'}
-                type="submit"
-                variant="primary"
-                isDisabled={Boolean(busy) || !draft.trim()}
-              />
-            </div>
-          </form>
+            <button
+              type="submit"
+              className="round-button"
+              aria-label={busy === 'message' ? 'Sending…' : 'Send message'}
+              disabled={Boolean(busy) || !draft.trim()}
+            >
+              <span aria-hidden="true">↑</span>
+            </button>
+          </div>
+        </form>
+      </section>
+      <aside className="work-panel" aria-label="Work and results">
+        <section className="card section-card work-summary">
+          <div className="section-heading">
+            <h2>The work</h2>
+            <span className="count">{running} running</span>
+          </div>
+          <div className="spend">
+            <span>Total cost so far</span>
+            <strong>
+              {dollars(total.usd)}
+              {total.usd !== undefined && !total.complete && ' (not all reported)'}
+            </strong>
+          </div>
         </section>
-        <aside className="work-panel" aria-label="Work and results">
-          <section className="work-summary">
-            <div className="section-heading">
-              <h2>The work</h2>
-              <span className="count">{running} running</span>
-            </div>
-            <div className="spend">
-              <span>Total cost so far</span>
-              <strong>
-                {dollars(total.usd)}
-                {total.usd !== undefined && !total.complete && ' (not all reported)'}
-              </strong>
-            </div>
-          </section>
-          <section aria-label="Task tree">
-            <h2 className="panel-heading">Live tasks</h2>
-            {tasks.length ? (
-              <ul className="task-tree">
-                {tasks
-                  .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-                  .map((task) => (
-                    <TaskBranch
-                      key={task.taskId}
-                      {...{ task, client, tasks, noPause, act, control }}
-                      busy={Boolean(busy)}
-                    />
-                  ))}
-              </ul>
-            ) : (
-              <p className="muted">Tasks will appear as the plan takes shape.</p>
-            )}
-          </section>
-          <section className="artifacts" aria-label="Artifacts">
-            <h2 className="panel-heading">Ready to review</h2>
-            {!withResults.some((task) => artifacts[task.taskId]?.listings.length) && (
-              <p className="muted">Reports, changes, and pull requests will collect here.</p>
-            )}
-            {withResults.map((task) => (
-              <ArtifactList
-                key={task.taskId}
-                client={client}
-                taskId={task.taskId}
-                title={task.title ?? 'Task'}
-                entry={artifacts[task.taskId] as TaskArtifacts}
-                busy={Boolean(busy)}
-                act={act}
-              />
-            ))}
-          </section>
-          <section className="notifications">
-            <h2>Step away. Stay in the loop.</h2>
-            <p className="muted">
-              Get a notification when background work finishes, even after you close this page.
-            </p>
-            {!client.unsupported.has('push') && !notifications && (
-              <Button
-                label="Enable notifications"
-                variant="secondary"
-                isDisabled={Boolean(busy)}
-                onClick={() =>
-                  void act('push', async () => {
-                    try {
-                      await enablePush(client);
-                      setNotifications(true);
-                      setNotificationHint('');
-                    } catch (e) {
-                      if (!(e instanceof ApiError) && !(e instanceof Unsupported)) {
-                        setNotificationHint(
-                          'Notifications could not be enabled. Check browser support and notification permissions.',
-                        );
-                        return;
-                      }
-                      throw e;
-                    }
-                  })
+        <section className="card section-card" aria-label="Task tree">
+          <h2 className="panel-heading">Live tasks</h2>
+          {tasks.length ? (
+            <ul className="task-tree">
+              {tasks
+                .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
+                .map((task) => (
+                  <TaskBranch
+                    key={task.taskId}
+                    {...{ task, client, tasks, noPause, act, control }}
+                    busy={Boolean(busy)}
+                  />
+                ))}
+            </ul>
+          ) : (
+            <p className="muted">Tasks will appear as the plan takes shape.</p>
+          )}
+        </section>
+        <section className="artifacts" aria-label="Artifacts">
+          <h2 className="panel-heading">Ready to review</h2>
+          {!withResults.some((task) => artifacts[task.taskId]?.listings.length) && (
+            <p className="muted">Reports, changes, and pull requests will collect here.</p>
+          )}
+          {withResults.map((task) => (
+            <ArtifactList
+              key={task.taskId}
+              client={client}
+              taskId={task.taskId}
+              title={task.title ?? 'Task'}
+              entry={artifacts[task.taskId] as TaskArtifacts}
+              busy={Boolean(busy)}
+              act={act}
+            />
+          ))}
+        </section>
+      </aside>
+    </div>
+  );
+}
+
+/** Step away, stay in the loop: the device's own notifications, one switch per browser. */
+export function NotificationsPanel({ client }: { client: CloudClient }) {
+  const [on, setOn] = useState(false);
+  const [hint, setHint] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  async function act(work: () => Promise<void>) {
+    if (pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      await work();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      pending.current = false;
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="card section-card notifications" aria-label="Notifications">
+      <h2>Step away. Stay in the loop.</h2>
+      <p className="muted">
+        Get a notification when background work finishes, even after you close this page.
+      </p>
+      {!client.unsupported.has('push') && !on && (
+        <Button
+          label="Enable notifications"
+          variant="secondary"
+          isDisabled={busy}
+          onClick={() =>
+            void act(async () => {
+              try {
+                await enablePush(client);
+                setOn(true);
+                setHint('');
+              } catch (e) {
+                if (!(e instanceof ApiError) && !(e instanceof Unsupported)) {
+                  setHint(
+                    'Notifications could not be enabled. Check browser support and notification permissions.',
+                  );
+                  return;
                 }
-              />
-            )}
-            {notifications && (
-              <>
-                <p role="status">Background notifications enabled</p>
-                <Button
-                  label="Turn off notifications"
-                  variant="secondary"
-                  isDisabled={Boolean(busy)}
-                  onClick={() =>
-                    void act('push', async () => {
-                      await disablePush(client);
-                      setNotifications(false);
-                      setNotificationHint('');
-                    })
-                  }
-                />
-              </>
-            )}
-            {client.unsupported.has('push') && (
-              <p className="muted">Background notifications are unavailable on this server.</p>
-            )}
-            {notificationHint && <p role="status">{notificationHint}</p>}
-          </section>
-        </aside>
-      </main>
-      <footer className="page-footer">A little less to manage. A little more done.</footer>
+                throw e;
+              }
+            })
+          }
+        />
+      )}
+      {on && (
+        <>
+          <p role="status">Background notifications enabled</p>
+          <Button
+            label="Turn off notifications"
+            variant="secondary"
+            isDisabled={busy}
+            onClick={() =>
+              void act(async () => {
+                await disablePush(client);
+                setOn(false);
+                setHint('');
+              })
+            }
+          />
+        </>
+      )}
+      {client.unsupported.has('push') && (
+        <p className="muted">Background notifications are unavailable on this server.</p>
+      )}
+      {hint && <p role="status">{hint}</p>}
+      {error && (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** Light or dark, kept in this browser. */
+function AppearanceChoice() {
+  const { mode, setMode } = useMode();
+  return (
+    <section className="card section-card" aria-label="Appearance">
+      <h2>Appearance</h2>
+      <div className="mode-choice" role="group" aria-label="Color mode">
+        {(['dark', 'light'] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={mode === value}
+            onClick={() => setMode(value)}
+          >
+            {value === 'dark' ? 'Dark' : 'Light'}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export function Settings({
+  client,
+  onDisconnect,
+}: {
+  client: CloudClient;
+  onDisconnect: () => void;
+}) {
+  return (
+    <div className="page">
+      <h1>Settings</h1>
+      <AppearanceChoice />
+      <section className="card section-card">
+        <MemoryPanel client={client} errorText={errorText} />
+      </section>
+      <NotificationsPanel client={client} />
+      <section className="card section-card" aria-label="Connection">
+        <h2>This device</h2>
+        <p className="muted">Disconnecting forgets the invite on this device and nothing else.</p>
+        <Button label="Disconnect" variant="secondary" onClick={onDisconnect} />
+      </section>
     </div>
   );
 }
 
 /** The first message of a new conversation: creates the conversation, then posts into it. */
-function StartForm({
+export function StartForm({
   client,
+  conversations,
   onStarted,
+  onOpen,
 }: {
   client: CloudClient;
+  conversations: Conversation[];
   onStarted: (conversation: Conversation) => void;
+  onOpen: (conversationId: string) => void;
 }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   // A retry after a failed post reuses the conversation and the message id.
   const attempt = useRef<{ conversationId: string; clientMessageId: string } | null>(null);
+  const recent = [...conversations].reverse().slice(0, 5);
   return (
-    <main className="welcome">
-      <h1>Make room for your next idea.</h1>
-      <p>Tell us what you’d like done, in a sentence. We’ll take it from there.</p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!draft.trim() || busy) return;
-          setBusy(true);
-          setError('');
-          void (async () => {
-            try {
-              attempt.current ??= {
-                conversationId: (await client.createConversation()).conversationId,
-                clientMessageId: crypto.randomUUID(),
-              };
-              const { conversationId, clientMessageId } = attempt.current;
-              await client.postMessage(conversationId, draft.trim(), clientMessageId);
-              attempt.current = null;
-              onStarted({ conversationId, title: null, createdAt: Date.now() });
-            } catch (failure) {
-              setError(errorText(failure));
-              setBusy(false);
-            }
-          })();
-        }}
-      >
-        <label htmlFor="first-message">What would you like to get done?</label>
-        <textarea
-          id="first-message"
-          rows={3}
-          maxLength={16000}
-          value={draft}
-          onChange={(e) => {
-            setDraft(displayText(e.target.value));
-            if (attempt.current) attempt.current.clientMessageId = crypto.randomUUID();
+    <div className="page">
+      <section className="card start" aria-label="Start something">
+        <h1>Make room for your next idea.</h1>
+        <p>Tell us what you’d like done, in a sentence. We’ll take it from there.</p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!draft.trim() || busy) return;
+            setBusy(true);
+            setError('');
+            void (async () => {
+              try {
+                attempt.current ??= {
+                  conversationId: (await client.createConversation()).conversationId,
+                  clientMessageId: crypto.randomUUID(),
+                };
+                const { conversationId, clientMessageId } = attempt.current;
+                await client.postMessage(conversationId, draft.trim(), clientMessageId);
+                attempt.current = null;
+                onStarted({ conversationId, title: null, createdAt: Date.now() });
+              } catch (failure) {
+                setError(errorText(failure));
+                setBusy(false);
+              }
+            })();
           }}
-        />
-        <Button
-          label={busy ? 'Starting…' : 'Start'}
-          type="submit"
-          variant="primary"
-          isDisabled={busy || !draft.trim()}
-        />
-      </form>
-      {error && (
-        <p role="alert" className="error">
-          {error}
-        </p>
+        >
+          <label htmlFor="first-message" className="sr-only">
+            What would you like to get done?
+          </label>
+          <div className="pill-field">
+            <textarea
+              id="first-message"
+              rows={1}
+              maxLength={16000}
+              placeholder="What would you like to get done?"
+              value={draft}
+              onChange={(e) => {
+                setDraft(displayText(e.target.value));
+                if (attempt.current) attempt.current.clientMessageId = crypto.randomUUID();
+              }}
+            />
+            <button
+              type="submit"
+              className="round-button"
+              aria-label={busy ? 'Starting…' : 'Start'}
+              disabled={busy || !draft.trim()}
+            >
+              <span aria-hidden="true">↑</span>
+            </button>
+          </div>
+        </form>
+        {error && (
+          <p role="alert" className="error">
+            {error}
+          </p>
+        )}
+      </section>
+      {recent.length > 0 && (
+        <section className="card section-card" aria-label="Recent conversations">
+          <h2>Pick up where you left off</h2>
+          <ul className="recent">
+            {recent.map((c) => (
+              <li key={c.conversationId}>
+                <button type="button" onClick={() => onOpen(c.conversationId)}>
+                  {displayText(c.title ?? 'Untitled conversation')}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
-    </main>
+    </div>
+  );
+}
+
+type View = 'home' | 'chat' | 'settings';
+const VIEWS: ReadonlyArray<{ view: View; label: string }> = [
+  { view: 'home', label: 'Home' },
+  { view: 'chat', label: 'Chat' },
+  { view: 'settings', label: 'Settings' },
+];
+
+/** The frame every signed-in screen sits in: brand and the segmented navigation. */
+export function Shell({
+  view,
+  onView,
+  children,
+}: {
+  view: View;
+  onView: (view: View) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="shell">
+      <header className="shell-top">
+        <a className="brand" href="/">
+          maka
+        </a>
+        <nav className="seg" aria-label="Sections">
+          {VIEWS.map((item) => (
+            <button
+              key={item.view}
+              type="button"
+              className="seg-item"
+              aria-current={view === item.view ? 'page' : undefined}
+              onClick={() => onView(item.view)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+      <main>{children}</main>
+    </div>
   );
 }
 
@@ -803,6 +940,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     conversations: Conversation[];
   } | null>(null);
   const [chosen, setChosen] = useState('');
+  const [view, setView] = useState<View>('home');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const connect = async (token: string) => {
@@ -815,12 +953,16 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           setSession(null);
           setInvite('');
           setChosen('');
+          setView('home');
           setError('Your invite is no longer valid. Please reconnect.');
         },
       });
       const result = await client.listConversations();
       setSession({ client, conversations: result.conversations });
-      setChosen(result.conversations.at(-1)?.conversationId ?? '');
+      const latest = result.conversations.at(-1)?.conversationId ?? '';
+      setChosen(latest);
+      // Someone with conversations lands in the latest one; a first visit lands on Home.
+      setView(latest ? 'chat' : 'home');
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -830,61 +972,65 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   useEffect(() => {
     if (initialToken) void connect(initialToken);
   }, [initialToken]);
+  const disconnect = () => {
+    setSession(null);
+    setInvite('');
+    setChosen('');
+    setView('home');
+  };
   const selected = session?.conversations.find((c) => c.conversationId === chosen);
   return session ? (
-    <>
-      <nav className="conversation-nav" aria-label="Conversations">
-        <label>
-          Conversation{' '}
-          <select
-            aria-label="Select conversation"
-            value={chosen}
-            onChange={(e) => setChosen(e.target.value)}
-          >
-            <option value="" disabled>
-              Choose a conversation
-            </option>
-            {session.conversations.map((c) => (
-              <option key={c.conversationId} value={c.conversationId}>
-                {displayText(c.title ?? 'Untitled conversation')}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Button
-          label="New conversation"
-          isDisabled={busy}
-          variant="secondary"
-          onClick={() => setChosen('')}
-        />
-      </nav>
-      <MemoryPanel client={session.client} errorText={errorText} />
+    <Shell view={view} onView={setView}>
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
-      {selected ? (
-        <ConversationView
-          key={chosen}
-          client={session.client}
-          conversation={selected}
-          onDisconnect={() => {
-            setSession(null);
-            setInvite('');
-          }}
-        />
-      ) : (
+      {view === 'home' && (
         <StartForm
           key={session.conversations.length}
           client={session.client}
+          conversations={session.conversations}
           onStarted={(conversation) => {
             setSession({ ...session, conversations: [...session.conversations, conversation] });
             setChosen(conversation.conversationId);
+            setView('chat');
+          }}
+          onOpen={(conversationId) => {
+            setChosen(conversationId);
+            setView('chat');
           }}
         />
       )}
-    </>
+      {view === 'chat' &&
+        (selected ? (
+          <ConversationView
+            key={chosen}
+            client={session.client}
+            conversation={selected}
+            picker={
+              <select
+                aria-label="Select conversation"
+                value={chosen}
+                onChange={(e) => setChosen(e.target.value)}
+              >
+                {session.conversations.map((c) => (
+                  <option key={c.conversationId} value={c.conversationId}>
+                    {displayText(c.title ?? 'Untitled conversation')}
+                  </option>
+                ))}
+              </select>
+            }
+          />
+        ) : (
+          <section className="card section-card" aria-label="No conversation">
+            <h2>No conversation open</h2>
+            <p className="muted">Start one from Home.</p>
+            <Button label="Go to Home" variant="secondary" onClick={() => setView('home')} />
+          </section>
+        ))}
+      {view === 'settings' && <Settings client={session.client} onDisconnect={disconnect} />}
+    </Shell>
   ) : (
     <main className="welcome">
       <span className="brand">maka</span>

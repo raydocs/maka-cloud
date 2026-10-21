@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { control, conversationsOf, noHorizontalScroll, signIn } from './support';
+import { control, conversationsOf, noHorizontalScroll, openSettings, signIn } from './support';
 
 const NAMES = /Claude|Codex|GPT|Anthropic|OpenAI/i;
 
@@ -150,11 +150,12 @@ test('another invite starts from a clean slate and never sees the first one’s 
   await page.getByRole('button', { name: 'Start' }).click();
   await expect(page.getByRole('log')).toContainText('secret plan');
   expect(await conversationsOf(request, first.token)).toHaveLength(1);
+  await openSettings(page);
   await page.getByRole('button', { name: 'Disconnect' }).click();
   await signIn(page, request);
   await expect(page.getByLabel('What would you like to get done?')).toBeVisible();
   await expect(page.getByText('secret plan')).toHaveCount(0);
-  await expect(page.getByRole('combobox').locator('option')).toHaveCount(1);
+  await expect(page.getByRole('region', { name: 'Recent conversations' })).toHaveCount(0);
 });
 
 test('a runner’s failure text and names are never shown', async ({ page, request }) => {
