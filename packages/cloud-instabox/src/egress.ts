@@ -168,7 +168,7 @@ guard() {
 # Without the lock two guards interleave, and one flushes the chain the other just made live: hooked
 # and empty. A box that cannot give it is refused.
 command -v flock >/dev/null 2>&1 || fail "flock is not installed, so two guards could interleave"
-exec 9>"$MAKA_LOCK" || fail "cannot open $MAKA_LOCK"
+exec 9>>"$MAKA_LOCK" || fail "cannot open $MAKA_LOCK"
 flock -w 30 9 || fail "cannot take $MAKA_LOCK"
 FAMILY=4 LOOPBACK="$MAKA_LO4" guard iptables $MAKA_V4
 # procfs files report size 0, so [ -s ] cannot tell: read the content.
