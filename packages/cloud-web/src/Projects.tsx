@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type CloudClient, Unsupported } from './client';
-import type { DutyView, ProjectView } from './contract';
-import { errorText } from './errors';
-import { displayText, dollars } from './presentation';
+import {
+  type CloudClient,
+  displayText,
+  dollars,
+  type DutyView,
+  errorText,
+  type ProjectView,
+  Unsupported,
+} from '@maka-cloud/client';
 
 const TRIGGER_WORDS: Record<string, string> = {
   ci_failed_default_branch: 'When CI fails on the default branch',

@@ -7,7 +7,11 @@ export default defineConfig({
   resolve: {
     // Reuse the public ChoicePanel export without building the desktop/UI graph.
     // This is the same implementation exported by packages/ui/src/index.ts.
-    alias: { '@maka/ui': fileURLToPath(new URL('../ui/src/choice-panel.tsx', import.meta.url)) },
+    alias: {
+      '@maka/ui': fileURLToPath(new URL('../ui/src/choice-panel.tsx', import.meta.url)),
+      // The logic the phone apps share; source-only, so no build step sits between them.
+      '@maka-cloud/client': fileURLToPath(new URL('../cloud-client/src/index.ts', import.meta.url)),
+    },
     dedupe: ['react', 'react-dom', '@astryxdesign/core'],
   },
   test: { environment: 'jsdom', include: ['tests/**/*.test.{ts,tsx}'], restoreMocks: true },

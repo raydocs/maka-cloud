@@ -1,8 +1,6 @@
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
-import type { CloudClient } from './client';
-import type { MemoryProfile } from './contract';
-import { displayText } from './presentation';
+import { type CloudClient, displayText, type MemoryProfile } from '@maka-cloud/client';
 
 /** The invite's profile, not the selected conversation's. Unmounted on disconnect. */
 export function MemoryPanel({

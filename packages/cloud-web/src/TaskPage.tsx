@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react';
-import { type CloudClient, Unsupported } from './client';
-import type { ArtifactListing, InboxItem, TaskView } from './contract';
+import {
+  type ArtifactListing,
+  type CloudClient,
+  displayText,
+  dollars,
+  errorText,
+  type InboxItem,
+  publicLink,
+  stepsOf,
+  taskLabel,
+  type TaskView,
+  Unsupported,
+} from '@maka-cloud/client';
 import { DiffLines, SourcesStack, useSources } from './Delivery';
-import { errorText } from './errors';
-import { displayText, dollars, publicLink, stepsOf, taskLabel } from './presentation';
 
 /** What a result is, said in a person's words; a name is only a name. */
 const isDiff = (listing: ArtifactListing) =>

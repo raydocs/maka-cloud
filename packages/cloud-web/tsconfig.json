@@ -13,6 +13,7 @@
     "types": ["vite/client", "node"],
     "paths": {
       "@maka/ui": ["../ui/src/choice-panel.tsx"],
+      "@maka-cloud/client": ["../cloud-client/src/index.ts"],
       "react": ["./node_modules/@types/react"],
       "react/*": ["./node_modules/@types/react/*"],
       "@astryxdesign/core": ["./node_modules/@astryxdesign/core"]

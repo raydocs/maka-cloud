@@ -1,6 +1,7 @@
 # Builds and tests packages/cloud-web (T9) against the real cloud-server with a
-# fake runner. The package is not a root workspace (its toolchain pins differ
-# from the root's), so ci.yml does not cover it. No keys, no model, no network
+# fake runner, and the logic it shares with the phone apps, packages/cloud-client
+# (T29). Neither package is a root workspace (their toolchain pins differ
+# from the root's), so ci.yml does not cover them. No keys, no model, no network
 # beyond localhost.
 name: Fork cloud-web
 
@@ -54,6 +55,14 @@ jobs:
           npm --workspace @maka-cloud/conductor run build
           npm --workspace @maka-cloud/playbooks run build
           npm --workspace @maka-cloud/supervisor run build
+
+      # The logic the web app and the phone apps share (T29). Source-only, no
+      # DOM: its tests run in plain Node, once for every client.
+      - name: Typecheck and test the shared client logic
+        run: |
+          npm --prefix packages/cloud-client ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-client run typecheck
+          npm --prefix packages/cloud-client test
 
       - name: Install cloud-web dependencies
         run: npm --prefix packages/cloud-web ci --workspaces=false --ignore-scripts --no-audit --no-fund

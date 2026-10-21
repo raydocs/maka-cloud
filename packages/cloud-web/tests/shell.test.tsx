@@ -2,8 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App, NotificationsPanel, Settings, Shell } from '../src/App';
 import { Home } from '../src/Home';
-import { CloudClient } from '../src/client';
-import type { Conversation } from '../src/contract';
+import { CloudClient, type Conversation } from '@maka-cloud/client';
 import { readMode, ThemeProvider, useMode } from '../src/theme';
 
 afterEach(() => {

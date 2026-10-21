@@ -1,8 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
 import { ConversationView, Picture, QuestionCard } from '../src/App';
-import { CloudClient } from '../src/client';
-import type { Conversation, InboxItem, Question, TaskView } from '../src/contract';
+import {
+  CloudClient,
+  type Conversation,
+  type InboxItem,
+  type Question,
+  type TaskView,
+} from '@maka-cloud/client';
 import { Computer } from '../src/Computer';
 import { InboxCard, InboxPanel, visibleInbox } from '../src/Inbox';
 

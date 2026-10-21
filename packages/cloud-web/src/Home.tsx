@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
-import { type CloudClient, Unsupported } from './client';
-import type { Conversation, InboxItem, ProjectView, TaskView } from './contract';
-import { TERMINAL } from './contract';
-import { errorText } from './errors';
+import {
+  type CloudClient,
+  type Conversation,
+  displayText,
+  dollars,
+  errorText,
+  firstSentence,
+  inboxAnswerer,
+  type InboxItem,
+  mergeInboxItem,
+  type ProjectView,
+  type TaskView,
+  TERMINAL,
+  Unsupported,
+} from '@maka-cloud/client';
 import { InboxCard } from './Inbox';
-import { inboxAnswerer } from './inboxAnswer';
-import { displayText, dollars, firstSentence } from './presentation';
-import { mergeInboxItem } from './state';
 
 const DAY_MS = 86_400_000;
 const RECENT_CONVERSATIONS = 5;

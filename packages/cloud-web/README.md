@@ -1,6 +1,6 @@
 # T9: conversation workspace
 
-React web app, entirely inside `packages/cloud-web`. The first screen is one
+React web app inside `packages/cloud-web` (its API client, contract and state live in `packages/cloud-client`, shared with the phone apps). The first screen is one
 sentence: the user types what they want done, and the conversation starts. From
 there one view holds the messages, the live task tree with its current step,
 the cost so far, recommended-first decision cards, pause/resume/cancel, and the

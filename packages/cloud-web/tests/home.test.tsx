@@ -1,9 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test } from 'vitest';
-import { CloudClient } from '../src/client';
-import type { Conversation, InboxItem, ProjectView, TaskView } from '../src/contract';
+import {
+  CloudClient,
+  type Conversation,
+  inboxAnswerer,
+  type InboxItem,
+  type ProjectView,
+  type TaskView,
+} from '@maka-cloud/client';
 import { doneSince, Home, nextRuns, relativeTime, verbOf } from '../src/Home';
-import { inboxAnswerer } from '../src/inboxAnswer';
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);

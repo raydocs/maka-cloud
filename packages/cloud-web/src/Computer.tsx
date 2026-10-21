@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, type CloudClient } from './client';
-import type { ComputerFrame, ComputerInput, TaskView } from './contract';
-import { displayText } from './presentation';
+import {
+  ApiError,
+  type CloudClient,
+  type ComputerFrame,
+  type ComputerInput,
+  displayText,
+  type TaskView,
+} from '@maka-cloud/client';
 
 export function Computer({ client, task }: { client: CloudClient; task: TaskView }) {
   const [open, setOpen] = useState(false);

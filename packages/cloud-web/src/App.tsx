@@ -2,43 +2,41 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
 import { ChoicePanel } from '@maka/ui';
 import { useMode } from './theme';
-import { ApiError, CloudClient, Unsupported } from './client';
-import { errorText } from './errors';
 import {
+  ApiError,
+  applyEvent,
+  applyInboxItem,
   type ArtifactContent,
   type ArtifactListing,
+  CloudClient,
   type Conversation,
-  type InboxItem,
-  type Question,
-  TERMINAL,
-  type TaskView,
-} from './contract';
-import { Home } from './Home';
-import { InboxPanel } from './Inbox';
-import { inboxAnswerer } from './inboxAnswer';
-import { Computer } from './Computer';
-import { TaskDelivery } from './Delivery';
-import { MemoryPanel } from './Memory';
-import {
+  type ConversationState,
   displayJson,
   displayText,
   dollars,
+  emptyState,
+  errorText,
   exactText,
+  inboxAnswerer,
+  type InboxItem,
+  mergeViews,
   publicLink,
+  type Question,
   stepsOf,
   taskLabel,
-} from './presentation';
+  type TaskView,
+  TERMINAL,
+  totalCost,
+  Unsupported,
+} from '@maka-cloud/client';
+import { Home } from './Home';
+import { InboxPanel } from './Inbox';
+import { Computer } from './Computer';
+import { TaskDelivery } from './Delivery';
+import { MemoryPanel } from './Memory';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
-import {
-  applyEvent,
-  applyInboxItem,
-  type ConversationState,
-  emptyState,
-  mergeViews,
-  totalCost,
-} from './state';
 
 const REASON_HEADING = {
   taste: 'Needs your decision',

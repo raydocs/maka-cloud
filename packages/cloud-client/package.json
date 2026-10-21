@@ -1,0 +1,21 @@
+{
+  "name": "@maka-cloud/client",
+  "version": "0.1.0",
+  "description": "The logic the web app and the phone apps share: the API client, the contract, the event reducer, how things are shown in words, and how an inbox answer is sent. No DOM and no React.",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
