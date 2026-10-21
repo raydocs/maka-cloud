@@ -348,6 +348,31 @@ const item: InboxItem = {
   updatedAt: 1,
 };
 
+test('a finished card beside its own result card does not list the files and links again', () => {
+  const withEvidence: InboxItem = {
+    ...item,
+    evidence: [{ kind: 'artifact', taskId: 'tsk_1', name: 'changes.diff' }],
+  };
+  const { rerender } = render(
+    <InboxCard item={withEvidence} disabled={false} onAnswer={() => {}} />,
+  );
+  expect(screen.getByText(/changes\.diff/u)).toBeTruthy();
+  rerender(<InboxCard item={withEvidence} disabled={false} onAnswer={() => {}} resultShown />);
+  expect(screen.queryByText(/changes\.diff/u)).toBeNull();
+  // The answer stays: the supervisor still wants one.
+  expect(screen.getByRole('button', { name: 'Got it' })).toBeTruthy();
+  // Anything that is not a finished result keeps its evidence, such as an action held for approval.
+  rerender(
+    <InboxCard
+      item={{ ...withEvidence, kind: 'approval' }}
+      disabled={false}
+      onAnswer={() => {}}
+      resultShown
+    />,
+  );
+  expect(screen.getByText(/changes\.diff/u)).toBeTruthy();
+});
+
 test('the supervisor’s check label is shown as sent, whichever it is, and never added when absent', () => {
   const labels = [
     'finished (independently checked): “Done.”',

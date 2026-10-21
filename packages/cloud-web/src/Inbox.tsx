@@ -6,10 +6,13 @@ export function InboxCard({
   item,
   disabled,
   onAnswer,
+  resultShown = false,
 }: {
   item: InboxItem;
   disabled: boolean;
   onAnswer: (optionId: string, text?: string) => void;
+  /** The task's own result card is on screen, so its files and links are not listed again. */
+  resultShown?: boolean;
 }) {
   const [note, setNote] = useState('');
   const card = inboxCardModel(item);
@@ -24,7 +27,7 @@ export function InboxCard({
       {card.cannotApproveHere && (
         <p className="muted">This card cannot be shown exactly, so it cannot be approved here.</p>
       )}
-      {card.evidence.length > 0 && (
+      {card.evidence.length > 0 && !(resultShown && item.kind === 'finished') && (
         <ul className="muted">
           {card.evidence.map((line, index) => (
             <li
@@ -89,11 +92,14 @@ export function InboxPanel({
   openQuestions,
   disabled,
   onAnswer,
+  shownResults,
 }: {
   items: InboxItem[];
   openQuestions: ReadonlySet<string>;
   disabled: boolean;
   onAnswer: (item: InboxItem, optionId: string, text?: string) => void;
+  /** Tasks whose result card is already on screen beside the inbox. */
+  shownResults?: ReadonlySet<string>;
 }) {
   const { live, closed } = visibleInbox(items, openQuestions);
   if (live.length === 0 && closed.length === 0) return null;
@@ -106,6 +112,7 @@ export function InboxPanel({
           item={item}
           disabled={disabled}
           onAnswer={(optionId, text) => onAnswer(item, optionId, text)}
+          resultShown={item.taskId !== null && Boolean(shownResults?.has(item.taskId))}
         />
       ))}
       {closed.length > 0 && (

@@ -400,11 +400,20 @@ export function ConversationView({
             onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
           />
         ))}
+        {/* Each result shows once: proposed cards live on Home, and a finished task's card here
+            does not list again the files and links its result card above already shows. */}
         <InboxPanel
-          items={Object.values(state.inbox)}
+          items={Object.values(state.inbox).filter((item) => item.kind !== 'suggestion')}
           openQuestions={openQuestions}
           disabled={Boolean(busy)}
           onAnswer={answerItem}
+          shownResults={
+            new Set(
+              tasks
+                .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
+                .map((task) => task.taskId),
+            )
+          }
         />
         {error && (
           <p role="alert" className="error">
