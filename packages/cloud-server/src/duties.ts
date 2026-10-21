@@ -2,7 +2,33 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { HttpError, readJson, respond, take } from './http.js';
 import type { InviteInfo } from './invites.js';
+import { scrubErrorText } from './public-view.js';
 import type { RateLimiter } from './rate-limit.js';
+
+/** What the owner sees of the suggestions for one project: a switch for each kind, and the cards open now. */
+export interface SuggestionsOverview {
+  kinds: Array<{
+    kind: string;
+    label: string;
+    enabled: boolean;
+    accepted: number;
+    dismissed: number;
+    ignored: number;
+    ignoredInARow: number;
+    backedOff: boolean;
+    offer: 'none' | 'due' | 'offered' | 'off';
+  }>;
+  cards: Array<{
+    cardId: string;
+    kind: string;
+    title: string;
+    detail: string;
+    mode: string;
+    estimateUsd: number;
+    typical: boolean;
+    external: boolean;
+  }>;
+}
 
 /**
  * What the duty routes need from the duties engine. Declared here, so the server imports nothing
@@ -39,6 +65,16 @@ export interface DutyService {
     | { ok: true; proposal: unknown }
     | { ok: false; reason: 'not_found' | 'already_set_up' | 'inspect_failed' | 'unavailable' }
   >;
+  /** Proposed cards (T30). Absent when they are off: the routes then do not exist. */
+  suggestions?: {
+    overview(owner: string, projectId: string): SuggestionsOverview | undefined;
+    setKind(
+      owner: string,
+      projectId: string,
+      kind: string,
+      enabled: boolean,
+    ): 'ok' | 'not_found' | 'invalid_kind';
+  };
 }
 
 /** Who is still allowed to act: checked again once a body has been read. */
@@ -48,6 +84,8 @@ export interface DutyOwners {
 
 /** The webhook body cap: GitHub's own limit is larger, but nothing we handle comes near this. */
 export const WEBHOOK_MAX_BYTES = 1_048_576;
+
+const kindPatch = z.object({ kind: z.string().min(1).max(40), enabled: z.boolean() }).strict();
 
 const dutyPatch = z.object({ state: z.enum(['active', 'off']) }).strict();
 
@@ -182,6 +220,41 @@ export class DutyRoutes {
         return true;
       }
       respond(res, 200, { proposal: result.proposal });
+      return true;
+    }
+    const suggestions = /^\/v1\/projects\/([^/]+)\/suggestions$/u.exec(path);
+    if (suggestions && this.service.suggestions) {
+      const projectId = decodeURIComponent(suggestions[1] ?? '');
+      if (method === 'GET') {
+        const overview = this.service.suggestions.overview(invite.inviteId, projectId);
+        if (overview === undefined) throw new HttpError(404, 'not_found');
+        respond(res, 200, {
+          suggestions: {
+            kinds: overview.kinds,
+            // Titles are our words, details quote what others wrote: scrubbed like every public text.
+            cards: overview.cards.map((card) => ({
+              ...card,
+              title: scrubErrorText(card.title),
+              detail: scrubErrorText(card.detail),
+            })),
+          },
+        });
+        return true;
+      }
+      allow(method, 'PATCH');
+      take(this.limiter, invite);
+      const body = kindPatch.safeParse(await readJson(req, false));
+      if (!body.success) throw new HttpError(400, 'invalid_request');
+      this.reauthenticate(invite);
+      const result = this.service.suggestions.setKind(
+        invite.inviteId,
+        projectId,
+        body.data.kind,
+        body.data.enabled,
+      );
+      if (result === 'not_found') throw new HttpError(404, 'not_found');
+      if (result === 'invalid_kind') throw new HttpError(400, 'invalid_request');
+      respond(res, 200, { kind: body.data.kind, enabled: body.data.enabled });
       return true;
     }
     const duty = /^\/v1\/projects\/([^/]+)\/duties\/([^/]+)$/u.exec(path);

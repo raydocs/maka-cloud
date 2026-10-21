@@ -110,6 +110,8 @@ async function start(
             name === 'MAKA_CLOUD_INVITE_DAILY_USD' ||
             name === 'MAKA_CLOUD_INVITE_MONTHLY_USD' ||
             name === 'MAKA_GITHUB_WEBHOOK_SECRET' ||
+            name === 'MAKA_GITHUB_TOKEN' ||
+            name === 'MAKA_CLOUD_CARDS' ||
             name === 'MAKA_CLOUD_DUTY_REPOS',
         ),
       ),
@@ -1498,6 +1500,138 @@ test('a project is set up from a proposal the owner decides, and only then does 
     60_000,
   );
   void dataDir;
+});
+
+test('with cards on, a scan shows a card in the inbox and one tap starts one limited task', async (t) => {
+  const own = dutyOwner();
+  const failing = {
+    failingOnDefault: [{ name: 'CI', runId: 1, headSha: 'a'.repeat(40) }],
+    flaky: [],
+    advisories: [],
+    ownPulls: [],
+    newIssues: [],
+  };
+  const { stack } = await start(
+    t,
+    undefined,
+    { ...DUTY_ENV, MAKA_CLOUD_CARDS: '1', MAKA_GITHUB_TOKEN: 'github_pat_test_not_a_token' },
+    true,
+    {
+      cards: {
+        reader: { read: async () => failing },
+        // The test runs the pass itself: no timer.
+        schedule: { every: () => () => undefined },
+      },
+    },
+    own.prepare,
+  );
+  assert.ok(stack.cards, 'cards are on');
+  const api = (path: string, init: RequestInit = {}) =>
+    fetch(`${stack.cloud.server.url}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${own.made.token}`,
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+    });
+  const added = await api('/v1/projects', {
+    method: 'POST',
+    body: JSON.stringify({
+      repo: 'acme/widgets',
+      installationId: 7,
+      defaultBranch: 'main',
+      selfLogins: ['maka-bot'],
+    }),
+  });
+  assert.equal(added.status, 201);
+  const { project } = (await added.json()) as { project: { projectId: string } };
+  await stack.cards.pass();
+  type Item = {
+    itemId: string;
+    kind: string;
+    ask: string;
+    preconditionHash: string;
+    options: Array<{ id: string; label: string }>;
+  };
+  const open = async () =>
+    ((await (await api('/v1/inbox/items?state=open')).json()) as { items: Item[] }).items;
+  const card = (await open()).find((item) => item.kind === 'suggestion');
+  assert.ok(card, 'the scan raised a card');
+  assert.equal(card.ask, 'Fix the failing test on main');
+  assert.deepEqual(
+    card.options.map((o) => o.label),
+    ['Do it', 'Not now'],
+  );
+  // A second pass the same day finds the project scanned: still one card.
+  await stack.cards.pass();
+  assert.equal((await open()).filter((item) => item.kind === 'suggestion').length, 1);
+
+  const shown = (await (await api(`/v1/projects/${project.projectId}/suggestions`)).json()) as {
+    suggestions: {
+      kinds: Array<{ kind: string; enabled: boolean }>;
+      cards: Array<{ kind: string; title: string }>;
+    };
+  };
+  assert.deepEqual(
+    shown.suggestions.cards.map((c) => c.title),
+    ['Fix the failing test on main'],
+  );
+  assert.equal(shown.suggestions.kinds.find((k) => k.kind === 'fix_main_ci')?.enabled, true);
+  assert.ok(
+    !shown.suggestions.kinds.some((k) => k.kind === 'merge_pr' || k.kind === 'close_issues'),
+    'gated kinds are not shown',
+  );
+
+  const tap = (answerId: string) =>
+    api(`/v1/inbox/items/${card.itemId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({
+        answerId,
+        optionId: 'do',
+        preconditionHash: card.preconditionHash,
+      }),
+    });
+  assert.equal((await tap('ans_1')).status, 200);
+  assert.equal((await tap('ans_1')).status, 200, 'the same tap again');
+  const conversations = (
+    (await (await api('/v1/conversations')).json()) as {
+      conversations: Array<{ conversationId: string }>;
+    }
+  ).conversations;
+  const state = stack.cloud.conductor.state;
+  const runs = conversations.flatMap((c) =>
+    state.runsOfConversation(c.conversationId).filter((run) => run.dutyId?.startsWith('card:')),
+  );
+  assert.equal(runs.length, 1, 'one tap, one task');
+  assert.equal(runs[0]?.authority, 'open-pr');
+  assert.equal(runs[0]?.hardBudget, true, 'a card run’s budget cannot be raised');
+  assert.equal(runs[0]?.budgetUsd, 6);
+
+  // The owner can turn the kind off for this project; nobody else can.
+  const off = await api(`/v1/projects/${project.projectId}/suggestions`, {
+    method: 'PATCH',
+    body: JSON.stringify({ kind: 'fix_main_ci', enabled: false }),
+  });
+  assert.equal(off.status, 200);
+  const after = (await (await api(`/v1/projects/${project.projectId}/suggestions`)).json()) as {
+    suggestions: { kinds: Array<{ kind: string; enabled: boolean }> };
+  };
+  assert.equal(after.suggestions.kinds.find((k) => k.kind === 'fix_main_ci')?.enabled, false);
+  const stranger = stack.cloud.server.invites.create('stranger');
+  const peek = await fetch(
+    `${stack.cloud.server.url}/v1/projects/${project.projectId}/suggestions`,
+    {
+      headers: { authorization: `Bearer ${stranger.token}` },
+    },
+  );
+  assert.equal(peek.status, 404);
+});
+
+test('cards need duties and a GitHub token, and are off by default', async (t) => {
+  const { stack } = await start(t);
+  assert.equal(stack.cards, undefined);
+  const { stack: duty } = await start(t, undefined, DUTY_ENV);
+  assert.equal(duty.cards, undefined, 'duties alone do not turn cards on');
 });
 
 test('the backup of a stack with duties holds the projects and never the webhook secret', async (t) => {

@@ -5,6 +5,8 @@ import {
   Dispatcher,
   DutyEngine as Engine,
   GitHubInspector,
+  isCardKind,
+  KIND_SPECS,
 } from '@maka-cloud/duties';
 import type { CloudServer, DutyService } from '@maka-cloud/server';
 import type { ProposalOutcome, SupervisorHost } from '@maka-cloud/supervisor';
@@ -27,6 +29,8 @@ export interface DutiesSetup {
   tickMs?: number;
   /** Replaces setInterval, so a test can see the timer is released. Returns the function that releases it. */
   every?: (fn: () => void, ms: number) => () => void;
+  /** Proposed cards are on: the project routes also show and switch the suggestions. */
+  cards?: boolean;
   engine?: Pick<EngineOptions, 'now' | 'proposer'>;
   onWarning?: (message: string, detail?: unknown) => void;
 }
@@ -181,6 +185,41 @@ export function createDuties(setup: DutiesSetup): DutiesRuntime {
       return { ok: true, proposal: proposed.proposal };
     },
   };
+
+  if (setup.cards) {
+    service.suggestions = {
+      overview: (owner, projectId) => {
+        if (!engine.project(owner, projectId)) return undefined;
+        return {
+          kinds: engine.cards.stats(owner, projectId).map((stat) => ({
+            kind: stat.kind,
+            label: KIND_SPECS[stat.kind].label,
+            enabled: stat.enabled,
+            accepted: stat.accepted,
+            dismissed: stat.dismissed,
+            ignored: stat.ignored,
+            ignoredInARow: stat.ignoredInARow,
+            backedOff: stat.backedOff,
+            offer: stat.offer,
+          })),
+          cards: engine.cards.list(owner, projectId, ['open']).map((card) => ({
+            cardId: card.cardId,
+            kind: card.kind,
+            title: card.title,
+            detail: card.detail,
+            mode: card.mode,
+            estimateUsd: card.estimateUsd,
+            typical: card.typical,
+            external: card.external,
+          })),
+        };
+      },
+      setKind: (owner, projectId, kind, enabled) => {
+        if (!isCardKind(kind) || KIND_SPECS[kind].gated) return 'invalid_kind';
+        return engine.cards.setKindEnabled(owner, projectId, kind, enabled) ? 'ok' : 'not_found';
+      },
+    };
+  }
 
   const proposals: DutiesRuntime['proposals'] = {
     decide: async (decision): Promise<ProposalOutcome> => {

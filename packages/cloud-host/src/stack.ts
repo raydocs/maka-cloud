@@ -45,6 +45,7 @@ import {
   scrubErrorText,
 } from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
+import { type CardsRuntime, createCards } from './cards/runtime.js';
 import { createDuties, type DutiesRuntime } from './duties/runtime.js';
 import {
   conductorGateway,
@@ -85,6 +86,8 @@ export interface StackDependencies {
   ownerOfTask?: (taskId: string) => string | undefined;
   /** Replaces the GitHub reader that proposals inspect repositories with, for tests. */
   dutyInspector?: import('@maka-cloud/duties').RepoInspector;
+  /** Replaces the GitHub reader and the timing of the card scans, for tests. */
+  cards?: Pick<NonNullable<Parameters<typeof createCards>[0]>, 'reader' | 'schedule'>;
   /** How often schedules are looked at and finished duty runs settled, in milliseconds. Default 60000. */
   dutyTickMs?: number;
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
@@ -119,6 +122,8 @@ export interface Stack {
   pause: PauseSwitch;
   /** The standing duties; absent while `MAKA_GITHUB_WEBHOOK_SECRET` is not set. */
   duties?: DutiesRuntime;
+  /** Proposed cards; absent while `MAKA_CLOUD_CARDS` is not set. */
+  cards?: CardsRuntime;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -159,6 +164,9 @@ export async function startStack(
     | {
         backupTo(destination: string): Promise<void>;
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
+        raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
+        raiseSuggestionOffer(input: Parameters<Supervisor['raiseSuggestionOffer']>[0]): boolean;
+        closeSuggestion(lineage: string): boolean;
       }
     | undefined;
   let raiseCapHit:
@@ -232,6 +240,8 @@ export async function startStack(
   let duties: DutiesRuntime | undefined;
   // The box pool and its sleep and cleanup loops, made only with `MAKA_CLOUD_BOXES=1`.
   let boxService: BoxService | undefined;
+  // Proposed cards (T30): only when asked for, on top of the duties' database.
+  let cards: CardsRuntime | undefined;
   // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
   // the Agent SDK, which needs the agent's account.
   let transcripts: SqliteTranscriptStore | undefined;
@@ -247,12 +257,25 @@ export async function startStack(
             dbPath: config.dutiesDbPath,
             webhookSecret,
             links: config.dutyLinks,
+            cards: config.cardsSet,
             ...(dependencies.dutyInspector === undefined
               ? {}
               : { inspector: dependencies.dutyInspector }),
             ...(dependencies.dutyTickMs === undefined ? {} : { tickMs: dependencies.dutyTickMs }),
             onWarning: warn,
           });
+    if (duties !== undefined && config.cardsSet) {
+      const modes = config.modes;
+      cards = createCards({
+        engine: duties.engine,
+        minRunUsd: (mode) => modes.modes[mode].budget.minRunUsd,
+        ...(dependencies.cards?.reader === undefined ? {} : { reader: dependencies.cards.reader }),
+        ...(dependencies.cards?.schedule === undefined
+          ? {}
+          : { schedule: dependencies.cards.schedule }),
+        onWarning: warn,
+      });
+    }
     const publicUrl = config.mcp.publicUrl;
     if (config.boxes !== undefined) {
       const apiKey = env.INSTABOX_API_KEY;
@@ -397,6 +420,7 @@ export async function startStack(
               return inviteId === undefined ? undefined : { inviteId };
             },
             ...(duties === undefined ? {} : { proposals: duties.proposals }),
+            ...(cards === undefined ? {} : { suggestions: cards.suggestions }),
             onStarted: (supervisor) => {
               supervisorRef = supervisor;
               raiseCapHit = (input) => supervisor.raiseCapHit(input);
@@ -422,22 +446,31 @@ export async function startStack(
     boxService?.pool
       .reconcile()
       .catch((error: unknown) => warn('Box pool reconcile failed', error));
+    const runsOf = (conversationId: string) => {
+      const conductorState = cloud.conductor.state;
+      return conductorState.runsOfConversation(conversationId).map((run) => ({
+        runId: run.runId,
+        dutyId: run.dutyId,
+        state: run.state,
+        spentUsd: conductorState.budget(run.runId).spentUsd,
+        endReason: run.endReason,
+      }));
+    };
     duties?.start({
       server: cloud.server,
-      runsOf: (conversationId) => {
-        const conductorState = cloud.conductor.state;
-        return conductorState.runsOfConversation(conversationId).map((run) => ({
-          runId: run.runId,
-          dutyId: run.dutyId,
-          state: run.state,
-          spentUsd: conductorState.budget(run.runId).spentUsd,
-          endReason: run.endReason,
-        }));
-      },
+      runsOf,
       postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
       raiseProposal: (input) => supervisorRef?.raiseProposal(input) ?? false,
     });
+    cards?.start({
+      server: cloud.server,
+      runsOf,
+      raiseSuggestion: (input) => supervisorRef?.raiseSuggestion(input) ?? false,
+      raiseOffer: (input) => supervisorRef?.raiseSuggestionOffer(input) ?? false,
+      closeSuggestion: (lineage) => supervisorRef?.closeSuggestion(lineage) ?? false,
+    });
   } catch (error) {
+    await cards?.stop();
     await duties?.stop();
     duties?.close();
     await boxService?.close();
@@ -561,6 +594,7 @@ export async function startStack(
     gateway,
     pause,
     ...(duties === undefined ? {} : { duties }),
+    ...(cards === undefined ? {} : { cards }),
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
@@ -575,6 +609,7 @@ export async function startStack(
           try {
             // The timer and the launches stop first; the database closes once the server no
             // longer answers webhook requests.
+            await cards?.stop();
             await duties?.stop();
             await cloud.close();
           } finally {

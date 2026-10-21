@@ -4,17 +4,20 @@ export {
   BACKOFF_INTERVAL_MS,
   type Card,
   type CardChange,
+  type CardOutcome,
   type CardState,
   CardStore,
   EXPIRE_AFTER_MS,
   type KindStats,
   MAX_CARDS_PER_DAY,
+  MIN_TASKS_FOR_TYPICAL,
   type NewCard,
   NewCardSchema,
   type OfferState,
   type ProposeResult as CardProposeResult,
   SUPPRESS_AFTER_NO_MS,
   SUPPRESS_AFTER_YES_MS,
+  TASKS_FOR_TYPICAL,
 } from './cards/store.js';
 export {
   CARD_KINDS,
@@ -41,6 +44,7 @@ export {
   type ScanOptions,
   type ScanOutcome,
   type ScanResult,
+  type VerifyResult,
 } from './cards/scan.js';
 export {
   GitHubSignalReader,
