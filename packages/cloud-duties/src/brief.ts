@@ -37,7 +37,7 @@ function clip(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}… (cut)` : text;
 }
 
-const AUTHORITY_TEXT: Record<Authority, string> = {
+export const AUTHORITY_TEXT: Record<Authority, string> = {
   'read-only':
     'You may read the repository and report what you find. You may not open pull requests or change anything outside your sandbox.',
   'open-pr':
