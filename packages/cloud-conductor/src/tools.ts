@@ -74,7 +74,7 @@ export interface ToolHost {
   /** Whether who approved a held call may still have it run (their invite is active and owns the conversation). */
   approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
   /** Whether a text carries a key or token (see `ConductorOptions.carriesSecret`). */
-  carriesSecret(text: string): boolean;
+  carriesSecret(value: unknown): boolean;
 }
 
 /**
@@ -105,7 +105,16 @@ export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
   approvalDetails?(args: z.infer<P>): Promise<string> | string;
   impl(
     args: z.infer<P>,
-    context: { runId: string; conversationId: string; signal: AbortSignal },
+    context: {
+      runId: string;
+      conversationId: string;
+      signal: AbortSignal;
+      /**
+       * For a held call: the card the owner approved, exactly as it was shown. A tool whose card
+       * names what it will act on checks that it acts on that, read again at the moment it runs.
+       */
+      approved?: string;
+    },
   ): Promise<unknown>;
 }
 
@@ -578,7 +587,7 @@ export function conductorTools(
             const spec = extra.find((tool) => tool.name === held.tool);
             question = await approvalCard(spec, held.tool, held.args);
             // The card is shown and bound as it is, so a card with a key in it is not asked at all.
-            if (host.carriesSecret(question) || host.carriesSecret(JSON.stringify(held.args))) {
+            if (host.carriesSecret(question) || host.carriesSecret(held.args)) {
               throw new ToolRefusal(
                 'secret_in_call',
                 'The held call carries what looks like a key or token, and the approval card must show a call word for word, so it cannot be asked. Do not ask; tell the user the action was dropped and why. Keep secrets out of the call: name where the credential is kept instead.',
@@ -746,6 +755,14 @@ function holdUnlessApproved(
   shown: string | undefined,
 ): void {
   if (actionRef !== undefined) {
+    // An approval stored before the conductor stopped asking about calls with a key in them is
+    // not run, whatever was answered: the owner could not be shown what they approved.
+    if (host.carriesSecret(args) || (shown !== undefined && host.carriesSecret(shown))) {
+      throw new ToolRefusal(
+        'secret_in_call',
+        'The approved call carries what looks like a key or token. It was not shown to the user as it is, so it does not run. Do not retry; tell the user the action was dropped and why.',
+      );
+    }
     if (
       shown === undefined ||
       !host.state.consumeApproval(turn.runId, tool, actionRef, args, shown, (approvedBy) =>
@@ -877,18 +894,21 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
       gate(host, turn);
       requireAuthority(host, turn, spec.name, policy, guarded);
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
+      let approved: string | undefined;
       if (guarded) {
         // An approval covers the call only while its card reads as the owner saw it (T15).
         const shown =
           actionRef === undefined ? undefined : await approvalCard(spec, spec.name, args);
         if (actionRef !== undefined) gate(host, turn);
         holdUnlessApproved(host, turn, spec.name, args, actionRef, always, shown);
+        approved = shown;
       }
       if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
       return spec.impl(args as never, {
         runId: turn.runId,
         conversationId: turn.conversationId,
         signal: signalOf(turn, ctx),
+        ...(approved === undefined ? {} : { approved }),
       });
     },
   };

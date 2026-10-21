@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
+  containsSecret,
+  scrubReading,
   scrubSecretFields,
   scrubSecretShapes,
+  scrubSecretText,
   scrubValues,
   setKnownSecrets,
 } from '../secret-shapes.js';
@@ -48,15 +51,33 @@ test('JSON that was written into a string is read through its escapes', () => {
 
 test('the values this process holds are removed however they are written, and ordinary text stays', () => {
   const key = 'gw-live-Zk39/Qp+Lm20x';
-  setKnownSecrets([key, 'short']);
+  setKnownSecrets([key]);
   gone(`the gateway said no to ${key}`, key);
   gone(`GET /v1?x=${encodeURIComponent(key)}`, encodeURIComponent(key));
   gone(`{"detail":"${JSON.stringify(key).slice(1, -1)}"}`, key);
   gone(`Authorization: Basic ${Buffer.from(`user:${key}`).toString('base64')}`, 'dXNlcjpnd');
-  // Too short to be told from a word.
-  assert.equal(scrubSecretShapes('a short word'), 'a short word');
   setKnownSecrets([]);
   assert.equal(scrubSecretShapes(`still ${key}`), `still ${key}`);
+});
+
+test("a short registered value that is a plain word is left alone, so a host's AUTH_PROVIDER does not eat the text", () => {
+  setKnownSecrets(['google', 'invite', 'sqlite']);
+  assert.equal(
+    scrubSecretShapes('Sign in with google or invite to sandbox'),
+    'Sign in with google or invite to sandbox',
+  );
+  assert.equal(containsSecret({ question: 'Sign in with google?' }), false);
+});
+
+test('a short registered key is removed too, in every form, and a blank one is not a key', () => {
+  const short = 'p@ss/w?';
+  setKnownSecrets([short, '  ', '']);
+  gone(`the gateway said no to ${short}`, short);
+  gone(`GET /v1?x=${encodeURIComponent(short)}`, encodeURIComponent(short));
+  gone(`{"detail":"${JSON.stringify(short).slice(1, -1)}"}`, short);
+  assert.equal(containsSecret({ ask: `use ${short}` }), true);
+  assert.equal(scrubSecretShapes('a short word'), 'a short word');
+  setKnownSecrets([]);
 });
 
 test('ordinary text and data pass through', () => {
@@ -135,4 +156,165 @@ test('an object keeps the link between a scheme or header name and its value', (
   });
   assert.ok(!JSON.stringify(out).includes(basic), JSON.stringify(out));
   assert.match(JSON.stringify(out), /"value":"x"/u);
+});
+
+// -- recheck17 item 5, recheck18 item 1 ---------------------------------------------------------
+
+const layers = (text: string, times: number): string => {
+  let out = text;
+  for (let i = 0; i < times; i++) out = JSON.stringify(out).slice(1, -1);
+  return out;
+};
+
+test('a key with awkward characters is found through several layers of percent-encoding and JSON escaping, in any case of hex', () => {
+  const key = 'p@ss/w?"q\\x';
+  const once = encodeURIComponent(key);
+  const twice = encodeURIComponent(once);
+  const forms = [
+    once,
+    once.toLowerCase().replace(/%([0-9a-f]{2})/gu, (_, hex: string) => `%${hex}`),
+    // Mixed case, escape by escape: the first lower, the second upper.
+    once.replace(/%2F/u, '%2f'),
+    twice,
+    twice.replace(/%252F/u, '%252f'),
+    layers(key, 1),
+    layers(key, 2),
+    layers(key, 3),
+    layers(encodeURIComponent(key), 2),
+    encodeURIComponent(layers(key, 2)),
+  ];
+  for (const form of forms) {
+    assert.ok(
+      !scrubValues(`Authorization failed for ${form} (401)`, [key]).includes(form),
+      `leaked: ${form}`,
+    );
+  }
+  setKnownSecrets([key]);
+  try {
+    for (const form of forms) {
+      assert.ok(!scrubSecretShapes(`failed for ${form}`).includes(form), `leaked: ${form}`);
+    }
+  } finally {
+    setKnownSecrets([]);
+  }
+  // Ordinary text that merely looks similar stays.
+  assert.equal(scrubValues('p@ss and %40 and w?', [key]), 'p@ss and %40 and w?');
+});
+
+test('a credential serialised again and again is scrubbed whatever the order of its fields', () => {
+  const secret = 'dXNlcjpwYXNzd29yZC12ZXJ5LXNlY3JldA==';
+  const digest = 'username="u", realm="r", nonce="n", response="abcdef0123456789"';
+  const values: unknown[] = [
+    { name: 'Authorization', value: `Basic ${secret}` },
+    { value: `Basic ${secret}`, name: 'Authorization' },
+    { value: secret, scheme: 'Basic' },
+    { scheme: 'Digest', value: digest },
+    { value: digest, extra: { deeper: 1 }, scheme: 'Digest' },
+    ['Authorization', `Basic ${secret}`],
+  ];
+  for (const value of values) {
+    for (let times = 0; times <= 4; times++) {
+      let text = JSON.stringify(value);
+      for (let i = 0; i < times; i++) text = JSON.stringify({ body: text });
+      const out = scrubSecretShapes(text);
+      assert.ok(!out.includes(secret), `${times} layers, secret kept: ${out}`);
+      assert.ok(!out.includes('abcdef0123456789'), `${times} layers, digest kept: ${out}`);
+      assert.ok(!out.includes('nonce'), `${times} layers, digest half kept: ${out}`);
+    }
+    // Written inside a string field that is itself JSON, as a tool result that quotes a response.
+    const inner = scrubSecretShapes(JSON.stringify({ result: JSON.stringify(value) }));
+    assert.ok(!inner.includes(secret) && !inner.includes('abcdef0123456789'), inner);
+  }
+});
+
+test('a text that is cut off in the middle of nested JSON still loses its credential', () => {
+  const secret = 'dXNlcjpwYXNzd29yZC12ZXJ5LXNlY3JldA==';
+  const text = JSON.stringify({
+    body: JSON.stringify({ value: `Basic ${secret}`, name: 'Authorization' }),
+  });
+  for (const cut of [text.length, text.length - 3, text.length - 12]) {
+    assert.ok(!scrubSecretShapes(text.slice(0, cut)).includes(secret), String(cut));
+  }
+  assert.equal(
+    scrubSecretShapes('{"title":"fix the nonce","n":[1,2]}'),
+    '{"title":"fix the nonce","n":[1,2]}',
+  );
+});
+
+test('a long token followed by a lone percent sign or backslash is scrubbed in linear time', () => {
+  for (const tail of ['!%', '\nbuild 100%', ' C:\\']) {
+    const text = `${'a'.repeat(200_000)}${tail}`;
+    const started = Date.now();
+    scrubSecretShapes(text);
+    assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms for ${tail}`);
+  }
+});
+
+test('JSON nested past the stack is not read as JSON and does not throw', () => {
+  const deep = `${'['.repeat(6000)}${']'.repeat(6000)}`;
+  assert.doesNotThrow(() => scrubSecretShapes(deep));
+  assert.equal(
+    scrubSecretShapes(`${deep} Authorization: Bearer abcdefgh12345678`).includes(
+      'abcdefgh12345678',
+    ),
+    false,
+  );
+});
+
+test('a key split by a character that shows nothing is still found, whichever the character', () => {
+  const key = 'abc12345SECRETkey';
+  setKnownSecrets([key]);
+  for (const mark of [
+    '\u034f',
+    '\ufe0f',
+    '\u180b',
+    '\u3164',
+    '\u{e0100}',
+    '\u0301',
+    '\u200b',
+    '\u00ad',
+  ]) {
+    const split = `abc12345${mark}SECRETkey`;
+    assert.ok(
+      !scrubSecretText(`here: ${split}`).includes('SECRETkey'),
+      `U+${mark.codePointAt(0)?.toString(16)} survived`,
+    );
+    assert.equal(
+      containsSecret({ ask: split }),
+      true,
+      `U+${mark.codePointAt(0)?.toString(16)} not found`,
+    );
+  }
+  // The shape of a token the same way: nothing of its tail is left showing.
+  assert.ok(!scrubSecretText('sk-abcdefgh\u034fijklmnop').includes('ijklmnop'));
+  // Text with nothing in it is not rewritten.
+  assert.equal(
+    scrubSecretText('na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}'),
+    'na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}',
+  );
+});
+
+test('text of scripts that are written with combining marks is shown as written, with or without a secret in it', () => {
+  const hindi = 'किताब में पुस्तक है';
+  const thai = 'สวัสดีครับ';
+  const arabic = 'مُحَمَّد';
+  const emoji = '❤️ 1️⃣';
+  for (const text of [hindi, thai, arabic, emoji]) {
+    assert.equal(scrubReading(text, scrubSecretShapes), text);
+    assert.equal(scrubSecretText(text), text);
+  }
+  setKnownSecrets(['abc12345SECRETkey']);
+  assert.equal(scrubSecretText(`${hindi} abc12345́SECRETkey ${thai}`), `${hindi} [secret] ${thai}`);
+  // A secret with marks of its own script inside it is found too, at the price of those marks.
+  setKnownSecrets(['पुस्तक-secret-9']);
+  assert.equal(scrubSecretText('x पुस्‍तक-secret-9 y'), 'x [secret] y');
+});
+
+test('a short registered value that is a number or a version is left alone, a mixed one is a key', () => {
+  setKnownSecrets(['1.0.0', '604800', '123456', 'en-US']);
+  assert.equal(
+    scrubSecretShapes('Node 1.0.0, ttl 604800, 123456'),
+    'Node 1.0.0, ttl 604800, 123456',
+  );
+  assert.equal(scrubSecretShapes('locale en-US'), 'locale [secret]');
 });

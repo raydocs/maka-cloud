@@ -15,7 +15,7 @@ import {
 } from '@maka-cloud/orchestrator';
 import { attestExports, exportArtifacts } from './export.js';
 import type { Fleet } from './fleet.js';
-import type { RemoteMachine } from './machine.js';
+import { type RemoteMachine, runNameOf } from './machine.js';
 import { type InputRequest, parseBriefHeader } from './inputs.js';
 import { LineSplitter } from './lines.js';
 import { type AgentChannel, asAgent } from './agent-user.js';
@@ -168,8 +168,11 @@ export class SandboxCliRunner implements Runner {
   }
 
   /** Called by the orchestrator on restart for a task that was running. Idempotent. */
-  async stopOrphaned(taskId: TaskId, options: { signal?: AbortSignal } = {}): Promise<void> {
-    await this.fleet.stopTask(taskId, options.signal);
+  async stopOrphaned(
+    taskId: TaskId,
+    options: { signal?: AbortSignal; epoch?: number } = {},
+  ): Promise<void> {
+    await this.fleet.stopTask(taskId, options.signal, options.epoch);
   }
 }
 
@@ -891,7 +894,7 @@ class Run implements RunHandle {
     this.checkCancelled();
 
     const dir = machine.taskDir(spec.taskId);
-    const run = `t${turns}`;
+    const run = runNameOf(spec.epoch, turns);
     this.runName = run;
     this.runNames.push(run);
     const runToken = randomBytes(16).toString('hex');

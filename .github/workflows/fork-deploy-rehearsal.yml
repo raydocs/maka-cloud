@@ -43,15 +43,10 @@ jobs:
 
       # Sign in with the invite, a task and its result card, one approval answered once, a restart
       # in the middle of a task, a backup and a restore. The flow only speaks HTTP and runs the
-      # one ops script, so the same step can run against a host that is not this one.
-      #
-      # Every CLI now runs as an agent account that is not the sandbox user, and the stand-in
-      # sandbox has no second account yet, so each step that runs a task is an expected failure.
-      # Take a step off this list when the rehearsal's sandbox has the account (see
-      # deploy/rehearsal/README.md, "The agent account").
+      # one ops script, so the same step can run against a host that is not this one. The stand-in
+      # sandbox has the agent account every CLI runs as (deploy/rehearsal/README.md, "The agent
+      # account"), so no step is an expected failure; MAKA_REHEARSAL_XFAIL is the place to mark one.
       - name: Run the flow
-        env:
-          MAKA_REHEARSAL_XFAIL: task,approval,restart,restart-reply?,backup-restore
         run: |
           set -a
           . "$MAKA_REHEARSAL_DIR/env"
