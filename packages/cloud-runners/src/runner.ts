@@ -21,7 +21,6 @@ import { LineSplitter } from './lines.js';
 import { type AgentChannel, asAgent } from './agent-user.js';
 import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
 import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
-import { steerKeysIn } from './hooks.js';
 import {
   restoreTranscript,
   type TranscriptLine,
@@ -30,6 +29,13 @@ import {
 } from './transcripts.js';
 import { buildRunScript } from './scripts.js';
 import { errorMessage, shq } from './shell.js';
+import {
+  MAX_STEER_RECEIPTS,
+  newReceipt,
+  receiptIsFor,
+  receiptsShownIn,
+  type SteerReceipt,
+} from './steer-receipts.js';
 import type { ModelAccess, RunnerSessionRecord, SandboxLease } from './types.js';
 import {
   DEFAULT_PRICES,
@@ -223,8 +229,10 @@ class Run implements RunHandle {
   /** Messages for the agent not yet read, and the keys of those it has (an offer repeated is ignored). */
   private readonly waitingSteers: Array<{ steerId: string; text: string }> = [];
   private readonly readSteers = new Set<string>();
-  /** Messages given to the agent in a hook's answer, not yet shown in the kept transcript. */
-  private readonly handedSteers = new Set<string>();
+  /** Messages given to the agent in a hook's answer (by key), not yet shown by the kept transcript. */
+  private readonly handedSteers = new Map<string, SteerReceipt>();
+  /** Hand-overs are one at a time: each writes its receipts down before the answer goes out. */
+  private takeChain: Promise<unknown> = Promise.resolve();
   /** Whether this run keeps the conversation's transcript off the sandbox (the proof a message was read). */
   private mirror: TranscriptMirror | undefined;
   /** On a run that continues an earlier one: the keys the kept transcript shows were given already. */
@@ -306,23 +314,34 @@ class Run implements RunHandle {
   }
 
   /**
-   * Reads the kept transcript once for the keys of messages it shows the agent was given, and
-   * sorts the messages offered meanwhile: those it shows are reported as read and never given
-   * again, the others wait for the next step. A transcript that cannot be read gives nothing
-   * away, and the messages go on as new ones (one the agent saw may then be read twice, which is
-   * better than one it never saw being lost).
+   * Sorts the messages offered to a run that continues an earlier one. The receipts the earlier
+   * run wrote down say which messages it handed to the agent; the kept transcript (the server's
+   * copy) shows which of those the agent really has: a line that carries the receipt's reference
+   * and text. Those are reported as read and never given again; every other message waits for the
+   * next step. A message the transcript merely names, or one whose receipt it does not show, is
+   * given (it may then be read twice, which is better than a message the agent never saw being
+   * lost), and so is every message when the transcript cannot be read.
    */
   private async vetSteers(): Promise<void> {
     const shown = new Set<string>();
     try {
-      const sessionId =
-        this.record?.sessionId ?? (await this.fleet.sessions.get(this.spec.taskId))?.sessionId;
+      const record = await this.fleet.sessions.get(this.spec.taskId);
+      const sessionId = this.record?.sessionId ?? record?.sessionId;
+      const receipts = (record?.steerReceipts ?? []).filter((receipt) =>
+        this.steersToVet.some(
+          (message) =>
+            message.steerId === receipt.steerId &&
+            receiptIsFor(receipt, this.scrubForReader(message.text)),
+        ),
+      );
       const transcripts = this.fleet.options.transcripts;
-      if (sessionId !== undefined && transcripts) {
+      if (sessionId !== undefined && transcripts && receipts.length > 0) {
         let cursor: number | undefined;
         do {
           const page = await transcripts.read(this.spec.taskId, sessionId, cursor);
-          for (const line of page.lines) for (const key of steerKeysIn(line)) shown.add(key);
+          for (const line of page.lines) {
+            for (const receipt of receiptsShownIn(line, receipts)) shown.add(receipt.steerId);
+          }
           cursor = page.next;
         } while (cursor !== undefined);
       }
@@ -344,15 +363,16 @@ class Run implements RunHandle {
   }
 
   /**
-   * The kept transcript holds these lines: a message they show the agent was given is now read, as
-   * far as anyone can prove, and only now is it reported.
+   * The kept transcript holds these lines (the ones the store committed): a message whose receipt
+   * they show is now read, as far as anyone can prove, and only now is it reported.
    */
   private mirrorKept(lines: readonly TranscriptLine[]): void {
     if (this.handedSteers.size === 0) return;
     for (const line of lines) {
-      for (const key of steerKeysIn(line.json)) {
-        if (!this.handedSteers.delete(key)) continue;
-        this.events.push({ type: 'steered', steerId: key });
+      for (const receipt of receiptsShownIn(line.json, this.handedSteers.values())) {
+        if (this.handedSteers.get(receipt.steerId) !== receipt) continue;
+        this.handedSteers.delete(receipt.steerId);
+        this.events.push({ type: 'steered', steerId: receipt.steerId });
       }
     }
   }
@@ -366,23 +386,59 @@ class Run implements RunHandle {
   }
 
   /**
-   * Hands the hook the messages that fit and reports each as read, as the hook returns them to the
-   * agent. The first always goes, whatever its size; the rest wait for the next step.
+   * Hands the hook the messages that fit, as the hook returns them to the agent. The first always
+   * goes, whatever its size; the rest wait for the next step. With the conversation kept off the
+   * sandbox, a receipt for each is written down first (a failure leaves the messages waiting) and
+   * a message is reported read when the kept transcript shows it (`mirrorKept`); without, there is
+   * nothing to show it by, and handing it over is the proof.
    */
-  private takeSteers(maxChars: number): Array<{ steerId: string; text: string }> {
-    const taken: Array<{ steerId: string; text: string }> = [];
+  private takeSteers(
+    maxChars: number,
+  ): Promise<Array<{ steerId: string; text: string; ref?: string }>> {
+    const next = this.takeChain.then(() => this.handOver(maxChars));
+    this.takeChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async handOver(
+    maxChars: number,
+  ): Promise<Array<{ steerId: string; text: string; ref?: string }>> {
+    const { fleet, spec } = this;
+    const picked: Array<{ steerId: string; text: string }> = [];
     let chars = 0;
-    while (this.waitingSteers.length > 0) {
-      const next = this.waitingSteers[0] as { steerId: string; text: string };
-      if (taken.length > 0 && chars + next.text.length > maxChars) break;
-      this.waitingSteers.shift();
+    for (const next of this.waitingSteers) {
+      if (picked.length > 0 && chars + next.text.length > maxChars) break;
       chars += next.text.length;
-      taken.push(next);
-      this.readSteers.add(next.steerId);
-      // With the conversation kept off the sandbox, it is read once the kept transcript shows it
-      // (`mirrorKept`); without, there is nothing to show it by, and handing it over is the proof.
-      if (this.mirror) this.handedSteers.add(next.steerId);
-      else this.events.push({ type: 'steered', steerId: next.steerId });
+      picked.push(next);
+    }
+    if (picked.length === 0) return [];
+    const receipts = this.mirror
+      ? picked.map((message) =>
+          newReceipt(message.steerId, this.scrubForReader(message.text), fleet.now()),
+        )
+      : [];
+    if (receipts.length > 0) {
+      const ids = new Set(receipts.map((receipt) => receipt.steerId));
+      this.record = await fleet.updateRecord(spec.taskId, (current) => ({
+        ...(current ?? (this.record as RunnerSessionRecord)),
+        steerReceipts: [
+          ...(current?.steerReceipts ?? []).filter((receipt) => !ids.has(receipt.steerId)),
+          ...receipts,
+        ].slice(-MAX_STEER_RECEIPTS),
+        updatedAt: fleet.now(),
+      }));
+    }
+    const taken: Array<{ steerId: string; text: string; ref?: string }> = [];
+    for (const [index, message] of picked.entries()) {
+      // A message withdrawn while the receipts were written is not given.
+      const at = this.waitingSteers.indexOf(message);
+      if (at < 0) continue;
+      this.waitingSteers.splice(at, 1);
+      this.readSteers.add(message.steerId);
+      const receipt = receipts[index];
+      if (receipt) this.handedSteers.set(message.steerId, receipt);
+      else this.events.push({ type: 'steered', steerId: message.steerId });
+      taken.push({ ...message, ...(receipt ? { ref: receipt.ref } : {}) });
     }
     return taken;
   }
