@@ -51,7 +51,9 @@ const marked = (env.MAKA_REHEARSAL_XFAIL ?? '')
   .map((name) => name.trim())
   .filter(Boolean);
 const xfail = new Set(marked.map((name) => name.replace(/\?$/u, '')));
-const mayPass = new Set(marked.filter((name) => name.endsWith('?')).map((name) => name.slice(0, -1)));
+const mayPass = new Set(
+  marked.filter((name) => name.endsWith('?')).map((name) => name.slice(0, -1)),
+);
 
 if (!base || !token || !controlUrl || !ops) {
   console.error(
