@@ -8,7 +8,7 @@ appId: cloud.maka.app
 - scrollUntilVisible:
     element:
       id: "delivery-picture"
-- assertVisible: "The login page no longer loops."
+- assertVisible: "Login page after fix"
 - assertVisible: "Open pull request · github.com ↗"
 - takeScreenshot: delivery-card
 - tapOn:
