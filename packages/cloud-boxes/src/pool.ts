@@ -55,6 +55,8 @@ type BoxState =
   | 'suspended'
   | 'waking'
   | 'lost'
+  /** Its labels or name no longer say it is this pool's box for this slot: never used, never relabelled. */
+  | 'refused'
   /** Being checked for deletion: nothing may take it. */
   | 'deleting';
 
@@ -403,7 +405,7 @@ export class BoxPool implements SandboxProvider {
     const { snapshotId, choice } = want;
     const boxes = this.boxesOf(tenantId);
     for (const box of boxes.values()) {
-      if (box.taskId === taskId && box.state !== 'lost') {
+      if (box.taskId === taskId && box.state !== 'lost' && box.state !== 'refused') {
         // The same task again (a resume, a repeated call): the same box, with a newer lease. The
         // older call's lease no longer matches the claim, so releasing it frees nothing.
         const holder = Symbol('lease');
@@ -482,6 +484,11 @@ export class BoxPool implements SandboxProvider {
       } else {
         // A task that asks again while its box is still being made waits for the same creation.
         await box.creation;
+        // The labels are read again before a cached box is handed out: whoever changed them, the box
+        // is no longer known to be this pool's, and writing our labels over them would hide that.
+        if (!(await this.stillOurs(box, holder))) {
+          return await this.take(box.tenantId, taskId, plan.choice);
+        }
         if (box.state === 'waking') {
           box.waking ??= this.wake(box);
           if (!(await box.waking)) return await this.take(box.tenantId, taskId, plan.choice);
@@ -508,6 +515,69 @@ export class BoxPool implements SandboxProvider {
     } finally {
       if (plan.kind === 'create') box.creation = undefined;
     }
+  }
+
+  /**
+   * Reads the box again and checks its whole identity (pool label, invite, slot, name, and that no
+   * other live task holds it). False when the box was refused or is gone and the caller must take
+   * another; true when it is fine, or when a newer ask of the same task took the claim over.
+   */
+  private async stillOurs(box: Box, holder: symbol): Promise<boolean> {
+    const machineId = box.machineId as string;
+    let machine: InstaboxMachine;
+    try {
+      machine = await this.api.getMachine(machineId);
+    } catch (error) {
+      if ((error as { status?: number }).status !== 404) throw error;
+      if (box.holder === holder) this.forget(box);
+      return box.holder !== holder;
+    }
+    if (box.holder !== holder) return true;
+    if (machine.state === 'deleted' || machine.state === 'deleting') {
+      this.forget(box);
+      return false;
+    }
+    const why = this.identityProblem(box, machine, { taskLabel: true });
+    if (why === undefined) return true;
+    this.quarantine(box, why);
+    return false;
+  }
+
+  /** Why a fetched machine is not this box (undefined when it is). */
+  private identityProblem(
+    box: Box,
+    machine: InstaboxMachine,
+    options: { taskLabel: boolean },
+  ): string | undefined {
+    const checked = checkBox(
+      machine,
+      { maxPerInvite: this.maxPerInvite },
+      { tenantId: box.tenantId, slot: box.slot },
+    );
+    if (!checked.ok) return checked.reason;
+    if (machine.id !== box.machineId) return 'it is not the machine the pool recorded';
+    if (
+      options.taskLabel &&
+      checked.taskId !== undefined &&
+      checked.taskId !== box.taskId &&
+      this.options.isTaskLive(checked.taskId)
+    ) {
+      return `task ${checked.taskId} holds it`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Takes a box whose identity changed out of use. It keeps its slot (nothing is made over it) and its
+   * labels (nothing is written to it), is listed by `refusedBoxes`, and is deleted by no one here.
+   */
+  private quarantine(box: Box, why: string): void {
+    this.refuse(box.machineId as string, why);
+    box.state = 'refused';
+    box.sleepPhase = undefined;
+    box.holder = undefined;
+    box.taskId = undefined;
+    this.pump(box.tenantId);
   }
 
   private async create(plan: Extract<Plan, { kind: 'create' }>): Promise<void> {
@@ -747,7 +817,8 @@ export class BoxPool implements SandboxProvider {
 
   private writeLabels(box: Box): Promise<void> {
     const write = box.labels.then(async () => {
-      if (box.machineId === undefined) return;
+      // Nothing is written to a box that was refused: its labels are the evidence.
+      if (box.machineId === undefined || box.state === 'refused') return;
       await this.api.patchMachineMetadata(box.machineId, this.desiredLabels(box));
     });
     // The chain goes on after a failed write; the caller of this write still sees the failure.
@@ -821,6 +892,11 @@ export class BoxPool implements SandboxProvider {
         try {
           const machine = await this.api.getMachine(box.machineId);
           exists = machine.state !== 'deleted' && machine.state !== 'deleting';
+          const why = exists ? this.identityProblem(box, machine, { taskLabel: false }) : undefined;
+          if (why !== undefined) {
+            this.quarantine(box, why);
+            continue;
+          }
         } catch (error) {
           if ((error as { status?: number }).status !== 404) throw error;
         }
@@ -939,6 +1015,11 @@ export class BoxPool implements SandboxProvider {
     try {
       const machine = await this.api.getMachine(machineId);
       if (this.turnedBack(box, generation)) return undefined;
+      const why = this.identityProblem(box, machine, { taskLabel: false });
+      if (why !== undefined) {
+        this.quarantine(box, why);
+        return undefined;
+      }
       if (machine.state !== 'running') {
         // Instabox paused it for idleness first; the next task wakes it through the wake path.
         if (
