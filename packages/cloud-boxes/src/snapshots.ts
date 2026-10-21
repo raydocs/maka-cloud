@@ -45,6 +45,8 @@ export interface SetupSnapshot {
   snapshotId: string;
   /** The hash of the setup this snapshot holds; boxes made from it carry it as `maka.setup`. */
   setupHash: string;
+  /** `repoKey` of the repository, for the `maka.repo` label and the checkout directory. */
+  repo: string;
   name: string;
   /** False when a snapshot of this setup already existed. */
   built: boolean;
@@ -105,7 +107,12 @@ const repoPrefix = (tenantId: string, repoUrl: string): string =>
 
 /** The directory of a repository's checkout in a box. */
 export function repoDir(repoUrl: string): string {
-  return `${REPOS_ROOT}/${sha(repoUrl).slice(0, 8)}`;
+  return `${REPOS_ROOT}/${repoKey(repoUrl)}`;
+}
+
+/** Names a repository's checkout directory and the `maka.repo` label. */
+export function repoKey(repoUrl: string): string {
+  return sha(repoUrl).slice(0, 8);
 }
 
 export function assertCloneUrl(repoUrl: string): void {
@@ -158,11 +165,23 @@ export class SetupSnapshots {
     const existing = (await api.listSnapshots()).find((snapshot) => snapshot.name === name);
     if (existing) {
       if (existing.status === 'ready')
-        return { snapshotId: existing.id, setupHash: hash, name, built: false };
+        return {
+          snapshotId: existing.id,
+          setupHash: hash,
+          repo: repoKey(recipe.repoUrl),
+          name,
+          built: false,
+        };
       if (existing.status === 'pending') {
         // Another builder is uploading it.
         const done = await api.waitForSnapshot(existing.id);
-        return { snapshotId: done.id, setupHash: hash, name, built: false };
+        return {
+          snapshotId: done.id,
+          setupHash: hash,
+          repo: repoKey(recipe.repoUrl),
+          name,
+          built: false,
+        };
       }
       await api.deleteSnapshot(existing.id);
     }
@@ -215,10 +234,22 @@ export class SetupSnapshots {
         const winner = (await api.listSnapshots()).find((snapshot) => snapshot.name === name);
         if (!winner) throw error;
         const done = await api.waitForSnapshot(winner.id);
-        return { snapshotId: done.id, setupHash: hash, name, built: false };
+        return {
+          snapshotId: done.id,
+          setupHash: hash,
+          repo: repoKey(recipe.repoUrl),
+          name,
+          built: false,
+        };
       }
       const ready = await api.waitForSnapshot(snapshotId);
-      return { snapshotId: ready.id, setupHash: hash, name, built: true };
+      return {
+        snapshotId: ready.id,
+        setupHash: hash,
+        repo: repoKey(recipe.repoUrl),
+        name,
+        built: true,
+      };
     } finally {
       await Promise.resolve(box.release()).catch((error) =>
         this.options.onWarning?.(`could not give back builder box ${box.machineId}`, error),

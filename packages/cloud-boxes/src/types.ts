@@ -17,6 +17,14 @@ export type BoxApi = Pick<
 /** Why the pool runs `beforeUse` on a box: it was just made, made from a snapshot, or woken. */
 export type BoxUseReason = 'create' | 'restore' | 'wake';
 
+/** A built setup snapshot a task's repository can start boxes from (see `SetupSnapshots`). */
+export interface SetupChoice {
+  setupHash: string;
+  /** `repoKey` of the repository: names the checkout directory in the box. */
+  repo: string;
+  snapshotId: string;
+}
+
 export interface BoxPoolOptions {
   api: BoxApi;
   /**
@@ -47,6 +55,16 @@ export interface BoxPoolOptions {
   idle?: { agentMs?: number; userMs?: number };
   /** Limits for waking a box, in ms; a failure of one is tried again with the next. Default 60 s then 180 s. */
   wakeTimeoutsMs?: readonly number[];
+  /**
+   * The built setup snapshot for the task's repository, if there is one. A lookup, never a build: a
+   * task must not wait for a build to get a box. A box made for the task starts from it, and a free box
+   * with the same setup is preferred to one without.
+   */
+  setupOf?: (tenantId: string, taskId: string) => Promise<SetupChoice | undefined>;
+  /** How long a box's `.agents/resume` may run, in seconds. Default 120. */
+  resumeTimeoutSeconds?: number;
+  /** Called when a box's `.agents/resume` failed. The box is still handed out: a failure is reported, not hidden. */
+  onResumeFailure?: (machineId: string, reason: string) => void;
   /**
    * Whether anything wrote to the box in the last minute, asked right before a box is suspended. A
    * failure to tell counts as "yes": the box stays awake.
