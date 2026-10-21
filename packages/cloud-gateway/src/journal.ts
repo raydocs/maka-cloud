@@ -264,8 +264,11 @@ export class RunBudgetHeld extends Error {
  * a reservation that would take what the invite booked since `sinceMs` above `limitUsd`.
  *
  * One run holds an invite's budget at a time: while another run renewed it within `RUN_LEASE_MS`
- * this throws `RunBudgetHeld` and changes nothing; a budget nobody renews (its run was killed) is
- * taken over, which starts the budget afresh. Renew it with `renewRunBudget` while the run lasts.
+ * this throws `RunBudgetHeld` and changes nothing. A budget nobody renews (its run was killed) is
+ * taken over, and the new run inherits its window, not a fresh one: the dead run's tasks may still
+ * be on the server booking under the same account, and they must not get a second budget's worth.
+ * What the invite booked since the first run began counts toward the new limit. Renew it with
+ * `renewRunBudget` while the run lasts.
  */
 export function setRunBudget(
   path: string,
@@ -286,24 +289,31 @@ export function setRunBudget(
     db.exec('BEGIN IMMEDIATE');
     try {
       const held = db
-        .prepare('SELECT run_id, heartbeat_at FROM run_budget WHERE account = ?')
-        .get(inviteId) as { run_id: string; heartbeat_at: number } | undefined;
+        .prepare(
+          'SELECT run_id, heartbeat_at, since_ms, since_seq FROM run_budget WHERE account = ?',
+        )
+        .get(inviteId) as
+        | { run_id: string; heartbeat_at: number; since_ms: number; since_seq: number | null }
+        | undefined;
       if (held && held.run_id !== runId && held.heartbeat_at + RUN_LEASE_MS > now) {
         throw new RunBudgetHeld('another run holds the run budget of this invite');
       }
       // Rows after this one were booked after the budget was set, whatever their timestamps say.
       const { seq } = db
         .prepare('SELECT COALESCE(MAX(rowid), 0) AS seq FROM account_spend')
-        .get() as {
-        seq: number;
-      };
+        .get() as { seq: number };
+      // A takeover keeps the window of the run it takes over from; the same run setting its budget
+      // again starts over, as it always did.
+      const inherits = held !== undefined && held.run_id !== runId;
+      const sinceMs = inherits ? Math.min(held.since_ms, budget.sinceMs) : budget.sinceMs;
+      const sinceSeq = inherits ? held.since_seq : seq;
       db.prepare(
         `INSERT INTO run_budget (account, limit_usd, since_ms, since_seq, run_id, heartbeat_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (account) DO UPDATE SET limit_usd = excluded.limit_usd,
            since_ms = excluded.since_ms, since_seq = excluded.since_seq, run_id = excluded.run_id,
            heartbeat_at = excluded.heartbeat_at`,
-      ).run(inviteId, budget.limitUsd, budget.sinceMs, seq, runId, now);
+      ).run(inviteId, budget.limitUsd, sinceMs, sinceSeq, runId, now);
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');

@@ -334,6 +334,40 @@ test('one run holds an invite’s run budget at a time: a second run is refused 
   assert.equal(renewRunBudget(path, INVITE.inviteId, 'run_b', later), true);
 });
 
+test('a run that takes over a budget nobody renews inherits its window, so the dead run’s tasks cannot book a second budget', async (t) => {
+  const path = join(await dir(t), 'spend.db');
+  const journal = new SqliteSpendJournal(path);
+  t.after(() => journal.close());
+  let clock = Date.parse('2026-10-20T23:00:00Z');
+  const ledger = ledgerOn(journal, () => clock);
+  setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, 'run_a', clock);
+  clock = Date.parse('2026-10-20T23:50:00Z');
+  assert.deepEqual(ledger.reserve(INVITE, 'a1', 4), { ok: true });
+
+  // Run A's command dies. After midnight run B takes over its budget; run A's task, still on the
+  // server with its credential, keeps booking under the same account.
+  clock = Date.parse('2026-10-21T00:10:00Z');
+  setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, 'run_b', clock);
+  assert.equal(
+    refused(ledger.reserve(INVITE, 'a2', 4)),
+    'invite_run',
+    'the $4 run A booked still counts, so another $4 would pass the $5',
+  );
+  assert.deepEqual(ledger.reserve(INVITE, 'b1', 1), { ok: true }, 'what is left is still there');
+  assert.equal(refused(ledger.reserve(INVITE, 'b2', 0.5)), 'invite_run');
+
+  // A raw connection that knows nothing of budgets is held to the same window.
+  const olderServer = new DatabaseSync(path);
+  t.after(() => olderServer.close());
+  assert.throws(
+    () =>
+      olderServer
+        .prepare('INSERT INTO account_spend (key, account, day, month, usd) VALUES (?, ?, ?, ?, ?)')
+        .run('older', INVITE.inviteId, '2026-10-21', '2026-10', 0.5),
+    /run budget/u,
+  );
+});
+
 test('a run clears only its own run budget, and a budget nobody renews keeps limiting until a run takes it over', async (t) => {
   const path = join(await dir(t), 'spend.db');
   const journal = new SqliteSpendJournal(path);
