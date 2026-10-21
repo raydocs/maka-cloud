@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { test } from 'node:test';
-import { EGRESS_BLOCKED_V4, EGRESS_CHAIN, InstaboxApiError } from '@maka-cloud/instabox';
+import {
+  applyEgressGuard,
+  EGRESS_BLOCKED_V4,
+  EGRESS_CHAIN,
+  InstaboxApiError,
+} from '@maka-cloud/instabox';
 import { collect, setup, terminal } from './harness.js';
 
 const MUTATING = /(^| )(-N|-F|-A|-I|-D|-X) /u;
@@ -107,4 +112,39 @@ test('a box that is asleep is woken and checked again, and a failing guard refus
   );
   assert.equal(end?.type, 'failed');
   assert.equal(await refused.cliCalls('claude'), 0);
+});
+
+test('a box that falls asleep between the guard and the launch is guarded again before its task code runs', async (t) => {
+  let slept = false;
+  const seen: number[] = [];
+  const h = await setup({
+    cloud: {
+      // The box goes to sleep right after the first check and loses its rules, as a restored one can.
+      egressGuard: async (client, machineId, signal) => {
+        await applyEgressGuard(client, machineId, signal ? { signal } : {});
+        if (!slept) {
+          slept = true;
+          h.fake.machineState = 'suspended';
+          h.fake.autoSuspendedAt = new Date().toISOString();
+          h.fake.firewall.reset();
+        }
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  // What the box's rules were whenever a script with a task's code in it reached the box.
+  h.fake.onExec = (request) => {
+    if (typeof request.body?.stdin === 'string' && request.body.stdin.includes('claude')) {
+      seen.push(h.fake.firewall.rules('iptables', EGRESS_CHAIN).length);
+    }
+    return undefined;
+  };
+  const events = await collect(await h.runners.claude.start(await h.spec('tsk_eg_sleep')));
+  assert.equal(terminal(events)?.type, 'finished');
+  assert.ok(slept);
+  assert.ok(seen.length > 0, 'the launch script reached the box');
+  assert.ok(
+    seen.every((rules) => rules > 0),
+    `the box had no rules when task code reached it: ${seen}`,
+  );
 });
