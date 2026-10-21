@@ -27,6 +27,7 @@ import {
   MAX_REVIEW_BYTES,
   parseReviewFile,
   plain,
+  type FixRecord,
   type ReviewRecord,
   fixBrief,
   MAX_FIX_FINDINGS,
@@ -1031,6 +1032,9 @@ class CodingRun implements RunHandle {
         };
       }
     }
+    // Set once the fixed change has passed the checks and is kept on the host: from then on a
+    // second review that fails ends with it, not with the first change (which the fix replaced).
+    let kept: { outcome: typeof outcome; applied: FixRecord } | undefined;
     try {
       this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
       const turn = await this.agentTurn(
@@ -1080,20 +1084,39 @@ class CodingRun implements RunHandle {
       this.budgetStop = undefined;
       // The fixed change has passed the checks: it, not the first one, is what a stop during the
       // second review must leave kept.
-      await this.keepUntilReviewed(task, verification, fixed, {
-        ...first,
-        fix: { sent, result: 'applied' },
-      });
+      const applied: FixRecord = { sent, result: 'applied' };
+      await this.keepUntilReviewed(task, verification, fixed, { ...first, fix: applied });
+      kept = { outcome: fixed, applied };
       const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
       if (second.status !== 'reviewed') {
         return {
-          outcome,
-          review: notApplied(`the fixed change could not be reviewed again (${second.reason})`),
+          outcome: fixed,
+          review: {
+            ...second,
+            reason: plain(`the fixed change could not be reviewed again (${second.reason})`, 300),
+            fix: applied,
+          },
         };
       }
-      return { outcome: fixed, review: { ...second, fix: { sent, result: 'applied' } } };
+      return { outcome: fixed, review: { ...second, fix: applied } };
     } catch (error) {
       if (this.cancelled || error instanceof CancelledError) throw error;
+      if (kept) {
+        // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
+        return {
+          outcome: kept.outcome,
+          review: {
+            ...first,
+            status: 'unavailable',
+            reviewer: first.reviewer,
+            reason: plain(
+              `the fixed change could not be reviewed again (${errorMessage(error)})`,
+              300,
+            ),
+            fix: kept.applied,
+          },
+        };
+      }
       return { outcome, review: notApplied(errorMessage(error)) };
     } finally {
       this.budgetStop = undefined;
