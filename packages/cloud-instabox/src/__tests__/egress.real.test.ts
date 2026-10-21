@@ -91,4 +91,21 @@ describe('applyEgressGuard against the real iptables', () => {
     await run();
     assert.ok(iptables('iptables', '-S', EGRESS_CHAIN).includes('-d 10.0.0.0/8 -j REJECT'));
   });
+
+  it('follows a name server that changed, and removes an exception nobody wrote', async (t) => {
+    if (!holder) return t.skip('no network namespace to try it in');
+    await run();
+    await fs.writeFile(join(state, 'resolv.conf'), 'nameserver 10.0.0.99\nnameserver fd00::99\n');
+    iptables('iptables', '-A', EGRESS_CHAIN, '-d', '10.1.2.3', '-j', 'ACCEPT');
+    await run();
+    const rules = iptables('iptables', '-S', EGRESS_CHAIN);
+    assert.ok(rules.includes('-d 10.0.0.99/32 -p udp -m udp --dport 53 -j RETURN'), rules);
+    assert.ok(!rules.includes('10.0.0.53') && !rules.includes('10.1.2.3'), rules);
+    assert.ok(iptables('ip6tables', '-S', EGRESS_CHAIN).includes('-d fd00::99/128 -p udp'));
+    assert.equal(
+      iptables('iptables', '-S', 'OUTPUT').split('\n')[1],
+      `-A OUTPUT -j ${EGRESS_CHAIN}`,
+    );
+    assert.ok(!iptables('iptables', '-S').includes(`${EGRESS_CHAIN}_NEW`), 'no scratch chain left');
+  });
 });
