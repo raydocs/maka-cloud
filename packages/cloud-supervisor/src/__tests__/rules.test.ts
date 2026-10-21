@@ -97,6 +97,35 @@ test('an approval item shows hidden characters of the held call as escapes, and 
   await r.stop();
 });
 
+test('an approval item shows the card exactly as the conductor built it, lines and names included (T15)', async () => {
+  const r = await rig();
+  const card =
+    'Allow open_pull_request(taskId: "tsk_1", title: "Fix \uFF43odex login")? It cannot be undone.\n\nRepository: acme/codex-secrets\nBranch: maka/tsk_1';
+  r.host.feed.append(
+    'conductor.question',
+    CONVERSATION,
+    {
+      questionId: 'q_exact',
+      reason: 'irreversible',
+      question: card,
+      options: [
+        { id: 'approve', label: 'Go ahead' },
+        { id: 'reject', label: "Don't do it" },
+      ],
+      recommended: 'reject',
+      action: {
+        tool: 'open_pull_request',
+        args: { taskId: 'tsk_1', title: 'Fix \uFF43odex login' },
+      },
+    },
+    r.clock.t,
+  );
+  await r.supervisor.settled();
+  const [item] = await active(r);
+  assert.equal(item?.ask, card);
+  await r.stop();
+});
+
 test('quoted text cannot seem to close its quotes with a look-alike', async () => {
   const { quoted } = await import('../text.js');
   assert.equal(

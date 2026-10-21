@@ -59,6 +59,93 @@ test('an approval shows the held call and says what the user is approving', () =
   expect(screen.getByText('{"branch":"fix-1"}')).toBeTruthy();
 });
 
+const card =
+  'Allow open_pull_request(taskId: "tsk_1", title: "Fix \uFF43odex login")? It cannot be undone.\n\nRepository: acme/codex-secrets';
+
+test('an approval card is shown exactly as the approval binds it: no name filter, no normalising (T15)', () => {
+  const answers: string[] = [];
+  render(
+    <QuestionCard
+      question={{
+        ...question,
+        reason: 'irreversible',
+        question: card,
+        options: [
+          { id: 'approve', label: 'Go ahead' },
+          { id: 'reject', label: "Don't do it" },
+        ],
+        recommended: 'approve',
+        action: {
+          tool: 'open_pull_request',
+          args: { taskId: 'tsk_1', title: 'Fix \uFF43odex login' },
+        },
+      }}
+      disabled={false}
+      onAnswer={(optionId) => answers.push(optionId)}
+    />,
+  );
+  expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(card);
+  expect(screen.getByText('{"taskId":"tsk_1","title":"Fix \uFF43odex login"}')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+  expect(answers).toEqual(['approve']);
+});
+
+test('an approval card holding a hidden character cannot be approved', () => {
+  render(
+    <QuestionCard
+      question={{
+        ...question,
+        reason: 'irreversible',
+        question: 'Allow post_comment(body: "ok \u202Etxt.terces")? It cannot be undone.',
+        options: [
+          { id: 'approve', label: 'Go ahead' },
+          { id: 'reject', label: "Don't do it" },
+        ],
+        recommended: 'approve',
+      }}
+      disabled={false}
+      onAnswer={() => {}}
+    />,
+  );
+  const options = screen.getAllByRole('option');
+  expect(options).toHaveLength(1);
+  expect(options[0]?.textContent).toContain("Don't do it");
+  expect(screen.getByText(/cannot be approved here/)).toBeTruthy();
+});
+
+test('an approval inbox item is shown exactly as the approval binds it, and only then can be approved (T15)', () => {
+  const approvalItem: InboxItem = {
+    ...item,
+    kind: 'approval',
+    ask: card,
+    evidence: [
+      { kind: 'action', tool: 'open_pull_request', args: '{"repo":"acme/codex-secrets"}' },
+    ],
+    options: [
+      { id: 'reject', label: "Don't do it", recommended: true },
+      { id: 'approve', label: 'Go ahead', recommended: false },
+    ],
+  };
+  const { unmount } = render(
+    <InboxCard item={approvalItem} disabled={false} onAnswer={() => {}} />,
+  );
+  expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(card);
+  expect(screen.getByText('{"repo":"acme/codex-secrets"}')).toBeTruthy();
+  expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
+    "Don't do it",
+    'Go ahead',
+  ]);
+  unmount();
+  render(
+    <InboxCard
+      item={{ ...approvalItem, ask: 'Allow it?\u2066 It cannot be undone.' }}
+      disabled={false}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(["Don't do it"]);
+});
+
 type Frame = { id: number; kind: string; data: Record<string, unknown> };
 
 /** A fetch that serves a fixed event replay and records the control calls. */

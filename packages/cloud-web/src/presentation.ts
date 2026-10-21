@@ -17,6 +17,13 @@ export function displayText(value: string): string {
     .replace(hiddenNames, 'assistant');
 }
 
+// The text of an approval card, exactly as the server sent it, or undefined when it holds a
+// hidden character. The approval binds that text word for word, so it is never normalised or
+// name-filtered; the server builds it with none of those characters (T15).
+export function exactText(value: string): string | undefined {
+  return value.replaceAll('\n', '').search(hidden) === -1 ? value : undefined;
+}
+
 // What a value keeps only as a visible escape when it is shown to be approved.
 const escaped =
   /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}\u02BA\u02DD\u02EE\u05F4\u1CD3\u201C-\u201F\u2033\u2036\u275D\u275E\u2760\u3003\u301D-\u301F\uFF02]/gu;
