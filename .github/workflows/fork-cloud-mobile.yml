@@ -254,6 +254,9 @@ jobs:
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl install "$udid" "$RUNNER_TEMP/ios-build/Build/Products/Release-iphonesimulator/Maka.app"
           bash packages/cloud-mobile/scripts/run-flows.sh ios
+        env:
+          # Maestro starts an XCTest driver on the simulator; a cold hosted Mac needs more than the default.
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: '240000'
 
       - name: Keep the screenshots and logs
         if: always()
