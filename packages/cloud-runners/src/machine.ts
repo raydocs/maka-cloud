@@ -5,7 +5,7 @@ import {
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
 import { scrubSecretShapes } from '@maka-cloud/orchestrator';
-import { PREPARE_AGENT_SCRIPT } from './agent-user.js';
+import { agentPrefix, PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
   FILE_CLEAN_SCRIPT,
@@ -26,6 +26,7 @@ import {
   TOOL_ABORT_SCRIPT,
   TOOL_CHECK_SCRIPT,
   TOOL_CHUNK_SCRIPT,
+  commandOfRunScript,
 } from './scripts.js';
 import { assertSafeId } from './shell.js';
 
@@ -227,8 +228,27 @@ export class RemoteMachine {
     workdir: string;
     /** Keep the raw output in the memory-backed log directory (default), or next to the run. */
     rawLogs?: boolean;
+    /**
+     * Set only by the pinned CLI install, which runs as the sandbox user because it writes
+     * the sandbox user's own `~/.maka-cli`, which the agent's account cannot. Everything else is
+     * task code, and task code must not be able to change the firewall.
+     */
+    runsAs?: 'sandbox-user';
     signal?: AbortSignal;
   }): Promise<'started' | 'already' | 'cancelled'> {
+    // The sandbox user may change the egress rules (the guard does, through sudo); the agent's
+    // account may not. So no task code starts as the sandbox user: the script must hand its command
+    // to the agent's account, and a machine that has none starts nothing.
+    if (input.runsAs !== 'sandbox-user') {
+      if (this.agentUser === undefined) {
+        throw new Error('this sandbox has no agent account, so no task code starts in it');
+      }
+      if (!commandOfRunScript(input.script)?.startsWith(agentPrefix(this.agentUser))) {
+        throw new Error(
+          `the run ${input.run} would start as the sandbox user, who can change the firewall; task code runs as ${this.agentUser}`,
+        );
+      }
+    }
     const envs = {
       ...input.envs,
       MAKA_DIR: this.taskDir(input.dirName),

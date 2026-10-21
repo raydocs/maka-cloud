@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { collect, notes, setup, terminal } from './harness.js';
+import { asAgent } from '../agent-user.js';
+import { buildRunScript } from '../scripts.js';
+import { collect, HARNESS_AGENT, notes, setup, terminal } from './harness.js';
 
 function reasonOf(events: Parameters<typeof terminal>[0]): string {
   const last = terminal(events);
@@ -146,7 +148,7 @@ test('a retried start does not delete the result a running turn already wrote', 
   const input = {
     dirName: 'tsk_keep',
     run: 't1',
-    script: 'exit 0\n',
+    script: buildRunScript({ preamble: '', command: asAgent('true', HARNESS_AGENT) }),
     envs: {},
     runToken: 'token-keep',
     workdir: join(h.root, 'tsk_keep'),

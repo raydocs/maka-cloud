@@ -276,6 +276,7 @@ mkdir -p "$(dirname ${shq(marker)})"
       runToken: randomUUID(),
       workdir: machine.taskDir(dirName),
       rawLogs: false,
+      runsAs: 'sandbox-user',
     });
 
     const watch = this.poller.watch(machine, { dir: dirName, run });
