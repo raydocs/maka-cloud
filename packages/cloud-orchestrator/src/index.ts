@@ -69,6 +69,7 @@ export {
   type StepIntentResult,
   type StepLog,
 } from './steps.js';
+export { scrubSecretFields, scrubSecretShapes, setKnownSecrets } from './secret-shapes.js';
 export {
   assertEpoch,
   type Fence,

@@ -10,6 +10,7 @@ import {
   type RunnerEvent,
   ResultManifestSchema,
   type RunSpec,
+  scrubSecretShapes,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { attestExports, exportArtifacts } from './export.js';
@@ -765,7 +766,7 @@ class Run implements RunHandle {
         await this.guard(machine.prepareAgent(spec.taskId, channel.group, this.signal));
       } catch (error) {
         if (this.cancelled || error instanceof CancelledError) throw new CancelledError();
-        return { ok: false, reason: this.scrub(errorMessage(error)) };
+        return { ok: false, reason: this.scrubForReader(errorMessage(error)) };
       }
     }
     const reader = this.openReader();
@@ -826,7 +827,7 @@ class Run implements RunHandle {
    */
   private openReader(): TurnReader {
     const { vendor } = this;
-    const parser = vendor.parser((text) => this.scrub(text));
+    const parser = vendor.parser((text) => this.scrubForReader(text));
     this.callCosts = new Map();
     this.reportedTotal = undefined;
     const rawTail: string[] = [];
@@ -835,12 +836,12 @@ class Run implements RunHandle {
 
     const handleLine = (line: string): void => {
       if (line.startsWith('MAKA_GUARD: ')) {
-        guardReason = clipQuote(this.scrub(line.slice('MAKA_GUARD: '.length)));
+        guardReason = clipQuote(this.scrubForReader(line.slice('MAKA_GUARD: '.length)));
         return;
       }
       const events = parser.feed(line);
       if (events.length === 0 && line.trim() !== '' && !line.trimStart().startsWith('{')) {
-        rawTail.push(clipQuote(this.scrub(line)));
+        rawTail.push(clipQuote(this.scrubForReader(line)));
         if (rawTail.length > RAW_TAIL_LINES) rawTail.shift();
       }
       for (const event of events) {
@@ -1043,7 +1044,7 @@ class Run implements RunHandle {
         ended: false,
         outcome: {
           ok: false,
-          reason: `the agent SDK did not start the agent: ${this.scrub(errorMessage(sdkError))}`,
+          reason: `the agent SDK did not start the agent: ${this.scrubForReader(errorMessage(sdkError))}`,
         },
       };
     }
@@ -1061,7 +1062,7 @@ class Run implements RunHandle {
     if (process.failure) {
       return {
         ended: false,
-        outcome: { ok: false, reason: this.scrub(errorMessage(process.failure)) },
+        outcome: { ok: false, reason: this.scrubForReader(errorMessage(process.failure)) },
       };
     }
     const exit = process.exitCode ?? undefined;
@@ -1070,7 +1071,7 @@ class Run implements RunHandle {
         ended: false,
         outcome: {
           ok: false,
-          reason: `the agent SDK reported an error: ${this.scrub(errorMessage(sdkError))}`,
+          reason: `the agent SDK reported an error: ${this.scrubForReader(errorMessage(sdkError))}`,
         },
       };
     }
@@ -1413,8 +1414,18 @@ class Run implements RunHandle {
    * of the CLI is scrubbed before anything shortens or reformats it, not after.
    */
   private redact(text: string, max: number): string {
-    const out = this.scrub(text);
+    const out = this.scrubForReader(text);
     return out.length <= max ? out : `${out.slice(0, max - 1)}…`;
+  }
+
+  /**
+   * Text a person will read (a failure, a note, a quote of the CLI): the run's own secrets, then
+   * anything shaped like a key or a credential header, which also catches a key this run was
+   * never given. The transcript the conversation resumes from keeps `scrub` alone, so history is
+   * not rewritten.
+   */
+  private scrubForReader(text: string): string {
+    return scrubSecretShapes(this.scrub(text));
   }
 
   /** Replaces every secret of the run in `text`. Nothing is cut: call this before clipping. */
