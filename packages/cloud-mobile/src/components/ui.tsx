@@ -15,15 +15,22 @@ import {
   View,
   type ViewStyle,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { type Edge, SafeAreaView } from 'react-native-safe-area-context';
 import { radius, TOUCH, useTheme } from '@/lib/theme';
 
-/** The soft full-bleed background every screen sits on. */
+/**
+ * The soft full-bleed background every screen sits on. On iOS the tab bar floats over the screen, so
+ * its height is part of the bottom inset (the chat box sat on top of it); Android lays the bar out
+ * below the screen already.
+ */
+const SCREEN_EDGES: Edge[] =
+  Platform.OS === 'ios' ? ['top', 'left', 'right', 'bottom'] : ['top', 'left', 'right'];
+
 export function Screen({ children }: { children: ReactNode }) {
   const t = useTheme();
   return (
     <LinearGradient colors={[t.bgTop, t.bgBottom]} style={styles.fill}>
-      <SafeAreaView style={styles.fill} edges={['top', 'left', 'right']}>
+      <SafeAreaView style={styles.fill} edges={SCREEN_EDGES}>
         {children}
       </SafeAreaView>
     </LinearGradient>
