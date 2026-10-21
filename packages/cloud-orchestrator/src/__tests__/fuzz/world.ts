@@ -177,8 +177,8 @@ interface ModelTask {
   stopPending: boolean;
   createdAt: number;
   budgetUsd?: number;
-  /** Cumulative spend per reporting task, recorded on a top-level task. */
-  spend: Map<TaskId, number>;
+  /** Cumulative spend per reporting task and attempt (`<epoch>:<taskId>`), recorded on a top-level task. */
+  spend: Map<string, number>;
 }
 
 interface Internals {
@@ -673,10 +673,8 @@ export class FuzzWorld {
     const task = this.tasks.get(event.taskId);
     if (!task) return;
     if (event.type === 'task_cost') {
-      task.spend.set(
-        event.fromTaskId,
-        Math.max(task.spend.get(event.fromTaskId) ?? 0, event.costUsd),
-      );
+      const run = `${event.epoch ?? 0}:${event.fromTaskId}`;
+      task.spend.set(run, Math.max(task.spend.get(run) ?? 0, event.costUsd));
     } else if (event.type === 'task_started') task.started = true;
     else if (event.type === 'task_cancel_requested') task.cancelRequested = true;
     else if (event.type === 'task_pause_requested') task.pauseRequested = true;
@@ -1114,7 +1112,7 @@ export class FuzzWorld {
       // A run of a process that died took its unrecorded reports with it.
       if (run.epoch !== this.epoch || run.reportedUsd === 0) continue;
       const root = this.chain(run.taskId).at(-1);
-      const recorded = root?.spend.get(run.taskId) ?? 0;
+      const recorded = root ? recordedFor(root, run.taskId) : 0;
       if (Math.round(recorded * 100) < Math.round(run.reportedUsd * 100)) {
         this.violation(
           `the run of ${run.taskId} reported $${run.reportedUsd}, but $${recorded} is recorded`,
@@ -1527,7 +1525,8 @@ export class FuzzWorld {
   private unrecordedSpend(taskId: TaskId): string | undefined {
     for (const run of this.runs) {
       if (run.taskId !== taskId || run.epoch !== this.epoch || run.reportedUsd === 0) continue;
-      const recorded = this.chain(taskId).at(-1)?.spend.get(taskId) ?? 0;
+      const root = this.chain(taskId).at(-1);
+      const recorded = root ? recordedFor(root, taskId) : 0;
       if (Math.round(recorded * 100) < Math.round(run.reportedUsd * 100)) {
         return `its run reported $${run.reportedUsd}, but $${recorded} is recorded`;
       }
@@ -1585,4 +1584,13 @@ export function formatFailure(result: FuzzResult): string {
     'Trace:',
     ...result.trace.map((line) => `  ${line}`),
   ].join('\n');
+}
+
+/** The most any attempt of `taskId` has had recorded on its tree's top-level task. */
+function recordedFor(root: { spend: Map<string, number> }, taskId: TaskId): number {
+  let most = 0;
+  for (const [key, usd] of root.spend) {
+    if (key.endsWith(`:${taskId}`)) most = Math.max(most, usd);
+  }
+  return most;
 }
