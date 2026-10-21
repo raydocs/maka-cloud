@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { test } from 'node:test';
+import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import type { JournalTotals } from '@maka-cloud/gateway';
+import { type JournalTotals, type ReserveResult, SqliteSpendJournal } from '@maka-cloud/gateway';
 import { createLiveSmokeDeps, smokeCapProblem, smokeCommand } from '../smoke-live.js';
 import { SMOKE_VARIABLES, type SmokeSettings, smokeGate } from '../smoke.js';
 
@@ -42,6 +45,14 @@ function untouchable(): {
       readTotals: () => {
         touched.push('readTotals');
         throw new Error('no journal may be read');
+      },
+      runBudget: {
+        enforced: () => {
+          touched.push('runBudget');
+          throw new Error('no journal may be opened');
+        },
+        set: () => touched.push('runBudget'),
+        clear: () => touched.push('runBudget'),
       },
       openInvites: () => {
         touched.push('openInvites');
@@ -535,6 +546,96 @@ test('the caps are those of the invite the token belongs to: a token of another 
     undefined,
   );
   assert.ok(own.calls.includes('resolve the smoke token'), 'the token is what is resolved');
+});
+
+/** A server's ledger on a real journal file, as the smoke invite's requests would be booked. */
+async function serverLedger(t: TestContext, clock: { now: number }) {
+  const dir = await mkdtemp(join(tmpdir(), 'smoke-run-budget-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const journal = new SqliteSpendJournal(join(dir, 'gateway-spend.db'));
+  t.after(() => journal.close());
+  const ledger = journal.accountLedger({
+    limitsOf: () => ({ dailyUsd: 5, monthlyUsd: 50 }),
+    serverDailyUsd: () => 1_000,
+    now: () => clock.now,
+  });
+  return { dir, ledger };
+}
+
+/** Runs the whole smoke command against a server that is down, so it ends after its first request. */
+function downServer(onFirstRequest: () => void): NonNullable<Parameters<typeof smokeCommand>[1]> {
+  let requests = 0;
+  let ticks = 0;
+  const invites = fakeInvites({ dailyUsd: 5, monthlyUsd: 50 });
+  return {
+    print: () => {},
+    openInvites: invites.open_ as never,
+    fetch: (async () => {
+      requests += 1;
+      if (requests === 1) onFirstRequest();
+      throw new Error('the server is down');
+    }) as typeof fetch,
+    readTotals: () => ({ taskUsd: new Map(), accountDayUsd: new Map(), serverDayUsd: 0 }),
+    run: async () => {},
+    now: () => (ticks += 1_000),
+    sleep: async () => {},
+  };
+}
+
+test('the run budget of the smoke command holds across UTC midnight, where the daily cap starts over', async (t) => {
+  const clock = { now: Date.now() };
+  const { dir, ledger } = await serverLedger(t, clock);
+  const account = { inviteId: INVITE };
+  const outcomes: ReserveResult[] = [];
+  const io = downServer(() => {
+    // Research spends $4 late on one UTC day and coding $4 early on the next: the budget is $5.
+    clock.now = Date.now();
+    outcomes.push(ledger.reserve(account, 'research', 4));
+    ledger.settle('research', 4);
+    clock.now += 25 * 3_600_000;
+    outcomes.push(ledger.reserve(account, 'coding', 4));
+  });
+  const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+  assert.equal(await smokeCommand(env, io), 1, 'the scenarios failed against a down server');
+  assert.equal(outcomes[0]?.ok, true);
+  assert.equal(outcomes[1]?.ok, false, 'the second $4 is past the $5 of the run');
+  assert.equal(outcomes[1]?.ok ? undefined : outcomes[1]?.cap?.scope, 'invite_run');
+  // The budget is gone when the run is: the invite is held to its daily and monthly caps again.
+  assert.deepEqual(ledger.reserve(account, 'later', 4), { ok: true });
+});
+
+test('the smoke command refuses before any request when the server does not enforce run budgets, and sets and clears the budget around a run', async (t) => {
+  const { io, touched, printed } = untouchable();
+  const invites = fakeInvites({ dailyUsd: 5, monthlyUsd: 50 });
+  io.openInvites = invites.open_ as never;
+  const calls: string[] = [];
+  io.runBudget = {
+    enforced: () => {
+      calls.push('enforced');
+      return false;
+    },
+    set: () => calls.push('set'),
+    clear: () => calls.push('clear'),
+  };
+  assert.equal(await smokeCommand(LIVE_ENV, io), 2);
+  assert.deepEqual(calls, ['enforced'], 'nothing is set for a server that would ignore it');
+  assert.deepEqual(touched, [], 'and nothing is sent');
+  assert.match(printed.join('\n'), /enforces the run budget/u);
+
+  // A run that ends, however it ends, takes its budget with it.
+  const down = downServer(() => {});
+  const seen: string[] = [];
+  down.runBudget = {
+    enforced: () => true,
+    set: (_path, inviteId, budget) => {
+      seen.push(`set ${inviteId} ${budget.limitUsd}`);
+    },
+    clear: (_path, inviteId) => {
+      seen.push(`clear ${inviteId}`);
+    },
+  };
+  await smokeCommand(LIVE_ENV, down);
+  assert.deepEqual(seen, [`set ${INVITE} 5`, `clear ${INVITE}`]);
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {

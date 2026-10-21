@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type { Account, SpendAccounts } from './accounts.js';
 import type { BudgetPort, CapHit, ReserveResult } from './budget.js';
@@ -99,10 +100,16 @@ function openJournal(path: string): DatabaseSync {
         day TEXT NOT NULL,
         month TEXT NOT NULL,
         usd REAL NOT NULL,
-        settled INTEGER NOT NULL DEFAULT 0
+        settled INTEGER NOT NULL DEFAULT 0,
+        booked_at INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS account_spend_day ON account_spend (day, account);
       CREATE INDEX IF NOT EXISTS account_spend_month ON account_spend (account, month);
+      CREATE TABLE IF NOT EXISTS run_budget (
+        account TEXT PRIMARY KEY,
+        limit_usd REAL NOT NULL,
+        since_ms INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS spend_policy (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         invite_daily_usd REAL NOT NULL,
@@ -118,6 +125,7 @@ function openJournal(path: string): DatabaseSync {
         PRIMARY KEY (invite_id, key)
       );
       `);
+      addBookedAt(db);
       return db;
     } catch (error) {
       try {
@@ -132,6 +140,86 @@ function openJournal(path: string): DatabaseSync {
       sleepSync(5 + Math.random() * 20);
     }
   }
+}
+
+/** A journal made before spend was timed has no `booked_at`; rows from then count for no run. */
+function addBookedAt(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(account_spend)').all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === 'booked_at')) return;
+  try {
+    db.exec('ALTER TABLE account_spend ADD COLUMN booked_at INTEGER NOT NULL DEFAULT 0');
+  } catch (error) {
+    // Another process added it between the check and the statement.
+    if (!/duplicate column/iu.test(error instanceof Error ? error.message : '')) throw error;
+  }
+}
+
+/**
+ * The journal's `user_version` once an account ledger that enforces run budgets has been opened on
+ * it. A process that sets a run budget refuses unless the server that books against the file has
+ * been started on code that reads it: an older server would ignore the budget.
+ */
+const RUN_BUDGET_LEDGER_VERSION = 1;
+
+/**
+ * What an invite may spend in one run, wherever the run falls: a budget that starts at `sinceMs`
+ * and counts everything the invite books from then on (held and settled), across UTC midnight and
+ * restarts. It is kept in the journal file, so the process that runs the work sets it from outside
+ * the server and the ledger reads it at every reservation.
+ */
+export interface RunBudget {
+  limitUsd: number;
+  sinceMs: number;
+}
+
+/** Whether the server that books against this journal file enforces run budgets (see `setRunBudget`). */
+export function journalEnforcesRunBudgets(path: string): boolean {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
+    return row.user_version >= RUN_BUDGET_LEDGER_VERSION;
+  } finally {
+    db.close();
+  }
+}
+
+function withJournal<T>(path: string, body: (db: DatabaseSync) => T): T {
+  // A missing file would be created empty: the server has never run here.
+  if (!existsSync(path)) throw new Error(`The server has not run here: ${path} does not exist.`);
+  const db = openJournal(path);
+  try {
+    return body(db);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Starts the run budget of `inviteId`, replacing any earlier one. From now on the account ledger
+ * refuses a reservation that would take what the invite booked since `sinceMs` above `limitUsd`.
+ */
+export function setRunBudget(path: string, inviteId: string, budget: RunBudget): void {
+  if (
+    !Number.isFinite(budget.limitUsd) ||
+    budget.limitUsd < 0 ||
+    !Number.isFinite(budget.sinceMs)
+  ) {
+    throw new RangeError('A run budget is a number of dollars, 0 or more, from a point in time');
+  }
+  withJournal(path, (db) => {
+    db.prepare(
+      `INSERT INTO run_budget (account, limit_usd, since_ms) VALUES (?, ?, ?)
+       ON CONFLICT (account) DO UPDATE SET limit_usd = excluded.limit_usd,
+         since_ms = excluded.since_ms`,
+    ).run(inviteId, budget.limitUsd, budget.sinceMs);
+  });
+}
+
+/** Ends the run budget of `inviteId`; the invite is then held to its daily and monthly caps alone. */
+export function clearRunBudget(path: string, inviteId: string): void {
+  withJournal(path, (db) => {
+    db.prepare('DELETE FROM run_budget WHERE account = ?').run(inviteId);
+  });
 }
 
 /** What an invite may spend per UTC day and month unless it has caps of its own, and what the whole server may spend per day. */
@@ -365,7 +453,15 @@ export class SqliteSpendJournal implements SpendJournal {
     this.db
       .prepare('DELETE FROM account_spend WHERE day < ?')
       .run(new Date(now() - 62 * 86_400_000).toISOString().slice(0, 10));
-    const sum = (where: string, ...args: string[]): number =>
+    // Reservations made before this opened cannot be told from later ones by a run budget that
+    // an older server ignored; only a server on this code makes the marker, see the constant.
+    const { user_version: version } = this.db.prepare('PRAGMA user_version').get() as {
+      user_version: number;
+    };
+    if (version < RUN_BUDGET_LEDGER_VERSION) {
+      this.db.exec(`PRAGMA user_version = ${RUN_BUDGET_LEDGER_VERSION}`);
+    }
+    const sum = (where: string, ...args: Array<string | number>): number =>
       (
         this.db
           .prepare(`SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE ${where}`)
@@ -403,6 +499,20 @@ export class SqliteSpendJournal implements SpendJournal {
         try {
           const refusal = ((): ReserveResult | undefined => {
             if (inviteId !== undefined && limits) {
+              const run = this.db
+                .prepare('SELECT limit_usd, since_ms FROM run_budget WHERE account = ?')
+                .get(name) as { limit_usd: number; since_ms: number } | undefined;
+              if (run) {
+                if (!Number.isFinite(run.limit_usd) || !Number.isFinite(run.since_ms)) {
+                  return { ok: false, budget: true, reason: 'this invite may not spend' };
+                }
+                if (
+                  sum('account = ? AND booked_at >= ?', name, run.since_ms) + usd >
+                  run.limit_usd + EPSILON
+                ) {
+                  return capRefusal({ scope: 'invite_run', inviteId, limitUsd: run.limit_usd });
+                }
+              }
               if (sum('account = ? AND day = ?', name, day) + usd > limits.dailyUsd + EPSILON) {
                 return capRefusal({ scope: 'invite_daily', inviteId, limitUsd: limits.dailyUsd });
               }
@@ -428,9 +538,9 @@ export class SqliteSpendJournal implements SpendJournal {
           }
           this.db
             .prepare(
-              'INSERT INTO account_spend (key, account, day, month, usd) VALUES (?, ?, ?, ?, ?)',
+              'INSERT INTO account_spend (key, account, day, month, usd, booked_at) VALUES (?, ?, ?, ?, ?, ?)',
             )
-            .run(key, name, day, month, usd);
+            .run(key, name, day, month, usd, now());
           this.db.exec('COMMIT');
           return { ok: true };
         } catch {
@@ -537,7 +647,9 @@ function capRefusal(cap: CapHit): ReserveResult {
       ? "the server's daily limit"
       : cap.scope === 'invite_daily'
         ? "this invite's daily limit"
-        : "this invite's monthly limit";
+        : cap.scope === 'invite_run'
+          ? "this invite's limit for the current run"
+          : "this invite's monthly limit";
   return {
     ok: false,
     budget: true,

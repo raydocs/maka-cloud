@@ -1,6 +1,6 @@
 /** A cap on an account's spend that refused a request. */
 export interface CapHit {
-  scope: 'invite_daily' | 'invite_monthly' | 'server_daily';
+  scope: 'invite_daily' | 'invite_monthly' | 'invite_run' | 'server_daily';
   /** The invite whose cap it is; absent for the server-wide cap. */
   inviteId?: string;
   limitUsd: number;
