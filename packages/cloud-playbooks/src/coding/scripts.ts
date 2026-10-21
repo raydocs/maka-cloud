@@ -2,13 +2,22 @@
  * Shell scripts the coding runner runs in the task's sandbox with exec, as the sandbox user.
  * Every script takes its input from `MAKA_*` variables (never interpolated into the script
  * text) and works inside `$MAKA_DIR`, the task's directory; the repository is
- * `$MAKA_DIR/workspace`. Git runs with hooks and fsmonitor off, so nothing the agent put in the
- * repository's config runs when the runner looks at the work.
+ * `$MAKA_DIR/workspace`. The agent owns the repository's own `.git` (its config, attributes and
+ * hooks), so the sandbox user never reads it: after the clone, git runs against `control.git` in
+ * the task directory, which only the sandbox user can enter, with no configuration of its own
+ * beyond what is on the command line and the working tree as the only thing it reads from the
+ * agent. A filter, a hook or a textconv named in the agent's `.git/config` or `.gitattributes` has
+ * no definition there and so nothing to run.
  */
 
 const GIT_FN = String.raw`
-export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1
-g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotepath=off -c advice.detachedHead=false "$@"; }
+export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PAGER
+g() { git --git-dir="$MAKA_DIR/control.git" --work-tree="$MAKA_DIR/workspace" -c safe.directory='*' -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null -c core.quotepath=off -c advice.detachedHead=false "$@"; }
+`;
+
+/** What every script that reads the repository first checks: the control repository was made at the clone. */
+const NEED_CONTROL = String.raw`[ -d "$MAKA_DIR/control.git" ] && [ ! -L "$MAKA_DIR/control.git" ] || { echo "ERR control repository missing"; exit 0; }
 `;
 
 /**
@@ -18,11 +27,13 @@ g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotepath=
  */
 export const CLONE_SCRIPT = `set -u
 umask 077
-${GIT_FN}
+export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotepath=off -c advice.detachedHead=false "$@"; }
 mkdir -p "$MAKA_DIR" || exit 1
 ws="$MAKA_DIR/workspace"
 tmp="$MAKA_DIR/workspace.clone"
-rm -rf -- "$tmp"
+cg="$MAKA_DIR/control.git"
+rm -rf -- "$tmp" "$MAKA_DIR/control.git.clone"
 mkdir "$tmp" && cd "$tmp" || exit 1
 g init -q
 if ! g fetch -q --depth=1 --no-tags "$MAKA_REPO_URL" "$MAKA_REF" > "$MAKA_DIR/clone.err" 2>&1; then
@@ -32,9 +43,19 @@ if ! g fetch -q --depth=1 --no-tags "$MAKA_REPO_URL" "$MAKA_REF" > "$MAKA_DIR/cl
 fi
 g checkout -q --detach FETCH_HEAD || { echo CLONE_FAILED; exit 0; }
 sha=$(g rev-parse HEAD) || { echo CLONE_FAILED; exit 0; }
+# The repository the runner itself reads: its own copy of the commit's objects and an index of the
+# commit, in a directory the agent cannot enter. Nothing of it comes from the workspace's \`.git\`
+# after this point (the agent writes that), and nothing runs from it.
+ccl="$MAKA_DIR/control.git.clone"
+git --git-dir="$ccl" init -q || { echo CLONE_FAILED; exit 0; }
+cp -a "$tmp/.git/objects/." "$ccl/objects/" || { echo CLONE_FAILED; exit 0; }
+[ ! -f "$tmp/.git/shallow" ] || cp "$tmp/.git/shallow" "$ccl/shallow" || { echo CLONE_FAILED; exit 0; }
+printf '%s\\n' "$sha" > "$ccl/HEAD"
+GIT_INDEX_FILE="$ccl/index" git --git-dir="$ccl" --work-tree="$tmp" -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null read-tree "$sha" || { echo CLONE_FAILED; exit 0; }
 cd "$MAKA_DIR" || exit 1
-rm -rf -- "$ws"
+rm -rf -- "$ws" "$cg"
 mv "$tmp" "$ws"
+mv "$ccl" "$cg"
 echo "BASE $sha"
 `;
 
@@ -154,6 +175,9 @@ mv -f -- "$MAKA_FILE.tmp" "$MAKA_FILE"
  */
 export const SAMPLE_SCRIPT = `set -u
 ${GIT_FN}
+# Lets git keep the control repository's index fresh, so a sample hashes what changed, not every file.
+export GIT_OPTIONAL_LOCKS=1
+[ -d "$MAKA_DIR/control.git" ] || exit 0
 cd "$MAKA_DIR/workspace" 2>/dev/null || exit 0
 g status --porcelain=v1 -z --untracked-files=all --no-renames 2>/dev/null | head -c 500000 \\
   | while IFS= read -r -d '' entry; do
@@ -199,7 +223,7 @@ restore() {
 export const BASE_REVERT_SCRIPT = `set -u
 umask 077
 ${GIT_FN}${CHANGED_PATHS_FN}${RESTORE_FN}
-ws="$MAKA_DIR/workspace"
+${NEED_CONTROL}ws="$MAKA_DIR/workspace"
 bk="$MAKA_DIR/base-check"
 cd "$ws" || exit 1
 restore || { echo RESTORE_FAILED; exit 0; }
@@ -249,7 +273,7 @@ restore && echo RESTORED
 export const CHANGES_SCRIPT = `set -u
 umask 077
 ${GIT_FN}
-cd "$MAKA_DIR/workspace" || { echo "ERR workspace"; exit 0; }
+${NEED_CONTROL}cd "$MAKA_DIR/workspace" || { echo "ERR workspace"; exit 0; }
 idx="$MAKA_DIR/changes.index"
 rm -f -- "$idx"
 export GIT_INDEX_FILE="$idx"
@@ -267,6 +291,7 @@ rm -f -- "$idx"
 /** One chunk of a blob: base64 of \`$MAKA_LEN\` bytes from \`$MAKA_OFF\`. */
 export const BLOB_CHUNK_SCRIPT = `set -u
 ${GIT_FN}
+[ -d "$MAKA_DIR/control.git" ] || exit 1
 cd "$MAKA_DIR/workspace" || exit 1
 g cat-file blob "$MAKA_SHA" | tail -c +$((MAKA_OFF + 1)) | head -c "$MAKA_LEN" | base64 -w0
 `;

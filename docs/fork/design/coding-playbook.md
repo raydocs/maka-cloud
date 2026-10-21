@@ -121,6 +121,11 @@ Decided by win (2026-10-19):
   splitting.
 - Build outputs ignored by git stay in place during the base check, so a test that reads a stale build could pass on
   the base commit; the check then reports "does not reproduce" rather than a false pass.
-- The agent can rewrite the repository's git metadata. Delivered contents are what git would commit from the working
+- The agent can rewrite the repository's git metadata, and it owns `.git` (config, attributes, hooks). The sandbox user
+  never reads it: the clone makes `control.git` in the task directory (its own copy of the base objects and an index,
+  where the agent cannot enter), and every git the runner runs (changes, baseline revert, the edit-loop sample, blob
+  reads) runs against it with the workspace as the working tree, no configuration of its own and no attributes file, so
+  a filter, textconv, hook or fsmonitor the agent configures has nothing to run. A workspace without it is refused.
+  Delivered contents are what git would commit from the working
   tree and are hash-checked in transit; the tree is built on GitHub's own base tree, and the repository's CI runs on
   the pull request.
