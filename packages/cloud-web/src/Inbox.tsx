@@ -78,9 +78,6 @@ export function InboxCard({
               />
             ))}
           </div>
-          {card.hasRecommended && (
-            <p className="muted">The filled button is the recommended answer.</p>
-          )}
         </>
       )}
     </section>
