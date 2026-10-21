@@ -14,8 +14,9 @@ import {
 } from './contract';
 import { InboxPanel } from './Inbox';
 import { Computer } from './Computer';
+import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
-import { displayJson, displayText, dollars, publicLink } from './presentation';
+import { displayJson, displayText, dollars, publicLink, stepsOf } from './presentation';
 import { disablePush, enablePush } from './push';
 import {
   applyEvent,
@@ -158,6 +159,27 @@ function taskLabel(task: TaskView): string {
   }[task.state];
 }
 
+/** The one updating line of a running task, and the steps behind it when it is opened. */
+function StepLine({ notes }: { notes: readonly string[] }) {
+  const { current, steps } = stepsOf(notes);
+  if (current === undefined) return null;
+  return (
+    <details className="current-step">
+      <summary>
+        <span>Current step</span>
+        {displayText(current)}
+      </summary>
+      {steps.length > 1 && (
+        <ol className="steps">
+          {steps.map((step, i) => (
+            <li key={i}>{displayText(step)}</li>
+          ))}
+        </ol>
+      )}
+    </details>
+  );
+}
+
 function TaskBranch({
   task,
   client,
@@ -204,12 +226,7 @@ function TaskBranch({
         {stopping && (
           <p className="muted">Still stopping. The cost may change until it has stopped.</p>
         )}
-        {task.progress.length > 0 && (
-          <p className="current-step">
-            <span>Current step</span>
-            {displayText(task.progress.at(-1) ?? '')}
-          </p>
-        )}
+        {task.progress.length > 0 && <StepLine notes={task.progress} />}
         {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
         {task.manifest && <p>{displayText(task.manifest.summary)}</p>}
         {live && <Computer client={client} task={task} />}
@@ -539,6 +556,16 @@ export function ConversationView({
             </article>
           ))}
         </div>
+        {tasks
+          .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
+          .map((task) => (
+            <TaskDelivery
+              key={task.taskId}
+              client={client}
+              task={task}
+              listings={artifacts[task.taskId]?.listings ?? []}
+            />
+          ))}
         {questions.map((question) => (
           <QuestionCard
             key={question.questionId}

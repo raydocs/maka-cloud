@@ -100,6 +100,41 @@ function vapidKeys() {
   };
 }
 
+/** A 1x1 PNG: the preview image the fake sites serve. */
+export const PREVIEW_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/**
+ * The preview proxy's only network, replaced: `docs.example.test` has a title and a preview image,
+ * `plain.example.test` has a title and no image, anything else does not answer. No test here
+ * reaches a real site.
+ */
+type PreviewFetch = NonNullable<
+  NonNullable<Parameters<typeof startCloudServer>[0]['previews']>['fetch']
+>;
+export const previewFetch: PreviewFetch = async (url) => {
+  const { hostname, pathname } = new URL(url);
+  if (pathname === '/preview.png') {
+    return { ok: true, url, contentType: 'image/png', body: PREVIEW_PNG };
+  }
+  const page = (title: string, image: boolean) =>
+    ({
+      ok: true,
+      url,
+      contentType: 'text/html',
+      body: Buffer.from(
+        `<html><head><title>${title}</title>${
+          image ? `<meta property="og:image" content="https://${hostname}/preview.png">` : ''
+        }</head><body></body></html>`,
+      ),
+    }) as const;
+  if (hostname === 'docs.example.test') return page('How redirects work', true);
+  if (hostname === 'plain.example.test') return page('Notes from a small site', false);
+  return { ok: false, reason: 'network' };
+};
+
 export async function startStack(
   options: { pausable?: boolean; port?: number; push?: boolean; inbox?: boolean } = {},
 ): Promise<Stack> {
@@ -169,6 +204,7 @@ export async function startStack(
     invitesPath: join(dir, 'invites.sqlite'),
     handoffRoot: join(dir, 'handoff'),
     runners: new RunnerRegistry([fake]),
+    previews: { fetch: previewFetch },
     computer: computer.source,
     ...(options.port === undefined ? {} : { port: options.port }),
     host: '127.0.0.1',

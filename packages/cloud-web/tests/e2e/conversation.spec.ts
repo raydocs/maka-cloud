@@ -97,10 +97,16 @@ test('one sentence in, a watched piece of work and a reviewable result out', asy
   await expect(page.locator('.report-content')).toContainText(
     'Solid-state cells <script>alert(1)</script> are close.',
   );
-  await expect(page.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
-    'href',
-    'https://github.com/example/repo/pull/7',
-  );
+  // The pull request is one tap on the result card and listed with the other results.
+  for (const where of [
+    page.getByRole('article', { name: 'Result: Write the report' }),
+    page.getByRole('region', { name: 'Artifacts' }),
+  ]) {
+    await expect(where.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
+      'href',
+      'https://github.com/example/repo/pull/7',
+    );
+  }
   expect(await page.locator('body').innerText()).not.toMatch(NAMES);
   await noHorizontalScroll(page);
 });
