@@ -109,6 +109,17 @@ Still missing before it can merge:
    an install line over 24 KB that holds a certificate field and a key, which must not reach the
    output. Source: batch29 A7 (owner's Codex recheck).
 
+## Smoke enumeration and the task list (from the #328 review)
+
+1. P3: the smoke should throw if the conversation list ever gains a `next` cursor, because it reads
+   one page today and would miss the rest. Test: a list reply with a `next` cursor makes the smoke
+   refuse to start.
+2. P3: the smoke should request `limit=200` per page, so an invite with a long history needs fewer
+   pages. Test: the request carries `limit=200`.
+3. P3, possibly user-visible: the server's `listTasks` can drop a task from a page, so the task list
+   may miss one. Check the lane's cursor logic first. Test: a page boundary that falls inside a run
+   of tasks returns each task exactly once. Source: the #328 review.
+
 ## Reviews merged without an outside review
 
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
