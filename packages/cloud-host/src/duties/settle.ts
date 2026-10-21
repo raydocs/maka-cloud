@@ -30,7 +30,9 @@ const STOPPED_BY_PERSON: ReadonlySet<string> = new Set(['user_stop', 'paused']);
 /**
  * Only a stop by a person is `stopped` and leaves the failure count alone. Any other way a run is
  * cancelled (the hard budget, a reason this list does not know, none recorded) counts against the
- * duty, so a duty that keeps hitting its budget turns itself off.
+ * duty, so a duty that keeps hitting its budget turns itself off. A run the conductor ended as
+ * `model_transient` (an overloaded or unreachable model, before the run did anything) is
+ * `transient`: the engine runs it once more instead of counting it. Any other reason fails closed.
  */
 function outcomeOf(
   run: DutyRunView & { state: 'done' | 'failed' | 'cancelled' | 'interrupted' },
@@ -40,6 +42,8 @@ function outcomeOf(
       return 'completed';
     case 'cancelled':
       return run.endReason !== null && STOPPED_BY_PERSON.has(run.endReason) ? 'stopped' : 'failed';
+    case 'failed':
+      return run.endReason === 'model_transient' ? 'transient' : 'failed';
     default:
       return 'failed';
   }

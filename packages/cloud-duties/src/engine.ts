@@ -13,6 +13,8 @@ import {
   fromMicro,
   MAX_CHAIN_DEPTH,
   MAX_CONSECUTIVE_FAILURES,
+  TRANSIENT_RETRY_DELAY_MINUTES,
+  TRANSIENT_RETRY_SKIP_WITHIN_MINUTES,
   MAX_ENABLED_DUTIES,
   type Project,
   type Proposal,
@@ -58,7 +60,11 @@ export interface RunRequest {
   attempts: number;
 }
 
-export type EndOutcome = 'completed' | 'failed' | 'stopped' | 'abandoned';
+/**
+ * How a started run ended. `transient` is a failure on a model error that passes by itself: the
+ * engine runs the request once more when it can, and otherwise counts it as `failed`.
+ */
+export type EndOutcome = 'completed' | 'failed' | 'stopped' | 'abandoned' | 'transient';
 
 export type AddProjectResult =
   | { ok: true; project: Project }
@@ -123,6 +129,9 @@ interface RequestRow {
 }
 
 type ClaimResult = 'created' | 'duplicate' | 'daily_cap';
+
+/** The trigger key of a request's one retry. A key that already ends with it is not retried again. */
+const RETRY_KEY_SUFFIX = ':retry';
 
 const DELIVERY_RETENTION_MS = 30 * 24 * 3_600_000;
 const MINUTE_MS = 60_000;
@@ -414,6 +423,7 @@ export class DutyEngine {
     external: boolean,
     at: number,
     supersede?: { scope: string; seq: number },
+    notBefore = at,
   ): ClaimResult {
     const exists = this.db
       .prepare('SELECT 1 FROM run_requests WHERE duty_id = ? AND trigger_key = ?')
@@ -445,7 +455,7 @@ export class DutyEngine {
         fits ? null : 0,
         supersede?.scope ?? null,
         supersede?.seq ?? null,
-        at,
+        notBefore,
         at,
         fits ? null : at,
       );
@@ -905,7 +915,8 @@ export class DutyEngine {
    * started (spent 0). Ending twice changes nothing. Returns whether this call ended it.
    */
   finish(requestId: string, outcome: EndOutcome, spentUsd?: number): boolean {
-    return transaction(this.db, () => {
+    let retryQueued = false;
+    const ended = transaction(this.db, () => {
       const row = this.db
         .prepare('SELECT state, reserved_micro, started_at FROM run_requests WHERE request_id = ?')
         .get(requestId) as
@@ -927,9 +938,74 @@ export class DutyEngine {
           "UPDATE run_requests SET state = 'done', reason = ?, spent_micro = ?, finished_at = ? WHERE request_id = ? AND state = 'started'",
         )
         .run(outcome, spent, this.now(), requestId);
-      this.countOutcome(requestId, outcome);
+      // A transient failure is not counted against the duty while its one retry is waiting; the
+      // retry's own end counts instead. With no retry it is an ordinary failure.
+      if (outcome !== 'transient') {
+        this.countOutcome(requestId, outcome);
+      } else if (this.retryTransient(requestId)) {
+        retryQueued = true;
+      } else {
+        this.db
+          .prepare("UPDATE run_requests SET reason = 'failed' WHERE request_id = ?")
+          .run(requestId);
+        this.countOutcome(requestId, 'failed');
+      }
       return true;
     });
+    if (retryQueued) this.notify();
+    return ended;
+  }
+
+  /**
+   * Queues the one retry of a request that failed on a transient model error: same brief, same
+   * authority and budget as the first, claimed against today's cap like any request (so the retry's
+   * money is reserved before it runs), two minutes later. Not when the request already is a
+   * retry, the duty or project is off, or the duty's schedule fires again within 30 minutes (that
+   * run is the retry). Inside the caller's transaction; true when a retry is waiting.
+   */
+  private retryTransient(requestId: string): boolean {
+    const row = this.db
+      .prepare('SELECT * FROM run_requests WHERE request_id = ?')
+      .get(requestId) as unknown as
+      | (RequestRow & {
+          trigger_key: string;
+          supersede_scope: string | null;
+          supersede_seq: number | null;
+        })
+      | undefined;
+    if (!row || row.trigger_key.endsWith(RETRY_KEY_SUFFIX)) return false;
+    const duty = this.db.prepare('SELECT * FROM duties WHERE duty_id = ?').get(row.duty_id) as
+      | DutyRow
+      | undefined;
+    const project = duty ? this.projectById(duty.project_id) : undefined;
+    if (!duty || !project || duty.state !== 'active' || !this.permitted(project)) return false;
+    const at = this.now();
+    const next = this.nextScheduledRun(duty, at);
+    if (next !== undefined && next - at <= TRANSIENT_RETRY_SKIP_WITHIN_MINUTES * MINUTE_MS) {
+      return false;
+    }
+    // The first request's own limits, not whatever the duty says now.
+    const claimed = this.claim(
+      project,
+      { ...duty, authority: row.authority, run_budget_micro: row.run_budget_micro },
+      `${row.trigger_key}${RETRY_KEY_SUFFIX}`,
+      row.brief,
+      row.external === 1,
+      at,
+      row.supersede_scope !== null && row.supersede_seq !== null
+        ? { scope: row.supersede_scope, seq: row.supersede_seq }
+        : undefined,
+      at + TRANSIENT_RETRY_DELAY_MINUTES * MINUTE_MS,
+    );
+    return claimed === 'created';
+  }
+
+  /** When a schedule duty fires next, or nothing for any other trigger. */
+  private nextScheduledRun(duty: DutyRow, at: number): number | undefined {
+    const trigger = JSON.parse(duty.trigger) as Trigger;
+    if (trigger.kind !== 'schedule' || duty.activated_at === null) return undefined;
+    const every = trigger.everyMinutes * MINUTE_MS;
+    return duty.activated_at + (Math.floor((at - duty.activated_at) / every) + 1) * every;
   }
 
   /** Requests whose run has started and not been accounted for, for the host to reconcile. */
