@@ -1,5 +1,4 @@
-import { ApiError, type CloudClient } from './client';
-import { type PushRegistration, routes } from './contract';
+import { ApiError, type CloudClient, type PushRegistration, routes } from '@maka-cloud/client';
 
 function supported(): boolean {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;

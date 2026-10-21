@@ -1,7 +1,12 @@
 import { Button } from '@astryxdesign/core';
 import { useState } from 'react';
-import type { InboxEvidence, InboxItem } from './contract';
-import { displayText, exactText, publicLink } from './presentation';
+import {
+  displayText,
+  exactText,
+  type InboxEvidence,
+  type InboxItem,
+  publicLink,
+} from '@maka-cloud/client';
 
 const HEADING: Record<string, string> = {
   approval: 'Needs your approval',

@@ -1,13 +1,17 @@
 import { useEffect, useState } from 'react';
-import { Unsupported, type CloudClient } from './client';
-import type {
-  ArtifactListing,
-  SourceLabel,
-  SourceListing,
-  SourcePreview,
-  TaskView,
-} from './contract';
-import { captionOf, displayText, firstSentence, publicLink } from './presentation';
+import {
+  type ArtifactListing,
+  captionOf,
+  type CloudClient,
+  displayText,
+  firstSentence,
+  publicLink,
+  type SourceLabel,
+  type SourceListing,
+  type SourcePreview,
+  type TaskView,
+  Unsupported,
+} from '@maka-cloud/client';
 import { Viewer } from './Viewer';
 
 /** A picture's bytes as a local object URL, revoked when it goes. */

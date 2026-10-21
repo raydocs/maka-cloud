@@ -1,8 +1,17 @@
 // @vitest-environment node
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { ApiError, CloudClient, readEvents, Unsupported } from '../../src/client';
-import { type FeedEvent, routes } from '../../src/contract';
-import { type ConversationState, applyEvent, emptyState, totalCost } from '../../src/state';
+import {
+  ApiError,
+  applyEvent,
+  CloudClient,
+  type ConversationState,
+  emptyState,
+  type FeedEvent,
+  readEvents,
+  routes,
+  totalCost,
+  Unsupported,
+} from '@maka-cloud/client';
 import { MANIFEST, type Stack, startStack } from '../support/stack';
 
 /**

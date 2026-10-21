@@ -1,10 +1,17 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { ConversationView } from '../src/App';
-import { CloudClient } from '../src/client';
-import type { ArtifactListing, SourceListing, TaskView } from '../src/contract';
+import {
+  type ArtifactListing,
+  captionOf,
+  CloudClient,
+  firstSentence,
+  type SourceListing,
+  STEP_PREFIX,
+  stepsOf,
+  type TaskView,
+} from '@maka-cloud/client';
 import { DeliveryCard, SourcesStack, stackOf } from '../src/Delivery';
-import { captionOf, firstSentence, STEP_PREFIX, stepsOf } from '../src/presentation';
 
 beforeEach(() => {
   // jsdom has no object URLs; the code under test only needs a string it can hand to <img>.

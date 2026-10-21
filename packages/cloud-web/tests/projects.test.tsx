@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { CloudClient } from '../src/client';
-import type { DutyView, InboxItem, ProjectView, TaskView } from '../src/contract';
+import {
+  CloudClient,
+  type DutyView,
+  type InboxItem,
+  type ProjectView,
+  type TaskView,
+} from '@maka-cloud/client';
 import { Projects, budgetWords, triggerWords } from '../src/Projects';
 import { TaskPage, verdictOf } from '../src/TaskPage';
 
