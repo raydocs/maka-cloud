@@ -1,7 +1,15 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, relative } from 'node:path';
+import {
+  type BoxService,
+  type BoxServiceOptions,
+  cliInstallCommands,
+  pinnedVersions,
+  startBoxService,
+} from '@maka-cloud/boxes';
 import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox';
 import {
   type Orchestrator,
   RunnerRegistry,
@@ -94,6 +102,11 @@ export interface StackDependencies {
     retryAfterMs?: number;
     now?: () => number;
   };
+  /**
+   * Replaces the sandbox client, the egress guard and the timers of the box pool (`MAKA_CLOUD_BOXES=1`),
+   * for tests. Unset in the product: the pool uses the account's `INSTABOX_API_KEY` and the real guard.
+   */
+  boxes?: Pick<BoxServiceOptions, 'guard' | 'timers'> & { client?: InstaboxClient };
   onWarning?: (message: string, detail?: unknown) => void;
   /** Routine events worth a log line, such as a finished backup. */
   onInfo?: (event: string, fields: Record<string, string | number>) => void;
@@ -225,6 +238,8 @@ export async function startStack(
   // has no duties: there is no webhook route and no project route.
   const webhookSecret = config.dutiesSet ? env.MAKA_GITHUB_WEBHOOK_SECRET?.trim() : undefined;
   let duties: DutiesRuntime | undefined;
+  // The box pool and its sleep and cleanup loops, made only with `MAKA_CLOUD_BOXES=1`.
+  let boxService: BoxService | undefined;
   // Proposed cards (T30): only when asked for, on top of the duties' database.
   let cards: CardsRuntime | undefined;
   // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
@@ -262,6 +277,38 @@ export async function startStack(
       });
     }
     const publicUrl = config.mcp.publicUrl;
+    if (config.boxes !== undefined) {
+      const apiKey = env.INSTABOX_API_KEY;
+      const client =
+        dependencies.boxes?.client ??
+        (apiKey === undefined || apiKey === ''
+          ? undefined
+          : new InstaboxClient({
+              apiKey,
+              baseUrl: config.instabox.apiUrl ?? DEFAULT_INSTABOX_BASE_URL,
+            }));
+      if (client === undefined) throw new Error('INSTABOX_API_KEY is not set.');
+      boxService = startBoxService({
+        client,
+        templateId: config.boxes.templateId,
+        maxPerInvite: config.boxes.maxPerInvite,
+        ...(config.agentChannel === undefined ? {} : { agent: config.agentChannel }),
+        // Until the orchestrator exists every task counts as live: a box is never freed by a guess.
+        isTaskLive: (taskId) => {
+          const state = orchestrator?.taskStateOf(taskId);
+          return (
+            orchestrator === undefined ||
+            state === 'queued' ||
+            state === 'running' ||
+            state === 'paused'
+          );
+        },
+        conversationOf: (taskId) => conversationOfTask?.(taskId),
+        onWarning: warn,
+        ...(dependencies.boxes?.guard === undefined ? {} : { guard: dependencies.boxes.guard }),
+        ...(dependencies.boxes?.timers === undefined ? {} : { timers: dependencies.boxes.timers }),
+      });
+    }
     const runnerOptions: Partial<CloudRunnersOptions> = {
       modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) => {
         const inviteId = dependencies.ownerOfTask
@@ -283,7 +330,12 @@ export async function startStack(
       ],
       inputs: sameConversationInputPolicy(directory),
       tenantOf,
-      sandboxes: new TenantMachineProvider(config.sandboxes),
+      // The pool makes, sleeps and deletes the boxes; the CLIs on them are the pinned, checked ones.
+      sandboxes:
+        boxService === undefined ? new TenantMachineProvider(config.sandboxes) : boxService.pool,
+      ...(boxService === undefined
+        ? {}
+        : { installCommands: cliInstallCommands(), versions: pinnedVersions() }),
       ...(config.agentChannel === undefined || transcripts === undefined
         ? {}
         : {
@@ -390,6 +442,10 @@ export async function startStack(
     // They are written only once this process holds the server's database, which keeps a second
     // server out: a start that fails on the way never changes what the running server published.
     journal.setSpendPolicy(config.spend);
+    // Boxes labelled with a task that ended while the server was down are freed (or kept, if live).
+    boxService?.pool
+      .reconcile()
+      .catch((error: unknown) => warn('Box pool reconcile failed', error));
     const runsOf = (conversationId: string) => {
       const conductorState = cloud.conductor.state;
       return conductorState.runsOfConversation(conversationId).map((run) => ({
@@ -417,6 +473,7 @@ export async function startStack(
     await cards?.stop();
     await duties?.stop();
     duties?.close();
+    await boxService?.close();
     transcripts?.close();
     await gateway.close();
     invites.close();
@@ -557,6 +614,7 @@ export async function startStack(
             await cloud.close();
           } finally {
             duties?.close();
+            await boxService?.close();
             transcripts?.close();
             await gateway.close();
             invites?.close();
