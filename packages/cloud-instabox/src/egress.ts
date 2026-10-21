@@ -50,12 +50,42 @@ export const EGRESS_GUARD_SCRIPT = `
 M="$MAKA_M"
 fail() { printf '%s' "$M"; printf 'ERR\\0%s\\0' "$1"; printf '%s' "$M"; exit 0; }
 as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi; }
-# Whether the rules are already in place: the reply rule opens the chain, the chain is the first
-# OUTPUT rule and every net is blocked. Sets WHY when not.
-verify() {
-  tool="$1"; shift
-  first=$(as_root "$tool" -w -S OUTPUT 2>/dev/null | awk '$1 == "-A" { print $0; exit }')
-  [ "$first" = "-A OUTPUT -j $MAKA_CHAIN" ] || { WHY="$MAKA_CHAIN is not the first OUTPUT rule"; return 1; }
+# What the tool prints for a chain, with the chain's own name made generic so that two chains with
+# the same rules print the same.
+render() {
+  as_root "$tool" -w -S "$1" 2>/dev/null | awk -v c="$1" '{ for (i = 1; i <= NF; i++) if ($i == c) $i = "CHAIN"; print }'
+}
+first_output_rule() {
+  as_root "$tool" -w -S OUTPUT 2>/dev/null | awk '$1 == "-A" { print $0; exit }'
+}
+# Fills a chain with the policy: replies, this box's name servers (now), neighbour discovery, then
+# the blocked nets.
+build() {
+  chain="$1"; shift
+  as_root "$tool" -w -N "$chain" 2>/dev/null
+  as_root "$tool" -w -F "$chain" || fail "$tool: cannot reset $chain (needs root or sudo -n)"
+  as_root "$tool" -w -A "$chain" -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN \\
+    || fail "$tool: cannot add the reply rule"
+  for ns in $(awk '$1 == "nameserver" { print $2 }' "$MAKA_RESOLV_CONF" 2>/dev/null); do
+    case "$ns" in *:*) fam=6 ;; *) fam=4 ;; esac
+    [ "$fam" = "$FAMILY" ] || continue
+    for proto in udp tcp; do
+      as_root "$tool" -w -A "$chain" -d "$ns" -p "$proto" --dport 53 -j RETURN \\
+        || fail "$tool: cannot add the name server rule"
+    done
+  done
+  if [ "$FAMILY" = 6 ]; then
+    for kind in $MAKA_ICMPV6; do
+      as_root "$tool" -w -A "$chain" -p ipv6-icmp --icmpv6-type "$kind" -j RETURN \\
+        || fail "$tool: cannot add the $kind rule"
+    done
+  fi
+  for net in "$@"; do
+    as_root "$tool" -w -A "$chain" -d "$net" -j REJECT || fail "$tool: cannot block $net"
+  done
+}
+# Whatever the rules say, the chain must open with the reply rule and reject every net. Sets WHY.
+sane() {
   listed=$(as_root "$tool" -w -S "$MAKA_CHAIN" 2>/dev/null) || { WHY="cannot read $MAKA_CHAIN back"; return 1; }
   opener=$(printf '%s\\n' "$listed" | awk '$1 == "-A" { print $0; exit }')
   # iptables prints the states in its own order (RELATED,ESTABLISHED), whatever order they were given in.
@@ -67,37 +97,39 @@ verify() {
     printf '%s\\n' "$listed" | grep -Fq -- "-d $net -j REJECT" || { WHY="$net is not blocked"; return 1; }
   done
 }
+unhook() {
+  n=0
+  while [ "$n" -lt 20 ] && as_root "$tool" -w -C OUTPUT -j "$1" 2>/dev/null; do
+    as_root "$tool" -w -D OUTPUT -j "$1" || fail "$tool: cannot unhook $1"
+    n=$((n + 1))
+  done
+}
 guard() {
   tool="$1"; shift
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
-  # Rules that are already right are left alone: rebuilding the chain opens a gap for the tasks
-  # that are running in the box.
-  verify "$tool" "$@" && return 0
-  as_root "$tool" -w -N "$MAKA_CHAIN" 2>/dev/null
-  as_root "$tool" -w -F "$MAKA_CHAIN" || fail "$tool: cannot reset $MAKA_CHAIN (needs root or sudo -n)"
-  as_root "$tool" -w -A "$MAKA_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN \\
-    || fail "$tool: cannot add the reply rule"
-  for ns in $(awk '$1 == "nameserver" { print $2 }' "$MAKA_RESOLV_CONF" 2>/dev/null); do
-    case "$ns" in *:*) fam=6 ;; *) fam=4 ;; esac
-    [ "$fam" = "$FAMILY" ] || continue
-    for proto in udp tcp; do
-      as_root "$tool" -w -A "$MAKA_CHAIN" -d "$ns" -p "$proto" --dport 53 -j RETURN \\
-        || fail "$tool: cannot add the name server rule"
-    done
-  done
-  if [ "$FAMILY" = 6 ]; then
-    for kind in $MAKA_ICMPV6; do
-      as_root "$tool" -w -A "$MAKA_CHAIN" -p ipv6-icmp --icmpv6-type "$kind" -j RETURN \\
-        || fail "$tool: cannot add the $kind rule"
-    done
+  # The policy as it should be now is built in a chain nothing uses, and the live chain is compared
+  # with it as the tool prints both: a name server that changed (a box restored elsewhere) or a rule
+  # added or lost shows as a difference, whatever the order or form the tool prints.
+  next="$MAKA_CHAIN"_NEW
+  unhook "$next"
+  build "$next" "$@"
+  want=$(render "$next")
+  [ -n "$want" ] || fail "$tool: cannot read $next back"
+  have=$(render "$MAKA_CHAIN")
+  if [ "$(first_output_rule)" = "-A OUTPUT -j $MAKA_CHAIN" ] && [ "$have" = "$want" ] && sane "$@"; then
+    # Right already: nothing live is touched, so no gap opens for the tasks running in the box.
+    as_root "$tool" -w -F "$next"; as_root "$tool" -w -X "$next"
+    return 0
   fi
-  for net in "$@"; do
-    as_root "$tool" -w -A "$MAKA_CHAIN" -d "$net" -j REJECT || fail "$tool: cannot block $net"
-  done
-  as_root "$tool" -w -C OUTPUT -j "$MAKA_CHAIN" 2>/dev/null \\
-    || as_root "$tool" -w -I OUTPUT 1 -j "$MAKA_CHAIN" || fail "$tool: cannot hook $MAKA_CHAIN into OUTPUT"
-  # Read it back.
-  verify "$tool" "$@" || fail "$tool: $WHY"
+  # Otherwise the new chain takes over before the old one goes: the box is never without a hook.
+  as_root "$tool" -w -I OUTPUT 1 -j "$next" || fail "$tool: cannot hook $next into OUTPUT"
+  unhook "$MAKA_CHAIN"
+  as_root "$tool" -w -F "$MAKA_CHAIN" 2>/dev/null
+  as_root "$tool" -w -X "$MAKA_CHAIN" 2>/dev/null
+  as_root "$tool" -w -E "$next" "$MAKA_CHAIN" || fail "$tool: cannot put $MAKA_CHAIN in place"
+  [ "$(first_output_rule)" = "-A OUTPUT -j $MAKA_CHAIN" ] || fail "$tool: $MAKA_CHAIN is not the first OUTPUT rule"
+  [ "$(render "$MAKA_CHAIN")" = "$want" ] || fail "$tool: $MAKA_CHAIN does not read back as written"
+  sane "$@" || fail "$tool: $WHY"
 }
 # Several server processes can guard the same box at once; one at a time, so that no one reads
 # back the rules while another is refilling them.

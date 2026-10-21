@@ -10,7 +10,9 @@ import {
 import { collect, setup, terminal } from './harness.js';
 
 const MUTATING = /(^| )(-N|-F|-A|-I|-D|-X) /u;
-const mutations = (calls: string[]) => calls.filter((call) => MUTATING.test(call));
+// The scratch chain the policy is built in is not live: nothing routes to it.
+const mutations = (calls: string[]) =>
+  calls.filter((call) => MUTATING.test(call) && !call.includes(`${EGRESS_CHAIN}_NEW`));
 
 test('the box is closed and read back before the CLI starts', async (t) => {
   const h = await setup();
