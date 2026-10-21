@@ -6,11 +6,12 @@
 #
 # The server's settings are deploy/rehearsal/server.env (with the sandbox map up.sh adds), the names
 # are deploy/rehearsal/compose.env. See deploy/rehearsal/README.md.
+# Relative paths here resolve against the first file (deploy/), not against this one.
 services:
   stubs:
     # The server's own image (the stand-ins use the workspaces' test doubles, which it carries).
     build:
-      context: ../..
+      context: ..
       dockerfile: deploy/Dockerfile
       target: server
     image: maka-cloud:local
