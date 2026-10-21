@@ -94,7 +94,7 @@ interface Waiter {
   tenantId: string;
   taskId: TaskId;
   choice: SetupChoice | undefined;
-  settle: (finish: () => Promise<Box>) => void;
+  settle: (finish: () => Promise<Held>) => void;
   fail: (error: Error) => void;
   timer: unknown;
 }
@@ -107,9 +107,22 @@ interface Want {
   choice?: SetupChoice;
 }
 
+/** A box taken by one `acquire`, with the claim token only that call's lease may release. */
+interface Held {
+  box: Box;
+  holder: symbol;
+}
+
 type Plan =
-  | { kind: 'have'; box: Box; choice?: SetupChoice }
-  | { kind: 'create'; box: Box; why: BoxUseReason; snapshotId?: string; choice?: SetupChoice }
+  | { kind: 'have'; box: Box; holder: symbol; choice?: SetupChoice }
+  | {
+      kind: 'create';
+      box: Box;
+      holder: symbol;
+      why: BoxUseReason;
+      snapshotId?: string;
+      choice?: SetupChoice;
+    }
   | { kind: 'none' };
 
 /**
@@ -369,7 +382,7 @@ export class BoxPool implements SandboxProvider {
 
   // -- taking a box ------------------------------------------------------------------------------
 
-  private async take(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Box> {
+  private async take(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Held> {
     const plan = this.plan(tenantId, taskId, choice === undefined ? {} : { choice });
     return plan.kind === 'none'
       ? await this.wait(tenantId, taskId, choice)
@@ -385,9 +398,11 @@ export class BoxPool implements SandboxProvider {
     const boxes = this.boxesOf(tenantId);
     for (const box of boxes.values()) {
       if (box.taskId === taskId && box.state !== 'lost') {
-        // The same task again (a resume, a repeated call): the same box, with a newer lease.
-        box.holder = Symbol('lease');
-        return { kind: 'have', box, ...(choice === undefined ? {} : { choice }) };
+        // The same task again (a resume, a repeated call): the same box, with a newer lease. The
+        // older call's lease no longer matches the claim, so releasing it frees nothing.
+        const holder = Symbol('lease');
+        box.holder = holder;
+        return { kind: 'have', box, holder, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (snapshotId === undefined) {
@@ -413,8 +428,8 @@ export class BoxPool implements SandboxProvider {
             a.slot - b.slot,
         )[0];
       if (free) {
-        this.claim(free, taskId);
-        return { kind: 'have', box: free, ...(choice === undefined ? {} : { choice }) };
+        const holder = this.claim(free, taskId);
+        return { kind: 'have', box: free, holder, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (this.atAccountLimit()) return { kind: 'none' };
@@ -422,11 +437,12 @@ export class BoxPool implements SandboxProvider {
       if (boxes.has(slot)) continue;
       const box = this.newBox(tenantId, slot);
       boxes.set(slot, box);
-      this.claim(box, taskId);
+      const holder = this.claim(box, taskId);
       box.state = 'creating';
       return {
         kind: 'create',
         box,
+        holder,
         why: snapshotId === undefined ? 'create' : 'restore',
         ...(snapshotId === undefined ? {} : { snapshotId }),
         ...(choice === undefined || snapshotId !== undefined ? {} : { choice }),
@@ -435,21 +451,22 @@ export class BoxPool implements SandboxProvider {
     return { kind: 'none' };
   }
 
-  private claim(box: Box, taskId: TaskId): void {
+  private claim(box: Box, taskId: TaskId): symbol {
     // Taking a box that is going to sleep turns the sleep back; taking a sleeping one wakes it.
     box.state =
       box.machineId === undefined ? 'creating' : box.state === 'suspended' ? 'waking' : 'claimed';
     box.sleepPhase = undefined;
     box.taskId = taskId;
-    box.holder = Symbol('lease');
+    const holder = Symbol('lease');
+    box.holder = holder;
     const conversationId = this.options.conversationOf?.(taskId);
     if (conversationId !== undefined) box.conversationId = conversationId;
+    return holder;
   }
 
   /** The async tail of a decision: write the label, or make the box. A failure gives the box back. */
-  private async finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Box> {
-    const { box } = plan;
-    const holder = box.holder;
+  private async finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Held> {
+    const { box, holder } = plan;
     const taskId = box.taskId as TaskId;
     try {
       if (plan.kind === 'create') {
@@ -464,7 +481,7 @@ export class BoxPool implements SandboxProvider {
         }
         await this.writeLabels(box);
       }
-      return box;
+      return { box, holder };
     } catch (error) {
       if (plan.kind === 'create') this.forget(box);
       else if (box.holder === holder) this.free(box);
@@ -607,8 +624,8 @@ export class BoxPool implements SandboxProvider {
 
   // -- waiting -----------------------------------------------------------------------------------
 
-  private wait(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Box> {
-    return new Promise<Box>((resolve, reject) => {
+  private wait(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Held> {
+    return new Promise<Held>((resolve, reject) => {
       const waiter: Waiter = {
         tenantId,
         taskId,
@@ -658,12 +675,11 @@ export class BoxPool implements SandboxProvider {
 
   // -- leases ------------------------------------------------------------------------------------
 
-  private lease(box: Box): SandboxLease {
-    const holder = box.holder;
+  private lease({ box, holder }: Held): SandboxLease {
     return {
       machineId: box.machineId as string,
       release: async () => {
-        if (box.holder !== holder || holder === undefined) return;
+        if (box.holder !== holder) return;
         this.free(box);
         await box.labels;
       },
@@ -962,8 +978,9 @@ export class BoxPool implements SandboxProvider {
         this.markLost(box, `it failed its guard after waking: ${errorText(error)}`);
         return false;
       }
-      box.state = 'claimed';
+      // The box stays `waking` through its resume, so every ask for it waits on this same wake.
       await this.resume(box);
+      if (box.state === 'waking') box.state = 'claimed';
       return true;
     } finally {
       box.waking = undefined;
