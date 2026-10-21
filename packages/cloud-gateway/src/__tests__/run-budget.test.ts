@@ -6,11 +6,15 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import {
+  Allowance,
+  accountPort,
+  type BudgetPort,
   clearRunBudget,
   journalEnforcesRunBudgets,
   RUN_LEASE_MS,
   RunBudgetHeld,
   renewRunBudget,
+  LimitPort,
   type ReserveResult,
   type SpendAccounts,
   SqliteSpendJournal,
@@ -35,6 +39,10 @@ function ledgerOn(journal: SqliteSpendJournal, now: () => number): SpendAccounts
     now,
   });
 }
+
+/** A credential issued now: a grant's port, stamped with the invite's generation at this moment. */
+const issue = (ledger: SpendAccounts, usd = 1_000): BudgetPort =>
+  accountPort(new LimitPort([new Allowance(usd)]), ledger, INVITE);
 
 const refused = (result: ReserveResult) => (result.ok ? undefined : result.cap?.scope);
 
@@ -119,22 +127,28 @@ test('a run budget counts only what the invite booked since the run began, and o
   assert.deepEqual(ledger.reserve('server', 'digest', 50), { ok: true }, 'nor has the server');
 });
 
-test('replacing a run budget starts it over, and clearing it leaves the daily and monthly caps alone', async (t) => {
+test('the run that holds a budget may set it again, but that never gives it a fresh start; clearing leaves the daily and monthly caps alone', async (t) => {
   const path = join(await dir(t), 'spend.db');
   const journal = new SqliteSpendJournal(path);
   t.after(() => journal.close());
   let clock = Date.parse('2026-10-20T10:00:00Z');
   const ledger = ledgerOn(journal, () => clock);
-  setRunBudget(path, INVITE.inviteId, { limitUsd: 2, sinceMs: clock }, RUN);
-  assert.deepEqual(ledger.reserve(INVITE, 'a', 2), { ok: true });
-  assert.equal(refused(ledger.reserve(INVITE, 'b', 1)), 'invite_run');
+  setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, RUN);
+  const credential = issue(ledger);
+  assert.deepEqual(credential.reserve('a', 3), { ok: true });
 
+  // A retry, or a changed limit: the $3 still counts, and the credential still books.
   clock += 1_000;
-  setRunBudget(path, INVITE.inviteId, { limitUsd: 2, sinceMs: clock }, RUN);
-  assert.deepEqual(ledger.reserve(INVITE, 'b', 2), { ok: true }, 'a new run');
-  clearRunBudget(path, INVITE.inviteId, RUN);
-  assert.deepEqual(ledger.reserve(INVITE, 'c', 100), { ok: true });
-  clearRunBudget(path, INVITE.inviteId, RUN);
+  assert.deepEqual(
+    setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, RUN, clock),
+    { fenced: false },
+  );
+  assert.deepEqual(credential.reserve('c', 2), { ok: true }, 'the $2 left is all there is');
+  assert.equal(refused(credential.reserve('b', 3)), 'invite_run', 'the window did not start over');
+
+  assert.equal(clearRunBudget(path, INVITE.inviteId, RUN), true);
+  assert.deepEqual(issue(ledger).reserve('d', 100), { ok: true });
+  assert.equal(clearRunBudget(path, INVITE.inviteId, RUN), false);
 });
 
 test('an invalid run budget or a journal that does not exist is refused, and nothing is created', async (t) => {
@@ -334,38 +348,154 @@ test('one run holds an invite’s run budget at a time: a second run is refused 
   assert.equal(renewRunBudget(path, INVITE.inviteId, 'run_b', later), true);
 });
 
-test('a run that takes over a budget nobody renews inherits its window, so the dead run’s tasks cannot book a second budget', async (t) => {
+test('a takeover fences the run it takes over from, and only then opens a window of its own', async (t) => {
   const path = join(await dir(t), 'spend.db');
   const journal = new SqliteSpendJournal(path);
   t.after(() => journal.close());
   let clock = Date.parse('2026-10-20T23:00:00Z');
   const ledger = ledgerOn(journal, () => clock);
   setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, 'run_a', clock);
+  const a = issue(ledger);
   clock = Date.parse('2026-10-20T23:50:00Z');
-  assert.deepEqual(ledger.reserve(INVITE, 'a1', 4), { ok: true });
+  assert.deepEqual(a.reserve('a1', 4), { ok: true });
 
-  // Run A's command dies. After midnight run B takes over its budget; run A's task, still on the
-  // server with its credential, keeps booking under the same account.
+  // Run A's command dies. After midnight run B takes over; run A's task is still on the server
+  // with its credential.
+  clock = Date.parse('2026-10-21T00:10:00Z');
+  assert.deepEqual(
+    setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, 'run_b', clock),
+    { fenced: true },
+  );
+  const refusal = a.reserve('a2', 0.01);
+  assert.equal(refusal.ok, false, 'the earlier run books nothing, however little');
+  assert.match(refusal.ok ? '' : refusal.reason, /earlier run/u);
+
+  // The new run has the whole of its own budget, and no more: A's $4 is not in its window.
+  const b = issue(ledger);
+  assert.deepEqual(b.reserve('b1', 5), { ok: true });
+  assert.equal(refused(b.reserve('b2', 0.01)), 'invite_run');
+  assert.equal(a.reserve('a3', 0.01).ok, false);
+
+  // The file itself says the same to a process that books with a stale generation, and counts the
+  // bookings of one that knows nothing of generations.
+  const raw = new DatabaseSync(path);
+  t.after(() => raw.close());
+  const book = (key: string, usd: number, generation: number | null): void => {
+    raw
+      .prepare(
+        'INSERT INTO account_spend (key, account, day, month, usd, generation) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run(key, INVITE.inviteId, '2026-10-21', '2026-10', usd, generation);
+  };
+  assert.throws(() => book('stale', 0, 1), /earlier run/u);
+  assert.throws(() => book('older', 0.5, null), /run budget/u);
+});
+
+test('the new run ending its budget does not lift the cap off a task of the run it took over from', async (t) => {
+  const path = join(await dir(t), 'spend.db');
+  const journal = new SqliteSpendJournal(path);
+  t.after(() => journal.close());
+  let clock = Date.parse('2026-10-20T23:00:00Z');
+  const ledger = ledgerOn(journal, () => clock);
+  setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, 'run_a', clock);
+  const a = issue(ledger);
+  clock = Date.parse('2026-10-20T23:50:00Z');
+  assert.deepEqual(a.reserve('a1', 4), { ok: true });
+
   clock = Date.parse('2026-10-21T00:10:00Z');
   setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: clock }, 'run_b', clock);
-  assert.equal(
-    refused(ledger.reserve(INVITE, 'a2', 4)),
-    'invite_run',
-    'the $4 run A booked still counts, so another $4 would pass the $5',
-  );
-  assert.deepEqual(ledger.reserve(INVITE, 'b1', 1), { ok: true }, 'what is left is still there');
-  assert.equal(refused(ledger.reserve(INVITE, 'b2', 0.5)), 'invite_run');
+  assert.equal(a.reserve('a2', 4).ok, false, 'refused while run B holds the budget');
+  const b = issue(ledger);
+  assert.deepEqual(b.reserve('b1', 1), { ok: true });
+  // Run B finishes and clears its budget; run A's task is still going.
+  assert.equal(clearRunBudget(path, INVITE.inviteId, 'run_b'), true);
+  assert.equal(a.reserve('a3', 4).ok, false, 'still refused: run A is over');
+  assert.equal(b.reserve('b2', 1).ok, false, 'so is run B, which has ended');
+  // Credentials issued after the run are held to the daily and monthly caps alone.
+  assert.deepEqual(issue(ledger).reserve('after', 50), { ok: true });
+});
 
-  // A raw connection that knows nothing of budgets is held to the same window.
-  const olderServer = new DatabaseSync(path);
-  t.after(() => olderServer.close());
+test('a budget an earlier version left without a row sequence books nothing until a new run reopens it', async (t) => {
+  const path = join(await dir(t), 'spend.db');
+  const journal = new SqliteSpendJournal(path);
+  t.after(() => journal.close());
+  const t0 = Date.parse('2026-10-20T12:00:00Z');
+  const ledger = ledgerOn(journal, () => t0 + RUN_LEASE_MS * 10);
+  const raw = new DatabaseSync(path);
+  t.after(() => raw.close());
+  // As #158 left it: a run id and a window by time only. The stamp that time rests on can fall short.
+  raw
+    .prepare(
+      'INSERT INTO run_budget (account, limit_usd, since_ms, run_id, heartbeat_at, since_seq) VALUES (?, 5, ?, ?, ?, NULL)',
+    )
+    .run(INVITE.inviteId, t0, RUN, t0);
+
+  const refusal = issue(ledger).reserve('a', 0.01);
+  assert.equal(refusal.ok, false);
+  assert.match(refusal.ok ? '' : refusal.reason, /reopened/u);
   assert.throws(
     () =>
-      olderServer
+      raw
         .prepare('INSERT INTO account_spend (key, account, day, month, usd) VALUES (?, ?, ?, ?, ?)')
-        .run('older', INVITE.inviteId, '2026-10-21', '2026-10', 0.5),
+        .run('older', INVITE.inviteId, '2026-10-20', '2026-10', 0.01),
     /run budget/u,
+    'nor can a server that knows nothing of it',
   );
+
+  // The run that set it is not trusted with it either: setting it again is a new run.
+  assert.deepEqual(
+    setRunBudget(path, INVITE.inviteId, { limitUsd: 5, sinceMs: t0 }, RUN, t0 + 10 * RUN_LEASE_MS),
+    { fenced: true },
+  );
+  const reopened = issue(ledger);
+  assert.deepEqual(reopened.reserve('b', 5), { ok: true });
+  assert.equal(refused(reopened.reserve('c', 0.01)), 'invite_run');
+});
+
+test('the guards are swapped in one transaction, the new one first', async (t) => {
+  const path = join(await dir(t), 'spend.db');
+  const first = new SqliteSpendJournal(path);
+  first.close();
+  // A file as the previous version leaves it: its guard, and not the new ones.
+  const raw = new DatabaseSync(path);
+  raw.exec(`
+    DROP TRIGGER run_budget_guard_v3;
+    DROP TRIGGER run_generation_fence_v1;
+    CREATE TRIGGER run_budget_guard_v2 BEFORE INSERT ON account_spend
+    BEGIN SELECT RAISE(ABORT, 'the run budget of this account is used up'); END;
+  `);
+  raw.close();
+
+  // What the next open executes, in order, as another process would see the file change.
+  const statements: string[] = [];
+  const original = DatabaseSync.prototype.exec;
+  DatabaseSync.prototype.exec = function (this: DatabaseSync, sql: string) {
+    statements.push(sql.trim().split(/\s+/u).slice(0, 4).join(' '));
+    return original.call(this, sql);
+  };
+  try {
+    const journal = new SqliteSpendJournal(path);
+    journal.close();
+  } finally {
+    DatabaseSync.prototype.exec = original;
+  }
+
+  const guards = statements.flatMap((sql, index) =>
+    /^(CREATE TRIGGER|DROP TRIGGER)/u.test(sql) ? [index] : [],
+  );
+  assert.ok(guards.length > 0, JSON.stringify(statements));
+  const begin = statements.lastIndexOf('BEGIN IMMEDIATE', guards[0]);
+  const commit = statements.indexOf('COMMIT', guards.at(-1));
+  assert.ok(begin >= 0 && commit > guards.at(-1)!, 'inside one transaction');
+  assert.ok(
+    !statements
+      .slice(begin + 1, commit)
+      .some((sql) => sql === 'COMMIT' || sql === 'BEGIN IMMEDIATE'),
+    'and only one',
+  );
+  const created = statements.findIndex((sql) => sql.startsWith('CREATE TRIGGER'));
+  const dropped = statements.findIndex((sql) => sql.startsWith('DROP TRIGGER'));
+  assert.ok(created >= 0 && dropped > created, 'the new guard is in before the old one goes');
 });
 
 test('a run clears only its own run budget, and a budget nobody renews keeps limiting until a run takes it over', async (t) => {
