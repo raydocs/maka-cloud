@@ -120,6 +120,8 @@ export interface IssueInput {
   account?: Account;
   /** The conversation to tell if a cap stops the grant. Informational: it grants nothing. */
   conversationId?: string;
+  /** The attempt (epoch) of the task the grant is for; the journal keeps spend by it. */
+  attempt?: number;
 }
 
 export interface SpendState {
@@ -783,7 +785,7 @@ export class Gateway {
       port = accountPort(port, this.options.accounts, input.account);
     }
     if (this.options.journal && input.taskId !== undefined) {
-      port = journaledPort(port, this.options.journal, input.taskId);
+      port = journaledPort(port, this.options.journal, input.taskId, input.attempt);
     }
     const grant = new Grant(
       input.vendor,
