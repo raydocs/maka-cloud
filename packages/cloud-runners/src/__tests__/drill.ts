@@ -89,11 +89,15 @@ export async function crashInsideNeverStep(t: { after(fn: () => Promise<void>): 
   const restarted = h.makeRunners();
   // The box check needs a second account; it has its own tests (as in sdkSetup).
   restarted.fleet.ensureAgentIsolation = async () => undefined;
+  const takeoverStarted = Date.now();
   const second = await Orchestrator.create({
     store,
     runners: new RunnerRegistry(restarted.runners),
     handoffRoot,
   });
   t.after(async () => second.close());
-  return { h, store, first, second, info, taskId, specs, childPid, go, late };
+  // The resumed CLI has its message: the run is going again.
+  await until(async () => (await lines(fakeFile(h, 'prompts.log'))).length >= 2, 30_000);
+  const takeoverMs = Date.now() - takeoverStarted;
+  return { h, store, first, second, info, taskId, specs, childPid, go, late, takeoverMs };
 }

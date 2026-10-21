@@ -13,7 +13,7 @@ Status of the pieces (updated by each PR):
 | 5 | Spend follows the step log, per-task budgets | merged (#202), section 5 |
 | 6 | Steering, `restart` event, catch-up, stream fence | merged (#208, #209), section 6 |
 | 7 | Run timeline | in review, section 7 |
-| 8 | Drills, known gaps, bench | drills and known gaps in review (8a), section 8; bench not built (8b) |
+| 8 | Drills, known gaps, bench | in review, section 8 |
 
 ## 1. Step log and epoch fencing
 
@@ -339,3 +339,15 @@ Each is a test in `known-gaps.test.ts` that states what should hold and is expec
 | A child that left the run's process group (its own `setsid`) outlives the stop of its task, and its late write lands in the workspace. The step log fences the log, not the files; workspace files are not transactional. | T27 (stopping or replacing the whole box) |
 | A turn that makes no tool call never reads a message sent to it. The owner is told it was not seen (`task_steer_unseen`). | T28, agent side |
 | The Codex runner takes no messages for a running task. | T27 |
+
+### The bench
+
+Measured once, offline, with a fake runner: what durability adds (the SQLite log, the step log, the takeover), not a sandbox or a model. The method is durable-harness's: the median of per-round differences, warm-up rounds (5) left out, 25 rounds counted. Both are tests, so a regression fails them (`bench.test.ts` in `cloud-server`, and the drill in `cloud-runners`).
+
+| Gate | Limit | Measured (this machine) |
+|---|---|---|
+| First token of a durable task (delegate until the first progress note is in the log), over a plain run | 150 ms | 12.9 ms (plain 0.03 ms, durable 12.9 ms) |
+| A restart to a run going again, server stop and start included, SQLite log, fake runner | 12 s | 23 ms |
+| The drill's takeover to the resumed CLI having its message (real SDK, real stop of the old run by task id) | 12 s | 305 ms |
+
+The real figure for a box adds what a box costs (stopping the old run, waking a suspended machine, a fresh box for a lost one); T26 and T27 own those. The first-token gate does not include the model's own latency, which is the same with and without the log.

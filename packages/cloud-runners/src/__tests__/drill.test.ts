@@ -5,7 +5,9 @@ import { until } from './harness.js';
 import { crashInsideNeverStep, fakeFile, lines } from './drill.js';
 
 test('drill: the driver dies inside a never step: the step is reported interrupted and never run again, the task goes on, and the dead driver’s late writes are refused', async (t) => {
-  const { h, store, second, info, taskId, specs } = await crashInsideNeverStep(t);
+  const { h, store, second, info, taskId, specs, takeoverMs } = await crashInsideNeverStep(t);
+  t.diagnostic(`takeover to the resumed CLI having its message: ${takeoverMs} ms`);
+  assert.ok(takeoverMs <= 12_000, `the task was running again after ${takeoverMs} ms`);
 
   // The second process took the task over in the recorded session.
   assert.deepEqual(second.resumedTaskIds, [taskId]);
