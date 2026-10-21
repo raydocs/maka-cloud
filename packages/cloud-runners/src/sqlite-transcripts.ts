@@ -119,10 +119,11 @@ export class SqliteTranscriptStore implements TranscriptStore {
     taskId: TaskId,
     key: TranscriptKey,
     lines: readonly TranscriptLine[],
-  ): Promise<void> {
+  ): Promise<TranscriptLine[]> {
     checkAppend(key, lines, this.limits);
     const subpath = key.subpath ?? '';
-    this.write(() => {
+    return this.write(() => {
+      const committed: TranscriptLine[] = [];
       const task = this.db
         .prepare('SELECT project_key, bytes FROM transcript_tasks WHERE task_id = ?')
         .get(taskId) as { project_key: string; bytes: number } | undefined;
@@ -165,6 +166,7 @@ export class SqliteTranscriptStore implements TranscriptStore {
         if (Number(result.changes) === 0) continue;
         next++;
         added += Buffer.byteLength(line.json);
+        committed.push(line);
       }
       const total = (task?.bytes ?? 0) + added;
       if (total > this.limits.maxTaskBytes) {
@@ -183,6 +185,7 @@ export class SqliteTranscriptStore implements TranscriptStore {
           'INSERT INTO transcripts (task_id, session_id, subpath, lines) VALUES (?, ?, ?, ?) ON CONFLICT (task_id, session_id, subpath) DO UPDATE SET lines = excluded.lines',
         )
         .run(taskId, key.sessionId, subpath, next);
+      return committed;
     });
   }
 
@@ -238,11 +241,12 @@ export class SqliteTranscriptStore implements TranscriptStore {
     this.db.close();
   }
 
-  private write(work: () => void): void {
+  private write<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      work();
+      const result = work();
       this.db.exec('COMMIT');
+      return result;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
