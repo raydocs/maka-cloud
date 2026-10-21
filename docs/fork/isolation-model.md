@@ -1,0 +1,501 @@
+# Sandbox isolation and egress model
+
+This is the threat model for what runs in a sandbox box, the invariants the code is held to, how
+each one is enforced and tested, and the list of places where the code as of `da8705f` does not
+hold one of them. It exists so that the recheck loop stops finding new P1s one at a time: a
+finding is either a violation of a numbered invariant below (then it is a fix, listed in section 7
+with the test that proves it) or a gap in the model (then this file changes first).
+
+Launch scope: one sandbox machine per invite (`MAKA_CLOUD_SANDBOXES`), tasks started by users, the
+model gateway, approvals, the inbox. The box pool, snapshots as a trust boundary, proposed cards
+and the plan vault are off at launch (`docs/fork/launch-notes.md`) and are only noted in section 9.
+
+The code this describes: `packages/cloud-instabox/src/egress.ts`,
+`packages/cloud-runners/src/{agent-user,scripts,machine,fleet,process-channel,export}.ts`,
+`packages/cloud-playbooks/src/coding/{scripts,sandbox,runner}.ts`.
+
+## 1. Actors
+
+| Actor | What it is | Trust |
+| --- | --- | --- |
+| **Owner** | The person whose invite the box belongs to. Decides approvals, sees results. | Trusted. Everything in the box is theirs to see; nothing in the box is secret from them. |
+| **Server** (host) | The one Node process on the owner's host: orchestrator, conductor, runners, gateway. Holds every long-lived key. | Trusted. It is the only thing that talks to the sandbox API. |
+| **Control user** | The account the sandbox provider's `exec` runs as (the "sandbox user", `dev` on instabox). Has passwordless `sudo -n` for everything, so it is root by another name. Owns the work root, every task directory, the channel, the CLI install and the firewall rules. | Trusted *as long as it executes only host text*. Every script it runs is a string constant of ours with values in environment variables (`shell.ts`, `assertSafeId`). The moment it runs a file or a configuration the agent can write, it is the agent with root. |
+| **Agent account** | `MAKA_CLOUD_AGENT_USER` / `_GROUP`: an unprivileged account in the box image, in a group the control user shares. Every CLI (Claude, Codex) and every repository test command runs as it. One account per box at launch. | Untrusted. Everything it runs is model output steered by whatever the model read: the brief, the repository, web pages, issue text. |
+| **Task code** | What the agent account runs: the CLI, its tools, the repository's own test commands, the repository's git configuration and hooks, anything in the workspace. | Untrusted. Assume it is written by an attacker who controls the repository or a page the model fetched. |
+| **Sibling tasks** | Other tasks of the same invite on the same box (a research draft and its review, a coding task and its reviewer, duties). They run as the same agent account and share the box. | Each is untrusted to the others. At launch they are *not* kept apart; see section 8. |
+| **Other invites** | Other people's tasks. | Never on the same box (`TenantMachineProvider` refuses a machine listed for two invites; `MAKA_CLOUD_SANDBOXES` is one machine per invite). Nothing below needs to hold across invites because they share nothing. |
+| **Sandbox provider** | instabox: the API, the box's kernel and VM, its control plane inside the box, the cloud it runs on (its metadata service, its private network). | Trusted for the box boundary (kernel, VM). Its network is what the egress policy protects from the box. |
+| **Model vendors, GitHub, npm** | Reached from the box (through the gateway and the public internet) and from the server. | Out of scope here except that no long-lived credential for them reaches the box. |
+
+## 2. What is at stake
+
+What an attacker who controls task code wants, in order of damage:
+
+1. **Become the control user or root in the box.** Then the egress rules go, the channel can be
+   forged, every sibling task's files, tokens and results are theirs, and the box's cloud network is
+   reachable. This is the P1 class every recheck has found a new instance of.
+2. **Reach the provider's network from the box**: the cloud metadata address (its host's
+   credentials), private ranges, other tenants.
+3. **Make the owner approve or publish something other than what was checked**: change a sibling's
+   or its own result after verification, forge a "verified" manifest, publish a change that is not
+   the one the approval named.
+4. **Take a credential out of the box**: a vendor key, the GitHub token, a subscription login, the
+   instabox key. None of these are supposed to be in the box at all.
+5. **Spend another task's budget** (its gateway token) or outlive its stop.
+
+What is explicitly *not* defended:
+
+- **Exfiltration to the public internet.** The owner decided (2026-10-21) that the box may reach the
+  internet, loopback to itself, and nothing private. A task that reads the owner's repository can
+  post it anywhere. The gateway is the only budget boundary; the egress rules are not a data
+  boundary.
+- **A kernel privilege escalation** from the agent account. The box is a VM of the provider's; a
+  local root exploit is the provider's layer. We keep the attack surface small (no caps, no sudo,
+  no privileged groups, no container sockets) and stop there.
+- **The provider itself.** instabox's control plane can read everything in the box; `GET /files`
+  reads as root. We never use it on task paths (invariant I14), but we do not defend against the
+  provider.
+- **The owner's own tasks against each other, at launch.** Section 8.
+
+## 3. Trust boundaries and what each actor may do
+
+Layout per task, under `$MAKA_ROOT` (`/data/work`), as `PREPARE_SCRIPT` and `PREPARE_AGENT_SCRIPT`
+make it:
+
+```
+/data/work/                      control user, 710 group=agent   (enter, not list)
+  <taskId>/                      control user, 710 group=agent   (enter, not list)
+    workspace/                   control user, 2770 group=agent  (the repository; agent writes)
+    handoff/                     control user, 2770 group=agent  (brief.md 640 down, result.json up)
+    claude-config/               control user, 2770 group=agent  (CLI transcripts; both write)
+    chan/                        control user, 700               (the SDK channel; agent cannot enter)
+    <run>.lock .sh .token .pid .exit .cancel   control user, 600 (run state; agent cannot create here)
+    result.read, *.read, change.patch, base-check/, changes.index   control user, task directory
+  .setup/, .setup-<cli>/         control user (install markers and install runs)
+/dev/shm/maka-logs/<taskId>/     control user, 700, tmpfs        (raw CLI output; deleted on stop)
+~dev/.maka-cli/bin/              control user, 755, agent reads  (the pinned CLI, installed once)
+```
+
+| | Control user | Agent account | Sibling task (same account, launch) |
+| --- | --- | --- | --- |
+| Read `handoff/brief.md`, write `handoff/result.json` and artifacts | yes | yes | **yes** (same group) |
+| Read and write `workspace/` | yes, but only as the agent or through link-checked reads (I4) | yes | **yes** |
+| Enter or read `chan/` | yes | no | no |
+| Create entries in the task directory or the work root | yes | no | no |
+| Read another task's run state (`.pid`, `.token`) | yes | no | no |
+| Read `/proc/<pid>/environ` of a CLI process (its gateway token) | yes (sudo) | its own | **yes** (same uid) |
+| Change the firewall | yes (sudo) | no (I5) | no |
+| Write `~dev/.maka-cli` | yes | no | no |
+| Execute `~dev/.maka-cli/bin/claude` | **must not** (I1) | yes | yes |
+| Run git on the workspace | **must not** (I1) | yes | yes |
+| Reach 169.254/16, 10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7, fe80::/10 | no (I7) | no | no |
+| Reach 127/8 and ::1 through `lo` | yes | yes | yes |
+| Reach the public internet, the gateway, the MCP endpoint | yes | yes | yes |
+
+The control plane reaches in through the provider (`exec`); nothing in the box listens for us.
+
+## 4. Egress policy
+
+Where: an `OUTPUT` chain `MAKA_EGRESS` for iptables and, when `/proc/net/if_inet6` has content,
+ip6tables (`egress.ts`, `EGRESS_GUARD_SCRIPT`), installed as the control user through `sudo -n`.
+
+Order of rules, which is part of the policy:
+
+1. `RELATED,ESTABLISHED` replies return (the provider's control plane reaching in keeps working).
+2. The box's name servers from `/etc/resolv.conf`, UDP and TCP port 53 only, even when they sit in
+   a blocked range. A resolver in a private range is therefore reachable on port 53: DNS tunnelling
+   to the resolver is accepted.
+3. IPv6 neighbour and router discovery (ICMPv6 types in `EGRESS_ICMPV6_ALLOWED`).
+4. `127.0.0.0/8` and `::1/128` out of interface `lo` only (the owner's decision, 2026-10-21): a dev
+   server or a test that binds a port is reachable from the same box.
+5. REJECT for `EGRESS_BLOCKED_V4` (`169.254.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`,
+   `192.168.0.0/16`, `100.64.0.0/10`, `127.0.0.0/8`) and `EGRESS_BLOCKED_V6` (`fc00::/7`,
+   `fe80::/10`, `::1/128`). AWS keeps its IPv6 metadata at `fd00:ec2::254`, inside `fc00::/7`.
+
+Everything else is allowed. The policy is not an allowlist of hosts: the owner accepted the public
+internet.
+
+When: before any task code runs in a box, and again after anything that could have dropped the
+rules. `RemoteMachine` starts every box as *not verified* (`unguarded = true`, #297); `launch`,
+`launchInstall` and every `exec` marked `taskCode` call the guard first; a wake (`machine_not_running`)
+marks it not verified again (#236, #281). The guard is verify-first: rules that read back exactly
+right are left alone; otherwise a new chain is built under its own name, hooked first in `OUTPUT`,
+and only then are old chains unhooked, so the box is never without a hook (#247, #288). A guard
+that cannot finish is an `EgressGuardError` and the box is refused for that launch; a retry after a
+refusal is refused without a new exec (`refusals`).
+
+What the policy relies on: that the agent account cannot change it. That is invariant I5, checked by
+the box probe. The policy is enforced inside the box by the box's own kernel; nothing outside the
+box enforces it. If the provider ever offers a network policy on its side, that becomes the
+primary control and this chain the second.
+
+## 5. Invariants
+
+Each: the statement, how the code enforces it today, how it is tested today, and the fixes in
+section 7 that it still needs. "Real-account test" means a test that only runs as root on a machine
+with a second account (`canSeparate()` in `check-real-account.test.ts`, `agent-user.test.ts`); CI
+does not run those today (section 7, F9).
+
+**I1. Task-steerable code runs only as the agent account.** The control user never executes a
+file the agent can write, and never runs a program whose behaviour is configured by a file the
+agent can write. That includes the CLI (`--version` included), git on the workspace (its
+`.git/config` filters, hooks, fsmonitor, `.gitattributes`), `npm` in the workspace, and any test
+command.
+*Enforced*: `RemoteMachine.launch` wraps the program in `asAgentUser` (#290); checks go through
+`SandboxWorkspace.execCheck` → `asAgentScript` (#289).
+*Tested*: `firewall-account.test.ts` (argv reaches the agent as words, not shell; a machine with no
+agent account starts nothing), `check-real-account.test.ts` (real account).
+*Still violated*: F1 (git in the workspace as the control user), F3 (`--version` as the control user).
+
+**I2. Identity is decided by structure, never by parsing shell text.** `launch` takes a program and
+arguments and builds the account boundary itself; the only control-user run is `launchInstall`,
+which accepts only a `.setup-` directory and host text. No caller decides "runs as" with a string
+prefix.
+*Enforced*: `machine.ts` `launch` / `launchInstall` / `assertInstallDir` (#290).
+*Tested*: `firewall-account.test.ts` ("the CLI install is its own closed method").
+
+**I3. The control user's own files are closed to the agent.** Its home, `~/.maka-cli`, the work
+root, every task directory (entries cannot be created, the directory cannot be listed) and `chan/`
+(cannot be entered). The agent reaches `handoff/`, `workspace/` and `claude-config/` by path only.
+*Enforced*: modes in `PREPARE_SCRIPT`, `PREPARE_AGENT_SCRIPT`, `CHANNEL_DIR_CHECK`; probe facts
+`agent_control_write`, `chan_*`, `task_list`, `task_file_write`.
+*Tested*: `agent-user.test.ts` (real account: channel, handoff, task directory), probe fixture in
+`firewall-account.test.ts`.
+
+**I4. The control user never follows a path through an agent-writable directory except in three
+ways**: (a) a read with every component checked for links, the last open `O_NOFOLLOW`, and a size
+cap; (b) a file built in a directory the agent cannot write and renamed into place; (c) running the
+whole operation as the agent account. No `>`, `>>`, `cat >`, `cp`, `mkdir -p`, `rm -rf`, `chgrp` or
+`chmod` by the control user on a path under `workspace/`, `handoff/` or `claude-config/` otherwise.
+Also: no file the control user opens for writing lives in a directory the agent can write
+(`/tmp` included).
+*Enforced*: `PREPARE_SCRIPT` (brief by rename, #289), `RESULT_STAGE_SCRIPT`, `FILE_STAGE_SCRIPT`,
+`STAGE_INPUTS_SCRIPT`, `READ_SMALL_SCRIPT`, `TRANSCRIPT_CHUNK_SCRIPT` (`set -C` create),
+`export.ts` `writeHandoffFile` (host side).
+*Tested*: `handoff-links.test.ts`, `agent-user.test.ts` ("links the agent plants in handoff/ are not
+followed"), `result.test.ts`, `stage.test.ts`, `export.test.ts`.
+*Still violated*: F1 (`BASE_REVERT_SCRIPT` writes through unchecked workspace paths), F6 (the egress
+lock is opened in `/tmp`), F10 (transcript chunks appended by name in a group-writable directory).
+
+**I5. Nothing the agent account can reach lets it change the firewall, the accounts or the control
+user's processes.** No sudo rule at all (read from the trusted side), no process capabilities, no
+file capability on any binary it can run (except an explicit allowlist), no setuid or setgid root
+binary outside the distribution's set, no membership in a root-equivalent group, no writable
+container or VM socket. The probe fails closed: a fact that is missing, unreadable or produced by a
+tool that failed is a failed check, never a pass.
+*Enforced*: `AGENT_PROBE_SCRIPT` + `agentIsolationProblems` (#275, #290); `Fleet.ensureAgentIsolation`
+once per machine per process, before any run or check.
+*Tested*: `firewall-account.test.ts` (every fact, missing and wrong), `agent-user.test.ts` (real
+account: a box where the agent could become the sandbox user is refused).
+*Still violated*: F4 (file-capability scan fails open and is a partial list; no setuid scan).
+
+**I6. The egress rules are verified in place before task code runs, after every wake, and the box is
+never left without a hook while they change; two guards on one box serialise.** A guard that cannot
+take its lock, cannot read the rules back, or finds them wrong refuses the box.
+*Enforced*: `egress.ts` (verify-first, hook-first swap, `sane`, `flock`), `machine.ts`
+(`guardEgress`, `unguarded`, `refusals`, wake handling).
+*Tested*: `cloud-runners egress.test.ts`, `egress-wake.test.ts`, `cloud-instabox egress.test.ts`
+(scripted iptables), `egress.real.test.ts` (real iptables in a network namespace),
+`egress.live.test.ts` (by hand, `MAKA_CLOUD_LIVE=1`).
+*Still violated*: F5 (the lock is optional), F6 (the lock file is where the agent can put one first).
+
+**I7. The policy is exactly section 4**: blocked nets rejected, replies, resolvers on 53, ND and
+loopback-via-lo returned first, loopback refused on any other interface, nothing else special.
+*Enforced*: `EGRESS_GUARD_SCRIPT` `build` and `sane` (the chain must open with the reply rule, reject
+every net, allow loopback only out of `lo` and before the loopback reject).
+*Tested*: `cloud-instabox egress.test.ts`, `egress.real.test.ts` (packets, not text).
+
+**I8. No long-lived secret reaches the box.** A run gets a per-run gateway token and a per-task MCP
+token, both revoked when the task ends; vendor keys, the GitHub token, the instabox key and push
+keys stay on the server. Subscription logins are refused before the CLI starts. Raw CLI output goes
+to tmpfs and is deleted on stop, so a snapshot never holds it. The clone is unauthenticated (public
+repository only); the push happens on the server.
+*Enforced*: `vendors.ts` `env`/`guard`/`unsetVars`, `buildRunScript` (`MAKA_LOG_DIR` must be tmpfs),
+`KILL_SCRIPT` `cleanup_logs`, gateway tokens in `providers.ts`, `pull-request.ts` on the host.
+*Tested*: `secrets.test.ts` (nothing on disk at snapshot time, raw output deleted, disk-backed log
+directory refused), `cli-check.test.ts`.
+
+**I9. The agent's environment is an allowlist.** The agent process sees the variables the run needs
+(PATH, HOME, locale, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, the gateway and MCP variables, the search
+tool variables, `MAKA_RUN_TOKEN`) and nothing else from the control user's exec environment.
+*Enforced*: partly. `allowedSdkEnv` filters what the SDK passes; `asAgentUser` then runs
+`sudo --preserve-env`, which hands the whole control-user exec environment over.
+*Tested*: `process-channel.test.ts` (SDK side only).
+*Still violated*: F8.
+
+**I10. The SDK channel is written only by the host.** Hook answers (a `deny` in `hooks.ts`), the
+prompt, steering from the owner and permission decisions reach the CLI through `chan/<run>.in`,
+which only the control user can enter; the agent cannot forge an owner message or a hook decision.
+*Enforced*: `process-channel.ts` `CHANNEL_DIR_CHECK` (700, owned, not a link), probe facts `chan_*`.
+*Tested*: `process-channel.test.ts`, `agent-user.test.ts` (real account).
+
+**I11. What the owner approves is what was checked.** Before the repository's checks run and before
+the change is collected, every process of the task's agent run is stopped and confirmed gone
+(`releaseAgent` → `kill`, survivors are an error); checks run in their own PID namespace that is
+killed at exit; the collected change is hashed and the approval names that hash (#308); a failed
+later round cannot replace a kept checkpoint (#306).
+*Enforced*: `coding/runner.ts` (stop before `check` and `collect`), `KILL_SCRIPT`, `CHECK_SCRIPT`,
+`pull-request.ts`.
+*Tested*: `kill.test.ts`, `check-account.test.ts`, `pull-request.test.ts`, `fix-once.test.ts`.
+*Caveat*: holds against the task's own agent; a sibling task's agent (same account) is alive during
+verification and can edit the workspace. Section 8.
+
+**I12. Tasks on one box cannot read or change each other's files, processes or tokens.**
+*Enforced*: not at launch. One agent account per box; `workspace/`, `handoff/` and `claude-config/`
+are group-writable by that account; `/proc/<pid>/environ` of one task's CLI is readable by another's.
+*Tested*: no.
+*Fix*: per-task accounts, F11 and section 8.
+
+**I13. Invites never share a box.** One machine per invite in `MAKA_CLOUD_SANDBOXES`; a machine listed
+twice, or an invite with no machine, fails closed.
+*Enforced*: `TenantMachineProvider` constructor and `acquire`, `cloud-host` config check.
+*Tested*: `providers.test.ts`, host config tests.
+
+**I14. Task paths are never read through the provider's `GET /files`** (it reads as root and
+follows links). Every read of a task's files is an `exec` as the control user under I4.
+*Enforced*: `InstaboxClient.getFile` is called only by the instabox executor (`executor.ts`, the T1
+ACP executor, which checks containment on our side first), never by runners or playbooks.
+*Tested*: by review only. F12 adds a grep test.
+
+**I15. Every script the control user runs is host text; values travel in environment variables;
+names are validated.** No task-derived string is ever spliced into a script.
+*Enforced*: `shell.ts` (`shq`, `assertSafeId`), every `*_SCRIPT` constant, `asRootScript` (named
+variables only).
+*Tested*: `agent-user.test.ts` ("account names that could change the command are refused"),
+`firewall-account.test.ts`.
+
+**I16. Everything a task starts can be stopped from the control side, and only that.** A run is a
+process group with a token in its environment; a stop signals the group and whatever carries the
+token, as root when the processes are the agent's; checks are PID namespaces found by a tag; a stop
+of an earlier attempt leaves a later attempt's runs alone (#307); survivors are an error, not a
+warning.
+*Enforced*: `KILL_SCRIPT`, `SWEEP_SCRIPT`, `CHECK_STOP_SCRIPT`, `Fleet.stopTask`, `sweepOrphans`.
+*Tested*: `kill.test.ts`, `stale-stop.test.ts` (both packages), `orphans.test.ts`,
+`agent-user.test.ts` ("a run of the agent account is stopped like any other").
+
+## 6. The recurring classes, named
+
+Every P1 the rechecks found since #274 is one of these. A new finding should be filed under one;
+a finding that fits none means this section is incomplete.
+
+| Class | Invariant | Instances so far |
+| --- | --- | --- |
+| Control user runs repo-steerable code | I1 | repo tests as the control user (#289 fixed); CLI `--version` (open, F3); git filters/attributes on `git add -A` (open, F1); fsmonitor and hooks (scrubbed by `GIT_FN`, not enough) |
+| Fail-open probe | I5, I6 | sudo probe by trying commands (#290 fixed with `sudo -l -U`); `getcap` failure and partial cap list (open, F4); optional `flock` (open, F5) |
+| Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
+| Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
+| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` (open, F1); egress lock in `/tmp` (open, F6); transcript append (open, F10) |
+| Whole environment handed to the agent | I9 | `--preserve-env` (open, F8) |
+| Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
+
+## 7. Fix specs: where the code violates an invariant today
+
+Ordered as they should be done. Each is one pull request with a test that fails on `main` and
+passes on the branch; "real-account" tests are in addition to a unit test that CI runs. Owner of the
+implementation: the "Egress and secret hardening" thread. F1 and F2 are one change.
+
+**F1 (P1, I1 + I4): every git on the workspace runs as the agent account.**
+*Where*: `cloud-playbooks/src/coding/scripts.ts` (`CLONE_SCRIPT`, `SAMPLE_SCRIPT`, `CHANGES_SCRIPT`,
+`BASE_REVERT_SCRIPT`, `BASE_RESTORE_SCRIPT`, `BLOB_CHUNK_SCRIPT`), `sandbox.ts`, `runner.ts`
+(`exec` callers of those scripts).
+*Why*: `g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false ... }` runs as the control user
+in the agent-writable workspace. `git add -A` (in `CHANGES_SCRIPT` and `changed_paths`) runs
+`filter.<x>.clean` from `.git/config` + `.gitattributes`, which the agent writes: control-user
+execution. `BASE_REVERT_SCRIPT` also writes `g cat-file blob > "$p"`, `mkdir -p`, `rm -rf` and
+`cp -a` through paths it never checked for links, and skips `$MAKA_KEEP` entries (agent-named), so a
+kept path that is a link to a directory makes the control user write a base blob outside the
+workspace.
+*Change*: add `SandboxWorkspace.execAgent(script, options)` (like `execCheck` without the namespace:
+`asAgentScript` after `ensureAgentIsolation` + `prepareAgent`). Run all six scripts through it. The
+clone then happens after `prepareAgent`, with `umask 002` (which `asAgentUser` sets), so every file
+is group-readable: this closes F2. Files the control user reads afterwards must be where the agent
+may write: `change.patch` and `changes.index` move from `$MAKA_DIR` to `$MAKA_DIR/handoff/` and are
+read with the existing link-checked chunk reads (`PATCH_CHUNK_SCRIPT` already refuses a link and a
+non-file, and gets the per-component check of `FILE_STAGE_SCRIPT`; the base-check backup `base-check/` moves into `handoff/` too, or the revert
+runs entirely as the agent and the backup is the agent's). The control user keeps only: the parse of
+the scripts' stdout, `READ_SMALL_SCRIPT`, `WRITE_FILE_SCRIPT` (task directory, agent cannot write).
+*Test that fails on main*: `coding/__tests__/check-account.test.ts`: with the harness that records
+sudo users, every exec whose script contains `git ` is wrapped by `sudo -n -u <agent>`; today
+`CHANGES_SCRIPT` and `CLONE_SCRIPT` are not. Real-account (`check-real-account.test.ts`): a
+repository whose `.git/config` sets `filter.p.clean` to `touch "$HOME/pwned-$(id -u)"` with
+`* filter=p` in `.gitattributes`; after `collect`, no file owned by uid 0 was created; a kept path
+that is a symlink to a directory outside the workspace receives no file after a base revert.
+
+**F2 (P1, I1, A6): files the control user makes in the workspace are readable by the agent.**
+Closed by F1 (clone and revert run as the agent with `umask 002`). If F1 lands in pieces, the interim
+is `chmod -R g+rX` after `CLONE_SCRIPT` and after a revert, as the control user, on a workspace it
+has just created (no agent process alive yet, so no link race).
+*Test that fails on main*: real-account: after `clone`, `sudo -u <agent> cat workspace/<nested file>`
+succeeds; a baseline revert that exits 1 with `EACCES` is not accepted as "fails on base"
+(`notATestFailure` must treat a permission error as a runner error).
+
+**F3 (P1, I1, A2): the CLI's version check does not run the CLI as the control user.**
+*Where*: `cloud-runners/src/scripts.ts` `cliCheckScript`, `fleet.ts` `installCli`.
+*Why*: the script puts `$HOME/.maka-cli/bin` first on PATH and runs `claude --version` as the control
+user. The ownership and mode checks do not follow a control-owned symlink to an agent-writable
+dependency, and the checked tree can change between `find` and the run.
+*Change*: keep the ownership check (it protects the install from being swapped), then run the
+`--version` line as the agent (`asAgentUser('claude --version', user)`), so a rewritten CLI only runs as
+the agent, which is what runs it anyway. `installCli` already requires the agent account first
+(`requireAgentAccount` precedes `ensureCli`). Alternative with no execution at all: compare the
+sha256 of the installed `claude` entry point against the marker written at install.
+*Test that fails on main*: `cli-check.test.ts`: the version line of the script is inside the
+`sudo -n -u <agent>` wrapper (today it is not); in the fake-sandbox harness `sudoUsers()` lists the
+agent for the check exec. Update the deploy.md paragraph that describes the check.
+
+**F4 (P1, I5, A3): the capability and setuid scan fails closed and is complete.**
+*Where*: `cloud-runners/src/agent-user.ts` `AGENT_PROBE_SCRIPT` (`agent_filecaps`), `agentIsolationProblems`.
+*Why*: `getcap -r ... 2>/dev/null | grep ... || true`: a `getcap` that exits non-zero yields
+`agent_filecaps=none` and the box passes. The grep names eight capabilities; `cap_chown`,
+`cap_fowner`, `cap_setfcap`, `cap_dac_read_search` and others are as good as root for this model.
+Setuid-root binaries are not listed at all; a setuid `nft` or a custom tool would pass every probe.
+*Change*: run `getcap -r` with its exit status checked (`rc=$?`, any non-zero → `agent_filecaps=unknown`,
+refused); treat *any* capability on *any* binary as a finding unless the pair is on an explicit
+allowlist (`/usr/bin/ping` `cap_net_raw`, `/usr/bin/ping6` the same); add `agent_setuid` from
+`find / -xdev \( -perm -4000 -o -perm -2000 \) -type f` run as root, refused unless every path is on
+the distribution allowlist (`sudo`, `su`, `passwd`, `chfn`, `chsh`, `gpasswd`, `newgrp`, `mount`,
+`umount`, `fusermount3`, `ssh-keysign`, `unix_chkpwd`, `chage`, `expiry`, `wall`, `write`); add
+rootless container sockets (`/run/user/*/docker.sock`, `/run/user/*/podman/podman.sock`).
+*Test that fails on main*: `firewall-account.test.ts` probe fixture: `agent_filecaps=unknown` and a
+missing `agent_setuid` are refused; a script-level test (`agent-user.test.ts` style, FakeInstabox)
+with a `getcap` stand-in that exits 2 must produce `agent_filecaps=unknown`, and one that prints
+`/usr/bin/x cap_chown=ep` must produce `found`.
+
+**F5 (P1, I6, A4): the guard refuses to run without its lock.**
+*Where*: `cloud-instabox/src/egress.ts` `EGRESS_GUARD_SCRIPT` (`if command -v flock`).
+*Why*: without `flock`, two guards interleave and one's `-F` empties the chain the other just hooked:
+hooked but empty, which `sane` of the first caller does not see.
+*Change*: `command -v flock >/dev/null 2>&1 || fail "flock is not installed (util-linux)"`; the
+`exec 9>` and `flock -w 30 9` lines each `|| fail`.
+*Test that fails on main*: `cloud-instabox egress.test.ts`: with a PATH that has no `flock`, the guard
+is refused with that reason; the scripted-iptables test runs two guards at once and the chain reads
+back complete after both.
+
+**F6 (P1, I4 + I6): the egress lock lives where the agent cannot create it.**
+*Where*: `egress.ts` (`EGRESS_LOCK = '/tmp/.maka-egress.lock'`), `applyEgressGuard` envs, `fleet.ts`.
+*Why*: the control user opens `/tmp/.maka-egress.lock` for writing in a world-writable directory. The
+agent can create that name first: with `fs.protected_regular=1` the control user's open fails and
+every guard on the box fails (no task starts); with it off, the agent holds the flock and every
+guard times out; a symlink there is followed where `protected_symlinks` is off.
+*Change*: lock at `$MAKA_ROOT/.egress.lock` (the work root is 710, the agent cannot create entries);
+`applyEgressGuard` takes the root in `MAKA_LOCK` from the fleet; `fail` if the lock's directory is
+group- or world-writable.
+*Test that fails on main*: unit: the lock path in the exec request is under the work root, not
+`/tmp`; real-account: a file pre-made at the old and new lock paths by the agent account does not
+stop the guard.
+
+**F7 (P2, I4): `WRITE_FILE_SCRIPT`, `READ_SMALL_SCRIPT` and the kept paths are explicit about where
+they may point.** `MAKA_FILE` and `MAKA_KEEP` entries must satisfy `PLAIN_PATH` and contain no `/`
+(`MAKA_FILE`) before the script runs; today the host passes fixed names, so this is a guard against
+the next caller, not a live hole. *Test*: a `MAKA_FILE` of `handoff/x` or `../x` is refused.
+
+**F8 (P2, I9): the agent's environment is built from an allowlist.**
+*Where*: `agent-user.ts` `asAgentUser`.
+*Why*: `sudo --preserve-env` hands over everything in the control user's exec environment,
+including whatever the provider's exec sets and whatever a future preamble exports.
+*Change*: `sudo -n -u <user> -- env -i PATH="$PATH" HOME=... LANG=... <each allowed name>="$name" sh -c
+'umask 002; exec "$@"' sh <program> <args>`; the allowed names are the vendor's `env()` keys, the
+search tool's, `MAKA_RUN_TOKEN`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `TMPDIR`, `TERM`.
+*Test that fails on main*: launch with an extra env `MAKA_TEST_LEAK=1` and a program that dumps its
+environment; the dump must not contain it (today it does).
+
+**F9 (P2, every real-account invariant): CI runs the real-account tests.**
+*Where*: `.github/workflows/ci.yml`.
+*Why*: every test guarded by `canSeparate()` needs root and a second account; hosted runners are not
+root, so I3, I4, I10, I11 and I16 have no CI coverage with two accounts. The rechecks keep finding
+what those tests would.
+*Change*: one job that runs the `cloud-runners` and `cloud-playbooks` test suites inside a container
+as root with a `maka-agent` user and group, `sudo -n` for root, `iptables`/`ip6tables` stand-ins on
+PATH (the fake's), and asserts that the real-account tests were run, not skipped (count the `skip`
+reasons in the reporter output and fail on `needs root`).
+*Test that fails on main*: the job itself; today the count of skipped real-account tests is above
+zero everywhere.
+
+**F10 (P2, I4): transcript chunks are appended through a file descriptor, or built outside the
+group-writable directory.**
+*Where*: `scripts.ts` `TRANSCRIPT_CHUNK_SCRIPT`.
+*Why*: the temporary file is created with `set -C` (good), but each chunk reopens it by name with
+`>>` in `claude-config/projects/<key>/`, which the agent group writes; a link swapped in between two
+chunks is followed. Today only a sibling task's agent is alive then (the task's own CLI has not
+started), so this is the I12 class, but the fix is cheap.
+*Change*: build the file in `$MAKA_DIR/.restore-<session>.tmp` (task directory, agent cannot write)
+and `mv -fT` it into place at the last chunk, as `PREPARE_SCRIPT` does for the brief; `chgrp`/`chmod 660`
+on the temporary before the rename.
+*Test that fails on main*: `transcripts-runner.test.ts`: the chunk requests name a temporary under the
+task directory, not under `claude-config/`.
+
+**F11 (owner decision, I12): per-task agent accounts.** See section 8.
+
+**F12 (P3, I14 + I15): a test that greps.** One test in `cloud-runners` that fails if `getFile(`
+appears in `cloud-runners` or `cloud-playbooks` sources, or if any `*_SCRIPT` constant lacks
+`set -u`, or if `asAgentUser` is called with a string built by concatenation outside `machine.ts`.
+
+**Docs to change with the fixes**: `docs/fork/deploy.md` "The agent account" (the paragraph on the
+CLI version check and on git; add `flock` and `getcap` to the box image requirements; the lock's
+location), `deploy/rehearsal/README.md` (the second account the stand-in needs, F9's container is
+the same image).
+
+Not in this model and not for this lane: recheck A5 and A8 (transcript scrub by regex over JSON;
+receipt digest vs kept text) are secret-handling and delivery correctness, owned by the secrets work
+(#302 and after); recheck C1 to C5 are the mobile app.
+
+## 8. Per-task accounts: does launch need them?
+
+What one account per box means today, with real numbers from the code: `handoff/` and
+`claude-config/` are `2770` for the agent group, `workspace/` too, and every CLI of every task on the
+box runs as the same uid. So a task whose model was steered (a repository with a malicious test,
+a page it fetched) can, for any sibling task of the same invite on the same box:
+
+- read its brief and its transcript (the owner's own text, nothing another person's);
+- replace its `result.json` and artifacts before the control user reads them, so the owner sees a
+  result the sibling never produced;
+- edit its workspace while its checks run or after they passed and before the change is collected,
+  so a "verified" change is not what was verified (I11 holds only against the task's own agent);
+- read its gateway token from `/proc/<pid>/environ` and spend its budget, up to the task's own cap
+  and the invite's daily cap;
+- find its task id by `ps` (task directories cannot be listed, but process arguments and `cwd`
+  can be read for the same uid).
+
+What it does not mean: no other invite is reachable (I13), the control user and root are not
+reachable (I3, I5), no key is reachable that is not already the task's own kind (I8).
+
+Siblings on the launch path exist: a research task and its review run at once, the coding task and
+its cross-review do, duties run beside a user's task. So the exposure is real on the first live run,
+and bounded to one owner's own tasks harming each other.
+
+**Recommendation: launch without per-task accounts, with this written into
+`docs/fork/launch-notes.md` as an accepted risk, and make F11 the first post-launch isolation
+change.** Reasons: the patch (`/mnt/project-files/security/r19-4-agent-pool.patch`) is built but
+needs a real-account peer test, host config tests, docs and the `taskOver` lease release, and a
+box image with N accounts; none of that is a small PR, and F1 to F6 close root-in-the-box, which is
+the class that matters more. The alternative, one task at a time per box, would serialise the
+research review and the coding cross-review and is not recommended.
+
+If the owner wants the gap closed before launch instead, the order is: F9 first (the peer test needs
+the CI container with accounts), then the patch rebased on F1 to F6 with `MAKA_CLOUD_AGENT_ACCOUNTS`
+listing as many accounts as tasks may run at once on a box (the conductor's concurrency per
+conversation bounds it), then `deploy.md`. With per-task accounts, I12 becomes: each task directory
+holds one account, the group of that account is the task's group, and `handoff/`, `workspace/`,
+`claude-config/` are `2770` for that group only; the probe runs once per account; the stop releases
+the account only after survivors are confirmed gone.
+
+## 9. Out of scope at launch, kept here so the model is complete
+
+- **Box pool** (`MAKA_CLOUD_BOXES`, off): a box made by the server for one task and slept or
+  deleted after. When it comes on, I13 is enforced by the pool's labels instead of the fixed table,
+  and I6 must hold across sleep/restore (the guard already re-verifies after a wake). The pool's own
+  review items are in `docs/fork/post-launch-backlog.md`.
+- **Snapshots** as anything but a recovery aid: a snapshot holds every task's files on the box; it is
+  never a trust boundary. I8 (no raw output on disk) is what keeps secrets out of it.
+- **Proposed cards**, **plan vault**: no sandbox code of their own; the vault would put a user's own
+  vendor login on a box and needs its own model when it is wired.
+- **Deep research provenance** (R16-5), **per-task accounts** (this section 8).
+
+## 10. How to use this file
+
+A recheck finding on the sandbox path is filed as "violates I<n>" with a fix spec in section 7's
+form (where, why, change, test that fails on main). A finding that violates no invariant is a change
+to section 5 first. A PR that changes `egress.ts`, `agent-user.ts`, `scripts.ts`, `machine.ts`,
+`process-channel.ts` or the coding `scripts.ts`/`sandbox.ts` says in its description which
+invariants it touches and how each still holds.
