@@ -152,3 +152,59 @@ test('a kept first message from another invite in this tab is not reused', async
   expect(started.conversationId).toBe('cnv_1');
   expect(api.posts.map((p) => p.id)).not.toContain('other-id');
 });
+
+test('editing away from a failed send in this page makes the same words a new message, kept record included', async () => {
+  const storage = memoryStorage();
+  const api = server();
+  const client = new CloudClient('t', api.fetcher);
+  const feed = new ConversationFeed(client, 'cnv_a', 0, storagePendingSends(storage));
+  api.loseNext();
+  await feed.send('Again');
+  feed.draftEdited(); // away
+  feed.draftEdited(); // and back to the same words: a deliberate second message
+  await feed.send('Again');
+  expect(new Set(api.posts.map((p) => p.id)).size).toBe(2);
+  // After a reload, typing (draftEdited with no send in memory) does not drop the kept record.
+  api.loseNext();
+  await feed.send('Once');
+  const reloaded = new ConversationFeed(client, 'cnv_a', 0, storagePendingSends(storage));
+  reloaded.draftEdited();
+  await reloaded.send('Once');
+  const once = api.posts.filter((p) => p.text === 'Once').map((p) => p.id);
+  expect(new Set(once).size).toBe(1);
+});
+
+test('an edit while a first send is in flight makes the next send a new message', async () => {
+  const storage = memoryStorage();
+  const api = server();
+  const client = new CloudClient('t', api.fetcher);
+  const starter = new ConversationStarter(client, Date.now, storagePendingSends(storage));
+  api.loseNext();
+  const first = starter.start('Draft A');
+  starter.draftEdited(); // edited to B while A is in flight
+  await expect(first).rejects.toThrow();
+  await starter.start('Draft B');
+  const [a, b] = api.posts;
+  expect(a?.id).not.toBe(b?.id);
+});
+
+test('a kept send past its hour, or junk, is deleted with its text when the store opens', () => {
+  const storage = memoryStorage();
+  const now = 10 * PENDING_SEND_MS;
+  storage.setItem('maka.pending.old', JSON.stringify({ id: 'a', text: 'secret words', at: 0 }));
+  storage.setItem('maka.pending.junk', 'not json');
+  storage.setItem('maka.pending.fresh', JSON.stringify({ id: 'b', text: 'kept', at: now - 1 }));
+  storage.setItem('other.key', 'untouched');
+  const store = storagePendingSends(
+    Object.assign(storage, {
+      get length() {
+        return storage.map.size;
+      },
+      key: (i: number) => [...storage.map.keys()][i] ?? null,
+    }),
+    'maka.pending.',
+    () => now,
+  );
+  expect([...storage.map.keys()].sort()).toEqual(['maka.pending.fresh', 'other.key']);
+  expect(store.read('fresh')?.text).toBe('kept');
+});

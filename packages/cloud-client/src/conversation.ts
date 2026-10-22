@@ -226,6 +226,10 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
 
   /** Call when the draft changes: a different text is a different message. */
   draftEdited(): void {
+    // Editing away from a send that failed in this page makes the next send a new message, kept
+    // record included. After a reload there is no such send in memory, so typing the same words
+    // again still finds the kept one.
+    if (this.messageId !== null) this.sends?.clear(this.conversationId);
     this.messageId = null;
   }
 }

@@ -49,16 +49,48 @@ const isPending = (value: unknown): value is PendingSend => {
  * closes). Storage can be missing, full or blocked; then nothing is kept and a reload sends anew.
  */
 export function storagePendingSends(
-  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined,
+  storage:
+    | (Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> &
+        Partial<Pick<Storage, 'key' | 'length'>>)
+    | undefined,
   prefix = 'maka.pending.',
+  now: () => number = Date.now,
 ): PendingSends {
+  const expired = (value: PendingSend) =>
+    !(now() - value.at >= 0 && now() - value.at < PENDING_SEND_MS);
+  const load = (fullKey: string): PendingSend | undefined => {
+    const raw = storage?.getItem(fullKey);
+    if (!raw) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    // A record that is junk or past its hour is deleted, not just ignored: its text goes too.
+    if (!isPending(parsed) || expired(parsed)) {
+      storage?.removeItem(fullKey);
+      return undefined;
+    }
+    return parsed;
+  };
+  // Sweep this tab's old records once, so a send nobody retried does not keep its text.
+  try {
+    if (storage && typeof storage.key === 'function' && typeof storage.length === 'number') {
+      const keys: string[] = [];
+      for (let i = 0; i < storage.length; i += 1) {
+        const key = storage.key(i);
+        if (key?.startsWith(prefix)) keys.push(key);
+      }
+      for (const key of keys) load(key);
+    }
+  } catch {
+    // Blocked storage: nothing was kept to sweep.
+  }
   return {
     read(key) {
       try {
-        const raw = storage?.getItem(prefix + key);
-        if (!raw) return undefined;
-        const parsed: unknown = JSON.parse(raw);
-        return isPending(parsed) ? parsed : undefined;
+        return load(prefix + key);
       } catch {
         return undefined;
       }
