@@ -6,6 +6,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -92,14 +93,41 @@ export function parseEnvFile(text: string): EnvEntries {
     if (line === '' || line.startsWith('#')) continue;
     const at = line.indexOf('=');
     if (at <= 0) continue;
-    const name = line.slice(0, at).trim();
-    let value = line.slice(at + 1).trim();
-    if (value.length >= 2 && (value[0] === "'" || value[0] === '"') && value.endsWith(value[0])) {
-      value = value.slice(1, -1);
-    }
-    if (NAME.test(name)) entries.set(name, value);
+    const name = line
+      .slice(0, at)
+      .trim()
+      .replace(/^export\s+/u, '');
+    const value = envValue(line.slice(at + 1).trim());
+    if (NAME.test(name) && value !== undefined) entries.set(name, value);
   }
   return entries;
+}
+
+/**
+ * One value as Compose and systemd read it: single quotes keep everything, double quotes take
+ * backslash escapes, and an unquoted value ends at a ` #` comment. A quote that is never closed is
+ * no value at all, so the wizard sets that variable afresh rather than keeping a broken one.
+ */
+function envValue(text: string): string | undefined {
+  const quote = text[0];
+  if (quote === "'") {
+    const end = text.indexOf("'", 1);
+    return end < 0 ? undefined : text.slice(1, end);
+  }
+  if (quote === '"') {
+    let value = '';
+    for (let index = 1; index < text.length; index += 1) {
+      const char = text[index] as string;
+      if (char === '"') return value;
+      if (char === '\\' && index + 1 < text.length) {
+        index += 1;
+        const next = text[index] as string;
+        value += next === 'n' ? '\n' : next;
+      } else value += char;
+    }
+    return undefined;
+  }
+  return text.replace(/\s+#.*$/u, '');
 }
 
 /** Why a value cannot go in the file as one line, if it cannot. */
@@ -357,12 +385,17 @@ export function writePrivateFile(path: string, text: string): void {
   const temporary = join(dirname(path), `.${Date.now()}.${process.pid}.setup.tmp`);
   const fd = openSync(temporary, 'wx', 0o600);
   try {
-    writeSync(fd, text);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
+    try {
+      writeSync(fd, text);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
   }
-  renameSync(temporary, path);
 }
 
 const KEY_QUESTIONS = [
@@ -591,19 +624,36 @@ export async function runSetup(options: SetupOptions): Promise<number> {
   }
 
   const stamp = (options.now ?? (() => new Date()))().toISOString();
-  writePrivateFile(
-    options.envFile,
-    renderEnvFile(planned.server, [
-      `maka-cloud settings, written by "maka-cloud setup" on ${stamp}.`,
-      'Holds keys: root only, never in a repository. Every variable is in docs/fork/deploy.md.',
-    ]),
-  );
-  writePrivateFile(
-    options.composeEnvFile,
-    renderEnvFile(planned.compose, [
-      `The names Caddy serves, written by "maka-cloud setup" on ${stamp}. Point all three at this host.`,
-    ]),
-  );
+  // The names first (they hold nothing secret), the settings last: the settings are what name the
+  // invite, so a new invite they never came to name is revoked, and its token is never lost unseen.
+  try {
+    writePrivateFile(
+      options.composeEnvFile,
+      renderEnvFile(planned.compose, [
+        `The names Caddy serves, written by "maka-cloud setup" on ${stamp}. Point all three at this host.`,
+      ]),
+    );
+    writePrivateFile(
+      options.envFile,
+      renderEnvFile(planned.server, [
+        `maka-cloud settings, written by "maka-cloud setup" on ${stamp}.`,
+        'Holds keys: root only, never in a repository. Every variable is in docs/fork/deploy.md.',
+      ]),
+    );
+  } catch (error) {
+    if (owner.token !== undefined) {
+      const store = new InviteStore(join(options.dataDir, 'invites.db'));
+      try {
+        store.revoke(owner.inviteId);
+      } finally {
+        store.close();
+      }
+    }
+    io.say(
+      `The settings could not be written (${(error as NodeJS.ErrnoException).code ?? (error as Error).name}); ${options.envFile} is as it was.`,
+    );
+    return 2;
+  }
   io.say('');
   io.say(`Wrote ${options.envFile} and ${options.composeEnvFile}.`);
   io.say(

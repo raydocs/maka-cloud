@@ -297,3 +297,46 @@ test('checkers the operator chose are kept, unless they need a key that is gone'
   assert.ok(!plan(openAiOnly)?.includes('"openai"'));
   assert.deepEqual(answerProblems(answers), []);
 });
+
+test('values are read as Compose and systemd read them: escapes, comments, broken quotes', () => {
+  const read = parseEnvFile(
+    [
+      'MAKA_CLOUD_SANDBOXES="{\\"inv_aaaaaaaaaaaa\\":\\"m_a\\"}"',
+      'ANTHROPIC_API_KEY=sk-example # production',
+      "SINGLE='a # b'",
+      'export EXPORTED=yes',
+      'BROKEN="never closed',
+    ].join('\n'),
+  );
+  assert.equal(read.get('MAKA_CLOUD_SANDBOXES'), '{"inv_aaaaaaaaaaaa":"m_a"}');
+  assert.equal(read.get('ANTHROPIC_API_KEY'), 'sk-example');
+  assert.equal(read.get('SINGLE'), 'a # b');
+  assert.equal(read.get('EXPORTED'), 'yes');
+  assert.equal(read.has('BROKEN'), false);
+});
+
+test('when the settings cannot be written, the new invite is revoked and the old file kept', async (t) => {
+  const ws = workspace(t);
+  const { io, said } = scripted();
+  const code = await runSetup({
+    ...ws,
+    composeEnvFile: join(ws.dataDir, 'missing', 'names.env'),
+    env: fromEnv(),
+    fromEnv: true,
+    verify: false,
+    io,
+  });
+  assert.equal(code, 2);
+  assert.ok(said.some((line) => line.startsWith('The settings could not be written')));
+  assert.ok(!said.some((line) => line.startsWith('Your sign-in token')));
+  assert.equal(existsSync(ws.envFile), false);
+  const store = new InviteStore(join(ws.dataDir, 'invites.db'));
+  try {
+    assert.deepEqual(
+      store.list().map((invite) => invite.revokedAt !== null),
+      [true],
+    );
+  } finally {
+    store.close();
+  }
+});

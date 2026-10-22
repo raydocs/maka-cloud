@@ -102,35 +102,44 @@ wants_setup() {
 }
 
 run_setup() {
-  # The wizard runs in the server image as its unprivileged user (uid 1000), on a private copy of
-  # the settings; the copy is put back root-only and removed, whatever happens.
+  # The wizard runs in the server's image as its unprivileged user (uid 1000) on a private copy of
+  # the settings. That uid may be someone else's on this host, so the copy sits in a directory only
+  # root can enter: the container is given the inner directory itself, nobody on the host reaches
+  # it. The copy is put back root-only and removed, whatever happens.
   work="$(as_root mktemp -d)"
   trap 'as_root rm -rf "$work"' EXIT INT TERM
   as_root chmod 700 "$work"
-  [ -f "$SETTINGS" ] && as_root cp "$SETTINGS" "$work/settings.env"
-  [ -f "$NAMES" ] && as_root cp "$NAMES" "$work/names.env"
-  as_root touch "$work/none.env"
-  as_root chown -R 1000:1000 "$work"
+  as_root mkdir -m 700 "$work/setup"
+  [ -f "$SETTINGS" ] && as_root cp "$SETTINGS" "$work/setup/settings.env"
+  [ -f "$NAMES" ] && as_root cp "$NAMES" "$work/setup/names.env"
+  as_root chown -R 1000:1000 "$work/setup"
+  as_root sh -c 'umask 077; : > "$1"' sh "$work/none.env"
 
   if [ "$SETUP" = env ]; then
     # The answers reach the container as its env file: never on a command line, where any user
-    # of the host could read them, and sudo would drop them from the environment anyway.
-    for name in MAKA_CLOUD_SETUP_DOMAIN MAKA_CLOUD_SETUP_MACHINE MAKA_CLOUD_SETUP_EMAIL \
-      ANTHROPIC_API_KEY OPENAI_API_KEY INSTABOX_API_KEY MAKA_GITHUB_TOKEN; do
+    # of the host could read them, and sudo would drop them from the environment anyway. Single
+    # quotes, so Compose takes each value as it is (a "$" in an address is not a variable).
+    answers="MAKA_CLOUD_SETUP_DOMAIN MAKA_CLOUD_SETUP_MACHINE MAKA_CLOUD_SETUP_EMAIL
+      ANTHROPIC_API_KEY OPENAI_API_KEY INSTABOX_API_KEY MAKA_GITHUB_TOKEN"
+    for name in $answers; do
       eval "value=\${$name:-}"
       # shellcheck disable=SC2154 # set by the eval above
-      [ -n "$value" ] && printf '%s=%s\n' "$name" "$value"
+      case "$value" in *"'"*) fail "$name holds a single quote, which no setting may" ;; esac
+    done
+    for name in $answers; do
+      eval "value=\${$name:-}"
+      [ -n "$value" ] && printf "%s='%s'\n" "$name" "$value"
     done | as_root sh -c 'umask 077; cat > "$1"' sh "$work/none.env"
-    COMPOSE_SETTINGS="$work/none.env" compose run --rm --no-deps -T -v "$work:/setup" \
+    COMPOSE_SETTINGS="$work/none.env" compose run --rm --no-deps -T -v "$work/setup:/setup" \
       maka-cloud setup --from-env --settings /setup/settings.env --names /setup/names.env
   else
     [ -r /dev/tty ] || fail "the setup questions need a terminal; or set MAKA_CLOUD_SETUP=env"
-    COMPOSE_SETTINGS="$work/none.env" compose run --rm --no-deps -v "$work:/setup" \
+    COMPOSE_SETTINGS="$work/none.env" compose run --rm --no-deps -v "$work/setup:/setup" \
       maka-cloud setup --settings /setup/settings.env --names /setup/names.env < /dev/tty
   fi
 
-  as_root install -m 600 -o root -g root "$work/settings.env" "$SETTINGS"
-  as_root install -m 600 -o root -g root "$work/names.env" "$NAMES"
+  as_root install -m 600 -o root -g root "$work/setup/settings.env" "$SETTINGS"
+  as_root install -m 600 -o root -g root "$work/setup/names.env" "$NAMES"
   as_root rm -rf "$work"
   trap - EXIT INT TERM
 }
