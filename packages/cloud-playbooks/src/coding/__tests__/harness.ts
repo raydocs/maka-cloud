@@ -264,6 +264,11 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+# The agent starts under \`env -i\`; the pid directory is the test's own channel to its processes.
+if [ "$1" = env ] && [ "$2" = -i ] && [ -n "\${MAKA_TEST_PIDS:-}" ]; then
+  shift 2
+  exec env -i MAKA_TEST_PIDS="$MAKA_TEST_PIDS" "$@"
+fi
 exec "$@"
 `;
 

@@ -163,7 +163,8 @@ describe('.agents/resume', () => {
     const t = await sleepingBox();
     const first = await t.pool.acquire({ tenantId: A, taskId: 't2' });
     const [run] = resumeRuns(t);
-    assert.match(run?.cmd ?? '', /^sudo -n -u 'maka-agent' --preserve-env -- /);
+    assert.match(run?.cmd ?? '', /^sudo -n -u 'maka-agent' -- env -i PATH=/);
+    assert.match(run?.cmd ?? '', /\${MAKA_REPO_DIR\+"MAKA_REPO_DIR=\$MAKA_REPO_DIR"}/);
     assert.match(run?.cmd ?? '', /\.agents\/resume/);
     assert.deepEqual(t.fleet.agentChecks, [{ machineId: t.machineId, user: 'maka-agent' }]);
     await first.release();

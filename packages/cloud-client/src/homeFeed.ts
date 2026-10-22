@@ -27,6 +27,10 @@ export interface HomeSnapshot {
   /** Every inbox item seen, by id; the highest version wins. */
   items: Record<string, InboxItem>;
   busy: boolean;
+  /** False until the first read of the open decisions has finished, so "nothing waits" is never a guess. */
+  inboxLoaded: boolean;
+  /** The last read of the open decisions failed. */
+  inboxFailed: boolean;
   answerError: string;
   /** When the person last looked, or a day ago on a first visit; unknown until read. */
   since: number | undefined;
@@ -58,6 +62,8 @@ export class HomeFeed extends Store<HomeSnapshot> {
     super({
       items: {},
       busy: false,
+      inboxLoaded: false,
+      inboxFailed: false,
       answerError: '',
       since: undefined,
       done: undefined,
@@ -119,10 +125,13 @@ export class HomeFeed extends Store<HomeSnapshot> {
         if (!current()) return;
         this.update((s) => {
           const items = list.reduce((all, item) => mergeInboxItem(all, item), s.items);
-          return items === s.items ? s : { ...s, items };
+          return items === s.items && s.inboxLoaded && !s.inboxFailed
+            ? s
+            : { ...s, items, inboxLoaded: true, inboxFailed: false };
         });
       })
-      .catch(() => {});
+      // A failed read is not "nothing waits": it is told apart, so a screen never says all is clear.
+      .catch(() => current() && this.patch({ inboxFailed: true }));
     const seq = ++this.projectsSeq;
     const latest = () => current() && seq === this.projectsSeq;
     this.client

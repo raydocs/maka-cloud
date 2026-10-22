@@ -12,6 +12,7 @@ import { ConversationStore } from '../conversations.js';
 import { openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
 import { DEFAULT_HTTP_LIMITS, type HttpLimits, PublicApi } from '../http.js';
+import { AccountStore } from '../accounts.js';
 import { InviteStore } from '../invites.js';
 import { RateLimiter } from '../rate-limit.js';
 import { SqliteTaskStore } from '../sqlite-task-store.js';
@@ -25,6 +26,7 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
   const dir = await mkdtemp(join(tmpdir(), 'streams-test-'));
   const db = openDatabase(join(dir, 'server.sqlite'));
   const invites = new InviteStore(join(dir, 'invites.sqlite'));
+  const accounts = new AccountStore(join(dir, 'invites.sqlite'));
   const { token, inviteId } = invites.create('test');
   let n = 0;
   const conversations = new ConversationStore(db, hub, () => ({
@@ -35,6 +37,7 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
     db,
     memory: new MemoryStore(db),
     invites,
+    accounts,
     conversations,
     tasks: new SqliteTaskStore(db, hub),
     hub,
@@ -76,6 +79,7 @@ async function startApi(t: TestContext, limits: Partial<HttpLimits> = {}, hub = 
   t.after(async () => {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    accounts.close();
     invites.close();
     try {
       db.close();

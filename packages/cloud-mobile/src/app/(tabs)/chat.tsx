@@ -1,18 +1,38 @@
 import {
   ConversationFeed,
+  type TaskView,
   conversationSummary,
   displayText,
   dollars,
+  type ConversationState,
   type TaskControl,
+  TERMINAL,
   totalCost,
 } from '@maka-cloud/client';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  ActivityIndicator,
+  AppState,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  Platform,
+  Pressable,
+  View,
+} from 'react-native';
 import { DecisionCard, QuestionBlock } from '@/components/Decision';
+import { TaskDelivery } from '@/components/Delivery';
+import { TaskDetails } from '@/components/TaskDetails';
 import { TaskRow } from '@/components/TaskRow';
-import { Card, Field, PillButton, RoundButton, Screen, T } from '@/components/ui';
+import { Card, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
+import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
 import { useTheme } from '@/lib/theme';
+
+type Message = ConversationState['messages'][number];
 
 export default function Chat() {
   const { conversations, chosen } = useWorkspace();
@@ -44,20 +64,41 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     () => new ConversationFeed(client, conversationId),
     [client, conversationId],
   );
-  useEffect(() => {
-    feed.start();
-    return () => feed.stop();
-  }, [feed]);
+  // The stream runs only while this tab is in front and the app is in the foreground.
+  useFocusEffect(useCallback(() => keepLive(feed, AppState), [feed]));
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   const { state, status, error, busy, noPause } = snapshot;
   const { tasks, questions, running, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
   const [draft, setDraft] = useState('');
   const [picking, setPicking] = useState(false);
-  const scroll = useRef<{ scrollToEnd(options?: { animated?: boolean }): void } | null>(null);
+  const [detail, setDetail] = useState<TaskView | undefined>();
+  const scroll = useRef<FlatList<Message> | null>(null);
+  /** The newest messages stay in view only while the person is already reading them. */
+  const atEnd = useRef(true);
+  // Only the person's own scrolling decides this; a scroll the list makes while measuring does not.
+  const trackEnd = ({ nativeEvent }: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = nativeEvent;
+    atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
+  };
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
   const inbox = Object.values(state.inbox);
   const waiting = inbox.filter((item) => item.state !== 'closed');
+  // Something that waits on the person is always brought into view.
+  const needsYou = openQuestions.size + waiting.length;
+  useEffect(() => {
+    if (needsYou > 0) {
+      atEnd.current = true;
+      scroll.current?.scrollToEnd({ animated: true });
+    }
+  }, [needsYou]);
+  // The employee is at work while a task runs, or while the person's last message has no reply yet;
+  // a question or decision waiting on them is not work.
+  const working =
+    openQuestions.size === 0 &&
+    waiting.length === 0 &&
+    (tasks.some((task) => !TERMINAL.has(task.state) && task.state !== 'paused') ||
+      state.messages.at(-1)?.role === 'user');
 
   return (
     <KeyboardAvoidingView
@@ -71,9 +112,15 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         <View
           style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
         >
-          <T kind="small" accessibilityRole="text">
-            {status === 'Live' ? '● Live' : `○ ${status}`}
-          </T>
+          <View
+            accessible
+            accessibilityRole="text"
+            accessibilityLabel={status === 'Live' ? 'Live' : status}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}
+          >
+            <StatusMark tone={status === 'Live' ? 'ok' : 'idle'} />
+            <T kind="small">{status === 'Live' ? 'Live' : status}</T>
+          </View>
           {conversations.length > 1 && (
             <Pressable
               accessibilityRole="button"
@@ -88,26 +135,30 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           )}
         </View>
       </View>
-      <ScrollView
-        ref={(node) => {
-          scroll.current = node as unknown as typeof scroll.current;
-        }}
-        onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })}
+      <FlatList
+        ref={scroll}
+        data={state.messages}
+        keyExtractor={(message) => message.id}
+        initialNumToRender={20}
+        windowSize={7}
+        onContentSizeChange={() =>
+          atEnd.current && scroll.current?.scrollToEnd({ animated: false })
+        }
+        onScrollEndDrag={trackEnd}
+        onMomentumScrollEnd={trackEnd}
         contentContainerStyle={{ padding: 16, gap: 14 }}
         keyboardShouldPersistTaps="handled"
         accessibilityLabel="Messages"
-      >
-        {state.messages.length === 0 && (
+        ListEmptyComponent={
           <Card label="Empty conversation">
             <T kind="heading">What would you like to get done?</T>
             <T kind="muted">Bring a question, a project, or a plan. We’ll keep the work here.</T>
           </Card>
-        )}
-        {state.messages.map((message) => (
+        }
+        renderItem={({ item: message }) => (
           <View
-            key={message.id}
             style={[
-              { maxWidth: '88%', gap: 2 },
+              { maxWidth: '88%', gap: 2, marginBottom: 14 },
               message.role === 'user'
                 ? {
                     alignSelf: 'flex-end',
@@ -125,50 +176,74 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               {displayText(message.text)}
             </T>
           </View>
-        ))}
-        {roots.length > 0 && (
-          <Card label="The work">
-            <T kind="small">
-              {running} running · Total cost so far: {dollars(total.usd)}
-              {total.usd !== undefined && !total.complete && ' (not all reported)'}
-            </T>
+        )}
+        ListFooterComponent={
+          <View style={{ gap: 14 }}>
+            {working && (
+              <View
+                accessible
+                accessibilityRole="text"
+                accessibilityLabel="Maka is working"
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+              >
+                <ActivityIndicator size="small" color={theme.inkMuted} />
+                <T kind="muted">Maka is working…</T>
+              </View>
+            )}
+            {roots.length > 0 && (
+              <Card label="The work">
+                <T kind="small">
+                  {running} running · Total cost so far: {dollars(total.usd)}
+                  {total.usd !== undefined && !total.complete && ' (not all reported)'}
+                </T>
+                {roots.map((task) => (
+                  <TaskRow
+                    key={task.taskId}
+                    task={task}
+                    tasks={tasks}
+                    noPause={noPause}
+                    busy={Boolean(busy)}
+                    onControl={(taskId: string, action: TaskControl) =>
+                      void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
+                    }
+                  />
+                ))}
+              </Card>
+            )}
             {roots.map((task) => (
-              <TaskRow
+              <TaskDelivery
                 key={task.taskId}
+                client={client}
                 task={task}
-                tasks={tasks}
-                noPause={noPause}
-                busy={Boolean(busy)}
-                onControl={(taskId: string, action: TaskControl) =>
-                  void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
-                }
+                listings={snapshot.artifacts[task.taskId]?.listings ?? []}
+                onOpenTask={setDetail}
               />
             ))}
-          </Card>
-        )}
-        {questions.map((question) => (
-          <Card key={question.questionId} label="Your decision">
-            <QuestionBlock
-              question={question}
-              answered={state.answers[question.questionId]}
-              disabled={Boolean(busy)}
-              onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
-            />
-          </Card>
-        ))}
-        {waiting
-          .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
-          .map((item) => (
-            <Card key={item.itemId} label="Needs you">
-              <DecisionCard
-                item={item}
-                disabled={Boolean(busy)}
-                onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
-              />
-            </Card>
-          ))}
-        {error ? <T kind="error">{error}</T> : null}
-      </ScrollView>
+            {questions.map((question) => (
+              <Card key={question.questionId} label="Your decision">
+                <QuestionBlock
+                  question={question}
+                  answered={state.answers[question.questionId]}
+                  disabled={Boolean(busy)}
+                  onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
+                />
+              </Card>
+            ))}
+            {waiting
+              .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
+              .map((item) => (
+                <Card key={item.itemId} label="Needs you">
+                  <DecisionCard
+                    item={item}
+                    disabled={Boolean(busy)}
+                    onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
+                  />
+                </Card>
+              ))}
+            {error ? <T kind="error">{error}</T> : null}
+          </View>
+        }
+      />
       <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end', padding: 12 }}>
         <View style={{ flex: 1 }}>
           <Field
@@ -187,9 +262,22 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           label={busy === 'message' ? 'Sending…' : 'Send message'}
           glyph="↑"
           disabled={Boolean(busy) || !draft.trim()}
-          onPress={() => void feed.send(draft).then((sent) => sent && setDraft(''))}
+          onPress={() => {
+            const sending = draft;
+            // Words typed while it was sending stay in the box.
+            void feed
+              .send(sending)
+              .then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
+          }}
         />
       </View>
+      {detail && (
+        <TaskDetails
+          client={client}
+          task={state.tasks[detail.taskId] ?? detail}
+          onClose={() => setDetail(undefined)}
+        />
+      )}
       <Modal
         visible={picking}
         transparent
