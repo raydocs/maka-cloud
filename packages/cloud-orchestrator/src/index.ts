@@ -16,6 +16,7 @@ export {
 } from './fake-runner.js';
 export { Handoff, type HandoffPaths, MAX_BRIEF_BYTES, MAX_MANIFEST_BYTES } from './handoff.js';
 export {
+  type Admission,
   DEFAULT_ARCHIVE_CACHE,
   DEFAULT_CONTROL_TIMEOUT_MS,
   DEFAULT_MAX_DEPTH,
@@ -24,11 +25,14 @@ export {
   DEFAULT_TASK_LIMITS,
   DEFAULT_WAIT_MS,
   type DelegateInput,
+  holdNote,
+  isHoldNote,
   MAX_PENDING_STEERS,
   MAX_STEER_CHARS,
   MAX_WAIT_MS,
   Orchestrator,
   type OperatorAccess,
+  TURN_NOTE,
   type OrchestratorOptions,
   type RecoveredSpend,
   type OrchestratorStats,
