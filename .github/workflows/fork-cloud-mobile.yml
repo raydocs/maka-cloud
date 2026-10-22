@@ -36,7 +36,7 @@ jobs:
     # The repository variable CI_RUNNER (a JSON label list such as ["self-hosted","boat"]) moves
     # this job to a self-hosted runner; unset, it runs on GitHub's pinned image. Deleting the
     # variable is the way back, with no commit.
-    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.CI_RUNNER && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,7 +70,7 @@ jobs:
     # CI_RUNNER_MAC moves this job to the owner's Mac (Apple silicon), whose SDK sits at the runner's
     # ANDROID_HOME and whose emulator runs arm64; unset, it runs on GitHub's image, which carries the
     # SDK and runs the emulator under KVM.
-    runs-on: ${{ vars.CI_RUNNER_MAC && fromJSON(vars.CI_RUNNER_MAC) || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.CI_RUNNER_MAC && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_MAC) || 'ubuntu-24.04' }}
     # The build is the long step: a cold Gradle cache and one ABI, then the emulator flows.
     timeout-minutes: 60
     steps:
@@ -206,7 +206,7 @@ jobs:
   ios:
     # CI_RUNNER_MAC (a JSON label list such as ["self-hosted","mac"]) moves this job to a Mac of the
     # owner's; unset, it runs on GitHub's macos-15. Deleting the variable is the way back.
-    runs-on: ${{ vars.CI_RUNNER_MAC && fromJSON(vars.CI_RUNNER_MAC) || 'macos-15' }}
+    runs-on: ${{ vars.CI_RUNNER_MAC && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_MAC) || 'macos-15' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -53,7 +53,9 @@ jobs:
     # image's tools the steps do not install (Electron's desktop libraries, gpg, rustup); unset, it
     # runs on GitHub's image. CI_RUNNER_TEST can name a label that more runners carry, so several
     # pull requests' test jobs run at once.
-    runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
+    # A pull request from a fork always gets GitHub's image: the repository is public, and an
+    # outside contributor's code must never run on the owner's machines.
+    runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     # A full run (a shared script or the lockfile changed) takes 34-35 minutes, and the Storybook smoke
     # and the slowest workspaces were cut off at 45 under load.
     timeout-minutes: 75
@@ -204,14 +206,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-          cache: npm
+          # Fork: a self-hosted runner keeps ~/.npm itself; GitHub's cache would only download it again.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
       - name: Select the release npm toolchain
         if: steps.plan.outputs.cli_package == 'true'
         run: npm install --global --no-audit --no-fund "$(node -p 'require("./package.json").packageManager')"
 
       - name: Restore Electron artifact cache
-        if: steps.plan.outputs.code == 'true'
+        if: steps.plan.outputs.code == 'true' && runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/electron
