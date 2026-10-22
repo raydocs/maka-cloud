@@ -187,8 +187,10 @@ home=$(CDPATH= cd -P -- "$HOME" && pwd -P) || fail "cannot reach HOME"
 dir="$home"
 while :; do
   closed_dir "$dir" || fail "$dir could be changed by another account, so the lock cannot live under it"
-  [ "$dir" = / ] && break
-  dir=$(dirname "$dir")
+  # At the root: / or, for some dirname, //, which is its own parent.
+  parent=$(dirname "$dir") || fail "cannot find the directory above $dir"
+  [ "$parent" != "$dir" ] || break
+  dir="$parent"
 done
 lockdir="$home/$MAKA_LOCK_DIR"
 lock="$lockdir/lock"

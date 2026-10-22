@@ -370,6 +370,19 @@ describe('applyEgressGuard', () => {
     await assert.rejects(run(), /could be changed by another account/u);
   });
 
+  it('stops at the root when dirname keeps // as its own parent, as glibc does', async () => {
+    const bin = join(state, 'bin');
+    await fs.mkdir(bin);
+    // A dirname that answers // above a top-level directory, and for // itself (HOME=//root).
+    await fs.writeFile(
+      join(bin, 'dirname'),
+      '#!/bin/sh\ncase "$1" in /|//) echo //;; /*/*) exec /usr/bin/dirname "$1";; *) echo //;; esac\n',
+      { mode: 0o755 },
+    );
+    await make({ execPath: `${bin}:${process.env.PATH ?? ''}` });
+    await run();
+  });
+
   it('refuses when a rule cannot be added, and says which', async () => {
     await make({ env: { SHIM_FAIL: '169\\.254\\.0\\.0/16' } });
     await assert.rejects(run(), /cannot block 169\.254\.0\.0\/16/u);
