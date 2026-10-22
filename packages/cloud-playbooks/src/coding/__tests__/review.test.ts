@@ -59,6 +59,11 @@ async function reproThatOnBase(turn: AgentTurn, onBase: string): Promise<void> {
 for (const [label, onBase, why] of [
   ['times out', 'while :; do sleep 0.05; done', /timed out/],
   ['is killed by a signal', 'kill -9 $$', /killed by signal 9/],
+  [
+    'answers the timeout by killing itself',
+    "trap 'kill -9 $$' TERM; while :; do sleep 0.05; done",
+    /timed out/,
+  ],
   ['cannot run its command', 'no-such-command-here', /could not run \(exit 127\)/],
   // Read through a link the revert put back, as the agent: not a failure of the code.
   [

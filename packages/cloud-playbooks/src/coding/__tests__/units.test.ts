@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LoopDetector, parseSample } from '../loop.js';
 import { codingPlaybook, verifyCodingManifest } from '../playbook.js';
+import { checkTimedOut } from '../runner.js';
 import { isRepoPath, parseCodingBrief } from '../task.js';
 
 const block = (json: string) => `Plan.\n\n\`\`\`coding-task\n${json}\n\`\`\`\n`;
@@ -132,4 +133,15 @@ test('the coding runner wires onto the T6 runners', async () => {
   assert.equal(runner.name, 'coding');
   assert.equal(runner.options.agents['claude-agent-sdk'], cloud.claude);
   assert.equal(runner.options.agents.codex, cloud.codex);
+});
+
+test('a check is a timeout when the command itself ran for the whole limit', () => {
+  // TERM at the limit (124), or KILL after it (137), also when the command answered TERM by
+  // killing itself.
+  assert.equal(checkTimedOut(124, 1_000, 1), true);
+  assert.equal(checkTimedOut(137, 1_000, 1), true);
+  // A command that killed itself before the limit, however long the sandbox took to start.
+  assert.equal(checkTimedOut(137, 20, 1), false);
+  assert.equal(checkTimedOut(124, 400, 1), false);
+  assert.equal(checkTimedOut(1, 60_000, 1), false);
 });

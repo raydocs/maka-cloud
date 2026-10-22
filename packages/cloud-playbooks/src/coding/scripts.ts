@@ -111,6 +111,8 @@ export const CHECK_SCRIPT = `set -u
 umask 077
 cd "$MAKA_DIR/workspace" 2>/dev/null || { echo 'maka-check: the workspace is missing' >&2; exit 125; }
 mark=$(mktemp -d) || { echo 'maka-check: no temporary directory' >&2; exit 125; }
+# The check's own time, kept in this shell where the check cannot reach it.
+t0=\${EPOCHREALTIME:-}
 timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
   unshare --user --map-current-user --pid --fork --kill-child -- \\
   bash -c ': > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
@@ -120,6 +122,9 @@ timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
 rc=\${PIPESTATUS[0]}
 isolated=0
 [ -e "$mark/started" ] && isolated=1
+t1=\${EPOCHREALTIME:-}
+# Microseconds on both clocks; without EPOCHREALTIME (bash before 5) nothing is reported.
+[ -n "$t0" ] && [ -n "$t1" ] && echo "RAN_MS $(( (10#\${t1//[^0-9]/} - 10#\${t0//[^0-9]/}) / 1000 ))" >&2
 # The count of lines with a permission error, over the whole output and not only its tail, in lines
 # of at most 64 KiB so the count takes no more memory than that; none when grep failed.
 i=0
