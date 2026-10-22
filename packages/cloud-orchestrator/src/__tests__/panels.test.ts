@@ -9,6 +9,7 @@ import {
   MAX_PANEL_TAIL_LINES,
   MAX_PANEL_UPDATES_PER_TASK,
 } from '../panels.js';
+import { applyEvent, type TaskMap } from '../reducer.js';
 import { MemoryTaskStore } from '../store.js';
 import type { TaskEvent, TaskPanel } from '../types.js';
 import { eventually, makeHarness } from './harness.js';
@@ -184,4 +185,25 @@ test('no narration or panel text reaches a model: not the task view, and not the
   const spec = second.fake.recoveries[0];
   assert.ok(!JSON.stringify(spec?.recovery).includes('SENTINEL'));
   assert.ok(!JSON.stringify({ ...spec, recovery: undefined }).includes('SENTINEL'));
+});
+
+test('a resumed run gets its own budget of narration and panel updates', () => {
+  const tasks: TaskMap = new Map();
+  const apply = (event: TaskEvent) => applyEvent(tasks, { seq: 0, at: 1, event });
+  apply({
+    type: 'task_created',
+    taskId: 't',
+    sessionId: 's',
+    runner: 'fake',
+    mode: 'async',
+  } as TaskEvent);
+  apply({ type: 'task_started', taskId: 't' });
+  apply({ type: 'task_narration', taskId: 't', line: 'a' });
+  apply({ type: 'task_panel', taskId: 't', ...testsPanel() });
+  assert.deepEqual([tasks.get('t')?.narrations, tasks.get('t')?.panelUpdates], [1, 1]);
+  apply({ type: 'task_restarted', taskId: 't', epoch: 2, text: 'resuming' });
+  assert.deepEqual(
+    [tasks.get('t')?.narrations, tasks.get('t')?.panelUpdates],
+    [undefined, undefined],
+  );
 });

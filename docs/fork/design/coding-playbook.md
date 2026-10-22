@@ -89,8 +89,10 @@ change (`repro`), the repository's tests (`tests`), the reproduction test withou
 passes by failing), the change (`diff`) and the review (`review`). A panel is `running` while its check runs and
 settles when it ends, and a later round (the repair, the fix) replaces it in place. Summaries are built here from
 the sandbox's exit status, the change as git listed it and the review's counts, never by a model. The totals of the
-repository's tests (`41 passed, 1 failed`) are what the check printed, shown only when they fit the exit status; the
-reproduction test is the agent's own, so its panels show the verdict only. What an agent's stream says about itself
+repository's tests (`41 passed, 1 failed`) are the suite's word, from output the change can edit, shown only when they
+fit the exit status; the state of the panel is the exit code's. The reproduction test is the agent's own, so its panels
+show the verdict only. A tail may carry a vendor's words (the review panel lists the reviewer's finding titles, scrubbed
+like the rest); a summary never does. What an agent's stream says about itself
 (`narration`, `panel`) is ignored. Panels are not evidence and are not written to `verification.json`.
 
 ## Opening the pull request
