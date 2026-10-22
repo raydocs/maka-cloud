@@ -3,6 +3,7 @@ import type { ArtifactListing, InboxItem, Mode, Question, TaskControl } from './
 import { errorText } from './errors';
 import { randomId } from './ids';
 import { inboxAnswerer } from './inboxAnswer';
+import { type PendingSends, reusable } from './pending';
 import { displayText } from './presentation';
 import {
   applyEvent,
@@ -60,6 +61,9 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     private readonly client: CloudClient,
     readonly conversationId: string,
     private readonly reconcileDelayMs = 250,
+    /** Where an unacknowledged send is kept across a reload; none keeps it in memory only. */
+    private readonly sends?: PendingSends,
+    private readonly now: () => number = Date.now,
   ) {
     super({
       state: emptyState(),
@@ -197,14 +201,26 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     });
   }
 
-  /** Posts a message. A retry of the same text (after a failed post) reuses its id; see `draftEdited`. */
+  /**
+   * Posts a message. A retry of the same text (after a failed post) reuses its id; see
+   * `draftEdited`. With `sends`, so does the same text sent again after a reload, while the first
+   * post was never acknowledged: the server dedupes on the id, so it runs once.
+   */
   send(text: string, mode?: Mode): Promise<boolean> {
     const body = text.trim();
     if (!body) return Promise.resolve(false);
     return this.act('message', async () => {
-      this.messageId ??= randomId();
+      const kept = reusable(this.sends?.read(this.conversationId), body, this.now());
+      this.messageId ??= kept?.id ?? randomId();
+      // Kept before the post: a reload while it is in flight finds it.
+      this.sends?.write(this.conversationId, {
+        id: this.messageId,
+        text: body,
+        at: kept?.at ?? this.now(),
+      });
       await this.client.postMessage(this.conversationId, body, this.messageId, mode);
       this.messageId = null;
+      this.sends?.clear(this.conversationId);
     });
   }
 

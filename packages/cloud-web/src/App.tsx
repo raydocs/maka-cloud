@@ -34,6 +34,7 @@ import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
 import { ModePicker } from './ModePicker';
+import { pendingSends } from './pending';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
@@ -333,7 +334,7 @@ export function ConversationView({
   picker?: ReactNode;
 }) {
   const feed = useMemo(
-    () => new ConversationFeed(client, conversation.conversationId),
+    () => new ConversationFeed(client, conversation.conversationId, undefined, pendingSends),
     [client, conversation.conversationId],
   );
   useEffect(() => {
