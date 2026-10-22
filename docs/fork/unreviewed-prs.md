@@ -124,7 +124,8 @@ the final commit. The owner reports the approval; the PR bodies do not repeat it
 - #339 01:25Z Egress guard: the lock lives in a directory only the sandbox user can enter, not in /tmp (batch30 A4)
 - #344 01:25Z Egress: check the guard before every task-code exec (batch29 A2)
 
-Not in the owner's list, so its review status is not recorded here:
+Also merged in this window, with the Launch-path reviewer's second read (per the coordinator). It is
+not in the owner's list:
 
 - #353 01:15Z The agent starts with named variables only (isolation F8, I9)
 
