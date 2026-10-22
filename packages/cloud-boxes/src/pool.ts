@@ -103,7 +103,9 @@ interface Box {
   sleepAfter: number;
   /** Label writes of this box run one after another; each sends what the box is by then. */
   labels: Promise<void>;
-  /** Leases of the task that holds the box, replaced by a newer ask and given back since. */
+  /** For each repeated ask of the task that holds the box, the claim it replaced. */
+  replaced: Map<symbol, Holder>;
+  /** Claims of that task that hold nothing any more: leases given back after a newer ask replaced them, and asks that failed. */
   released: Set<symbol>;
 }
 
@@ -131,14 +133,7 @@ interface Held {
 }
 
 type Plan =
-  | {
-      kind: 'have';
-      box: Box;
-      holder: symbol;
-      choice?: SetupChoice;
-      /** The claim a repeated ask of the task replaced; it is put back if this ask fails. */
-      previous?: Holder;
-    }
+  | { kind: 'have'; box: Box; holder: symbol; choice?: SetupChoice }
   | {
       kind: 'create';
       box: Box;
@@ -453,16 +448,10 @@ export class BoxPool implements SandboxProvider {
       if (box.taskId === taskId && box.state !== 'lost' && box.state !== 'refused') {
         // The same task again (a resume, a repeated call): the same box, with a newer lease. The
         // older call's lease no longer matches the claim, so releasing it frees nothing.
-        const previous = box.holder;
         const holder = Symbol('lease');
+        if (box.holder !== undefined) box.replaced.set(holder, box.holder);
         box.holder = holder;
-        return {
-          kind: 'have',
-          box,
-          holder,
-          ...(previous === undefined ? {} : { previous }),
-          ...(choice === undefined ? {} : { choice }),
-        };
+        return { kind: 'have', box, holder, ...(choice === undefined ? {} : { choice }) };
       }
     }
     if (snapshotId === undefined) {
@@ -518,6 +507,7 @@ export class BoxPool implements SandboxProvider {
     box.sleepPhase = undefined;
     box.generation++;
     box.taskId = taskId;
+    box.replaced.clear();
     box.released.clear();
     const holder = Symbol('lease');
     box.holder = holder;
@@ -571,14 +561,19 @@ export class BoxPool implements SandboxProvider {
         // A box that was accepted but could not be read back stays, as lost.
         if (box.state !== 'lost') this.forget(box);
         else this.pump(box.tenantId);
-      } else if (box.holder === holder) {
-        // A run whose lease this ask replaced may still be using the box: its claim comes back,
-        // unless that run has given its lease back since.
-        const previous = plan.previous;
-        if (typeof previous === 'symbol' && !box.released.has(previous)) box.holder = previous;
-        else this.giveBack(box);
-        // A shutdown waits for this ask, so it waits for the label write a give-back started too.
-        await box.labels;
+      } else {
+        // This ask hands out no lease, so its claim holds nothing.
+        box.released.add(holder);
+        if (box.holder === holder) {
+          // A run whose lease this ask replaced may still be using the box: the nearest claim before
+          // this one that still holds comes back. With none, the box goes back as after a release.
+          let back = box.replaced.get(holder);
+          while (typeof back === 'symbol' && box.released.has(back)) back = box.replaced.get(back);
+          if (typeof back === 'symbol') box.holder = back;
+          else this.giveBack(box);
+          // A shutdown waits for this ask, so it waits for the label write a give-back started too.
+          await box.labels;
+        }
       }
       // The account has no room for another box but the invite has boxes: wait for one of them.
       if (error instanceof QuotaWait) {
@@ -1005,6 +1000,7 @@ export class BoxPool implements SandboxProvider {
       lostAt: undefined,
       sleepAfter: 0,
       labels: Promise.resolve(),
+      replaced: new Map(),
       released: new Set(),
     };
   }

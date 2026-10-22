@@ -850,4 +850,33 @@ describe('review fixes before the pool goes on', () => {
     await refused;
     await waiting;
   });
+
+  it('puts back the run’s claim when two newer asks of its task both fail, the older first', async () => {
+    const { pool, fleet } = setup({ maxPerInvite: 1 });
+    const running = await pool.acquire({ tenantId: A, taskId: 't1' });
+    const gates: (() => void)[] = [];
+    const real = fleet.getMachine.bind(fleet);
+    fleet.getMachine = async () => {
+      await new Promise<void>((resolve) => gates.push(resolve));
+      throw new Error('instabox is unreachable');
+    };
+    const b = pool.acquire({ tenantId: A, taskId: 't1' });
+    const c = pool.acquire({ tenantId: A, taskId: 't1' });
+    const bFails = assert.rejects(b, /unreachable/);
+    const cFails = assert.rejects(c, /unreachable/);
+    await flush();
+    assert.equal(gates.length, 2);
+    gates[0]?.();
+    await bFails;
+    gates[1]?.();
+    await cFails;
+    fleet.getMachine = real;
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(pool.waiting(A), 1, 'the run still holds the box');
+    await running.release();
+    await flush();
+    assert.equal(pool.waiting(A), 0, 'its release frees the box');
+    assert.equal((await other).machineId, running.machineId);
+  });
 });
