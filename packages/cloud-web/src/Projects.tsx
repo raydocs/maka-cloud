@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  BRAND,
   type CloudClient,
   AUTHORITY_WORDS,
   budgetWords,
@@ -159,7 +160,7 @@ function Suggestions({ client, projectId }: { client: CloudClient; projectId: st
 }
 
 /**
- * The projects the employee works on and the standing duties of each: what wakes it, how far it may
+ * The projects Maka works on and the standing duties of each: what wakes it, how far it may
  * go, what it may spend, and an on/off switch. The server decides what a switch may do (an
  * unapproved duty and the limit on duties that are on are refused and said so).
  */
@@ -213,10 +214,17 @@ export function Projects({ client }: { client: CloudClient }) {
           {error}
         </p>
       )}
+      {projects === undefined && !unavailable && !error && (
+        <section className="card section-card" aria-label="Loading" aria-busy="true">
+          <span className="skeleton-line" style={{ width: '40%' }} />
+          <span className="skeleton-line" />
+          <span className="skeleton-line" style={{ width: '70%' }} />
+        </section>
+      )}
       {projects?.length === 0 && !unavailable && (
         <section className="card section-card">
           <h2>No projects yet</h2>
-          <p className="muted">A project is a repository the employee looks after.</p>
+          <p className="muted">A project is a repository {BRAND.name} looks after.</p>
         </section>
       )}
       {projects?.map((project) => (

@@ -16,8 +16,7 @@ export function titleFrom(text: string): string {
 }
 
 export class ConversationStarter {
-  private attempt: { conversationId: string; clientMessageId: string; title: string } | null =
-    null;
+  private attempt: { conversationId: string; clientMessageId: string; title: string } | null = null;
 
   constructor(
     private readonly client: CloudClient,

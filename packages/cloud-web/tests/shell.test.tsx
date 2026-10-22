@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App, NotificationsPanel, Settings, Shell } from '../src/App';
 import { Home } from '../src/Home';
@@ -42,6 +42,34 @@ test('light is the default, a choice is kept in this browser and sets the page s
   expect(localStorage.getItem('maka.theme')).toBe('dark');
   unmount();
   expect(readMode()).toBe('dark');
+});
+
+test('with no stored choice the device decides, and a change of its setting is followed', async () => {
+  let dark = true;
+  const listeners = new Set<() => void>();
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() {
+      return query === '(prefers-color-scheme: dark)' && dark;
+    },
+    addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+  }));
+  expect(readMode()).toBe('dark');
+  render(
+    <ThemeProvider>
+      <ModeProbe />
+    </ThemeProvider>,
+  );
+  expect(screen.getByTestId('mode').textContent).toBe('dark');
+  await waitFor(() => expect(document.documentElement.getAttribute('data-theme')).toBe('dark'));
+  dark = false;
+  act(() => {
+    for (const listener of listeners) listener();
+  });
+  expect(screen.getByTestId('mode').textContent).toBe('light');
+  // A stored choice wins over the device.
+  fireEvent.click(screen.getByText('go dark'));
+  expect(screen.getByTestId('mode').textContent).toBe('dark');
 });
 
 test('a browser that refuses storage still gets light and can still switch', async () => {
@@ -156,13 +184,17 @@ test('Settings holds appearance, memory, notifications and the way out', () => {
   );
   expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
   const choice = screen.getByRole('group', { name: 'Color mode' });
-  expect(within(choice).getByRole('button', { name: 'Light' }).getAttribute('aria-pressed')).toBe(
-    'true',
-  );
+  const pressed = (name: string) =>
+    within(choice).getByRole('button', { name }).getAttribute('aria-pressed');
+  expect(pressed('System')).toBe('true');
   fireEvent.click(within(choice).getByRole('button', { name: 'Dark' }));
-  expect(within(choice).getByRole('button', { name: 'Dark' }).getAttribute('aria-pressed')).toBe(
-    'true',
-  );
+  expect(pressed('Dark')).toBe('true');
+  expect(pressed('System')).toBe('false');
+  expect(localStorage.getItem('maka.theme')).toBe('dark');
+  // Back to System forgets the choice, so the device decides again.
+  fireEvent.click(within(choice).getByRole('button', { name: 'System' }));
+  expect(pressed('System')).toBe('true');
+  expect(localStorage.getItem('maka.theme')).toBeNull();
   expect(screen.getByText('Memory')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Enable notifications' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));

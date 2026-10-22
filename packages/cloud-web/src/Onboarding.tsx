@@ -114,8 +114,7 @@ export function Onboarding({
                   disabled={!valid}
                   onClick={() => onPick(starter.sentence)}
                 >
-                  <span className="verb-chip">{starter.verb}</span>{' '}
-                  {starter.rest}
+                  <span className="verb-chip">{starter.verb}</span> {starter.rest}
                 </button>
               ))}
             </div>

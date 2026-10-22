@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ArrowUpRight, FileDiff } from 'lucide-react';
 import {
   type ArtifactListing,
   type CloudClient,
@@ -262,7 +263,7 @@ export function DeliveryCard({
           aria-label="Open large: the changes"
           onClick={() => void openDiff()}
         >
-          <span aria-hidden="true">±</span> View the changes
+          <FileDiff aria-hidden="true" size={16} className="icon-inline" /> View the changes
         </button>
       )}
       {/* The caption names a picture; the changes tile already says what it is. */}
@@ -278,7 +279,7 @@ export function DeliveryCard({
               target="_blank"
               rel="noreferrer noopener"
             >
-              {action.label} ↗
+              {action.label} <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           ))}
         </div>

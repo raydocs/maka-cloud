@@ -28,17 +28,18 @@ test('where decisions would be, Home says loading, could not be read, or nothing
 test('the send button is plainly at rest when empty and filled when there is something to send', async () => {
   const sent: string[] = [];
   const { rerender } = await render(
-    wrap(<RoundButton label="Send" glyph="↑" disabled onPress={() => sent.push('x')} />),
+    wrap(<RoundButton label="Send" icon="send" disabled onPress={() => sent.push('x')} />),
   );
   const flat = (style: unknown) => Object.assign({}, ...[style].flat(3).filter(Boolean));
   expect(flat(screen.getByRole('button', { name: 'Send' }).props.style).backgroundColor).toBe(
     DARK.chip,
   );
   await rerender(
-    wrap(<RoundButton label="Send" glyph="↑" disabled={false} onPress={() => sent.push('x')} />),
+    wrap(<RoundButton label="Send" icon="send" disabled={false} onPress={() => sent.push('x')} />),
   );
+  // Filled with ink, like every action; the accent is kept for what needs the person.
   expect(flat(screen.getByRole('button', { name: 'Send' }).props.style).backgroundColor).toBe(
-    DARK.accent,
+    DARK.pillOn,
   );
   await fireEvent.press(screen.getByRole('button', { name: 'Send' }));
   expect(sent).toEqual(['x']);

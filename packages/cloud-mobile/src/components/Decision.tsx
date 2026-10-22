@@ -8,11 +8,13 @@ import {
   questionCardModel,
 } from '@maka-cloud/client';
 import { useState } from 'react';
-import { Linking, View } from 'react-native';
-import { Field, PillButton, Solid, StatusMark, T } from './ui';
-import { mono } from '@/lib/theme';
+import { Linking, Pressable, View } from 'react-native';
+import { Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
+import { mono, useTheme } from '@/lib/theme';
+import { Icon } from './Icon';
 
 function Evidence({ line }: { line: EvidenceLine }) {
+  const t = useTheme();
   if (line.kind === 'artifact') return <T kind="small">{line.text}</T>;
   if (line.kind === 'action')
     return (
@@ -25,16 +27,46 @@ function Evidence({ line }: { line: EvidenceLine }) {
     );
   const href = line.href;
   return href ? (
-    <T
-      kind="small"
+    <Pressable
       accessibilityRole="link"
-      style={{ textDecorationLine: 'underline' }}
+      accessibilityLabel={line.label}
       onPress={() => void Linking.openURL(href)}
+      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 44 }}
     >
-      {line.label} ↗
-    </T>
+      <T kind="small" style={{ textDecorationLine: 'underline' }}>
+        {line.label}
+      </T>
+      <Icon name="external" size={13} color={t.inkMuted} />
+    </Pressable>
   ) : (
     <T kind="small">{line.label}</T>
+  );
+}
+
+/** A note only when asked for: "Add a note" opens the field, focused. */
+function Note({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (text: string) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return open ? (
+    <Field
+      label="Note"
+      placeholder="Note"
+      multiline
+      maxLength={4000}
+      value={value}
+      onChangeText={(text) => onChange(displayText(text))}
+      editable={!disabled}
+      autoFocus
+    />
+  ) : (
+    <QuietButton label="Add a note" onPress={() => setOpen(true)} disabled={disabled} />
   );
 }
 
@@ -91,17 +123,7 @@ export function DecisionCard({
         </T>
       ) : (
         <>
-          {item.allowText && (
-            <Field
-              label="Additional context (optional)"
-              placeholder="Additional context (optional)"
-              multiline
-              maxLength={4000}
-              value={note}
-              onChangeText={(text) => setNote(displayText(text))}
-              editable={!disabled}
-            />
-          )}
+          {item.allowText && <Note value={note} onChange={setNote} disabled={disabled} />}
           <View style={{ gap: 8 }}>
             {card.options.map((option) => (
               <PillButton
@@ -113,7 +135,6 @@ export function DecisionCard({
               />
             ))}
           </View>
-          {card.hasRecommended && <T kind="small">The filled button is the recommended answer.</T>}
         </>
       )}
     </View>
@@ -159,15 +180,7 @@ export function QuestionBlock({
         <T kind="muted">Answer recorded: {card.answeredLabel}</T>
       ) : (
         <>
-          <Field
-            label="Additional context (optional)"
-            placeholder="Additional context (optional)"
-            multiline
-            maxLength={4000}
-            value={note}
-            onChangeText={(text) => setNote(displayText(text))}
-            editable={!disabled}
-          />
+          <Note value={note} onChange={setNote} disabled={disabled} />
           <View style={{ gap: 8 }}>
             {card.options.map((option) => (
               <PillButton

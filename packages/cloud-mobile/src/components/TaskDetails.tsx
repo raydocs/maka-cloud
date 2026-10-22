@@ -1,5 +1,6 @@
 import {
   type CloudClient,
+  confidenceWords,
   displayText,
   dollars,
   errorText,
@@ -8,6 +9,8 @@ import {
   type LoadedResult,
   loadTaskResults,
   pullRequestOf,
+  reviewLineOf,
+  reviewWords,
   stepsOf,
   type TaskView,
   taskLabel,
@@ -18,9 +21,9 @@ import { useEffect, useState } from 'react';
 import { Image, Modal, ScrollView, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useBlobUri } from '@/lib/picture';
-import { radius, useTheme } from '@/lib/theme';
+import { mono, radius, useTheme } from '@/lib/theme';
 import { DiffLines, openLink, SourcesStack, useSources } from './Delivery';
-import { PillButton, Solid, StatusMark, T } from './ui';
+import { FailureNote, PillButton, Solid, StatusMark, T } from './ui';
 
 function List({ title, items }: { title: string; items: readonly string[] }) {
   if (items.length === 0) return null;
@@ -118,9 +121,10 @@ export function TaskDetails({
 
   const manifest = task.manifest;
   // The runner's own `review:` line says whether a second agent reviewed the change; it is shown
-  // on its own, in the runner's words, and left out of the plain list of what was done.
-  const reviewLine = manifest?.done.find((line) => line.startsWith('review: '));
+  // once, under Review, and left out of the plain list of what was done.
+  const reviewLine = reviewLineOf(manifest?.done);
   const done = manifest?.done.filter((line) => line !== reviewLine) ?? [];
+  const review = reviewWords(manifest?.done, verdict);
   const { steps } = stepsOf(task.progress);
   const pull = results ? pullRequestOf(results) : undefined;
   const title = displayText(task.title ?? 'Task');
@@ -141,40 +145,43 @@ export function TaskDetails({
               <StatusMark tone={TONE[task.state as keyof typeof TONE] ?? 'attention'} />
               <T kind="muted" style={{ flex: 1 }}>
                 {taskLabel(task)}
-                {task.costUsd !== undefined &&
-                  ` · Cost ${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
+                {task.costUsd !== undefined && ' · Cost '}
+                {task.costUsd !== undefined && (
+                  <T kind="muted" style={mono}>
+                    {`${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
+                  </T>
+                )}
               </T>
             </View>
             {pull && (
               <PillButton
-                label={`Pull request · ${hostOf(pull)} ↗`}
+                label={`Pull request · ${hostOf(pull)}`}
                 primary
+                external
                 onPress={() => openLink(pull)}
               />
             )}
-            {task.failureReason ? <T kind="error">{displayText(task.failureReason)}</T> : null}
+            {task.failureReason ? <FailureNote reason={task.failureReason} /> : null}
             {manifest && (
               <View style={{ gap: 8 }}>
                 <T kind="heading">Outcome</T>
                 <T kind="body" selectable>
                   {displayText(manifest.summary)}
                 </T>
-                <T kind="muted">Confidence the agent reported: {manifest.confidence}</T>
+                <T kind="muted">{confidenceWords(manifest.confidence)}</T>
                 <List title="Done" items={done} />
                 <List title="Not done" items={manifest.notDone} />
                 <List title="Known issues" items={manifest.knownIssues} />
               </View>
             )}
-            {reviewLine !== undefined && (
-              <View style={{ gap: 4 }}>
-                <T kind="heading">Independent review</T>
-                <T kind="body">{displayText(reviewLine.slice('review: '.length))}</T>
-              </View>
-            )}
-            {verdict && (
+            {review.length > 0 && (
               <View style={{ gap: 4 }}>
                 <T kind="heading">Review</T>
-                <T kind="body">{displayText(verdict.ask)}</T>
+                {review.map((line) => (
+                  <T key={line} kind="body">
+                    {line}
+                  </T>
+                ))}
               </View>
             )}
             {steps.length > 0 && (
@@ -197,7 +204,7 @@ export function TaskDetails({
                   {result.kind === 'report' && <Report text={result.text} />}
                   {result.kind === 'image' && <ImageResult name={result.name} blob={result.blob} />}
                   {result.kind === 'link' && (
-                    <PillButton label={`${result.url} ↗`} onPress={() => openLink(result.url)} />
+                    <PillButton label={result.url} external onPress={() => openLink(result.url)} />
                   )}
                   {result.kind === 'failed' && <T kind="muted">This result could not be loaded.</T>}
                 </View>

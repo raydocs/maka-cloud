@@ -9,7 +9,8 @@ import {
 } from '@maka-cloud/client';
 import { useState } from 'react';
 import { Pressable, View } from 'react-native';
-import { PillButton, StatusMark, T } from './ui';
+import { mono } from '@/lib/theme';
+import { FailureNote, QuietButton, StatusMark, T } from './ui';
 
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;
 
@@ -68,32 +69,41 @@ export function TaskRow({
       </View>
       <T kind="muted">
         {taskLabel(task)}
-        {task.parentTaskId === undefined &&
-          ` · Cost so far: ${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
+        {task.parentTaskId === undefined && ` · ${live ? 'Cost so far' : 'Cost'}: `}
+        {task.parentTaskId === undefined && (
+          <T kind="muted" style={mono}>
+            {`${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
+          </T>
+        )}
       </T>
       {task.budgetExceeded && <T kind="error">The budget was reached, so the work was stopped.</T>}
       {stopping && <T kind="muted">Still stopping. The cost may change until it has stopped.</T>}
-      {task.progress.length > 0 && <StepLine notes={task.progress} />}
-      {task.failureReason ? <T kind="error">{displayText(task.failureReason)}</T> : null}
+      {/* A finished task has no "current step". */}
+      {live && task.progress.length > 0 && <StepLine notes={task.progress} />}
+      {task.failureReason ? <FailureNote reason={task.failureReason} /> : null}
       {task.manifest ? <T kind="body">{displayText(task.manifest.summary)}</T> : null}
       {live && (
-        <View style={{ gap: 8 }}>
+        // Quiet words, as on the web: the task is the thing to read, the controls are a glance.
+        <View style={{ flexDirection: 'row', gap: 20 }}>
           {task.state === 'running' && !task.pauseRequested && !noPause.has(task.taskId) && (
-            <PillButton
-              label="Pause task"
+            <QuietButton
+              label="Pause"
+              accessibilityLabel="Pause task"
               disabled={busy}
               onPress={() => onControl(task.taskId, 'pause')}
             />
           )}
           {task.state === 'paused' && (
-            <PillButton
-              label="Resume task"
+            <QuietButton
+              label="Resume"
+              accessibilityLabel="Resume task"
               disabled={busy}
               onPress={() => onControl(task.taskId, 'resume')}
             />
           )}
-          <PillButton
-            label="Cancel task"
+          <QuietButton
+            label="Cancel"
+            accessibilityLabel="Cancel task"
             disabled={busy}
             onPress={() => onControl(task.taskId, 'cancel')}
           />

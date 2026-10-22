@@ -1,4 +1,5 @@
 import { Button } from '@astryxdesign/core';
+import { ArrowUpRight } from 'lucide-react';
 import { useState } from 'react';
 import {
   displayText,
@@ -51,7 +52,8 @@ export function InboxCard({
               {line.kind === 'link' &&
                 (line.href ? (
                   <a href={line.href} target="_blank" rel="noreferrer noopener">
-                    {line.label} ↗
+                    {line.label}{' '}
+                    <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
                   </a>
                 ) : (
                   line.label
@@ -73,7 +75,7 @@ export function InboxCard({
           )}
           {item.allowText && noting && (
             <label className="note-label">
-              Additional context (optional)
+              Note
               <textarea
                 rows={2}
                 maxLength={4000}
@@ -152,7 +154,8 @@ export function ResultCard({
               target="_blank"
               rel="noreferrer noopener"
             >
-              {pullRequestName(line.href) ?? line.label} ↗
+              {pullRequestName(line.href) ?? line.label}{' '}
+              <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           ) : line.kind === 'artifact' ? (
             <span key={`${item.itemId}-${index}`} className="evidence-chip">
