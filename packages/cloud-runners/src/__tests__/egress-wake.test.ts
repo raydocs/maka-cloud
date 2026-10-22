@@ -165,3 +165,31 @@ test('a box that passed once is checked again before the next task code: someone
   await h.runners.fleet.ensureCli(machine, claudeAdapter);
   assert.deepEqual(reached, [true, true], 'task code ran in a box whose rules were gone');
 });
+
+test('a task-code exec whose caller already gave up does not wait for the guard', async (t) => {
+  let release: () => void = () => {};
+  let hold = false;
+  const h = await setup({
+    cloud: {
+      egressGuard: () =>
+        hold
+          ? new Promise<void>((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve(),
+    },
+  });
+  t.after(() => {
+    release();
+    return h.cleanup();
+  });
+  const machine = h.runners.fleet.machine(h.fake.machineId);
+  await machine.exec('true', { taskCode: true });
+  hold = true;
+  const gone = new AbortController();
+  gone.abort(new Error('caller gave up'));
+  await assert.rejects(
+    machine.exec('echo late-marker', { taskCode: true, signal: gone.signal }),
+    /caller gave up/u,
+  );
+});

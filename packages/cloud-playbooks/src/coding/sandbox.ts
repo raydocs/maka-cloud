@@ -73,7 +73,11 @@ export class FleetCodingSandbox implements CodingSandbox {
     const machine: RemoteMachine = fleet.machine(lease.machineId);
     let released = false;
     const channel = fleet.options.agentChannel;
-    const run = async (script: string, options: ExecOptions): Promise<ExecResult> => {
+    const run = async (
+      script: string,
+      options: ExecOptions,
+      taskCode = true,
+    ): Promise<ExecResult> => {
       // Whatever runs in the workspace is the task's code: the egress guard is checked before it.
       // The agent's group goes to every script, for the ones that hand files to the agent.
       const envs =
@@ -81,7 +85,7 @@ export class FleetCodingSandbox implements CodingSandbox {
       const result = await machine.exec(script, {
         ...options,
         ...(envs === undefined ? {} : { envs }),
-        taskCode: true,
+        taskCode,
       });
       return {
         stdout: result.stdout,
@@ -103,8 +107,9 @@ export class FleetCodingSandbox implements CodingSandbox {
         await machine.prepareAgent(taskId, channel.group, options.signal);
         return run(asAgentScript(script, channel), options);
       },
+      // The host's own stop, not task code: it must reach a box whose guard now fails.
       execCheckStop: (script, options = {}) =>
-        run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options),
+        run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options, false),
       stopAll: async (stopSignal) => {
         await machine.kill(taskId, {
           ...(stopSignal ? { signal: stopSignal } : {}),

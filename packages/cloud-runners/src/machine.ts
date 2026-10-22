@@ -150,6 +150,8 @@ export class RemoteMachine {
    * resumed may have lost its rules without anything telling us. A box that fails is refused.
    */
   private guardEgress(signal?: AbortSignal): Promise<void> {
+    // A caller that has already given up does not wait for a check.
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (!this.egress) {
       const missing = new Error('this sandbox has no egress guard, so no task starts in it');
       this.refusals.add(missing);
