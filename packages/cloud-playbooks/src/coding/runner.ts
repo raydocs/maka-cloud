@@ -314,8 +314,9 @@ interface Collected {
  * `max` characters are kept: a key never spans a line, so that partial first line is the only place
  * a split key can be, and counting the margin in bytes against characters (a redaction shortens
  * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
- * line break (the git messages, folded onto one line) loses the word it starts with: a key has no
- * space in it, so the part of one left at the cut is there whole, however long the key was.
+ * line break (the git messages, folded onto one line) is that partial line whole, so none of it is
+ * shown, only \`…\`: no part of it can be told from the rest of a key, whatever its length, and a
+ * scheme cut to \`earer\` no longer marks the key after it.
  */
 export const TAIL_MARGIN = 512;
 
@@ -323,7 +324,8 @@ export function scrubbedTail(text: string, max: number, cut = false): string {
   let shown = scrubSecretText(text);
   if (cut) {
     const line = shown.indexOf('\n');
-    shown = line >= 0 ? shown.slice(line + 1) : shown.replace(/^\S*/u, '');
+    if (line < 0) return '…';
+    shown = shown.slice(line + 1);
   }
   return shown.length <= max ? shown : shown.slice(shown.length - max);
 }

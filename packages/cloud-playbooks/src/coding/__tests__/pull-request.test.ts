@@ -564,13 +564,17 @@ test('display text is scrubbed whole before it is cut, so a key at the cut leave
   }
 });
 
-test('a cut output with no line break loses the whole piece of a key the cut left, however long the key', () => {
+test('a cut output with no line break shows none of it, however long the key the cut left', () => {
   // A 2,048-character bearer token cut by the sandbox's tail: its scheme and first half are gone.
   const token = 'A'.repeat(1_024) + 'Z'.repeat(1_024);
-  const cut = `${token.slice(900)} request failed: 401 unauthorized`;
-  const shown = scrubbedTail(cut, 8_192, true);
-  assert.doesNotMatch(shown, /[AZ]{8}/u);
-  assert.equal(shown, ' request failed: 401 unauthorized');
+  assert.equal(
+    scrubbedTail(`${token.slice(900)} request failed: 401 unauthorized`, 8_192, true),
+    '…',
+  );
+  // A scheme cut to "earer" no longer marks the credential after it.
+  assert.equal(scrubbedTail('earer opaqueCredential0123456789 后面的文字', 8_192, true), '…');
+  // The git error as the host passes it, its own word first.
+  assert.equal(scrubbedTail('add earer opaqueCredential0123456789', 300, true), '…');
   // Not cut: the text is kept as it is.
   assert.equal(scrubbedTail('one line, not cut', 100), 'one line, not cut');
   // Cut at a line break: what follows it stays.
