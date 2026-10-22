@@ -85,8 +85,13 @@ That path is built, unit-tested and run end to end by the rehearsal on stand-ins
 
 A close lets go of the runs without stopping them, and lease renewals stop with it, so a task's
 sandbox lease runs out five minutes (the default `leaseTtlSeconds`) after the last renewal. A
-restart that takes longer than that lets the sandbox go to sleep under its running agent; the next
-process stops what is left and runs the task again from a fresh clone, as it does after a crash.
+restart that takes longer than that lets the sandbox go to sleep under its running agent. What the
+next process does depends on the runner. A runner that can resume (`recover`, the Claude runner) is
+stopped where it was left and runs the task again from a fresh clone, as after a crash. **The
+coding runner cannot**: its task is stopped and ended as failed ("orphaned: the orchestrator
+restarted while this task was running"), and the owner sends the goal again. If the change had
+already passed its checks, it is on the host (`keepUntilReviewed`) and the failed task shows it as
+kept for the owner to look at, as a task that fails or is stopped in the same state does.
 A forced exit (the process was still closing after ten seconds) exits with code 1 and logs
 `server.exit_forced`.
 

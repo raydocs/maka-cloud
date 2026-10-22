@@ -70,6 +70,12 @@ export interface OrchestratorOptions {
   runners: RunnerRegistry;
   /** Directory that holds one `<taskId>/` folder of handoff files per task. */
   handoffRoot: string;
+  /**
+   * Replaces the reads and writes of the handoff directory. For tests that schedule every await
+   * themselves (the schedule fuzzer): restore reads the handoff, so it must be in place before
+   * restore runs.
+   */
+  handoff?: Pick<Handoff, 'paths' | 'writeBrief' | 'discard' | 'readManifest'>;
   now?: () => number;
   /**
    * How many levels of tasks may sit below a task the caller delegated
@@ -199,7 +205,7 @@ export interface DelegateInput {
 export class Orchestrator {
   private readonly store: TaskStore;
   private readonly runners: RunnerRegistry;
-  private readonly handoff: Handoff;
+  private readonly handoff: Pick<Handoff, 'paths' | 'writeBrief' | 'discard' | 'readManifest'>;
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
@@ -263,7 +269,7 @@ export class Orchestrator {
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
     this.runners = options.runners;
-    this.handoff = new Handoff(options.handoffRoot);
+    this.handoff = options.handoff ?? new Handoff(options.handoffRoot);
     this.now = options.now ?? Date.now;
     this.quotas = { ...DEFAULT_QUOTAS, ...options.quotas };
     this.auth = new SessionAuth(
@@ -1015,18 +1021,22 @@ export class Orchestrator {
         continue;
       }
       // Nothing is running after a restart. History is never edited, so the
-      // outcome is appended.
+      // outcome is appended. A change the runner already kept for the owner is on the handoff
+      // directory, not in a process: it goes on the outcome like on any other end (read here,
+      // before the write chain, as `withKept` requires).
       const ended = await this.record(
-        task.cancelRequestedBy !== undefined
-          ? { type: 'task_cancelled', taskId: task.taskId }
-          : {
-              type: 'task_failed',
-              taskId: task.taskId,
-              reason:
-                plan?.kind === 'give_up'
-                  ? plan.reason
-                  : 'orphaned: the orchestrator restarted while this task was running',
-            },
+        await this.withKept(
+          task.cancelRequestedBy !== undefined
+            ? { type: 'task_cancelled', taskId: task.taskId }
+            : {
+                type: 'task_failed',
+                taskId: task.taskId,
+                reason:
+                  plan?.kind === 'give_up'
+                    ? plan.reason
+                    : 'orphaned: the orchestrator restarted while this task was running',
+              },
+        ),
         undefined,
         fence,
       );
