@@ -589,6 +589,23 @@ test('the limits of one task default to no turn limit and 4 hours, and take only
   );
 });
 
+test('one task runs at a time per invite unless the owner sets another whole number up to 32', () => {
+  assert.equal(readStackConfig(ENV).tasksPerInvite, 1);
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_TASKS_PER_INVITE: '3' }).tasksPerInvite, 3);
+  for (const bad of ['0', '-1', '1.5', 'two', '33']) {
+    assert.ok(
+      problemsOf({ ...ENV, MAKA_CLOUD_TASKS_PER_INVITE: bad }).some((text) =>
+        /MAKA_CLOUD_TASKS_PER_INVITE must be/u.test(text),
+      ),
+      bad,
+    );
+  }
+  assert.match(
+    describeConfig(readStackConfig(ENV)).join('\n'),
+    /tasks at once: +1 per invite; the next one waits its turn/u,
+  );
+});
+
 test('timeline content is off unless the owner sets 1, and anything else but 0 is refused', () => {
   assert.equal(readStackConfig(ENV).timelineContent, false);
   assert.equal(

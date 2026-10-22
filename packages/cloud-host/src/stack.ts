@@ -389,6 +389,7 @@ export async function startStack(
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
       orchestrator: { recoveredSpend: journal, limits: config.taskLimits },
+      tasksPerInvite: config.tasksPerInvite,
       timelineContent: config.timelineContent,
       conductorRoot: config.conductorRoot,
       conductor: {
