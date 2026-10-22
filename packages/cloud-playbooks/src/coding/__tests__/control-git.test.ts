@@ -278,6 +278,37 @@ test('the revert and the restore put the base back and the change returns, modes
   assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu, 'idempotent');
 });
 
+test('a link of the base put back over a directory of the change takes nothing outside the workspace with it', async (t) => {
+  const { tmp } = await setup(t);
+  const outside = join(tmp, 'outside');
+  await fs.mkdir(join(outside, 'cache', 'child'), { recursive: true });
+  await fs.writeFile(join(outside, 'cache', 'child', 'keep.txt'), 'not the workspace\n');
+  const origin = join(tmp, 'origin');
+  await fs.symlink(join(outside, 'cache'), join(origin, 'cache'));
+  git(origin, 'add', '-A');
+  git(origin, 'commit', '-q', '-m', 'a link out');
+  const dir = join(tmp, 'linked');
+  const cloned = run(CLONE_SCRIPT, {
+    MAKA_DIR: dir,
+    MAKA_REPO_URL: `file://${origin}`,
+    MAKA_REF: 'HEAD',
+  });
+  const base = /^BASE ([0-9a-f]{40})$/mu.exec(cloned)?.[1] as string;
+  const ws = join(dir, 'workspace');
+  // The change made the link a directory of its own, with a path the link's target also has.
+  await fs.rm(join(ws, 'cache'));
+  await fs.mkdir(join(ws, 'cache'));
+  await fs.writeFile(join(ws, 'cache', 'child'), 'the change\n');
+  const before = await snapshot(outside);
+  const out = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
+  assert.match(out, /^REVERTED \d+$/mu, out);
+  assert.equal(await fs.readlink(join(ws, 'cache')), join(outside, 'cache'));
+  assert.deepEqual(await snapshot(outside), before, 'the revert');
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
+  assert.deepEqual(await snapshot(outside), before, 'the restore');
+  assert.equal(await fs.readFile(join(ws, 'cache', 'child'), 'utf8'), 'the change\n');
+});
+
 test('the agent group reads the stage and writes the backup, and cannot write the stage', async (t) => {
   const { dir, base, ws } = await setup(t);
   await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');

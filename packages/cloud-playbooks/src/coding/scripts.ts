@@ -385,12 +385,14 @@ while IFS= read -r -d '' p; do
   count=$((count + 1))
 done < "$st/paths"
 mv "$bk/reverted.tmp" "$bk/reverted" || exit 1
+# Everything goes first, and only then is the base put in: a link of the base put back before a path
+# under it is removed would have that removal follow the link out of the workspace.
+while IFS= read -r -d '' p; do rm -rf -- "$p"; done < "$st/paths"
 n=0
 exec 3< "$st/paths" 4< "$st/modes"
 while IFS= read -r -d '' p <&3 && IFS= read -r -d '' mode <&4; do
   i=$n
   n=$((n + 1))
-  rm -rf -- "$p"
   case "$mode" in 100644|100755|120000) ;; *) continue ;; esac
   mkdir -p "$(dirname -- "$p")"
   if [ "$mode" = 120000 ]; then ln -s -- "$(cat -- "$st/blobs/$i")" "$p" || exit 1
