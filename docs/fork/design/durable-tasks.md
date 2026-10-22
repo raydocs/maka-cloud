@@ -19,6 +19,18 @@ Status of the pieces (updated by each PR):
 
 Lives in `@maka-cloud/orchestrator` (types, reducer, store, `steps.ts`, `orchestrator.ts`) and `SqliteTaskStore` in `@maka-cloud/server`.
 
+### One process owns a task store
+
+The restart design assumes one server process per data directory. Epochs fence a stale *driver* of a task; they are not what keeps a second *server* out, and several things read the log on the assumption that nothing else is writing it: `restore()` marks every unfinished task before it does anything else, `recordRecoveredSpend` hands the journal rows of "earlier processes" to the log and then forgets them (`recorded()` deletes every row whose epoch is not its own, so a live process's open holds would be taken for a dead one's), and the takeover checks (`holdsAttempt`) only compare against the log.
+
+What enforces it:
+
+- `openDatabase` (`cloud-server/src/db.ts`) takes `locking_mode=EXCLUSIVE` and an immediate write transaction at open, so a second server over the same file fails there with `DatabaseInUseError` instead of waiting. The lock is the kernel's: a crashed server leaves nothing to clean up. The supervisor's and the transcripts' databases do the same (`SupervisorDatabaseInUseError`, `TranscriptDatabaseInUseError`).
+- The host opens the server database before `restore()` and before it writes the spend caps, so a second stack is refused before it can touch the journal (`start-failure.test.ts`: a second stack over a running one fails with the lock error, the first one's open hold is still in the journal and its caps are unchanged; `lock.test.ts` for the file itself).
+- The spend journal is the one file other processes may open (the evals read the server's caps and book spend through `openServerLedger`); they take no epoch of their own and never run `unrecorded`/`recorded`.
+
+What it does not cover: two processes on different machines over a copied or network-mounted file (kernel locks are not reliable there), and a process that is given a different data directory. Epoch fencing stays as the second line for those: a driver that lost a task is refused at its next write. Do not rely on it as a substitute; run one server.
+
 ### Epochs
 
 Each attempt to drive a task has an epoch. A task starts at **epoch 1**: its creation is the first attempt, which is also what every task in an existing log is. A new attempt writes `task_attempt {epoch, cause}` where `epoch` is the previous one plus one (`cause`: `restart` or `resume`). `restore()` writes one for every unfinished task before it does anything else, so a process that still drives one of them is fenced from that moment.
