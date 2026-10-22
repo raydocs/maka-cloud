@@ -114,8 +114,12 @@ whose cost it cannot bound is refused (400), never sent.
   one applies (the higher tier is used when the bound is above its threshold). Input is reserved at
   the cache-write rate (1.25×, or 2× when the body asks for a one-hour cache), since any input token
   may be written to the cache. A model not in the table is refused. Built in: `claude-opus-5-5`,
-  `claude-sonnet-5-5`, `claude-haiku-5-5` (list prices as of 2026-10). OpenAI models must be
-  configured with `MAKA_CLOUD_GATEWAY_MODELS`.
+  `claude-sonnet-5-5`, `claude-haiku-5-5` (list prices as of 2026-10), and OpenAI's
+  `gpt-6.1-sol`, the built-in modes' Codex model ($2 input, $0.10 cached input, $10 output per
+  million tokens; above 272K input tokens $4, $0.20 and $15; 128K output cap; standard tier, from
+  <https://developers.openai.com/api/docs/pricing>, read 2026-10-22). `MAKA_CLOUD_GATEWAY_MODELS`
+  adds models and replaces a built-in price by vendor and model id; any other OpenAI model must be
+  configured there.
 - **Allowlisted fields.** Request fields that change the price or add work the body does not
   show are refused: fast mode, inference geography, service tiers other than standard, server-side
   conversation state (`previous_response_id`, `conversation`, stored prompts), MCP servers,

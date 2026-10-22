@@ -18,8 +18,9 @@ export interface ModelPrice {
 }
 
 /**
- * Anthropic list prices (Claude API, standard speed and tier) as of 2026-10. Configuration
- * replaces an entry by model id; OpenAI models are configuration only.
+ * List prices (standard speed and tier) as of 2026-10: Anthropic's Claude API, and OpenAI's for
+ * `gpt-6.1-sol`, the model the built-in modes give Codex (`DEFAULT_CODEX_MODEL` in cloud-modes). Configuration
+ * (`MAKA_CLOUD_GATEWAY_MODELS`) replaces an entry by vendor and model id and adds others.
  */
 export const BUILT_IN_MODELS: readonly ModelPrice[] = [
   {
@@ -46,6 +47,20 @@ export const BUILT_IN_MODELS: readonly ModelPrice[] = [
     cacheReadPerMTokUsd: 0.01,
     maxOutputTokens: 128_000,
     longContext: { aboveInputTokens: 100_000, inputPerMTokUsd: 0.5, outputPerMTokUsd: 2.5 },
+  },
+  // OpenAI API pricing, standard tier, read 2026-10-22 from
+  // https://developers.openai.com/api/docs/pricing and
+  // https://developers.openai.com/api/docs/models/gpt-6.1-sol: $2 input, $0.10 cached input,
+  // $10 output per million tokens; above 272K input tokens $4, $0.20 and $15; 128K output cap.
+  // The long tier's cached rate is the short one scaled by the input ratio, as `costUsd` does.
+  {
+    vendor: 'openai',
+    model: 'gpt-6.1-sol',
+    inputPerMTokUsd: 2,
+    outputPerMTokUsd: 10,
+    cacheReadPerMTokUsd: 0.1,
+    maxOutputTokens: 128_000,
+    longContext: { aboveInputTokens: 272_000, inputPerMTokUsd: 4, outputPerMTokUsd: 15 },
   },
 ];
 

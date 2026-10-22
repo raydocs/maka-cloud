@@ -478,6 +478,16 @@ test('the modes default to the built-in ones, and the built-in ones are priced b
   assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /modes: +quick, standard, deep/);
 });
 
+test('with no model configured, the built-in modes start: Codex reviews on a model the gateway prices', () => {
+  // No MAKA_CLOUD_GATEWAY_MODELS: the built-in modes name only models with a built-in price, or
+  // reading the config would fail with a "has no price" problem.
+  const config = readStackConfig(ENV);
+  assert.deepEqual(config.gateway.models, []);
+  const lines = describeConfig(config).join('\n');
+  assert.match(lines, /every role names its model/);
+  assert.match(lines, /gateway models: +built-in Claude and gpt-6\.1-sol prices only/);
+});
+
 test('MAKA_CLOUD_MODES replaces the modes, and a Codex model it names needs a gateway price', () => {
   const modes = structuredClone(DEFAULT_MODES);
   modes.modes.deep.reviewer.codex = { model: 'codex-test', effort: 'high' };
