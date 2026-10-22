@@ -239,13 +239,21 @@ interface CheckResult {
   /** The end of the output. */
   output: string;
   outputBytes: number;
+  /** Lines of the whole output, not only its end, with a permission error of the system on them. */
+  permissionErrors?: number;
 }
 
 /**
- * What a test prints when the account it runs as may not read or do something: the agent's account
- * is not the one the project's own tests run as, so it is not a failure of the code.
+ * How the system reports that the account a test runs as may not read or do something (errno names,
+ * Python's and Rust's errno numbers, a perror-style line that ends in the message): the agent's
+ * account is not the one the project's own tests run as, so it is not a failure of the code. Not
+ * the words alone, which a test of the project's own authorization prints too. As an extended
+ * regular expression for grep -iE in the sandbox, and the same for the end of the output here.
  */
-const PERMISSION_ERROR = /\b(?:EACCES|EPERM)\b|permission denied|operation not permitted/iu;
+const PERMISSION_ERROR_ERE =
+  '(^|[^[:alnum:]_])(EACCES|EPERM)([^[:alnum:]_]|$)|\\[Errno (1|13)\\]|\\(os error (1|13)\\)|: (permission denied|operation not permitted)[[:space:]]*$';
+const PERMISSION_ERROR =
+  /\b(?:EACCES|EPERM)\b|\[Errno (?:1|13)\]|\(os error (?:1|13)\)|: (?:permission denied|operation not permitted)\s*$/imu;
 
 /**
  * Why a check that did not pass is not a test failure (it timed out, died, was killed by a
@@ -257,7 +265,9 @@ function notATestFailure(check: CheckResult): string | undefined {
   if (check.exitCode < 0) return `did not finish (${check.output})`;
   if (check.exitCode >= 128) return `was killed by signal ${check.exitCode - 128}`;
   if (check.exitCode >= 125) return `could not run (exit ${check.exitCode})`;
-  if (PERMISSION_ERROR.test(check.output)) return 'met a permission error';
+  if ((check.permissionErrors ?? 0) > 0 || PERMISSION_ERROR.test(check.output)) {
+    return 'met a permission error';
+  }
   return undefined;
 }
 
@@ -1379,7 +1389,8 @@ class CodingRun implements RunHandle {
         MAKA_KEEP: repro.files.join('\n'),
       })
     ).stdout;
-    if (!/^STAGED \d+$/mu.test(staged)) {
+    // The whole output: a refusal names a path, and a name can hold a line of its own.
+    if (!/^STAGED \d+\n?$/u.test(staged)) {
       return {
         problem: `the change could not be reverted for the base check (${clipText(staged.trim(), 200)})`,
       };
@@ -1387,7 +1398,7 @@ class CodingRun implements RunHandle {
     this.baseCheckActive = true;
     try {
       const out = (await this.execCheck(BASE_REVERT_SCRIPT, {})).stdout;
-      if (!/^REVERTED \d+$/mu.test(out)) {
+      if (!/^REVERTED \d+\n?$/u.test(out)) {
         return {
           problem: `the change could not be reverted for the base check (${clipText(out.trim(), 200)})`,
         };
@@ -1437,6 +1448,7 @@ class CodingRun implements RunHandle {
             MAKA_CMD: command,
             MAKA_TIMEOUT: String(timeoutSeconds),
             MAKA_TAIL: String(this.limits.outputTailBytes + TAIL_MARGIN),
+            MAKA_PERMISSION_ERROR: PERMISSION_ERROR_ERE,
           },
           timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
         );
@@ -1448,10 +1460,12 @@ class CodingRun implements RunHandle {
       const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
       if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
+      const perms = /^PERMS (\d+)$/mu.exec(out.stderr);
       const result = {
         name,
         command: scrubSecretText(command),
         outputBytes: Number(bytes?.[1] ?? 0),
+        ...(perms ? { permissionErrors: Number(perms[1]) } : {}),
         output: scrubbedTail(
           out.stdout,
           this.limits.outputTailBytes,

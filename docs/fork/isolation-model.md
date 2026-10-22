@@ -201,10 +201,11 @@ control user and touches no workspace path (git against `control.git` and a stag
 task directory), `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT` run as the agent account through
 `execCheck`. Neither goes through a linked directory above a path (`UNSAFE_PATH`, `RESTORE_FAILED`).
 A link the revert puts back must resolve, as the agent, inside the workspace or to nothing
-(`LINK_LEADS_OUT` otherwise), and a base run whose output shows a permission error (`EACCES`, `EPERM`,
-"permission denied", "operation not permitted") is not counted as "the test fails on the base". Still
-open: a test that meets a permission error past a link the change did not touch and prints nothing
-about it.
+(`LINK_LEADS_OUT` otherwise), and a base run with a permission error of the system anywhere in its
+output (an errno name, Python's or Rust's errno number, or a line that ends in "Permission denied" or
+"Operation not permitted", counted in the sandbox over the whole output, not only its tail) is not
+counted as "the test fails on the base". Still open: a test that meets a permission error past a link
+the change did not touch and prints nothing about it.
 *Tested*: `handoff-links.test.ts`, `agent-user.test.ts` ("links the agent plants in handoff/ are not
 followed"), `result.test.ts`, `stage.test.ts`, `export.test.ts`.
 *Still violated*: F6 (the egress lock is opened in `/tmp`), F10 (transcript chunks

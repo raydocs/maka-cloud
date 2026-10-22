@@ -103,7 +103,8 @@ export function checkAttemptMark(attempt: number | undefined): string {
  * isolated, and the script exits 125 with a \`maka-check:\` line on stderr (which the check cannot
  * write to). \`timeout\` ends the command after \`$MAKA_TIMEOUT\` seconds (TERM, then KILL 5 s
  * later); an outer one ends the namespace 10 s after that. Prints the last \`$MAKA_TAIL\` bytes of
- * the output on stdout and \`BYTES <output bytes>\` on stderr. \`$MAKA_CHECK_TAG\` is an argument
+ * the output on stdout, and \`BYTES <output bytes>\` and \`PERMS <lines>\` (the lines that match
+ * \`$MAKA_PERMISSION_ERROR\`, over the whole output) on stderr. \`$MAKA_CHECK_TAG\` is an argument
  * of the processes outside the namespace and of its first process, so CHECK_STOP_SCRIPT finds them.
  */
 export const CHECK_SCRIPT = `set -u
@@ -114,10 +115,15 @@ timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
   unshare --user --map-current-user --pid --fork --kill-child -- \\
   bash -c ': > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
   "$MAKA_CHECK_TAG" "$mark" "$MAKA_CMD" "$MAKA_TIMEOUT" < /dev/null 2>&1 |
-  { tee >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
+  { tee >(grep -ciE -e "$MAKA_PERMISSION_ERROR" > "$mark/perms.part"; mv -f -- "$mark/perms.part" "$mark/perms") \\
+    >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
 rc=\${PIPESTATUS[0]}
 isolated=0
 [ -e "$mark/started" ] && isolated=1
+# The count of lines with a permission error, over the whole output and not only its tail.
+i=0
+while [ ! -e "$mark/perms" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$mark/perms" ] && echo "PERMS $(cat -- "$mark/perms")" >&2
 rm -rf -- "$mark"
 if [ "$isolated" = 0 ]; then
   echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed: the box must allow unprivileged user namespaces, which a container profile such as the Docker default seccomp refuses; no check can run until it does)' >&2
@@ -361,7 +367,7 @@ rm -f -- "$st/all"
 # follow links.
 if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
   bad=$(find "$ws" -xdev ! -type l -user "$(id -u)" \\( ! -group "$MAKA_AGENT_GROUP" -o \\( -type d ! -perm -g+rx \\) -o \\( ! -type d ! -perm -g+r \\) \\) -print -quit)
-  [ -z "$bad" ] || { echo "UNREADABLE_FOR_AGENT $bad"; exit 0; }
+  [ -z "$bad" ] || { printf 'UNREADABLE_FOR_AGENT %q\\n' "$bad"; exit 0; }
 fi
 # The agent reads the stage and writes the backup; the stage is not the agent's to change.
 mkdir -p -- "$bk" || exit 1
@@ -394,8 +400,8 @@ mkdir -p "$bk/files" || exit 1
 : > "$bk/reverted.tmp" || exit 1
 count=0
 while IFS= read -r -d '' p; do
-  case "/$p/" in //*|*/../*|*/./*) echo "UNSAFE_PATH $p"; exit 0 ;; esac
-  under_link "$ws" "$p" && { echo "UNSAFE_PATH $p"; exit 0; }
+  case "/$p/" in //*|*/../*|*/./*) printf 'UNSAFE_PATH %q\\n' "$p"; exit 0 ;; esac
+  under_link "$ws" "$p" && { printf 'UNSAFE_PATH %q\\n' "$p"; exit 0; }
   if [ -e "$p" ] || [ -L "$p" ]; then
     mkdir -p "$bk/files/$(dirname -- "$p")" && cp -a -- "$p" "$bk/files/$p" || exit 1
   fi
@@ -426,12 +432,12 @@ wsr=$(pwd -P) || exit 1
 exec 3< "$st/paths" 4< "$st/modes"
 while IFS= read -r -d '' p <&3 && IFS= read -r -d '' mode <&4; do
   [ "$mode" = 120000 ] || continue
-  if to=$(LC_ALL=C realpath -- "$p" 2>&1); then
+  if to=$(LC_ALL=C realpath -e -- "$p" 2>&1); then
     case "$to/" in "$wsr"/*) continue ;; esac
   else
     case "$to" in *": No such file or directory"|*": Not a directory") continue ;; esac
   fi
-  echo "LINK_LEADS_OUT $p"
+  printf 'LINK_LEADS_OUT %q\\n' "$p"
   exit 0
 done
 echo "REVERTED $count"

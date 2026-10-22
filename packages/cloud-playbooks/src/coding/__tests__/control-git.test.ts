@@ -35,7 +35,7 @@ function run(script: string, env: Record<string, string>): string {
  */
 function revertForBase(env: Record<string, string>): string {
   const staged = run(BASE_STAGE_SCRIPT, env);
-  if (!/^STAGED \d+$/mu.test(staged)) return staged;
+  if (!/^STAGED \d+\n?$/u.test(staged)) return staged;
   return run(BASE_REVERT_SCRIPT, { MAKA_DIR: env.MAKA_DIR as string });
 }
 
@@ -361,7 +361,7 @@ test('a directory named by a newline under a linked directory is no way past the
   // The change made lib a link out and keeps it.
   await linkLib();
   const out = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: 'lib' });
-  assert.match(out, /^UNSAFE_PATH lib\/$/mu, out);
+  assert.equal(out, "UNSAFE_PATH $'lib/\\n/deep/a.txt'\n");
   assert.deepEqual(await snapshot(outside), before, 'the revert');
   assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
   // The link put in place while the check ran: the restore stops before it.
@@ -390,6 +390,8 @@ test('a link the revert puts back that leads out of the workspace refuses the ba
   await fs.symlink(join(outside, 'closed', 'f'), join(origin, 'closed'));
   await fs.symlink('b.txt', join(origin, 'inside'));
   await fs.symlink('gone/x', join(origin, 'dangling'));
+  await fs.symlink(join(outside, 'missing'), join(origin, 'away'));
+  await fs.symlink(join(outside, 'open'), join(origin, 'out\nREVERTED 1'));
   git(origin, 'add', '-A');
   git(origin, 'commit', '-q', '-m', 'links');
   const dir = join(tmp, 'links');
@@ -421,11 +423,19 @@ test('a link the revert puts back that leads out of the workspace refuses the ba
     // Searchable again, so the temporary directory can be removed.
     await fs.chmod(join(outside, 'closed'), 0o755);
   }
-  // A link inside the workspace, and one that leads nowhere, are no reason to refuse.
+  // A name with a line of its own is one line of the refusal, never a record of success.
+  await replace('out\nREVERTED 1');
+  const named = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
+  assert.equal(named, "LINK_LEADS_OUT $'out\\nREVERTED 1'\n");
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
+  await fs.rm(join(ws, 'out\nREVERTED 1'));
+  await fs.symlink(join(outside, 'open'), join(ws, 'out\nREVERTED 1'));
+  // A link inside the workspace, and ones that lead nowhere (here or outside), are no reason to refuse.
   await replace('inside');
   await replace('dangling');
+  await replace('away');
   const ok = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
-  assert.match(ok, /^REVERTED 2$/mu, ok);
+  assert.match(ok, /^REVERTED 3$/mu, ok);
 });
 
 test('the agent group reads the stage and writes the backup, and cannot write the stage', async (t) => {
