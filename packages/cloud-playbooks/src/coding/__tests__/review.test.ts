@@ -60,6 +60,18 @@ for (const [label, onBase, why] of [
   ['times out', 'while :; do sleep 0.05; done', /timed out/],
   ['is killed by a signal', 'kill -9 $$', /killed by signal 9/],
   ['cannot run its command', 'no-such-command-here', /could not run \(exit 127\)/],
+  // Read through a link the revert put back, as the agent: not a failure of the code.
+  [
+    'meets a permission error',
+    'echo "cat: fixtures/data: Permission denied" >&2; exit 1',
+    /met a permission error/,
+  ],
+  // Also when more output follows than the end the runner keeps.
+  [
+    'meets a permission error long before its end',
+    'echo "cat: fixtures/data: Permission denied" >&2; head -c 20000 /dev/zero | tr "\\0" a; echo; exit 1',
+    /met a permission error/,
+  ],
 ] as const) {
   test(`a reproduction test that ${label} on the base commit does not prove the failure`, async (t) => {
     const h = await setup(t, { limits: { checkTimeoutMs: 1_000 } });
@@ -77,6 +89,26 @@ for (const [label, onBase, why] of [
     zeroStats(h.runner);
   });
 }
+
+test('a test of the project’s own authorization that fails on the base commit proves the failure', async (t) => {
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    await reproThatOnBase(
+      turn,
+      'echo "not ok - returns Permission denied for unauthorized requests"; echo "expected 403, got 500"; exit 1',
+    );
+    return 'ok';
+  };
+  const spec = await h.spec('tsk_auth');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  assert.equal(h.claude.turns.length, 1, 'verified on the first run');
+  const verification = await readJson(join(h.handoff, 'tsk_auth', 'verification.json'));
+  assert.deepEqual(
+    verification.attempts[0].turns.map((turn: { outcome: string }) => turn.outcome),
+    ['verified'],
+  );
+  zeroStats(h.runner);
+});
 
 test('a check cannot forge its result: an exit record it writes while it runs is not read', async (t) => {
   const h = await setup(t);
