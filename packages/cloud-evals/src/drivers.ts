@@ -9,6 +9,7 @@ import type {
 } from '@maka-cloud/playbooks/coding';
 import { aloneBrief, playbookBrief } from './briefs.js';
 import { drive } from './drive.js';
+import { type ProofSignals, proofOf } from './proof.js';
 import { defaultTestCommand } from './suites.js';
 import {
   cloneAt,
@@ -116,6 +117,15 @@ export interface PlaybookOptions {
   sandbox: CodingSandbox;
 }
 
+/** The proof is for the scorecard only: a missing or unreadable record is no proof, not a failure. */
+async function readProof(path: string): Promise<ProofSignals | null> {
+  try {
+    return proofOf(JSON.parse(await readFile(path, 'utf8')) as unknown);
+  } catch {
+    return null;
+  }
+}
+
 const CUT = /\[change\.patch cut at \d+ of \d+ bytes\]\n$/u;
 
 /**
@@ -196,6 +206,7 @@ export class PlaybookDriver implements SubjectDriver {
         costUsd: cost,
         end: 'finished',
         failureReason: null,
+        proof: await readProof(delivery.verificationPath),
       };
     } catch (error) {
       await this.options.sandbox.stopTask(input.taskId).catch(() => undefined);

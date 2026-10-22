@@ -314,7 +314,9 @@ interface Collected {
  * `max` characters are kept: a key never spans a line, so that partial first line is the only place
  * a split key can be, and counting the margin in bytes against characters (a redaction shortens
  * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
- * line break (the git messages, folded onto one line) loses its first `TAIL_MARGIN` characters.
+ * line break (the git messages, folded onto one line) is that partial line whole, so none of it is
+ * shown, only \`…\`: no part of it can be told from the rest of a key, whatever its length, and a
+ * scheme cut to \`earer\` no longer marks the key after it.
  */
 export const TAIL_MARGIN = 512;
 
@@ -322,13 +324,24 @@ export function scrubbedTail(text: string, max: number, cut = false): string {
   let shown = scrubSecretText(text);
   if (cut) {
     const line = shown.indexOf('\n');
-    shown = line >= 0 ? shown.slice(line + 1) : shown.slice(Math.min(TAIL_MARGIN, shown.length));
+    if (line < 0) return '…';
+    shown = shown.slice(line + 1);
   }
   return shown.length <= max ? shown : shown.slice(shown.length - max);
 }
 
 /** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
 const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
+
+/**
+ * What CLONE_SCRIPT says of a failed fetch (\`CLONE_FAILED\`, then the last 2512 bytes of git's
+ * error), scrubbed and cut to 500 characters. Whether the sandbox cut it is judged on the bytes as
+ * they came, before any space is trimmed: trimmed first, a cut one could pass as whole.
+ */
+export function cloneFailure(out: string): string {
+  const tail = out.replace(/^CLONE_FAILED\n?/u, '');
+  return scrubbedTail(tail, 500, wasCut(tail, 2512)).trim();
+}
 
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
@@ -1746,9 +1759,9 @@ class CodingRun implements RunHandle {
     const out = (await this.exec(CLONE_SCRIPT, { MAKA_REPO_URL: url, MAKA_REF: ref }, 600)).stdout;
     const base = /^BASE ([0-9a-f]{40})$/mu.exec(out);
     if (!base) {
-      const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
+      const detail = cloneFailure(out);
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${detail}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
