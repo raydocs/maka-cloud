@@ -177,21 +177,40 @@ It keeps its accumulated output, its stdin and its process, and reports when it 
 still stops it.
 
 **Maka today.** A check is one sandbox exec, at most 9.5 minutes (`MAX_CHECK_MS`), because an
-exec ends at 10. Real test suites
-for many repositories take longer, so their check fails on time, not on the change.
+exec ends at 10. Real test suites for many repositories take longer, so their check fails on time, not on the change.
 
-**Design.**
-- A check starts as a background job in the sandbox: a launcher writes its output to a file and
-  its exit code to another.
-- The runner polls the job, each poll a short exec, until it ends or the check's own limit is
-  reached. The default is 30 minutes, set per repository.
+**The constraint that decides the design.** A check's pass or fail is the exit status the sandbox
+API reports for its exec (`runCheck`). Nothing the checked code writes is ever read as its result,
+because that code is the agent's and could write "passed". A longer check must keep this property,
+so "the job writes its exit code to a file and we poll it" is ruled out. Instabox's API has only
+the one synchronous exec, which ends at 10 minutes, and no process handles.
+
+**Design.** Two ways keep the result out of the checked code's reach:
+- **A platform process API (preferred).** Instabox starts a process, and an API reports its status
+  and exit code across calls. The result comes from the sandbox API, as it does today. This needs
+  the instabox owner.
+- **A watcher the check cannot touch.** A launcher running as the sandbox's own user starts the check
+  as the agent's account, in its own user and PID namespace as `CHECK_SCRIPT` does, and waits on it.
+  It writes the exit status and the output tail into a directory only the sandbox user can write.
+  Each poll is a short exec as the sandbox user that reads that directory and the launcher's
+  liveness. A launcher that died without a status is a failed check, never a pass. This depends on
+  the split between the sandbox user and the agent's account that the isolation lane is finishing
+  (#353, #355, #360).
+
+Either way:
+- The check's limit is set per repository, 30 minutes by default, and capped.
 - Polls feed the tests panel from `hark-patterns.md`, pattern 2.
-- Cancelling the task kills the job.
+- Cancelling the task kills the whole namespace.
 - The verification record keeps what it keeps today: the last 8 KiB of output and the exit code.
 
-**Where.** Coding playbook, with the instabox lane for the launcher. **Tests.** A 15-minute fake
-suite passes the check. Cancelling during a check leaves no process behind. A job that never ends
-is stopped at the limit and recorded as a timeout.
+**Where.** The isolation lane decides between the two ways and owns the watcher; the coding
+playbook changes `runCheck`. Not a design-lane change.
+**Tests.**
+- The checked code writes a fake "exit 0" everywhere it can write, and the check still fails.
+- A launcher killed mid-check gives a failed check.
+- A 15-minute fake suite passes.
+- Cancelling during a check leaves no process behind.
+- A job that never ends is stopped at the limit and recorded as a timeout.
 
 ### 7. A fresh look after each computer action
 
@@ -229,7 +248,7 @@ for any wake that surfaces as a failure, and give it a typed status.
 |---|---|---|---|
 | 2 | Stall watchdog and an honest Live | small, client only | T29 (or the design lane, with the status line) |
 | 3 | Grant shape: authority, required expiry, withdrawal list | folds into `hark-patterns.md` 1 | Modes, supervisor |
-| 6 | Background checks with a longer limit | medium | Playbook, instabox |
+| 6 | Checks longer than one exec, result still out of the check's reach | medium | Isolation (decides), playbook, instabox |
 | 4 | Fail-closed invariant and its test | small | Egress hardening |
 | 5 | Uncertain outcomes for merge and comments | with C2 and C3 | C2, C3 |
 | 1 | Pending send kept across a reload | small | T29 |
