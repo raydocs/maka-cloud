@@ -46,10 +46,10 @@ below.
 
 | # | Grok Bot | Maka today | Verdict |
 |---|---|---|---|
-| 1 | Durable send: accepted ≠ completed; ask "did you get it?" before resending | Server dedupes on `clientMessageId`; the client reuses the id across retries until the draft changes | **Have**; one small gap |
-| 2 | Event stream with a stall watchdog, echo probes, reconnect backoff 1→10 s | Resume by `Last-Event-ID`, dedupe by id, backoff 0.5→10 s, server heartbeat every 15 s | **Gap**: no stall watchdog |
+| 1 | Durable send: accepted ≠ completed; ask "did you get it?" before resending | Server dedupes on `clientMessageId`; the client reuses the id across retries until the draft changes | **Have**; the reload gap is fixed in #380 |
+| 2 | Event stream with a stall watchdog, echo probes, reconnect backoff 1→10 s | Resume by `Last-Event-ID`, dedupe by id, backoff 0.5→10 s, server heartbeat every 15 s | **Gap**: no stall watchdog. Fixed in #379 |
 | 3 | Allow / ask / refuse by action class; standing grants per action and subject; a retirement list | Tool effects and run authorities (`cloud-conductor/src/guard.ts`); approvals bound to exact text | **Adopt**, folded into the grants of `hark-patterns.md` |
-| 4 | Consent and OS sandbox checked by different owners; an unsupported sandbox fails, never falls back | Conductor guard plus instabox and the egress guard | **Have**; make it a tested invariant |
+| 4 | Consent and OS sandbox checked by different owners; an unsupported sandbox fails, never falls back | Conductor guard plus instabox and the egress guard, with tests that it fails closed | **Have** |
 | 5 | Side effects with an "uncertain" outcome; no blind retry of a timed-out write | Opening a PR looks for one on the branch first, so a retry is safe | **Have for PRs**; adopt for merge and comments |
 | 6 | A long shell command moves to the background and keeps its output | A check is one sandbox exec, at most 9.5 minutes | **Gap**: long test suites fail the check |
 | 7 | A fresh screenshot after every computer action; a stale view is said to be stale | The computer is a human hand-over (watch, take over) | **Later**, if the agent drives the computer |
@@ -142,11 +142,13 @@ separate owners. When the requested sandbox cannot be provided, the call fails w
 **Maka today.** Consent is the conductor's guard and the approvals. Containment is instabox, the
 sandbox user, and the egress guard, which recent PRs have hardened.
 
-**Design.** Write the rule down and pin it with a test. If the sandbox, the egress guard or the
-agent account cannot be confirmed, the run fails closed with a reason. No path runs task code on
-the server host, whatever the approvals say. An approval never widens what the sandbox allows.
-**Where.** Egress and secret hardening lane. **Tests.** With the egress guard missing, a run fails
-before any task code runs. With an approval in hand and the sandbox unavailable, nothing runs.
+**Already pinned.** `cloud-runners/src/__tests__/egress-wake.test.ts` and `agent-account.test.ts`
+cover it:
+- A guard that fails after a wake is final, and no retry reaches the box with task code.
+- A machine nobody has checked is not trusted, and is checked again before the next task code.
+- A box that fails the isolation check is refused before the CLI starts.
+
+Keep the rule when adding runners: an approval never widens what the sandbox allows.
 
 ### 5. Side effects whose outcome is uncertain
 
@@ -226,9 +228,10 @@ exactly: no action on a stale view. **Where.** A later lane.
 **Grok Bot.** Sending distinguishes accepted, duplicate and refused. A hibernated box is its own
 answer, not a generic failure.
 
-**Maka.** Sandboxes sleep and wake (T26). When a message reaches a sleeping sandbox, the person
-should see "Waking your workspace…" as a state, not a red error. Look at the HTTP and event paths
-for any wake that surfaces as a failure, and give it a typed status.
+**Maka.** Sandboxes sleep and wake (T26), and the runner wakes a box without telling anyone. The
+person sees a task that is in progress with no step for as long as the wake takes. The runner should
+say so as a progress note ("Waking your workspace"), and a wake that fails should be its own reason,
+not a generic failure.
 **Where.** Server (T26 owner) and the design lane for the words.
 
 ### 9 and 10. What Maka must not do
@@ -246,13 +249,13 @@ for any wake that surfaces as a failure, and give it a typed status.
 
 | # | Change | Size | Lane |
 |---|---|---|---|
-| 2 | Stall watchdog and an honest Live | small, client only | T29 (or the design lane, with the status line) |
+| 2 | Stall watchdog and an honest Live | small, client only | done: #379 |
 | 3 | Grant shape: authority, required expiry, withdrawal list | folds into `hark-patterns.md` 1 | Modes, supervisor |
 | 6 | Checks longer than one exec, result still out of the check's reach | medium | Isolation (decides), playbook, instabox |
-| 4 | Fail-closed invariant and its test | small | Egress hardening |
+| 4 | Fail-closed: already pinned by tests | none | — |
 | 5 | Uncertain outcomes for merge and comments | with C2 and C3 | C2, C3 |
-| 1 | Pending send kept across a reload | small | T29 |
-| 8 | Waking as a state | small | T26, design |
+| 1 | Pending send kept across a reload | small | done: #380 |
+| 8 | Waking as a progress note and its own failure reason | small | Runners (T26) |
 
 Items 2 and 6 come before the first paid evaluation run. A stalled stream would hide a run's
 progress, and a 9.5-minute check limit would score real repositories on time instead of on their
