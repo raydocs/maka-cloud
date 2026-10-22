@@ -139,8 +139,9 @@ run_setup() {
   fi
 
   # Beside the destination, then renamed: a full disk leaves the old file whole, never half of one.
+  # Owner and group 0 by number: the root group is "wheel" on macOS.
   for pair in "settings.env:$SETTINGS" "names.env:$NAMES"; do
-    as_root install -m 600 -o root -g root "$work/setup/${pair%%:*}" "${pair#*:}.new"
+    as_root install -m 600 -o 0 -g 0 "$work/setup/${pair%%:*}" "${pair#*:}.new"
     as_root mv -f "${pair#*:}.new" "${pair#*:}"
   done
   as_root rm -rf "$work"

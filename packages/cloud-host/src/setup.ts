@@ -115,16 +115,21 @@ function envValue(text: string): string | undefined {
     return end < 0 ? undefined : text.slice(1, end);
   }
   if (quote === '"') {
-    let value = '';
+    // Octal and \x escapes are bytes, as in Go, so the value is built as bytes and read as UTF-8.
+    const bytes: number[] = [];
+    const add = (part: string): void => {
+      bytes.push(...Buffer.from(part, 'utf8'));
+    };
     for (let index = 1; index < text.length; index += 1) {
       const char = text[index] as string;
-      if (char === '"') return value;
+      if (char === '"') return Buffer.from(bytes).toString('utf8');
       if (char !== '\\' || index + 1 >= text.length) {
-        value += char;
+        add(char);
         continue;
       }
       const escape = unescape(text, index + 1);
-      value += escape.text;
+      if (escape.byte !== undefined) bytes.push(escape.byte);
+      else add(escape.text);
       index = escape.end - 1;
     }
     return undefined;
@@ -151,30 +156,32 @@ const SIMPLE_ESCAPES: Record<string, string> = {
  * it): the simple ones, octal `\NNN`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`. Any other is kept as it
  * was written, backslash and all, so nothing is silently lost.
  */
-function unescape(text: string, at: number): { text: string; end: number } {
+function unescape(text: string, at: number): { text: string; byte?: number; end: number } {
   const char = text[at] as string;
   const simple = SIMPLE_ESCAPES[char];
   if (simple !== undefined) return { text: simple, end: at + 1 };
-  const code = (digits: string, base: number, length: number, start: number) => {
+  const digits = (alphabet: string, length: number, start: number): number | undefined => {
     const part = text.slice(start, start + length);
-    if (part.length !== length || ![...part].every((d) => digits.includes(d.toLowerCase()))) {
+    if (part.length !== length || ![...part].every((d) => alphabet.includes(d.toLowerCase()))) {
       return undefined;
     }
-    const value = Number.parseInt(part, base);
-    return value <= 0x10ffff
-      ? { text: String.fromCodePoint(value), end: start + length }
-      : undefined;
+    return Number.parseInt(part, alphabet.length);
   };
-  const found =
-    char >= '0' && char <= '7'
-      ? code('01234567', 8, 3, at)
-      : char === 'x'
-        ? code('0123456789abcdef', 16, 2, at + 1)
-        : char === 'u'
-          ? code('0123456789abcdef', 16, 4, at + 1)
-          : char === 'U'
-            ? code('0123456789abcdef', 16, 8, at + 1)
-            : undefined;
+  const HEX = '0123456789abcdef';
+  let found: { text: string; byte?: number; end: number } | undefined;
+  if (char >= '0' && char <= '7') {
+    const byte = digits('01234567', 3, at);
+    if (byte !== undefined && byte <= 0xff) found = { text: '', byte, end: at + 3 };
+  } else if (char === 'x') {
+    const byte = digits(HEX, 2, at + 1);
+    if (byte !== undefined) found = { text: '', byte, end: at + 3 };
+  } else if (char === 'u' || char === 'U') {
+    const length = char === 'u' ? 4 : 8;
+    const point = digits(HEX, length, at + 1);
+    if (point !== undefined && point <= 0x10ffff && (point < 0xd800 || point > 0xdfff)) {
+      found = { text: String.fromCodePoint(point), end: at + 1 + length };
+    }
+  }
   return found ?? { text: `\\${char}`, end: at + 1 };
 }
 
