@@ -15,7 +15,7 @@ const config: ExpoConfig = {
   version: '0.1.0',
   orientation: 'portrait',
   scheme: 'makacloud',
-  userInterfaceStyle: 'dark',
+  userInterfaceStyle: 'automatic',
   ios: {
     // Provisional: the owner confirms the bundle id when the Apple Developer account exists.
     bundleIdentifier: 'cloud.maka.app',

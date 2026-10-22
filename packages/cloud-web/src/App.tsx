@@ -1,11 +1,14 @@
+import { ArrowUp, ArrowUpRight, FileText, Settings as SettingsIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
-import { ChoicePanel } from '@maka/ui';
-import { useMode } from './theme';
+import { type ModeChoice, useMode } from './theme';
+import { FailureNote } from './Failure';
 import {
   ApiError,
   type ArtifactContent,
   type ArtifactListing,
+  BRAND,
+  pullRequestName,
   CloudClient,
   type Conversation,
   ConversationFeed,
@@ -51,8 +54,10 @@ export function QuestionCard({
   onAnswer: (option: string, text?: string) => void;
 }) {
   const card = questionCardModel(question, answered);
-  const [selected, setSelected] = useState(card.firstOption);
   const [note, setNote] = useState('');
+  const [noting, setNoting] = useState(false);
+  // The same shape as the card on Home: the answers are the buttons, the recommended one first and
+  // filled, and a note only when asked for. One tap answers.
   return (
     <section className="question" aria-label="Your decision">
       <div className="section-heading">
@@ -73,37 +78,36 @@ export function QuestionCard({
         <p className="acknowledged">Answer recorded: {card.answeredLabel}</p>
       ) : (
         <>
-          <ChoicePanel
-            label="Choose an answer"
-            value={selected}
-            disabled={disabled}
-            options={card.options.map((o) => ({
-              value: o.id,
-              label: o.label,
-              description: o.recommended ? 'Recommended' : undefined,
-            }))}
-            onChange={setSelected}
-            onConfirm={() => {
-              if (selected) onAnswer(selected, note || undefined);
-            }}
-            onEscape={() => {}}
-          />
-          <label className="note-label">
-            Additional context (optional)
-            <textarea
-              rows={2}
-              maxLength={4000}
-              value={note}
-              onChange={(e) => setNote(displayText(e.target.value))}
-              disabled={disabled}
-            />
-          </label>
-          <Button
-            label="Send answer"
-            variant="primary"
-            isDisabled={disabled || !selected}
-            onClick={() => onAnswer(selected, note || undefined)}
-          />
+          {!noting && (
+            <button type="button" className="quiet-action" onClick={() => setNoting(true)}>
+              Add a note
+            </button>
+          )}
+          {noting && (
+            <label className="note-label">
+              Note
+              <textarea
+                rows={2}
+                maxLength={4000}
+                value={note}
+                onChange={(e) => setNote(displayText(e.target.value))}
+                disabled={disabled}
+                // The person just asked to write the note.
+                autoFocus
+              />
+            </label>
+          )}
+          <div className="inbox-options">
+            {card.options.map((option) => (
+              <Button
+                key={option.id}
+                label={option.label}
+                variant={option.recommended ? 'primary' : 'secondary'}
+                isDisabled={disabled}
+                onClick={() => onAnswer(option.id, note.trim() || undefined)}
+              />
+            ))}
+          </div>
         </>
       )}
     </section>
@@ -166,8 +170,11 @@ function TaskBranch({
           <span>{taskLabel(task)}</span>
           {task.parentTaskId === undefined && (
             <span>
-              Cost so far: {dollars(task.costUsd)}
-              {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+              {live ? 'Cost so far' : 'Cost'}:{' '}
+              <span className={task.costUsd === undefined ? undefined : 'mono'}>
+                {dollars(task.costUsd)}
+                {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+              </span>
             </span>
           )}
         </div>
@@ -178,44 +185,52 @@ function TaskBranch({
           <p className="muted">Still stopping. The cost may change until it has stopped.</p>
         )}
         {/* A finished task has no "current step", and a top-level result is on its own card. */}
-        {task.progress.length > 0 && task.state !== 'succeeded' && (
-          <StepLine notes={task.progress} />
-        )}
-        {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
+        {task.progress.length > 0 && live && <StepLine notes={task.progress} />}
+        {task.failureReason && <FailureNote reason={task.failureReason} />}
         {task.manifest && task.parentTaskId !== undefined && (
           <p>{displayText(task.manifest.summary)}</p>
         )}
         {live && <Computer client={client} task={task} />}
         {live && (
+          // Quiet words, not three pills: the task is the thing to read, the controls are a glance.
           <div className="task-actions">
             {task.state === 'running' && !task.pauseRequested && !noPause.has(task.taskId) && (
-              <Button
-                label="Pause task"
-                variant="secondary"
-                isDisabled={busy}
+              <button
+                type="button"
+                className="quiet-action"
+                aria-label="Pause task"
+                disabled={busy}
                 onClick={() =>
                   void act(`pause-${task.taskId}`, () => control(task.taskId, 'pause'))
                 }
-              />
+              >
+                Pause
+              </button>
             )}
             {task.state === 'paused' && (
-              <Button
-                label="Resume task"
-                variant="secondary"
-                isDisabled={busy}
+              <button
+                type="button"
+                className="quiet-action"
+                aria-label="Resume task"
+                disabled={busy}
                 onClick={() =>
                   void act(`resume-${task.taskId}`, () => control(task.taskId, 'resume'))
                 }
-              />
+              >
+                Resume
+              </button>
             )}
-            <Button
-              label="Cancel task"
-              variant="secondary"
-              isDisabled={busy}
+            <button
+              type="button"
+              className="quiet-action"
+              aria-label="Cancel task"
+              disabled={busy}
               onClick={() =>
                 void act(`cancel-${task.taskId}`, () => control(task.taskId, 'cancel'))
               }
-            />
+            >
+              Cancel
+            </button>
           </div>
         )}
       </article>
@@ -278,17 +293,16 @@ function ArtifactList({
         return (
           <article className="artifact card" key={`${taskId}-${listing.index}`}>
             <div className="artifact-heading">
-              <span className="file-symbol" aria-hidden="true">
-                ▤
-              </span>
-              <h3>{displayText(listing.name)}</h3>
+              <FileText aria-hidden="true" size={18} strokeWidth={1.8} className="file-symbol" />
+              <h3>{displayText(pullRequestName(link) ?? listing.name)}</h3>
             </div>
             <span className="artifact-kind">
               {kind} · {displayText(title)}
             </span>
             {link && (
               <a href={link} target="_blank" rel="noreferrer noopener">
-                {kind === 'Pull request' ? 'Open pull request' : 'Open link'} ↗
+                {kind === 'Pull request' ? 'Open pull request' : 'Open link'}{' '}
+                <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
               </a>
             )}
             {listing.kind === 'file' && !loaded && (
@@ -357,15 +371,30 @@ export function ConversationView({
 
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
+  const topLevel = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
+  // A top-level task's result card holds its outcome, so the inbox here does not announce it again.
+  // The same rule as `TaskDelivery`, which draws a result card only for these.
+  const shown = new Set(
+    topLevel
+      .filter((task) => task.state === 'succeeded' && task.manifest?.summary !== undefined)
+      .map((task) => task.taskId),
+  );
+  const unshown = withResults.filter((task) => !shown.has(task.taskId));
 
   return (
     <div className="chat">
       <section className="conversation card" aria-label="Conversation">
         <div className="conversation-heading">
           <h1>{displayText(conversation.title ?? 'A fresh start')}</h1>
+          {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
           <span className="connection" role="status">
-            <span className={`status-mark ${status === 'Live' ? 'succeeded' : 'attention'}`} />
-            {status}
+            {status === 'Connecting…' && <span className="muted">{status}</span>}
+            {status !== 'Live' && status !== 'Connecting…' && (
+              <>
+                <span className="status-mark attention" />
+                {status}
+              </>
+            )}
           </span>
           {picker}
         </div>
@@ -373,29 +402,31 @@ export function ConversationView({
           {state.messages.length === 0 && (
             <div className="empty">
               <h2>What would you like to get done?</h2>
-              <p>Bring a question, a project, or a plan. We’ll keep the work here.</p>
+              <p>Bring a question, a project, or a plan. {BRAND.name} keeps the work here.</p>
             </div>
           )}
           {state.messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
-              <span className="message-author">
-                {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : 'Maka'}
+              <span className="sr-only">
+                {message.role === 'user'
+                  ? 'You'
+                  : message.role === 'notice'
+                    ? 'Update'
+                    : BRAND.name}
               </span>
               <p>{displayText(message.text)}</p>
             </article>
           ))}
         </div>
-        {tasks
-          .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-          .map((task) => (
-            <TaskDelivery
-              key={task.taskId}
-              client={client}
-              task={task}
-              listings={artifacts[task.taskId]?.listings ?? []}
-              onOpenTask={onOpenTask}
-            />
-          ))}
+        {topLevel.map((task) => (
+          <TaskDelivery
+            key={task.taskId}
+            client={client}
+            task={task}
+            listings={artifacts[task.taskId]?.listings ?? []}
+            onOpenTask={onOpenTask}
+          />
+        ))}
         {questions.map((question) => (
           <QuestionCard
             key={question.questionId}
@@ -405,20 +436,18 @@ export function ConversationView({
             onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
           />
         ))}
-        {/* Each result shows once: proposed cards live on Home, and a finished task's card here
-            does not list again the files and links its result card above already shows. */}
+        {/* Proposed cards live on Home. A finished task whose result card is above is not
+            announced again here; it is acknowledged on Home. */}
         <InboxPanel
-          items={Object.values(state.inbox).filter((item) => item.kind !== 'suggestion')}
+          items={Object.values(state.inbox).filter(
+            (item) =>
+              item.kind !== 'suggestion' &&
+              !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
+          )}
           openQuestions={openQuestions}
           disabled={Boolean(busy)}
           onAnswer={answerItem}
-          shownResults={
-            new Set(
-              tasks
-                .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-                .map((task) => task.taskId),
-            )
-          }
+          shownResults={shown}
         />
         {error && (
           <p role="alert" className="error">
@@ -454,7 +483,7 @@ export function ConversationView({
               aria-label={busy === 'message' ? 'Sending…' : 'Send message'}
               disabled={Boolean(busy) || !draft.trim()}
             >
-              <span aria-hidden="true">↑</span>
+              <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
             </button>
           </div>
           <ModePicker
@@ -466,54 +495,55 @@ export function ConversationView({
         </form>
       </section>
       <aside className="work-panel" aria-label="Work and results">
-        <section className="card section-card work-summary">
+        <section className="card section-card work-summary" aria-label="Running">
           <div className="section-heading">
-            <h2>The work</h2>
+            <h2>Running</h2>
             <span className="count">{running} running</span>
           </div>
           <div className="spend">
             <span>Total cost so far</span>
-            <strong>
-              {dollars(total.usd)}
-              {total.usd !== undefined && !total.complete && ' (not all reported)'}
-            </strong>
+            <strong className="mono">{dollars(total.usd)}</strong>
+            {total.usd !== undefined && !total.complete && (
+              <span className="muted">Not all reported</span>
+            )}
           </div>
         </section>
         <section className="card section-card" aria-label="Task tree">
-          <h2 className="panel-heading">Live tasks</h2>
+          <h2 className="panel-heading">Tasks</h2>
           {tasks.length ? (
             <ul className="task-tree">
-              {tasks
-                .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-                .map((task) => (
-                  <TaskBranch
-                    key={task.taskId}
-                    {...{ task, client, tasks, noPause, act, control }}
-                    busy={Boolean(busy)}
-                  />
-                ))}
+              {topLevel.map((task) => (
+                <TaskBranch
+                  key={task.taskId}
+                  {...{ task, client, tasks, noPause, act, control }}
+                  busy={Boolean(busy)}
+                />
+              ))}
             </ul>
           ) : (
             <p className="muted">Tasks will appear as the plan takes shape.</p>
           )}
         </section>
-        <section className="artifacts" aria-label="Artifacts">
-          <h2 className="panel-heading">Ready to review</h2>
-          {!withResults.some((task) => artifacts[task.taskId]?.listings.length) && (
-            <p className="muted">Reports, changes, and pull requests will collect here.</p>
-          )}
-          {withResults.map((task) => (
-            <ArtifactList
-              key={task.taskId}
-              client={client}
-              taskId={task.taskId}
-              title={task.title ?? 'Task'}
-              entry={artifacts[task.taskId] as TaskArtifacts}
-              busy={Boolean(busy)}
-              act={act}
-            />
-          ))}
-        </section>
+        {/* A result with its own card in the conversation is not listed again here. */}
+        {(withResults.length === 0 || unshown.length > 0) && (
+          <section className="artifacts" aria-label="Artifacts">
+            <h2 className="panel-heading">Review</h2>
+            {!unshown.some((task) => artifacts[task.taskId]?.listings.length) && (
+              <p className="muted">Reports, changes, and pull requests will collect here.</p>
+            )}
+            {unshown.map((task) => (
+              <ArtifactList
+                key={task.taskId}
+                client={client}
+                taskId={task.taskId}
+                title={task.title ?? 'Task'}
+                entry={artifacts[task.taskId] as TaskArtifacts}
+                busy={Boolean(busy)}
+                act={act}
+              />
+            ))}
+          </section>
+        )}
       </aside>
     </div>
   );
@@ -600,21 +630,27 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
   );
 }
 
-/** Light or dark, kept in this browser. */
+const MODE_CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+];
+
+/** System, light or dark, kept in this browser. */
 function AppearanceChoice() {
-  const { mode, setMode } = useMode();
+  const { choice, setMode } = useMode();
   return (
     <section className="card section-card" aria-label="Appearance">
       <h2>Appearance</h2>
       <div className="mode-choice" role="group" aria-label="Color mode">
-        {(['light', 'dark'] as const).map((value) => (
+        {MODE_CHOICES.map(({ value, label }) => (
           <button
             key={value}
             type="button"
-            aria-pressed={mode === value}
+            aria-pressed={choice === value}
             onClick={() => setMode(value)}
           >
-            {value === 'dark' ? 'Dark' : 'Light'}
+            {label}
           </button>
         ))}
       </div>
@@ -668,20 +704,32 @@ export function Shell({
     <div className="shell">
       <header className="shell-top">
         <a className="brand" href="/">
-          maka
+          {BRAND.wordmark}
         </a>
-        <nav className="seg" aria-label="Sections">
-          {VIEWS.map((item) => (
-            <button
-              key={item.view}
-              type="button"
-              className="seg-item"
-              aria-current={view === item.view ? 'page' : undefined}
-              onClick={() => onView(item.view)}
-            >
-              {item.label}
-            </button>
-          ))}
+        {/* One row on a phone, as Hark's: the sections in a pill, Settings a round icon beside it. */}
+        <nav className="seg-nav" aria-label="Sections">
+          <div className="seg">
+            {VIEWS.filter((item) => item.view !== 'settings').map((item) => (
+              <button
+                key={item.view}
+                type="button"
+                className="seg-item"
+                aria-current={view === item.view ? 'page' : undefined}
+                onClick={() => onView(item.view)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="seg-settings"
+            aria-current={view === 'settings' ? 'page' : undefined}
+            onClick={() => onView('settings')}
+          >
+            <SettingsIcon aria-hidden="true" size={19} strokeWidth={1.8} />
+            <span className="sr-only">Settings</span>
+          </button>
         </nav>
       </header>
       <main>{children}</main>
@@ -785,17 +833,22 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               conversation={selected}
               onOpenTask={(task) => setTaskPage({ task, from: 'chat' })}
               picker={
-                <select
-                  aria-label="Select conversation"
-                  value={chosen}
-                  onChange={(e) => setChosen(e.target.value)}
-                >
-                  {session.conversations.map((c) => (
-                    <option key={c.conversationId} value={c.conversationId}>
-                      {displayText(c.title ?? 'Untitled conversation')}
-                    </option>
-                  ))}
-                </select>
+                session.conversations.length > 1 && (
+                  <select
+                    aria-label="Switch conversation"
+                    value=""
+                    onChange={(e) => e.target.value && setChosen(e.target.value)}
+                  >
+                    <option value="">Switch conversation</option>
+                    {session.conversations
+                      .filter((c) => c.conversationId !== chosen)
+                      .map((c) => (
+                        <option key={c.conversationId} value={c.conversationId}>
+                          {displayText(c.title ?? 'Untitled conversation')}
+                        </option>
+                      ))}
+                  </select>
+                )
               }
             />
           ) : (
@@ -814,7 +867,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     </Shell>
   ) : (
     <main className="welcome">
-      <span className="brand">maka</span>
+      <span className="brand">{BRAND.wordmark}</span>
       <h1>
         Your next big thing,
         <br />

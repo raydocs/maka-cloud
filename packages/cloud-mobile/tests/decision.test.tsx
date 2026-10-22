@@ -38,7 +38,7 @@ test('an approval is shown exactly as the server sent it, with the held call, an
   );
   expect(screen.getByText('Run "git push" on the repo?')).toBeTruthy();
   expect(screen.getByText('{"command":"git push"}')).toBeTruthy();
-  expect(screen.getByText('The filled button is the recommended answer.')).toBeTruthy();
+  expect(screen.queryByText('The filled button is the recommended answer.')).toBeNull();
   await fireEvent.press(screen.getByRole('button', { name: 'Approve' }));
   expect(answers).toEqual([['approve', undefined]]);
 });
@@ -112,7 +112,10 @@ test('a question with a note is answered with the note, and shows the recorded a
       />,
     ),
   );
-  await fireEvent.changeText(screen.getByLabelText('Additional context (optional)'), 'soon please');
+  // The note is there only when asked for.
+  expect(screen.queryByLabelText('Note')).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Add a note' }));
+  await fireEvent.changeText(screen.getByLabelText('Note'), 'soon please');
   await fireEvent.press(screen.getByRole('button', { name: 'Right' }));
   expect(answers).toEqual([['b', 'soon please']]);
   await rerender(

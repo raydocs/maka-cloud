@@ -43,7 +43,7 @@ test('Home, Chat and Settings fit the screen, cards are frosted and code is not'
     content: '+added line\n-removed line\n',
   });
   await control(request, 'complete', { taskId, manifest: { artifacts: ['out/changes.diff'] } });
-  await page.getByRole('button', { name: /Review changes\.diff/u }).click();
+  await page.getByRole('button', { name: 'Open large: the changes' }).click();
   const diff = page.locator('pre.diff-content');
   await expect(diff).toContainText('+added line');
   const solid = await diff.evaluate((el) => {
@@ -54,6 +54,8 @@ test('Home, Chat and Settings fit the screen, cards are frosted and code is not'
   expect(solid.bg).toMatch(/^rgb\(/u); // no alpha channel: opaque
   await noHorizontalScroll(page);
   await page.screenshot({ path: info.outputPath('chat.png') });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // Settings: light and dark are one tap, kept after a reload.
   await openSettings(page);
@@ -84,4 +86,31 @@ test('on a phone every navigation target is large enough to tap', async ({
   await openSection(page, 'Settings');
   const toggle = await page.getByRole('button', { name: 'Light', exact: true }).boundingBox();
   expect(toggle?.height ?? 0).toBeGreaterThanOrEqual(36);
+});
+
+test('with no stored choice the page follows the device, from the first paint', async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  // The first value the page ever sets: the inline script in index.html, before the app loads.
+  await page.addInitScript(() => {
+    const seen = window as unknown as { firstTheme?: string | null };
+    new MutationObserver((changes, observer) => {
+      for (const change of changes) {
+        const value = (change.target as Element).getAttribute?.('data-theme');
+        if (change.attributeName === 'data-theme' && value) {
+          seen.firstTheme = value;
+          observer.disconnect();
+          return;
+        }
+      }
+    }).observe(document, { subtree: true, attributes: true, attributeFilter: ['data-theme'] });
+  });
+  await page.goto('/');
+  expect(await page.evaluate(() => (window as unknown as { firstTheme?: string }).firstTheme)).toBe(
+    'dark',
+  );
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 });
