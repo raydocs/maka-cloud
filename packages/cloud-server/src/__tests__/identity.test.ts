@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, type KeyObject, sign } from 'node:crypto';
 import { test } from 'node:test';
-import { APPLE, createOidcVerifier, GOOGLE, type JwksSource } from '../identity.js';
+import {
+  APPLE,
+  createOidcVerifier,
+  GOOGLE,
+  type JwksSource,
+  jwksFromSafeFetch,
+} from '../identity.js';
+import { createSafeFetch } from '../safe-fetch.js';
 
 const NOW = 1_800_000_000_000;
 const AUD = 'cloud.maka.app';
@@ -247,4 +254,48 @@ test('a garbage or empty key set never replaces the keys that work', async () =>
   state.keys = [];
   now += 61_000;
   assert.ok(await verifier.verify(fresh(), NONCE));
+});
+
+test('the key set is fetched with the safe fetch: public https only, json only, nothing of ours sent', async () => {
+  const k = signer('k1');
+  const seen: Array<{ url: string; headers: Readonly<Record<string, string>> }> = [];
+  const body = Buffer.from(JSON.stringify({ keys: [k.jwk] }));
+  const safeFetch = createSafeFetch({
+    resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+    transport: async (request) => {
+      seen.push({ url: request.url.href, headers: request.headers });
+      return {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: (async function* () {
+          yield body;
+        })(),
+        destroy: () => undefined,
+      };
+    },
+  });
+  const verifier = createOidcVerifier(
+    { ...GOOGLE, audiences: [AUD] },
+    jwksFromSafeFetch(safeFetch),
+    () => NOW,
+  );
+  assert.ok(verifier);
+  assert.ok(await verifier.verify(token(k, {}), NONCE));
+  assert.equal(seen[0]?.url, GOOGLE.jwksUri);
+  assert.equal(
+    Object.keys(seen[0]?.headers ?? {}).some((h) => /authorization|cookie/i.test(h)),
+    false,
+  );
+  // a provider address that is not public is never fetched
+  const blocked = createOidcVerifier(
+    { ...GOOGLE, audiences: [AUD] },
+    jwksFromSafeFetch(
+      createSafeFetch({
+        resolve: async () => [{ address: '10.0.0.5', family: 4 }],
+        transport: async () => assert.fail('connected to a private address'),
+      }),
+    ),
+    () => NOW,
+  );
+  assert.equal(await blocked?.verify(token(k, {}), NONCE), undefined);
 });
