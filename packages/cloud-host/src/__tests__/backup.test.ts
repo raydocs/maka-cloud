@@ -486,7 +486,7 @@ test('from outside, a database a running server holds exclusively is refused wit
   assert.deepEqual(await readdir(backupDir), [], 'no scratch directory is left');
 });
 
-test('a private key in a stored conversation leaves no line of its body in the backup', async (t) => {
+test('a private key in a stored conversation leaves no line of its body in the backup, however it is escaped', async (t) => {
   const { dataDir, backupDir } = await dirs(t);
   await populate(dataDir);
   const paths = dataPathsOf(dataDir);
@@ -498,12 +498,34 @@ test('a private key in a stored conversation leaves no line of its body in the b
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   });
   const body = privateKey.split('\n').filter((line) => line !== '' && !line.startsWith('-----'));
-  await store.append('tsk_1', { projectKey: '-work-x', sessionId: session }, [
-    {
-      json: JSON.stringify({ type: 'user', uuid: 'a', text: `key.pem:\n${privateKey}after it` }),
-      uuid: 'a',
-    },
-  ]);
+  const line = (uuid: string, text: string) => JSON.stringify({ type: 'user', uuid, text });
+  const rows: [string, string, string][] = [
+    ['a', line('a', `key.pem:\n${privateKey}after it`), 'key.pem:\n[secret removed]\nafter it'],
+    // Line breaks written as \u000a, slashes as \/: the same JSON value.
+    [
+      'b',
+      line('b', `key.pem:\n${privateKey}after it`).replaceAll('\\n', '\\u000a'),
+      'key.pem:\n[secret removed]\nafter it',
+    ],
+    [
+      'c',
+      line('c', `key.pem:\n${privateKey}after it`).replaceAll('/', '\\/'),
+      'key.pem:\n[secret removed]\nafter it',
+    ],
+    // URL-encoded inside the text itself.
+    [
+      'd',
+      line('d', `key.pem:\n${privateKey.replaceAll('\n', '%0A')}after it`),
+      'key.pem:\n[secret removed]%0Aafter it',
+    ],
+    // Cut off before its end line: the rest of the text goes with it.
+    ['e', line('e', `key.pem:\n${privateKey.slice(0, 400)}`), 'key.pem:\n[secret removed]'],
+  ];
+  await store.append(
+    'tsk_1',
+    { projectKey: '-work-x', sessionId: session },
+    rows.map(([uuid, json]) => ({ json, uuid })),
+  );
   const done = await backupAll({
     dataDir,
     backupDir,
@@ -515,10 +537,17 @@ test('a private key in a stored conversation leaves no line of its body in the b
   const copy = SqliteTranscriptStore.open(join(done.path, 'transcripts.db'));
   const lines = (await copy.read('tsk_1', session)).lines;
   copy.close();
-  // Still one JSON line, and still the text around the key.
-  assert.equal(JSON.parse(lines[0] as string).text, 'key.pem:\n[secret removed]\nafter it');
-  for (const line of body) assert.ok(!(lines[0] as string).includes(line), 'a line of the body');
-  assert.doesNotMatch(lines[0] as string, /PRIVATE KEY/u);
+  assert.equal(lines.length, rows.length);
+  for (const [i, [uuid, , text]] of rows.entries()) {
+    const raw = lines[i] as string;
+    // Still one JSON line, and still the text around the key.
+    const read = JSON.parse(raw).text as string;
+    assert.equal(read, text, uuid);
+    for (const part of body) {
+      assert.ok(!raw.includes(part) && !read.includes(part), `${uuid}: a line of the body`);
+    }
+    assert.doesNotMatch(raw, /PRIVATE KEY/u, uuid);
+  }
   store.close();
 });
 

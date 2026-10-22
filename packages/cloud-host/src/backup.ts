@@ -39,26 +39,59 @@ const MANIFEST = 'manifest.json';
 const SQLITE_HEADER = 'SQLite format 3\0';
 const SQLITE_COMPANION = /-(?:wal|shm|journal)$/u;
 const SCAN_CHUNK = 1 << 20;
-/** Shapes that are secrets wherever they appear: private keys and this system's own tokens. */
+/** Shapes that are secrets wherever they appear: private keys (either end of one) and this system's own tokens. */
 const SECRET_SHAPES: readonly RegExp[] = [
-  // The whole block, not its first line: the body is the key. Also inside a JSON string, where its
-  // line breaks are escapes (a run of backslashes is taken whole, so no escape is left cut in two).
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/=:,\s]|\\+[nrt]|-(?!----))*(?:-----END [A-Z ]*PRIVATE KEY-----)?/u,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+  /-----END [A-Z ]*PRIVATE KEY-----/u,
   /\bmk[iog]_[\w.-]{16,}/u,
 ];
 
+/** A private key as written: the body is the key, so all of it, up to its end line or the end of the text. */
+const PRIVATE_KEY_BLOCK =
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gu;
+
 /**
- * `text` with every secret shape taken out. For copies of conversations a task may have seen such
- * a thing in (a key file in a repository): the backup scan refuses a copy that holds one, and one
- * file in a repository must not stop the daily backup. The replacement adds no quote or backslash,
- * so a JSON string stays one.
+ * `text` with every secret shape taken out, a private key whole. For copies of conversations a task
+ * may have seen such a thing in (a key file in a repository): the backup scan refuses a copy that
+ * holds one, and one file in a repository must not stop the daily backup. `text` is text as it
+ * reads, not as some encoding writes it: see `withoutSecretShapesInJson`.
  */
 export function withoutSecretShapes(text: string): string {
-  let out = text;
+  let out = text.replace(PRIVATE_KEY_BLOCK, '[secret removed]');
   for (const shape of SECRET_SHAPES) {
     out = out.replace(new RegExp(shape.source, 'gu'), '[secret removed]');
   }
   return out;
+}
+
+/**
+ * A JSON text with the secret shapes taken out of every string in it (keys included), each read as
+ * its value: however the text escapes a key's line breaks or slashes (\`\\n\`, \`\\u000a\`, \`\\/\`), the
+ * whole key goes. The text comes back as it was when nothing was taken out. Text that is not JSON is
+ * taken as it reads.
+ */
+export function withoutSecretShapesInJson(json: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return withoutSecretShapes(json);
+  }
+  let changed = false;
+  const clean = (item: unknown): unknown => {
+    if (typeof item === 'string') {
+      const out = withoutSecretShapes(item);
+      if (out !== item) changed = true;
+      return out;
+    }
+    if (Array.isArray(item)) return item.map(clean);
+    if (item !== null && typeof item === 'object') {
+      return Object.fromEntries(Object.entries(item).map(([key, v]) => [clean(key), clean(v)]));
+    }
+    return item;
+  };
+  const out = clean(value);
+  return changed ? JSON.stringify(out) : json;
 }
 
 export interface ManifestFile {
