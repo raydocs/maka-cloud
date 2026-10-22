@@ -87,10 +87,9 @@ Still missing before it can merge:
 
 1. The stand-in sandbox has no real firewall (the egress rules are checked as text, no packet is
    filtered) and a scripted CLI. The first live run is the first time those run.
-2. With a task running, the server logs `server.closing` and then does not exit: the run's poller
-   keeps polling the sandbox. Compose kills it after the 60 second grace period, so a restart with a
-   running task takes about a minute. A clean detach on close would make it immediate. T28 is fixing
-   this; keep the entry until that merges.
+2. (Done: closing the server now lets go of its runs, `Orchestrator.detachRuns` and `RunHandle.detach`, and the
+   poller's sleep no longer keeps the process alive; the exit is forced after ten seconds. Check the restart time on
+   the first live run.)
 3. Running the flow against the owner's host after every merge and daily (needs a stand-in instance
    there and an ops script for systemd).
 4. The smoke test's 3 minute window per task to confirm a stop (36 asks, 5 seconds apart,

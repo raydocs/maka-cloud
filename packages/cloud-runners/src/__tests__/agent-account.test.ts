@@ -16,7 +16,8 @@ test('a Codex run is started as the agent account, never as the sandbox user', a
   const end = terminal(await collect(await h.runners.codex.start(spec)));
   assert.equal(end?.type, 'finished');
   assert.equal(await h.cliCalls('codex'), 1);
-  assert.deepEqual(await h.sudoUsers(), ['maka-agent']);
+  // The version check runs the CLI as the agent account too, then the run itself.
+  assert.deepEqual(await h.sudoUsers(), ['maka-agent', 'maka-agent']);
 });
 
 test('without an agent account Codex runs nothing, as the SDK path does not', async (t) => {
@@ -48,7 +49,7 @@ test('a resumed Codex turn runs as the agent account too', async (t) => {
   await collect(await h.runners.codex.start(spec));
   // The first turn wrote no result; the repair turn is a second CLI call.
   assert.equal(await h.cliCalls('codex'), 2);
-  assert.deepEqual(await h.sudoUsers(), ['maka-agent', 'maka-agent']);
+  assert.deepEqual(await h.sudoUsers(), ['maka-agent', 'maka-agent', 'maka-agent']);
 });
 
 const INSTALL_RAN = 'touch "$HOME/install-ran"';

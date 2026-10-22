@@ -128,12 +128,34 @@ test('a different pinned version is installed over an older one', async (t) => {
     cloud: {
       versions: { 'claude-agent-sdk': '10.0.0', codex: '9.9.9' },
       installCommands: {
-        'claude-agent-sdk': `${INSTALL.replace('fake 9.9.9', 'x')}\nsed -i 's/9\\.9\\.9/10.0.0/' "$HOME/.maka-cli/bin/claude"`,
+        'claude-agent-sdk': `${INSTALL}\nsed -i 's/9\\.9\\.9/10.0.0/' "$HOME/.maka-cli/bin/claude"`,
       },
     },
   });
   t.after(() => h.cleanup());
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_inst_v')));
   assert.equal(terminal(events)?.type, 'finished');
+  assert.equal(await installs(h.home), 1);
+});
+
+test('an install that leaves a CLI the agent account cannot run fails the task with that reason, once', async (t) => {
+  const h = await setup({
+    installClis: false,
+    cloud: {
+      installCommands: {
+        'claude-agent-sdk': `mkdir -p "$HOME/.maka-cli/bin"
+printf '#!/bin/sh\\necho 0.0.1\\n' > "$HOME/.maka-cli/bin/claude"
+chmod +x "$HOME/.maka-cli/bin/claude"
+echo installed >> "$HOME/install-count"`,
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  const failed = terminal(
+    await collect(await h.runners.claude.start(await h.spec('tsk_inst_bad'))),
+  );
+  assert.equal(failed?.type, 'failed');
+  const reason = failed?.type === 'failed' ? failed.reason : '';
+  assert.match(reason, /cannot be run as the agent account/);
   assert.equal(await installs(h.home), 1);
 });
