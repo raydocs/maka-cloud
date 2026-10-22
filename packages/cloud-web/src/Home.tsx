@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ArrowUp } from 'lucide-react';
 import {
+  BRAND,
   type CloudClient,
   type Conversation,
   ConversationStarter,
@@ -7,6 +9,7 @@ import {
   doneSince,
   dollars,
   errorText,
+  finishedParts,
   HomeFeed,
   type Mode,
   nextRuns,
@@ -17,7 +20,7 @@ import {
   verbOf,
   type VisitStore,
 } from '@maka-cloud/client';
-import { InboxCard } from './Inbox';
+import { InboxCard, ResultCard } from './Inbox';
 import { ModePicker } from './ModePicker';
 import { SuggestionCard } from './Suggestion';
 import { submitOnEnter } from './keys';
@@ -49,8 +52,46 @@ function StatTile({ label, value }: { label: string; value: string }) {
   return (
     <div className="stat-tile">
       <span className="stat-label">{label}</span>
-      <strong className="stat-value">{value}</strong>
+      <strong className={/\d/u.test(value) ? 'stat-value mono' : 'stat-value'}>{value}</strong>
     </div>
+  );
+}
+
+/**
+ * What stands where the decisions would be when there are none: bars while they are read, a retry
+ * when they could not be (even if an earlier read was empty), a calm line when nothing waits. The
+ * phone's InboxStatus, on the web.
+ */
+function InboxStatus({
+  loaded,
+  failed,
+  onRetry,
+}: {
+  loaded: boolean;
+  failed: boolean;
+  onRetry: () => void;
+}) {
+  if (failed)
+    return (
+      <section className="card section-card" aria-label="Decisions could not be loaded">
+        <p className="muted">Decisions could not be loaded.</p>
+        <button type="button" className="quiet-action" onClick={onRetry}>
+          Try again
+        </button>
+      </section>
+    );
+  if (loaded)
+    return (
+      <section className="card section-card" aria-label="Nothing needs you">
+        <p className="muted">Nothing needs you.</p>
+      </section>
+    );
+  return (
+    <section className="card section-card" aria-label="Loading" aria-busy="true">
+      <span className="skeleton-line" style={{ width: '60%' }} />
+      <span className="skeleton-line" />
+      <span className="skeleton-line" style={{ width: '80%' }} />
+    </section>
   );
 }
 
@@ -85,10 +126,8 @@ export function Home({
   const clock = useRef(now);
   clock.current = now;
   const feed = useMemo(() => new HomeFeed(client, localVisits, () => clock.current()), [client]);
-  const { items, busy, answerError, since, done, projects } = useSyncExternalStore(
-    feed.subscribe,
-    feed.getSnapshot,
-  );
+  const { items, busy, inboxLoaded, inboxFailed, answerError, since, done, projects } =
+    useSyncExternalStore(feed.subscribe, feed.getSnapshot);
 
   // The last visit is read once; it is written when the person leaves, so a reload is a visit.
   // Come back to this tab and the decisions, results and schedule are read again.
@@ -115,7 +154,7 @@ export function Home({
   const live = Object.values(items)
     .filter((item) => item.state !== 'closed')
     .sort((a, b) => b.updatedAt - a.updatedAt);
-  // What the employee only suggests is not something that "needs you".
+  // What Maka only suggests is not something that "needs you".
   const { waiting: open, suggested } = splitSuggestions(live);
   const finished = since === undefined || done === undefined ? [] : doneSince(done, since);
   const spent = finished.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
@@ -129,130 +168,178 @@ export function Home({
   const recent = recentConversations(conversations);
 
   return (
-    <div className="page">
-      {open.length > 0 && (
-        <section className="card section-card" aria-label="Decisions waiting">
-          <h2>Waiting on you ({open.length})</h2>
-          {open.map((item) => (
-            <div key={item.itemId} className="decision">
-              <span className="chip verb">{verbOf(item.kind)}</span>
-              <InboxCard
-                item={item}
-                disabled={busy}
-                onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+    <div className="page home">
+      {/* Desktop: what waits on you beside the work, as Hark keeps its cards beside the chat.
+          A phone reads one column, in this order: waiting, suggested, start, results. */}
+      <div className="home-side">
+        {open.length > 0 && (
+          <section className="card section-card" aria-label="Decisions waiting">
+            <h2>Waiting on you ({open.length})</h2>
+            {open.map((item) => {
+              const parts = finishedParts(item);
+              const task = done?.get(item.conversationId)?.find((t) => t.taskId === item.taskId);
+              return parts ? (
+                <ResultCard
+                  key={item.itemId}
+                  item={item}
+                  parts={parts}
+                  disabled={busy}
+                  onAnswer={(optionId) => void feed.answer(item, optionId)}
+                  onReview={() =>
+                    task && onOpenTask ? onOpenTask(task) : onOpen(item.conversationId)
+                  }
+                />
+              ) : (
+                <div key={item.itemId} className="decision">
+                  <span className="chip verb">{verbOf(item.kind)}</span>
+                  <InboxCard
+                    item={item}
+                    disabled={busy}
+                    onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+                  />
+                  <button
+                    type="button"
+                    className="quiet-action"
+                    aria-label={`Open “${titleOf(item.conversationId)}”`}
+                    onClick={() => onOpen(item.conversationId)}
+                  >
+                    Open conversation
+                  </button>
+                </div>
+              );
+            })}
+            {answerError && (
+              <p role="alert" className="error">
+                {answerError}
+              </p>
+            )}
+          </section>
+        )}
+
+        {open.length === 0 && (
+          <InboxStatus loaded={inboxLoaded} failed={inboxFailed} onRetry={() => feed.refresh()} />
+        )}
+
+        {suggested.length > 0 && (
+          <section className="card section-card" aria-label="Suggestions">
+            <h2>Noticed for you ({suggested.length})</h2>
+            <p className="muted">Nothing starts until you tap its first word.</p>
+            {suggested.map((item) => (
+              <div key={item.itemId} className="decision">
+                <SuggestionCard
+                  item={item}
+                  disabled={busy}
+                  onAnswer={(optionId) => void feed.answer(item, optionId)}
+                />
+              </div>
+            ))}
+            {open.length === 0 && answerError && (
+              <p role="alert" className="error">
+                {answerError}
+              </p>
+            )}
+          </section>
+        )}
+
+        {schedule && (schedule.scheduled.length > 0 || schedule.watching > 0) && (
+          <section className="card section-card" aria-label="What runs next">
+            <h2>What runs next</h2>
+            {schedule.scheduled.length > 0 && (
+              <ul className="done-lines">
+                {schedule.scheduled.map((run) => (
+                  <li key={run.dutyId} className="next-run">
+                    <span className="done-text">
+                      <strong>{displayText(run.name)}</strong>
+                      <span className="muted">{displayText(run.repo)}</span>
+                    </span>
+                    <span className="done-cost muted">{relativeTime(run.at, now())}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {schedule.watching > 0 && (
+              <p className="muted">
+                {schedule.watching === 1
+                  ? '1 more duty wakes when something happens on GitHub.'
+                  : `${schedule.watching} more duties wake when something happens on GitHub.`}
+              </p>
+            )}
+          </section>
+        )}
+      </div>
+      <div className="home-main">
+        {onboarding && conversations.length === 0 && (
+          <Onboarding
+            onPick={(sentence) => {
+              setDraft(sentence);
+              starter.draftEdited();
+              document.getElementById('first-message')?.focus();
+            }}
+            onSkip={() => setOnboarding(false)}
+          />
+        )}
+
+        <section className="card start" aria-label="Start something">
+          <h1>Make room for your next idea.</h1>
+          <p>Tell {BRAND.name} what you’d like done, in a sentence. It takes it from there.</p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!draft.trim() || starting) return;
+              setStarting(true);
+              setStartError('');
+              void starter.start(draft, workMode).then(onStarted, (failure: unknown) => {
+                setStartError(errorText(failure));
+                setStarting(false);
+              });
+            }}
+          >
+            <label htmlFor="first-message" className="sr-only">
+              What would you like to get done?
+            </label>
+            <div className="pill-field">
+              <textarea
+                id="first-message"
+                rows={1}
+                maxLength={16000}
+                placeholder="What would you like to get done?"
+                onKeyDown={submitOnEnter}
+                value={draft}
+                onChange={(e) => {
+                  setDraft(displayText(e.target.value));
+                  starter.draftEdited();
+                }}
               />
               <button
-                type="button"
-                className="link-button"
-                onClick={() => onOpen(item.conversationId)}
+                type="submit"
+                className="round-button"
+                aria-label={starting ? 'Starting…' : 'Start'}
+                disabled={starting || !draft.trim()}
               >
-                Open “{titleOf(item.conversationId)}”
+                <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
               </button>
             </div>
-          ))}
-          {answerError && (
-            <p role="alert" className="error">
-              {answerError}
-            </p>
-          )}
-        </section>
-      )}
-
-      {suggested.length > 0 && (
-        <section className="card section-card" aria-label="Suggestions">
-          <h2>Noticed for you ({suggested.length})</h2>
-          <p className="muted">Nothing starts until you tap its first word.</p>
-          {suggested.map((item) => (
-            <div key={item.itemId} className="decision">
-              <SuggestionCard
-                item={item}
-                disabled={busy}
-                onAnswer={(optionId) => void feed.answer(item, optionId)}
-              />
-            </div>
-          ))}
-          {open.length === 0 && answerError && (
-            <p role="alert" className="error">
-              {answerError}
-            </p>
-          )}
-        </section>
-      )}
-
-      {onboarding && conversations.length === 0 && (
-        <Onboarding
-          onPick={(sentence) => {
-            setDraft(sentence);
-            starter.draftEdited();
-            document.getElementById('first-message')?.focus();
-          }}
-          onSkip={() => setOnboarding(false)}
-        />
-      )}
-
-      <section className="card start" aria-label="Start something">
-        <h1>Make room for your next idea.</h1>
-        <p>Tell us what you’d like done, in a sentence. We’ll take it from there.</p>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!draft.trim() || starting) return;
-            setStarting(true);
-            setStartError('');
-            void starter.start(draft, workMode).then(onStarted, (failure: unknown) => {
-              setStartError(errorText(failure));
-              setStarting(false);
-            });
-          }}
-        >
-          <label htmlFor="first-message" className="sr-only">
-            What would you like to get done?
-          </label>
-          <div className="pill-field">
-            <textarea
-              id="first-message"
-              rows={1}
-              maxLength={16000}
-              placeholder="What would you like to get done?"
-              onKeyDown={submitOnEnter}
-              value={draft}
-              onChange={(e) => {
-                setDraft(displayText(e.target.value));
-                starter.draftEdited();
-              }}
+            <ModePicker
+              value={workMode}
+              onChange={setWorkMode}
+              idPrefix="start"
+              disabled={starting}
             />
-            <button
-              type="submit"
-              className="round-button"
-              aria-label={starting ? 'Starting…' : 'Start'}
-              disabled={starting || !draft.trim()}
-            >
-              <span aria-hidden="true">↑</span>
-            </button>
-          </div>
-          <ModePicker
-            value={workMode}
-            onChange={setWorkMode}
-            idPrefix="start"
-            disabled={starting}
-          />
-        </form>
-        {startError && (
-          <p role="alert" className="error">
-            {startError}
-          </p>
-        )}
-      </section>
+          </form>
+          {startError && (
+            <p role="alert" className="error">
+              {startError}
+            </p>
+          )}
+        </section>
 
-      {since !== undefined && done !== undefined && (finished.length > 0 || open.length > 0) && (
-        <section className="card section-card" aria-label="Since you were last here">
-          <h2>Since you were last here</h2>
-          <div className="stat-tiles">
-            <StatTile label="Done" value={String(finished.length)} />
-            <StatTile label="Needs you" value={String(open.length)} />
-            <StatTile label="Spent" value={anySpend ? dollars(spent) : 'Not reported'} />
-          </div>
-          {finished.length > 0 && (
+        {since !== undefined && done !== undefined && finished.length > 0 && (
+          <section className="card section-card" aria-label="Since you were last here">
+            <h2>Since you were last here</h2>
+            <div className="stat-tiles">
+              <StatTile label="Done" value={String(finished.length)} />
+              <StatTile label="Spent" value={anySpend ? dollars(spent) : 'Not reported'} />
+            </div>
             <ul className="done-lines">
               {finished.map((entry) => (
                 <li key={entry.taskId}>
@@ -275,50 +362,24 @@ export function Home({
                 </li>
               ))}
             </ul>
-          )}
-        </section>
-      )}
+          </section>
+        )}
 
-      {schedule && (schedule.scheduled.length > 0 || schedule.watching > 0) && (
-        <section className="card section-card" aria-label="What runs next">
-          <h2>What runs next</h2>
-          {schedule.scheduled.length > 0 && (
-            <ul className="done-lines">
-              {schedule.scheduled.map((run) => (
-                <li key={run.dutyId} className="next-run">
-                  <span className="done-text">
-                    <strong>{displayText(run.name)}</strong>
-                    <span className="muted">{displayText(run.repo)}</span>
-                  </span>
-                  <span className="done-cost muted">{relativeTime(run.at, now())}</span>
+        {recent.length > 0 && (
+          <section className="card section-card" aria-label="Recent conversations">
+            <h2>Pick up where you left off</h2>
+            <ul className="recent">
+              {recent.map((c) => (
+                <li key={c.conversationId}>
+                  <button type="button" onClick={() => onOpen(c.conversationId)}>
+                    {displayText(c.title ?? 'Untitled conversation')}
+                  </button>
                 </li>
               ))}
             </ul>
-          )}
-          {schedule.watching > 0 && (
-            <p className="muted">
-              {schedule.watching === 1
-                ? '1 more duty wakes when something happens on GitHub.'
-                : `${schedule.watching} more duties wake when something happens on GitHub.`}
-            </p>
-          )}
-        </section>
-      )}
-
-      {recent.length > 0 && (
-        <section className="card section-card" aria-label="Recent conversations">
-          <h2>Pick up where you left off</h2>
-          <ul className="recent">
-            {recent.map((c) => (
-              <li key={c.conversationId}>
-                <button type="button" onClick={() => onOpen(c.conversationId)}>
-                  {displayText(c.title ?? 'Untitled conversation')}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+          </section>
+        )}
+      </div>
     </div>
   );
 }

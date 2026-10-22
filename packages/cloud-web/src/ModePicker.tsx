@@ -1,3 +1,5 @@
+import { ChevronDown } from 'lucide-react';
+import { useRef } from 'react';
 import { type Mode, MODES } from '@maka-cloud/client';
 
 const LABELS: Record<Mode, { label: string; hint: string }> = {
@@ -9,6 +11,9 @@ const LABELS: Record<Mode, { label: string; hint: string }> = {
 /**
  * How much care the next piece of work gets. "Let it decide" sends no mode: the agent picks from
  * the size of the work and the budget. A pick applies when the message starts new work.
+ *
+ * Folded into one small chip that names the current choice; it opens to the four choices, each
+ * with a line on what it means, and closes on a pick. Most messages never need it.
  */
 export function ModePicker({
   value,
@@ -21,6 +26,7 @@ export function ModePicker({
   idPrefix: string;
   disabled?: boolean;
 }) {
+  const menu = useRef<HTMLDetailsElement>(null);
   const options: Array<{ value: Mode | undefined; label: string; hint: string }> = [
     {
       value: undefined,
@@ -29,26 +35,38 @@ export function ModePicker({
     },
     ...MODES.map((mode) => ({ value: mode, ...LABELS[mode] })),
   ];
+  const current = options.find((option) => option.value === value) ?? options[0];
   return (
-    <fieldset className="mode-picker" disabled={disabled}>
-      <legend className="sr-only">How much care this needs</legend>
-      {options.map((option) => {
-        const id = `${idPrefix}-${option.value ?? 'auto'}`;
-        return (
-          <span key={id} className="mode-option">
-            <input
-              type="radio"
-              id={id}
-              name={`${idPrefix}-mode`}
-              checked={value === option.value}
-              onChange={() => onChange(option.value)}
-            />
-            <label htmlFor={id} title={option.hint}>
-              {option.label}
-            </label>
-          </span>
-        );
-      })}
-    </fieldset>
+    <details className="mode-menu" ref={menu}>
+      <summary aria-label={`How much care: ${current?.label}`}>
+        {current?.label}
+        <ChevronDown aria-hidden="true" size={14} className="mode-caret" />
+      </summary>
+      <fieldset className="mode-picker" disabled={disabled}>
+        <legend className="sr-only">How much care this needs</legend>
+        {options.map((option) => {
+          const id = `${idPrefix}-${option.value ?? 'auto'}`;
+          return (
+            <span key={id} className="mode-option">
+              <input
+                type="radio"
+                id={id}
+                name={`${idPrefix}-mode`}
+                checked={value === option.value}
+                onChange={() => {
+                  onChange(option.value);
+                  if (menu.current) menu.current.open = false;
+                }}
+                aria-describedby={`${id}-hint`}
+              />
+              <label htmlFor={id}>{option.label}</label>
+              <span id={`${id}-hint`} className="mode-hint">
+                {option.hint}
+              </span>
+            </span>
+          );
+        })}
+      </fieldset>
+    </details>
   );
 }

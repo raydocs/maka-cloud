@@ -69,7 +69,7 @@ test('a finished task arrives as one card, its picture opens large, and its page
   await expect(card.getByText('The login page no longer loops.', { exact: true })).toBeVisible();
   await expect(card).not.toContainText('Tests pass and the screenshot');
   await expect(card.getByText('Login page after fix', { exact: true })).toBeVisible();
-  await expect(card.getByRole('link', { name: 'Open pull request ↗' })).toHaveAttribute(
+  await expect(card.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
     'href',
     'https://github.com/example/repo/pull/12',
   );
@@ -252,7 +252,7 @@ test('a task page opens from the card, shows its changes and review on an opaque
   await page.screenshot({ path: info.outputPath('task-page.png') });
 
   // Back returns to the chat as it was, not a fresh one.
-  await page.getByRole('button', { name: '← Back' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('article', { name: /^Result: Fix the login loop/u })).toBeVisible();
 });
 
