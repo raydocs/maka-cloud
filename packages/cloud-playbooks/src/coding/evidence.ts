@@ -91,11 +91,16 @@ export function pullRequestBody(verification: VerificationView, extras: ProofExt
   rows.push(['Independent review', reviewRow(verification)]);
   const fix = verification.review?.fix;
   if (fix && fix.sent > 0) {
+    const sent = `${fix.sent} finding(s) sent back over ${fix.rounds} fix round(s)`;
+    // The last round's fixed change may have passed the checks without its review finishing.
+    const reviewedAgain = fix.history.at(-1)?.result !== 'not_reviewed';
     rows.push([
       'Fix after review',
-      fix.result === 'applied'
-        ? `✅ ${fix.sent} finding(s) sent back over ${fix.rounds} fix round(s); this is the latest fixed change, checked and reviewed again`
-        : `⚠️ ${fix.sent} finding(s) sent back over ${fix.rounds} fix round(s); no fix was used`,
+      fix.result !== 'applied'
+        ? `⚠️ ${sent}; no fix was used`
+        : reviewedAgain
+          ? `✅ ${sent}; this is the latest fixed change, checked and reviewed again`
+          : `⚠️ ${sent}; this is the latest fixed change, checked but its review did not finish`,
     ]);
   }
   if (verification.attempts.length > 1) {

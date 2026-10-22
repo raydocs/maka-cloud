@@ -690,6 +690,22 @@ test('the proof table leaves out a run link that is not plain https, and anythin
     },
   });
   assert.match(fixed, /\| Fix after review \| ✅ 3 finding\(s\) sent back over 2 fix round\(s\);/u);
+  const unfinished = pullRequestBody({
+    ...VERIFICATION,
+    review: {
+      ...VERIFICATION.review,
+      fix: {
+        rounds: 1,
+        sent: 1,
+        result: 'applied' as const,
+        history: [{ sent: 1, result: 'not_reviewed' as const }],
+      },
+    },
+  });
+  assert.match(
+    unfinished,
+    /\| Fix after review \| ⚠️ 1 finding\(s\) .*its review did not finish \|/u,
+  );
 });
 
 test('a scoped approval may cover this tool only for the repository its card names, and never for a kept, unreviewed, unknown or modified change', async (t) => {
