@@ -5,7 +5,6 @@ import {
   type InboxItem,
   inboxCardModel,
   pullRequestName,
-  type ResultParts,
   verbOf,
   visibleInbox,
 } from '@maka-cloud/client';
@@ -116,7 +115,8 @@ export function ResultCard({
   onReview,
 }: {
   item: InboxItem;
-  parts: ResultParts;
+  /** The supervisor's sentence, split by `finishedParts`. */
+  parts: { title: string; check: string; outcome: string };
   disabled: boolean;
   onAnswer: (optionId: string) => void;
   onReview: () => void;
@@ -136,15 +136,13 @@ export function ResultCard({
         </button>{' '}
         {parts.title}
       </h3>
-      <p className={parts.failed ? 'failure' : undefined}>
-        {parts.failed ? `Failed: ${parts.detail}` : parts.detail}
-      </p>
+      <p>{parts.outcome}</p>
       <div className="result-meta">
-        {parts.checked !== undefined && (
-          <span className={parts.checked ? 'checked' : 'unchecked'}>
-            {parts.checked ? 'Checked by a second agent' : 'Not checked by a second agent'}
-          </span>
-        )}
+        <span className={parts.check === 'independently checked' ? 'checked' : 'unchecked'}>
+          {parts.check === 'independently checked'
+            ? 'Checked by a second agent'
+            : 'Not checked by a second agent'}
+        </span>
         {card.evidence.map((line, index) =>
           line.kind === 'link' && line.href ? (
             <a

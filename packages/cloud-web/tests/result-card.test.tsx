@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
-import { type InboxItem, resultParts } from '@maka-cloud/client';
+import { finishedParts, type InboxItem } from '@maka-cloud/client';
 import { ResultCard } from '../src/Inbox';
 
 afterEach(cleanup);
@@ -33,7 +33,7 @@ test('a finished task reads as "[Review] title", the outcome, the check and its 
   render(
     <ResultCard
       item={item}
-      parts={resultParts(item) as never}
+      parts={finishedParts(item) as NonNullable<ReturnType<typeof finishedParts>>}
       disabled={false}
       onAnswer={onAnswer}
       onReview={onReview}

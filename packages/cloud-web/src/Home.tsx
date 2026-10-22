@@ -7,12 +7,12 @@ import {
   doneSince,
   dollars,
   errorText,
+  finishedParts,
   HomeFeed,
   type Mode,
   nextRuns,
   recentConversations,
   relativeTime,
-  resultParts,
   splitSuggestions,
   type TaskView,
   verbOf,
@@ -138,7 +138,7 @@ export function Home({
           <section className="card section-card" aria-label="Decisions waiting">
             <h2>Waiting on you ({open.length})</h2>
             {open.map((item) => {
-              const parts = resultParts(item);
+              const parts = finishedParts(item);
               const task = done?.get(item.conversationId)?.find((t) => t.taskId === item.taskId);
               return parts ? (
                 <ResultCard
