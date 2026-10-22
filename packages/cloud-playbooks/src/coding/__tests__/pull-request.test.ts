@@ -8,7 +8,7 @@ import { setKnownSecrets } from '@maka-cloud/orchestrator';
 import { type ChangeSet, JsonFileCodingDeliveries, MemoryCodingDeliveries } from '../deliveries.js';
 import { GitHubPublisher, githubTokenProblem, type PullRequestPublisher } from '../github.js';
 import { openPullRequestTool, pullRequestBody } from '../pull-request.js';
-import { clipText } from '../runner.js';
+import { clipText, scrubbedTail } from '../runner.js';
 import { FakeGitHub } from './fake-github.js';
 
 const TOKEN = 'github_pat_11ABCDEFG_secretsecretsecret';
@@ -562,6 +562,19 @@ test('display text is scrubbed whole before it is cut, so a key at the cut leave
   } finally {
     setKnownSecrets([]);
   }
+});
+
+test('a cut output with no line break loses the whole piece of a key the cut left, however long the key', () => {
+  // A 2,048-character bearer token cut by the sandbox's tail: its scheme and first half are gone.
+  const token = 'A'.repeat(1_024) + 'Z'.repeat(1_024);
+  const cut = `${token.slice(900)} request failed: 401 unauthorized`;
+  const shown = scrubbedTail(cut, 8_192, true);
+  assert.doesNotMatch(shown, /[AZ]{8}/u);
+  assert.equal(shown, ' request failed: 401 unauthorized');
+  // Not cut: the text is kept as it is.
+  assert.equal(scrubbedTail('one line, not cut', 100), 'one line, not cut');
+  // Cut at a line break: what follows it stays.
+  assert.equal(scrubbedTail('ken-tail\nnext line', 100, true), 'next line');
 });
 
 test('a later run of the conversation opens a change kept by an earlier run, but no other task it did not delegate', async (t) => {
