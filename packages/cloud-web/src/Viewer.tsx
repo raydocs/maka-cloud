@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { Minimize2, X } from 'lucide-react';
 
 const SWIPE_DISTANCE = 80;
 
@@ -65,7 +66,7 @@ export function Viewer({
         aria-label="Close"
         onClick={onClose}
       >
-        <span aria-hidden="true">×</span>
+        <X aria-hidden="true" size={18} strokeWidth={2} />
       </button>
       <div
         className="viewer-body"
@@ -91,7 +92,7 @@ export function Viewer({
         aria-label="Collapse"
         onClick={onClose}
       >
-        <span aria-hidden="true">⤡</span>
+        <Minimize2 aria-hidden="true" size={16} strokeWidth={2} />
       </button>
     </div>,
     document.body,

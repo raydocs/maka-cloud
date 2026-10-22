@@ -2,7 +2,7 @@ import { Button } from '@astryxdesign/core';
 import { displayText, type InboxItem, suggestionLine } from '@maka-cloud/client';
 
 /**
- * A task the employee noticed and proposes (T30): the verb-first title, what it will cost and where,
+ * A task Maka noticed and proposes (T30): the verb-first title, what it will cost and where,
  * and two answers. "Do it" starts exactly one task, and the server reads the repository again first;
  * a card that moved is replaced here instead of acted on. Text written by other people is quoted
  * by the server before it gets here, and the task a tap starts asks before anything risky.
@@ -55,7 +55,7 @@ export function SuggestionCard({
       ) : null}
       {item.state === 'answering' ? (
         <p className="acknowledged" role="status">
-          Your answer is chosen and is being delivered.
+          Sending…
         </p>
       ) : (
         <div className="inbox-options">

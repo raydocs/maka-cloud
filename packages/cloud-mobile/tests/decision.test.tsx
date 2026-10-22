@@ -113,9 +113,9 @@ test('a question with a note is answered with the note, and shows the recorded a
     ),
   );
   // The note is there only when asked for.
-  expect(screen.queryByLabelText('Additional context (optional)')).toBeNull();
+  expect(screen.queryByLabelText('Note')).toBeNull();
   await fireEvent.press(screen.getByRole('button', { name: 'Add a note' }));
-  await fireEvent.changeText(screen.getByLabelText('Additional context (optional)'), 'soon please');
+  await fireEvent.changeText(screen.getByLabelText('Note'), 'soon please');
   await fireEvent.press(screen.getByRole('button', { name: 'Right' }));
   expect(answers).toEqual([['b', 'soon please']]);
   await rerender(

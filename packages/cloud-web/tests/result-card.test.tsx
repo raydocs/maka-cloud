@@ -45,7 +45,7 @@ test('a finished task reads as "[Review] title", the outcome, the check and its 
   expect(screen.getByText('The login test passed 50 runs in a row.')).toBeTruthy();
   expect(screen.getByText('Not checked by a second agent')).toBeTruthy();
   expect(screen.getByText('changes.diff')).toBeTruthy();
-  expect(screen.getByRole('link', { name: 'Pull request #42 ↗' }).getAttribute('href')).toBe(
+  expect(screen.getByRole('link', { name: 'Pull request #42' }).getAttribute('href')).toBe(
     'https://github.com/acme/widgets/pull/42',
   );
   fireEvent.click(screen.getByRole('button', { name: 'Review: Fix the flaky login test' }));

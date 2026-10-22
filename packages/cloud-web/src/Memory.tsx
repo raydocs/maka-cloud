@@ -48,10 +48,7 @@ export function MemoryPanel({
       </summary>
       <section aria-label="Your memory" className="memory-content">
         <h2>Your saved facts</h2>
-        <p className="muted">
-          Shared across your conversations, never with another invite. Changes apply to the next
-          turn, not work already running. Old chat messages are not erased.
-        </p>
+        <p className="muted">Used in all your conversations, from the next message on.</p>
         {error && (
           <p className="error" role="alert">
             {error}
@@ -158,10 +155,7 @@ export function MemoryPanel({
             <li key={summary.id}>{displayText(summary.text)}</li>
           ))}
         </ul>
-        <p className="muted">
-          Deleted and replaced facts stay forgotten. To prevent their return, a private suppression
-          record is retained and older summaries are cleared. Reworded facts are not detected.
-        </p>
+        <p className="muted">A fact you delete stays forgotten.</p>
       </section>
     </details>
   );
