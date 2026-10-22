@@ -15,8 +15,8 @@ variable and its jobs go to the owner's runners; delete it and they go back to G
 | ci `test` | `ubuntu-24.04` (GitHub) | `CI_RUNNER_TEST`, else `CI_RUNNER` |
 | cloud-web, mobile `checks` | `ubuntu-24.04` (GitHub) | `CI_RUNNER` |
 | the rehearsal | `ubuntu-24.04` (GitHub) | `CI_RUNNER_DOCKER`, else `CI_RUNNER` |
-| mobile `ios` | the Mac minis | `CI_RUNNER_MAC` = `["self-hosted","mac"]` (set) |
-| mobile `android` | `ubuntu-24.04` (GitHub, emulator under KVM) | `CI_RUNNER_ANDROID` (unset, so the Macs serve iOS only) |
+| mobile `ios` | the Mac mini | `CI_RUNNER_MAC` = `["self-hosted","mac"]` (set) |
+| mobile `android` | `ubuntu-24.04` (GitHub, emulator under KVM) | `CI_RUNNER_ANDROID` (unset, so the Mac serves iOS only) |
 
 A pull request from a fork never runs on the owner's machines, whatever the variables say: every
 `runs-on` falls back to GitHub's image when `github.event.pull_request.head.repo.fork` is true. The
@@ -27,7 +27,8 @@ repository also requires approval before any workflow runs for an outside contri
 
 | Runner | Host | Labels |
 |---|---|---|
-| `mac-mini`, `mac-mini-2` | Mac mini (Apple silicon, 12 cores, 16 GB), two instances: two mobile jobs at once | `self-hosted`, `mac` |
+| `mac-mini` | Mac mini (Apple silicon, 12 cores, 16 GB) | `self-hosted`, `mac` |
+| `mac-mini-2` | the same Mac, a second instance, kept off the `mac` label | `self-hosted`, `mac-android` |
 | `vps-1` | Ubuntu 24.04 server (12 vCPU, 15 GB, no KVM) | `self-hosted`, `vps`, `vps-test` |
 | `vps-2` | the same server, second instance | `vps-test`, `vps-docker` |
 
@@ -39,8 +40,10 @@ The VPS is a standby, not the default, for three reasons:
 
 To use it again, set `CI_RUNNER` to `["self-hosted","vps"]`, after that test passes there.
 
-Android runs on GitHub's image, x86_64 under KVM, so the two Macs are free for iOS: each phone run used
-to hold a Mac for both jobs, and runs queued behind each other. The VPS has no `/dev/kvm`; to use a Mac
+Android runs on GitHub's image, x86_64 under KVM, so the Mac is free for iOS: each phone run used to
+hold the Mac for both jobs, and runs queued behind each other. Only one instance takes `mac` jobs: two
+phone jobs at once on the same Mac share the scripted stack's ports and the simulator, and fail each
+other (seen on #387). The VPS has no `/dev/kvm`; to use a Mac
 for Android again, set `CI_RUNNER_ANDROID` to `["self-hosted","mac-android"]` (an arm64 emulator and an
 `arm64-v8a` build).
 
