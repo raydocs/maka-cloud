@@ -67,13 +67,16 @@ jobs:
           CI: '1'
 
   android:
-    # Stays on GitHub's image: it needs the Android SDK, NDK and emulator that image carries.
-    runs-on: ubuntu-24.04
+    # CI_RUNNER_MAC moves this job to the owner's Mac (Apple silicon), whose SDK sits at the runner's
+    # ANDROID_HOME and whose emulator runs arm64; unset, it runs on GitHub's image, which carries the
+    # SDK and runs the emulator under KVM.
+    runs-on: ${{ vars.CI_RUNNER_MAC && fromJSON(vars.CI_RUNNER_MAC) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       # GitHub's runner leaves little disk for a Gradle and NDK build; some runs ran out of space
       # ("No space left on device"). These preinstalled toolchains are not used here.
       - name: Free disk space
+        if: runner.environment == 'github-hosted'
         run: |
           df -h / | tail -1
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache/CodeQL
@@ -136,7 +139,7 @@ jobs:
       - name: Install Maestro
         run: |
           curl -fsSL -o "$RUNNER_TEMP/maestro.zip" "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
-          echo "${MAESTRO_SHA256}  $RUNNER_TEMP/maestro.zip" | sha256sum --check -
+          echo "${MAESTRO_SHA256}  $RUNNER_TEMP/maestro.zip" | shasum -a 256 --check -
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
           echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
 
@@ -151,6 +154,7 @@ jobs:
           exit 1
 
       - name: Enable KVM for the emulator
+        if: runner.os == 'Linux'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
@@ -160,7 +164,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: 34
-          arch: x86_64
+          arch: ${{ runner.arch == 'ARM64' && 'arm64-v8a' || 'x86_64' }}
           target: google_apis
           profile: pixel_7
           ram-size: 4096M
