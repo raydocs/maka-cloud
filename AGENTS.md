@@ -63,6 +63,7 @@ Upstream files this fork changes, so a sync knows what to re-check.
 |---|---|---|
 | `package.json`, `package-lock.json` | T11: `packages/cloud-memory` joins workspaces and both build chains before its server consumer; npm regenerates the workspace/server dependency entries and normalizes existing Web Push transitive dev flags and entry order (no version changes) | never; on a sync, keep the entry and build order |
 | `scripts/asf-license-headers.mjs` | `maka-cloud-fork` exclusion rule for our files | never |
+| `README.md` | replaced with the Maka Cloud README; it keeps the ASF header, upstream's positioning sentence and its hero image, which `website/test/site.test.mjs` reads | never; on a sync, keep ours |
 | `scripts/asf-license-headers.mjs` | go-live rehearsal lane: `deploy/` and the root `.dockerignore` join the `maka-cloud-fork` header exclusion | never; on a sync, keep the entries |
 | `scripts/asf-source-release.mjs` | go-live rehearsal lane: `.dockerignore`, `Caddyfile`, `.service` and `.env` (the rehearsal's settings files) count as text release inputs | never; on a sync, keep the entries |
 | `.github/dependabot.yml` | deleted: dependency bumps come through upstream syncs, not separate Dependabot PRs | never; on a sync, keep it deleted |
