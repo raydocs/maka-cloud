@@ -370,3 +370,60 @@ test('a feed stopped and started again replays from the start without doubling a
   expect(state.tasks.t1?.progress).toEqual(['step one', 'step two']);
   feed.stop();
 });
+
+test('Home takes the server’s cards and order, tells the server what was seen, and moves a card through it', async () => {
+  const card = (cardId: string, kind: string, rank: number) => ({
+    cardId,
+    kind,
+    ref: { type: 'inbox', id: cardId },
+    rank,
+    seenAt: null,
+    at: rank,
+  });
+  const seen: unknown[] = [];
+  const moves: unknown[] = [];
+  const { client } = served({
+    '/v1/home/seen': (_url, init) => {
+      seen.push(JSON.parse(String(init.body)));
+      return Response.json({ seen: [], visitedAt: 1 });
+    },
+    '/v1/home/order': (_url, init) => {
+      moves.push(JSON.parse(String(init.body)));
+      return Response.json({
+        cards: [card('waiting:b', 'waiting', 0), card('waiting:a', 'waiting', 1)],
+      });
+    },
+    '/v1/home': () =>
+      Response.json({ cards: [card('waiting:a', 'waiting', 0), card('waiting:b', 'waiting', 1)] }),
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  expect(feed.getSnapshot().cards).toBeUndefined();
+  feed.start([]);
+  await until(() => feed.getSnapshot().cards !== undefined, 'the cards');
+  expect(feed.getSnapshot().cards?.map((c) => c.cardId)).toEqual(['waiting:a', 'waiting:b']);
+
+  await feed.moveCard('waiting:b', null);
+  expect(moves).toEqual([{ cardId: 'waiting:b', after: null }]);
+  expect(feed.getSnapshot().cards?.map((c) => c.cardId)).toEqual(['waiting:b', 'waiting:a']);
+
+  feed.stop();
+  await until(() => seen.length === 1, 'the visit');
+  expect(seen).toEqual([{ cardIds: ['waiting:b', 'waiting:a'] }]);
+});
+
+test('Home without a server Home stays on its own parts and tells the server nothing', async () => {
+  const { client, calls } = served({
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  feed.start([]);
+  await until(() => feed.getSnapshot().inboxLoaded, 'the inbox');
+  await until(() => client.unsupported.has('home'), 'the answer of /v1/home');
+  expect(feed.getSnapshot().cards).toBeUndefined();
+  feed.stop();
+  await new Promise((r) => setTimeout(r, 20));
+  expect(calls.some((c) => c.url.startsWith('/v1/home/seen'))).toBe(false);
+});
