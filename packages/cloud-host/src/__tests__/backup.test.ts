@@ -14,6 +14,7 @@ import {
   listBackups,
   restoreBackup,
   verifyBackup,
+  withoutSecretShapesInJson,
 } from '../backup.js';
 import { backupLayoutOf, dataPathsOf } from '../config.js';
 
@@ -484,6 +485,22 @@ test('from outside, a database a running server holds exclusively is refused wit
     /held by a running server, which backs itself up/u,
   );
   assert.deepEqual(await readdir(backupDir), [], 'no scratch directory is left');
+});
+
+test('a conversation line keeps its numbers and its nesting when a key is taken out of it', () => {
+  const line = '{"n":9007199254740993,"big":1e400,"z":-0,"text":"mki_0123456789abcdef"}';
+  assert.equal(
+    withoutSecretShapesInJson(line),
+    '{"n":9007199254740993,"big":1e400,"z":-0,"text":"[secret removed]"}',
+  );
+  // Nested deeper than a call stack could walk, with nothing in it: as it was.
+  const deep = `${'['.repeat(20_000)}"x"${']'.repeat(20_000)}`;
+  assert.equal(withoutSecretShapesInJson(deep), deep);
+  const deepKey = `${'['.repeat(20_000)}"mki_0123456789abcdef"${']'.repeat(20_000)}`;
+  assert.equal(
+    withoutSecretShapesInJson(deepKey),
+    `${'['.repeat(20_000)}"[secret removed]"${']'.repeat(20_000)}`,
+  );
 });
 
 test('a private key in a stored conversation leaves no line of its body in the backup, however it is escaped', async (t) => {

@@ -64,34 +64,26 @@ export function withoutSecretShapes(text: string): string {
   return out;
 }
 
+/** A string of a JSON text, from its opening quote to its closing one. */
+const JSON_STRING = /"(?:[^"\\]|\\.)*"/gu;
+
 /**
  * A JSON text with the secret shapes taken out of every string in it (keys included), each read as
  * its value: however the text escapes a key's line breaks or slashes (\`\\n\`, \`\\u000a\`, \`\\/\`), the
- * whole key goes. The text comes back as it was when nothing was taken out. Text that is not JSON is
- * taken as it reads.
+ * whole key goes. Only those strings are written again; the rest of the text (numbers, nesting,
+ * spacing) stays byte for byte. Text that is not JSON is taken as it reads.
  */
 export function withoutSecretShapesInJson(json: string): string {
-  let value: unknown;
   try {
-    value = JSON.parse(json);
+    JSON.parse(json);
   } catch {
     return withoutSecretShapes(json);
   }
-  let changed = false;
-  const clean = (item: unknown): unknown => {
-    if (typeof item === 'string') {
-      const out = withoutSecretShapes(item);
-      if (out !== item) changed = true;
-      return out;
-    }
-    if (Array.isArray(item)) return item.map(clean);
-    if (item !== null && typeof item === 'object') {
-      return Object.fromEntries(Object.entries(item).map(([key, v]) => [clean(key), clean(v)]));
-    }
-    return item;
-  };
-  const out = clean(value);
-  return changed ? JSON.stringify(out) : json;
+  return json.replace(JSON_STRING, (token) => {
+    const value = JSON.parse(token) as string;
+    const clean = withoutSecretShapes(value);
+    return clean === value ? token : JSON.stringify(clean);
+  });
 }
 
 export interface ManifestFile {
