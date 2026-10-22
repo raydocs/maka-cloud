@@ -264,6 +264,20 @@ changed_paths() {
 }
 `;
 
+const UNDER_LINK_FN = `
+# Whether a directory above the workspace path \$2 is a link: a removal or a write under it would
+# follow the link out of the workspace (a kept path, or one the test put there).
+under_link() {
+  local d
+  d=$(dirname -- "$2")
+  while [ "$d" != . ] && [ "$d" != / ]; do
+    [ -L "$1/$d" ] && return 0
+    d=$(dirname -- "$d")
+  done
+  return 1
+}
+`;
+
 /**
  * Puts the agent's copy of every reverted file back (the part of a base check that edits the
  * workspace, so it runs as the agent: see \`BASE_REVERT_SCRIPT\`). A leftover of an interrupted
@@ -271,17 +285,20 @@ changed_paths() {
  * who made it: only what is in it is emptied.
  */
 const RESTORE_FN = `
+${UNDER_LINK_FN}
 restore() {
   [ -L "$bk" ] && return 1
   [ -d "$bk" ] || return 0
   if [ -f "$bk/reverted" ]; then
     local p
     while IFS= read -r -d '' p; do
+      under_link "$ws" "$p" && return 1
       rm -rf -- "$ws/$p"
     done < "$bk/reverted"
     local f rel
     while IFS= read -r -d '' f; do
       rel="\${f#"$bk/files/"}"
+      under_link "$ws" "$rel" && return 1
       mkdir -p -- "$(dirname -- "$ws/$rel")" && cp -a --remove-destination -- "$f" "$ws/$rel" || return 1
       # The backup kept the file's own mode; the agent writes the file as it did before the check.
       [ -L "$ws/$rel" ] || chmod g+rw -- "$ws/$rel" || return 1
@@ -365,6 +382,7 @@ echo "STAGED $n"
  * \`REVERTED <count>\`.
  */
 export const BASE_REVERT_SCRIPT = `set -u
+${UNDER_LINK_FN}
 # What is put back is the agent's own; the sandbox user is in its group and reads and removes it.
 umask 007
 ws="$MAKA_DIR/workspace"
@@ -378,6 +396,7 @@ mkdir -p "$bk/files" || exit 1
 count=0
 while IFS= read -r -d '' p; do
   case "/$p/" in //*|*/../*|*/./*) echo "UNSAFE_PATH $p"; exit 0 ;; esac
+  under_link "$ws" "$p" && { echo "UNSAFE_PATH $p"; exit 0; }
   if [ -e "$p" ] || [ -L "$p" ]; then
     mkdir -p "$bk/files/$(dirname -- "$p")" && cp -a -- "$p" "$bk/files/$p" || exit 1
   fi

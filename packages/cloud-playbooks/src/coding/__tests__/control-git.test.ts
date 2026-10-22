@@ -309,6 +309,31 @@ test('a link of the base put back over a directory of the change takes nothing o
   assert.equal(await fs.readFile(join(ws, 'cache', 'child'), 'utf8'), 'the change\n');
 });
 
+test('a path under a linked directory is neither reverted nor restored through the link', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  const outside = join(tmp, 'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(join(outside, 'a.txt'), 'not the workspace\n');
+  const before = await snapshot(outside);
+  // The change made lib a link out, and keeps it: lib/a.txt of the base is still a staged path.
+  await fs.rm(join(ws, 'lib'), { recursive: true });
+  await fs.symlink(outside, join(ws, 'lib'));
+  const out = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: 'lib' });
+  assert.match(out, /^UNSAFE_PATH lib\/a\.txt$/mu, out);
+  assert.deepEqual(await snapshot(outside), before, 'the revert');
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
+  // A link put in place of a reverted directory while the check ran: the restore stops before it.
+  await fs.rm(join(ws, 'lib'));
+  await fs.mkdir(join(ws, 'lib'));
+  await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');
+  const reverted = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
+  assert.match(reverted, /^REVERTED \d+$/mu, reverted);
+  await fs.rm(join(ws, 'lib'), { recursive: true });
+  await fs.symlink(outside, join(ws, 'lib'));
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORE_FAILED$/mu);
+  assert.deepEqual(await snapshot(outside), before, 'the restore');
+});
+
 test('the agent group reads the stage and writes the backup, and cannot write the stage', async (t) => {
   const { dir, base, ws } = await setup(t);
   await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');
