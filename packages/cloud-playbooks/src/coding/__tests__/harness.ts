@@ -51,6 +51,8 @@ export interface AgentTurn {
   progress(note: string): void;
   /** Reports what this run has spent so far, like a real runner (cumulative per run). */
   usage(costUsd: number): void;
+  /** Reports any event of the run's stream, as a runner of another make might. */
+  emit(event: RunnerEvent): void;
 }
 
 export type AgentScript = (turn: AgentTurn) => Promise<'ok' | { failed: string }>;
@@ -157,6 +159,7 @@ export class FakeAgent implements AgentRunner {
       signal: abort.signal,
       progress: (note) => push({ type: 'progress', note }),
       usage: (costUsd) => push({ type: 'usage', costUsd }),
+      emit: push,
     };
     this.turns.push(turn);
     this.open++;

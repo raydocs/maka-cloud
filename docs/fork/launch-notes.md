@@ -49,6 +49,17 @@ confirmed or the task is cancelled.
 - The go-live rehearsal (`deploy/rehearsal/`, the `rehearsal` CI job) runs with the same three off.
   Read its green run for what it covers (below), not as proof of the launch path on a real host.
 
+## Sign-in: what to check with the first real token
+
+- Sign in with Apple: the app passes the server's nonce to Apple unchanged, and the token's nonce
+  claim must equal it. Check this form with a real Apple token in the live run. The tests use a
+  fake signer, so a mismatch (for example if Apple returns the nonce hashed) would show only then.
+  Until then, email code and Google are the other ways in, and the invite token always works.
+- `MAKA_CLOUD_TRUST_PROXY` names the proxy's address (default loopback; Compose sets Caddy's fixed
+  address), so sign-in limits count each client and not the proxy, and a caller that reaches the
+  server directly cannot forge its way past them. Check that two phones on different networks do
+  not share one limit, and that the server is not reachable from outside except through the proxy.
+
 ## What the rehearsal verifies, and what it does not
 
 The rehearsal's sandbox stand-in has a real second OS account (`maka-agent`), a group it shares with

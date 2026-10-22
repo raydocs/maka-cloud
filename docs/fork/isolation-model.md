@@ -138,7 +138,9 @@ Each: the statement, how the code enforces it today, how it is tested today, and
 section 7 that it still needs. "Real-account test" means a test that only runs as root on a machine
 with a second account (`canSeparate()` in `check-real-account.test.ts`, `agent-user.test.ts`). The
 rehearsal job runs the whole task flow with a real second account since #301, but the unit suites'
-real-account tests still skip on hosted runners (section 7, F9).
+real-account tests ran only on a machine with root until F9: the `real-accounts` job of
+`fork-deploy-rehearsal.yml` now runs them in the `real-account-tests` image target (`deploy/Dockerfile`)
+with `MAKA_REQUIRE_REAL_ACCOUNTS=1`, which makes them fail instead of skip.
 
 **I1. Task-steerable code runs only as the agent account.** The control user never executes a
 file the agent can write, and never runs a program whose behaviour is configured by a file the
@@ -210,8 +212,7 @@ counted as "the test fails on the base". Still open: a test that meets a permiss
 the change did not touch and prints nothing about it.
 *Tested*: `handoff-links.test.ts`, `agent-user.test.ts` ("links the agent plants in handoff/ are not
 followed"), `result.test.ts`, `stage.test.ts`, `export.test.ts`.
-*Still violated*: F10 (transcript chunks
-appended by name in a group-writable directory).
+*Still violated*: none known (F1's revert and restore part fixed in #355; F10 closed in #401).
 
 **I5. Nothing the agent account can reach lets it change the firewall, the accounts or the control
 user's processes.** No sudo rule at all (read from the trusted side), no process capabilities, no
@@ -337,7 +338,7 @@ a finding that fits none means this section is incomplete.
 | Verified state that outlives the box | I6 | `exec` with `taskCode` guarded only while `unguarded`; a box restarted or restored by the provider without a `machine_not_running` answer kept its stale "verified" state (batch29 A2, #344 fixed, F14: the guard runs before every task-code exec) |
 | Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
-| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); the base revert and the restore, which a sibling's agent could race when the control user wrote by path (recheck A2, #355 fixed, F1's revert/restore part: `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT` run as the agent account and the control user's `BASE_STAGE_SCRIPT` touches no workspace path); egress lock truncating through a link (#310 fixed) and in `/tmp` (#339 fixed, F6); transcript append (open, F10); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
+| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); the base revert and the restore, which a sibling's agent could race when the control user wrote by path (recheck A2, #355 fixed, F1's revert/restore part: `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT` run as the agent account and the control user's `BASE_STAGE_SCRIPT` touches no workspace path); egress lock truncating through a link (#310 fixed) and in `/tmp` (#339 fixed, F6); transcript chunks built in the task directory and renamed into place (F10, closed); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
 | Control user's login files | I3 | `bash -lc` on every exec; probed (`agent_login_files`, F13, closed) |
 | Whole environment handed to the agent | I9 | `env -i` plus named variables (F8, closed) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
@@ -525,6 +526,13 @@ and `mv -fT` it into place at the last chunk, as `PREPARE_SCRIPT` does for the b
 on the temporary before the rename.
 *Test that fails on main*: `transcripts-runner.test.ts`: the chunk requests name a temporary under the
 task directory, not under `claude-config/`.
+*Done*: `TRANSCRIPT_CHUNK_SCRIPT` builds `$MAKA_DIR/.restore-<session>.tmp` (mode 600, sandbox user only),
+checks the hash, gives it the agent group and 660, and `mv -fT`s it into place. The test is in
+`transcripts.test.ts` (it fails on `main`): a link planted at the old name between two chunks is not
+written through. What is left: the destination's directories are checked by name just before the
+rename, so a sibling's agent that swaps `projects/<key>` for a link inside that window can redirect
+the rename; the file it could place is the hash-checked transcript, not content the agent chooses.
+I12 (one agent account per task) closes that window.
 
 **F11 (owner decision, I12): per-task agent accounts.** See section 8.
 

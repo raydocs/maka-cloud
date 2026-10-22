@@ -11,9 +11,21 @@ import { FleetCodingSandbox } from '../sandbox.js';
 import { CHECK_SCRIPT, CHECK_STOP_SCRIPT, checkTagPrefix } from '../scripts.js';
 
 // The real thing, where this machine has a second account to run the checks as.
-const CHANNEL = { user: 'nobody', group: 'nogroup' };
+const CHANNEL = {
+  user: process.env.MAKA_TEST_AGENT_USER ?? 'nobody',
+  group: process.env.MAKA_TEST_AGENT_GROUP ?? 'nogroup',
+};
 
 function canSeparate(): string | undefined {
+  const why = unseparated();
+  // The job that is meant to run these (deploy/Dockerfile `real-account-tests`) must not skip them.
+  if (why !== undefined && process.env.MAKA_REQUIRE_REAL_ACCOUNTS === '1') {
+    throw new Error(`the real-account tests are required here, and ${why}`);
+  }
+  return why;
+}
+
+function unseparated(): string | undefined {
   if (process.getuid?.() !== 0) return 'needs root, to run commands as another account';
   try {
     execFileSync('sudo', ['-n', '-u', CHANNEL.user, 'id', '-u'], { stdio: 'pipe' });

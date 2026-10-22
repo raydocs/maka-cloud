@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Recovery, RunHandle, Runner, RunnerEvent, RunSpec } from './runner.js';
-import type { ResultManifest } from './types.js';
+import type { ResultManifest, TaskPanel } from './types.js';
 
 export const DEFAULT_FAKE_MANIFEST: ResultManifest = {
   summary: 'fake run complete',
@@ -111,6 +111,15 @@ export class FakeRun implements RunHandle {
 
   progress(note: string): void {
     this.push({ type: 'progress', note });
+  }
+
+  /** What the run is doing now, and a panel of its work. */
+  narration(line: string): void {
+    this.push({ type: 'narration', line });
+  }
+
+  panel(panel: TaskPanel): void {
+    this.push({ type: 'panel', ...panel });
   }
 
   /** The agent reads every waiting message, as at its next tool call; the run reports it. */

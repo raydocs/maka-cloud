@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { ENV_VARIABLES, readStackConfig } from '../config.js';
+import { SETUP_VARIABLES } from '../setup.js';
 import { SMOKE_VARIABLES, smokeGate } from '../smoke.js';
 
 const DOC = readFileSync(
@@ -35,10 +36,24 @@ test('the deploy doc lists every environment variable the server and the smoke t
     table(SMOKE_VARIABLES),
     'paste the table from the code into docs/fork/deploy.md between the smoke markers',
   );
+  assert.equal(
+    between('<!-- setup:start -->', '<!-- setup:end -->'),
+    table(SETUP_VARIABLES),
+    'paste the table from the code into docs/fork/deploy.md between the setup markers',
+  );
 });
 
 test('the commands the deploy doc runs exist', () => {
-  for (const command of ['check', 'start', 'pause', 'resume', 'backups', 'backup', 'smoke']) {
+  for (const command of [
+    'setup',
+    'check',
+    'start',
+    'pause',
+    'resume',
+    'backups',
+    'backup',
+    'smoke',
+  ]) {
     assert.match(DOC, new RegExp(`maka-cloud ${command}\\b|cli\\.js ${command}\\b`, 'u'), command);
   }
   assert.match(DOC, /maka-cloud restore <name>/u);
