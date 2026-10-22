@@ -25,7 +25,16 @@ import type { OrchestratorLink } from './orchestrator-link.js';
 import type { Manifest, Playbook, VerifyContext } from './playbooks.js';
 import { reviewLinksOf } from './reviewer.js';
 import { printable, shownValue } from './shown.js';
-import type { BudgetView, ConductorState, HeldCall, QuestionOption, QuestionRow } from './state.js';
+import {
+  APPROVE_REPOSITORY_OPTION,
+  APPROVE_TASK_OPTION,
+  type BudgetView,
+  type ConductorState,
+  type GrantKey,
+  type HeldCall,
+  type QuestionOption,
+  type QuestionRow,
+} from './state.js';
 
 /** A tool call the conductor refuses. The model sees `code: message` as the tool error. */
 export class ToolRefusal extends Error {
@@ -78,6 +87,24 @@ export interface ToolHost {
   approverAuthorized(approvedBy: string | null, conversationId: string): boolean;
   /** Whether a text carries a key or token (see `ConductorOptions.carriesSecret`). */
   carriesSecret(value: unknown): boolean;
+  /**
+   * Whether a grant also lets a call past the taint hold (see `ConductorOptions.grantsCoverTaint`).
+   * Off: a call decided on tainted context is held whatever the owner granted.
+   */
+  readonly grantsCoverTaint: boolean;
+  /**
+   * Whether grants can be offered and used at all: only where the host checks who approved
+   * (`ConductorOptions.approverAuthorized`). Without that check a grant could not be tied to its owner.
+   */
+  readonly grantsUsable: boolean;
+}
+
+/** What a tool says a scoped approval of one of its calls would cover (see `ConductorToolSpec.grantScope`). */
+export interface GrantScopeKey {
+  /** The repository the call acts in, as the approval card names it. */
+  repository: string;
+  /** Arguments a grant pins to the value the owner saw; every other argument is free. */
+  fixed?: Record<string, string | number | boolean | null>;
 }
 
 /**
@@ -106,6 +133,14 @@ export interface ConductorToolSpec<P extends z.ZodObject = z.ZodObject> {
    * will act on), built by code from the held arguments and shown under the call itself.
    */
   approvalDetails?(args: z.infer<P>): Promise<string> | string;
+  /**
+   * Lets the owner keep an approval of this tool beyond one call ("for this task", "for this
+   * repository"). Returns what such a grant would cover for these arguments, or nothing for a call
+   * no grant may cover. Only an irreversible tool that does not spend may declare it, and
+   * `approvalDetails` must name the repository the owner is approving. A grant never reaches the
+   * tool's own checks in `impl`, a standing duty's authority, or the taint hold.
+   */
+  grantScope?(args: z.infer<P>): Promise<GrantScopeKey | undefined> | GrantScopeKey | undefined;
   impl(
     args: z.infer<P>,
     context: {
@@ -204,6 +239,7 @@ export function conductorTools(
   host: ToolHost,
   extra: readonly ConductorToolSpec[] = [],
 ): MakaTool[] {
+  for (const spec of extra) checkGrantScope(spec);
   const playbookIds = host.playbooks.map((playbook) => playbook.id) as [string, ...string[]];
   const playbookOf = (id: string | null) => host.playbooks.find((playbook) => playbook.id === id);
 
@@ -510,6 +546,7 @@ export function conductorTools(
       let recommended: string;
       let raiseToUsd: number | null = null;
       let actionRef: string | null = null;
+      let grantCandidate: GrantKey | undefined;
       let check: () => { code: string; message: string } | undefined;
       switch (args.reason) {
         case 'taste': {
@@ -601,6 +638,23 @@ export function conductorTools(
               );
             }
             note = args.question;
+            // A scope beyond this once is offered only where a grant could be used, for a call
+            // the tool agrees one may cover, and never on a card that carries a secret.
+            grantCandidate = await grantCandidateFor(host, turn, spec, held);
+            if (grantCandidate) {
+              options = [
+                { id: 'approve', label: 'Go ahead, just this once' },
+                {
+                  id: APPROVE_TASK_OPTION,
+                  label: "Go ahead, and don't ask again for this repository in this task",
+                },
+                {
+                  id: APPROVE_REPOSITORY_OPTION,
+                  label: "Go ahead, and don't ask again for this repository",
+                },
+                { id: 'reject', label: "Don't do it" },
+              ];
+            }
           }
           check = () => {
             const held = state.heldState(ref);
@@ -632,6 +686,7 @@ export function conductorTools(
           recommended,
           raiseToUsd,
           actionRef,
+          ...(grantCandidate === undefined ? {} : { grantCandidate }),
         },
         check,
       );
@@ -760,7 +815,8 @@ function holdUnlessApproved(
   actionRef: string | undefined,
   always: boolean,
   shown: string | undefined,
-): void {
+  grant?: GrantKey,
+): 'approval' | 'grant' | 'free' {
   if (actionRef !== undefined) {
     // An approval stored before the conductor stopped asking about calls with a key in them is
     // not run, whatever was answered: the owner could not be shown what they approved.
@@ -778,9 +834,32 @@ function holdUnlessApproved(
     ) {
       throw new ToolRefusal('not_approved', `Action ${actionRef} is not approved for this call.`);
     }
-    return;
+    return 'approval';
   }
   if (always) {
+    // An owner's grant stands in for the card of a call it covers (not for the taint hold, unless
+    // the conductor was set so), and the call's card is still built and shown to the tool.
+    if (
+      grant &&
+      host.grantsUsable &&
+      shown !== undefined &&
+      (!host.decidedOnTaint(turn) || host.grantsCoverTaint) &&
+      !host.carriesSecret(args) &&
+      !host.carriesSecret(shown)
+    ) {
+      const used = host.state.useGrant(turn.runId, grant, args, (owner) =>
+        host.approverAuthorized(owner, turn.conversationId),
+      );
+      if (used) {
+        host.postNotice(
+          turn,
+          printable(
+            `${tool} ran under your approval to ${used.scope === 'task' ? 'keep going in this task' : 'keep going in this repository'} (${used.repository}). Revoke it any time from your approvals.`,
+          ),
+        );
+        return 'grant';
+      }
+    }
     const ref = host.state.hold(turn.runId, tool, args);
     throw new ToolRefusal(
       'needs_approval',
@@ -794,6 +873,70 @@ function holdUnlessApproved(
       `This conversation has read content from outside the user, so this action needs the user's approval. Ask the user with ask_user (reason "irreversible", actionRef "${ref}") and end your turn.`,
     );
   }
+  return 'free';
+}
+
+const MAX_GRANT_REPOSITORY_CHARS = 300;
+
+/**
+ * Only an irreversible tool that does not spend may offer a scope. A spend, an egress, a delete
+ * or a merge without green CI is an always-ask gate: it has no scope, and a tool cannot add one.
+ */
+function checkGrantScope(spec: ConductorToolSpec): void {
+  if (spec.grantScope === undefined) return;
+  if (typeof spec.grantScope !== 'function') {
+    throw new Error(`Conductor tool ${spec.name}: grantScope must be a function.`);
+  }
+  if (!alwaysHeld(spec) || spec.effects.includes('spends') || BUILTIN_TOOL_POLICY[spec.name]) {
+    throw new Error(
+      `Conductor tool ${spec.name} cannot offer a scope: only an irreversible tool that does not spend can.`,
+    );
+  }
+}
+
+/**
+ * What a grant of this call would cover, or nothing: the tool offers none for these arguments, it
+ * fails, or the answer is not a plain repository name with pinned values. A failure is "no scope",
+ * so a call is held as it would be without one.
+ */
+async function grantKeyOf(
+  spec: ConductorToolSpec | undefined,
+  args: Record<string, unknown>,
+): Promise<GrantKey | undefined> {
+  if (!spec?.grantScope) return undefined;
+  try {
+    const scope = await spec.grantScope(args as never);
+    if (!scope || typeof scope.repository !== 'string') return undefined;
+    const repository = scope.repository;
+    if (repository.length === 0 || repository.length > MAX_GRANT_REPOSITORY_CHARS) return undefined;
+    const fixed = scope.fixed ?? {};
+    const pinned = Object.values(fixed).every(
+      (value) => value === null || ['string', 'number', 'boolean'].includes(typeof value),
+    );
+    return pinned ? { tool: spec.name, repository, fixed } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The scope offered with a held call's card, if any. The owner is offered one only where it could
+ * be used: the run is not a standing duty's, and the conversation is not tainted (unless a grant
+ * covers the taint hold). The card is the one the owner is shown, so a secret in it offers none.
+ */
+async function grantCandidateFor(
+  host: ToolHost,
+  turn: ActiveTurn,
+  spec: ConductorToolSpec | undefined,
+  held: HeldCall,
+): Promise<GrantKey | undefined> {
+  if (!host.grantsUsable) return undefined;
+  if (host.state.run(turn.runId)?.authority) return undefined;
+  if (host.state.taintOf(turn.conversationId) !== undefined && !host.grantsCoverTaint) {
+    return undefined;
+  }
+  if (host.carriesSecret(held.args)) return undefined;
+  return grantKeyOf(spec, held.args);
 }
 
 /** Under a held delegation: what the brief can do once it runs. */
@@ -903,12 +1046,26 @@ function playbookTool(host: ToolHost, spec: ConductorToolSpec): MakaTool {
       const { actionRef, ...args } = raw as Record<string, unknown> & { actionRef?: string };
       let approved: string | undefined;
       if (guarded) {
+        // A grant covers a first call of an irreversible tool; a call that carries an actionRef is
+        // judged on that approval alone.
+        const grant = actionRef === undefined && always ? await grantKeyOf(spec, args) : undefined;
         // An approval covers the call only while its card reads as the owner saw it (T15).
         const shown =
-          actionRef === undefined ? undefined : await approvalCard(spec, spec.name, args);
-        if (actionRef !== undefined) gate(host, turn);
-        holdUnlessApproved(host, turn, spec.name, args, actionRef, always, shown);
-        approved = shown;
+          actionRef === undefined && grant === undefined
+            ? undefined
+            : await approvalCard(spec, spec.name, args);
+        if (shown !== undefined) gate(host, turn);
+        const how = holdUnlessApproved(
+          host,
+          turn,
+          spec.name,
+          args,
+          actionRef,
+          always,
+          shown,
+          grant,
+        );
+        approved = how === 'free' ? undefined : shown;
       }
       if (policy.externalResult) host.state.taint(turn.conversationId, `tool:${spec.name}`);
       return spec.impl(args as never, {
