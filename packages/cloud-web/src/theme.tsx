@@ -5,13 +5,16 @@ export type Mode = 'light' | 'dark';
 
 const STORAGE_KEY = 'maka.theme';
 
-/** The same accent as tokens.css, so Astryx's own controls (buttons, focus rings) match the cards. */
+/**
+ * Astryx's own controls (buttons, focus rings) are ink, like the selected navigation pill: actions
+ * stay calm, and the blue accent in tokens.css is kept for what needs the person.
+ */
 const makaTheme = defineTheme({
   name: 'maka',
   tokens: {
-    '--color-accent': ['#3043c4', '#a3b1ff'],
+    '--color-accent': ['#111318', '#f2f4f8'],
     '--color-on-accent': ['#ffffff', '#0d1322'],
-    '--color-text-accent': ['#3043c4', '#a3b1ff'],
+    '--color-text-accent': ['#111318', '#f2f4f8'],
   },
   components: {
     button: { base: { borderRadius: '9999px', fontWeight: '500' } },

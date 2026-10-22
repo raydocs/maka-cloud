@@ -37,8 +37,9 @@ test('the send button is plainly at rest when empty and filled when there is som
   await rerender(
     wrap(<RoundButton label="Send" glyph="↑" disabled={false} onPress={() => sent.push('x')} />),
   );
+  // Filled with ink, like every action; the accent is kept for what needs the person.
   expect(flat(screen.getByRole('button', { name: 'Send' }).props.style).backgroundColor).toBe(
-    DARK.accent,
+    DARK.pillOn,
   );
   await fireEvent.press(screen.getByRole('button', { name: 'Send' }));
   expect(sent).toEqual(['x']);

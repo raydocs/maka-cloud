@@ -69,7 +69,7 @@ test('a finished task arrives as one card, its picture opens large, and its page
   await expect(card.getByText('The login page no longer loops.', { exact: true })).toBeVisible();
   await expect(card).not.toContainText('Tests pass and the screenshot');
   await expect(card.getByText('Login page after fix', { exact: true })).toBeVisible();
-  await expect(card.getByRole('link', { name: 'Open pull request ↗' })).toHaveAttribute(
+  await expect(card.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
     'href',
     'https://github.com/example/repo/pull/12',
   );

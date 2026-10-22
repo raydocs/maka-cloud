@@ -1,3 +1,4 @@
+import { ChevronDown } from 'lucide-react';
 import { useRef } from 'react';
 import { type Mode, MODES } from '@maka-cloud/client';
 
@@ -39,9 +40,7 @@ export function ModePicker({
     <details className="mode-menu" ref={menu}>
       <summary aria-label={`How much care: ${current?.label}`}>
         {current?.label}
-        <span aria-hidden="true" className="mode-caret">
-          ▾
-        </span>
+        <ChevronDown aria-hidden="true" size={14} className="mode-caret" />
       </summary>
       <fieldset className="mode-picker" disabled={disabled}>
         <legend className="sr-only">How much care this needs</legend>

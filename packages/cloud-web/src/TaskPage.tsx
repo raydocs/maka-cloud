@@ -1,3 +1,4 @@
+import { ArrowUpRight } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   type CloudClient,
@@ -109,7 +110,7 @@ export function TaskPage({
           <>
             {' · '}
             <a href={pull} target="_blank" rel="noreferrer noopener">
-              Pull request ↗
+              Pull request <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           </>
         )}
@@ -164,7 +165,7 @@ export function TaskPage({
             {result.kind === 'image' && <ImageResult name={result.name} blob={result.blob} />}
             {result.kind === 'link' && (
               <a href={result.url} target="_blank" rel="noreferrer noopener">
-                {result.url} ↗
+                {result.url} <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
               </a>
             )}
             {result.kind === 'failed' && <p className="muted">This result could not be loaded.</p>}

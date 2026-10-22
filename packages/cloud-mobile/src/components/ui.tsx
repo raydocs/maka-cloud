@@ -131,7 +131,7 @@ const TEXT: Record<TextKind, TextStyle> = {
   error: { fontSize: 15, lineHeight: 21 },
 };
 
-/** A button: filled when it is the recommended answer, outlined otherwise. At least 44 pt tall. */
+/** A button: filled with ink when it is the recommended answer, outlined otherwise. At least 44 pt tall. */
 export function PillButton({
   label,
   onPress,
@@ -160,12 +160,12 @@ export function PillButton({
       style={({ pressed }) => [
         styles.pill,
         primary
-          ? { backgroundColor: t.accent, borderColor: t.accent }
+          ? { backgroundColor: t.pillOn, borderColor: t.pillOn }
           : { backgroundColor: t.chip, borderColor: t.cardEdge },
         { opacity: disabled ? 0.5 : pressed ? 0.8 : 1 },
       ]}
     >
-      <Text style={[styles.pillText, { color: primary ? t.onAccent : t.ink }]} allowFontScaling>
+      <Text style={[styles.pillText, { color: primary ? t.onPillOn : t.ink }]} allowFontScaling>
         {label}
       </Text>
     </Pressable>
@@ -203,8 +203,9 @@ export function QuietButton({
 }
 
 /**
- * A small round send button next to a field. It is filled with the accent when there is something to
- * send; when there is not, it is an outlined ring in the muted ink (readable, but plainly at rest).
+ * A small round send button next to a field. It is filled with ink when there is something to send;
+ * when there is not, it is an outlined ring in the muted ink (readable, but plainly at rest). Actions
+ * are ink, as on the web; the accent is kept for what needs the person.
  */
 export function RoundButton({
   label,
@@ -233,11 +234,11 @@ export function RoundButton({
         styles.round,
         disabled
           ? { backgroundColor: t.chip, borderColor: t.inkMuted, borderWidth: 1.5 }
-          : { backgroundColor: t.accent, borderColor: t.accent, borderWidth: 1.5 },
+          : { backgroundColor: t.pillOn, borderColor: t.pillOn, borderWidth: 1.5 },
       ]}
     >
       <Text
-        style={{ color: disabled ? t.inkMuted : t.onAccent, fontSize: 20, fontWeight: '700' }}
+        style={{ color: disabled ? t.inkMuted : t.onPillOn, fontSize: 20, fontWeight: '700' }}
         allowFontScaling={false}
       >
         {glyph}

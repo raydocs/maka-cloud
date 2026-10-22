@@ -36,7 +36,7 @@ select {
   color: inherit;
 }
 a {
-  color: var(--accent);
+  color: var(--ink);
   text-underline-offset: 3px;
 }
 button,
@@ -836,7 +836,7 @@ a.evidence-chip:hover {
 }
 .computer summary {
   cursor: pointer;
-  color: var(--accent);
+  color: var(--ink);
   padding: 6px 0;
 }
 
@@ -860,7 +860,7 @@ a.evidence-chip:hover {
   min-width: 0;
 }
 .file-symbol {
-  color: var(--accent);
+  color: var(--ink-muted);
   font-size: 22px;
 }
 .artifact-kind {
@@ -1160,7 +1160,7 @@ a.evidence-chip:hover {
   min-height: 40px;
   padding: 6px 18px;
   border-radius: var(--radius-pill);
-  background: var(--accent);
+  background: var(--pill-on);
   color: var(--on-accent);
   font-weight: var(--w-medium);
   text-decoration: none;
@@ -1195,7 +1195,7 @@ a.evidence-chip:hover {
   overflow: hidden;
   font-size: 40px;
   font-weight: var(--w-medium);
-  color: var(--accent);
+  color: var(--ink-muted);
 }
 .source-image img {
   width: 100%;
@@ -1352,7 +1352,7 @@ a.evidence-chip:hover {
   padding: 6px 0;
   border: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--ink);
   font-size: 13px;
   cursor: pointer;
   text-align: left;
@@ -1451,7 +1451,7 @@ a.evidence-chip:hover {
   cursor: pointer;
 }
 .switch.on {
-  background: var(--accent);
+  background: var(--pill-on);
 }
 .switch:disabled {
   opacity: 0.6;
@@ -1510,7 +1510,7 @@ a.evidence-chip:hover {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: var(--ink);
   cursor: pointer;
   min-height: 44px;
   text-decoration: underline;
@@ -1612,4 +1612,40 @@ a.evidence-chip:hover {
 }
 .mode-picker:disabled {
   opacity: 0.6;
+}
+
+/* The language: actions are ink, colour is for what needs you, numbers and code-like things are mono. */
+/* Numbers and code-like things in mono (cost, file names, PR numbers); words stay in the sans. */
+.done-cost,
+.spend strong,
+.count,
+.evidence-chip {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.stat-value {
+  font-variant-numeric: tabular-nums;
+}
+/* Colour only for what needs you: a blue dot beside "Waiting on you". */
+section[aria-label="Decisions waiting"] > h2::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin: 0 10px 2px 0;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+.icon-inline {
+  vertical-align: -2px;
+}
+.delivery-diff-tile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mode-caret {
+  transition: transform var(--dur-fast) var(--ease);
 }

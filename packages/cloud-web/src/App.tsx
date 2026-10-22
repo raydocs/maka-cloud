@@ -1,3 +1,4 @@
+import { ArrowUp, ArrowUpRight, Settings as SettingsIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
 import { useMode } from './theme';
@@ -300,7 +301,8 @@ function ArtifactList({
             </span>
             {link && (
               <a href={link} target="_blank" rel="noreferrer noopener">
-                {kind === 'Pull request' ? 'Open pull request' : 'Open link'} ↗
+                {kind === 'Pull request' ? 'Open pull request' : 'Open link'}{' '}
+                <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
               </a>
             )}
             {listing.kind === 'file' && !loaded && (
@@ -474,7 +476,7 @@ export function ConversationView({
               aria-label={busy === 'message' ? 'Sending…' : 'Send message'}
               disabled={Boolean(busy) || !draft.trim()}
             >
-              <span aria-hidden="true">↑</span>
+              <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
             </button>
           </div>
           <ModePicker
@@ -709,16 +711,7 @@ export function Shell({
             aria-current={view === 'settings' ? 'page' : undefined}
             onClick={() => onView('settings')}
           >
-            <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20">
-              <path
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.3l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.6 7.6 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.6 7.6 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z"
-              />
-            </svg>
+            <SettingsIcon aria-hidden="true" size={19} strokeWidth={1.8} />
             <span className="sr-only">Settings</span>
           </button>
         </nav>

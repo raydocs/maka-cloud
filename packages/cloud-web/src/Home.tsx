@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ArrowUp } from 'lucide-react';
 import {
   type CloudClient,
   type Conversation,
@@ -274,7 +275,7 @@ export function Home({
                 aria-label={starting ? 'Starting…' : 'Start'}
                 disabled={starting || !draft.trim()}
               >
-                <span aria-hidden="true">↑</span>
+                <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
               </button>
             </div>
             <ModePicker
