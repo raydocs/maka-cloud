@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   orderByDescendingWeight,
+  parseCliArgs,
   runWorkspaceTests,
   testSourceWeight,
 } from './run-workspace-tests-parallel.mjs';
@@ -193,5 +194,26 @@ test('a real workspace whose dist holds no tests fails instead of passing empty'
         if (context !== undefined) process.env.NODE_TEST_CONTEXT = context;
       }
     },
+  );
+});
+
+test('a longer per-workspace time limit can be asked for on the command line', () => {
+  const dirs = ['a', 'b'];
+  assert.equal(parseCliArgs(['--concurrency=3'], dirs).workspaceTimeoutMs, undefined);
+  assert.equal(
+    parseCliArgs(['--workspace-timeout-minutes=30'], dirs).workspaceTimeoutMs,
+    1_800_000,
+  );
+  assert.equal(
+    parseCliArgs(['--workspace-timeout-minutes', '2'], dirs).workspaceTimeoutMs,
+    120_000,
+  );
+  assert.throws(
+    () => parseCliArgs(['--workspace-timeout-minutes=0'], dirs),
+    /workspace-timeout-minutes must be greater than zero/u,
+  );
+  assert.throws(
+    () => parseCliArgs(['--workspace-timeout-minutes=soon'], dirs),
+    /workspace-timeout-minutes must be greater than zero/u,
   );
 });
