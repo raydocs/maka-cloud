@@ -115,6 +115,19 @@ read is as the T28 thread reports it; the merge times are from GitHub.
 - #338 00:11Z A check that cannot get its own namespaces says why; launch notes list it as a live-run check
 - #345 00:19Z A recovered journal row without an attempt is booked once however often it is read (recheck B2)
 
+## Owner's local Codex review, E-lane (recheck28)
+
+These merged after the owner's local Codex (gpt-6.1-sol, xhigh) approved each one, with CI green on
+the final commit. The owner reports the approval; the PR bodies do not repeat it.
+
+- #334 01:25Z Box check: the capability and setuid scan covers every program the agent can run, and no file name hides one (batch30 A1, A3)
+- #339 01:25Z Egress guard: the lock lives in a directory only the sandbox user can enter, not in /tmp (batch30 A4)
+- #344 01:25Z Egress: check the guard before every task-code exec (batch29 A2)
+
+Not in the owner's list, so its review status is not recorded here:
+
+- #353 01:15Z The agent starts with named variables only (isolation F8, I9)
+
 ## Not in the list
 
 - #309 (Egress guard: refuse a box where the lock cannot be taken) was closed unmerged at 22:28Z; #310 is its replacement.
