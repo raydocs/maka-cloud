@@ -419,6 +419,21 @@ while IFS= read -r -d '' p <&3 && IFS= read -r -d '' mode <&4; do
     [ "$mode" = 100755 ] && chmod +x "$p"
   fi
 done
+# A link put back must lead inside the workspace, or nowhere: through one that leads out, or past a
+# directory the agent cannot search, the test meets a permission error, an ordinary exit status that
+# would be taken for "the test fails on the base". Resolved as the agent, after every link is back.
+wsr=$(pwd -P) || exit 1
+exec 3< "$st/paths" 4< "$st/modes"
+while IFS= read -r -d '' p <&3 && IFS= read -r -d '' mode <&4; do
+  [ "$mode" = 120000 ] || continue
+  if to=$(LC_ALL=C realpath -- "$p" 2>&1); then
+    case "$to/" in "$wsr"/*) continue ;; esac
+  else
+    case "$to" in *": No such file or directory"|*": Not a directory") continue ;; esac
+  fi
+  echo "LINK_LEADS_OUT $p"
+  exit 0
+done
 echo "REVERTED $count"
 `;
 

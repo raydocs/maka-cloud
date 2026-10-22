@@ -301,7 +301,8 @@ test('a link of the base put back over a directory of the change takes nothing o
   await fs.writeFile(join(ws, 'cache', 'child'), 'the change\n');
   const before = await snapshot(outside);
   const out = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
-  assert.match(out, /^REVERTED \d+$/mu, out);
+  // The link leads out, so the check is refused; it was put back, after the removals.
+  assert.match(out, /^LINK_LEADS_OUT cache$/mu, out);
   assert.equal(await fs.readlink(join(ws, 'cache')), join(outside, 'cache'));
   assert.deepEqual(await snapshot(outside), before, 'the revert');
   assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
@@ -373,6 +374,58 @@ test('a directory named by a newline under a linked directory is no way past the
   await linkLib();
   assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORE_FAILED$/mu);
   assert.deepEqual(await snapshot(outside), before, 'the restore');
+});
+
+test('a link the revert puts back that leads out of the workspace refuses the base check, not counts as a failure', {
+  // Root searches every directory: the permission error cannot be seen as root.
+  skip: process.getuid?.() === 0 ? 'runs as root' : undefined,
+}, async (t) => {
+  const { tmp } = await setup(t);
+  const outside = join(tmp, 'outside');
+  await fs.mkdir(join(outside, 'closed'), { recursive: true });
+  await fs.writeFile(join(outside, 'open'), 'readable, and still not the workspace\n');
+  await fs.writeFile(join(outside, 'closed', 'f'), 'behind a directory the agent cannot search\n');
+  const origin = join(tmp, 'origin');
+  await fs.symlink(join(outside, 'open'), join(origin, 'out'));
+  await fs.symlink(join(outside, 'closed', 'f'), join(origin, 'closed'));
+  await fs.symlink('b.txt', join(origin, 'inside'));
+  await fs.symlink('gone/x', join(origin, 'dangling'));
+  git(origin, 'add', '-A');
+  git(origin, 'commit', '-q', '-m', 'links');
+  const dir = join(tmp, 'links');
+  const cloned = run(CLONE_SCRIPT, {
+    MAKA_DIR: dir,
+    MAKA_REPO_URL: `file://${origin}`,
+    MAKA_REF: 'HEAD',
+  });
+  const base = /^BASE ([0-9a-f]{40})$/mu.exec(cloned)?.[1] as string;
+  const ws = join(dir, 'workspace');
+  await fs.chmod(join(outside, 'closed'), 0o000);
+  const replace = async (name: string) => {
+    await fs.rm(join(ws, name));
+    await fs.writeFile(join(ws, name), 'the change\n');
+  };
+  // The change made each link a file; the revert puts the link back.
+  const targets = { out: join(outside, 'open'), closed: join(outside, 'closed', 'f') };
+  try {
+    for (const [name, target] of Object.entries(targets)) {
+      await replace(name);
+      const out = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
+      assert.match(out, new RegExp(`^LINK_LEADS_OUT ${name}$`, 'mu'), out);
+      assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
+      assert.equal(await fs.readFile(join(ws, name), 'utf8'), 'the change\n');
+      await fs.rm(join(ws, name));
+      await fs.symlink(target, join(ws, name));
+    }
+  } finally {
+    // Searchable again, so the temporary directory can be removed.
+    await fs.chmod(join(outside, 'closed'), 0o755);
+  }
+  // A link inside the workspace, and one that leads nowhere, are no reason to refuse.
+  await replace('inside');
+  await replace('dangling');
+  const ok = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
+  assert.match(ok, /^REVERTED 2$/mu, ok);
 });
 
 test('the agent group reads the stage and writes the backup, and cannot write the stage', async (t) => {

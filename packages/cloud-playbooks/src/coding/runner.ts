@@ -242,15 +242,22 @@ interface CheckResult {
 }
 
 /**
+ * What a test prints when the account it runs as may not read or do something: the agent's account
+ * is not the one the project's own tests run as, so it is not a failure of the code.
+ */
+const PERMISSION_ERROR = /\b(?:EACCES|EPERM)\b|permission denied|operation not permitted/iu;
+
+/**
  * Why a check that did not pass is not a test failure (it timed out, died, was killed by a
- * signal, or could not run its command), or undefined when it is one: a non-zero exit below 125
- * of its own.
+ * signal, could not run its command, or met a permission error), or undefined when it is one: a
+ * non-zero exit below 125 of its own.
  */
 function notATestFailure(check: CheckResult): string | undefined {
   if (check.timedOut) return 'timed out';
   if (check.exitCode < 0) return `did not finish (${check.output})`;
   if (check.exitCode >= 128) return `was killed by signal ${check.exitCode - 128}`;
   if (check.exitCode >= 125) return `could not run (exit ${check.exitCode})`;
+  if (PERMISSION_ERROR.test(check.output)) return 'met a permission error';
   return undefined;
 }
 
@@ -1304,7 +1311,7 @@ class CodingRun implements RunHandle {
     if (why !== undefined) {
       return {
         ok: false,
-        problem: `the reproduction test \`${repro.command}\` ${why} with your changes outside its files reverted, so it does not show the problem; it must fail by itself there, with an exit code from 1 to 124, within the time limit`,
+        problem: `the reproduction test \`${repro.command}\` ${why} with your changes outside its files reverted, so it does not show the problem; it must fail by itself there, with an exit code from 1 to 124 and no permission error, within the time limit`,
         output: onBase.output,
       };
     }

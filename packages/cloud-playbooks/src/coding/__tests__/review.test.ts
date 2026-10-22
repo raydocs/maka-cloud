@@ -60,6 +60,12 @@ for (const [label, onBase, why] of [
   ['times out', 'while :; do sleep 0.05; done', /timed out/],
   ['is killed by a signal', 'kill -9 $$', /killed by signal 9/],
   ['cannot run its command', 'no-such-command-here', /could not run \(exit 127\)/],
+  // Read through a link the revert put back, as the agent: not a failure of the code.
+  [
+    'meets a permission error',
+    'echo "cat: fixtures/data: Permission denied" >&2; exit 1',
+    /met a permission error/,
+  ],
 ] as const) {
   test(`a reproduction test that ${label} on the base commit does not prove the failure`, async (t) => {
     const h = await setup(t, { limits: { checkTimeoutMs: 1_000 } });
