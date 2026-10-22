@@ -122,6 +122,7 @@ test('a review panel shows the counts the review reported, and a review that cou
 
 const P1 = { severity: 'P1', title: 'add() ignores negative numbers', path: 'lib/add.sh', line: 1 };
 const P2 = { severity: 'P2', title: 'No test for the zero case' };
+const P3 = { severity: 'P3', title: 'The comment could be shorter' };
 const GUARDED = `${FIXED_ADD}# negative numbers are handled by the shell arithmetic\n`;
 
 const reviewsInRounds =
@@ -144,7 +145,7 @@ test('a coding run narrates its phases and shows a panel for each check, the cha
     await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), GUARDED);
     return 'ok';
   };
-  h.codex.script = reviewsInRounds([[P1, P2], [P2]]);
+  h.codex.script = reviewsInRounds([[P1, P2], [P3]]);
   const events = await collect(await h.runner.start(await h.spec('tsk_panels')));
   assert.deepEqual(terminal(events), { type: 'finished' });
 
@@ -174,7 +175,7 @@ test('a coding run narrates its phases and shows a panel for each check, the cha
       ['tests', 'passed', 'passed'],
       ['repro-base', 'passed', 'failed (exit 1)'],
       ['diff', 'passed', shown.diff?.summary ?? ''],
-      ['review', 'passed', '0 P1, 1 P2, 0 P3'],
+      ['review', 'passed', '0 P1, 0 P2, 1 P3'],
     ],
   );
   assert.match(shown.diff?.summary ?? '', /^\+\d+ −\d+ in 2 files$/u);
@@ -188,8 +189,38 @@ test('a coding run narrates its phases and shows a panel for each check, the cha
     ['running', 'running'],
     ['failed', '1 P1, 1 P2, 0 P3'],
     ['running', 'running'],
-    ['passed', '0 P1, 1 P2, 0 P3'],
+    ['passed', '0 P1, 0 P2, 1 P3'],
   ]);
+  zeroStats(h.runner);
+});
+
+test('every fix round is narrated and the review panel follows each review', async (t) => {
+  const h = await setup(t, { modes: DEFAULT_MODES });
+  h.claude.script = async (turn) => {
+    if (turn.n === 1) return fixes(turn);
+    await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), `${GUARDED}# round ${turn.n}\n`);
+    return 'ok';
+  };
+  h.codex.script = reviewsInRounds([[P1], [P2], []]);
+  const events = await collect(await h.runner.start(await h.spec('tsk_rounds')));
+  assert.deepEqual(terminal(events), { type: 'finished' });
+  assert.equal(
+    narrationOf(events).filter((line) => line === 'Fixing the problems the review found').length,
+    2,
+  );
+  assert.deepEqual(
+    panelsOf(events)
+      .filter((panel) => panel.panelId === 'review')
+      .map((panel) => [panel.state, panel.summary]),
+    [
+      ['running', 'running'],
+      ['failed', '1 P1, 0 P2, 0 P3'],
+      ['running', 'running'],
+      ['passed', '0 P1, 1 P2, 0 P3'],
+      ['running', 'running'],
+      ['passed', '0 P1, 0 P2, 0 P3'],
+    ],
+  );
   zeroStats(h.runner);
 });
 
