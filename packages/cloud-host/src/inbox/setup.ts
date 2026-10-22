@@ -138,5 +138,5 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     },
   });
   setup.onStarted?.(supervisor);
-  return inboxService(supervisor);
+  return inboxService(supervisor, conductor);
 }

@@ -9,6 +9,7 @@ import {
   type ComputerInput,
   type ComputerState,
   type FeedEvent,
+  type HomeCard,
   type InboxAnswerRequest,
   type InboxAnswerResult,
   type InboxItem,
@@ -285,6 +286,26 @@ export class CloudClient {
       'inbox',
     );
     return Array.isArray(result.items) ? result.items : [];
+  }
+  /** Home's cards in the server's order; `Unsupported` on a server without `/v1/home`. */
+  async home(): Promise<HomeCard[]> {
+    const result = await this.request<{ cards: HomeCard[] }>(routes.home, {}, 'home');
+    return Array.isArray(result.cards) ? result.cards : [];
+  }
+  /** Tells the server the person saw these cards and left Home. */
+  homeSeen(cardIds: readonly string[]) {
+    return this.request<{ seen: string[]; visitedAt: number }>(routes.homeSeen, {
+      method: 'POST',
+      body: JSON.stringify({ cardIds }),
+    });
+  }
+  /** Moves a card to just after `after` (first when null) inside its kind; answers the new list. */
+  async moveHomeCard(cardId: string, after: string | null): Promise<HomeCard[]> {
+    const result = await this.request<{ cards: HomeCard[] }>(routes.homeOrder, {
+      method: 'POST',
+      body: JSON.stringify({ cardId, after }),
+    });
+    return Array.isArray(result.cards) ? result.cards : [];
   }
   /** The invite's projects and their duties; `Unsupported` where no duties engine runs. */
   async listProjects(): Promise<ProjectView[]> {

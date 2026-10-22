@@ -34,6 +34,7 @@ export interface Harness {
     conversationId: string,
     questionId: string,
     optionId: string,
+    caller?: string,
   ): ReturnType<Conductor['onAnswer']>;
   /** Builds a new conductor over the same root, as after a restart. */
   restart(options?: Partial<ConductorOptions>): Promise<Conductor>;
@@ -112,9 +113,9 @@ export async function makeHarness(t: TestContext, options: HarnessOptions = {}):
       );
       return messageId;
     },
-    answer: (conversationId, questionId, optionId) =>
+    answer: (conversationId, questionId, optionId, caller) =>
       harness.conductor.onAnswer(
-        { conversationId, questionId, optionId },
+        { conversationId, questionId, optionId, ...(caller === undefined ? {} : { caller }) },
         harness.access(conversationId),
       ),
     restart: async (overrides) => {

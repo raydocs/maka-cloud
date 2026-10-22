@@ -21,30 +21,30 @@ function ModeProbe() {
   return (
     <>
       <span data-testid="mode">{mode}</span>
-      <button type="button" onClick={() => setMode('light')}>
-        go light
+      <button type="button" onClick={() => setMode('dark')}>
+        go dark
       </button>
     </>
   );
 }
 
-test('dark is the default, a choice is kept in this browser and sets the page scheme', async () => {
+test('light is the default, a choice is kept in this browser and sets the page scheme', async () => {
   const { unmount } = render(
     <ThemeProvider>
       <ModeProbe />
     </ThemeProvider>,
   );
-  expect(screen.getByTestId('mode').textContent).toBe('dark');
-  await waitFor(() => expect(document.documentElement.getAttribute('data-theme')).toBe('dark'));
-  fireEvent.click(screen.getByText('go light'));
   expect(screen.getByTestId('mode').textContent).toBe('light');
   await waitFor(() => expect(document.documentElement.getAttribute('data-theme')).toBe('light'));
-  expect(localStorage.getItem('maka.theme')).toBe('light');
+  fireEvent.click(screen.getByText('go dark'));
+  expect(screen.getByTestId('mode').textContent).toBe('dark');
+  await waitFor(() => expect(document.documentElement.getAttribute('data-theme')).toBe('dark'));
+  expect(localStorage.getItem('maka.theme')).toBe('dark');
   unmount();
-  expect(readMode()).toBe('light');
+  expect(readMode()).toBe('dark');
 });
 
-test('a browser that refuses storage still gets dark and can still switch', async () => {
+test('a browser that refuses storage still gets light and can still switch', async () => {
   vi.stubGlobal('localStorage', {
     getItem: () => {
       throw new Error('blocked');
@@ -53,19 +53,19 @@ test('a browser that refuses storage still gets dark and can still switch', asyn
       throw new Error('blocked');
     },
   });
-  expect(readMode()).toBe('dark');
+  expect(readMode()).toBe('light');
   render(
     <ThemeProvider>
       <ModeProbe />
     </ThemeProvider>,
   );
-  fireEvent.click(screen.getByText('go light'));
-  expect(screen.getByTestId('mode').textContent).toBe('light');
+  fireEvent.click(screen.getByText('go dark'));
+  expect(screen.getByTestId('mode').textContent).toBe('dark');
 });
 
-test('a stored value that is not a known mode is dark', () => {
+test('a stored value that is not a known mode is light', () => {
   localStorage.setItem('maka.theme', 'neon');
-  expect(readMode()).toBe('dark');
+  expect(readMode()).toBe('light');
 });
 
 test('the navigation marks the open section and moves between them', () => {
@@ -156,11 +156,11 @@ test('Settings holds appearance, memory, notifications and the way out', () => {
   );
   expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
   const choice = screen.getByRole('group', { name: 'Color mode' });
-  expect(within(choice).getByRole('button', { name: 'Dark' }).getAttribute('aria-pressed')).toBe(
+  expect(within(choice).getByRole('button', { name: 'Light' }).getAttribute('aria-pressed')).toBe(
     'true',
   );
-  fireEvent.click(within(choice).getByRole('button', { name: 'Light' }));
-  expect(within(choice).getByRole('button', { name: 'Light' }).getAttribute('aria-pressed')).toBe(
+  fireEvent.click(within(choice).getByRole('button', { name: 'Dark' }));
+  expect(within(choice).getByRole('button', { name: 'Dark' }).getAttribute('aria-pressed')).toBe(
     'true',
   );
   expect(screen.getByText('Memory')).toBeTruthy();
