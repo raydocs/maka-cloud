@@ -265,7 +265,8 @@ export function DeliveryCard({
           <span aria-hidden="true">±</span> View the changes
         </button>
       )}
-      {caption && <p className="delivery-caption muted">{caption}</p>}
+      {/* The caption names a picture; the changes tile already says what it is. */}
+      {shot && caption && <p className="delivery-caption muted">{caption}</p>}
       {failed && <p className="muted">The picture could not be loaded.</p>}
       {actions.length > 0 && (
         <div className="delivery-actions">

@@ -1,6 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
-import { ChoicePanel } from '@maka/ui';
 import { useMode } from './theme';
 import {
   ApiError,
@@ -52,8 +51,10 @@ export function QuestionCard({
   onAnswer: (option: string, text?: string) => void;
 }) {
   const card = questionCardModel(question, answered);
-  const [selected, setSelected] = useState(card.firstOption);
   const [note, setNote] = useState('');
+  const [noting, setNoting] = useState(false);
+  // The same shape as the card on Home: the answers are the buttons, the recommended one first and
+  // filled, and a note only when asked for. One tap answers.
   return (
     <section className="question" aria-label="Your decision">
       <div className="section-heading">
@@ -74,37 +75,36 @@ export function QuestionCard({
         <p className="acknowledged">Answer recorded: {card.answeredLabel}</p>
       ) : (
         <>
-          <ChoicePanel
-            label="Choose an answer"
-            value={selected}
-            disabled={disabled}
-            options={card.options.map((o) => ({
-              value: o.id,
-              label: o.label,
-              description: o.recommended ? 'Recommended' : undefined,
-            }))}
-            onChange={setSelected}
-            onConfirm={() => {
-              if (selected) onAnswer(selected, note || undefined);
-            }}
-            onEscape={() => {}}
-          />
-          <label className="note-label">
-            Additional context (optional)
-            <textarea
-              rows={2}
-              maxLength={4000}
-              value={note}
-              onChange={(e) => setNote(displayText(e.target.value))}
-              disabled={disabled}
-            />
-          </label>
-          <Button
-            label="Send answer"
-            variant="primary"
-            isDisabled={disabled || !selected}
-            onClick={() => onAnswer(selected, note || undefined)}
-          />
+          {!noting && (
+            <button type="button" className="quiet-action" onClick={() => setNoting(true)}>
+              Add a note
+            </button>
+          )}
+          {noting && (
+            <label className="note-label">
+              Additional context (optional)
+              <textarea
+                rows={2}
+                maxLength={4000}
+                value={note}
+                onChange={(e) => setNote(displayText(e.target.value))}
+                disabled={disabled}
+                // The person just asked to write the note.
+                autoFocus
+              />
+            </label>
+          )}
+          <div className="inbox-options">
+            {card.options.map((option) => (
+              <Button
+                key={option.id}
+                label={option.label}
+                variant={option.recommended ? 'primary' : 'secondary'}
+                isDisabled={disabled}
+                onClick={() => onAnswer(option.id, note.trim() || undefined)}
+              />
+            ))}
+          </div>
         </>
       )}
     </section>
@@ -167,7 +167,7 @@ function TaskBranch({
           <span>{taskLabel(task)}</span>
           {task.parentTaskId === undefined && (
             <span>
-              Cost so far: {dollars(task.costUsd)}
+              {live ? 'Cost so far' : 'Cost'}: {dollars(task.costUsd)}
               {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
             </span>
           )}
@@ -236,6 +236,12 @@ function TaskBranch({
 }
 
 /** Where a result link points, said in the user's words; nothing here claims the result was checked. */
+/** "Pull request #42" for a GitHub pull request link, which would otherwise be named "github.com". */
+export function pullRequestName(url: string | undefined): string | undefined {
+  const number = url?.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)(?:[/?#]|$)/u)?.[1];
+  return number ? `Pull request #${number}` : undefined;
+}
+
 function artifactKind(listing: ArtifactListing, url: string | undefined): string {
   if (url && /\/pull\/\d+/u.test(url)) return 'Pull request';
   if (/\.(diff|patch)$/iu.test(listing.name)) return 'Changes';
@@ -282,7 +288,7 @@ function ArtifactList({
               <span className="file-symbol" aria-hidden="true">
                 ▤
               </span>
-              <h3>{displayText(listing.name)}</h3>
+              <h3>{displayText(pullRequestName(link) ?? listing.name)}</h3>
             </div>
             <span className="artifact-kind">
               {kind} · {displayText(title)}
@@ -358,6 +364,14 @@ export function ConversationView({
 
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
+  const topLevel = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
+  // A top-level task's result card holds its outcome, so the inbox here does not announce it again.
+  // The same rule as `TaskDelivery`, which draws a result card only for these.
+  const shown = new Set(
+    topLevel
+      .filter((task) => task.state === 'succeeded' && task.manifest?.summary !== undefined)
+      .map((task) => task.taskId),
+  );
 
   return (
     <div className="chat">
@@ -379,24 +393,26 @@ export function ConversationView({
           )}
           {state.messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
-              <span className="message-author">
-                {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}
+              <span className="sr-only">
+                {message.role === 'user'
+                  ? 'You'
+                  : message.role === 'notice'
+                    ? 'Update'
+                    : BRAND.name}
               </span>
               <p>{displayText(message.text)}</p>
             </article>
           ))}
         </div>
-        {tasks
-          .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-          .map((task) => (
-            <TaskDelivery
-              key={task.taskId}
-              client={client}
-              task={task}
-              listings={artifacts[task.taskId]?.listings ?? []}
-              onOpenTask={onOpenTask}
-            />
-          ))}
+        {topLevel.map((task) => (
+          <TaskDelivery
+            key={task.taskId}
+            client={client}
+            task={task}
+            listings={artifacts[task.taskId]?.listings ?? []}
+            onOpenTask={onOpenTask}
+          />
+        ))}
         {questions.map((question) => (
           <QuestionCard
             key={question.questionId}
@@ -406,20 +422,18 @@ export function ConversationView({
             onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
           />
         ))}
-        {/* Each result shows once: proposed cards live on Home, and a finished task's card here
-            does not list again the files and links its result card above already shows. */}
+        {/* Proposed cards live on Home. A finished task whose result card is above is not
+            announced again here; it is acknowledged on Home. */}
         <InboxPanel
-          items={Object.values(state.inbox).filter((item) => item.kind !== 'suggestion')}
+          items={Object.values(state.inbox).filter(
+            (item) =>
+              item.kind !== 'suggestion' &&
+              !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
+          )}
           openQuestions={openQuestions}
           disabled={Boolean(busy)}
           onAnswer={answerItem}
-          shownResults={
-            new Set(
-              tasks
-                .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-                .map((task) => task.taskId),
-            )
-          }
+          shownResults={shown}
         />
         {error && (
           <p role="alert" className="error">
@@ -481,18 +495,16 @@ export function ConversationView({
           </div>
         </section>
         <section className="card section-card" aria-label="Task tree">
-          <h2 className="panel-heading">Live tasks</h2>
+          <h2 className="panel-heading">Tasks</h2>
           {tasks.length ? (
             <ul className="task-tree">
-              {tasks
-                .filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId])
-                .map((task) => (
-                  <TaskBranch
-                    key={task.taskId}
-                    {...{ task, client, tasks, noPause, act, control }}
-                    busy={Boolean(busy)}
-                  />
-                ))}
+              {topLevel.map((task) => (
+                <TaskBranch
+                  key={task.taskId}
+                  {...{ task, client, tasks, noPause, act, control }}
+                  busy={Boolean(busy)}
+                />
+              ))}
             </ul>
           ) : (
             <p className="muted">Tasks will appear as the plan takes shape.</p>
@@ -786,17 +798,22 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               conversation={selected}
               onOpenTask={(task) => setTaskPage({ task, from: 'chat' })}
               picker={
-                <select
-                  aria-label="Select conversation"
-                  value={chosen}
-                  onChange={(e) => setChosen(e.target.value)}
-                >
-                  {session.conversations.map((c) => (
-                    <option key={c.conversationId} value={c.conversationId}>
-                      {displayText(c.title ?? 'Untitled conversation')}
-                    </option>
-                  ))}
-                </select>
+                session.conversations.length > 1 && (
+                  <select
+                    aria-label="Switch conversation"
+                    value=""
+                    onChange={(e) => e.target.value && setChosen(e.target.value)}
+                  >
+                    <option value="">Switch conversation</option>
+                    {session.conversations
+                      .filter((c) => c.conversationId !== chosen)
+                      .map((c) => (
+                        <option key={c.conversationId} value={c.conversationId}>
+                          {displayText(c.title ?? 'Untitled conversation')}
+                        </option>
+                      ))}
+                  </select>
+                )
               }
             />
           ) : (

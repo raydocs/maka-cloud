@@ -206,9 +206,14 @@ test('someone with conversations lands in the latest one; a first visit lands on
   );
   const chat = await screen.findByRole('region', { name: 'Conversation' });
   expect(within(chat).getByRole('heading', { level: 1 }).textContent).toBe('Latest');
-  expect(
-    (screen.getByRole('combobox', { name: 'Select conversation' }) as HTMLSelectElement).value,
-  ).toBe('cnv_b');
+  // The switcher names the other conversations instead of repeating the open one's title.
+  const picker = screen.getByRole('combobox', { name: 'Switch conversation' }) as HTMLSelectElement;
+  expect([...picker.options].map((o) => o.textContent)).toEqual(['Switch conversation', 'Older']);
+  fireEvent.change(picker, { target: { value: 'cnv_a' } });
+  const switched = await screen.findByRole('region', { name: 'Conversation' });
+  await waitFor(() =>
+    expect(within(switched).getByRole('heading', { level: 1 }).textContent).toBe('Older'),
+  );
   unmount();
 
   signedIn([]);

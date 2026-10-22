@@ -54,12 +54,13 @@ test('one sentence in, a watched piece of work and a reviewable result out', asy
     },
   });
   await expect(page.getByText('Needs your decision')).toBeVisible();
-  await expect(page.getByRole('listbox').getByRole('option').first()).toContainText(
+  const decision = page.getByRole('region', { name: 'Your decision' });
+  await expect(decision.locator('.inbox-options button').first()).toHaveText(
     'Peer-reviewed papers only',
   );
-  await expect(page.getByRole('listbox').getByRole('option').first()).toContainText('Recommended');
+  await decision.getByRole('button', { name: 'Add a note' }).click();
   await page.getByLabel('Additional context (optional)').fill('Keep it short.');
-  await page.getByRole('button', { name: 'Send answer' }).click();
+  await decision.getByRole('button', { name: 'Peer-reviewed papers only' }).click();
   await expect(page.getByText('Answer recorded: Peer-reviewed papers only')).toBeVisible();
   await expect(page.getByText('Needs your decision')).toHaveCount(0);
   expect(await control<unknown[]>(request, 'answers')).toEqual(

@@ -26,7 +26,7 @@ const question: Question = {
   recommended: 'quiet',
 };
 
-test('recommendation is first; keyboard can pick another answer and add context', () => {
+test('the answers are the buttons, the recommended one first and filled; a note only when asked for', () => {
   const answers: unknown[] = [];
   render(
     <QuestionCard
@@ -35,14 +35,17 @@ test('recommendation is first; keyboard can pick another answer and add context'
       onAnswer={(optionId, text) => answers.push({ optionId, text })}
     />,
   );
-  const options = screen.getAllByRole('option');
-  expect(options[0].textContent).toContain('A quieter launch');
-  expect(options[0].textContent).toContain('Recommended');
-  fireEvent.keyDown(screen.getByRole('listbox'), { key: 'ArrowDown' });
+  const card = screen.getByRole('region', { name: 'Your decision' });
+  const options = within(card.querySelector('.inbox-options') as HTMLElement).getAllByRole(
+    'button',
+  );
+  expect(options.map((o) => o.textContent)).toEqual(['A quieter launch', expect.any(String)]);
+  expect(screen.queryByLabelText('Additional context (optional)')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Add a note' }));
   fireEvent.change(screen.getByLabelText('Additional context (optional)'), {
     target: { value: 'Keep it short' },
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+  fireEvent.click(options[1] as HTMLElement);
   expect(answers).toEqual([{ optionId: 'bold', text: 'Keep it short' }]);
 });
 
@@ -91,7 +94,7 @@ test('an approval card is shown exactly as the approval binds it: no name filter
   );
   expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(card);
   expect(screen.getByText('{"taskId":"tsk_1","title":"Fix \uFF43odex login"}')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Go ahead' }));
   expect(answers).toEqual(['approve']);
 });
 
@@ -112,9 +115,11 @@ test('an approval card holding a hidden character cannot be approved', () => {
       onAnswer={() => {}}
     />,
   );
-  const options = screen.getAllByRole('option');
-  expect(options).toHaveLength(1);
-  expect(options[0]?.textContent).toContain("Don't do it");
+  const card = screen.getByRole('region', { name: 'Your decision' });
+  const options = within(card.querySelector('.inbox-options') as HTMLElement).getAllByRole(
+    'button',
+  );
+  expect(options.map((o) => o.textContent)).toEqual(["Don't do it"]);
   expect(screen.getByText(/cannot be approved here/)).toBeTruthy();
 });
 
