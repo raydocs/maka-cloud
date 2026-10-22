@@ -258,7 +258,12 @@ test('an approval that carries a key through percent escapes, \\u escapes or a s
       kind: 'approval',
       ask: 'Allow x()?',
       evidence: [`seen ${form}`],
-      options: [{ id: 'approve' }, { id: 'reject' }],
+      options: [
+        { id: 'approve' },
+        { id: 'approve_task' },
+        { id: 'approve_repository' },
+        { id: 'reject' },
+      ],
     }) as { ask: string; options: { id: string }[] };
     assert.equal(out.ask, WITHHELD_APPROVAL, form);
     assert.deepEqual(

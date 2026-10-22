@@ -119,9 +119,16 @@ function toPublicApproval(item: object): unknown {
   };
 }
 
-/** The options of a question with the one that approves taken out. */
+/** The answers that approve a held call: this once, and the two that also keep the approval as a grant. */
+const APPROVING_OPTIONS: ReadonlySet<unknown> = new Set([
+  'approve',
+  'approve_task',
+  'approve_repository',
+]);
+
+/** The options of a question with every one that approves taken out. */
 function withoutApprove(options: unknown[]): unknown[] {
-  return options.filter((option) => (option as { id?: unknown })?.id !== 'approve');
+  return options.filter((option) => !APPROVING_OPTIONS.has((option as { id?: unknown })?.id));
 }
 
 export function toPublicView(view: TaskView): PublicTaskView {

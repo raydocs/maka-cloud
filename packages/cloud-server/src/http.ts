@@ -30,6 +30,7 @@ import {
 import { type OpenedPages, type PreviewService, PreviewBusy, siteOf } from './previews.js';
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
+import type { HomeRoutes } from './home.js';
 import type { InboxRoutes } from './inbox.js';
 import type { AccountStore } from './accounts.js';
 import type { AuthRoutes } from './auth-routes.js';
@@ -182,6 +183,8 @@ export interface PublicApiDeps {
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
   /** Absent when no supervisor runs; the `/v1/inbox` routes then answer 404. */
   inbox?: InboxRoutes;
+  /** Home's cards, in the order the server keeps for each owner. */
+  home?: HomeRoutes;
   /** Absent when no sign-in is configured; `/v1/auth` then answers like any unknown path. */
   auth?: AuthRoutes;
   /** Absent when no duties engine runs; `/github/webhook` and `/v1/projects` then answer like any unknown path. */
@@ -606,6 +609,9 @@ export class PublicApi {
     }
     if (this.deps.duties && path.startsWith('/v1/projects')) {
       if (await this.deps.duties.handle(req, res, url, invite)) return;
+    }
+    if (this.deps.home && (path === '/v1/home' || path.startsWith('/v1/home/'))) {
+      if (await this.deps.home.handle(req, res, url, invite)) return;
     }
     if (this.deps.inbox && path.startsWith('/v1/inbox/')) {
       if (await this.deps.inbox.handle(req, res, url, invite)) return;
