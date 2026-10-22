@@ -9,8 +9,8 @@ features (box pool, proposed cards, plan vault) are out of scope; findings on th
 
 ## Verdict
 
-Three things stand between `main` and a first user. The first two are known and owned by a lane;
-the third came out of the #323 review and has no owner yet:
+Three things stood between `main` and a first user. The first two are known and owned by a lane;
+the third came out of the #323 review and was closed by #331 (a9d9faa, 2026-10-21 23:45Z):
 
 1. **Sign-in is an invite-token box, held in memory only.** The web app's first screen asks for the
    token, keeps it in React state and nowhere else (`packages/cloud-web/src/App.tsx:676-830`,
@@ -22,10 +22,13 @@ the third came out of the #323 review and has no owner yet:
    later (mechanism in "Restart" below). The rehearsal passes because its restart step tolerates the
    kill; a real task has never been restarted. T28 owns the fix (`post-launch-backlog.md`, "Go-live
    rehearsal" item 2).
-3. **The agent's git refuses its own checkout.** The clone is owned by the sandbox user and no
-   `safe.directory` reaches the agent, so the real CLI's `git status` fails with "dubious
-   ownership" (section 2). File edits work, which is why the `checkout` gate (#323) passes without
-   it. One small runner fix plus a `git status` in the gate.
+3. **The agent's git refused its own checkout (closed by #331).** The clone is owned by the
+   sandbox user and no `safe.directory` reached the agent, so the real CLI's `git status` failed
+   with "dubious ownership" (section 2). File edits worked, which is why the `checkout` gate (#323)
+   passed without it. #331 names the exact workspace as `safe.directory` in the agent's launch
+   environment (`cloud-runners/src/agent-user.ts`, `AGENT_ENTRY`, through `GIT_CONFIG_COUNT`), with
+   a real-account test; the `git status` as the agent in the rehearsal's `checkout` step is in #323
+   and is what shows it on a box.
 
 Everything else on the path is built, unit-tested and, except for the real sandbox, the real model
 and GitHub, rehearsed end to end in CI. The rest of this document is what to check on the first
@@ -84,16 +87,17 @@ Findings:
   agent's runs only in the final cleanup (`cloud-playbooks/src/coding/runner.ts:1797`); a background
   process the agent left in its turn survives into `verify` and `collect`. Fix: stop the task's agent
   runs, with no survivors, before the first revert and before `collect` (isolation-model.md F1).
-- **P2 (found in the #323 review, not yet owned)**: the real agent cannot run git in its checkout.
-  The clone runs as the sandbox user, so `.git` and every file are owned by it (#312 changes the
-  group, not the owner); git refuses a repository owned by another user ("dubious ownership")
-  unless `safe.directory` names it, and only the control user's `g()` has `safe.directory='*'`
-  (`cloud-playbooks/src/coding/scripts.ts:16`). The agent runs with the sandbox user's `HOME`
-  (`asAgentUser`, `--preserve-env`), which it cannot read. The real Claude CLI runs git in the work
-  directory for its own context, and the model runs `git status`/`git diff`; all of it fails while
-  file edits still work. Fix: `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory
-  GIT_CONFIG_VALUE_0=<workspace>` in the agent's launch environment, with a real-account test, and a
-  `git status` as the agent in the rehearsal's `checkout` step (#323).
+- **P2 (found in the #323 review), fixed by #331 (a9d9faa)**: the real agent could not run git in
+  its checkout. The clone runs as the sandbox user, so `.git` and every file are owned by it (#312
+  changes the group, not the owner); git refuses a repository owned by another user ("dubious
+  ownership") unless `safe.directory` names it, and only the control user's `g()` had
+  `safe.directory='*'` (`cloud-playbooks/src/coding/scripts.ts:16`). The agent runs with the sandbox
+  user's `HOME` (`asAgentUser`, `--preserve-env`), which it cannot read. The real Claude CLI runs git
+  in the work directory for its own context, and the model runs `git status`/`git diff`; all of it
+  failed while file edits still worked. #331 exports `GIT_CONFIG_KEY_n=safe.directory` with the
+  workspace's real path in the agent's entry (`agent-user.ts`, `AGENT_ENTRY`, both the run and the
+  exec branch), command-line scope being the one protected configuration git reads it from, with a
+  real-account test; the `git status` as the agent in the rehearsal's `checkout` step is in #323.
 - **P2**: every check runs under `unshare --user --map-current-user --pid` (`CHECK_SCRIPT`), which
   needs unprivileged user namespaces on the box. Docker's default seccomp profile refuses it, so
   the rehearsal's coding task fails its verification with exit 125 and the `checkout` gate (#323)
@@ -245,7 +249,14 @@ different brief (this thread): #299 (phone apps, ok at e083a6e), #312 (control.g
 be7bdb7, merged), #313 (file-capability probe, findings posted), #315 (isolation model, gap edits at
 a40713f), #316 (scrub before clip, merged, one P2 follow-up), #317 (smoke cleanup, ok, merged),
 #318 (deep mode off, ok with a P3), #298 (export reserved names, ok), #322 (secret-shapes
-backslash run, ok with the P1 above), #323 (rehearsal `checkout` gate, ok with two P2s above). The
+backslash run, ok with the P1 above), #323 (rehearsal `checkout` gate, ok with two P2s above), and
+after this audit was written: #324 (this audit), #325 (kept conversation exact and owner-only, ok at
+8e65d54), #328 (smoke enumeration fail-closed, ok), #330 (short registered values, ok with a P2 on
+the host's name-guessed list, merged with the filter), #331 (gate 3, ok), #335 (handoff files, P2:
+the reviewer's `change.patch` can be swapped by the first agent's leftover process), #336 (a later
+run opens a kept change, ok), #337 (clean detach on close, gate 2, P2: a detach during the base
+check leaves the workspace reverted), #340 (CLI check as the agent, ok with a P2 on reinstalls),
+#341 (delivery files by hash, ok). The
 PRs merged between 17:27Z
 and 22:28Z had no outside review at all; of those, the ones on the launch path are #232, #233,
 #240, #242, #243, #244, #246, #247, #250, #254, #256, #260, #263 and #237. Recheck them with Codex

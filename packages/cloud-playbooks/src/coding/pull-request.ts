@@ -17,6 +17,12 @@ export interface PullRequestToolOptions {
    * `(runId, taskId) => conductor.state.tasksOf(runId).includes(taskId)`.
    */
   ownsTask(runId: string, taskId: string): boolean;
+  /**
+   * Whether any run of the run's conversation delegated the task: `conductor.state.conversationOwnsTask`.
+   * A change kept for the owner is opened by a later run (the owner's "open it anyway" starts one),
+   * so that run may open a kept task of its conversation; it may open no other task it did not delegate.
+   */
+  ownsConversationTask?(runId: string, taskId: string): boolean;
 }
 
 const parameters = z.object({
@@ -128,11 +134,16 @@ export function openPullRequestTool(
       return lines.join('\n');
     },
     async impl(args, context) {
-      if (!options.ownsTask(context.runId, args.taskId)) {
-        throw new ToolRefusal(
-          'not_your_task',
-          `Task ${args.taskId} was not delegated by this run.`,
-        );
+      const delegatedHere = options.ownsTask(context.runId, args.taskId);
+      const notYours = new ToolRefusal(
+        'not_your_task',
+        `Task ${args.taskId} was not delegated by this run.`,
+      );
+      if (
+        !delegatedHere &&
+        !(options.ownsConversationTask?.(context.runId, args.taskId) ?? false)
+      ) {
+        throw notYours;
       }
       const delivery = await options.deliveries.get(args.taskId);
       if (!delivery) {
@@ -150,6 +161,8 @@ export function openPullRequestTool(
           `The verified change of ${args.taskId} cannot be read; nothing was opened.`,
         );
       });
+      // A task an earlier run of the conversation delegated is opened only while it is kept.
+      if (!delegatedHere && loaded.verification.kept === undefined) throw notYours;
       const approved = approvedHashes(context.approved);
       if (
         !approved ||

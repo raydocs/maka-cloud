@@ -614,6 +614,9 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const ownInbox = inbox;
     let closing: Promise<void> | undefined;
     const shutdown = async (): Promise<void> => {
+      // First: runs let go of at once (their pollers and calls end, nothing is cancelled), so the
+      // process can exit and the next one resumes the tasks, instead of waiting out a grace period.
+      orchestrator.detachRuns();
       ownDeliveries?.stop();
       api.closeStreams();
       server.closeAllConnections();
