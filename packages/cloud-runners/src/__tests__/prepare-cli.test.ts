@@ -3,10 +3,12 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { CLAUDE_CLI, CODEX_CLI } from './fake-cli.js';
+import type { CloudRunnersOptions } from '../fleet.js';
 import { collect, type Harness, setup, terminal } from './harness.js';
 
 // The codex install says it started, waits until the test lets it go, and fails unless allowed.
 const CODEX_INSTALL = `echo started >> "$HOME/codex-install-started"
+echo $BASHPID >> "$HOME/codex-install-pids"
 while [ ! -e "$HOME/codex-install-go" ]; do sleep 0.05; done
 [ -f "$HOME/codex-install-ok" ] || { echo "registry unreachable"; exit 3; }
 mkdir -p "$HOME/.maka-cli/bin"
@@ -36,11 +38,25 @@ async function lines(path: string): Promise<number> {
   return text.split('\n').filter(Boolean).length;
 }
 
+/** Whether a process is still running (a zombie is not). */
+async function running(pid: number): Promise<boolean> {
+  const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '');
+  return stat !== '' && !/^\d+ \(.*\) [ZX] /su.test(stat);
+}
+
+async function installPids(h: Harness): Promise<number[]> {
+  const text = await fs.readFile(join(h.home, 'codex-install-pids'), 'utf8').catch(() => '');
+  return text.split('\n').filter(Boolean).map(Number);
+}
+
 /** Claude is installed; codex is not, and installs with `CODEX_INSTALL`. */
-async function claudeOnly(t: { after(fn: () => Promise<void>): void }): Promise<Harness> {
+async function claudeOnly(
+  t: { after(fn: () => Promise<void>): void },
+  cloud: Partial<CloudRunnersOptions> = {},
+): Promise<Harness> {
   const h = await setup({
     installClis: false,
-    cloud: { installCommands: { codex: CODEX_INSTALL } },
+    cloud: { installCommands: { codex: CODEX_INSTALL }, ...cloud },
   });
   t.after(async () => {
     // A held install would outlive the test: let it go before the files are removed.
@@ -102,10 +118,13 @@ test('the reviewer CLI installs while the implementer works, and its failure sho
 test('an install still going when the work ends does not hold the work, and the review shares it', async (t) => {
   const rejections = watchRejections(t);
   const h = await claudeOnly(t);
-  const work = await collect(
-    await h.runners.claude.start(await h.spec('tsk_prep_share', { prepareRunners: ['codex'] })),
+  const handle = await h.runners.claude.start(
+    await h.spec('tsk_prep_share', { prepareRunners: ['codex'] }),
   );
+  const work = await collect(handle);
   assert.equal(terminal(work)?.type, 'finished');
+  // The coding playbook cancels every run once it is over: that is not a cancelled task.
+  await handle.cancel();
   await until(() => exists(join(h.home, 'codex-install-started')), 'the codex install to start');
   assert.equal(await lines(join(h.home, 'codex-install-count')), 0, 'the install is still held');
 
@@ -124,3 +143,70 @@ test('a run that names no later runner installs nothing else', async (t) => {
   assert.equal(terminal(work)?.type, 'finished');
   assert.equal(await exists(join(h.home, 'codex-install-started')), false);
 });
+
+test('an install that runs out of time is killed, and what it left is not trusted', async (t) => {
+  const rejections = watchRejections(t);
+  // It writes a working CLI first, then hangs.
+  const held = `mkdir -p "$HOME/.maka-cli/bin"
+cat > "$HOME/.maka-cli/bin/codex" <<'FAKE_CLI_EOF'
+${CODEX_CLI}
+FAKE_CLI_EOF
+chmod +x "$HOME/.maka-cli/bin/codex"
+${CODEX_INSTALL}`;
+  const h = await claudeOnly(t, { setupTimeoutMs: 1_000, installCommands: { codex: held } });
+  // An earlier install of this version finished once; its CLI has gone since.
+  const marker = join(h.root, '.setup', 'codex-9.9.9.ok');
+  await fs.writeFile(marker, '');
+  const failed = terminal(
+    await collect(await h.runners.codex.start(await h.spec('tsk_inst_slow', { runner: 'codex' }))),
+  );
+  assert.equal(failed?.type, 'failed');
+  const reason = failed?.type === 'failed' ? failed.reason : '';
+  assert.match(reason, /installing codex@9\.9\.9 in the sandbox failed \(timed out\)/);
+  const [pid] = await installPids(h);
+  assert.ok(pid !== undefined);
+  assert.equal(await running(pid), false, 'the install that timed out was killed');
+  assert.equal(await exists(join(h.root, '.setup-codex')), false, 'its lock is gone');
+  assert.equal(await exists(marker), false, 'the half-done install leaves no marker to trust');
+
+  // The next run installs again rather than take the CLI the stopped install wrote.
+  await fs.writeFile(join(h.home, 'codex-install-ok'), '');
+  await fs.writeFile(join(h.home, 'codex-install-go'), '');
+  const again = terminal(
+    await collect(await h.runners.codex.start(await h.spec('tsk_inst_again', { runner: 'codex' }))),
+  );
+  assert.equal(again?.type, 'finished');
+  assert.equal(await lines(join(h.home, 'codex-install-started')), 2);
+  assert.equal(await lines(join(h.home, 'codex-install-count')), 1);
+  assert.deepEqual(rejections, []);
+});
+
+test('the background install of a cancelled task is stopped, and a run that needs it then installs afresh', async (t) => {
+  const rejections = watchRejections(t);
+  const h = await claudeOnly(t);
+  await h.setMode('wait');
+  const handle = await h.runners.claude.start(
+    await h.spec('tsk_prep_cancel', { prepareRunners: ['codex'] }),
+  );
+  const work = collect(handle);
+  await until(() => exists(join(h.home, 'codex-install-started')), 'the codex install to start');
+  const [first] = await installPids(h);
+  assert.ok(first !== undefined);
+
+  await handle.cancel();
+  await work;
+  // Started while the stop is under way: it waits for it, then installs again.
+  await h.setMode('ok');
+  const next = h.runners.codex.start(await h.spec('tsk_prep_next', { runner: 'codex' }));
+  await until(
+    async () => (await lines(join(h.home, 'codex-install-started'))) === 2,
+    'a second install',
+  );
+  assert.equal(await running(first), false, 'the install nobody needs was killed');
+  await fs.writeFile(join(h.home, 'codex-install-ok'), '');
+  await fs.writeFile(join(h.home, 'codex-install-go'), '');
+  assert.equal(terminal(await collect(await next))?.type, 'finished');
+  assert.equal(await lines(join(h.home, 'codex-install-count')), 1);
+  assert.deepEqual(rejections, []);
+});
+
