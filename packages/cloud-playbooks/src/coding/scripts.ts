@@ -44,6 +44,9 @@ ws="$MAKA_DIR/workspace"
 tmp="$MAKA_DIR/workspace.clone"
 cg="$MAKA_DIR/control.git"
 rm -rf -- "$tmp" "$MAKA_DIR/control.git.clone"
+# A base check a closed process left half-way: its copy of the change belongs to the tree this
+# clone replaces, and must not be put over the new one.
+rm -rf -- "$MAKA_DIR/base-check"
 mkdir "$tmp" && cd "$tmp" || exit 1
 g init -q
 if ! g fetch -q --depth=1 --no-tags "$MAKA_REPO_URL" "$MAKA_REF" > "$MAKA_DIR/clone.err" 2>&1; then

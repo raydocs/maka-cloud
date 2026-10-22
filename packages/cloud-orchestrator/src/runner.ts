@@ -101,6 +101,13 @@ export interface RunHandle {
    * waiting; false when it was handed over (or is being) and cannot be taken back.
    */
   unsteer?(steerId: string): boolean;
+  /**
+   * Lets go of the run without stopping it, because this process is closing. Nothing is cancelled,
+   * released or reported: the stream just ends, the task stays unfinished in the log, and the next
+   * process over the same store takes it over like one whose process died (it stops what is left
+   * and resumes). Optional: a run without it is left to the closing process's exit.
+   */
+  detach?(): void;
 }
 
 export interface Runner {

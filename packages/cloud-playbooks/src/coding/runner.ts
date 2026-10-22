@@ -401,6 +401,8 @@ class CodingRun implements RunHandle {
   /** Reads of agent streams that outlived the wait for their last spend; each adds to the total when it ends. */
   private readonly lateSpends = new Set<Promise<void>>();
   private readonly hostDir: string;
+  /** Set when the process is closing and let go of this run (see `detach`). */
+  private detached = false;
 
   constructor(
     private readonly runner: CodingRunner,
@@ -425,6 +427,21 @@ class CodingRun implements RunHandle {
     await this.cleanup();
     // A cancel that returns says everything the task started is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
+  }
+
+  /**
+   * Lets go of the task for a process that is closing: its agent run is let go of, its waits end,
+   * and nothing is stopped, restored or reported (the sandbox keeps what it has). The task stays
+   * unfinished in the log and the next process takes it over as it does after a crash.
+   */
+  detach(): void {
+    if (this.ended || this.detached) return;
+    this.detached = true;
+    this.agentHandle?.detach?.();
+    this.cancelled = true;
+    this.abort.abort();
+    this.cleanupPromise = Promise.resolve();
+    this.events.close();
   }
 
   private get signal(): AbortSignal {
