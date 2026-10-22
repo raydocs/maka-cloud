@@ -15,7 +15,8 @@ variable and its jobs go to the owner's runners; delete it and they go back to G
 | ci `test` | `ubuntu-24.04` (GitHub) | `CI_RUNNER_TEST`, else `CI_RUNNER` |
 | cloud-web, mobile `checks` | `ubuntu-24.04` (GitHub) | `CI_RUNNER` |
 | the rehearsal | `ubuntu-24.04` (GitHub) | `CI_RUNNER_DOCKER`, else `CI_RUNNER` |
-| mobile `ios` and `android` | the Mac mini | `CI_RUNNER_MAC` = `["self-hosted","mac"]` (set) |
+| mobile `ios` | the Mac minis | `CI_RUNNER_MAC` = `["self-hosted","mac"]` (set) |
+| mobile `android` | `ubuntu-24.04` (GitHub, emulator under KVM) | `CI_RUNNER_ANDROID` (unset, so the Macs serve iOS only) |
 
 A pull request from a fork never runs on the owner's machines, whatever the variables say: every
 `runs-on` falls back to GitHub's image when `github.event.pull_request.head.repo.fork` is true. The
@@ -38,8 +39,10 @@ The VPS is a standby, not the default, for three reasons:
 
 To use it again, set `CI_RUNNER` to `["self-hosted","vps"]`, after that test passes there.
 
-The VPS has no `/dev/kvm`, so the Android emulator runs on the Mac: an arm64 emulator and an
-`arm64-v8a` build. On GitHub's image it is x86_64 under KVM.
+Android runs on GitHub's image, x86_64 under KVM, so the two Macs are free for iOS: each phone run used
+to hold a Mac for both jobs, and runs queued behind each other. The VPS has no `/dev/kvm`; to use a Mac
+for Android again, set `CI_RUNNER_ANDROID` to `["self-hosted","mac-android"]` (an arm64 emulator and an
+`arm64-v8a` build).
 
 Every push to `main` runs the mobile lane without a filter, and a merge every few minutes used to
 queue one 13-minute run per commit on the Mac. Pushes to `main` now share one concurrency group: the

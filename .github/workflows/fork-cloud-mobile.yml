@@ -70,10 +70,10 @@ jobs:
           CI: '1'
 
   android:
-    # CI_RUNNER_MAC moves this job to the owner's Mac (Apple silicon), whose SDK sits at the runner's
+    # CI_RUNNER_ANDROID moves this job to the owner's Mac (Apple silicon), whose SDK sits at the runner's
     # ANDROID_HOME and whose emulator runs arm64; unset, it runs on GitHub's image, which carries the
-    # SDK and runs the emulator under KVM.
-    runs-on: ${{ vars.CI_RUNNER_MAC && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_MAC) || 'ubuntu-24.04' }}
+    # SDK and runs the emulator under KVM. It has its own variable so the Macs can be kept for iOS.
+    runs-on: ${{ vars.CI_RUNNER_ANDROID && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_ANDROID) || 'ubuntu-24.04' }}
     # The build is the long step: a cold Gradle cache and one ABI, then the emulator flows.
     timeout-minutes: 60
     steps:
