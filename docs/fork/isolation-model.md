@@ -517,8 +517,10 @@ checks the hash, gives it the agent group and 660, and `mv -fT`s it into place. 
 `transcripts.test.ts` (it fails on `main`): a link planted at the old name between two chunks is not
 written through. Follow-ups: the group now comes from the configured agent channel, passed as
 `MAKA_AGENT_GROUP`, never from the destination directory, which a sibling's agent could swap.
-The device and inode of the built file must match the destination after the rename, or the upload
-fails closed. The tests in `transcripts.test.ts` fail on the code from #401: the group test gives the
+After the rename the script compares the built file's device and inode with the destination's, and
+refuses if they differ. That catches only a file replaced between the rename and the check: `stat`
+follows the same path as `mv`, so a directory swapped for a link before the rename passes it, and the
+agent's group can still replace the file after the check. The tests in `transcripts.test.ts` fail on the code from #401: the group test gives the
 destination directory a different group and expects the file to keep the configured group; the rename test substitutes an identical-content
 file with a new inode and expects refusal.
 What is left: the destination's directories are checked by name just before the
