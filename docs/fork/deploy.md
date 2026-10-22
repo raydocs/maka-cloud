@@ -247,6 +247,12 @@ Under Compose, run the commands below as
 deploy/compose.yaml stop maka-cloud` first. Copy the `maka-backups` volume off
 the host as the backup section says.
 
+The file pins its network (`172.29.80.0/24`, Caddy at `172.29.80.2`) so the server can trust
+Caddy's forwarded client address and no other peer's. Choose another range in the file if your host
+already uses that one. A host that ran an earlier version of the file keeps its old network, and
+Compose will not change it in place: run `docker compose -f deploy/compose.yaml down` once (the
+volumes stay) and then the `up` command again.
+
 ## Rehearse it first
 
 `deploy/rehearsal/` brings the same images, Compose file and Caddyfile up with stand-ins for the model
