@@ -91,6 +91,8 @@ case "$mode" in
     echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"f1","content":"page text"},{"type":"tool_result","tool_use_id":"f2","is_error":true,"content":"404"}]}}'
     ;;
   spend|spendhang)
+    # With \`hold-spend\` the spending waits until the test lets it go.
+    if [ -e "$ctl/hold-spend" ]; then while [ ! -e "$ctl/go" ]; do sleep 0.05; done; fi
     # One model call can come as several events with the same message id and usage.
     echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":100000,"output_tokens":50000},"content":[{"type":"text","text":"step one"}]}}'
     echo '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":100000,"output_tokens":50000},"content":[{"type":"tool_use","name":"Bash","input":{}}]}}'

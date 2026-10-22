@@ -104,7 +104,9 @@ Still missing before it can merge:
 
 ## Install output (`cloud-runners`)
 
-1. P2: the install-output window drops a field's parent key before the scrub when a certificate
+1. (Done: the value of a secret field that runs past its line is held back as the lines come, before
+   the window, so a certificate line over 24 KB no longer lets the key after it out.) P2: the
+   install-output window drops a field's parent key before the scrub when a certificate
    line is over 24 KB, so a key can reach the output. A first user's `npm install` may print that
    line, so this is on the first-user path; the owner's coordinator may want it in a lane instead.
    Fix: stream-scrub with object and field state kept before windowing (`install-output.ts`). Test:
