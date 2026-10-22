@@ -285,6 +285,10 @@ export class PublicApi {
   }
 
   /**
+   * A human's control of a computer is leased to the invite, not to the device that took it: every
+   * input is authorised again with its own bearer, so a signed-out device cannot drive it, and the
+   * account's other devices keep it.
+   *
    * Ends the streams of invites that are no longer active, and those of a device whose session
    * is revoked or has gone idle. `only` limits it to one invite.
    */

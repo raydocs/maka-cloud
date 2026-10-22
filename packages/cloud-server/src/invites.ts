@@ -42,6 +42,8 @@ export const INVITE_MIGRATIONS: readonly string[] = [
   `ALTER TABLE invites ADD COLUMN daily_limit_usd REAL;
    ALTER TABLE invites ADD COLUMN monthly_limit_usd REAL`,
   // Accounts and device sessions (T31). An account is one person's way to sign in to one invite.
+  // The REFERENCES clauses document the shape: the file runs without `foreign_keys`, so every query
+  // that reads a session joins through to its invite instead of trusting the reference.
   `CREATE TABLE IF NOT EXISTS accounts (
     account_id TEXT PRIMARY KEY,
     invite_id TEXT NOT NULL UNIQUE REFERENCES invites (invite_id),

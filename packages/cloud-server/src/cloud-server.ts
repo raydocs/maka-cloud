@@ -400,6 +400,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       return sessionId === undefined ? undefined : conversations.conversationOf(sessionId);
     };
     const ownInviteStore = invites;
+    const ownAccountStore = accounts;
+    /** The invite is active and, for a device session, that session is still good. */
+    const callerActive = (inviteId: string, sessionId?: string): boolean =>
+      ownInviteStore.active(inviteId) &&
+      (sessionId === undefined || ownAccountStore.active(sessionId));
     const authorized = (caller: string, conversationId: string): boolean =>
       ownInviteStore.active(caller) && conversations.owns(caller, conversationId);
     const memory = new MemoryStore(db);
@@ -589,14 +594,14 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
               options.duties,
               new RateLimiter(limits.controlPerMinute),
               new RateLimiter(WEBHOOKS_PER_MINUTE),
-              { active: (inviteId) => ownInviteStore.active(inviteId) },
+              { active: callerActive },
             ),
           }
         : {}),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
-              active: (inviteId) => ownInviteStore.active(inviteId),
+              active: callerActive,
               conversationsOf: (inviteId) => conversations.idsOf(inviteId),
             }),
           }
