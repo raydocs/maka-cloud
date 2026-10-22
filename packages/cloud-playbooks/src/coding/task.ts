@@ -82,3 +82,25 @@ export function isRepoPath(path: string): boolean {
   const parts = path.split('/');
   return parts.every((part) => part !== '' && part !== '.' && part !== '..') && parts[0] !== '.git';
 }
+
+/**
+ * A file of the task directory a script is told to read or write: relative, every part a plain
+ * name (letters, digits, `.`, `_`, `-`), none empty, none starting with a dot, so no `..`, no
+ * hidden file and nothing the scripts' own temporary names (`.publish.*`) could collide with.
+ */
+export function isTaskFile(name: string): boolean {
+  return /^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/u.test(name);
+}
+
+/**
+ * The values a script takes from its environment as paths: `MAKA_FILE` must be a task file and
+ * every line of `MAKA_KEEP` a repository path. Returns the first thing refused.
+ */
+export function refusedScriptEnv(envs: Record<string, string>): string | undefined {
+  const file = envs.MAKA_FILE;
+  if (file !== undefined && !isTaskFile(file)) return `MAKA_FILE is not a plain file name`;
+  const keep = envs.MAKA_KEEP;
+  if (keep !== undefined && keep !== '' && !keep.split('\n').every(isRepoPath))
+    return `MAKA_KEEP holds a path that is not inside the repository`;
+  return undefined;
+}
