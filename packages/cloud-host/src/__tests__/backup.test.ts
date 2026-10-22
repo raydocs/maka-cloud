@@ -501,6 +501,16 @@ test('a conversation line keeps its numbers and its nesting when a key is taken 
     withoutSecretShapesInJson(deepKey),
     `${'['.repeat(20_000)}"[secret removed]"${']'.repeat(20_000)}`,
   );
+  // A string as long as a stored line may be, with and without a key in it.
+  const long = 'x'.repeat(16_000_000);
+  assert.equal(
+    withoutSecretShapesInJson(JSON.stringify({ text: long })),
+    JSON.stringify({ text: long }),
+  );
+  assert.equal(
+    withoutSecretShapesInJson(JSON.stringify({ text: `${long} mki_0123456789abcdef` })),
+    JSON.stringify({ text: `${long} [secret removed]` }),
+  );
 });
 
 test('a private key in a stored conversation leaves no line of its body in the backup, however it is escaped', async (t) => {

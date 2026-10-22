@@ -64,8 +64,8 @@ export function withoutSecretShapes(text: string): string {
   return out;
 }
 
-/** A string of a JSON text, from its opening quote to its closing one. */
-const JSON_STRING = /"(?:[^"\\]|\\.)*"/gu;
+const QUOTE = 0x22;
+const BACKSLASH = 0x5c;
 
 /**
  * A JSON text with the secret shapes taken out of every string in it (keys included), each read as
@@ -79,11 +79,21 @@ export function withoutSecretShapesInJson(json: string): string {
   } catch {
     return withoutSecretShapes(json);
   }
-  return json.replace(JSON_STRING, (token) => {
+  // In a JSON text every quote outside a string opens one. The strings are found by a scan, not a
+  // regular expression: a pattern walking a string of many megabytes runs out of stack.
+  const parts: string[] = [];
+  let from = 0;
+  for (let open = json.indexOf('"'); open !== -1; open = json.indexOf('"', from)) {
+    let close = open + 1;
+    while (json.charCodeAt(close) !== QUOTE) close += json.charCodeAt(close) === BACKSLASH ? 2 : 1;
+    const token = json.slice(open, close + 1);
     const value = JSON.parse(token) as string;
     const clean = withoutSecretShapes(value);
-    return clean === value ? token : JSON.stringify(clean);
-  });
+    parts.push(json.slice(from, open), clean === value ? token : JSON.stringify(clean));
+    from = close + 1;
+  }
+  parts.push(json.slice(from));
+  return parts.join('');
 }
 
 export interface ManifestFile {
