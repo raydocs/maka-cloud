@@ -306,6 +306,29 @@ interface Collected {
   patch: string;
 }
 
+/**
+ * The sandbox cuts output to its last bytes before the host sees it, which can split a key at the
+ * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted and the host scrubs the
+ * whole of it. When the text was cut, what is left of the cut line is dropped before the last
+ * `max` characters are kept: a key never spans a line, so that partial first line is the only place
+ * a split key can be, and counting the margin in bytes against characters (a redaction shortens
+ * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
+ * line break (the git messages, folded onto one line) loses its first `TAIL_MARGIN` characters.
+ */
+export const TAIL_MARGIN = 512;
+
+export function scrubbedTail(text: string, max: number, cut = false): string {
+  let shown = scrubSecretText(text);
+  if (cut) {
+    const line = shown.indexOf('\n');
+    shown = line >= 0 ? shown.slice(line + 1) : shown.slice(Math.min(TAIL_MARGIN, shown.length));
+  }
+  return shown.length <= max ? shown : shown.slice(shown.length - max);
+}
+
+/** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
+const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
+
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
   const shown = scrubSecretText(text);
@@ -629,8 +652,14 @@ class CodingRun implements RunHandle {
       }
       let problem: CheckProblem;
       if (!turn.ok) {
-        record.turns.push({ run, kind, outcome: 'agent_failed', detail: turn.reason, checks: [] });
-        runs.push({ run, outcome: `the agent's run failed: ${turn.reason}` });
+        record.turns.push({
+          run,
+          kind,
+          outcome: 'agent_failed',
+          detail: scrubSecretText(turn.reason),
+          checks: [],
+        });
+        runs.push({ run, outcome: scrubSecretText(`the agent's run failed: ${turn.reason}`) });
         problem = { problem: `your last run failed: ${turn.reason}` };
       } else {
         const checks: CheckResult[] = [];
@@ -647,7 +676,7 @@ class CodingRun implements RunHandle {
           outcome: checked.ok ? 'verified' : 'check_failed',
           checks: checks.map(({ output: _output, ...rest }) => rest),
         };
-        if (!checked.ok) turnRecord.detail = checked.problem;
+        if (!checked.ok) turnRecord.detail = scrubSecretText(checked.problem);
         record.turns.push(turnRecord);
         if (checked.ok && collected) {
           return { ok: true, repro: checked.repro, manifest: turn.manifest, collected };
@@ -655,7 +684,7 @@ class CodingRun implements RunHandle {
         if (checked.ok) throw new Error('unreachable: verified without a change set');
         runs.push({
           run,
-          outcome: `check failed: ${checked.problem}`,
+          outcome: scrubSecretText(`check failed: ${checked.problem}`),
           ...(checked.output ? { output: checked.output } : {}),
         });
         problem = checked;
@@ -789,7 +818,10 @@ class CodingRun implements RunHandle {
       );
       return { ok: true, manifest };
     } catch (error) {
-      return { ok: false, reason: `its result could not be read (${errorMessage(error)})` };
+      return {
+        ok: false,
+        reason: scrubSecretText(`its result could not be read (${errorMessage(error)})`),
+      };
     }
   }
 
@@ -1376,7 +1408,7 @@ class CodingRun implements RunHandle {
             MAKA_CHECK_TAG: tag,
             MAKA_CMD: command,
             MAKA_TIMEOUT: String(timeoutSeconds),
-            MAKA_TAIL: String(this.limits.outputTailBytes),
+            MAKA_TAIL: String(this.limits.outputTailBytes + TAIL_MARGIN),
           },
           timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
         );
@@ -1388,7 +1420,16 @@ class CodingRun implements RunHandle {
       const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
       if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
-      const result = { name, command, outputBytes: Number(bytes?.[1] ?? 0), output: out.stdout };
+      const result = {
+        name,
+        command: scrubSecretText(command),
+        outputBytes: Number(bytes?.[1] ?? 0),
+        output: scrubbedTail(
+          out.stdout,
+          this.limits.outputTailBytes,
+          Number(bytes?.[1] ?? 0) > this.limits.outputTailBytes + TAIL_MARGIN,
+        ),
+      };
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
@@ -1421,7 +1462,10 @@ class CodingRun implements RunHandle {
     if (out.truncated) return { reason: 'the change is too large to read' };
     const lines = out.stdout.split('\n');
     const err = lines.find((line) => line.startsWith('ERR '));
-    if (err) return { reason: `git could not list the change (${err.slice(4)})` };
+    if (err)
+      return {
+        reason: `git could not list the change (${scrubbedTail(err.slice(4), 300, wasCut(err.slice(4), 812))})`,
+      };
     const raw = lines.find((line) => line.startsWith('RAW '));
     const patchLine = lines.find((line) => line.startsWith('PATCH '));
     if (raw === undefined || patchLine === undefined)
@@ -1574,9 +1618,15 @@ class CodingRun implements RunHandle {
     else delete verification.kept;
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
-    verification.repro = outcome.repro;
+    // What the agent wrote (the reproduction command, the names of the files) is scrubbed like any
+    // other text that reaches the owner.
+    verification.repro = {
+      ...outcome.repro,
+      command: scrubSecretText(outcome.repro.command),
+      files: outcome.repro.files.map((file) => scrubSecretText(file)),
+    };
     verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-      path: file.path,
+      path: scrubSecretText(file.path),
       status: file.status,
     }));
     const verificationText = JSON.stringify(verification, null, 2);
@@ -1691,7 +1741,7 @@ class CodingRun implements RunHandle {
     if (!base) {
       const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${clipText(detail, 500)}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
