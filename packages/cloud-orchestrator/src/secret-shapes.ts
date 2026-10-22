@@ -17,6 +17,28 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\b((?:x-api-key|authorization|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/giu,
 ];
 
+/**
+ * The body of a private key whose first marker is not in the text: output cut to its last bytes
+ * can begin in the middle of the block, leaving the lines of base64 and, at the end, the closing
+ * marker. A run of three or more full-width base64 lines is taken whole (a key body is 64 to 76
+ * characters wide; a list of hashes is hex, which is left alone), and so are the lines in front of
+ * a closing marker. Not among `SECRET_SHAPES`: a copy that must stay exact (`scrubKeyShapes`) can
+ * hold base64 data of its own.
+ */
+const KEY_BODY_LINE = String.raw`[ \t]*(?![0-9a-fA-F]{60,100}[ \t]*\r?$)[A-Za-z0-9+/]{60,100}={0,2}[ \t]*(?:\r?\n|(?![\s\S]))`;
+const KEY_END = String.raw`-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`;
+const KEY_BODY_SHAPES: readonly RegExp[] = [
+  new RegExp(
+    String.raw`^(?:${KEY_BODY_LINE}){3,2000}(?:[ \t]*[A-Za-z0-9+/]{1,100}={1,2}[ \t]*(?:\r?\n|$))?`,
+    'gmu',
+  ),
+  new RegExp(
+    String.raw`^(?:[ \t]*[A-Za-z0-9+/]{16,100}={0,2}[ \t]*\r?\n){1,2000}[ \t]*${KEY_END}`,
+    'gmu',
+  ),
+  new RegExp(String.raw`[ \t]*${KEY_END}`, 'gu'),
+];
+
 /** Names whose value is a secret whatever it looks like: in a header, a query string or a JSON field. */
 const SECRET_FIELD =
   'authorization|proxy-authorization|x-api-key|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer|token|secret|client[_-]?secret|password|passwd|credentials?|cookie|set-cookie|private[_-]?key|signature|x-amz-security-token';
@@ -389,6 +411,9 @@ function scrubShapes(text: string): string {
     out = out.replace(shape, (match, name: unknown) =>
       typeof name === 'string' ? `${name}[secret]` : '[secret]',
     );
+  }
+  for (const shape of KEY_BODY_SHAPES) {
+    out = out.replace(shape, (match) => (match.endsWith('\n') ? '[secret]\n' : '[secret]'));
   }
   return out;
 }

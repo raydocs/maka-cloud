@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
   containsSecret,
+  scrubKeyShapes,
   scrubReading,
   scrubSecretFields,
   scrubSecretShapes,
@@ -379,4 +380,43 @@ test('text of scripts that are written with combining marks is shown as written,
   // A secret with marks of its own script inside it is found too, at the price of those marks.
   setKnownSecrets(['पुस्तक-secret-9']);
   assert.equal(scrubSecretText('x पुस्‍तक-secret-9 y'), 'x [secret] y');
+});
+
+test('the lines of a private key whose first marker was cut off are taken, with their closing marker', () => {
+  const line = (n: number) => `${String(n).padStart(2, '0')}${'AbCdEfGhIj'.repeat(6)}`.slice(0, 64);
+  const body = [10, 11, 12, 13, 14].map(line);
+  // Output cut to its last bytes: the opening marker and the first line are gone.
+  const tail = `ok 1 - prior test\n${body.slice(1).join('\n')}\nQUJD+/==\n-----END RSA PRIVATE KEY-----\nok 2 - next test\n`;
+  const out = scrubSecretShapes(tail);
+  for (const kept of body) assert.equal(out.includes(kept), false, kept);
+  assert.doesNotMatch(out, /END RSA PRIVATE KEY/u);
+  assert.match(out, /ok 1 - prior test\n/u);
+  assert.match(out, /ok 2 - next test\n$/u);
+  // Without the closing marker too, and the short last line with its padding goes with them.
+  const open = scrubSecretShapes(`before\n${body.join('\n')}\nQUJD+/==\nafter\n`);
+  for (const kept of body) assert.equal(open.includes(kept), false, kept);
+  assert.equal(open.includes('QUJD+/=='), false);
+  assert.match(open, /^before\n.*after\n$/su);
+  // Only the lines in front of a lone closing marker, when fewer than three are left.
+  const two = scrubSecretShapes(`${body[3]}\n${body[4]}\n-----END PRIVATE KEY-----\n`);
+  assert.equal(two.includes(body[3] as string), false);
+  assert.equal(two.includes(body[4] as string), false);
+});
+
+test('lists of hashes, a short base64 line or two, and a copy that must stay exact are left alone', () => {
+  const hashes = Array.from({ length: 4 }, (_, i) => `${i}`.repeat(64).replace(/\d/gu, 'a')).join(
+    '\n',
+  );
+  assert.equal(scrubSecretShapes(`${hashes}\n`), `${hashes}\n`);
+  const b64 = 'AbCdEfGhIj'.repeat(7);
+  const twoLines = `${b64}\n${b64}\nthe end\n`;
+  assert.equal(scrubSecretShapes(twoLines), twoLines);
+  const data = `${[b64, b64, b64, b64].join('\n')}\n`;
+  assert.equal(scrubKeyShapes(data), data);
+});
+
+test('a very long run of base64 lines is scrubbed without running out of stack', () => {
+  const line = 'AbCdEfGhIj'.repeat(7);
+  const out = scrubSecretShapes(Array(10_000).fill(line).join('\n'));
+  assert.equal(out.includes(line), false);
 });
