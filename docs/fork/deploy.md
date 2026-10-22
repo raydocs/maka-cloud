@@ -417,6 +417,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
+| `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
@@ -500,13 +501,28 @@ The check also looks at what the account could do to the egress rules, so code t
 cannot take them away. The sandbox user (it needs `sudo -n`, which the egress guard needs too) reads
 the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
 account is not allowed to run anything; a query that fails is a failed check. The account must hold no
-Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), no program under `/usr/sbin`, `/usr/bin`,
-`/sbin`, `/bin` or `/usr/local` may carry a capability such as `cap_net_admin` or `cap_setuid`
-(the box needs `getcap`, from `libcap2-bin`; without it the check fails), it must not be in a group that
+Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), and no program it can run anywhere on the
+box (the whole tree from `/` and every mount below it, the work root included, except `/proc`, `/sys`
+and `/dev`) may carry any file capability, be setuid to another account, or be setgid to a group the
+agent is not in, apart from the stock ping and id-mapping helpers and the stock setuid tools (`sudo`,
+`su`, `passwd`, `mount`, ...) under their own paths. The scan runs as root, needs GNU `find` and
+`getcap` (from `libcap2-bin`), and a scan that fails, or a `getcap` that reports an error, is a failed
+check. It must not be in a group that
 is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
 socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
 not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
 out of the check.
+
+The box must also allow unprivileged user and PID namespaces (`unshare --user --map-current-user
+--pid` as the sandbox user): every check of a coding task (the repository's tests, the reproduction
+test) runs in one, and a box that refuses them, as Docker's default seccomp profile does, makes every
+check fail at once with exit 125 ("could not start the check in its own user and PID namespace"). On
+Ubuntu 24.04 that includes the host's AppArmor rule: set `kernel.apparmor_restrict_unprivileged_userns=0`
+(the rehearsal job does) or give the sandbox user a profile that allows user namespaces.
+
+The agent runs `git` in a checkout that the sandbox user owns. The server names that one workspace
+as git's `safe.directory` in the agent's environment (`asAgentUser`), so nothing is set on the box;
+the rehearsal's `checkout` step has the agent run `git status` there to show it.
 
 The server starts nothing as the sandbox user either. A run is a program and its arguments; the
 server quotes them and hands the whole command to the agent account itself, so no argument can add a
@@ -516,7 +532,8 @@ command that runs as the sandbox user. The pinned CLI install, which writes the 
 Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
 test commands run as the agent account (the stop that ends them runs as root, since the processes are
 the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
-closed to everyone else, and the brief is written in the task directory and renamed into `handoff/`,
+closed to everyone else and then asks it for its version as the agent account, by absolute path, so
+the sandbox user never runs what the agent's tooling may have shaped, and the brief is written in the task directory and renamed into `handoff/`,
 so a link the agent leaves there is never followed.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
@@ -657,10 +674,21 @@ Preparation:
    only holds that invite back; about two minutes after it stopped renewing it,
    the next smoke run takes it over. A takeover first fences the killed run:
    every model key and conductor session issued under it books nothing from then
-   on (the invite's generation in the journal moves up), the new run cancels the
-   tasks it left running (if it cannot cancel one, or cannot list them, it
-   starts nothing and exits 2: cancel them by hand and run again), and only then does the new run get a budget of its
-   own, starting empty. A run that ends clears its budget and fences its own
+   on (the invite's generation in the journal moves up), and only then does the
+   new run get a budget of its own, starting empty. Every run, takeover or not,
+   first stops what an earlier run left going: it cancels each task that has not
+   ended, and asks about every task that has (however long ago, since the task
+   list cannot show a pending stop and the server's flag has no age limit), because only the server's answer to a cancel says whether the task's run or
+   its tree is still being stopped. It sends the cancel again every 5 seconds,
+   for up to 3 minutes a task (the server itself retries a stop that failed with
+   a growing delay), until the answer says the task ended with nothing pending.
+   A task not seen stopped, or a conversation or task list it cannot read to
+   its end (a next page after the last one it reads, a cursor that does not move
+   forward, an entry of an unexpected shape), means it starts nothing and exits
+   2, naming the last error: stop those tasks by hand and run again. A task that
+   started after the list was read is not seen. The
+   cleanup is repeated by the next run even though the run that failed it has
+   cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
    sequence, books nothing until the next run reopens it. A server on code from
    before run generations can no longer book on the smoke invite once that invite

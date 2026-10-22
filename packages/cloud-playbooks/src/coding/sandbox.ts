@@ -5,10 +5,10 @@ import {
   type Fleet,
   type RemoteMachine,
 } from '@maka-cloud/runners';
-import { CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
+import { BASE_RESTORE_SCRIPT, CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
 
 /** What CHECK_STOP_SCRIPT reads from its environment. */
-const CHECK_STOP_ENV = ['MAKA_CHECK_TAG'];
+const CHECK_STOP_ENV = ['MAKA_CHECK_TAG', 'MAKA_CHECK_UP_TO'];
 
 export interface ExecResult {
   stdout: string;
@@ -50,9 +50,10 @@ export interface SandboxWorkspace {
 }
 
 export interface CodingSandbox {
-  open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace>;
+  /** `attempt`: the attempt (epoch) of the run that opens it; its stop leaves a later attempt's runs alone. */
+  open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace>;
   /** Stops whatever a task left running, found by id alone (after a restart). Idempotent. */
-  stopTask(taskId: string, signal?: AbortSignal): Promise<void>;
+  stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void>;
 }
 
 /**
@@ -62,7 +63,7 @@ export interface CodingSandbox {
 export class FleetCodingSandbox implements CodingSandbox {
   constructor(private readonly fleet: Fleet) {}
 
-  async open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace> {
+  async open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace> {
     const { fleet } = this;
     const lease = await fleet.sandboxes.acquire({ tenantId: fleet.tenantOf(taskId), taskId });
     if (signal?.aborted) {
@@ -71,9 +72,21 @@ export class FleetCodingSandbox implements CodingSandbox {
     }
     const machine: RemoteMachine = fleet.machine(lease.machineId);
     let released = false;
-    const run = async (script: string, options: ExecOptions): Promise<ExecResult> => {
+    const channel = fleet.options.agentChannel;
+    const run = async (
+      script: string,
+      options: ExecOptions,
+      taskCode = true,
+    ): Promise<ExecResult> => {
       // Whatever runs in the workspace is the task's code: the egress guard is checked before it.
-      const result = await machine.exec(script, { ...options, taskCode: true });
+      // The agent's group goes to every script, for the ones that hand files to the agent.
+      const envs =
+        channel === undefined ? options.envs : { ...options.envs, MAKA_AGENT_GROUP: channel.group };
+      const result = await machine.exec(script, {
+        ...options,
+        ...(envs === undefined ? {} : { envs }),
+        taskCode,
+      });
       return {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -82,10 +95,11 @@ export class FleetCodingSandbox implements CodingSandbox {
         timedOut: result.timedOut,
       };
     };
-    const channel = fleet.options.agentChannel;
     return {
       dir: machine.taskDir(taskId),
-      exec: (script, options = {}) => run(script, options),
+      // Putting the change back after a base check is the host's own fixed script: like the check
+      // stop, it must reach a box whose guard now fails, or the change stays in the backup.
+      exec: (script, options = {}) => run(script, options, script !== BASE_RESTORE_SCRIPT),
       execCheck: async (script, options = {}) => {
         if (channel === undefined) {
           throw new Error('checks run as the agent account, and none is configured');
@@ -93,13 +107,17 @@ export class FleetCodingSandbox implements CodingSandbox {
         await fleet.ensureAgentIsolation(machine, options.signal);
         // The task directory and workspace belong to the agent's group before its tests enter them.
         await machine.prepareAgent(taskId, channel.group, options.signal);
-        return run(asAgentScript(script, channel), options);
+        return run(asAgentScript(script, channel, Object.keys(options.envs ?? {})), options);
       },
+      // The host's own stop, not task code: it must reach a box whose guard now fails.
       execCheckStop: (script, options = {}) =>
-        run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options),
+        run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options, false),
       stopAll: async (stopSignal) => {
-        await machine.kill(taskId, stopSignal ? { signal: stopSignal } : {});
-        await stopChecks(machine, taskId, stopSignal, channel);
+        await machine.kill(taskId, {
+          ...(stopSignal ? { signal: stopSignal } : {}),
+          ...(attempt === undefined ? {} : { upToAttempt: attempt }),
+        });
+        await stopChecks(machine, taskId, stopSignal, channel, attempt);
       },
       agentOnSameMachine: async () =>
         (await fleet.sessions.get(taskId))?.machineId === lease.machineId,
@@ -111,10 +129,10 @@ export class FleetCodingSandbox implements CodingSandbox {
     };
   }
 
-  async stopTask(taskId: string, signal?: AbortSignal): Promise<void> {
+  async stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void> {
     const { fleet } = this;
     let failure: unknown;
-    await fleet.stopTask(taskId, signal).catch((error: unknown) => {
+    await fleet.stopTask(taskId, signal, upToAttempt).catch((error: unknown) => {
       failure = error;
     });
     // The checks ran on the machine the task's lease gives, as in open().
@@ -126,6 +144,7 @@ export class FleetCodingSandbox implements CodingSandbox {
           taskId,
           signal,
           fleet.options.agentChannel,
+          upToAttempt,
         );
       } finally {
         await lease.release();
@@ -143,11 +162,19 @@ async function stopChecks(
   taskId: string,
   signal: AbortSignal | undefined,
   channel: AgentChannel | undefined,
+  upToAttempt?: number,
 ): Promise<void> {
+  // A bound that is not a whole attempt number would make the script stop everything.
+  if (upToAttempt !== undefined && !Number.isSafeInteger(upToAttempt)) {
+    throw new Error(`not an attempt number: ${upToAttempt}`);
+  }
   const out = await machine.exec(
     channel === undefined ? CHECK_STOP_SCRIPT : asRootScript(CHECK_STOP_SCRIPT, CHECK_STOP_ENV),
     {
-      envs: { MAKA_CHECK_TAG: checkTagPrefix(taskId) },
+      envs: {
+        MAKA_CHECK_TAG: checkTagPrefix(taskId),
+        ...(upToAttempt === undefined ? {} : { MAKA_CHECK_UP_TO: String(upToAttempt) }),
+      },
       timeoutSeconds: 30,
       ...(signal ? { signal } : {}),
     },

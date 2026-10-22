@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { HttpError, parseCount, readJson, respond, take } from './http.js';
 import type { InviteInfo } from './invites.js';
-import { toPublicItem } from './public-view.js';
+import { toPublicDigest, toPublicItem } from './public-view.js';
 import type { RateLimiter } from './rate-limit.js';
 
 /**
@@ -35,12 +35,19 @@ export interface InboxService {
     caller: string;
     conversations: readonly string[];
   }): Promise<InboxAnswerResult>;
-  /** `ok: false` for a kind the inbox does not have. */
-  setMute(kind: string, muted: boolean): { ok: true; settings: unknown } | { ok: false };
-  settings(): unknown;
-  /** `ok: false` for a patch the settings reject. */
-  updateSettings(patch: unknown): { ok: true; settings: unknown } | { ok: false };
-  digest(): Promise<unknown>;
+  /**
+   * The mutes, the settings and the digest are each owner's own: `owner` is the invite, and one
+   * owner's call never changes or shows another's. `ok: false` for a kind the inbox does not have.
+   */
+  setMute(
+    owner: string,
+    kind: string,
+    muted: boolean,
+  ): { ok: true; settings: unknown } | { ok: false };
+  settings(owner: string): unknown;
+  /** `ok: false` for a patch the settings reject, which includes everything that is the operator's to set. */
+  updateSettings(owner: string, patch: unknown): { ok: true; settings: unknown } | { ok: false };
+  digest(owner: string): Promise<unknown>;
   stop(): Promise<void>;
 }
 
@@ -75,8 +82,11 @@ const answerBody = z
 
 /** Who owns what, for the inbox routes. */
 export interface InboxOwners {
-  /** Whether the invite is still active: checked again after the body is read. */
-  active(inviteId: string): boolean;
+  /**
+   * Whether the invite is still active and, for a device, its session too: checked again after the
+   * body is read.
+   */
+  active(inviteId: string, sessionId?: string): boolean;
   /** The ids of the conversations the invite owns. */
   conversationsOf(inviteId: string): string[];
 }
@@ -84,9 +94,9 @@ export interface InboxOwners {
 /**
  * The `/v1/inbox/…` routes. They sit behind the same invite as every other
  * route, and an invite sees and answers the items of its own conversations
- * only. The mutes, the settings and the digest are one set for the whole
- * server, shared by every owner, so no invite reaches them: they answer 404
- * until they are kept per owner.
+ * only. The mutes, the settings and the digest are kept per owner (the
+ * invite): an invite reaches its own and nobody else's, and what the operator
+ * owns (stall times, the hourly cap, the digest schedule) it can read and not set.
  */
 export class InboxRoutes {
   constructor(
@@ -115,7 +125,51 @@ export class InboxRoutes {
       await this.answer(req, res, invite, decodeURIComponent(answer[1] ?? ''));
       return true;
     }
+    const mute = /^\/v1\/inbox\/mutes\/([^/]+)$/u.exec(path);
+    if (mute) {
+      if (method !== 'PUT' && method !== 'DELETE') {
+        throw new HttpError(405, 'method_not_allowed', { allow: 'PUT, DELETE' });
+      }
+      take(this.limiter, invite);
+      this.checkActive(invite);
+      const result = this.service.setMute(
+        invite.inviteId,
+        decodeURIComponent(mute[1] ?? ''),
+        method === 'PUT',
+      );
+      if (!result.ok) throw new HttpError(404, 'not_found');
+      respond(res, 200, { settings: result.settings });
+      return true;
+    }
+    if (path === '/v1/inbox/settings') {
+      if (method === 'GET') {
+        respond(res, 200, { settings: this.service.settings(invite.inviteId) });
+        return true;
+      }
+      if (method !== 'PUT') throw new HttpError(405, 'method_not_allowed', { allow: 'GET, PUT' });
+      take(this.limiter, invite);
+      const patch = await readJson(req, false);
+      this.checkActive(invite);
+      const result = this.service.updateSettings(invite.inviteId, patch);
+      if (!result.ok) throw new HttpError(400, 'invalid_request');
+      respond(res, 200, { settings: result.settings });
+      return true;
+    }
+    if (path === '/v1/inbox/digest') {
+      allow(method, 'POST');
+      take(this.limiter, invite);
+      this.checkActive(invite);
+      respond(res, 200, { digest: toPublicDigest(await this.service.digest(invite.inviteId)) });
+      return true;
+    }
     return false;
+  }
+
+  /** A revoke that landed while the request was read wins. */
+  private checkActive(invite: InviteInfo): void {
+    if (!this.owners.active(invite.inviteId, invite.sessionId)) {
+      throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+    }
   }
 
   private async list(res: ServerResponse, url: URL, invite: InviteInfo): Promise<void> {
@@ -146,7 +200,7 @@ export class InboxRoutes {
     const body = answerBody.safeParse(await readJson(req, false));
     if (!body.success) throw new HttpError(400, 'invalid_request');
     // Checked again now the body is in: a revoke that landed while it arrived wins.
-    if (!this.owners.active(invite.inviteId)) {
+    if (!this.owners.active(invite.inviteId, invite.sessionId)) {
       throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     }
     const result = await this.service.answer({

@@ -43,12 +43,16 @@ export interface ModelAccessProvider {
     budgetRootId?: TaskId;
     /** What this run alone may spend, when that is less than `budgetUsd` (`RunSpec.turnBudgetUsd`). */
     turnBudgetUsd?: number;
+    /** The attempt (epoch) of the task that drives the run (`RunSpec.epoch`). */
+    attempt?: number;
   }): Promise<ModelAccess>;
   /**
    * Revokes whatever was issued for `taskId`, from a process that no longer holds the
-   * `ModelAccess` (called when leftovers are stopped after a restart).
+   * `ModelAccess` (called when leftovers are stopped after a restart). With `upToAttempt` only
+   * the access issued for that attempt or an earlier one is revoked: a stop from an earlier
+   * attempt that arrives late must not cut the access of the attempt that took the task over.
    */
-  revokeForTask?(taskId: TaskId): Promise<void> | void;
+  revokeForTask?(taskId: TaskId, options?: { upToAttempt?: number }): Promise<void> | void;
 }
 
 export interface SandboxLease {

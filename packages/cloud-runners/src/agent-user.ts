@@ -36,23 +36,85 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
 }
 
 /**
- * `commandLine` (already quoted) run as the agent's user. The environment is passed on, but PATH is
- * handed over explicitly since sudo replaces it; the shared umask lets the sandbox user read and
- * remove what the agent writes in the workspace.
+ * What runs as the agent before its command. The checkout belongs to the sandbox user, so git, run
+ * by the agent in it, refuses it as owned by someone else; the exact workspace is named as a safe
+ * directory through the environment (`GIT_CONFIG_COUNT`, which git reads as command-line
+ * configuration: the only place `safe.directory` is honoured besides the protected files, and not
+ * a file the agent can write). The workspace is `MAKA_WORKDIR` for a run, or the one beside
+ * `MAKA_DIR` for an exec; nothing else is trusted.
  */
-export function asAgent(commandLine: string, channel: AgentChannel): string {
-  return asAgentUser(commandLine, assertAgentChannel(channel).user);
+const AGENT_ENTRY = [
+  'umask 002; PATH="$1"; shift',
+  // `env -i` leaves no account variables: the CLI and its tools read these before the passwd entry.
+  'USER=$(id -un 2>/dev/null) && LOGNAME=$USER && export USER LOGNAME',
+  'SHELL=/bin/sh; [ -x /bin/bash ] && SHELL=/bin/bash; export SHELL',
+  'd="${MAKA_WORKDIR:-${MAKA_DIR:+$MAKA_DIR/workspace}}"',
+  'if [ -n "$d" ] && d=$(cd "$d" 2>/dev/null && pwd -P); then',
+  '  n=${GIT_CONFIG_COUNT:-0}',
+  '  export "GIT_CONFIG_KEY_$n=safe.directory" "GIT_CONFIG_VALUE_$n=$d" "GIT_CONFIG_COUNT=$((n + 1))"',
+  'fi',
+  'exec "$@"',
+].join('\n');
+
+/**
+ * What the agent's process may inherit from the sandbox user's exec environment, besides the names
+ * a caller passes with the command: where it runs, its locale and temporary files, where its CLI
+ * keeps configuration, and the run's own token. Everything else the exec carries (what the
+ * provider's exec sets, what a login file or a preamble exports) stays behind.
+ */
+const AGENT_ENV_BASE = [
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TERM',
+  'TMPDIR',
+  'CLAUDE_CONFIG_DIR',
+  'CODEX_HOME',
+  'MAKA_DIR',
+  'MAKA_WORKDIR',
+  'MAKA_RUN_TOKEN',
+] as const;
+
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/u;
+
+/**
+ * `commandLine` (already quoted) run as the agent's user. The environment is built, not passed on:
+ * `env -i` with `PATH` (sudo replaces it, so it is handed over explicitly) and each of the base
+ * names and the caller's `names` that is set in the sandbox user's exec (`${NAME+...}` adds
+ * nothing for one that is not). The shared umask lets the sandbox user read and remove what the
+ * agent writes in the workspace.
+ */
+export function asAgent(
+  commandLine: string,
+  channel: AgentChannel,
+  names: readonly string[] = [],
+): string {
+  return asAgentUser(commandLine, assertAgentChannel(channel).user, names);
 }
 
 /** `asAgent` for a caller that knows the account's name only. */
-export function asAgentUser(commandLine: string, user: string): string {
+export function asAgentUser(
+  commandLine: string,
+  user: string,
+  names: readonly string[] = [],
+): string {
   assertAgentChannel({ user, group: 'x' });
-  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
+  const kept = [...new Set([...AGENT_ENV_BASE, ...names])].filter((name) => name !== 'PATH');
+  for (const name of kept) {
+    if (!ENV_NAME.test(name)) throw new Error(`Unsafe variable name: ${name}`);
+  }
+  const vars = kept.map((name) => `\${${name}+"${name}=$${name}"}`).join(' ');
+  return `sudo -n -u ${shq(user)} -- env -i PATH="$PATH" ${vars} sh -c ${shq(AGENT_ENTRY)} sh "$PATH" ${commandLine}`;
 }
 
 /** A whole script (any text, quoted here) run under bash as the agent's user, as `asAgent` does a command. */
-export function asAgentScript(script: string, channel: AgentChannel): string {
-  return asAgent(`bash -c ${shq(script)}`, channel);
+export function asAgentScript(
+  script: string,
+  channel: AgentChannel,
+  names: readonly string[] = [],
+): string {
+  return asAgent(`bash -c ${shq(script)}`, channel, names);
 }
 
 /**
@@ -81,13 +143,172 @@ root=$(dirname "$MAKA_DIR")
 mkdir -p handoff
 chgrp "$MAKA_AGENT_GROUP" "$root" . workspace handoff
 chmod 710 "$root" .
-chmod 2770 workspace handoff
+chmod 2770 workspace
+# Sticky: the agent writes its own files in handoff but cannot remove or replace the runner's.
+chmod 3770 handoff
 # The CLI's configuration directory (its transcripts): the agent writes it, the sandbox user puts a
 # kept conversation back into it.
 mkdir -p claude-config
 chgrp "$MAKA_AGENT_GROUP" claude-config
 chmod 2770 claude-config
 `;
+
+/**
+ * Part of the probe: the files the control user's login shell reads on every exec. Needs
+ * `as_agent`.
+ */
+export const LOGIN_FILES_PROBE = `# Every exec of the control user runs under a login shell, which reads these files first: whoever
+# can write one (or the directory it is in) runs code as the control user. Each must be a regular
+# file (a link is followed to its target) the control user or root owns, which the agent cannot write,
+# in directories (all the way up) that it cannot write either, apart from sticky ones.
+mine=$(id -u)
+login_bad=""
+dir_safe() {
+  local owner
+  owner=$(stat -c %u -- "$1" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  if as_agent test -w "$1" >/dev/null 2>&1; then
+    # A sticky directory (/tmp) lets the agent add entries but not rename or remove ours.
+    case "$(stat -c %a -- "$1" 2>/dev/null)" in 1???|3???|5???|7???) return 0 ;; esac
+    return 1
+  fi
+  return 0
+}
+# A directory and every one above it: a writable one lets the agent swap what is below.
+chain_safe() {
+  local d="$1"
+  while :; do
+    dir_safe "$d" || return 1
+    [ "$d" = / ] && return 0
+    d=$(dirname -- "$d")
+  done
+}
+login_safe() {
+  local target owner
+  target=$(readlink -f -- "$1" 2>/dev/null) || return 1
+  [ -f "$target" ] || return 1
+  owner=$(stat -c %u -- "$target" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  as_agent test -w "$target" >/dev/null 2>&1 && return 1
+  chain_safe "$(dirname -- "$target")"
+}
+login_files=("$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" /etc/profile /etc/bash.bashrc /etc/profile.d/*)
+login_dirs=("$HOME" /etc /etc/profile.d)
+# A test names its own files and directories (one per line); nothing else sets these.
+if [ -n "\${MAKA_LOGIN_FILES+x}" ]; then mapfile -t login_files <<< "$MAKA_LOGIN_FILES"; mapfile -t login_dirs <<< "\${MAKA_LOGIN_DIRS:-}"; fi
+unset MAKA_LOGIN_FILES MAKA_LOGIN_DIRS
+for f in "\${login_files[@]}"; do
+  [ -n "$f" ] || continue
+  { [ -e "$f" ] || [ -L "$f" ]; } || continue
+  login_safe "$f" || login_bad="$login_bad $f"
+done
+for d in "\${login_dirs[@]}"; do
+  [ -d "$d" ] || continue
+  chain_safe "$(readlink -f -- "$d")" || login_bad="$login_bad $d"
+done
+if [ -z "$login_bad" ]; then echo "FACT agent_login_files=none"; else echo "FACT agent_login_files=$login_bad"; fi
+`;
+
+/**
+ * Whether any program the agent can run carries a file capability, or is setuid to anyone but the
+ * agent or setgid to a group the agent is not in. The whole tree from `/` is walked (hidden
+ * directories, files at the top and every mount below included, the task root too: a privileged
+ * program there would be as dangerous as anywhere), except the kernel's own `/proc`, `/sys` and
+ * `/dev`. The walk runs as root, so an unreadable directory is read, and any failure of it, of
+ * `getcap`, or anything `getcap` says on stderr is `unchecked`, never `none`.
+ *
+ * File names are never cut back out of text where a name could fake the cut: `getcap` gets the
+ * files whose path has no line break in bulk, and prints one line per file with its path first; a
+ * line whose path is not one word is `found`. A file whose path has a line break is asked about
+ * alone, by its own path. Every capability on a program the agent can execute is `found`, except
+ * the few that the stock tools of a distribution carry under their own paths and that cannot reach
+ * the firewall or the control user (raw sockets for ping, the id-mapping helpers); likewise for the
+ * stock setuid tools (whose rules, like sudo's, are checked on their own), matched on the whole
+ * path. Whether the agent can execute a file is asked of the agent account and must be answered: a
+ * refusal of the account itself is `unchecked`, not "no". `as_agent`, `root` and `tool_bin` are
+ * defined by the probe around it; `MAKA_SCAN_ROOTS` (one directory per line) replaces `/` for a
+ * test, and the probe unsets it.
+ */
+export const FILE_CAPS_PROBE = `nl=$(printf '\\nx'); nl=\${nl%x}
+# One walk of every scan root; the find tests and actions given select and write the files (with
+# -fprint0 into files made beforehand, so they stay readable here). Prints failed when it did not finish.
+scan() {
+  roots=()
+  while IFS= read -r dir; do roots+=("$dir"); done < <(if [ -n "\${MAKA_SCAN_ROOTS:-}" ]; then printf '%s\\n' "$MAKA_SCAN_ROOTS"; else echo /; fi)
+  root find "\${roots[@]}" -ignore_readdir_race '(' -path /proc -o -path /sys -o -path /dev ')' -prune -o -type f '(' "$@" ')' >/dev/null || echo failed
+}
+# Prints yes for a path the agent can execute, nothing when it cannot, unchecked without an answer.
+agent_runs() {
+  can=$(as_agent sh -c '[ -x "$1" ] && echo x || echo -' sh "$1" 2>/dev/null) || can=""
+  case "$can" in
+    x) echo yes ;;
+    -) ;;
+    *) echo unchecked ;;
+  esac
+}
+verdict() {
+  if printf '%s\\n' "$2" | grep -q unchecked; then echo "FACT $1=unchecked"
+  elif [ -n "$2" ]; then echo "FACT $1=found"
+  else echo "FACT $1=none"; fi
+}
+tmp=$(mktemp -d) || tmp=""
+getcap_bin=$(tool_bin getcap)
+if [ -z "$tmp" ] || [ -z "$getcap_bin" ] || ! : > "$tmp/bulk" || ! : > "$tmp/odd" || ! : > "$tmp/errs"; then
+  echo "FACT agent_filecaps=unchecked"
+elif [ -n "$(scan -perm /111 '(' -path "*$nl*" -fprint0 "$tmp/odd" -o -fprint0 "$tmp/bulk" ')')" ]; then
+  echo "FACT agent_filecaps=unchecked"
+else
+  rc=0
+  listing=$(root xargs -0 -r "$getcap_bin" < "$tmp/bulk" 2>>"$tmp/errs") || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "FACT agent_filecaps=unchecked"
+  else
+    found=$(
+      # A line break in the path would split getcap's line: each such file alone, by its own path.
+      while IFS= read -r -d '' path; do
+        rc=0
+        one=$(root "$getcap_bin" "$path" 2>>"$tmp/errs") || rc=$?
+        if [ "$rc" != 0 ]; then echo unchecked; elif [ -n "$one" ]; then agent_runs "$path"; fi
+      done < "$tmp/odd"
+      printf '%s\\n' "$listing" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
+        if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
+        if printf '%s\\n' "$line" | grep -Eq '^/[^[:space:]]+ (= )?[^[:space:]]+$'; then
+          agent_runs "\${line%% *}"
+        else
+          echo yes
+        fi
+      done
+    )
+    if [ -s "$tmp/errs" ]; then echo "FACT agent_filecaps=unchecked"; else verdict agent_filecaps "$found"; fi
+  fi
+fi
+# setuid to another account, or setgid to a group the agent does not already have.
+gids=$(as_agent id -G 2>/dev/null) || gids=""
+others=()
+for gid in $gids; do
+  case "$gid" in *[!0-9]*) gids="" ;; *) others+=('!' -group "$gid") ;; esac
+done
+if [ -z "$tmp" ] || [ -z "$gids" ] || ! : > "$tmp/setid"; then
+  echo "FACT agent_setid=unchecked"
+elif [ -n "$(scan '(' '(' -perm -4000 ! -user "$MAKA_AGENT_USER" ')' -o '(' -perm -2000 "\${others[@]}" ')' ')' -fprint0 "$tmp/setid")" ]; then
+  echo "FACT agent_setid=unchecked"
+else
+  found=$(while IFS= read -r -d '' path; do
+    case "\${path%/*}" in
+      (/bin|/sbin|/usr/bin|/usr/sbin)
+        case "\${path##*/}" in
+          (su|sudo|passwd|chsh|chfn|gpasswd|newgrp|mount|umount|fusermount|fusermount3|chage|expiry|crontab|wall|write|ssh-agent|unix_chkpwd|pam_extrausers_chkpwd) continue ;;
+        esac ;;
+      (/usr/lib/openssh|/usr/libexec/openssh) [ "\${path##*/}" != ssh-keysign ] || continue ;;
+      (/usr/lib/dbus-1.0|/usr/libexec/dbus-1.0) [ "\${path##*/}" != dbus-daemon-launch-helper ] || continue ;;
+    esac
+    agent_runs "$path"
+  done < "$tmp/setid")
+  verdict agent_setid "$found"
+fi
+[ -z "$tmp" ] || rm -rf "$tmp"`;
 
 /**
  * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
@@ -116,7 +337,8 @@ mkdir "$scratch/workspace" "$scratch/handoff"
 : > "$scratch/handoff/brief.md"
 chgrp "$MAKA_AGENT_GROUP" "$MAKA_ROOT" "$scratch" "$scratch/workspace" "$scratch/handoff" "$scratch/handoff/brief.md" 2>/dev/null || echo "FACT group=no"
 chmod 710 "$MAKA_ROOT" "$scratch"
-chmod 2770 "$scratch/workspace" "$scratch/handoff"
+chmod 2770 "$scratch/workspace"
+chmod 3770 "$scratch/handoff"
 chmod 640 "$scratch/handoff/brief.md"
 as_agent() { sudo -n -u "$MAKA_AGENT_USER" --preserve-env -- "$@"; }
 yes_no() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
@@ -143,12 +365,8 @@ caps=$(as_agent sh -c 'grep -E "^Cap(Prm|Eff|Amb):" /proc/self/status' 2>/dev/nu
 if [ -z "$caps" ]; then echo "FACT agent_caps=unknown"
 elif printf '%s\n' "$caps" | awk '{ if ($2 !~ /^0+$/) bad = 1 } END { exit bad ? 0 : 1 }'; then echo "FACT agent_caps=held"
 else echo "FACT agent_caps=none"; fi
-if command -v getcap >/dev/null 2>&1; then
-  filecaps=$(getcap -r /usr/sbin /usr/bin /sbin /bin /usr/local/bin /usr/local/sbin 2>/dev/null | grep -Ei 'cap_(net_admin|sys_admin|setuid|setgid|dac_override|dac_read_search|sys_ptrace|sys_module)' || true)
-  if [ -z "$filecaps" ]; then echo "FACT agent_filecaps=none"; else echo "FACT agent_filecaps=found"; fi
-else
-  echo "FACT agent_filecaps=unchecked"
-fi
+unset MAKA_SCAN_ROOTS
+${FILE_CAPS_PROBE}
 # Groups that are root by another name, and the sockets that run containers for whoever may write them.
 groups=$(as_agent id -Gn 2>/dev/null || true)
 if [ -z "$groups" ]; then echo "FACT agent_groups=unknown"; else echo "FACT agent_groups=$groups"; fi
@@ -163,6 +381,7 @@ for path in "$HOME" "$HOME/.maka-cli" "$HOME/.maka-cli/bin" "$MAKA_ROOT" "$(dirn
   if [ -e "$path" ] && as_agent test -w "$path" >/dev/null 2>&1; then writable="$writable $path"; fi
 done
 if [ -z "$writable" ]; then echo "FACT agent_control_write=none"; else echo "FACT agent_control_write=$writable"; fi
+${LOGIN_FILES_PROBE}
 # The firewall itself: can this account change network policy (a capability, a setuid tool)? A
 # scratch chain is made and taken away again (also on the way out, if this stops half way).
 chain="MAKA_PROBE_$$"
@@ -246,6 +465,16 @@ export function agentIsolationProblems(output: string): string[] {
     'agent_filecaps',
     'none',
     'a program carries a capability the agent could use (or file capabilities could not be listed)',
+  );
+  mustBe(
+    'agent_login_files',
+    'none',
+    'the agent account can change a file or directory that the login shell of the control user reads (or one of them is a link to nowhere, or could not be checked)',
+  );
+  mustBe(
+    'agent_setid',
+    'none',
+    'a program is setuid or setgid to another account and the agent could run it (or they could not be listed)',
   );
   mustBe('agent_sockets', 'none', 'the agent account can reach a container or VM socket');
   mustBe(

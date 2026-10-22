@@ -6,6 +6,8 @@ export interface InviteInfo {
   label: string;
   createdAt: number;
   revokedAt: number | null;
+  /** Set when the caller signed in on a device: the session its token belongs to. */
+  sessionId?: string;
 }
 
 /**
@@ -39,6 +41,34 @@ export const INVITE_MIGRATIONS: readonly string[] = [
   )`,
   `ALTER TABLE invites ADD COLUMN daily_limit_usd REAL;
    ALTER TABLE invites ADD COLUMN monthly_limit_usd REAL`,
+  // Accounts and device sessions (T31). An account is one person's way to sign in to one invite.
+  // The REFERENCES clauses document the shape: the file runs without `foreign_keys`, so every query
+  // that reads a session joins through to its invite instead of trusting the reference.
+  `CREATE TABLE IF NOT EXISTS accounts (
+    account_id TEXT PRIMARY KEY,
+    invite_id TEXT NOT NULL UNIQUE REFERENCES invites (invite_id),
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts (account_id),
+    token_sha256 BLOB NOT NULL,
+    device_label TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    revoked_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS sessions_by_account ON sessions (account_id)`,
+  // Who an account is at a provider. The provider's own subject is the key, never an email address.
+  `CREATE TABLE IF NOT EXISTS identities (
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts (account_id),
+    email TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (provider, subject)
+  );
+  CREATE INDEX IF NOT EXISTS identities_by_account ON identities (account_id)`,
 ];
 
 function digest(token: string): Buffer {
@@ -101,6 +131,23 @@ export class InviteStore {
     const revoked = Number(result.changes) > 0;
     if (revoked) for (const listener of [...this.revokeListeners]) listener(inviteId);
     return revoked;
+  }
+
+  /** The invite when it exists and is not revoked, read from the file every time. */
+  get(inviteId: string): InviteInfo | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT invite_id, label, created_at FROM invites WHERE invite_id = ? AND revoked_at IS NULL',
+      )
+      .get(inviteId) as { invite_id: string; label: string; created_at: number } | undefined;
+    return (
+      row && {
+        inviteId: row.invite_id,
+        label: row.label,
+        createdAt: row.created_at,
+        revokedAt: null,
+      }
+    );
   }
 
   /** Whether the invite exists and is not revoked. Read from the file every time. */
@@ -210,7 +257,7 @@ export class InviteStore {
   }
 }
 
-function migrateInvites(db: DatabaseSync): void {
+export function migrateInvites(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const { user_version: version } = db.prepare('PRAGMA user_version').get() as {

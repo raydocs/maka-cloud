@@ -330,9 +330,9 @@ check (T5, inside its write chain) is the final arbiter for question answers.
 |---|---|
 | `GET /v1/inbox/items?state=open&after=&limit=` | Items, with version and precondition hash. |
 | `POST /v1/inbox/items/:id/answer` | As above. 202 on claim, 409 `stale` / `already_answered`. |
-| `PUT /v1/inbox/mutes/:kind`, `DELETE …` | Mute and unmute a kind. |
-| `GET` / `PUT /v1/inbox/settings` | Quiet hours, hourly cap, stall time, digest schedule, daily verifier cap. |
-| `POST /v1/inbox/digest` | Build and return a digest now. |
+| `PUT /v1/inbox/mutes/:kind`, `DELETE …` | Mute and unmute a kind for the calling invite only. |
+| `GET` / `PUT /v1/inbox/settings` | The calling invite's own mutes, quiet hours and time zone, shown over the operator's settings (an invite's mutes add to the operator's; it cannot lift one the operator set). The hourly cap, stall times, digest schedule and verifier cap are the operator's: an invite reads them and cannot set them. The hourly cap is one count for the whole server. |
+| `POST /v1/inbox/digest` | Build and return the calling invite's digest now (only its own items, scrubbed like an item). |
 | SSE `inbox.item` on `GET /v1/events` | Item snapshot with `version`. Clients list on connect, then apply events by `(id, version)`. |
 
 Since per-invite isolation, items are listed and answered within the caller's

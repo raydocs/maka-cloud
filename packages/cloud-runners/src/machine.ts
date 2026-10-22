@@ -51,6 +51,25 @@ const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 const TRANSCRIPT_ATTEMPTS = 3;
 
 /** Caps on what one task may copy from another's workspace. */
+export interface KillOptions {
+  signal?: AbortSignal;
+  graceTenths?: number;
+  cancelRuns?: string[];
+  runs?: string[];
+  /** Leave alone the runs of an attempt after this one. */
+  upToAttempt?: number;
+}
+
+function assertAttempt(attempt: number): number {
+  if (!Number.isInteger(attempt) || attempt < 0) throw new Error(`Unsafe attempt: ${attempt}`);
+  return attempt;
+}
+
+/** A run's name: the attempt that started it, when known, and its turn. Stops tell attempts apart by it. */
+export function runNameOf(attempt: number | undefined, turn: number): string {
+  return attempt === undefined ? `t${turn}` : `e${assertAttempt(attempt)}.t${turn}`;
+}
+
 export interface StageLimits {
   maxFiles: number;
   maxFileBytes: number;
@@ -76,9 +95,9 @@ interface ExecOptions {
    */
   wake?: boolean;
   /**
-   * The command runs repo or task code. Such a command only reaches a box whose egress was checked
-   * since the box was last woken here: after a wake, and while a check has failed, it is guarded
-   * first and a failure is final (the box is awake, which is not the same as closed).
+   * The command runs repo, task or CLI code. Such a command only reaches a box whose egress was
+   * checked and passed since the box was made or last woken here: until then it is guarded first,
+   * and a failure is final (the box is awake, which is not the same as closed).
    */
   taskCode?: boolean;
   envs?: Record<string, string>;
@@ -117,14 +136,11 @@ export class RemoteMachine {
   ) {}
 
   private guarding: Promise<void> | undefined;
-  /** This machine was woken here (or a check failed) and has not passed a check since. */
-  private unguarded = false;
   /** Errors the egress check threw: a retry must not start task code after one of these. */
   private readonly refusals = new WeakSet<object>();
 
   /** Wakes the box. Its rules may be gone, so nothing runs in it until the next check passes. */
   private async wake(signal?: AbortSignal): Promise<void> {
-    this.unguarded = true;
     await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
   }
 
@@ -134,6 +150,8 @@ export class RemoteMachine {
    * resumed may have lost its rules without anything telling us. A box that fails is refused.
    */
   private guardEgress(signal?: AbortSignal): Promise<void> {
+    // A caller that has already given up does not wait for a check.
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (!this.egress) {
       const missing = new Error('this sandbox has no egress guard, so no task starts in it');
       this.refusals.add(missing);
@@ -152,9 +170,7 @@ export class RemoteMachine {
             await this.wake();
             await egress();
           }
-          this.unguarded = false;
         } catch (error) {
-          this.unguarded = true;
           if (typeof error === 'object' && error !== null) this.refusals.add(error);
           throw error;
         }
@@ -206,8 +222,9 @@ export class RemoteMachine {
       ...(options.timeoutSeconds ? { timeoutSeconds: options.timeoutSeconds } : {}),
     };
     const call = options.signal ? { signal: options.signal } : {};
-    // A box that was woken here, or whose last check failed, may have no rules: look first.
-    if (options.taskCode && this.unguarded) await this.guardEgress(options.signal);
+    // Look first, every time: a box that passed before may have been restarted, restored or woken by
+    // someone else since, and lost its rules without this process seeing it.
+    if (options.taskCode) await this.guardEgress(options.signal);
     try {
       return await this.client.exec(this.machineId, request, call);
     } catch (error) {
@@ -290,6 +307,7 @@ export class RemoteMachine {
     const line = asAgentUser(
       [input.program, ...input.args].map((word) => shq(word)).join(' '),
       this.agentUser,
+      Object.keys(input.envs),
     );
     return await this.start(
       buildRunScript({
@@ -399,15 +417,18 @@ export class RemoteMachine {
    * runs are touched (processes, lock, raw output): a run that is done uses this, because a later
    * turn of the same task may already be running.
    */
-  async kill(
+  async kill(dirName: string, options: KillOptions = {}): Promise<string[]> {
+    return (await this.killRuns(dirName, options)).killed;
+  }
+
+  /**
+   * `kill`, and also the runs it left alone: with `upToAttempt`, the runs of a later attempt are
+   * not touched (a stop that was slow must not reach the run of the attempt that took the task over).
+   */
+  async killRuns(
     dirName: string,
-    options: {
-      signal?: AbortSignal;
-      graceTenths?: number;
-      cancelRuns?: string[];
-      runs?: string[];
-    } = {},
-  ): Promise<string[]> {
+    options: KillOptions = {},
+  ): Promise<{ killed: string[]; left: string[] }> {
     const result = await this.exec(KILL_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
@@ -422,6 +443,9 @@ export class RemoteMachine {
               MAKA_CANCEL_RUNS: options.cancelRuns.map((run) => assertSafeId('run', run)).join(' '),
             }
           : {}),
+        ...(options.upToAttempt === undefined
+          ? {}
+          : { MAKA_UP_TO_ATTEMPT: String(assertAttempt(options.upToAttempt)) }),
       },
       timeoutSeconds: 15,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -438,9 +462,11 @@ export class RemoteMachine {
         `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
-    return lines
-      .filter((line) => line.startsWith('KILLED '))
-      .map((line) => line.slice('KILLED '.length).trim());
+    const named = (prefix: string) =>
+      lines
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => line.slice(prefix.length).trim());
+    return { killed: named('KILLED '), left: named('LEFT ') };
   }
 
   /** Names of task directories that still have a live run. */

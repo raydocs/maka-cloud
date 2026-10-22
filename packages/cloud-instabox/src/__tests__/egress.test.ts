@@ -274,6 +274,115 @@ describe('applyEgressGuard', () => {
     });
   });
 
+  it('refuses when there is no flock, because two guards could then interleave', async () => {
+    // A PATH with every tool of /usr/bin and /bin except flock.
+    const bin = join(tmpdir(), `no-flock-${process.pid}-${Date.now()}`);
+    await fs.mkdir(bin, { recursive: true });
+    try {
+      for (const dir of ['/usr/bin', '/bin']) {
+        for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
+          if (name === 'flock') continue;
+          await fs.symlink(join(dir, name), join(bin, name)).catch(() => undefined);
+        }
+      }
+      await make({ execPath: bin });
+      await assert.rejects(run(), (error: unknown) => {
+        assert.ok(error instanceof EgressGuardError);
+        assert.match(error.message, /flock is not installed/u);
+        return true;
+      });
+      assert.deepEqual(v4(), [], 'no rules were changed by a guard that could not lock');
+    } finally {
+      await fs.rm(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when the lock cannot be taken', async () => {
+    const bin = join(tmpdir(), `stuck-flock-${process.pid}-${Date.now()}`);
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(join(bin, 'flock'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    try {
+      await make({ execPath: `${bin}:${process.env.PATH ?? ''}` });
+      await assert.rejects(run(), /cannot take/u);
+      assert.deepEqual(v4(), []);
+    } finally {
+      await fs.rm(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps its lock in a directory of the sandbox user that nobody else can enter, not in /tmp', async () => {
+    const home = join(state, 'home');
+    await fs.mkdir(home);
+    await make({ home });
+    await run();
+    const dir = await fs.lstat(join(home, '.maka-egress'));
+    assert.ok(dir.isDirectory());
+    assert.equal(dir.mode & 0o777, 0o700, 'the lock directory is closed to the group and others');
+    const lock = await fs.lstat(join(home, '.maka-egress', 'lock'));
+    assert.ok(lock.isFile());
+    assert.equal(lock.mode & 0o077, 0, 'the lock file opens for nobody else');
+  });
+
+  it('refuses a lock directory or file that is a link, and changes no rule', async () => {
+    const home = join(state, 'home');
+    const elsewhere = join(state, 'elsewhere');
+    await fs.mkdir(home);
+    await fs.mkdir(elsewhere);
+    await fs.symlink(elsewhere, join(home, '.maka-egress'));
+    await make({ home });
+    await assert.rejects(run(), /is not a directory of the sandbox user/u);
+    assert.deepEqual(v4(), []);
+    await h.cleanup();
+    await fs.rm(join(home, '.maka-egress'));
+    await fs.mkdir(join(home, '.maka-egress'), { mode: 0o700 });
+    await fs.symlink(join(elsewhere, 'target'), join(home, '.maka-egress', 'lock'));
+    await make({ home });
+    await assert.rejects(run(), /is a link/u);
+    assert.deepEqual(v4(), []);
+    await assert.rejects(
+      fs.lstat(join(elsewhere, 'target')),
+      /ENOENT/u,
+      'the link was not followed',
+    );
+  });
+
+  it('refuses a home that another account could swap, through it or any directory above it', async () => {
+    // Writable by everyone and not sticky: anyone could rename the home and put another in its place.
+    const open = join(state, 'open');
+    await fs.mkdir(open);
+    await fs.chmod(open, 0o777);
+    const home = join(open, 'home');
+    await fs.mkdir(home);
+    await make({ home });
+    await assert.rejects(run(), /could be changed by another account/u);
+    assert.deepEqual(v4(), []);
+    await assert.rejects(fs.lstat(join(home, '.maka-egress')), /ENOENT/u, 'nothing was made');
+    // Sticky, as /tmp is: nobody else can rename what is ours in it.
+    await h.cleanup();
+    await fs.chmod(open, 0o1777);
+    await make({ home });
+    await run();
+    // The home itself, open to the group.
+    await h.cleanup();
+    await fs.chmod(open, 0o755);
+    await fs.chmod(home, 0o775);
+    await make({ home });
+    await assert.rejects(run(), /could be changed by another account/u);
+  });
+
+  it('stops at the root when dirname keeps // as its own parent, as glibc does', async () => {
+    const bin = join(state, 'bin');
+    await fs.mkdir(bin);
+    // A dirname that answers // above a top-level directory, and for // itself (HOME=//root).
+    await fs.writeFile(
+      join(bin, 'dirname'),
+      '#!/bin/sh\ncase "$1" in /|//) echo //;; /*/*) exec /usr/bin/dirname "$1";; *) echo //;; esac\n',
+      { mode: 0o755 },
+    );
+    await make({ execPath: `${bin}:${process.env.PATH ?? ''}` });
+    await run();
+  });
+
   it('refuses when a rule cannot be added, and says which', async () => {
     await make({ env: { SHIM_FAIL: '169\\.254\\.0\\.0/16' } });
     await assert.rejects(run(), /cannot block 169\.254\.0\.0\/16/u);

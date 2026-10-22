@@ -31,6 +31,7 @@ function newHold(): { hold: FakeHold; settled: Promise<void> } {
 export class FakeRun implements RunHandle {
   readonly events: AsyncIterable<RunnerEvent>;
   cancelCalls = 0;
+  detachCalls = 0;
   pauseCalls = 0;
   resumeCalls = 0;
   /** True between a pause that finished and the resume that undid it. */
@@ -157,6 +158,12 @@ export class FakeRun implements RunHandle {
 
   async cancel(): Promise<void> {
     this.cancelCalls += 1;
+    this.end();
+  }
+
+  /** The process is closing and lets go of the run: its stream ends, nothing is cancelled. */
+  detach(): void {
+    this.detachCalls += 1;
     this.end();
   }
 

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { verifyCodingManifest } from '../playbook.js';
 import {
+  type AgentScript,
   BUGGY_ADD,
   collect,
   FIXED_ADD,
@@ -130,8 +131,10 @@ test('after two failures the task goes to the other vendor once, from the base c
         () => false,
       ),
       brief: await fs.readFile(turn.spec.briefPath, 'utf8'),
-      failure: JSON.parse(await fs.readFile(join(turn.dir, 'failure_brief.json'), 'utf8')),
-      reproLeft: await fs.stat(join(turn.dir, 'repro.json')).then(
+      failure: JSON.parse(
+        await fs.readFile(join(turn.dir, 'handoff', 'failure_brief.json'), 'utf8'),
+      ),
+      reproLeft: await fs.stat(join(turn.dir, 'handoff', 'repro.json')).then(
         () => true,
         () => false,
       ),
@@ -164,8 +167,16 @@ test('after two failures the task goes to the other vendor once, from the base c
   assert.equal(seen.failure.baseSha, h.baseSha);
   assert.equal(seen.failure.runs.length, 2);
   assert.match(seen.failure.runs[0].outcome, /fails with your change/);
-  const attemptPatch = await fs.readFile(join(h.root, 'tsk_handoff', 'attempt-1.patch'), 'utf8');
+  const attemptPatch = await fs.readFile(
+    join(h.root, 'tsk_handoff', 'handoff', 'attempt-1.patch'),
+    'utf8',
+  );
   assert.match(attemptPatch, /tests\/test_add.sh/);
+  assert.match(
+    seen.brief,
+    /handoff\/failure_brief\.json/,
+    'the brief points where the agent can read',
+  );
 
   const manifest = await readJson(spec.resultPath);
   assert.ok(
@@ -192,6 +203,86 @@ test('when both vendors fail, the task finishes with an honest manifest and neve
   assert.deepEqual(manifest.artifacts, ['failure_brief.json', 'verification.json']);
   assert.equal(verifyCodingManifest(manifest).ok, false);
   assert.equal(await h.deliveries.get('tsk_giveup'), undefined, 'nothing to deliver');
+  zeroStats(h.runner);
+});
+
+test('a key in a check’s output is scrubbed before the sandbox’s cut, in the failure brief and the verification record', async (t) => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  // One key is cut in two by the old 200-byte tail, one lies whole inside it.
+  const leak = [
+    `echo A=${key}`,
+    `echo ${'b'.repeat(115)}`,
+    `echo B=${key}`,
+    'echo END',
+    'exit 1',
+  ].join('\n');
+  const h = await setup(t, { limits: { outputTailBytes: 200 } });
+  const leaks: AgentScript = async (turn) => {
+    await writeRepro(turn, `${leak}\n`);
+    return 'ok';
+  };
+  h.claude.script = leaks;
+  h.codex.script = leaks;
+  const spec = await h.spec('tsk_leak');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const dir = join(h.handoff, 'tsk_leak');
+  const brief = await fs.readFile(join(dir, 'failure_brief.json'), 'utf8');
+  const record = await fs.readFile(join(dir, 'verification.json'), 'utf8');
+  assert.match(brief, /END/, 'the check output is in the brief');
+  for (const text of [brief, record]) {
+    assert.doesNotMatch(text, /ghp_|0123456789abcdef/);
+  }
+  zeroStats(h.runner);
+});
+
+test('many redacted keys in a cut check output do not pull the cut fragment of a key into the record', async (t) => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  // Each redaction shortens the scrubbed text by 32 characters: twenty of them would walk the old
+  // character count back over the whole margin and keep the line the sandbox's cut split.
+  const leak = [...Array.from({ length: 20 }, () => `echo T=${key}`), 'echo END', 'exit 1'].join(
+    '\n',
+  );
+  const h = await setup(t, { limits: { outputTailBytes: 205 } });
+  const leaks: AgentScript = async (turn) => {
+    await writeRepro(turn, `${leak}\n`);
+    return 'ok';
+  };
+  h.claude.script = leaks;
+  h.codex.script = leaks;
+  const spec = await h.spec('tsk_many');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const dir = join(h.handoff, 'tsk_many');
+  for (const name of ['failure_brief.json', 'verification.json']) {
+    assert.doesNotMatch(
+      await fs.readFile(join(dir, name), 'utf8'),
+      /ghp_|0123456789abcdef|def0123/,
+    );
+  }
+  zeroStats(h.runner);
+});
+
+test('a key the agent put in its reproduction command or a file name is scrubbed from verification.json', async (t) => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    await fixes(turn);
+    await fs.writeFile(join(turn.workspace, 'tests', `notes-${key}.txt`), 'x');
+    await fs.writeFile(
+      join(turn.dir, 'handoff', 'repro.json'),
+      JSON.stringify({
+        command: `bash tests/test_add.sh # ${key}`,
+        files: ['tests/test_add.sh', `tests/notes-${key}.txt`],
+      }),
+    );
+    return 'ok';
+  };
+  h.codex.script = reviewsNothing;
+  const spec = await h.spec('tsk_keyname');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const dir = join(h.handoff, 'tsk_keyname');
+  const record = await fs.readFile(join(dir, 'verification.json'), 'utf8');
+  assert.doesNotMatch(record, /ghp_|0123456789abcdef/);
+  assert.match(record, /tests\/test_add\.sh/, 'the rest of the command is kept');
   zeroStats(h.runner);
 });
 
@@ -268,4 +359,46 @@ test('a check that runs past its timeout is stopped and counts as a failure', as
   );
   assert.equal(tests.exitCode, 124);
   zeroStats(h.runner);
+});
+
+test('a repro.json at the task directory is not read: the agent can only write handoff/', async (t) => {
+  const h = await setup(t);
+  // The task directory is closed to the agent's account, so a record there can only be a stale or
+  // planted one; the one in handoff/ is the agent's.
+  const misplaced: AgentScript = async (turn) => {
+    const result = await fixes(turn);
+    await fs.rename(join(turn.dir, 'handoff', 'repro.json'), join(turn.dir, 'repro.json'));
+    return result;
+  };
+  h.claude.script = misplaced;
+  h.codex.script = misplaced;
+  const events = await collect(await h.runner.start(await h.spec('tsk_oldrepro')));
+  assert.ok(terminal(events), 'the task ends');
+  assert.equal(await h.deliveries.get('tsk_oldrepro'), undefined);
+  zeroStats(h.runner);
+});
+
+test('the records of a delivery sit where no exported artifact can name them (recheck28 F4)', async (t) => {
+  const h = await setup(t);
+  h.claude.script = fixes;
+  const spec = await h.spec('tsk_records');
+  await collect(await h.runner.start(spec));
+  const delivery = await h.deliveries.get('tsk_records');
+  assert.ok(delivery);
+  const dir = dirname(spec.resultPath);
+  for (const path of [delivery.changesPath, delivery.verificationPath]) {
+    const name = relative(dir, path);
+    // An exported artifact is a plain relative path: letters, digits, `_`, `.`, `-`, never a first
+    // dot. A name in the task directory itself (`changes.<hash>.json`) is one an agent can export.
+    assert.match(name, /^\.records\/(changes|verification)\.[0-9a-f]{16}\.json$/u, name);
+  }
+  // The agent's runs may not export into that directory either.
+  const turn = h.claude.turns[0];
+  assert.ok(turn?.spec.reserved?.includes('.records'));
+  // And the records are still what the delivery names: the hashes hold.
+  const changes = await fs.readFile(delivery.changesPath);
+  assert.equal(
+    (await import('node:crypto')).createHash('sha256').update(changes).digest('hex'),
+    delivery.changesSha256,
+  );
 });

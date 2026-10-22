@@ -233,7 +233,7 @@ test('the adapter speaks the public API as the smoke invite, with its token and 
   }
 });
 
-test('tasks are read across pages, and a malformed task is left out', async () => {
+test('tasks are read across pages, and a malformed task is an error, not a task left out', async () => {
   const server = await stub();
   try {
     server.setHandler((req, res) => {
@@ -252,14 +252,26 @@ test('tasks are read across pages, and a malformed task is left out', async () =
       });
     });
     const deps = createLiveSmokeDeps(settingsFor(server.url));
+    // The malformed entry on the first page is not skipped: a task not seen is a task not stopped.
+    await assert.rejects(deps.tasks('c1'), /entry of an unexpected shape/u);
+    server.setHandler((req, res) => {
+      const after = new URL(req.url ?? '', 'http://x').searchParams.get('after');
+      if (after === '0') {
+        return json(res, 200, {
+          tasks: [
+            { taskId: 't1', state: 'running', costUsd: 0.5, title: 'research', progress: [] },
+          ],
+          next: 7,
+        });
+      }
+      json(res, 200, {
+        tasks: [{ taskId: 't2', parentTaskId: 't1', state: 'failed', failureReason: 'broke' }],
+      });
+    });
     assert.deepEqual(await deps.tasks('c1'), [
       { taskId: 't1', state: 'running', costUsd: 0.5, title: 'research' },
       { taskId: 't2', parentTaskId: 't1', state: 'failed', failureReason: 'broke' },
     ]);
-    assert.deepEqual(
-      server.requests.map((r) => r.path),
-      ['/v1/conversations/c1/tasks?after=0', '/v1/conversations/c1/tasks?after=7'],
-    );
   } finally {
     await server.close();
   }
@@ -589,7 +601,17 @@ function downServer(onFirstRequest: () => void): NonNullable<Parameters<typeof s
   return {
     print: () => {},
     openInvites: invites.open_ as never,
-    fetch: (async () => {
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      // The run first lists the invite's conversations to stop what an earlier run left going:
+      // nothing, here, and not one of the requests these tests count.
+      if (
+        new URL(String(input)).pathname === '/v1/conversations' &&
+        (init?.method ?? 'GET') === 'GET'
+      ) {
+        return new Response(JSON.stringify({ conversations: [] }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       requests += 1;
       if (requests === 1) onFirstRequest();
       throw new Error('the server is down');
@@ -719,21 +741,25 @@ test('a smoke run that takes over an abandoned budget fences the earlier run’s
   const io = downServer(() => {});
   io.print = (line) => printed.push(line);
   io.runId = 'run_new';
+  io.now = Date.now;
   io.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     if (init?.method === 'POST' && url.pathname.endsWith('/cancel')) {
-      cancelled.push(url.pathname.split('/')[3] ?? '');
-      return answer({});
+      const taskId = url.pathname.split('/')[3] ?? '';
+      cancelled.push(taskId);
+      return answer({ task: { taskId, state: 'cancelled' } });
     }
     if (url.pathname === '/v1/conversations') {
       return answer({ conversations: [{ conversationId: 'cnv_old' }] });
     }
     if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+      const state = (taskId: string, going: string) =>
+        cancelled.includes(taskId) ? 'cancelled' : going;
       return answer({
         tasks: [
-          { taskId: 'tsk_running', state: 'running' },
-          { taskId: 'tsk_done', state: 'succeeded' },
-          { taskId: 'tsk_paused', state: 'paused' },
+          { taskId: 'tsk_running', state: state('tsk_running', 'running') },
+          { taskId: 'tsk_done', state: 'succeeded', finishedAt: 1 },
+          { taskId: 'tsk_paused', state: state('tsk_paused', 'paused') },
         ],
       });
     }
@@ -742,12 +768,13 @@ test('a smoke run that takes over an abandoned budget fences the earlier run’s
   const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
   await smokeCommand(env, io);
 
-  assert.deepEqual(cancelled, ['tsk_running', 'tsk_paused']);
+  assert.deepEqual(cancelled, ['tsk_running', 'tsk_done', 'tsk_paused']);
   assert.match(printed.join('\n'), /took over the run budget of an earlier run/u);
   const refusal = old.reserve('old2', 0.01);
   assert.equal(refusal.ok, false, 'the earlier run’s credential books nothing');
-  // A first run, with nothing to take over, cancels nothing.
+  // A first run, with nothing to take over and nothing going, cancels nothing.
   cancelled.length = 0;
+  io.fetch = downServer(() => {}).fetch;
   const fresh = await mkdtemp(join(tmpdir(), 'smoke-first-run-'));
   t.after(() => rm(fresh, { recursive: true, force: true }));
   const journal = new SqliteSpendJournal(join(fresh, 'gateway-spend.db'));
@@ -794,7 +821,7 @@ test('a smoke run that cannot stop what the earlier run left running starts noth
     const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
 
     assert.equal(await smokeCommand(env, io), 2, failure);
-    assert.match(printed.join('\n'), /could not stop what the earlier run left running/u, failure);
+    assert.match(printed.join('\n'), /could not stop what an earlier run left running/u, failure);
     assert.match(printed.join('\n'), /nothing was started/u, failure);
     assert.ok(
       !requests.some(
@@ -816,7 +843,233 @@ test('a smoke run that cannot stop what the earlier run left running starts noth
   }
 });
 
-test('a task whose cancel failed but which has ended since does not stop the run from starting', async (t) => {
+/**
+ * A server whose smoke invite has the given tasks in one conversation. `tasksOf` is the task list,
+ * read from the log: it sees the cancels so far and, like the real list, never carries
+ * `treeStopPending`. `viewOf` is the answer to a cancel (the orchestrator's own view, which does),
+ * by task and by how many cancels of that task came before; by default the list's entry for it.
+ */
+function leftoverServer(
+  tasksOf: (cancelled: readonly string[], reads: number) => unknown[],
+  cancelStatus = 200,
+  viewOf?: (taskId: string, nth: number) => unknown,
+) {
+  const cancelled: string[] = [];
+  const requests: string[] = [];
+  let reads = 0;
+  const answer = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  const fetchStub = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? 'GET';
+    requests.push(`${method} ${url.pathname}`);
+    if (url.pathname === '/v1/conversations' && method === 'GET') {
+      return answer({ conversations: [{ conversationId: 'cnv_old' }] });
+    }
+    if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+      reads += 1;
+      return answer({ tasks: tasksOf(cancelled, reads) });
+    }
+    if (method === 'POST' && url.pathname.endsWith('/cancel')) {
+      const taskId = url.pathname.split('/')[3] ?? '';
+      const nth = cancelled.filter((id) => id === taskId).length;
+      cancelled.push(taskId);
+      if (cancelStatus !== 200) return new Response('{}', { status: cancelStatus });
+      const task =
+        viewOf?.(taskId, nth) ??
+        tasksOf(cancelled, reads).find((entry) => (entry as { taskId?: string }).taskId === taskId);
+      return answer({ task });
+    }
+    throw new Error('the server is down');
+  }) as typeof fetch;
+  return { fetch: fetchStub, cancelled, requests };
+}
+
+const startedAScenario = (requests: readonly string[]): boolean =>
+  requests.some((line) => line.startsWith('POST /v1/conversations') && !line.endsWith('/cancel'));
+
+test('a run that could not stop an earlier run’s tasks leaves the next run to try again, not to start beside them', async (t) => {
+  const clock = { now: Date.now() };
+  const { dir } = await serverLedger(t, clock);
+  const journalPath = join(dir, 'gateway-spend.db');
+  setRunBudget(
+    journalPath,
+    INVITE,
+    { limitUsd: 5, sinceMs: clock.now - 3_600_000 },
+    'run_old',
+    clock.now - 3 * RUN_LEASE_MS,
+  );
+  const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+  const attempt = async (server: ReturnType<typeof leftoverServer>, runId: string) => {
+    const printed: string[] = [];
+    const io = downServer(() => {});
+    io.print = (line) => printed.push(line);
+    io.runId = runId;
+    io.fetch = server.fetch;
+    return { code: await smokeCommand(env, io), printed: printed.join('\n') };
+  };
+
+  // The first run takes the budget over, cannot cancel, stops, and clears its budget on the way out.
+  const stuck = leftoverServer(() => [{ taskId: 'tsk_old', state: 'running' }], 500);
+  const first = await attempt(stuck, 'run_1');
+  assert.equal(first.code, 2);
+  assert.ok(!startedAScenario(stuck.requests));
+
+  // The next run finds no budget to take over, yet must clean up again and must not start.
+  const again = leftoverServer(() => [{ taskId: 'tsk_old', state: 'running' }], 500);
+  const second = await attempt(again, 'run_2');
+  assert.ok(again.cancelled.length > 1, 'it tried to cancel the leftover again, and again');
+  assert.ok(again.cancelled.every((id) => id === 'tsk_old'));
+  assert.equal(second.code, 2, second.printed);
+  assert.match(second.printed, /the last error: POST \/v1\/tasks\/tsk_old\/cancel answered 500/u);
+  assert.match(second.printed, /nothing was started/u);
+  assert.ok(!startedAScenario(again.requests), again.requests.join(', '));
+
+  // Once the cancel works, the run goes on.
+  const working = leftoverServer((cancelled) => [
+    { taskId: 'tsk_old', state: cancelled.includes('tsk_old') ? 'cancelled' : 'running' },
+  ]);
+  const third = await attempt(working, 'run_3');
+  assert.ok(working.cancelled.includes('tsk_old'));
+  assert.match(third.printed, /cancelled 1 task\(s\) an earlier run left running/u);
+  assert.doesNotMatch(third.printed, /nothing was started/u);
+});
+
+test('only a stop the server confirms counts: the cancel answer, not the list, says whether a tree is still going', async (t) => {
+  const run = async (
+    tasksOf: Parameters<typeof leftoverServer>[0],
+    viewOf?: Parameters<typeof leftoverServer>[2],
+    clock?: () => number,
+  ) => {
+    const { dir } = await serverLedger(t, { now: Date.now() });
+    const server = leftoverServer(tasksOf, 200, viewOf);
+    const printed: string[] = [];
+    const io = downServer(() => {});
+    io.print = (line) => printed.push(line);
+    io.runId = 'run_new';
+    io.fetch = server.fetch;
+    if (clock) io.now = clock;
+    const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+    return { code: await smokeCommand(env, io), printed: printed.join('\n'), server };
+  };
+
+  // The list shows a task that ended with no flag at all, as the real list does for a task whose
+  // stream is still being read: only the cancel's answer says its tree is still going.
+  const ended = { taskId: 'tsk_end', state: 'failed' };
+  const hidden = await run(
+    () => [ended],
+    () => ({ ...ended, treeStopPending: true }),
+  );
+  assert.equal(hidden.code, 2, hidden.printed);
+  assert.match(hidden.printed, /could not confirm the stop of 1 task/u);
+  assert.ok(!startedAScenario(hidden.server.requests));
+  // The same task, once the server stops reporting a pending tree, lets the run go on.
+  const clears = await run(
+    () => [ended],
+    (_id, nth) => ({ ...ended, ...(nth < 3 ? { treeStopPending: true } : {}) }),
+  );
+  assert.doesNotMatch(clears.printed, /nothing was started/u, clears.printed);
+  assert.ok(clears.server.cancelled.length >= 3, 'it asked again until the tree was clear');
+
+  // An ended task with a stop pending on the list itself is the same.
+  const pending = await run(() => [{ ...ended, stopPending: true }]);
+  assert.equal(pending.code, 2, pending.printed);
+  assert.ok(!startedAScenario(pending.server.requests));
+
+  // A cancel the server accepted, with the task still going afterwards, is not a stop.
+  const ignored = await run(() => [{ taskId: 'tsk_run', state: 'running' }]);
+  assert.equal(ignored.code, 2, ignored.printed);
+  assert.match(ignored.printed, /could not confirm the stop/u);
+
+  // A cancelled task whose answer still carries a pending tree stop is not a stop either.
+  const tree = await run(
+    (cancelled) => [{ taskId: 'tsk_tree', state: cancelled.length > 0 ? 'cancelled' : 'running' }],
+    () => ({ taskId: 'tsk_tree', state: 'cancelled', treeStopPending: true }),
+  );
+  assert.equal(tree.code, 2, tree.printed);
+
+  // A task that ended long ago is asked about like any other: the list shows no tree flag and the
+  // server's has no age limit, so a failed task whose stream still runs is not assumed stopped.
+  const longAgo = () => 10 * 60_000 * 10;
+  const old = await run(
+    () => [{ ...ended, finishedAt: 1 }],
+    () => ({ ...ended, treeStopPending: true }),
+    longAgo,
+  );
+  assert.deepEqual([...new Set(old.server.cancelled)], ['tsk_end']);
+  assert.equal(old.code, 2, old.printed);
+  assert.ok(!startedAScenario(old.server.requests));
+  // Once the server says nothing is pending, the same old task lets the run go on.
+  const calm = await run(() => [{ ...ended, finishedAt: 1 }], undefined, longAgo);
+  assert.deepEqual(calm.server.cancelled, ['tsk_end']);
+  assert.doesNotMatch(calm.printed, /nothing was started/u, calm.printed);
+});
+
+test('an enumeration that is not complete starts nothing: a next page that never ends, a bad cursor or a bad shape', async (t) => {
+  const answer = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  const run = async (conversations: unknown, tasksBody: (after: number) => unknown) => {
+    const { dir } = await serverLedger(t, { now: Date.now() });
+    const printed: string[] = [];
+    const requests: string[] = [];
+    const io = downServer(() => {});
+    io.print = (line) => printed.push(line);
+    io.runId = 'run_new';
+    io.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      requests.push(`${method} ${url.pathname}`);
+      if (url.pathname === '/v1/conversations' && method === 'GET') return answer(conversations);
+      if (url.pathname === '/v1/conversations/cnv_old/tasks') {
+        return answer(tasksBody(Number(url.searchParams.get('after'))));
+      }
+      throw new Error('the server is down');
+    }) as typeof fetch;
+    const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
+    return { code: await smokeCommand(env, io), printed: printed.join('\n'), requests };
+  };
+  const one = { conversations: [{ conversationId: 'cnv_old' }] };
+  const done = (taskId: string) => ({ taskId, state: 'succeeded' });
+
+  // A list with a next page after the last page that is read is not a shorter list.
+  const endless = await run(one, (after) => ({ tasks: [done(`tsk_${after}`)], next: after + 1 }));
+  assert.equal(endless.code, 2, endless.printed);
+  assert.match(endless.printed, /longer than \d+ pages/u);
+  assert.ok(!startedAScenario(endless.requests));
+
+  // A cursor that does not move forward, is not a number, or comes with a task of no shape.
+  for (const body of [
+    { tasks: [], next: 0 },
+    { tasks: [], next: 'more' },
+    { tasks: [done('tsk_a'), { nonsense: true }] },
+    { nothing: true },
+  ]) {
+    const bad = await run(one, () => body);
+    assert.equal(bad.code, 2, `${JSON.stringify(body)}: ${bad.printed}`);
+    assert.ok(!startedAScenario(bad.requests), JSON.stringify(body));
+  }
+
+  // A conversation list that is not a list, or holds an entry with no id, is not an empty one.
+  for (const conversations of [
+    { conversations: 'none' },
+    {},
+    { conversations: [{ title: 'x' }] },
+  ]) {
+    const bad = await run(conversations, () => ({ tasks: [] }));
+    assert.equal(bad.code, 2, `${JSON.stringify(conversations)}: ${bad.printed}`);
+    assert.ok(!startedAScenario(bad.requests), JSON.stringify(conversations));
+  }
+
+  // A complete enumeration of two pages goes on.
+  const fine = await run(one, (after) =>
+    after === 0 ? { tasks: [done('tsk_a')], next: 1 } : { tasks: [done('tsk_b')] },
+  );
+  // It got past the enumeration: both tasks were asked about.
+  assert.ok(fine.requests.includes('POST /v1/tasks/tsk_a/cancel'), fine.requests.join(' | '));
+  assert.ok(fine.requests.includes('POST /v1/tasks/tsk_b/cancel'), fine.requests.join(' | '));
+});
+
+test('a refused cancel is not taken for a stop, even when the task list shows the task ended', async (t) => {
   const clock = { now: Date.now() };
   const { dir } = await serverLedger(t, clock);
   const journalPath = join(dir, 'gateway-spend.db');
@@ -853,12 +1106,10 @@ test('a task whose cancel failed but which has ended since does not stop the run
   }) as typeof fetch;
   const env = { ...LIVE_ENV, MAKA_CLOUD_DATA_DIR: dir, MAKA_CLOUD_SMOKE_MAX_USD: '5' };
   const code = await smokeCommand(env, io);
-  assert.equal(
-    code,
-    1,
-    `the scenarios ran (and failed against a down server): ${printed.join(' | ')}`,
-  );
-  assert.doesNotMatch(printed.join('\n'), /nothing was started/u);
+  // The list cannot show a tree that is still stopping, so only the answer to a cancel counts.
+  assert.equal(code, 2, printed.join(' | '));
+  assert.match(printed.join('\n'), /could not confirm the stop of 1 task\(s\): tsk_x/u);
+  assert.match(printed.join('\n'), /the last error: POST \/v1\/tasks\/tsk_x\/cancel answered 409/u);
 });
 
 test('a daily cap at or below the budget passes the cap check, and an unreadable invites file refuses', () => {

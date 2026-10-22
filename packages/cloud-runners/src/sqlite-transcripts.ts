@@ -1,3 +1,4 @@
+import { chmodSync, closeSync, existsSync, openSync } from 'node:fs';
 import { backup as sqliteBackup, DatabaseSync } from 'node:sqlite';
 import type { TaskId } from '@maka-cloud/orchestrator';
 import {
@@ -11,6 +12,18 @@ import {
   type TranscriptStore,
   TranscriptFull,
 } from './transcripts.js';
+
+/**
+ * The database holds the model's history exactly as the CLI wrote it, unscrubbed, so only the
+ * server's account may open it. SQLite gives the journal and the write-ahead log the mode of the
+ * database file, so the file is created, or put right, before it is opened.
+ */
+function ownerOnly(path: string): void {
+  if (!existsSync(path)) closeSync(openSync(path, 'a', 0o600));
+  for (const file of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+    if (existsSync(file)) chmodSync(file, 0o600);
+  }
+}
 
 /** Another process already holds the transcript database. */
 export class TranscriptDatabaseInUseError extends Error {
@@ -81,6 +94,7 @@ export class SqliteTranscriptStore implements TranscriptStore {
   }
 
   static open(path: string, limits: Partial<TranscriptLimits> = {}): SqliteTranscriptStore {
+    ownerOnly(path);
     const db = new DatabaseSync(path);
     try {
       const version = (db.prepare('PRAGMA user_version').get() as { user_version: number })

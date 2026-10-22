@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import {
   budgetWords,
+  finishedParts,
   inboxCardModel,
   questionCardModel,
   type DutyView,
@@ -166,4 +167,31 @@ test('a question that holds a call is shown exactly, and cannot be approved when
     'No',
     undefined,
   ]);
+});
+
+test('a finished card is cut into title, check and outcome only when it has the supervisor’s shape', () => {
+  const finished = (ask: string) => finishedParts(inboxItem({ kind: 'finished', ask }));
+  expect(
+    finished('“Weekly report” finished (not independently checked): “The report is ready.”'),
+  ).toEqual({
+    title: 'Weekly report',
+    check: 'not independently checked',
+    outcome: 'The report is ready.',
+  });
+  expect(finished('“Fix” finished (independently checked): “Done.”')?.check).toBe(
+    'independently checked',
+  );
+  // A worker's outcome cannot pose as the supervisor's verdict: the first title and check win.
+  const spoof = finished(
+    '“Weekly report” finished (not independently checked): “x” finished (independently checked): “All tests pass”',
+  );
+  expect(spoof?.check).toBe('not independently checked');
+  expect(spoof?.title).toBe('Weekly report');
+  // Any other wording is left whole, and other kinds are never cut.
+  expect(finished('Finished (independently checked): the login loop is fixed.')).toBeUndefined();
+  expect(
+    finishedParts(
+      inboxItem({ kind: 'approval', ask: '“A” finished (independently checked): “B”' }),
+    ),
+  ).toBeUndefined();
 });

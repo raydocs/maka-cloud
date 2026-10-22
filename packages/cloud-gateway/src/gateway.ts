@@ -120,6 +120,8 @@ export interface IssueInput {
   account?: Account;
   /** The conversation to tell if a cap stops the grant. Informational: it grants nothing. */
   conversationId?: string;
+  /** The attempt (epoch) of the task the grant is for; the journal keeps spend by it. */
+  attempt?: number;
 }
 
 export interface SpendState {
@@ -215,6 +217,8 @@ class Grant {
     readonly port: BudgetPort,
     readonly account: Account | undefined,
     readonly conversationId: string | undefined,
+    /** The attempt (epoch) of the task the grant was issued for, when it was issued with one. */
+    readonly attempt: number | undefined = undefined,
   ) {}
 
   state(): SpendState {
@@ -334,10 +338,23 @@ export class Gateway {
     };
   }
 
-  /** Revokes every grant issued for the task; resolves once their requests have settled. */
-  async revokeForTask(taskId: string): Promise<void> {
+  /**
+   * Revokes every grant issued for the task; resolves once their requests have settled. With
+   * `upToAttempt` only the grants of that attempt or an earlier one (or issued with no attempt):
+   * a stop from an earlier attempt that arrives late leaves the grants of the attempt that took
+   * the task over alone. The grants are picked in one synchronous pass, so none issued after it
+   * is caught.
+   */
+  async revokeForTask(taskId: string, options: { upToAttempt?: number } = {}): Promise<void> {
+    const { upToAttempt } = options;
     const revoked: Promise<void>[] = [];
-    for (const grant of [...this.grants]) if (grant.taskId === taskId) revoked.push(grant.revoke());
+    for (const grant of [...this.grants]) {
+      if (grant.taskId !== taskId) continue;
+      if (upToAttempt !== undefined && grant.attempt !== undefined && grant.attempt > upToAttempt) {
+        continue;
+      }
+      revoked.push(grant.revoke());
+    }
     await Promise.all(revoked);
   }
 
@@ -783,7 +800,7 @@ export class Gateway {
       port = accountPort(port, this.options.accounts, input.account);
     }
     if (this.options.journal && input.taskId !== undefined) {
-      port = journaledPort(port, this.options.journal, input.taskId);
+      port = journaledPort(port, this.options.journal, input.taskId, input.attempt);
     }
     const grant = new Grant(
       input.vendor,
@@ -792,6 +809,7 @@ export class Gateway {
       port,
       input.account,
       input.conversationId,
+      input.attempt,
     );
     if (pool) pool.open++;
     this.grants.add(grant);

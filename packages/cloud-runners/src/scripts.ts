@@ -11,6 +11,7 @@
  * `$MAKA_LOG_ROOT/<taskId>/`, on memory-backed storage that a snapshot of the sandbox's files
  * does not contain, and deleted when the run is stopped.
  */
+import { asAgentUser } from './agent-user.js';
 
 /**
  * True when `$1` is a live run whose environment carries its own token (guards pid reuse). A
@@ -204,12 +205,37 @@ done
  * With `MAKA_ONLY_RUNS` (run names, space separated) it touches those runs alone: their process
  * groups, locks and raw output files, never another run of the task. A run's cleanup uses this, so
  * that it cannot reach a later turn of the same task that has started since.
+ *
+ * With `MAKA_UP_TO_ATTEMPT` it leaves alone the runs of a later attempt: a run is named
+ * \`e<attempt>.t<turn>\` when its attempt is known, and one whose attempt is after the asking one is
+ * the new driver's own (a slow stop from an earlier attempt can arrive after another process took
+ * the task over). It prints \`LEFT <run>\` for each run it left alone; a run with no attempt in its
+ * name is older than attempts and is stopped.
  */
 export const KILL_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+newer_attempt() {
+  [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ] || return 1
+  case "$1" in
+    e[0-9]*.*)
+      n="\${1#e}"
+      n="\${n%%.*}"
+      case "$n" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$n" -gt "$MAKA_UP_TO_ATTEMPT" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
 cleanup_logs() {
   [ -n "\${MAKA_LOG_DIR:-}" ] || return 0
   if [ -n "\${MAKA_ONLY_RUNS:-}" ]; then
     for run in $MAKA_ONLY_RUNS; do rm -f -- "$MAKA_LOG_DIR/$run.out"; done
+  elif [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ]; then
+    for out in "$MAKA_LOG_DIR"/*.out; do
+      [ -f "$out" ] || continue
+      name="\${out##*/}"
+      name="\${name%.out}"
+      newer_attempt "$name" || rm -f -- "$out"
+    done
   else
     rm -rf -- "$MAKA_LOG_DIR"
   fi
@@ -227,6 +253,7 @@ for run in \${MAKA_CANCEL_RUNS:-}; do : > "$run.cancel"; done
 for lockf in $locks; do
   [ -f "$lockf" ] || continue
   lockbase="\${lockf%.lock}"
+  newer_attempt "\${lockbase#./}" && continue
   [ -f "$lockbase.exit" ] || : > "$lockbase.cancel"
 done
 found=0
@@ -234,6 +261,10 @@ survivors=0
 for pidf in $pids; do
   [ -f "$pidf" ] || continue
   base="\${pidf%.pid}"
+  if newer_attempt "\${base#./}"; then
+    echo "LEFT \${base#./}"
+    continue
+  fi
   pid=$(cat "$pidf" 2>/dev/null) || continue
   case "$pid" in ''|*[!0-9]*) continue ;; esac
   group_is_run "$base" "$pid" || continue
@@ -456,20 +487,26 @@ fi
 export const TOOL_ABORT_SCRIPT = `rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`;
 
 /**
- * True (exit 0) when the CLI at the pinned version is installed. This runs the CLI as the sandbox
- * user, so it first refuses a CLI that is not wholly the sandbox user's own and closed to everyone
- * else (nothing under `~/.maka-cli` owned by another user, or writable by a group or the world),
- * and one that is not under `~/.maka-cli` at all: whatever the agent could have rewritten is never
- * run as the sandbox user. A refused CLI counts as not installed, and the install replaces it.
+ * True (exit 0) when the CLI at the pinned version is installed. The version is asked of the CLI
+ * as the agent's account: the sandbox user runs nothing from `~/.maka-cli`, which holds a program
+ * and its dependencies the agent's tooling may have shaped. The CLI is named by its absolute path
+ * and `~/.maka-cli/bin` is never put on this script's PATH, so a file of that name in it cannot
+ * stand in for `readlink`, `find` or `id`. It must also be wholly the sandbox user's own and closed
+ * to everyone else (nothing under `~/.maka-cli` owned by another user, or writable by a group or the
+ * world), and be under `~/.maka-cli`; a refused CLI counts as not installed and the install
+ * replaces it. The marker (the sandbox user's own file) is what pins the version; the run of the CLI
+ * is a liveness check that it can be run as the agent account, and must print the pinned version as
+ * a whole word. It assumes `sudo` keeps the sandbox user's HOME (no `always_set_home`).
  */
-export function cliCheckScript(binary: string): string {
-  return `export PATH="$HOME/.maka-cli/bin:$PATH"
-[ -f "$MAKA_MARKER" ] && command -v ${binary} >/dev/null 2>&1 || exit 1
+export function cliCheckScript(binary: string, agentUser: string): string {
+  return `cli="$HOME/.maka-cli/bin/${binary}"
+[ -f "$MAKA_MARKER" ] && [ -x "$cli" ] || exit 1
 root=$(readlink -f "$HOME/.maka-cli") || exit 1
-exe=$(readlink -f "$(command -v ${binary})") || exit 1
+exe=$(readlink -f "$cli") || exit 1
 case "$exe" in "$root"/*) ;; *) exit 1 ;; esac
 [ -z "$(find "$root" "$HOME/.maka-cli" \\( ! -user "$(id -un)" -o \\( ! -type l -a -perm /022 \\) \\) -print -quit 2>/dev/null)" ] || exit 1
-${binary} --version 2>&1 | grep -qF -- "$MAKA_VERSION"`;
+ver=$(printf '%s' "$MAKA_VERSION" | sed 's/[.+]/\\\\&/g')
+${asAgentUser('"$cli" --version', agentUser)} 2>&1 | grep -qE -- "(^|[^0-9A-Za-z.])$ver([^0-9A-Za-z.]|$)"`;
 }
 
 /**

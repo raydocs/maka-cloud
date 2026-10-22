@@ -105,7 +105,11 @@ test('the rehearsal resolves to its own project, volumes and images, with or wit
     assert.ok(volumes.length >= 4);
     for (const name of volumes) assert.match(name, /^maka-rehearsal_/u, name);
     for (const [service, { image }] of Object.entries(config.services)) {
-      assert.match(image, /^maka-rehearsal(-proxy)?:local$/u, `${service} builds ${image}`);
+      assert.match(
+        image,
+        /^maka-rehearsal(-proxy|-sandbox)?:local$/u,
+        `${service} builds ${image}`,
+      );
     }
   }
 });

@@ -11,8 +11,8 @@ import {
   relativeTime,
   verbOf,
 } from '@maka-cloud/client';
-import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   AppState,
   KeyboardAvoidingView,
@@ -22,8 +22,16 @@ import {
   View,
 } from 'react-native';
 import { DecisionCard } from '@/components/Decision';
-import { Card, Chip, Field, RoundButton, Screen, StatusMark, T } from '@/components/ui';
+import { InboxStatus } from '@/components/InboxStatus';
+import { Card, Chip, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
 import { useWorkspace } from '@/lib/session';
+
+/** What a first visit can start with; one tap puts it in the box, the person sends it. */
+const EXAMPLES = [
+  'Fix the failing test on my main branch',
+  'Review my latest open pull request',
+  'Add a README section that explains setup',
+] as const;
 
 /**
  * Home: first what waits on the person (one-tap cards), then the start sentence, then what was done
@@ -35,10 +43,8 @@ export default function Home() {
   const router = useRouter();
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const feed = useMemo(() => new HomeFeed(client, visits), [client, visits]);
-  const { items, busy, answerError, since, done, projects } = useSyncExternalStore(
-    feed.subscribe,
-    feed.getSnapshot,
-  );
+  const { items, busy, inboxLoaded, inboxFailed, answerError, since, done, projects } =
+    useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   const latest = useRef(conversations);
   latest.current = conversations;
   useEffect(() => {
@@ -54,6 +60,15 @@ export default function Home() {
     };
   }, [feed]);
   useEffect(() => feed.conversationsChanged(conversations), [feed, conversations]);
+  // Coming back to this tab (not only to the app) reads decisions and results again; the first
+  // focus is the load that `start` already began.
+  const firstFocus = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) firstFocus.current = false;
+      else feed.refresh();
+    }, [feed]),
+  );
 
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
@@ -118,11 +133,12 @@ export default function Home() {
                   />
                   <Pressable
                     accessibilityRole="button"
+                    accessibilityLabel={`Open conversation: ${titleOf(item.conversationId)}`}
                     onPress={() => openConversation(item.conversationId)}
-                    style={{ minHeight: 44, justifyContent: 'center' }}
+                    style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-end' }}
                   >
                     <T kind="muted" style={{ textDecorationLine: 'underline' }}>
-                      Open “{titleOf(item.conversationId)}”
+                      Open conversation
                     </T>
                   </Pressable>
                 </View>
@@ -131,8 +147,12 @@ export default function Home() {
             </Card>
           )}
 
+          {waiting.length === 0 && (
+            <InboxStatus loaded={inboxLoaded} failed={inboxFailed} onRetry={() => feed.refresh()} />
+          )}
+
           <Card label="Start something">
-            <T kind="title">Make room for your next idea.</T>
+            <T kind={waiting.length > 0 ? 'heading' : 'title'}>Make room for your next idea.</T>
             <T kind="muted">
               Tell us what you’d like done, in a sentence. We’ll take it from there.
             </T>
@@ -160,6 +180,22 @@ export default function Home() {
             {startError ? <T kind="error">{startError}</T> : null}
           </Card>
 
+          {conversations.length === 0 && waiting.length === 0 && (
+            <Card label="Ideas to start with">
+              <T kind="heading">Not sure where to begin?</T>
+              {EXAMPLES.map((example) => (
+                <PillButton
+                  key={example}
+                  label={example}
+                  onPress={() => {
+                    setDraft(example);
+                    starter.draftEdited();
+                  }}
+                />
+              ))}
+            </Card>
+          )}
+
           {since !== undefined &&
             done !== undefined &&
             (finished.length > 0 || waiting.length > 0) && (
@@ -168,8 +204,9 @@ export default function Home() {
                 <View style={{ flexDirection: 'row', gap: 8 }}>
                   <Stat label="Done" value={String(finished.length)} />
                   <Stat label="Needs you" value={String(waiting.length)} />
-                  <Stat label="Spent" value={anySpend ? dollars(spent) : 'Not reported'} />
+                  <Stat label="Spent" value={anySpend ? dollars(spent) : '—'} />
                 </View>
+                {!anySpend && finished.length > 0 && <T kind="small">Spend not reported.</T>}
                 {finished.map((entry) => (
                   <Pressable
                     key={entry.taskId}
@@ -191,7 +228,7 @@ export default function Home() {
                       </T>
                       <T kind="muted">{displayText(entry.outcome)}</T>
                     </View>
-                    <T kind="muted">{dollars(entry.costUsd)}</T>
+                    {entry.costUsd !== undefined && <T kind="muted">{dollars(entry.costUsd)}</T>}
                   </Pressable>
                 ))}
               </Card>

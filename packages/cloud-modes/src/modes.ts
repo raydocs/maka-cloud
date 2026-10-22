@@ -4,6 +4,9 @@ import { z } from 'zod';
 export const MODES_CONFIG_VERSION = 1;
 
 export const MODE_IDS = ['quick', 'standard', 'deep'] as const;
+
+/** The mode a request for `deep` runs in while deep mode is off (it is off at launch). */
+export const LAUNCH_FALLBACK_MODE = 'standard' as const;
 export type ModeId = (typeof MODE_IDS)[number];
 
 export function isModeId(value: unknown): value is ModeId {
@@ -223,6 +226,14 @@ export interface ModeChoice {
   mode: ModeId;
   /** Why this mode: the user asked, the conductor suggested it and the budget allows it, or only the budget. */
   source: 'user' | 'conductor' | 'budget';
+}
+
+/**
+ * The config with `deep` made a copy of `standard`: while deep mode is off, a run that still names
+ * it (a brief, a stored run) gets the standard models, effort and budget, never the deep ones.
+ */
+export function withoutDeep(config: ModesConfig): ModesConfig {
+  return { ...config, modes: { ...config.modes, deep: config.modes.standard } };
 }
 
 /** The dearest mode whose minimum the budget meets, not above `ceiling`; the cheapest when none is met. */

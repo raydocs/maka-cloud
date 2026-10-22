@@ -284,3 +284,24 @@ test('a database from a newer version is refused and left alone', async (t) => {
   assert.throws(() => new ConductorState(path), /Unsupported conductor database schema version/);
   assert.equal(userVersion(path), CONDUCTOR_MIGRATIONS.length + 1);
 });
+
+test('a task is owned by the conversation of the run that delegated it, across later runs and no other', async (t) => {
+  const path = await tempDb(t);
+  const state = new ConductorState(path);
+  t.after(() => state.close());
+  const first = state.admitMessage('cnv_a', 'msg_1', 5);
+  assert.ok(!first.duplicate && first.newRun);
+  const run1 = first.run.runId;
+  state.reserveDelegation(run1, 1, 'key_1');
+  state.bindTask('key_1', 'tsk_a');
+  assert.equal(state.endRun(run1, 'failed', 'stopped'), true);
+  const second = state.admitMessage('cnv_a', 'msg_2', 5);
+  assert.ok(!second.duplicate && second.newRun);
+  const other = state.admitMessage('cnv_b', 'msg_3', 5);
+  assert.ok(!other.duplicate && other.newRun);
+
+  assert.equal(state.tasksOf(second.run.runId).includes('tsk_a'), false);
+  assert.equal(state.conversationOwnsTask(second.run.runId, 'tsk_a'), true);
+  assert.equal(state.conversationOwnsTask(other.run.runId, 'tsk_a'), false);
+  assert.equal(state.conversationOwnsTask(second.run.runId, 'tsk_none'), false);
+});

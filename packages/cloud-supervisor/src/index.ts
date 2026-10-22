@@ -16,6 +16,8 @@ export { offerRef, type SuggestionChoice, type SuggestionOfferChoice } from './r
 export {
   DEFAULT_SETTINGS,
   type Settings,
+  OwnerSettingsPatchSchema,
+  type OwnerSettingsPatch,
   SettingsPatchSchema,
   type SettingsPatch,
   SettingsSchema,

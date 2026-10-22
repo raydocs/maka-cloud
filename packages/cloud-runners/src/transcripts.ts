@@ -7,7 +7,15 @@ import { errorMessage } from './shell.js';
  * The conversation of a Claude task, kept off the sandbox. The Agent SDK mirrors every transcript
  * line the CLI writes to a `SessionStore`; this is what that store keeps, so a task can go on from
  * where it was on a sandbox that has none of its files. Lines are the CLI's own JSON lines, as
- * text, already scrubbed of the run's secrets.
+ * text, exactly as written.
+ *
+ * This is the model's history, for replay only, and it is never edited: a resumed conversation
+ * must show the model what it saw, and the model checks it (the signature on a thinking block,
+ * the order of the blocks), so a line with one character changed fails the resume. It is
+ * therefore not scrubbed, and nothing a person reads is made from it: it is kept in a database
+ * only the server's account can open (`SqliteTranscriptStore`), read back only to put it on the
+ * agent's sandbox, and deleted with the task. Text for readers (step notes, failures, results)
+ * is scrubbed where it is made, from the run's own events, never from this copy.
  */
 export interface TranscriptStore {
   /**
@@ -222,22 +230,26 @@ export class MemoryTranscriptStore implements TranscriptStore {
 export interface MirrorOptions {
   taskId: TaskId;
   store: TranscriptStore;
-  /** Takes the run's secrets out of a line before it is kept. */
-  redact(text: string): string;
   /** A batch that was refused or could not be kept. The SDK also reports it in its message stream. */
   onProblem?(message: string): void;
   /** Called with the lines of a batch the store committed (not those it skipped as stored already), never before. */
   onKept?(lines: readonly TranscriptLine[]): void;
 }
 
-/** The SDK's store for a task, with a way to wait until everything it was given is kept or has failed. */
-export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
+/**
+ * The SDK's store for a task, with a way to wait until everything it was given is kept or has
+ * failed, and the first batch that is still not kept (the SDK offers a refused batch again, so a
+ * refusal that a retry then kept is not a failure).
+ */
+export type TranscriptMirror = SessionStore & {
+  drain(): Promise<void>;
+  unkept(): string | undefined;
+};
 
 /**
  * The SDK's `SessionStore` for one task. The SDK hands it every line the CLI writes to its
  * transcript, and it keeps them in the task's `TranscriptStore`: only under this task, only for
- * keys that are plain names, every line scrubbed of the run's secrets first, and in the order they
- * came.
+ * keys that are plain names, each line exactly as the CLI wrote it, and in the order they came.
  *
  * It never gives lines back to the SDK. A resumed conversation is put on the sandbox by
  * `restoreTranscript` before the CLI starts, where the CLI reads it as it reads any of its own
@@ -245,22 +257,29 @@ export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
  * rewrite the CLI's environment.
  */
 export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror {
-  const { taskId, store, redact } = options;
+  const { taskId, store } = options;
   let chain: Promise<unknown> = Promise.resolve();
+  // Refused batches by content, until the same batch is kept.
+  const refused = new Map<string, string>();
   return {
     drain: async () => {
       await chain;
     },
+    unkept: () => refused.values().next().value,
     append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
       const run = async (): Promise<void> => {
-        const lines = entries.map((entry) => scrubbed(entry, redact));
+        const lines = entries.map(asLine);
         const committed = await store.append(taskId, key, lines);
+        refused.delete(batch);
         options.onKept?.(committed);
       };
+      const batch = JSON.stringify([key, entries]);
       const next = chain.then(run, run);
       chain = next.catch(() => undefined);
       return next.catch((error) => {
-        options.onProblem?.(`a transcript batch was not kept: ${errorMessage(error)}`);
+        const message = `a transcript batch was not kept: ${errorMessage(error)}`;
+        if (!refused.has(batch)) refused.set(batch, message);
+        options.onProblem?.(message);
         throw error;
       });
     },
@@ -270,26 +289,14 @@ export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror
   };
 }
 
-/**
- * One entry as a transcript line. The text is scrubbed whole and must still be one JSON object, or
- * the entry is refused (an entry that cannot be scrubbed safely is not kept).
- */
-function scrubbed(entry: SessionStoreEntry, redact: (text: string) => string): TranscriptLine {
+/** One entry as a transcript line: the entry as it is, which must be an object with a type. */
+function asLine(entry: SessionStoreEntry): TranscriptLine {
   if (typeof entry !== 'object' || entry === null || typeof entry.type !== 'string') {
     throw new Error('transcript refused: an entry is not an object with a type');
   }
-  const text = redact(JSON.stringify(entry));
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error('transcript refused: an entry could not be scrubbed');
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('transcript refused: an entry could not be scrubbed');
-  }
-  const uuid = (parsed as { uuid?: unknown }).uuid;
-  return typeof uuid === 'string' && uuid.length <= 100 ? { json: text, uuid } : { json: text };
+  const uuid = (entry as { uuid?: unknown }).uuid;
+  const json = JSON.stringify(entry);
+  return typeof uuid === 'string' && uuid.length <= 100 ? { json, uuid } : { json };
 }
 
 export type RestoreResult =

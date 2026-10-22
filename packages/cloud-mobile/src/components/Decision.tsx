@@ -1,6 +1,7 @@
 import {
   displayText,
   type EvidenceLine,
+  finishedParts,
   type InboxItem,
   inboxCardModel,
   type Question,
@@ -49,15 +50,35 @@ export function DecisionCard({
 }) {
   const [note, setNote] = useState('');
   const card = inboxCardModel(item);
+  // A finished task reads as a title, how far it was checked, and the outcome; any other wording is
+  // shown whole, as the supervisor sent it.
+  const finished = finishedParts(item);
   return (
     <View style={{ gap: 8 }} accessible={false}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <StatusMark tone={item.state === 'open' ? 'attention' : 'ok'} />
-        <T kind="small">{card.heading}</T>
-      </View>
-      <T kind="heading" selectable>
-        {card.text}
-      </T>
+      {finished ? (
+        <>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <StatusMark tone="ok" />
+            <T kind="heading" selectable style={{ flex: 1 }}>
+              {`${finished.title} finished`}
+            </T>
+          </View>
+          <T kind="small">{`${finished.check.charAt(0).toUpperCase()}${finished.check.slice(1)}`}</T>
+          <T kind="body" selectable>
+            {finished.outcome}
+          </T>
+        </>
+      ) : (
+        <>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <StatusMark tone={item.state === 'open' ? 'attention' : 'ok'} />
+            <T kind="small">{card.heading}</T>
+          </View>
+          <T kind="heading" selectable>
+            {card.text}
+          </T>
+        </>
+      )}
       {card.cannotApproveHere && (
         <T kind="muted">This card cannot be shown exactly, so it cannot be approved here.</T>
       )}

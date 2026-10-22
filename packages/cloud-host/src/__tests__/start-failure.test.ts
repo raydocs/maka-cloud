@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import type { CloudRunners, CloudRunnersOptions } from '@maka-cloud/runners';
 import { readStackConfig } from '../config.js';
@@ -176,4 +177,47 @@ test('a stack that fails to start with the agent account set leaves the conversa
   });
   assert.match(String((error as Error).message), /no fleet/u);
   assert.deepEqual(openFilesUnder(dir), []);
+});
+
+test('a second stack over the data directory of a running one fails and leaves what the first holds', {
+  skip: !LINUX,
+}, async (t) => {
+  const dir = await dataDir(t);
+  const first = await startStack(configFor(dir), ENV, { createRunners: FLEET });
+  t.after(() => first.close());
+  const journalPath = join(dir, 'gateway-spend.db');
+  const policy = (): unknown => {
+    const db = new DatabaseSync(journalPath);
+    try {
+      return db.prepare('SELECT * FROM spend_policy').all();
+    } finally {
+      db.close();
+    }
+  };
+  // A model request of the first process that is in flight: its hold is written down before it is sent.
+  const writer = new DatabaseSync(journalPath);
+  writer
+    .prepare('INSERT INTO holds (key, epoch, task_id, usd, attempt) VALUES (?, ?, ?, ?, ?)')
+    .run('k1', 'epoch-of-the-first', 'tsk_1', 2, 1);
+  writer.close();
+  const before = policy();
+  const second = configFor(dir, { MAKA_CLOUD_SERVER_DAILY_USD: '1' });
+  const error = await fails(second, ENV, { createRunners: FLEET });
+  assert.ok(error instanceof Error);
+  assert.match(
+    error.name,
+    /InUse/u,
+    'the second stack is refused for the lock, not for something else',
+  );
+  const reader = new DatabaseSync(journalPath);
+  try {
+    assert.equal(
+      (reader.prepare('SELECT COUNT(*) AS n FROM holds').get() as { n: number }).n,
+      1,
+      'the second stack did not take the first one’s open hold for an earlier process’s',
+    );
+  } finally {
+    reader.close();
+  }
+  assert.deepEqual(policy(), before, 'the second stack wrote no caps of its own');
 });

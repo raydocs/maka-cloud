@@ -49,6 +49,9 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
   if (event.type === 'task_cost') {
     const spend = (task.spendByRun ??= {});
     const run = spendKey(event);
+    if (event.recovery !== undefined) {
+      (task.recoveredRows ??= {})[event.recovery] ??= event.epoch ?? 0;
+    }
     // The total moves by what this run's figure rose, so a report costs the same however many runs
     // the task has had (a sum over all of them made replaying a long log quadratic).
     task.spendSum ??= Object.values(spend).reduce((sum, usd) => sum + usd, 0);
@@ -82,6 +85,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       task.finishedAt = at;
       stopClock(task, at);
       task.failureReason = event.reason;
+      if (event.kept !== undefined) task.kept = event.kept;
       return;
     case 'task_cancel_requested':
       task.cancelRequestedBy ??= event.by;
@@ -90,6 +94,7 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
       task.state = 'cancelled';
       task.finishedAt = at;
       stopClock(task, at);
+      if (event.kept !== undefined) task.kept = event.kept;
       return;
     case 'task_pause_requested':
       if (task.state === 'running') task.pauseRequested = true;
@@ -210,6 +215,7 @@ export function toView(task: TaskRecord): TaskView {
     ...(task.finishedAt === undefined ? {} : { finishedAt: task.finishedAt }),
     progress: task.progress.slice(-VIEW_PROGRESS_NOTES),
     ...(task.manifest === undefined ? {} : { manifest: structuredClone(task.manifest) }),
+    ...(task.kept === undefined ? {} : { kept: structuredClone(task.kept) }),
     ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
     cancelRequested: task.cancelRequestedBy !== undefined,
     pauseRequested: task.pauseRequested === true,

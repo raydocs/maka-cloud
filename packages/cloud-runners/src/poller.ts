@@ -70,7 +70,14 @@ export class MachinePoller {
   pollCount = 0;
 
   constructor(private readonly options: PollerOptions) {
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    // The wait between polls does not keep the process alive: a server that is shutting down with a
+    // run in flight must be able to exit, and the next process recovers the run.
+    this.sleep =
+      options.sleep ??
+      ((ms) =>
+        new Promise((resolve) => {
+          setTimeout(resolve, ms).unref();
+        }));
     this.maxFailures = options.maxFailures ?? 5;
   }
 

@@ -1,7 +1,7 @@
 # Launch notes: what stays off
 
 The first launch is the default path of `docs/fork/deploy.md`: one sandbox machine per invite, tasks
-started by users, the model gateway, approvals and the inbox. Three things are built and tested but
+started by users, the model gateway, approvals and the inbox. Four things are built and tested but
 stay off at launch. None of them is needed by a first user, and none is switched on by accident:
 each is off unless its setting is present, so the launch environment file simply leaves them out.
 
@@ -9,6 +9,7 @@ each is off unless its setting is present, so the launch environment file simply
 | --- | --- | --- | --- |
 | Box pool | `MAKA_CLOUD_BOXES` unset (and `MAKA_CLOUD_BOX_TEMPLATE`, `MAKA_CLOUD_BOX_MAX` unset) | the server would make, sleep and delete sandboxes itself, a pool per invite, instead of the fixed `MAKA_CLOUD_SANDBOXES` machine per invite | the pool's own review items are closed and a second invite needs more than one box |
 | Proposed cards | `MAKA_CLOUD_CARDS` unset or `0` | a daily read-only scan of each registered project, with up to 3 one-tap cards in the inbox | the cards' own review items (secrets in GitHub text, rendering as plain text) are closed |
+| Deep mode | `MAKA_CLOUD_DEEP_MODE` unset or `0` | the conductor is not told about `deep`, a suggestion of it runs as `standard`, and a user's pick of it runs as `standard` with the notice "Deep mode is not available yet"; `deep` holds `standard`'s values everywhere the modes are read | the provenance gap in `docs/fork/post-launch-backlog.md` (Deep research) is closed |
 | Plan vault | not wired: `packages/cloud-plans` is imported by no server package, so no setting turns it on | the user's own Claude or ChatGPT plan used on the boxes (T27) | T27 is finished and reviewed; it needs the box pool first |
 
 ## What to check at launch
@@ -18,40 +19,84 @@ each is off unless its setting is present, so the launch environment file simply
 - `MAKA_CLOUD_CARDS` is not in the environment file. The start-up summary then says
   `proposed cards:      off (set MAKA_CLOUD_CARDS=1 to turn them on)` and
   `sandbox machines:    N (one per invite)`.
+- `MAKA_CLOUD_DEEP_MODE` is not in the environment file. The start-up summary then says
+  `deep mode:           off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)`.
 - Nothing about the plan vault is set; there is nothing to set. Tasks use the model gateway with the
   owner's keys, as in the runbook.
 - `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` are set, and every sandbox machine has that
   account (see "The agent account" in `docs/fork/deploy.md`). Without them no CLI starts and every
   task fails at once, so a launch host without them serves nobody.
 - The go-live rehearsal (`deploy/rehearsal/`, the `rehearsal` CI job) runs with the same three off.
-  Read its green run for what it covers (below), not as proof of the launch path.
+  Read its green run for what it covers (below), not as proof of the launch path on a real host.
 
-## What the rehearsal does not verify yet
+## What the rehearsal verifies, and what it does not
 
-The rehearsal's sandbox is a single-user stand-in with no second OS account, so every step that
-runs a task fails by design and is listed as an expected failure in
-`.github/workflows/fork-deploy-rehearsal.yml` (`MAKA_REHEARSAL_XFAIL`). A green run therefore proves
-the image build, the Compose and Caddy stack, TLS, the health check and sign-in, and nothing about
-tasks:
+The rehearsal's sandbox stand-in has a real second OS account (`maka-agent`), a group it shares with
+the sandbox user and passwordless `sudo` for the sandbox user, and the scripted `claude` speaks the
+Agent SDK's stream-json protocol. So every step of the flow runs with the agent account, and none is
+an expected failure any more. The CI run on the pull request that added it (Docker, Compose, Caddy)
+passed all seven steps:
 
-| Step | Status in the rehearsal | Unverified until |
-| --- | --- | --- |
-| `health`, `sign-in` | runs and passes | (covered) |
-| `task` (a task and its result card) | expected failure | the stand-in has the agent account |
-| `approval` (an approval answered once) | expected failure | the same |
-| `restart` (a restart in the middle of a task) | expected failure | the same |
-| `restart-reply` | expected failure (may pass when `restart` does) | the same |
-| `backup-restore` (backup, restore, a task still runs) | expected failure | the same |
+| Step | Status in the rehearsal |
+| --- | --- |
+| `health`, `sign-in` | passes |
+| `task` (a task and its result card) | passes |
+| `approval` (an approval answered once) | passes |
+| `restart` (a restart in the middle of a task) | passes (a close lets go of the runs, so it takes seconds; before that, a minute: Compose waited out its 60 s grace period) |
+| `restart-reply` | passes |
+| `backup-restore` (backup, restore, a task still runs) | passes |
 
-What takes them off the list is written in `deploy/rehearsal/README.md`, "The agent account": a real
-second account in the stub container, a shared group, passwordless `sudo -n` for the sandbox user
-and stand-ins for the firewall tools the box check tries, and the scripted `claude` speaking the
-Agent SDK's stream-json protocol. Until that is done, the first run on a real host is the first time
-a task runs end to end with the agent account, and it needs the owner's keys and budget.
+**Gate for the first live run: a coding task's checkout.** The `task` step runs the `free` playbook, which
+never clones a repository, so it cannot show the agent account working in a checkout. The launch-path
+review found that it could not: the checkout was cloned under `umask 077` with the agent outside its group
+(fixed on main by #312), `repro.json` is written to a directory the agent cannot write, and git as the agent
+refuses the checkout ("dubious ownership"; the sandbox user owns it). The rehearsal's `checkout` step runs
+a coding task through the server's own clone script and has the scripted agent, as the agent account, read
+its brief, edit a file of the checkout, run `git status` there and write the `repro.json` the brief names;
+it then needs the runner to read that file, run the reproduction test in its check namespace, and go on to the task's own tests. It is a gate, not an expected
+failure (it is not in `MAKA_REHEARSAL_XFAIL`): the `rehearsal` job is the launch check and stays red
+until the step passes, and **the first live run does not start until it does.**
+
+- [ ] `checkout` passes in CI (needs the `repro.json` move and the `safe.directory` fix to have landed).
+
+Still not verified by the rehearsal, so the first run on a real host is the first time they run:
+
+- Unprivileged user namespaces on the instabox image. Every check of a coding task runs under `unshare --user --pid`;
+  Docker's default seccomp profile refuses it (the rehearsal's box must allow it), and whether instabox does is
+  unknown. Where it is refused, no check can run and the task fails with the message "the check … could not run:
+  the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed …)". Live-run
+  check: run `unshare --user --map-current-user --pid --fork true` as the sandbox user on the real box first.
+- The firewall is a stand-in that keeps its rules in files: the egress guard's rules are checked as
+  text, no packet is filtered.
+- The CLI is scripted: the real `claude`'s flags, its own files and its network use are not exercised.
+- The agent starts under `env -i` with named variables only (`asAgentUser`, isolation F8). `USER`, `LOGNAME`
+  and `SHELL` are set by the entry from the agent account; whether the real `claude -p` starts without any
+  other variable the box's exec carried is not shown. Before the first task, run the real `claude -p` once
+  under the exact `asAgentUser` line on the real box.
+- The sandbox user may run any command as root in the stand-in; a real box need not allow that.
+- Any model, GitHub, certificate or domain, and the owner's keys and budget.
 
 ## Why these three
 
 Each adds a second way to reach a sandbox, a credential or a GitHub repository, and the open review
 items on them are not on the path a first user takes. Leaving them off cuts scope without leaving a
 gap in what a first user does: sign in, give a goal, see the result card, approve, restart safely.
-That path is built and unit-tested; the rehearsal does not yet run it end to end (see above).
+That path is built, unit-tested and run end to end by the rehearsal on stand-ins (see above).
+
+A close lets go of the runs without stopping them, and lease renewals stop with it, so a task's
+sandbox lease runs out five minutes (the default `leaseTtlSeconds`) after the last renewal. A
+restart that takes longer than that lets the sandbox go to sleep under its running agent. What the
+next process does depends on the runner. A runner that can resume (`recover`, the Claude runner) is
+stopped where it was left and runs the task again from a fresh clone, as after a crash. **The
+coding runner cannot**: its task is stopped and ended as failed ("orphaned: the orchestrator
+restarted while this task was running"), and the owner sends the goal again. If the change had
+already passed its checks, it is on the host (`keepUntilReviewed`) and the failed task shows it as
+kept for the owner to look at, as a task that fails or is stopped in the same state does.
+A forced exit (the process was still closing after ten seconds) exits with code 1 and logs
+`server.exit_forced`.
+
+Run one server per data directory. A second one over the same directory refuses to start
+(`DatabaseInUseError`) before it touches the spend journal or the task log, and the first keeps
+running. With a fixed gateway port on the same machine the second one is refused earlier, by the
+port (`EADDRINUSE`): same outcome, nothing of the first touched. See
+`design/durable-tasks.md`, "One process owns a task store".

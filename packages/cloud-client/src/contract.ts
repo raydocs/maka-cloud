@@ -41,6 +41,8 @@ export interface TaskView {
   finishedAt?: number;
   progress: string[];
   manifest?: Manifest;
+  /** What the runner kept for the owner when the task ended without a result. */
+  kept?: Manifest;
   failureReason?: string;
   cancelRequested: boolean;
   /** On a top-level task: what its whole tree reported spending. Absent until a run reports. */
@@ -70,9 +72,9 @@ export type TaskEvent =
   /** A cut-off run goes again: show `text` in place of what you had of its turn. */
   | { type: 'task_restarted'; taskId: string; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }
-  | { type: 'task_failed'; taskId: string; reason: string }
+  | { type: 'task_failed'; taskId: string; reason: string; kept?: Manifest }
   | { type: 'task_cancel_requested'; taskId: string; by: string }
-  | { type: 'task_cancelled'; taskId: string }
+  | { type: 'task_cancelled'; taskId: string; kept?: Manifest }
   | { type: 'task_pause_requested'; taskId: string; by: string }
   | { type: 'task_paused'; taskId: string }
   | { type: 'task_pause_failed'; taskId: string; reason: string }

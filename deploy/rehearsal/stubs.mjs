@@ -1,7 +1,9 @@
 // The stand-ins the go-live rehearsal runs against: no real model, no real sandbox, no keys.
 //
 //   - a sandbox API (the instabox API as the server calls it); a command the server runs "in the
-//     sandbox" runs for real in this process's container, with the scripted `claude` below on its PATH
+//     sandbox" runs for real in this process's container, as this process's user (the sandbox user),
+//     with the scripted `claude` below on its PATH; the CLI itself runs as the agent account, a second
+//     real account of the same container (REHEARSAL_AGENT_GROUP names the group both belong to)
 //   - a model API (Anthropic Messages) that answers the conductor from a fixed script
 //   - a small control API the flow uses to steer the scripted `claude` and to see what it did
 //
@@ -10,7 +12,8 @@
 // sandbox and model code paths. See deploy/rehearsal/README.md.
 
 import { createServer } from 'node:http';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { FakeInstabox } from '@maka-cloud/instabox/testing';
 import {
@@ -20,22 +23,29 @@ import {
   tool,
   toolResults,
 } from '@maka-cloud/conductor/testing/fake-model';
-import { CLAUDE_CLI } from '../../packages/cloud-runners/dist/__tests__/fake-cli.js';
+import { SDK_CLI } from '../../packages/cloud-runners/dist/__tests__/fake-sdk-cli.js';
 import { claudeAdapter } from '../../packages/cloud-runners/dist/vendors.js';
+import { loadAgentSdk } from '../../packages/cloud-runners/dist/sdk-turn.js';
 
 const env = process.env;
 const apiKey = env.INSTABOX_API_KEY ?? 'ibk_rehearsal';
 const machineId = env.REHEARSAL_MACHINE_ID ?? 'm_rehearsal0000000000000000';
 const home = env.REHEARSAL_HOME ?? '/tmp/sandbox-home';
 const workRoot = env.REHEARSAL_WORK_ROOT ?? '/data/work';
-// The version the server pins; its install check runs `claude --version` and looks for it.
-const claudeVersion = env.REHEARSAL_CLAUDE_VERSION ?? claudeAdapter.defaultVersion;
+// The version the server pins; its install check runs `claude --version` and looks for it. A
+// server that drives the CLI through the Agent SDK (the agent account is set) pins the one the
+// SDK was built for.
+const claudeVersion =
+  env.REHEARSAL_CLAUDE_VERSION ??
+  (env.REHEARSAL_AGENT_GROUP ? (await loadAgentSdk()).cliVersion : undefined) ??
+  claudeAdapter.defaultVersion;
 const ports = {
   sandbox: Number(env.REHEARSAL_SANDBOX_PORT ?? 9100),
   model: Number(env.REHEARSAL_MODEL_PORT ?? 9101),
   control: Number(env.REHEARSAL_CONTROL_PORT ?? 9102),
 };
 const host = env.REHEARSAL_HOST ?? '0.0.0.0';
+const agentGroup = env.REHEARSAL_AGENT_GROUP;
 const ctl = join(home, 'fake-cli');
 
 // The sandbox as a fresh machine would be after the server's one-time setup: the scripted `claude`
@@ -44,12 +54,42 @@ rmSync(home, { recursive: true, force: true });
 mkdirSync(join(home, '.maka-cli', 'bin'), { recursive: true });
 writeFileSync(
   join(home, '.maka-cli', 'bin', 'claude'),
-  CLAUDE_CLI.replace('fake 9.9.9', `scripted claude ${claudeVersion}`),
+  SDK_CLI.replace('fake 9.9.9', `scripted claude ${claudeVersion}`),
   { mode: 0o755 },
 );
 mkdirSync(join(workRoot, '.setup'), { recursive: true });
 writeFileSync(join(workRoot, '.setup', `claude-${claudeVersion}.ok`), '');
 mkdirSync(ctl, { recursive: true });
+if (agentGroup) {
+  // The scripted claude runs as the agent account and keeps its notes (and waits for `go`) here.
+  execFileSync('chgrp', [agentGroup, ctl]);
+  chmodSync(ctl, 0o2775);
+}
+
+// A small repository the coding task clones: the sandbox's git is told that `rehearsal/sample` on
+// GitHub is this one (the runner's clone URL is fixed), so the real clone script runs against it
+// and nothing leaves the container. Its test, `sh check.sh`, passes once README.md says the line
+// the scripted `claude` appends.
+const sampleRepo = join(home, 'sample-repo');
+mkdirSync(sampleRepo, { recursive: true });
+writeFileSync(join(sampleRepo, 'README.md'), '# sample\n');
+writeFileSync(join(sampleRepo, 'check.sh'), 'grep -q rehearsal-fixed README.md\n');
+for (const args of [
+  ['init', '-q', '-b', 'main'],
+  ['add', '.'],
+  [
+    '-c',
+    'user.name=rehearsal',
+    '-c',
+    'user.email=rehearsal@example.invalid',
+    'commit',
+    '-q',
+    '-m',
+    'sample',
+  ],
+]) {
+  execFileSync('git', args, { cwd: sampleRepo });
+}
 
 const sandbox = await new FakeInstabox({
   host,
@@ -57,6 +97,13 @@ const sandbox = await new FakeInstabox({
   apiKey,
   machineId,
   home,
+  // The agent account is a real one, so what the runners end or read as root is done by real sudo.
+  rootSudo: agentGroup !== undefined,
+  env: {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: `url.file://${sampleRepo}.insteadOf`,
+    GIT_CONFIG_VALUE_0: 'https://github.com/rehearsal/sample.git',
+  },
 }).start();
 
 // What the conductor says, by what it was last told. The user's message names the scenario; the
@@ -74,6 +121,32 @@ const delegate = (n, actionRef) =>
       mode: 'wait',
       timeoutMs: 120_000,
       budgetUsd: 1,
+      ...(actionRef === undefined ? {} : { actionRef }),
+    }),
+  );
+
+const CODING_BRIEF = [
+  'Make README.md of the sample repository say rehearsal-fixed.',
+  '',
+  '```coding-task',
+  JSON.stringify({
+    repo: 'rehearsal/sample',
+    baseRef: 'main',
+    testCommand: 'sh check.sh',
+    goal: 'Make README.md say rehearsal-fixed.',
+  }),
+  '```',
+].join('\n');
+
+const delegateCoding = (actionRef) =>
+  calls(
+    tool('delegate_task', {
+      runner: 'coding',
+      brief: CODING_BRIEF,
+      title: 'Rehearsal coding task',
+      mode: 'wait',
+      timeoutMs: 240_000,
+      budgetUsd: 3,
       ...(actionRef === undefined ? {} : { actionRef }),
     }),
   );
@@ -135,7 +208,8 @@ function conductor(request) {
       }
       return text(`The rehearsal step ${used?.name ?? ''} was refused.`);
     }
-    if (used?.name === 'start_playbook') return delegate(0);
+    if (used?.name === 'start_playbook')
+      return scenario === 'code' ? delegateCoding() : delegate(0);
     if (used?.name === 'delegate_task') {
       if (scenario === 'approve' && succeeded === 1) return delegate(1);
       const task = result.json?.task;
@@ -164,6 +238,11 @@ function conductor(request) {
         ],
         recommended: 'casual',
       }),
+    );
+  }
+  if (scenario === 'code') {
+    return calls(
+      tool('start_playbook', { playbook: 'coding', goal: 'Make README.md say rehearsal-fixed.' }),
     );
   }
   if (scenario === 'run' || scenario === 'approve') {
@@ -195,6 +274,10 @@ const control = createServer((req, res) => {
       mode: existsSync(join(ctl, 'mode')) ? readFileSync(join(ctl, 'mode'), 'utf8').trim() : 'ok',
       waiting: existsSync(join(ctl, 'waiting')),
       released: existsSync(join(ctl, 'go')),
+      // What the scripted `claude` did to the checkout in `code` mode, as the account it runs as.
+      code: existsSync(join(ctl, 'code-result.json'))
+        ? JSON.parse(readFileSync(join(ctl, 'code-result.json'), 'utf8'))
+        : undefined,
       cliRuns: sandbox.execRequests.length,
       modelRequests: model.requests.length,
     });

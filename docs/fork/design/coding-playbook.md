@@ -24,7 +24,7 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
    (`git fetch --depth=1`, URL built from the validated `owner/name`). Public repositories only: no token enters a
    sandbox.
 3. A vendor agent (T6 `SandboxCliRunner`, Claude first unless the brief says otherwise) writes a reproduction test,
-   records it in `repro.json`, and makes the change.
+   records it in `handoff/repro.json` (the agent can write only `handoff/` and `workspace/` of its task directory), and makes the change.
 4. The runner checks the work itself, as the agent's account (never the sandbox user: a repository's test command is
    the agent's code, and a box with no agent account runs no check), with detached processes it polls:
    the reproduction test passes; `testCommand` passes; the reproduction test **fails** with every change outside its
@@ -38,7 +38,11 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
    failures. There is never a third agent, and never two at once.
 7. A verified change is read out as git would commit it (diff against the base commit including untracked files,
    ignored files excluded, every blob's sha1 checked on the host; symlinks, submodules and oversized files refused)
-   into `changes.json`, `change.patch` and `verification.json`, and recorded in `CodingDeliveries`.
+   into `changes.json`, `change.patch` and `verification.json`, and recorded in `CodingDeliveries`. The delivery
+   points at hash-named copies of the change and its record (`changes.<hash>.json`, `verification.<hash>.json`) that
+   are never written twice. They live in `.records/` of the task's handoff directory, which no exported artifact can
+   name (an artifact is a plain relative path, never starting with a dot) and which the export reserves besides.
+   Beside the plain-named files, an artifact called `changes.<hash>.json` replaced an earlier delivery's change or record.
 8. The runner writes the result manifest itself. Its `done` holds one `verified:` line; `verify` requires it and the
    three artifacts. When both vendors fail, the task still finishes, with `notDone`, low confidence and the failure
    brief, so the conductor can say what went wrong.
@@ -121,6 +125,16 @@ Decided by win (2026-10-19):
   splitting.
 - Build outputs ignored by git stay in place during the base check, so a test that reads a stale build could pass on
   the base commit; the check then reports "does not reproduce" rather than a false pass.
-- The agent can rewrite the repository's git metadata. Delivered contents are what git would commit from the working
+- The agent can rewrite the repository's git metadata, and it owns `.git` (config, attributes, hooks). The sandbox user
+  never reads it: the clone makes `control.git` in the task directory (its own copy of the base objects and an index,
+  where the agent cannot enter), and every git the runner runs (changes, baseline revert, the edit-loop sample, blob
+  reads) runs against it with the workspace as the working tree, no configuration of its own and no attributes file, so
+  a filter, textconv, hook or fsmonitor the agent configures has nothing to run. A workspace without it is refused, and
+  so is one with a repository inside it (a `.git` below the top, such as a populated submodule): git would run a child
+  git there with the agent's configuration, so the changes, the sample and the base check print `ERR nested repository`
+  and the owner sees a progress note. Submodules are never followed in status or diff. The base check and its restore
+  put files back only through directories that resolve inside the workspace (the agent can swap a directory for a
+  symlink), and a restored file is group-writable so the agent can edit it as before.
+  Delivered contents are what git would commit from the working
   tree and are hash-checked in transit; the tree is built on GitHub's own base tree, and the repository's CI runs on
   the pull request.

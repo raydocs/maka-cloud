@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import {
+  containsSecret,
+  scrubKeyShapes,
+  scrubReading,
   scrubSecretFields,
   scrubSecretShapes,
+  scrubSecretText,
   scrubValues,
   setKnownSecrets,
 } from '../secret-shapes.js';
@@ -48,15 +52,34 @@ test('JSON that was written into a string is read through its escapes', () => {
 
 test('the values this process holds are removed however they are written, and ordinary text stays', () => {
   const key = 'gw-live-Zk39/Qp+Lm20x';
-  setKnownSecrets([key, 'short']);
+  setKnownSecrets([key]);
   gone(`the gateway said no to ${key}`, key);
   gone(`GET /v1?x=${encodeURIComponent(key)}`, encodeURIComponent(key));
   gone(`{"detail":"${JSON.stringify(key).slice(1, -1)}"}`, key);
   gone(`Authorization: Basic ${Buffer.from(`user:${key}`).toString('base64')}`, 'dXNlcjpnd');
-  // Too short to be told from a word.
-  assert.equal(scrubSecretShapes('a short word'), 'a short word');
   setKnownSecrets([]);
   assert.equal(scrubSecretShapes(`still ${key}`), `still ${key}`);
+});
+
+test('a short registered value is a key whatever it looks like; only a few characters are not', () => {
+  setKnownSecrets(['hunter', '123456', 'a1b2', 'abc']);
+  assert.equal(
+    scrubSecretShapes('pw hunter and 123456 and a1b2'),
+    'pw [secret] and [secret] and [secret]',
+  );
+  assert.equal(containsSecret({ question: 'Sign in with hunter?' }), true);
+  assert.equal(scrubSecretShapes('the abc of it'), 'the abc of it');
+});
+
+test('a short registered key is removed too, in every form, and a blank one is not a key', () => {
+  const short = 'p@ss/w?';
+  setKnownSecrets([short, '  ', '']);
+  gone(`the gateway said no to ${short}`, short);
+  gone(`GET /v1?x=${encodeURIComponent(short)}`, encodeURIComponent(short));
+  gone(`{"detail":"${JSON.stringify(short).slice(1, -1)}"}`, short);
+  assert.equal(containsSecret({ ask: `use ${short}` }), true);
+  assert.equal(scrubSecretShapes('a short word'), 'a short word');
+  setKnownSecrets([]);
 });
 
 test('ordinary text and data pass through', () => {
@@ -135,4 +158,292 @@ test('an object keeps the link between a scheme or header name and its value', (
   });
   assert.ok(!JSON.stringify(out).includes(basic), JSON.stringify(out));
   assert.match(JSON.stringify(out), /"value":"x"/u);
+});
+
+// -- recheck17 item 5, recheck18 item 1 ---------------------------------------------------------
+
+const layers = (text: string, times: number): string => {
+  let out = text;
+  for (let i = 0; i < times; i++) out = JSON.stringify(out).slice(1, -1);
+  return out;
+};
+
+test('a key with awkward characters is found through several layers of percent-encoding and JSON escaping, in any case of hex', () => {
+  const key = 'p@ss/w?"q\\x';
+  const once = encodeURIComponent(key);
+  const twice = encodeURIComponent(once);
+  const forms = [
+    once,
+    once.toLowerCase().replace(/%([0-9a-f]{2})/gu, (_, hex: string) => `%${hex}`),
+    // Mixed case, escape by escape: the first lower, the second upper.
+    once.replace(/%2F/u, '%2f'),
+    twice,
+    twice.replace(/%252F/u, '%252f'),
+    layers(key, 1),
+    layers(key, 2),
+    layers(key, 3),
+    layers(encodeURIComponent(key), 2),
+    encodeURIComponent(layers(key, 2)),
+  ];
+  for (const form of forms) {
+    assert.ok(
+      !scrubValues(`Authorization failed for ${form} (401)`, [key]).includes(form),
+      `leaked: ${form}`,
+    );
+  }
+  setKnownSecrets([key]);
+  try {
+    for (const form of forms) {
+      assert.ok(!scrubSecretShapes(`failed for ${form}`).includes(form), `leaked: ${form}`);
+    }
+  } finally {
+    setKnownSecrets([]);
+  }
+  // Ordinary text that merely looks similar stays.
+  assert.equal(scrubValues('p@ss and %40 and w?', [key]), 'p@ss and %40 and w?');
+});
+
+test('a credential serialised again and again is scrubbed whatever the order of its fields', () => {
+  const secret = 'dXNlcjpwYXNzd29yZC12ZXJ5LXNlY3JldA==';
+  const digest = 'username="u", realm="r", nonce="n", response="abcdef0123456789"';
+  const values: unknown[] = [
+    { name: 'Authorization', value: `Basic ${secret}` },
+    { value: `Basic ${secret}`, name: 'Authorization' },
+    { value: secret, scheme: 'Basic' },
+    { scheme: 'Digest', value: digest },
+    { value: digest, extra: { deeper: 1 }, scheme: 'Digest' },
+    ['Authorization', `Basic ${secret}`],
+  ];
+  for (const value of values) {
+    for (let times = 0; times <= 4; times++) {
+      let text = JSON.stringify(value);
+      for (let i = 0; i < times; i++) text = JSON.stringify({ body: text });
+      const out = scrubSecretShapes(text);
+      assert.ok(!out.includes(secret), `${times} layers, secret kept: ${out}`);
+      assert.ok(!out.includes('abcdef0123456789'), `${times} layers, digest kept: ${out}`);
+      assert.ok(!out.includes('nonce'), `${times} layers, digest half kept: ${out}`);
+    }
+    // Written inside a string field that is itself JSON, as a tool result that quotes a response.
+    const inner = scrubSecretShapes(JSON.stringify({ result: JSON.stringify(value) }));
+    assert.ok(!inner.includes(secret) && !inner.includes('abcdef0123456789'), inner);
+  }
+});
+
+test('a text that is cut off in the middle of nested JSON still loses its credential', () => {
+  const secret = 'dXNlcjpwYXNzd29yZC12ZXJ5LXNlY3JldA==';
+  const text = JSON.stringify({
+    body: JSON.stringify({ value: `Basic ${secret}`, name: 'Authorization' }),
+  });
+  for (const cut of [text.length, text.length - 3, text.length - 12]) {
+    assert.ok(!scrubSecretShapes(text.slice(0, cut)).includes(secret), String(cut));
+  }
+  assert.equal(
+    scrubSecretShapes('{"title":"fix the nonce","n":[1,2]}'),
+    '{"title":"fix the nonce","n":[1,2]}',
+  );
+});
+
+test('a long token followed by a lone percent sign or backslash is scrubbed in linear time', () => {
+  for (const tail of ['!%', '\nbuild 100%', ' C:\\']) {
+    const text = `${'a'.repeat(200_000)}${tail}`;
+    const started = Date.now();
+    scrubSecretShapes(text);
+    assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms for ${tail}`);
+  }
+});
+
+test('a long run of backslashes or of escaped quotes is scrubbed in linear time', () => {
+  const runs = [
+    '\\'.repeat(200_000),
+    '\\"'.repeat(100_000),
+    '"\\'.repeat(100_000),
+    `'${'\\'.repeat(200_000)}`,
+    `${'\\'.repeat(100_000)}"password`,
+    `${'\\'.repeat(100_000)}"password"`,
+    `${'\\\\"'.repeat(50_000)}x`,
+  ];
+  for (const text of runs) {
+    for (const scrub of [scrubSecretShapes, scrubSecretText]) {
+      const started = Date.now();
+      scrub(text);
+      assert.ok(
+        Date.now() - started < 1500,
+        `took ${Date.now() - started} ms for ${text.slice(0, 12)}`,
+      );
+    }
+    const started = Date.now();
+    containsSecret(text);
+    assert.ok(Date.now() - started < 1500, `containsSecret took ${Date.now() - started} ms`);
+  }
+});
+
+test('a long text of credential-like pairs without a brace is scrubbed in linear time', () => {
+  for (const unit of [
+    '"value":"x",',
+    '"token":"[secret]",',
+    '"scheme":"Basic",',
+    '"name":"Authorization",',
+  ]) {
+    const text = unit.repeat(Math.ceil(240_000 / unit.length));
+    for (const scrub of [scrubSecretShapes, scrubSecretText]) {
+      const started = Date.now();
+      scrub(text);
+      assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms for ${unit}`);
+    }
+  }
+});
+
+test('a scheme and its credential are found when other fields sit between them, up to a bound', () => {
+  const gap = (n: number) => `"x":"${'a'.repeat(n)}",`;
+  // Not a JSON text as a whole (a log line with a piece of one), so only the patterns read it.
+  const pair = (n: number) => `sent "scheme":"Basic",${gap(n)}"value":"dXNlcjpwYXNzd29yZA==" ok`;
+  assert.ok(!scrubSecretShapes(pair(100)).includes('dXNlcjpwYXNzd29yZA'));
+  assert.ok(!scrubSecretShapes(pair(400)).includes('dXNlcjpwYXNzd29yZA'));
+  // Known limit: with more than 512 characters of other fields between the two, the pair is not
+  // recognised by its shape (a JSON text that parses is read field by field instead, and a registered secret is still found).
+  assert.ok(scrubSecretShapes(pair(2000)).includes('dXNlcjpwYXNzd29yZA'));
+});
+
+test('known limit: a secret field whose quote follows a lone backslash is no longer read as one', () => {
+  // Well-formed JSON never writes a key right after a backslash; text that does (a Windows path
+  // printed before a field) was matched before the pattern started only at the start of a run.
+  assert.ok(scrubSecretShapes('C:\\"token":"abc12345"').includes('abc12345'));
+});
+
+test('JSON nested past the stack is not read as JSON and does not throw', () => {
+  const deep = `${'['.repeat(6000)}${']'.repeat(6000)}`;
+  assert.doesNotThrow(() => scrubSecretShapes(deep));
+  assert.equal(
+    scrubSecretShapes(`${deep} Authorization: Bearer abcdefgh12345678`).includes(
+      'abcdefgh12345678',
+    ),
+    false,
+  );
+});
+
+test('a key split by a character that shows nothing is still found, whichever the character', () => {
+  const key = 'abc12345SECRETkey';
+  setKnownSecrets([key]);
+  for (const mark of [
+    '\u034f',
+    '\ufe0f',
+    '\u180b',
+    '\u3164',
+    '\u{e0100}',
+    '\u0301',
+    '\u200b',
+    '\u00ad',
+  ]) {
+    const split = `abc12345${mark}SECRETkey`;
+    assert.ok(
+      !scrubSecretText(`here: ${split}`).includes('SECRETkey'),
+      `U+${mark.codePointAt(0)?.toString(16)} survived`,
+    );
+    assert.equal(
+      containsSecret({ ask: split }),
+      true,
+      `U+${mark.codePointAt(0)?.toString(16)} not found`,
+    );
+  }
+  // A mark that would compose with the letter before it (c and an acute make ć) is found too.
+  setKnownSecrets(['abcDEF12345key']);
+  for (const split of ['abc\u0301DEF12345key', 'abcDEF12345ke\u0308y', 'a\u0300bcDEF12345key']) {
+    assert.ok(!scrubSecretText(`here: ${split}`).includes('12345'), JSON.stringify(split));
+    assert.equal(containsSecret({ ask: split }), true, JSON.stringify(split));
+  }
+  // A key with accents of its own is still found with a mark put into it.
+  setKnownSecrets(['café12345']);
+  for (const split of ['café\u030112345', 'cafe\u0301\u030112345', 'café123\u030045']) {
+    assert.ok(!scrubSecretText(`here: ${split}`).includes('12345'), JSON.stringify(split));
+    assert.equal(containsSecret({ ask: split }), true, JSON.stringify(split));
+  }
+  // The shape of a token the same way: nothing of its tail is left showing.
+  assert.ok(!scrubSecretText('sk-abcdefgh\u034fijklmnop').includes('ijklmnop'));
+  // Text with nothing in it is not rewritten.
+  assert.equal(
+    scrubSecretText('na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}'),
+    'na\u0308ive e\u0301 \u{1F468}\u200d\u{1F469}',
+  );
+});
+
+test('text of scripts that are written with combining marks is shown as written, with or without a secret in it', () => {
+  const hindi = 'किताब में पुस्तक है';
+  const thai = 'สวัสดีครับ';
+  const arabic = 'مُحَمَّد';
+  const emoji = '❤️ 1️⃣';
+  for (const text of [hindi, thai, arabic, emoji]) {
+    assert.equal(scrubReading(text, scrubSecretShapes), text);
+    assert.equal(scrubSecretText(text), text);
+  }
+  setKnownSecrets(['abc12345SECRETkey']);
+  assert.equal(scrubSecretText(`${hindi} abc12345́SECRETkey ${thai}`), `${hindi} [secret] ${thai}`);
+  // A secret with marks of its own script inside it is found too, at the price of those marks.
+  setKnownSecrets(['पुस्तक-secret-9']);
+  assert.equal(scrubSecretText('x पुस्‍तक-secret-9 y'), 'x [secret] y');
+});
+
+test('the lines of a private key whose first marker was cut off are taken, with their closing marker', () => {
+  const line = (n: number) => `${String(n).padStart(2, '0')}${'AbCdEfGhIj'.repeat(6)}`.slice(0, 64);
+  const body = [10, 11, 12, 13, 14].map(line);
+  // Output cut to its last bytes: the opening marker and the first line are gone.
+  const tail = `ok 1 - prior test\n${body.slice(1).join('\n')}\nQUJD+/==\n-----END RSA PRIVATE KEY-----\nok 2 - next test\n`;
+  const out = scrubSecretShapes(tail);
+  for (const kept of body) assert.equal(out.includes(kept), false, kept);
+  assert.doesNotMatch(out, /END RSA PRIVATE KEY/u);
+  assert.match(out, /ok 1 - prior test\n/u);
+  assert.match(out, /ok 2 - next test\n$/u);
+  // Without the closing marker too, and the short last line with its padding goes with them.
+  const open = scrubSecretShapes(`before\n${body.join('\n')}\nQUJD+/==\nafter\n`);
+  for (const kept of body) assert.equal(open.includes(kept), false, kept);
+  assert.equal(open.includes('QUJD+/=='), false);
+  assert.match(open, /^before\n.*after\n$/su);
+  // Only the lines in front of a lone closing marker, when fewer than three are left.
+  const two = scrubSecretShapes(`${body[3]}\n${body[4]}\n-----END PRIVATE KEY-----\n`);
+  assert.equal(two.includes(body[3] as string), false);
+  assert.equal(two.includes(body[4] as string), false);
+});
+
+test('lists of hashes, a short base64 line or two, and a copy that must stay exact are left alone', () => {
+  const hashes = Array.from({ length: 4 }, (_, i) => `${i}`.repeat(64).replace(/\d/gu, 'a')).join(
+    '\n',
+  );
+  assert.equal(scrubSecretShapes(`${hashes}\n`), `${hashes}\n`);
+  const b64 = 'AbCdEfGhIj'.repeat(7);
+  const twoLines = `${b64}\n${b64}\nthe end\n`;
+  assert.equal(scrubSecretShapes(twoLines), twoLines);
+  const data = `${[b64, b64, b64, b64].join('\n')}\n`;
+  assert.equal(scrubKeyShapes(data), data);
+});
+
+test('a very long run of base64 lines is scrubbed without running out of stack', () => {
+  const line = 'AbCdEfGhIj'.repeat(7);
+  const out = scrubSecretShapes(Array(10_000).fill(line).join('\n'));
+  assert.equal(out.includes(line), false);
+});
+
+test('long lists of hashes, ids and paths are scrubbed in linear time', () => {
+  const hash = 'a1b2c3d4'.repeat(8);
+  const lists = [
+    Array(10_000).fill(hash),
+    Array.from({ length: 10_000 }, (_, i) => `id${String(i).padStart(18, '0')}`),
+    Array.from({ length: 10_000 }, (_, i) => `packages/cloudserver/src/dir${i}`),
+  ];
+  for (const lines of lists) {
+    const text = `${lines.join('\n')}\n`;
+    const started = Date.now();
+    scrubSecretShapes(text);
+    assert.ok(Date.now() - started < 500, `${lines[0]} took ${Date.now() - started} ms`);
+  }
+  // With a closing marker after them, the lines in front of it go and the rest stays.
+  const withEnd = scrubSecretShapes(
+    `${lists[0]?.slice(0, 100).join('\n')}\n-----END OPENSSH PRIVATE KEY-----\nafter\n`,
+  );
+  assert.equal(withEnd.includes(hash), false);
+  assert.match(withEnd, /after\n$/u);
+});
+
+test('a closing marker in the middle of a line, or with nothing before it, loses only itself', () => {
+  assert.equal(scrubSecretShapes('see -----END PRIVATE KEY----- here'), 'see [secret] here');
+  assert.equal(scrubSecretShapes('-----END PRIVATE KEY-----\nrest\n'), '[secret]\nrest\n');
+  assert.equal(scrubSecretShapes('words\n-----END PRIVATE KEY-----\n'), 'words\n[secret]\n');
 });

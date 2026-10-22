@@ -64,7 +64,7 @@ const prompts = async (h: Harness): Promise<string[]> =>
     .filter(Boolean)
     .map((text) => JSON.parse(text) as string);
 
-test('every line the CLI writes is kept in the store, scrubbed of the run’s secrets, and the CLI writes where the SDK looks', async (t) => {
+test('every line the CLI writes is kept in the store exactly as written, and the CLI writes where the SDK looks', async (t) => {
   const r = await rig(t);
   await r.h.setMode('leak');
   const spec = await r.h.spec('tsk_tr_mirror', {
@@ -80,29 +80,23 @@ test('every line the CLI writes is kept in the store, scrubbed of the run’s se
 
   const kept = await r.stored('tsk_tr_mirror');
   assert.equal(kept.length, 4, 'the prompt, the key line, the progress line, the answer');
-  const text = kept.join('\n');
-  assert.ok(!text.includes(API_KEY), 'the API key reached the store');
-  assert.ok(!text.includes(MCP_TOKEN), 'the MCP token reached the store');
-  assert.match(text, /key \[redacted\] token \[redacted\]/);
-  // What is kept is what the CLI wrote, line for line, but for the scrubbing.
+  // The model checks its own history on a resume, so the kept copy is the CLI's file byte for byte:
+  // nothing is scrubbed out of it (it never leaves the server except to go back onto a sandbox).
   const onBox = (await fs.readFile(r.boxFile('tsk_tr_mirror'), 'utf8')).split('\n').filter(Boolean);
-  assert.deepEqual(
-    kept.map((line) => JSON.parse(line).uuid),
-    onBox.map((line) => JSON.parse(line).uuid),
-  );
+  assert.deepEqual(kept, onBox);
+  assert.match(kept.join('\n'), new RegExp(`key ${API_KEY} token ${MCP_TOKEN}`, 'u'));
   assert.equal((await r.h.sessions.get('tsk_tr_mirror'))?.sessionId, SESSION);
 });
 
-test('a key the run was never given is scrubbed from the kept conversation too', async (t) => {
+test('a key the user pasted stays in the kept conversation as written', async (t) => {
   const r = await rig(t);
   await r.h.setMode('shape');
   const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_shape')));
   assert.equal(terminal(events)?.type, 'finished', JSON.stringify(terminal(events)));
-  const text = (await r.stored('tsk_tr_shape')).join('\n');
-  assert.ok(!text.includes('sk-ant-api03-AbCd'), 'an API key reached the store');
-  assert.ok(!text.includes('ghp_AbCd'), 'a token reached the store');
-  assert.match(text, /the user pasted \[secret\] and \[secret\]/);
-  for (const line of await r.stored('tsk_tr_shape')) JSON.parse(line);
+  const kept = await r.stored('tsk_tr_shape');
+  const onBox = (await fs.readFile(r.boxFile('tsk_tr_shape'), 'utf8')).split('\n').filter(Boolean);
+  assert.deepEqual(kept, onBox);
+  assert.match(kept.join('\n'), /sk-ant-api03-AbCd/u);
 });
 
 test('without a transcript store the CLI is not asked to mirror anything and keeps its own configuration directory', async (t) => {
@@ -149,6 +143,40 @@ test('a sandbox that lost the conversation gets it back from the store before th
   assert.equal(
     await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8'),
     `${stored}\n`,
+  );
+});
+
+test('the model’s own blocks (a thinking signature, redacted thinking) come back onto a new sandbox untouched', async (t) => {
+  const r = await rig(t);
+  await r.h.setMode('thinking');
+  const spec = await r.h.spec('tsk_tr_think');
+  assert.equal(terminal(await collect(await r.h.runners.claude.start(spec)))?.type, 'finished');
+  // The sandbox comes back from an older snapshot: only the first line is left there.
+  const first = (await fs.readFile(r.boxFile('tsk_tr_think'), 'utf8')).split('\n')[0];
+  await fs.writeFile(r.boxFile('tsk_tr_think'), `${first}\n`);
+
+  const events = await collect(
+    await r.h.runners.claude.resume('tsk_tr_think', { prompt: 'Go on.', spec }),
+  );
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  const resumed = await fs.readFile(join(r.h.home, 'fake-cli', 'resumed-2.jsonl'), 'utf8');
+  const blocks = resumed
+    .split('\n')
+    .filter(Boolean)
+    .flatMap((line) => JSON.parse(line).message?.content ?? [])
+    .filter((block: unknown) => typeof block === 'object' && block !== null) as Array<{
+    type?: string;
+    signature?: string;
+    data?: string;
+  }>;
+  const thinking = blocks.find((block) => block.type === 'thinking');
+  assert.equal(
+    thinking?.signature,
+    'EqQBCkYIBxgCKkA0Vh7Pq9m1ZtQ2w8d3Jx5sL0bN4cR6yU/aKfGhTeWnMoPzXvB1iDjE2lSq+u7CyHrAgFkIwVtQpZnYb',
+  );
+  assert.equal(
+    blocks.find((block) => block.type === 'redacted_thinking')?.data,
+    'EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxfnXrssn6jjZVM1UJ1',
   );
 });
 
@@ -255,20 +283,59 @@ test('a conversation that began before transcripts were kept goes on as it is, u
   assert.equal(await store.locate('tsk_tr_legacy', 'sess-1'), undefined);
 });
 
-test('a store that refuses lines is reported, and the task still finishes', async (t) => {
+test('a store that refuses lines stops the turn: a conversation that is not all kept is not carried on', async (t) => {
   const down = new MemoryTranscriptStore();
   down.append = async () => {
     throw new Error('the transcript database is full');
   };
   const r = await rig(t, { store: down });
   const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_down')));
-  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', JSON.stringify(notes(events)));
+  assert.match(
+    end?.type === 'failed' ? end.reason : '',
+    /conversation could not be kept.*the transcript database is full/u,
+  );
   assert.ok(
     notes(events).some((note) =>
       /a transcript batch was not kept: the transcript database is full/.test(note),
     ),
     JSON.stringify(notes(events)),
   );
+});
+
+test('a store that fails only on the last lines still ends the turn as a failure', async (t) => {
+  const late = new MemoryTranscriptStore();
+  const append = late.append.bind(late);
+  late.append = async (taskId, key, lines) => {
+    if (lines.some((line) => line.json.includes('all done'))) {
+      throw new Error('the transcript database went away');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: late });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_late')));
+  const end = terminal(events);
+  assert.equal(end?.type, 'failed', JSON.stringify(notes(events)));
+  assert.match(end?.type === 'failed' ? end.reason : '', /the transcript database went away/u);
+});
+
+test('a refusal that the SDK retries and the store then keeps does not fail the turn', async (t) => {
+  const busy = new MemoryTranscriptStore();
+  const append = busy.append.bind(busy);
+  const refusedOnce = new Set<string>();
+  busy.append = async (taskId, key, lines) => {
+    const batch = lines.map((line) => line.json).join('\n');
+    if (!refusedOnce.has(batch)) {
+      refusedOnce.add(batch);
+      throw new Error('the transcript database is busy');
+    }
+    return append(taskId, key, lines);
+  };
+  const r = await rig(t, { store: busy });
+  const events = await collect(await r.h.runners.claude.start(await r.h.spec('tsk_tr_busy')));
+  assert.equal(terminal(events)?.type, 'finished', JSON.stringify(notes(events)));
+  assert.ok(refusedOnce.size > 0);
 });
 
 test('a conversation that cannot be put on the sandbox fails the turn before the CLI starts', async (t) => {

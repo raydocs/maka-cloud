@@ -9,7 +9,7 @@ import {
 import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
-import { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
+import { applyEvent, reduce, runTimeMs, spendKey, type TaskMap, toView } from './reducer.js';
 import { MAX_RESUMES_IN_A_ROW, recoveryNote, resumesInARow } from './recovery.js';
 import type { Recovery, RunHandle, RunnerRegistry, RunSpec } from './runner.js';
 import {
@@ -24,6 +24,7 @@ import {
   type AttemptCause,
   isTerminal,
   OrchestratorError,
+  type ResultManifest,
   type SessionId,
   type SteerId,
   type SteerState,
@@ -69,6 +70,12 @@ export interface OrchestratorOptions {
   runners: RunnerRegistry;
   /** Directory that holds one `<taskId>/` folder of handoff files per task. */
   handoffRoot: string;
+  /**
+   * Replaces the reads and writes of the handoff directory. For tests that schedule every await
+   * themselves (the schedule fuzzer): restore reads the handoff, so it must be in place before
+   * restore runs.
+   */
+  handoff?: Pick<Handoff, 'paths' | 'writeBrief' | 'discard' | 'readManifest'>;
   now?: () => number;
   /**
    * How many levels of tasks may sit below a task the caller delegated
@@ -129,6 +136,11 @@ export interface RecoveredSpend {
    */
   unrecorded(): ReadonlyArray<{
     taskId: TaskId;
+    /**
+     * The attempt (epoch) whose grants spent it: its figure replaces what that attempt's live
+     * reports gave, however often it is read. Absent for spend written before attempts were kept.
+     */
+    attempt?: number;
     usd: number;
     cutOffCalls?: number;
     cutOffUsd?: number;
@@ -193,7 +205,7 @@ export interface DelegateInput {
 export class Orchestrator {
   private readonly store: TaskStore;
   private readonly runners: RunnerRegistry;
-  private readonly handoff: Handoff;
+  private readonly handoff: Pick<Handoff, 'paths' | 'writeBrief' | 'discard' | 'readManifest'>;
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
@@ -227,6 +239,8 @@ export class Orchestrator {
    */
   private readonly readers = new Map<TaskId, Promise<void>>();
   private closed = false;
+  /** Set when the process is closing: runs are let go, and what they still report is not recorded. */
+  private detaching = false;
   private readonly executorSessions = new Map<TaskId, SessionId>();
   private readonly waiters = new Map<TaskId, Set<() => void>>();
   private readonly background = new Set<Promise<void>>();
@@ -255,7 +269,7 @@ export class Orchestrator {
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
     this.runners = options.runners;
-    this.handoff = new Handoff(options.handoffRoot);
+    this.handoff = options.handoff ?? new Handoff(options.handoffRoot);
     this.now = options.now ?? Date.now;
     this.quotas = { ...DEFAULT_QUOTAS, ...options.quotas };
     this.auth = new SessionAuth(
@@ -359,6 +373,17 @@ export class Orchestrator {
   /** Tasks the last `create` found unfinished and started driving again (their runner has `recover`). */
   get resumedTaskIds(): readonly TaskId[] {
     return this.resumed;
+  }
+
+  /**
+   * Lets go of every run this process holds, for a process that is closing: the runs stop working
+   * (their timers and pollers end at once) but nothing is cancelled and no task is ended. The task
+   * logs still say `running`, and the next process resumes them as it does after a crash, only
+   * without the minute of waiting to be killed. What a run reports after this is not recorded.
+   */
+  detachRuns(): void {
+    this.detaching = true;
+    for (const handle of this.handles.values()) handle.detach?.();
   }
 
   /**
@@ -942,7 +967,7 @@ export class Orchestrator {
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
     const stops = await Promise.all(
-      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId))),
+      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch)),
     );
     const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
@@ -996,18 +1021,22 @@ export class Orchestrator {
         continue;
       }
       // Nothing is running after a restart. History is never edited, so the
-      // outcome is appended.
+      // outcome is appended. A change the runner already kept for the owner is on the handoff
+      // directory, not in a process: it goes on the outcome like on any other end (read here,
+      // before the write chain, as `withKept` requires).
       const ended = await this.record(
-        task.cancelRequestedBy !== undefined
-          ? { type: 'task_cancelled', taskId: task.taskId }
-          : {
-              type: 'task_failed',
-              taskId: task.taskId,
-              reason:
-                plan?.kind === 'give_up'
-                  ? plan.reason
-                  : 'orphaned: the orchestrator restarted while this task was running',
-            },
+        await this.withKept(
+          task.cancelRequestedBy !== undefined
+            ? { type: 'task_cancelled', taskId: task.taskId }
+            : {
+                type: 'task_failed',
+                taskId: task.taskId,
+                reason:
+                  plan?.kind === 'give_up'
+                    ? plan.reason
+                    : 'orphaned: the orchestrator restarted while this task was running',
+              },
+        ),
         undefined,
         fence,
       );
@@ -1059,30 +1088,54 @@ export class Orchestrator {
   }
 
   /**
-   * Records what runs of an earlier process spent, before any task here ends or settles. It is
-   * recorded as the total of the attempt that process drove (`task_cost` keeps the highest per
-   * task and attempt, and attempts add up), so it replaces the figure the run reported live rather
-   * than adding to it. A crash after the records and before `recorded()` hands the same rows to
-   * the next process, which counts them once more under the attempt before its own: spend is
-   * never lost, and in that one window it is counted twice (the safe side of a cap). The tree is
-   * not cancelled for it here: every task still running is ended just below.
+   * Records what runs of an earlier process spent, before any task here ends or settles. Each row
+   * is the total of one attempt of one task, and is recorded under that attempt (`task_cost` keeps
+   * the highest per task and attempt, and attempts add up): it replaces the figure the run
+   * reported live rather than adding to it, and recording it again (a crash after the records and
+   * before `recorded()` hands the same rows to the next process) changes nothing. Spend written
+   * before the journal kept attempts has none: it is booked under the attempt before the one just
+   * begun, or, when the task's log holds figures from before attempts were keyed (epoch 0), under
+   * that, so it replaces those too. The tree is not cancelled for it here: every task still
+   * running is ended just below.
    */
   private async recordRecoveredSpend(begun: ReadonlyMap<TaskId, number>): Promise<void> {
     const recovered = this.recoveredSpend?.unrecorded() ?? [];
-    for (const { taskId, usd, cutOffCalls, cutOffUsd } of recovered) {
+    for (const { taskId, attempt: spentIn, usd, cutOffCalls, cutOffUsd } of recovered) {
       if (!Number.isFinite(usd) || usd <= 0) continue;
       const root = this.treeRoot(taskId);
       if (!root) continue;
-      // The earlier process drove the attempt before the one this process just began.
-      const epoch = begun.has(taskId)
-        ? (begun.get(taskId) as number) - 1
-        : (this.lookup(taskId)?.epoch ?? 0);
+      let epoch: number;
+      // A row without an attempt is booked under an attempt that depends on this process (the one
+      // before the one just begun). A crash after the record and before `recorded()` hands the same
+      // row to the next process, whose attempt is another: the row's id says where it went.
+      // The id is a hash of the row's sum, so it holds only while no new row without an attempt is
+      // written for the task (every run spec carries its epoch, so only a journal from before
+      // attempts has them); two such rows with the same figures would share an id.
+      const recovery =
+        spentIn === undefined
+          ? createHash('sha256')
+              .update(JSON.stringify([taskId, usd, cutOffCalls ?? 0, cutOffUsd ?? 0]))
+              .digest('hex')
+          : undefined;
+      const booked = recovery === undefined ? undefined : root.recoveredRows?.[recovery];
+      if (booked !== undefined) {
+        epoch = booked;
+      } else if (spentIn !== undefined && Number.isInteger(spentIn) && spentIn >= 1) {
+        epoch = spentIn;
+      } else if (root.spendByRun?.[spendKey({ fromTaskId: taskId })] !== undefined) {
+        epoch = 0;
+      } else {
+        epoch = begun.has(taskId)
+          ? (begun.get(taskId) as number) - 1
+          : (this.lookup(taskId)?.epoch ?? 0);
+      }
       await this.record({
         type: 'task_cost',
         taskId: root.taskId,
         fromTaskId: taskId,
         costUsd: usd,
         epoch,
+        ...(recovery === undefined ? {} : { recovery }),
       });
       // The calls the restart cut off are charged in full and may be made again by the run that
       // resumes; the task's log says so, under the attempt that now drives it.
@@ -1239,12 +1292,16 @@ export class Orchestrator {
       if (signal.aborted) return release();
       const task = this.lookup(taskId);
       if (!task?.stopPending) return release();
+      // A newer attempt (another process) drives the task: the stop is its to finish, and a run
+      // or an access of its own is not this attempt's to stop.
+      if (this.fenced.has(taskId)) return release();
       // A start still under way may yet hand back a run: try again after it.
       if (this.starting.has(taskId)) continue;
       try {
         // Only a confirmed stop clears the obligation: a runner that is gone or
-        // can no longer stop by id leaves it owed.
-        if ((await this.stopLeftover(task)) !== 'stopped' || signal.aborted) continue;
+        // can no longer stop by id leaves it owed. It stops what this attempt or an earlier one
+        // started, and nothing of a later one.
+        if ((await this.stopLeftover(task, task.epoch)) !== 'stopped' || signal.aborted) continue;
         await this.recordStopped(taskId);
       } catch {
         // The store failed; the obligation is still in the log, so try again.
@@ -1290,6 +1347,7 @@ export class Orchestrator {
         briefPath: paths.briefPath,
         resultPath: paths.resultPath,
         steps: this.stepLog(fence),
+        epoch: fence.epoch,
         ...(left === undefined
           ? {}
           : { budgetUsd: left, budgetRootId: (this.treeRoot(taskId) as TaskRecord).taskId }),
@@ -1351,6 +1409,7 @@ export class Orchestrator {
       }
       this.handles.set(taskId, handle);
       this.starting.delete(taskId);
+      if (this.detaching) handle.detach?.();
       try {
         if (recovery !== undefined && this.tasks.get(taskId)?.state === 'running') {
           // A task a restart resumed started long ago: its start is in the log already. What is
@@ -1567,6 +1626,7 @@ export class Orchestrator {
           await this.recordSpend(taskId, event.costUsd, fence);
           continue;
         }
+        if (this.detaching) continue;
         if (!(await reports)) continue;
         // The outcome of a stopping task no longer counts, but its stream is read to the end:
         // the run reports what settled while it stopped.
@@ -1604,7 +1664,7 @@ export class Orchestrator {
         }
       }
     } catch (error) {
-      if (!(await reports)) return;
+      if (this.detaching || !(await reports)) return;
       // The stream broke; the remote run may still be alive, so the handle
       // stays registered and is cancelled when the task ends.
       this.readers.delete(taskId);
@@ -1618,7 +1678,7 @@ export class Orchestrator {
       );
       return;
     }
-    if (!(await reports)) return;
+    if (this.detaching || !(await reports)) return;
     // A clean end of the stream does not prove the remote run stopped, so the
     // handle stays registered and is cancelled when the task ends.
     this.readers.delete(taskId);
@@ -1670,7 +1730,7 @@ export class Orchestrator {
       // the task ends once that is recorded, so what it reads as costing is what the run spent.
       if (cancelled) await this.readerEnded(taskId);
     }
-    await this.record({ type: 'task_cancelled', taskId });
+    await this.record(await this.withKept({ type: 'task_cancelled', taskId }));
   }
 
   /**
@@ -1700,13 +1760,26 @@ export class Orchestrator {
     event: TaskEvent & { taskId: TaskId },
     fence: Fence,
   ): Promise<StoredEvent | undefined> {
-    return this.record(
-      event,
-      () => {
-        if (this.isStopping(event.taskId)) throw new Superseded();
-      },
-      fence,
+    return this.withKept(event).then((withKept) =>
+      this.record(
+        withKept,
+        () => {
+          if (this.isStopping(event.taskId)) throw new Superseded();
+        },
+        fence,
+      ),
     );
+  }
+
+  /**
+   * A failed or cancelled task's event, with the change the runner kept for the owner when it left
+   * one. Read before the write chain, never in it.
+   */
+  private async withKept<E extends TaskEvent>(event: E): Promise<E> {
+    if (event.type !== 'task_failed' && event.type !== 'task_cancelled') return event;
+    if (event.kept !== undefined) return event;
+    const kept = await this.keptManifestOf(event.taskId);
+    return kept === undefined ? event : { ...event, kept };
   }
 
   /**
@@ -1773,6 +1846,22 @@ export class Orchestrator {
     });
     this.writeChain = written.catch(() => undefined);
     return written;
+  }
+
+  /**
+   * The manifest a runner left for a change it kept for the owner (a `kept:` line in `done`), read
+   * from the handoff when the task ends without a result. Anything else, or a manifest that cannot
+   * be read, is nothing: a failed task shows what the runner reported.
+   */
+  private async keptManifestOf(taskId: TaskId): Promise<ResultManifest | undefined> {
+    try {
+      const result = await this.handoff.readManifest(taskId);
+      if (!result.ok) return undefined;
+      const kept = result.manifest.done.some((line) => line.trim().startsWith('kept:'));
+      return kept ? result.manifest : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

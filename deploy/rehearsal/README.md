@@ -7,7 +7,7 @@ health check that never goes green.
 
 | Part | What it is |
 | --- | --- |
-| `compose.yaml` | adds the `stubs` service to `deploy/compose.yaml`, and gives the rehearsal its own project name (`maka-rehearsal`) and image tags |
+| `compose.yaml` | adds the `stubs` service (the `rehearsal-sandbox` image target of `deploy/Dockerfile`) to `deploy/compose.yaml`, and gives the rehearsal its own project name (`maka-rehearsal`) and image tags |
 | `lib.sh` | the one place that runs Compose (`-p maka-rehearsal`), and `guard_rehearsal`, which every script calls before it changes the stack |
 | `compose.env` | the three names (`app`, `mcp`, `models` on `.localhost`) and Caddy's own certificate authority (`local_certs`) |
 | `server.env` | the server's settings: fake keys, the stand-ins as the model and sandbox APIs |
@@ -31,7 +31,7 @@ to reach a real deployment on the same host (project `maka-cloud`, volumes `maka
 `maka-cloud_maka-backups` and Caddy's state, images `maka-cloud:local` and `maka-cloud-proxy:local`).
 It has its own project, `maka-rehearsal` (the override names it, and every call passes `-p`), its own
 volumes, networks and containers, and builds its own images (`maka-rehearsal:local`,
-`maka-rehearsal-proxy:local`) instead of retagging the deployment's. Before any step that changes the
+`maka-rehearsal-sandbox:local`, `maka-rehearsal-proxy:local`) instead of retagging the deployment's. Before any step that changes the
 stack, `guard_rehearsal` reads the resolved Compose configuration and refuses unless the project, every
 volume and every image are the rehearsal's. `MAKA_REHEARSAL_PROJECT` may rename the project, but only to
 `maka-rehearsal` or a name that starts with `maka-rehearsal-`. The rehearsal publishes ports 80 and 443,
@@ -49,14 +49,25 @@ so it cannot start next to a running deployment on the same ports either (set `M
 2. `sign-in`: the invite's token opens the API; no token and a wrong one do not.
 3. `task`: a message starts a task; the result card (an inbox item of kind `finished`) and the
    closing message arrive.
-4. `approval`: two tasks in one conversation; the second is held for the user. Each approval card is
+4. `checkout` (the gate for the first live run): a coding task. The server's own clone script fetches a
+   small repository (`rehearsal/sample`; the sandbox's git is told that this GitHub name is a local
+   repository, so nothing leaves the container), then the scripted `claude` does what the task's
+   brief asks of an agent, as the agent account: it reads the brief, appends a line to `README.md` in
+   the checkout, runs `git status` there and writes the `repro.json` the brief names. It records what
+   each did, and the step fails if any was refused, or if the runner never gets past the reproduction
+   test to the task's own test command (it reads `repro.json` and runs that test in a new user and PID
+   namespace first; the stand-in container runs without Docker's default seccomp and AppArmor profiles
+   for that). The task itself
+   ends at the review, which needs a second vendor the stand-in does not have, so it is never
+   delivered and the step does not look at how it ends.
+5. `approval`: two tasks in one conversation; the second is held for the user. Each approval card is
    answered, the first one twice (the second answer must be a duplicate), and exactly that many
    answers are recorded and tasks run.
-5. `restart`: the server restarts while a task is running in the sandbox; the task resumes and
+6. `restart`: the server restarts while a task is running in the sandbox; the task resumes and
    finishes once, with one result card.
-6. `restart-reply`: the conductor, whose turn the restart cut, follows the resumed task and, when it
+7. `restart-reply`: the conductor, whose turn the restart cut, follows the resumed task and, when it
    ends, says so in the conversation, once.
-7. `backup-restore`: the server is stopped and backed up, something new happens, the backup is
+8. `backup-restore`: the server is stopped and backed up, something new happens, the backup is
    restored, and the conversations and the inbox are as they were; a new task still runs.
 
 A conversation after the first holds each delegation for approval (the invite's memory has read
@@ -78,8 +89,10 @@ that has real keys: its tasks are scripted and the control API has no login.
 server's real sandbox and model code runs against them:
 
 - **Sandbox API** (`:9100`): `FakeInstabox` from `@maka-cloud/instabox/testing`. A command the server
-  runs "in the sandbox" runs for real in the stubs container, with the scripted `claude` installed
-  where the server looks for it (`CLAUDE_CLI` from the runners' tests, modes `ok` and `waitinit`).
+  runs "in the sandbox" runs for real in the stubs container, as its user (`node`, the sandbox user),
+  with the scripted `claude` installed where the server looks for it (`SDK_CLI` from the runners'
+  tests, which speaks the Agent SDK's stream-json protocol; modes `ok` and `waitinit`). The CLI
+  itself runs as the agent account, a second real account of that container (below).
 - **Model API** (`:9101`): `startFakeModel` from `@maka-cloud/conductor/testing/fake-model`, answering
   the conductor from the script in `stubs.mjs`: the user's first message names the scenario
   (`rehearsal: run`, `rehearsal: approve`, `rehearsal: ask`).
@@ -93,16 +106,25 @@ secret: the keys are fake and the token belongs to a database that `down.sh` del
 ## The agent account
 
 Every CLI runs as an account that is not the sandbox user (`MAKA_CLOUD_AGENT_USER`, `_GROUP`), and
-the server checks the box for that account before its first run. The stand-in sandbox is one
-container with one user, so it has no such account: a task fails at once with "needs an agent
-channel", and the steps that run a task (`task`, `approval`, `restart`, `restart-reply`,
-`backup-restore`) are marked as expected failures in the workflow (`MAKA_REHEARSAL_XFAIL`;
-`restart-reply?` depends on `restart` and may pass).
+the server checks the box for that account before its first run. The stubs container is made like
+such a box, from the `rehearsal-sandbox` target of `deploy/Dockerfile` (the server's image plus):
 
-What takes them off the list, all of it in this directory:
+- a second account, `maka-agent`, with no sudo rights, and a group, `maka-box`, that it and the
+  sandbox user (`node`) share;
+- passwordless `sudo` for `node` (a real `sudo` package) and `getcap` (`libcap2-bin`; the box check refuses a box that cannot list file capabilities), and `/data` that anyone can enter but only `node` can list (mode 711), so the task directories under `/data/work` can be reached by the agent but not listed;
+- the sandbox API's `rootSudo` option (`REHEARSAL_AGENT_GROUP` turns it on): the firewall tools
+  stay the stand-ins that keep their rules in files, and every other `sudo -n` (ending the agent's
+  processes, reading their environment, the box check's policy query) goes to the real `sudo`.
 
-- the stubs container gets a real second account without sudo, a group shared with the sandbox user
-  and passwordless `sudo -n` for the sandbox user (the box image's job on a real host);
-- `server.env` sets `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP`, which also turns the
-  Agent SDK path on, so the scripted `claude` has to speak its stream-json protocol (`SDK_CLI` in
-  the runners' tests does) and the control API's `waitinit` and `release` have to work with it.
+`server.env` sets `MAKA_CLOUD_AGENT_USER=maka-agent` and `MAKA_CLOUD_AGENT_GROUP=maka-box`, which also
+turns the Agent SDK path on, and the scripted `claude` speaks the SDK's protocol. So the box check,
+the private channel, the agent-owned workspace, the stop as root and the resume after a restart all
+run for real against two accounts. Every step of the flow runs; none is an expected failure.
+
+What this still does not show: the firewall is the stand-in (no packet is filtered, so the egress
+guard's rules are checked as text, not as traffic), the CLI is scripted (the real one's flags, its
+own files and its network use are not exercised) and `node` may run any command as root here, which a
+real box need not allow. The first live run is still the first time any of that runs.
+
+`MAKA_REHEARSAL_XFAIL` (comma-separated step names, in the workflow's environment) marks a step that
+is expected to fail; the same step passing then fails the run. A name followed by `?` may pass or fail.

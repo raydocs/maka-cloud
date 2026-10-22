@@ -13,7 +13,7 @@ import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox'
 import {
   type Orchestrator,
   RunnerRegistry,
-  scrubSecretShapes,
+  containsSecret,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
@@ -360,6 +360,8 @@ export async function startStack(
       // The token is read from MAKA_GITHUB_TOKEN when a pull request is opened, never earlier.
       publisher: new GitHubPublisher({ env }),
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
+      ownsConversationTask: (runId, taskId) =>
+        conductor?.state.conversationOwnsTask(runId, taskId) ?? false,
     });
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the
@@ -400,12 +402,13 @@ export async function startStack(
         },
         playbooks: STACK_PLAYBOOKS,
         modes: config.modes,
+        deepMode: config.deepMode,
         tools: [pullRequests],
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
         scrubTaskText: scrubErrorText,
-        carriesSecret: (text) => scrubSecretShapes(text) !== text,
+        carriesSecret: (value) => containsSecret(value),
       },
       supervisor: (context) =>
         startInbox(

@@ -33,7 +33,10 @@ const FINDINGS = [
 /** A reviewer that writes `review.json` with these findings. */
 function reviews(findings: unknown[] = FINDINGS, summary = 'Looks right.'): AgentScript {
   return async (turn) => {
-    await fs.writeFile(join(turn.dir, 'review.json'), JSON.stringify({ summary, findings }));
+    await fs.writeFile(
+      join(turn.dir, 'handoff', 'review.json'),
+      JSON.stringify({ summary, findings }),
+    );
     return 'ok';
   };
 }
@@ -93,6 +96,20 @@ test('the other vendor reviews a change, and the review is part of what is deliv
     [h.codex.turns[0]?.spec.model, h.codex.turns[0]?.spec.effort],
     [undefined, 'medium'],
   );
+
+  // The files the runner writes in the task directory are not for an agent's artifact to replace.
+  for (const turn of [h.claude.turns[0], h.codex.turns[0]]) {
+    assert.deepEqual([...(turn?.spec.reserved ?? [])].sort(), [
+      '.records',
+      'brief.md',
+      'change.patch',
+      'changes.json',
+      'failure_brief.json',
+      'result.json',
+      'review.md',
+      'verification.json',
+    ]);
+  }
 
   const brief = await fs.readFile(h.codex.turns[0]?.spec.briefPath ?? '', 'utf8');
   assert.match(brief, /# Review of a change/);
@@ -224,7 +241,7 @@ const NOT_REVIEWED: [string, AgentScript, RegExp][] = [
   [
     'writes something that is not JSON',
     async (turn) => {
-      await fs.writeFile(join(turn.dir, 'review.json'), 'LGTM');
+      await fs.writeFile(join(turn.dir, 'handoff', 'review.json'), 'LGTM');
       return 'ok';
     },
     /review\.json is not valid JSON/,
@@ -233,7 +250,7 @@ const NOT_REVIEWED: [string, AgentScript, RegExp][] = [
     'writes the wrong shape',
     async (turn) => {
       await fs.writeFile(
-        join(turn.dir, 'review.json'),
+        join(turn.dir, 'handoff', 'review.json'),
         JSON.stringify({ findings: [{ severity: 'P0' }] }),
       );
       return 'ok';
@@ -244,7 +261,7 @@ const NOT_REVIEWED: [string, AgentScript, RegExp][] = [
     'writes a file that is too large',
     async (turn) => {
       await fs.writeFile(
-        join(turn.dir, 'review.json'),
+        join(turn.dir, 'handoff', 'review.json'),
         JSON.stringify({ findings: [], summary: 'x'.repeat(70_000) }),
       );
       return 'ok';
@@ -254,7 +271,7 @@ const NOT_REVIEWED: [string, AgentScript, RegExp][] = [
   [
     'leaves a symlink',
     async (turn) => {
-      await fs.symlink('/etc/hostname', join(turn.dir, 'review.json'));
+      await fs.symlink('/etc/hostname', join(turn.dir, 'handoff', 'review.json'));
       return 'ok';
     },
     /review\.json is a symlink/,
@@ -294,7 +311,7 @@ test('a reviewer that cannot start keeps the change for the owner without delive
 test('a review.json the implementer left behind is not taken for the review', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = async (turn) => {
-    await fs.writeFile(join(turn.dir, 'review.json'), JSON.stringify({ findings: [] }));
+    await fs.writeFile(join(turn.dir, 'handoff', 'review.json'), JSON.stringify({ findings: [] }));
     return fixes(turn);
   };
   h.codex.script = async () => 'ok';
@@ -316,6 +333,24 @@ test('a reviewer that changes the repository did not review what would be delive
     'tsk_tamper',
     events,
     /the reviewer changed the repository, so its review was not used/,
+  );
+  zeroStats(h.runner);
+});
+
+test('a copy of the change swapped under the reviewer is not a review of the change: nothing is delivered', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = fixes;
+  // What a process left running by the first agent does once the reviewer's copy of the diff exists.
+  h.codex.script = async (turn) => {
+    await fs.writeFile(join(turn.dir, 'handoff', 'change.patch'), 'a harmless diff\n');
+    return reviews([])(turn);
+  };
+  const { events } = await finished(h, 'tsk_swap');
+  await notDelivered(
+    h,
+    'tsk_swap',
+    events,
+    /the copy of the change given to the reviewer was replaced, so its review was not used/,
   );
   zeroStats(h.runner);
 });
@@ -541,7 +576,7 @@ test('cancel while the review file is being read: the change is kept and everyth
     if (
       phase === 'before' &&
       call.script === READ_SMALL_SCRIPT &&
-      call.envs.MAKA_FILE === 'review.json'
+      call.envs.MAKA_FILE === 'handoff/review.json'
     ) {
       reached.open();
       await held.promise;
@@ -564,7 +599,7 @@ test('a sandbox error while the review file is read is a review that did not hap
   h.claude.script = fixes;
   h.codex.script = reviews();
   h.replace = (call) =>
-    call.script === READ_SMALL_SCRIPT && call.envs.MAKA_FILE === 'review.json'
+    call.script === READ_SMALL_SCRIPT && call.envs.MAKA_FILE === 'handoff/review.json'
       ? Promise.reject(new Error('the sandbox went away'))
       : undefined;
   const { events } = await finished(h, 'tsk_rerr');

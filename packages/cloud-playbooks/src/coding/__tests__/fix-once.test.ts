@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +43,10 @@ const fixesFindings: AgentScript = async (turn) => {
 function reviewsInRounds(rounds: unknown[][]): AgentScript {
   return async (turn) => {
     const findings = rounds[Math.min(turn.n, rounds.length) - 1] ?? [];
-    await fs.writeFile(join(turn.dir, 'review.json'), JSON.stringify({ summary: 'ok', findings }));
+    await fs.writeFile(
+      join(turn.dir, 'handoff', 'review.json'),
+      JSON.stringify({ summary: 'ok', findings }),
+    );
     return 'ok';
   };
 }
@@ -128,7 +132,7 @@ test('after a fix, verification.json and the pull request describe the delivered
       'source lib/add.sh\n[ "$(add -1 3)" = 2 ]\n',
     );
     await fs.writeFile(
-      join(turn.dir, 'repro.json'),
+      join(turn.dir, 'handoff', 'repro.json'),
       JSON.stringify({
         command: 'bash tests/test_add.sh && bash tests/test_neg.sh',
         files: ['tests/test_add.sh', 'tests/test_neg.sh'],
@@ -212,7 +216,42 @@ for (const [name, fix, reason] of NOT_APPLIED) {
   });
 }
 
-test('a fixed change that cannot be reviewed again is not delivered, and the first change still has its P1 so it is kept for the owner', async (t) => {
+/** The fixed change passed the checks but its second review did not finish: it is kept, unreviewed. */
+async function fixedAndKept(h: Harness, id: string, events: RunnerEvent[], why: RegExp) {
+  assert.deepEqual(terminal(events), { type: 'finished' }, 'a kept change is not a failed task');
+  const dir = join(h.handoff, id);
+  const manifest = await readJson(join(dir, 'result.json'));
+  assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
+  assert.equal(verifyCodingManifest(manifest).ok, false);
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.match(record.kept?.reason ?? '', /could not be independently reviewed/);
+  assert.match(record.kept?.reason ?? '', why);
+  assert.equal(record.review.status, 'unavailable');
+  assert.equal(record.review.fix.result, 'applied');
+  // The P1 the first review found is still said, with the fact that its fix was never checked.
+  assert.match(
+    record.review.reason,
+    /first review found 1 serious problem\(s\); the fix was not checked/,
+  );
+  assert.match(
+    await fs.readFile(join(dir, 'review.md'), 'utf8'),
+    /first review found 1 serious problem/,
+  );
+  // The fixed change is what was checked, kept and published; the first change is not.
+  assert.equal(await deliveredAddSh(h, id), GUARDED);
+  assert.match(await fs.readFile(join(dir, 'change.patch'), 'utf8'), /negative numbers/);
+  const delivery = await h.deliveries.get(id);
+  assert.ok(delivery);
+  assert.equal(
+    delivery.changesSha256,
+    createHash('sha256')
+      .update(await fs.readFile(join(dir, 'changes.json')))
+      .digest('hex'),
+  );
+  assert.equal(delivery.publishedPr, undefined);
+}
+
+test('a fixed change that cannot be reviewed again is kept unreviewed: the fixed change, not the first one', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -220,11 +259,11 @@ test('a fixed change that cannot be reviewed again is not delivered, and the fir
     return { failed: 'the reviewer is down' };
   };
   const { events } = await run(h, 'tsk_na2');
-  await failedWithP1(h, 'tsk_na2', events, /could not be reviewed again/);
+  await fixedAndKept(h, 'tsk_na2', events, /could not be reviewed again/);
   zeroStats(h.runner);
 });
 
-test('a fixed change on which the reviewer touched the repository is not delivered, and the first change is kept with its P1', async (t) => {
+test('a fixed change on which the reviewer touched the repository is kept unreviewed, as the fixed change', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = async (turn) => {
@@ -232,7 +271,7 @@ test('a fixed change on which the reviewer touched the repository is not deliver
     return reviewsInRounds([[P1], []])(turn);
   };
   const { events } = await run(h, 'tsk_na3');
-  await failedWithP1(h, 'tsk_na3', events, /the fix was not used/);
+  await fixedAndKept(h, 'tsk_na3', events, /could not be reviewed again/);
   zeroStats(h.runner);
 });
 
@@ -420,4 +459,49 @@ test('the fix brief sends the first findings only, as data, with the checks the 
   assert.match(brief, /bash tests\/run\.sh/);
   assert.match(brief, /There is no further round/);
   assert.match(brief, /Plan: fix lib\/add\.sh\./);
+});
+
+test('between the files of a second delivery and its record, the first delivery still matches its files', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = implements_(fixesFindings);
+  h.codex.script = reviewsInRounds([[P1], []]);
+  // What a restart at the moment the fixed change's record is about to be written would find: the
+  // fixed change's files are on disk and the record still names the first change.
+  const record = h.deliveries.record.bind(h.deliveries);
+  let writes = 0;
+  let found: { onDisk: string; recorded: string; kept: unknown; fixedOnDisk: boolean } | undefined;
+  h.deliveries.record = async (delivery) => {
+    writes++;
+    if (writes === 2) {
+      const earlier = await h.deliveries.get('tsk_crash');
+      assert.ok(earlier);
+      const verification = JSON.parse(await fs.readFile(earlier.verificationPath, 'utf8'));
+      const changes = await fs.readFile(earlier.changesPath, 'utf8');
+      found = {
+        onDisk: createHash('sha256').update(changes).digest('hex'),
+        recorded: earlier.changesSha256,
+        kept: verification.kept,
+        fixedOnDisk: (await fs.readFile(delivery.changesPath, 'utf8')).includes(
+          Buffer.from(GUARDED).toString('base64'),
+        ),
+      };
+    }
+    return record(delivery);
+  };
+  const { events } = await run(h, 'tsk_crash');
+  assert.deepEqual(terminal(events), { type: 'finished' });
+
+  assert.ok(found, 'the fixed change was recorded after the first one');
+  assert.equal(found.onDisk, found.recorded, 'the change the record names is the change on disk');
+  assert.ok(found.kept, 'and it is still the kept record of that first change');
+  assert.equal(
+    found.fixedOnDisk,
+    true,
+    'while the fixed change is already on disk under its own name',
+  );
+  assert.equal(
+    await deliveredAddSh(h, 'tsk_crash'),
+    GUARDED,
+    'the record then moves to the fixed change',
+  );
 });

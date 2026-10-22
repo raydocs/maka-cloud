@@ -25,6 +25,12 @@ export interface RunSpec {
    * limit). A run is one start or one resume after a restart. The smaller of the two binds.
    */
   turnBudgetUsd?: number;
+  /**
+   * File names in the handoff directory that an artifact this run exports may not replace, besides
+   * its own brief and result. A playbook whose agents share the task's directory lists the files
+   * its own code writes there.
+   */
+  reserved?: string[];
   /** Orchestrator MCP endpoint scoped to this task's own session, so the executor can delegate too. */
   mcp?: { url: string; token: string };
   /**
@@ -41,6 +47,11 @@ export interface RunSpec {
   effort?: string;
   /** Set when the run continues a task an earlier attempt was driving; see `Runner.recover`. */
   recovery?: Recovery;
+  /**
+   * The attempt (epoch) that drives this run: the one its usage reports and its model access are
+   * booked under, so spend that a restart recovers lands on the same figure as the live report.
+   */
+  epoch?: number;
 }
 
 /** Why and how a task is being driven again after its previous attempt ended without an outcome. */
@@ -90,6 +101,13 @@ export interface RunHandle {
    * waiting; false when it was handed over (or is being) and cannot be taken back.
    */
   unsteer?(steerId: string): boolean;
+  /**
+   * Lets go of the run without stopping it, because this process is closing. Nothing is cancelled,
+   * released or reported: the stream just ends, the task stays unfinished in the log, and the next
+   * process over the same store takes it over like one whose process died (it stops what is left
+   * and resumes). Optional: a run without it is left to the closing process's exit.
+   */
+  detach?(): void;
 }
 
 export interface Runner {
