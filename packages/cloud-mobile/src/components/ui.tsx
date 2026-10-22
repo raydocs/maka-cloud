@@ -359,8 +359,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  pillText: { fontSize: 16, fontWeight: '600', textAlign: 'center' },
-  pillRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  pillText: { fontSize: 16, fontWeight: '600', textAlign: 'center', flexShrink: 1 },
+  pillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    maxWidth: '100%',
+  },
   round: {
     width: TOUCH,
     height: TOUCH,
