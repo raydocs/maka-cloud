@@ -115,17 +115,22 @@ test('the mode picker sits on the start card and in the chat, fits the screen, a
   request,
 }, info) => {
   await signIn(page, request);
+  // Folded into one chip that names the choice; it opens to the four.
+  const chip = page.locator('.start .mode-menu > summary');
+  await expect(chip).toHaveText(/Let it decide/u);
+  await chip.click();
   const startPicker = page.getByRole('group', { name: 'How much care this needs' });
   await expect(startPicker).toBeVisible();
   await expect(startPicker.getByLabel('Let it decide')).toBeChecked();
   await noHorizontalScroll(page);
-  // The labels are the tap targets: tall enough for a thumb.
+  // Each choice is a row tall enough for a thumb, with a line on what it means.
   for (const label of ['Let it decide', 'Quick', 'Standard', 'Deep']) {
-    const box = await startPicker.getByText(label, { exact: true }).boundingBox();
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(40);
+    const row = startPicker.locator('.mode-option').filter({ hasText: label });
+    expect((await row.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(40);
   }
   await startPicker.getByLabel('Deep').check();
-  await expect(startPicker.getByLabel('Deep')).toBeChecked();
+  await expect(startPicker).toBeHidden();
+  await expect(chip).toHaveText(/Deep/u);
   const sent = page.waitForRequest(
     (r) => r.method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/u.test(r.url()),
   );
@@ -135,9 +140,7 @@ test('the mode picker sits on the start card and in the chat, fits the screen, a
 
   // In the chat the picker starts from "Let it decide" again, and sends no mode until one is picked.
   await expect(page.getByRole('log')).toContainText('Weekly report');
-  const chatPicker = page.getByRole('group', { name: 'How much care this needs' });
-  await expect(chatPicker).toBeVisible();
-  await expect(chatPicker.getByLabel('Let it decide')).toBeChecked();
+  await expect(page.locator('.composer .mode-menu > summary')).toHaveText(/Let it decide/u);
   await noHorizontalScroll(page);
   const next = page.waitForRequest(
     (r) => r.method() === 'POST' && /\/v1\/conversations\/[^/]+\/messages$/u.test(r.url()),
