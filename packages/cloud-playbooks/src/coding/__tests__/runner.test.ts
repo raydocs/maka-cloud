@@ -235,6 +235,32 @@ test('a key in a check’s output is scrubbed before the sandbox’s cut, in the
   zeroStats(h.runner);
 });
 
+test('many redacted keys in a cut check output do not pull the cut fragment of a key into the record', async (t) => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  // Each redaction shortens the scrubbed text by 32 characters: twenty of them would walk the old
+  // character count back over the whole margin and keep the line the sandbox's cut split.
+  const leak = [...Array.from({ length: 20 }, () => `echo T=${key}`), 'echo END', 'exit 1'].join(
+    '\n',
+  );
+  const h = await setup(t, { limits: { outputTailBytes: 205 } });
+  const leaks: AgentScript = async (turn) => {
+    await writeRepro(turn, `${leak}\n`);
+    return 'ok';
+  };
+  h.claude.script = leaks;
+  h.codex.script = leaks;
+  const spec = await h.spec('tsk_many');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const dir = join(h.handoff, 'tsk_many');
+  for (const name of ['failure_brief.json', 'verification.json']) {
+    assert.doesNotMatch(
+      await fs.readFile(join(dir, name), 'utf8'),
+      /ghp_|0123456789abcdef|def0123/,
+    );
+  }
+  zeroStats(h.runner);
+});
+
 test('a key the agent put in its reproduction command or a file name is scrubbed from verification.json', async (t) => {
   const key = 'ghp_0123456789abcdef0123456789abcdef0123';
   const h = await setup(t);

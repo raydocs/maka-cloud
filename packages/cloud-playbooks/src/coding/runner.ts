@@ -308,16 +308,26 @@ interface Collected {
 
 /**
  * The sandbox cuts output to its last bytes before the host sees it, which can split a key at the
- * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted, the host scrubs the
- * whole of it, and only then keeps the last `max` characters, so a key the cut split is either
- * whole and scrubbed or in the margin that is dropped.
+ * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted and the host scrubs the
+ * whole of it. When the text was cut, what is left of the cut line is dropped before the last
+ * `max` characters are kept: a key never spans a line, so that partial first line is the only place
+ * a split key can be, and counting the margin in bytes against characters (a redaction shortens
+ * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
+ * line break (the git messages, folded onto one line) loses its first `TAIL_MARGIN` characters.
  */
 export const TAIL_MARGIN = 512;
 
-export function scrubbedTail(text: string, max: number): string {
-  const shown = scrubSecretText(text);
+export function scrubbedTail(text: string, max: number, cut = false): string {
+  let shown = scrubSecretText(text);
+  if (cut) {
+    const line = shown.indexOf('\n');
+    shown = line >= 0 ? shown.slice(line + 1) : shown.slice(Math.min(TAIL_MARGIN, shown.length));
+  }
   return shown.length <= max ? shown : shown.slice(shown.length - max);
 }
+
+/** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
+const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
 
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
@@ -808,7 +818,10 @@ class CodingRun implements RunHandle {
       );
       return { ok: true, manifest };
     } catch (error) {
-      return { ok: false, reason: `its result could not be read (${errorMessage(error)})` };
+      return {
+        ok: false,
+        reason: scrubSecretText(`its result could not be read (${errorMessage(error)})`),
+      };
     }
   }
 
@@ -1411,7 +1424,11 @@ class CodingRun implements RunHandle {
         name,
         command: scrubSecretText(command),
         outputBytes: Number(bytes?.[1] ?? 0),
-        output: scrubbedTail(out.stdout, this.limits.outputTailBytes),
+        output: scrubbedTail(
+          out.stdout,
+          this.limits.outputTailBytes,
+          Number(bytes?.[1] ?? 0) > this.limits.outputTailBytes + TAIL_MARGIN,
+        ),
       };
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
@@ -1446,7 +1463,9 @@ class CodingRun implements RunHandle {
     const lines = out.stdout.split('\n');
     const err = lines.find((line) => line.startsWith('ERR '));
     if (err)
-      return { reason: `git could not list the change (${scrubbedTail(err.slice(4), 300)})` };
+      return {
+        reason: `git could not list the change (${scrubbedTail(err.slice(4), 300, wasCut(err.slice(4), 812))})`,
+      };
     const raw = lines.find((line) => line.startsWith('RAW '));
     const patchLine = lines.find((line) => line.startsWith('PATCH '));
     if (raw === undefined || patchLine === undefined)
@@ -1722,7 +1741,7 @@ class CodingRun implements RunHandle {
     if (!base) {
       const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500)}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
