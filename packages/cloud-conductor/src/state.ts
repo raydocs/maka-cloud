@@ -1582,15 +1582,15 @@ export class ConductorState {
     }));
   }
 
-  /** Revokes one of the owner's grants. False if it is not theirs, or was already revoked. */
+  /** Revokes one of the owner's usable grants. False if it is not theirs, does not exist, expired or was already revoked. */
   revokeGrant(owner: string, grantId: string): boolean {
     return (
       Number(
         this.db
           .prepare(
-            'UPDATE grants SET revoked_at = ? WHERE grant_id = ? AND owner = ? AND revoked_at IS NULL',
+            'UPDATE grants SET revoked_at = ? WHERE grant_id = ? AND owner = ? AND revoked_at IS NULL AND expires_at > ?',
           )
-          .run(this.now(), grantId, owner).changes,
+          .run(this.now(), grantId, owner, this.now()).changes,
       ) === 1
     );
   }
@@ -1601,11 +1601,12 @@ export class ConductorState {
       this.db
         .prepare(
           `UPDATE grants SET revoked_at = ? WHERE owner = ? AND revoked_at IS NULL
-             AND (? IS NULL OR tool = ?) AND (? IS NULL OR repository = ?)`,
+             AND expires_at > ? AND (? IS NULL OR tool = ?) AND (? IS NULL OR repository = ?)`,
         )
         .run(
           this.now(),
           owner,
+          this.now(),
           filter.tool ?? null,
           filter.tool ?? null,
           filter.repository ?? null,
