@@ -67,6 +67,24 @@ RUN apt-get update \
  && chmod 711 /data
 USER node
 
+# Only CI uses this one (.github/workflows/fork-deploy-rehearsal.yml, job `real-accounts`): the
+# cloud-runners and cloud-playbooks test suites, built in the `build` stage above, run as root next
+# to a second account made like the rehearsal sandbox's (`maka-agent` in `maka-box`, real `sudo`,
+# `getcap`, `git`), on a machine with nothing else on it. A hosted runner cannot do this: it is not
+# root for the tests and its own setuid tools and capabilities fail the box check. With
+# MAKA_REQUIRE_REAL_ACCOUNTS the tests that need the second account fail instead of skipping, so a
+# green job means they ran. Not a deployment target.
+FROM build AS real-account-tests
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sudo libcap2-bin git \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd maka-box \
+ && useradd --no-create-home --gid maka-box --shell /bin/bash maka-agent
+ENV MAKA_REQUIRE_REAL_ACCOUNTS=1 MAKA_TEST_AGENT_USER=maka-agent MAKA_TEST_AGENT_GROUP=maka-box
+WORKDIR /app/packages
+CMD ["sh", "-c", "set -eu; cd cloud-runners && node --test dist/__tests__/*.test.js && cd ../cloud-playbooks && node --test dist/coding/__tests__/*.test.js dist/__tests__/*.test.js"]
+
 FROM caddy:2-alpine AS proxy
 COPY --from=build /web-dist /srv/web
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
