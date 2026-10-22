@@ -23,6 +23,7 @@
  *
  * `--concurrency N`: cap the batch to avoid overloading small runners.
  * `--workspaces a,b`: run only the selected workspace paths.
+ * `--workspace-timeout-minutes N`: stop a workspace that runs longer than N minutes (default 15).
  *
  * Workspaces are queued heaviest first so a long suite cannot be picked up once
  * the other slots have drained.
@@ -306,12 +307,16 @@ export async function runWorkspaceTests(options = {}) {
 
 export function parseCliArgs(args, availableDirs) {
   let concurrency = Number.POSITIVE_INFINITY;
+  let workspaceTimeoutMinutes;
   const requestedDirs = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === '--concurrency') concurrency = Number(args[++index]);
     else if (arg.startsWith('--concurrency=')) concurrency = Number(arg.slice(14));
-    else if (arg === '--workspaces') requestedDirs.push(...(args[++index] ?? '').split(','));
+    else if (arg === '--workspace-timeout-minutes') workspaceTimeoutMinutes = Number(args[++index]);
+    else if (arg.startsWith('--workspace-timeout-minutes=')) {
+      workspaceTimeoutMinutes = Number(arg.slice(28));
+    } else if (arg === '--workspaces') requestedDirs.push(...(args[++index] ?? '').split(','));
     else if (arg.startsWith('--workspaces=')) requestedDirs.push(...arg.slice(13).split(','));
     else if (arg === '--workspace') requestedDirs.push(args[++index] ?? '');
     else if (arg.startsWith('--workspace=')) requestedDirs.push(arg.slice(12));
@@ -323,11 +328,17 @@ export function parseCliArgs(args, availableDirs) {
   ) {
     throw new Error('--concurrency must be a positive integer');
   }
+  if (workspaceTimeoutMinutes !== undefined && !(workspaceTimeoutMinutes > 0)) {
+    throw new Error('--workspace-timeout-minutes must be greater than zero');
+  }
   const selected = [...new Set(requestedDirs.filter(Boolean))];
   const unknown = selected.filter((dir) => !availableDirs.includes(dir));
   if (unknown.length > 0) throw new Error(`Unknown workspace: ${unknown.join(', ')}`);
   return {
     concurrency,
+    ...(workspaceTimeoutMinutes === undefined
+      ? {}
+      : { workspaceTimeoutMs: workspaceTimeoutMinutes * 60_000 }),
     workspaceDirs:
       selected.length > 0 ? availableDirs.filter((dir) => selected.includes(dir)) : availableDirs,
   };
