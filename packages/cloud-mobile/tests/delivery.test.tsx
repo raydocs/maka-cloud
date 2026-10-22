@@ -86,3 +86,48 @@ test('even "show more" stops at a hard cap, and says where to read the rest', as
     screen.getByText('Showing the first 5000 of 6000 lines. Read the rest on the web.'),
   ).toBeTruthy();
 });
+
+test('screenshots at several sizes show side by side, labelled, instead of the changes', async () => {
+  const reads: number[] = [];
+  const client = {
+    readArtifact: async (_task: string, index: number) => {
+      reads.push(index);
+      return {
+        kind: 'image',
+        name: `${index}.png`,
+        blob: new Blob(['png'], { type: 'image/png' }),
+      };
+    },
+  } as unknown as CloudClient;
+  const desktop = {
+    index: 3,
+    name: 'home-desktop.png',
+    kind: 'file' as const,
+    image: true as const,
+  };
+  const phone = { index: 4, name: 'home-phone.png', kind: 'file' as const, image: true as const };
+  await render(
+    wrap(
+      <DeliveryCard
+        client={client}
+        task={task}
+        model={model({
+          caption: 'Desktop and phone',
+          shot: desktop,
+          views: [
+            { viewport: 'Desktop', listing: desktop },
+            { viewport: 'Phone', listing: phone },
+          ],
+        })}
+      />,
+    ),
+  );
+  expect(screen.getByLabelText('Open large: Desktop')).toBeTruthy();
+  expect(screen.getByLabelText('Open large: Phone')).toBeTruthy();
+  expect(screen.getByText('Desktop')).toBeTruthy();
+  expect(screen.getByText('Phone')).toBeTruthy();
+  // The frames say what they are; the caption is not repeated, and the diff gives way.
+  expect(screen.queryByText('Desktop and phone')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'View the changes' })).toBeNull();
+  expect([...reads].sort()).toEqual([3, 4]);
+});
