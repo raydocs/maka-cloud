@@ -333,7 +333,9 @@ export function boundOpenAI(
     body: sent,
     inputTokens: sent.byteLength + limits.requestOverheadTokens,
     outputTokens: output,
-    inputMultiplier: 1,
+    // Any input token may be written to the cache, which GPT-5.6 and later bill at 1.25x input
+    // (the default 30-minute lifetime; the field that asks for 12 hours is refused).
+    inputMultiplier: CACHE_WRITE_5M,
     oneHourCache: false,
     stream: body.stream === true,
   };
@@ -382,6 +384,16 @@ function refusedContent(input: unknown): string | undefined {
       continue;
     }
     if (!isObject(node)) continue;
+    // A breakpoint may not choose a cache lifetime: a 12-hour write costs 2.5x input, above
+    // the 1.25x the bound reserves. `prompt_cache_options`, which sets it for the request, is
+    // not an allowed field.
+    const breakpoint = node.prompt_cache_breakpoint;
+    if (
+      breakpoint !== undefined &&
+      (!isObject(breakpoint) || (breakpoint.ttl !== undefined && breakpoint.ttl !== '30m'))
+    ) {
+      return 'only the default 30-minute cache lifetime is allowed';
+    }
     if (node.type !== undefined) {
       if (node.type === 'item_reference') return 'stored items are not allowed';
       if (typeof node.type !== 'string' || !OPENAI_INPUT_TYPES.has(node.type)) {

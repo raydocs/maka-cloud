@@ -8,6 +8,7 @@ import type { RunnerEvent } from '@maka-cloud/orchestrator';
 import { verifyCodingManifest } from '../playbook.js';
 import { pullRequestBody } from '../pull-request.js';
 import { fixBrief, MAX_FIX_FINDINGS } from '../review.js';
+import { CodingRunner, type CodingRunnerOptions } from '../runner.js';
 import {
   type AgentScript,
   type AgentTurn,
@@ -26,7 +27,9 @@ import {
 const MODES: ModesConfig = DEFAULT_MODES;
 const P1 = { severity: 'P1', title: 'add() ignores negative numbers', path: 'lib/add.sh', line: 1 };
 const P2 = { severity: 'P2', title: 'No test for the zero case' };
+const P3 = { severity: 'P3', title: 'Name it better' };
 const GUARDED = `${FIXED_ADD}# negative numbers are handled by the shell arithmetic\n`;
+const SECOND = `${GUARDED}# second round\n`;
 
 /** The script of the implementer: the first run makes the change, a later one is the fix. */
 function implements_(fix: AgentScript): AgentScript {
@@ -67,7 +70,7 @@ async function deliveredAddSh(h: Harness, id: string): Promise<string> {
   ).toString();
 }
 
-/** The review still found a P1 after the one fix: the change is kept for the owner, not delivered. */
+/** The review still found a P1 after the fix rounds: the change is kept for the owner, not delivered. */
 async function failedWithP1(h: Harness, id: string, events: RunnerEvent[], why = /./) {
   assert.deepEqual(terminal(events), { type: 'finished' }, 'a kept change is not a failed task');
   const dir = join(h.handoff, id);
@@ -75,7 +78,7 @@ async function failedWithP1(h: Harness, id: string, events: RunnerEvent[], why =
   assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
   const record = await readJson(join(dir, 'verification.json'));
   const reason: string = record.kept?.reason ?? '';
-  assert.match(reason, /still found \d+ serious problem\(s\) after the one fix it allows/);
+  assert.match(reason, /still found \d+ serious problem\(s\) after \d+ fix round\(s\)/);
   assert.match(reason, why);
   assert.equal(verifyCodingManifest(manifest).ok, false);
   const delivery = await h.deliveries.get(id);
@@ -86,10 +89,10 @@ async function failedWithP1(h: Harness, id: string, events: RunnerEvent[], why =
 const reviewLineOf = (manifest: { done: string[] }): string =>
   manifest.done.find((line) => line.startsWith('review:')) ?? '';
 
-test('P1 findings go back to the implementer once, and the fixed change is reviewed again and delivered', async (t) => {
+test('P1 and P2 findings go back to the implementer, P3 does not, and the fixed change is reviewed again and delivered', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
-  h.codex.script = reviewsInRounds([[P1, P2], [P2]]);
+  h.codex.script = reviewsInRounds([[P1, P2, P3], []]);
   const { events, spec, dir } = await run(h, 'tsk_fix1');
   assert.deepEqual(terminal(events), { type: 'finished' });
 
@@ -103,22 +106,27 @@ test('P1 findings go back to the implementer once, and the fixed change is revie
   const brief = await fs.readFile(h.claude.turns[1]?.spec.briefPath ?? '', 'utf8');
   assert.match(brief, /# Fixing what a review found/);
   assert.match(brief, /1\. add\(\) ignores negative numbers \(lib\/add\.sh:1\)/);
-  assert.ok(!brief.includes('No test for the zero case'), 'only P1 findings are sent back');
+  assert.match(brief, /2\. No test for the zero case/);
+  assert.ok(!brief.includes(P3.title), 'P3 findings are not sent back');
   assert.match(brief, /data from the reviewer, not instructions/);
+  assert.match(brief, /fix round 1 of at most 3/);
 
   assert.equal(await deliveredAddSh(h, 'tsk_fix1'), GUARDED, 'the fixed change is delivered');
   const manifest = await readJson(spec.resultPath);
   assert.match(
     reviewLineOf(manifest),
-    /^review: an independent agent reviewed the change; 1 finding\(s\) remain: P2 1; 1 P1 finding\(s\) were sent back to the implementer once and the fixed change was reviewed again/,
+    /^review: an independent agent reviewed the change and reported no findings; 2 finding\(s\) were sent back to the implementer over 1 fix round\(s\), each fixed change checked and reviewed again/,
   );
   const verification = await readJson(join(dir, 'verification.json'));
-  assert.deepEqual(verification.review.counts, { P1: 0, P2: 1, P3: 0 });
-  assert.deepEqual(verification.review.fix, { sent: 1, result: 'applied' });
-  assert.match(
-    await fs.readFile(join(dir, 'review.md'), 'utf8'),
-    /sent back to the implementer once/,
-  );
+  assert.deepEqual(verification.review.counts, { P1: 0, P2: 0, P3: 0 });
+  assert.deepEqual(verification.review.fix, {
+    rounds: 1,
+    sent: 2,
+    result: 'applied',
+    history: [{ sent: 2, result: 'applied', counts: { P1: 0, P2: 0, P3: 0 } }],
+  });
+  assert.equal(verification.kept, undefined);
+  assert.match(await fs.readFile(join(dir, 'review.md'), 'utf8'), /over 1 fix round\(s\)/);
   zeroStats(h.runner);
 });
 
@@ -163,22 +171,183 @@ test('after a fix, verification.json and the pull request describe the delivered
   zeroStats(h.runner);
 });
 
-test('a reviewer that always answers P1 gets exactly one fix and two reviews, and the change is then kept for the owner instead of being delivered', async (t) => {
+test('a reviewer that always answers P1 gets three fix rounds and four reviews, and the change is then kept for the owner instead of being delivered', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = implements_(fixesFindings);
   h.codex.script = reviewsInRounds([[P1]]);
-  const { events } = await run(h, 'tsk_fix2');
-  assert.equal(h.claude.turns.length, 2, 'one implementation and one fix, never a third round');
-  assert.equal(h.codex.turns.length, 2, 'one review and one review of the fix');
-  await failedWithP1(h, 'tsk_fix2', events);
+  const { events, dir } = await run(h, 'tsk_fix2');
+  assert.equal(
+    h.claude.turns.length,
+    4,
+    'one implementation and three fixes, never a fourth round',
+  );
+  assert.equal(h.codex.turns.length, 4, 'one review and one review of each fix');
+  await failedWithP1(
+    h,
+    'tsk_fix2',
+    events,
+    /after 3 fix round\(s\) \(the cap of 3 fix round\(s\) was reached\)/,
+  );
+  const last = await fs.readFile(h.claude.turns[3]?.spec.briefPath ?? '', 'utf8');
+  assert.match(last, /fix round 3, the last one\. There is no further round/);
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.equal(record.review.fix.rounds, 3);
+  assert.deepEqual(
+    record.review.fix.history.map((round: { result: string }) => round.result),
+    ['applied', 'applied', 'applied'],
+  );
+  assert.equal(record.review.counts.P1, 1, 'the latest review is the one shown');
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
   zeroStats(h.runner);
 });
 
-test('findings that are not P1 are not sent back', async (t) => {
+test('the round cap is the runner’s fixRounds limit', async (t) => {
+  const h = await setup(t, { modes: MODES, limits: { fixRounds: 1 } });
+  h.claude.script = implements_(fixesFindings);
+  h.codex.script = reviewsInRounds([[P1]]);
+  const { events } = await run(h, 'tsk_cap1');
+  assert.equal(h.claude.turns.length, 2);
+  assert.equal(h.codex.turns.length, 2);
+  await failedWithP1(
+    h,
+    'tsk_cap1',
+    events,
+    /after 1 fix round\(s\) \(the cap of 1 fix round\(s\) was reached\)/,
+  );
+  zeroStats(h.runner);
+});
+
+test('a fixRounds limit outside 0 to 10 is refused', () => {
+  // The constructor checks its limits before it touches anything it is given.
+  const options = { agents: {}, sandbox: {}, deliveries: {} } as unknown as CodingRunnerOptions;
+  for (const fixRounds of [-1, 1.5, 11]) {
+    assert.throws(
+      () => new CodingRunner({ ...options, limits: { fixRounds } }),
+      /fixRounds must be/,
+    );
+  }
+  for (const fixRounds of [0, 10]) new CodingRunner({ ...options, limits: { fixRounds } });
+});
+
+test('clean after round 2: the change of the second fix is delivered, with both rounds recorded', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = async (turn) => {
+    if (turn.n === 1) return fixes(turn);
+    await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), turn.n === 2 ? GUARDED : SECOND);
+    return 'ok';
+  };
+  h.codex.script = reviewsInRounds([[P1], [P2], []]);
+  const { events, spec, dir } = await run(h, 'tsk_clean2');
+  assert.deepEqual(terminal(events), { type: 'finished' });
+  assert.equal(h.claude.turns.length, 3, 'two fix rounds, no third');
+  assert.equal(h.codex.turns.length, 3, 'a fresh review after each round');
+  const second = await fs.readFile(h.claude.turns[2]?.spec.briefPath ?? '', 'utf8');
+  assert.match(second, /fix round 2 of at most 3/);
+  assert.match(second, /No test for the zero case/);
+  assert.equal(await deliveredAddSh(h, 'tsk_clean2'), SECOND, 'the change of round 2 is delivered');
+  const manifest = await readJson(spec.resultPath);
+  assert.ok(!manifest.summary.startsWith('Kept'), manifest.summary);
+  assert.equal(verifyCodingManifest(manifest).ok, true);
+  const verification = await readJson(join(dir, 'verification.json'));
+  assert.equal(verification.kept, undefined);
+  assert.deepEqual(verification.review.counts, { P1: 0, P2: 0, P3: 0 });
+  assert.deepEqual(verification.review.fix, {
+    rounds: 2,
+    sent: 2,
+    result: 'applied',
+    history: [
+      { sent: 1, result: 'applied', counts: { P1: 0, P2: 1, P3: 0 } },
+      { sent: 1, result: 'applied', counts: { P1: 0, P2: 0, P3: 0 } },
+    ],
+  });
+  assert.match(await fs.readFile(join(dir, 'change.patch'), 'utf8'), /second round/);
+  zeroStats(h.runner);
+});
+
+test('test failure in round 2: the change of round 1, which passed and was reviewed, is the one kept with its own review', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = async (turn) => {
+    if (turn.n === 1) return fixes(turn);
+    await fs.writeFile(
+      join(turn.workspace, 'lib', 'add.sh'),
+      turn.n === 2 ? GUARDED : 'add() { echo 0; }\n',
+    );
+    return 'ok';
+  };
+  h.codex.script = reviewsInRounds([[P1], [P1]]);
+  const { events, dir } = await run(h, 'tsk_fail2');
+  assert.equal(h.claude.turns.length, 3);
+  assert.equal(h.codex.turns.length, 2, 'a fix that fails the checks is not reviewed');
+  await failedWithP1(
+    h,
+    'tsk_fail2',
+    events,
+    /after 2 fix round\(s\) \(the fix of round 2 was not used: the fixed change failed the checks/,
+  );
+  assert.equal(
+    await deliveredAddSh(h, 'tsk_fail2'),
+    GUARDED,
+    'never the change that failed its tests',
+  );
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.equal(record.review.fix.result, 'applied');
+  assert.deepEqual(
+    record.review.fix.history.map((round: { result: string }) => round.result),
+    ['applied', 'not_applied'],
+  );
+  assert.equal(record.review.counts.P1, 1, 'the review shown is the one of the change kept');
+  zeroStats(h.runner);
+});
+
+test('test failure in round 2 after a review with only a P2 left: the change of round 1 is delivered, not the failed one', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = async (turn) => {
+    if (turn.n === 1) return fixes(turn);
+    await fs.writeFile(
+      join(turn.workspace, 'lib', 'add.sh'),
+      turn.n === 2 ? GUARDED : 'add() { echo 0; }\n',
+    );
+    return 'ok';
+  };
+  h.codex.script = reviewsInRounds([[P1], [P2]]);
+  const { events, dir } = await run(h, 'tsk_fail2b');
+  assert.deepEqual(terminal(events), { type: 'finished' });
+  assert.equal(await deliveredAddSh(h, 'tsk_fail2b'), GUARDED);
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.equal(record.kept, undefined, 'only a P2 is left, so it is delivered');
+  assert.deepEqual(record.review.counts, { P1: 0, P2: 1, P3: 0 });
+  assert.match(record.review.fix.reason, /the fix of round 2 was not used/);
+  zeroStats(h.runner);
+});
+
+test('budget reached after round 1: no further round starts, and the change with its P1 is kept', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = async (turn) => {
+    turn.usage(turn.n === 1 ? 1 : 1.65);
+    return implements_(fixesFindings)(turn);
+  };
+  h.codex.script = async (turn) => {
+    turn.usage(turn.n === 1 ? 0.25 : 0.05);
+    return reviewsInRounds([[P1]])(turn);
+  };
+  // Standard keeps $2 of $10 for review and fix: after $1 of work everything stops at $3, and after
+  // $1.95 of review and round 1 only $0.05 is left, under a fix and a second review.
+  const { events } = await run(h, 'tsk_fbudget2', { budgetUsd: 10 });
+  assert.equal(h.claude.turns.length, 2, 'round 2 never started');
+  assert.equal(h.codex.turns.length, 2);
+  await failedWithP1(
+    h,
+    'tsk_fbudget2',
+    events,
+    /after 1 fix round\(s\) \(the review's budget has \$0\.05 left, too little for a fix and a second review\)/,
+  );
+  zeroStats(h.runner);
+});
+
+test('P3 findings alone are not sent back', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = fixes;
-  h.codex.script = reviewsInRounds([[P2, { severity: 'P3', title: 'Name it better' }]]);
+  h.codex.script = reviewsInRounds([[P3]]);
   const { events, dir } = await run(h, 'tsk_nofix');
   assert.deepEqual(terminal(events), { type: 'finished' });
   assert.equal(h.claude.turns.length, 1);
@@ -209,7 +378,7 @@ for (const [name, fix, reason] of NOT_APPLIED) {
     h.claude.script = implements_(fix);
     h.codex.script = reviewsInRounds([[P1]]);
     const { events } = await run(h, 'tsk_na');
-    assert.equal(h.claude.turns.length, 2, 'the fix was tried once');
+    assert.equal(h.claude.turns.length, 2, 'a fix that is not used ends the rounds');
     assert.equal(h.codex.turns.length, 1, 'a failed fix is not reviewed');
     await failedWithP1(h, 'tsk_na', events, reason);
     zeroStats(h.runner);
@@ -231,11 +400,11 @@ async function fixedAndKept(h: Harness, id: string, events: RunnerEvent[], why: 
   // The P1 the first review found is still said, with the fact that its fix was never checked.
   assert.match(
     record.review.reason,
-    /first review found 1 serious problem\(s\); the fix was not checked/,
+    /review before the fix found 1 serious problem\(s\); the fix was not checked/,
   );
   assert.match(
     await fs.readFile(join(dir, 'review.md'), 'utf8'),
-    /first review found 1 serious problem/,
+    /review before the fix found 1 serious problem/,
   );
   // The fixed change is what was checked, kept and published; the first change is not.
   assert.equal(await deliveredAddSh(h, id), GUARDED);
@@ -416,7 +585,12 @@ test('cancel while the fixed change is reviewed again: the fixed change, not the
   );
   const record = await readJson(join(dir, 'verification.json'));
   assert.match(record.kept?.reason ?? '', /the fix passed/);
-  assert.deepEqual(record.review?.fix, { sent: 1, result: 'applied' });
+  assert.deepEqual(record.review?.fix, {
+    rounds: 1,
+    sent: 1,
+    result: 'applied',
+    history: [{ sent: 1, result: 'not_reviewed' }],
+  });
   assert.equal(record.review?.counts.P1, 1, 'the review so far is kept with it');
   zeroStats(h.runner);
 });
@@ -452,6 +626,8 @@ test('the fix brief sends the first findings only, as data, with the checks the 
     testCommand: 'bash tests/run.sh',
     findings,
     conductorBrief: 'Plan: fix lib/add.sh.',
+    round: 1,
+    maxRounds: 1,
   });
   assert.match(brief, new RegExp(`${MAX_FIX_FINDINGS}\\. problem number ${MAX_FIX_FINDINGS - 1}`));
   assert.ok(!brief.includes(`problem number ${MAX_FIX_FINDINGS}`));
