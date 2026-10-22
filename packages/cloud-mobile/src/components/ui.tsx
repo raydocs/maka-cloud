@@ -172,6 +172,36 @@ export function PillButton({
   );
 }
 
+/** A quiet word that does something ("Add a note"): muted, 44 pt tall. */
+export function QuietButton({
+  label,
+  onPress,
+  accessibilityLabel,
+  disabled = false,
+}: {
+  label: string;
+  onPress: () => void;
+  accessibilityLabel?: string;
+  disabled?: boolean;
+}) {
+  const t = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      hitSlop={4}
+      style={({ pressed }) => [styles.quiet, { opacity: disabled ? 0.5 : pressed ? 0.6 : 1 }]}
+    >
+      <Text style={{ color: t.inkMuted, fontSize: 15 }} allowFontScaling>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 /**
  * A small round send button next to a field. It is filled with the accent when there is something to
  * send; when there is not, it is an outlined ring in the muted ink (readable, but plainly at rest).
@@ -311,6 +341,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   mark: { width: 10, height: 10, borderRadius: 5 },
+  quiet: { minHeight: TOUCH, justifyContent: 'center', alignSelf: 'flex-start' },
   field: {
     minHeight: TOUCH,
     borderRadius: radius.small,

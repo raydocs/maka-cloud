@@ -69,7 +69,7 @@ export function TaskRow({
       <T kind="muted">
         {taskLabel(task)}
         {task.parentTaskId === undefined &&
-          ` · Cost so far: ${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
+          ` · ${live ? 'Cost so far' : 'Cost'}: ${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
       </T>
       {task.budgetExceeded && <T kind="error">The budget was reached, so the work was stopped.</T>}
       {stopping && <T kind="muted">Still stopping. The cost may change until it has stopped.</T>}

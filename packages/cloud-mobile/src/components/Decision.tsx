@@ -9,7 +9,7 @@ import {
 } from '@maka-cloud/client';
 import { useState } from 'react';
 import { Linking, View } from 'react-native';
-import { Field, PillButton, Solid, StatusMark, T } from './ui';
+import { Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
 import { mono } from '@/lib/theme';
 
 function Evidence({ line }: { line: EvidenceLine }) {
@@ -35,6 +35,33 @@ function Evidence({ line }: { line: EvidenceLine }) {
     </T>
   ) : (
     <T kind="small">{line.label}</T>
+  );
+}
+
+/** A note only when asked for: "Add a note" opens the field, focused. */
+function Note({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (text: string) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return open ? (
+    <Field
+      label="Additional context (optional)"
+      placeholder="Additional context (optional)"
+      multiline
+      maxLength={4000}
+      value={value}
+      onChangeText={(text) => onChange(displayText(text))}
+      editable={!disabled}
+      autoFocus
+    />
+  ) : (
+    <QuietButton label="Add a note" onPress={() => setOpen(true)} disabled={disabled} />
   );
 }
 
@@ -91,17 +118,7 @@ export function DecisionCard({
         </T>
       ) : (
         <>
-          {item.allowText && (
-            <Field
-              label="Additional context (optional)"
-              placeholder="Additional context (optional)"
-              multiline
-              maxLength={4000}
-              value={note}
-              onChangeText={(text) => setNote(displayText(text))}
-              editable={!disabled}
-            />
-          )}
+          {item.allowText && <Note value={note} onChange={setNote} disabled={disabled} />}
           <View style={{ gap: 8 }}>
             {card.options.map((option) => (
               <PillButton
@@ -113,7 +130,6 @@ export function DecisionCard({
               />
             ))}
           </View>
-          {card.hasRecommended && <T kind="small">The filled button is the recommended answer.</T>}
         </>
       )}
     </View>
@@ -159,15 +175,7 @@ export function QuestionBlock({
         <T kind="muted">Answer recorded: {card.answeredLabel}</T>
       ) : (
         <>
-          <Field
-            label="Additional context (optional)"
-            placeholder="Additional context (optional)"
-            multiline
-            maxLength={4000}
-            value={note}
-            onChangeText={(text) => setNote(displayText(text))}
-            editable={!disabled}
-          />
+          <Note value={note} onChange={setNote} disabled={disabled} />
           <View style={{ gap: 8 }}>
             {card.options.map((option) => (
               <PillButton

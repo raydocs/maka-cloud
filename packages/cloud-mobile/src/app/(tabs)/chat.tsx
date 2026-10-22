@@ -84,7 +84,14 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   };
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
   const inbox = Object.values(state.inbox);
-  const waiting = inbox.filter((item) => item.state !== 'closed');
+  // As on the web: a finished task whose row already shows its outcome is not announced again here;
+  // its card waits on Home.
+  const shown = new Set(roots.filter((task) => task.manifest).map((task) => task.taskId));
+  const waiting = inbox.filter(
+    (item) =>
+      item.state !== 'closed' &&
+      !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
+  );
   // Something that waits on the person is always brought into view.
   const needsYou = openQuestions.size + waiting.length;
   useEffect(() => {
