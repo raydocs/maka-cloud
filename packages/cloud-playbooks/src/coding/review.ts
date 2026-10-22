@@ -29,6 +29,17 @@ const SECRET_MARK = '[secret]';
 /** Breaks that read as the space between two words; a key split by one is shown split, as written. */
 const BREAKS = /[\t\n\v\f\r]/gu;
 
+/**
+ * The letters and digits a text shows, compatibility forms and marks folded and each \`[secret]\` one
+ * character: two readings of one text compare equal when they hide the same, however each was
+ * spaced, quoted, serialised or normalised.
+ */
+const skeleton = (text: string): string =>
+  text
+    .normalize('NFKD')
+    .replaceAll(SECRET_MARK, '\u0001')
+    .replace(/[^\p{L}\p{N}\u0001]/gu, '');
+
 export function plain(text: string, max: number): string {
   // Scrubbed before anything is flattened: a key split by a character that becomes a space here is
   // no longer one the scrubber knows. The scrubber reads zero-width characters away itself; the
@@ -41,7 +52,7 @@ export function plain(text: string, max: number): string {
   const shown = scrubSecretText(spaced);
   const joined = spaced.replace(UNPRINTABLE, '');
   const scrubbedJoined = scrubSecretText(joined);
-  if (scrubbedJoined !== joined && shown.replace(UNPRINTABLE, '') !== scrubbedJoined) {
+  if (scrubbedJoined !== joined && skeleton(shown) !== skeleton(scrubbedJoined)) {
     return clip(SECRET_MARK, max);
   }
   return clip(scrubSecretText(shown.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim()), max);

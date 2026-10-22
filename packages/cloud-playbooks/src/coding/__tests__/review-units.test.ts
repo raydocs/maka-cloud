@@ -129,6 +129,14 @@ test('a key split after enough of it to be found is not shown in part, and no wo
   assert.equal(plain(`${key}\nnot safe to deploy`, 200), '[secret] not safe to deploy');
   // A key whole as written, and a hidden character elsewhere, keep the text.
   assert.equal(plain(`${key} is bad\u0000ly placed`, 200), '[secret] is bad ly placed');
+  // Readings that differ only in how they are spaced, serialised or normalised keep it too.
+  for (const text of [
+    `{"warning": "not safe to deploy", "token": "${key}"}\u0000`,
+    `${key} e\u200d\u0301: not safe to deploy`,
+  ]) {
+    assert.match(plain(text, 200), /not safe to deploy/u, JSON.stringify(text));
+    assert.doesNotMatch(plain(text, 200), /0123456789abcdef/u);
+  }
 });
 
 test('a clip never cuts a [secret] mark, half a character or a letter from its marks', () => {
