@@ -122,13 +122,16 @@ test('the creation rate survives a restart: it is counted from the database', as
   await h.server.orchestrator.delegate(again, { runner: 'fake', brief: 'later' });
 });
 
-test('the tasks route lists one conversation, in order, in pages', async (t) => {
-  const { h, session, conversationId, orchestrator } = await setup(t);
+test('the tasks route lists every task exactly once across page boundaries with equal creation times', async (t) => {
+  const { h, session, conversationId, orchestrator } = await setup(t, {
+    orchestrator: { now: () => 10_000_000 },
+  });
   const otherConversation = await newConversation(h);
   const ids: string[] = [];
   for (let i = 0; i < 5; i += 1) {
     ids.push((await orchestrator.delegate(session, { runner: 'fake', brief: `t${i}` })).taskId);
   }
+  assert.equal(new Set(ids.map((id) => orchestrator.status(session, id).createdAt)).size, 1);
   const page = async (query: string) =>
     (await (await h.api(`/v1/conversations/${conversationId}/tasks${query}`)).json()) as {
       tasks: Array<{ taskId: string }>;
