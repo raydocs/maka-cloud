@@ -420,3 +420,30 @@ test('a very long run of base64 lines is scrubbed without running out of stack',
   const out = scrubSecretShapes(Array(10_000).fill(line).join('\n'));
   assert.equal(out.includes(line), false);
 });
+
+test('long lists of hashes, ids and paths are scrubbed in linear time', () => {
+  const hash = 'a1b2c3d4'.repeat(8);
+  const lists = [
+    Array(10_000).fill(hash),
+    Array.from({ length: 10_000 }, (_, i) => `id${String(i).padStart(18, '0')}`),
+    Array.from({ length: 10_000 }, (_, i) => `packages/cloudserver/src/dir${i}`),
+  ];
+  for (const lines of lists) {
+    const text = `${lines.join('\n')}\n`;
+    const started = Date.now();
+    scrubSecretShapes(text);
+    assert.ok(Date.now() - started < 500, `${lines[0]} took ${Date.now() - started} ms`);
+  }
+  // With a closing marker after them, the lines in front of it go and the rest stays.
+  const withEnd = scrubSecretShapes(
+    `${lists[0]?.slice(0, 100).join('\n')}\n-----END OPENSSH PRIVATE KEY-----\nafter\n`,
+  );
+  assert.equal(withEnd.includes(hash), false);
+  assert.match(withEnd, /after\n$/u);
+});
+
+test('a closing marker in the middle of a line, or with nothing before it, loses only itself', () => {
+  assert.equal(scrubSecretShapes('see -----END PRIVATE KEY----- here'), 'see [secret] here');
+  assert.equal(scrubSecretShapes('-----END PRIVATE KEY-----\nrest\n'), '[secret]\nrest\n');
+  assert.equal(scrubSecretShapes('words\n-----END PRIVATE KEY-----\n'), 'words\n[secret]\n');
+});
