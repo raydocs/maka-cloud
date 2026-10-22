@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { ProofSignals } from './proof.js';
 import { outcomeOf } from './sandbox-ops.js';
 import {
   type Grade,
@@ -44,7 +45,7 @@ export class FakeDriver implements SubjectDriver {
   ) {}
 
   async run(input: DriverInput): Promise<DriverResult> {
-    const [resolve, size, fail] = unit(this.subjectId, input.task.id);
+    const [resolve, size, fail, doubt] = unit(this.subjectId, input.task.id);
     // Log-normal-ish spread around the median, capped by the budget the run was given.
     const cost = Math.min(
       input.budgetUsd,
@@ -60,8 +61,25 @@ export class FakeDriver implements SubjectDriver {
       costUsd: cost,
       end: 'finished',
       failureReason: null,
+      ...(this.subjectId === 'coding-playbook' ? { proof: fakeProof(resolves, doubt!) } : {}),
     };
   }
+}
+
+/**
+ * The playbook's record, shaped like a fair one: a right change is nearly always handed over
+ * hands-off, a wrong one is mostly caught (kept, or a P1 left open) and sometimes not.
+ */
+function fakeProof(resolves: boolean, doubt: number): ProofSignals {
+  const confident = resolves ? doubt < 0.9 : doubt < 0.15;
+  return {
+    reproduced: true,
+    reviewed: true,
+    crossVendor: true,
+    open: { P1: confident ? 0 : 1, P2: 0, P3: 0 },
+    attempts: 1,
+    kept: !confident && doubt < 0.5,
+  };
 }
 
 /** Resolved when the fake patch says so. */

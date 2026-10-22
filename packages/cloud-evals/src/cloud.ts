@@ -9,6 +9,7 @@ import type {
   SubjectExecutionResult,
 } from '@maka/eval';
 import type { BudgetLedger, Reservation } from './ledger.js';
+import { proofArtifact } from './proof.js';
 import {
   DriverError,
   type Grader,
@@ -263,6 +264,7 @@ export function createCloudEvals(options: CloudEvalsOptions): CloudEvals {
                   },
                 ]
               : []),
+            ...(result.proof ? [proofArtifact(result.proof)] : []),
           ],
         };
       } catch (error) {

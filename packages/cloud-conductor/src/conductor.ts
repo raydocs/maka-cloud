@@ -28,6 +28,7 @@ import { conductorSystemPrompt, PLANNER_SYSTEM_PROMPT, plannerInput } from './pr
 import {
   ConductorState,
   type DelegationRow,
+  isApprovingOption,
   OPEN_RUN_STATES,
   type OutboxRow,
   type QuestionRow,
@@ -85,6 +86,13 @@ export interface ConductorOptions {
    * pick of it runs as `standard` with a notice.
    */
   deepMode?: boolean;
+  /**
+   * Whether a scoped approval (a grant the owner kept: "for this task", "for this repository")
+   * also lets a call past the taint hold. Off by default: a call decided on context that read
+   * outside content (a task result, a fetched page) is held for a card whatever was granted, so
+   * injected text cannot use a grant. With it off, no scope is offered on a tainted conversation.
+   */
+  grantsCoverTaint?: boolean;
   /**
    * Appended once to each new durable user turn, never to the system prompt or old history. It
    * taints the conversation (T15) unless it says `external: false`; a non-empty string always does.
@@ -250,6 +258,7 @@ export class Conductor {
   private readonly playbooks: readonly Playbook[];
   private readonly modes: ModesConfig | undefined;
   private readonly deepMode: boolean;
+  private readonly grantsCoverTaint: boolean;
   private readonly limits: ConductorLimits;
   private readonly prices: ModelPrices;
   private readonly now: () => number;
@@ -288,6 +297,7 @@ export class Conductor {
     this.playbooks = options.playbooks ?? DEFAULT_PLAYBOOKS;
     this.modes = options.modes;
     this.deepMode = options.deepMode === true;
+    this.grantsCoverTaint = options.grantsCoverTaint === true;
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
@@ -467,7 +477,7 @@ export class Conductor {
       return { accepted: true, duplicate: false };
     }
     const followUp =
-      question.reason === 'irreversible' && option.id === 'approve'
+      question.reason === 'irreversible' && isApprovingOption(option.id)
         ? ` Call the tool again with the same arguments and actionRef "${question.actionRef}".`
         : question.reason === 'irreversible'
           ? ' Do not perform that action.'
@@ -1429,6 +1439,8 @@ export class Conductor {
       playbooks: this.playbooks,
       ...(this.modes ? { modes: this.modes } : {}),
       deepMode: this.deepMode,
+      grantsCoverTaint: this.grantsCoverTaint,
+      grantsUsable: this.approverAuthorized !== undefined,
       turnFor: (ctx: MakaToolContext) => {
         const turn = this.turns.get(ctx.sessionId);
         if (!turn) throw new ToolRefusal('no_run', 'This session has no running conductor turn.');

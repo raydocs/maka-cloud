@@ -21,6 +21,7 @@ import { InboxCard } from './Inbox';
 import { ModePicker } from './ModePicker';
 import { pendingSends } from './pending';
 import { SuggestionCard } from './Suggestion';
+import { submitOnEnter } from './keys';
 
 /** What the browser remembers about when this invite last looked at Home. Never the token. */
 function visitKey(fingerprint: string) {
@@ -201,6 +202,7 @@ export function Home({
               rows={1}
               maxLength={16000}
               placeholder="What would you like to get done?"
+              onKeyDown={submitOnEnter}
               value={draft}
               onChange={(e) => {
                 setDraft(displayText(e.target.value));

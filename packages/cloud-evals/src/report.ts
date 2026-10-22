@@ -6,6 +6,7 @@ import {
   type ExperimentSpec,
   selectCellResult,
 } from '@maka/eval';
+import { type ProofSignals, proofFromArtifacts } from './proof.js';
 
 export interface CellRow {
   cellId: string;
@@ -18,6 +19,8 @@ export interface CellRow {
   costUsd: number | null;
   durationMs: number;
   failureReason: string | null;
+  /** What the subject's own record said about its change; null when it kept none. */
+  proof: ProofSignals | null;
 }
 
 export interface CurvePoint {
@@ -70,6 +73,7 @@ export async function loadRows(spec: ExperimentSpec, store: AttemptStore): Promi
       costUsd: result.costUsd,
       durationMs: result.durationMs,
       failureReason: result.failureReason,
+      proof: proofFromArtifacts(result.artifacts),
     });
   }
   return rows;
