@@ -777,4 +777,77 @@ describe('review fixes before the pool goes on', () => {
     await assert.rejects(asking, /shut down/);
     await waiting;
   });
+
+  it('puts back the claim of a run still under way when a newer ask of its task fails', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const running = await pool.acquire({ tenantId: A, taskId: 't1' });
+    const real = fleet.getMachine.bind(fleet);
+    let failures = 1;
+    fleet.getMachine = async (id: string) => {
+      if (failures-- > 0) throw new Error('instabox is unreachable');
+      return await real(id);
+    };
+    await assert.rejects(pool.acquire({ tenantId: A, taskId: 't1' }), /unreachable/);
+    // The task ends while its run still unwinds: the box is the run's until it gives it back.
+    live.delete('t1');
+    await pool.reconcile();
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(pool.waiting(A), 1, 'the next task waits for the run');
+    await running.release();
+    assert.equal((await other).machineId, running.machineId);
+  });
+
+  it('does not put back the claim of a run that gave its lease back while a newer ask was under way', async () => {
+    const { pool, fleet } = setup({ maxPerInvite: 1 });
+    const running = await pool.acquire({ tenantId: A, taskId: 't1' });
+    let fail!: () => void;
+    const real = fleet.getMachine.bind(fleet);
+    fleet.getMachine = async (id: string) => {
+      await new Promise<void>((resolve) => {
+        fail = resolve;
+      });
+      fleet.getMachine = real;
+      throw new Error('instabox is unreachable');
+    };
+    const repeat = pool.acquire({ tenantId: A, taskId: 't1' });
+    await flush();
+    await running.release();
+    fail();
+    await assert.rejects(repeat, /unreachable/);
+    const next = await pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.equal(next.machineId, running.machineId, 'the box is free, not held for ever');
+  });
+
+  it('waits on shutdown for the give-back write of an ask that failed', async () => {
+    const { pool, fleet } = setup();
+    const first = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await first.release();
+    let fail!: () => void;
+    const real = fleet.getMachine.bind(fleet);
+    fleet.getMachine = async (id: string) => {
+      await new Promise<void>((resolve) => {
+        fail = resolve;
+      });
+      fleet.getMachine = real;
+      throw new Error('instabox is unreachable');
+    };
+    const asking = pool.acquire({ tenantId: A, taskId: 't2' });
+    const refused = assert.rejects(asking, /unreachable/);
+    await flush();
+    pool.dispose();
+    const clearing = fleet.hold('patchMachineMetadata');
+    let settled = false;
+    const waiting = pool.settled().then(() => {
+      settled = true;
+    });
+    fail();
+    await clearing.reached;
+    await flush();
+    assert.equal(settled, false, 'the give-back write is still under way');
+    clearing.release();
+    await refused;
+    await waiting;
+  });
 });

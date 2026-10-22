@@ -114,7 +114,8 @@ An ask under way when the pool is shut down hands out nothing: it fails, and a b
 free (a live task keeps its claim). The service's `close()` waits for hand-outs and builder leases under way,
 their guard, give-back write and failure delete included, so a stopping process does not leave a box it was
 making unrecorded or a builder undeleted. A builder whose guard ends after the shutdown is deleted, not handed
-out. A failed repeat ask of a live task keeps the task's claim, like a run's release.
+out. A repeat ask of a task that fails puts back the claim of the run it replaced, unless that run has given
+its lease back since; then a live task keeps the box, as after a run's release.
 
 Every `acquire` gets its own claim token. A task that asks again (a repeat, a resume) gets a new token and
 the older call's lease stops matching, so releasing it frees nothing; only the lease whose token is the
