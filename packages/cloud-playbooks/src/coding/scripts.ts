@@ -106,17 +106,19 @@ export const CHECK_SCRIPT = `set -u
 umask 077
 cd "$MAKA_DIR/workspace" 2>/dev/null || { echo 'maka-check: the workspace is missing' >&2; exit 125; }
 mark=$(mktemp -d) || { echo 'maka-check: no temporary directory' >&2; exit 125; }
+# The check's own time, kept in this shell where the check cannot reach it.
+t0=\${EPOCHREALTIME:-}
 timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
   unshare --user --map-current-user --pid --fork --kill-child -- \\
-  bash -c 'printf %s "$EPOCHREALTIME" > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
+  bash -c ': > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
   "$MAKA_CHECK_TAG" "$mark" "$MAKA_CMD" "$MAKA_TIMEOUT" < /dev/null 2>&1 |
   { tee >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
 rc=\${PIPESTATUS[0]}
 isolated=0
 [ -e "$mark/started" ] && isolated=1
-# How long the command itself ran, without the sandbox's setup: microseconds on both clocks.
-start=$(tr -dc 0-9 < "$mark/started" 2>/dev/null)
-[ -n "$start" ] && echo "RAN_MS $(( (\${EPOCHREALTIME//[^0-9]/} - start) / 1000 ))" >&2
+t1=\${EPOCHREALTIME:-}
+# Microseconds on both clocks; without EPOCHREALTIME (bash before 5) nothing is reported.
+[ -n "$t0" ] && [ -n "$t1" ] && echo "RAN_MS $(( (10#\${t1//[^0-9]/} - 10#\${t0//[^0-9]/}) / 1000 ))" >&2
 rm -rf -- "$mark"
 if [ "$isolated" = 0 ]; then
   echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed: the box must allow unprivileged user namespaces, which a container profile such as the Docker default seccomp refuses; no check can run until it does)' >&2
