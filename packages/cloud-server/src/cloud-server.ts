@@ -260,6 +260,8 @@ export interface CloudServerOptions {
     limits?: Partial<AuthLimits>;
     /** Mail the server may send in an hour, over all addresses (default 300). */
     maxMailsPerHour?: number;
+    /** The server is behind one reverse proxy: count sign-in limits per forwarded client address. */
+    trustProxy?: boolean;
     /** Tests only: the clock of nonces, codes and rate limits. */
     now?: () => number;
   };
@@ -619,6 +621,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
                 }
               : {}),
             ...(authOptions.now ? { now: authOptions.now } : {}),
+            ...(authOptions.trustProxy ? { trustProxy: true } : {}),
             ...(authOptions.limits ? { limits: authOptions.limits } : {}),
             reauthenticate: (invite) => api.reauthenticate(invite),
             removePush: (inviteId, endpoint) => push?.remove(inviteId, endpoint) ?? false,

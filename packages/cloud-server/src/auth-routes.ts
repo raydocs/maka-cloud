@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import type { AccountStore, Identity } from './accounts.js';
 import type { EmailCodes, NonceStore } from './challenges.js';
 import { HttpError, readJson, respond } from './http.js';
 import type { IdentityVerifier } from './identity.js';
 import type { InviteInfo, InviteStore } from './invites.js';
+import { isPublicAddress } from './public-address.js';
 import { RateLimiter } from './rate-limit.js';
 
 /** How often sign-in routes may be called, per minute. Tests lower or raise them. */
@@ -61,6 +63,13 @@ export interface AuthOptions {
   /** Absent: there is no email sign-in. */
   emailCodes?: EmailCodes;
   limits?: Partial<AuthLimits>;
+  /**
+   * The server sits behind one reverse proxy (the deployment's Caddy or nginx). Then a request whose
+   * socket address is private (the proxy) is counted against the client address the proxy put last
+   * in `X-Forwarded-For`; a request from a public address is counted against that address and its
+   * header is ignored. Without it every person would share the proxy's address and its limits.
+   */
+  trustProxy?: boolean;
 }
 
 export interface AuthDeps extends AuthOptions {
@@ -104,6 +113,16 @@ export class AuthRoutes {
     this.total = new RateLimiter(limits.total, this.now, 4);
   }
 
+  /** Who a request is counted as, for the per-address limits. */
+  private clientOf(req: IncomingMessage): string {
+    const header = req.headers['x-forwarded-for'];
+    return clientAddress(
+      req.socket.remoteAddress ?? 'unknown',
+      Array.isArray(header) ? header.join(',') : header,
+      this.deps.trustProxy === true,
+    );
+  }
+
   /** Paths answered without a bearer token. */
   isPublic(path: string): boolean {
     return /^\/v1\/auth\/(?:options|nonce|session|email|email\/verify|claim)$/u.test(path);
@@ -114,7 +133,7 @@ export class AuthRoutes {
     const method = req.method ?? 'GET';
     const secure = { 'cache-control': 'no-store' };
     const answer = (status: number, body: unknown) => respond(res, status, body, secure);
-    const address = req.socket.remoteAddress ?? 'unknown';
+    const address = this.clientOf(req);
     // The mail route is held to the tight bucket too: every call can send mail through the owner's key.
     const guess = path !== '/v1/auth/options' && path !== '/v1/auth/nonce';
     this.limit(address, guess);
@@ -215,10 +234,7 @@ export class AuthRoutes {
       await drain(req);
       this.deps.reauthenticate(invite);
       const accountId = accounts.accountOf(invite.inviteId);
-      if (
-        accountId === undefined ||
-        !accounts.revokeSession(accountId, decodeURIComponent(one[1] ?? ''))
-      ) {
+      if (accountId === undefined || !accounts.revokeSession(accountId, idOf(one[1]))) {
         throw new HttpError(404, 'not_found');
       }
       respond(res, 204, undefined, secure);
@@ -331,13 +347,19 @@ export class AuthRoutes {
     const accountId = accounts.accountOfIdentity(identity);
     if (accountId !== undefined) {
       const session = accounts.issueSession(accountId, deviceLabel ?? '');
-      // An account whose invite was revoked is refused like a wrong identity: it gets in nowhere.
-      if (!session) throw new HttpError(401, 'sign_in_failed');
-      return { status: 'signed_in', token: session.token, sessionId: session.sessionId };
+      if (session) {
+        return { status: 'signed_in', token: session.token, sessionId: session.sessionId };
+      }
+      // The account's invite was revoked: the identity gets in nowhere, and is asked for an invite
+      // like a new one. A claim with a new invite frees it from the dead account.
     }
     if (this.pending.size >= MAX_PENDING) {
+      // Spent sign-ins first: a burst must not push out one that is still live.
+      const at = this.now();
+      for (const [token, entry] of this.pending)
+        if (entry.expiresAt <= at) this.pending.delete(token);
       const oldest = this.pending.keys().next();
-      if (!oldest.done) this.pending.delete(oldest.value);
+      if (this.pending.size >= MAX_PENDING && !oldest.done) this.pending.delete(oldest.value);
     }
     const pendingToken = `pnd_${randomBytes(24).toString('base64url')}`;
     const expiresAt = this.now() + PENDING_TTL_MS;
@@ -364,6 +386,30 @@ export class AuthRoutes {
     const session = this.deps.accounts.issueSession(accountId, body.device ?? '');
     if (!session) throw new HttpError(403, 'invite_unavailable');
     return { status: 'signed_in', token: session.token, sessionId: session.sessionId };
+  }
+}
+
+/**
+ * The address a request is counted against. Behind a trusted proxy a private socket address is the
+ * proxy, and the client is the last `X-Forwarded-For` entry (the one the proxy itself added; earlier
+ * entries are the client's to forge). A public socket address is always its own client.
+ */
+export function clientAddress(
+  socket: string,
+  forwardedFor: string | undefined,
+  trustProxy: boolean,
+): string {
+  if (!trustProxy || isPublicAddress(socket)) return socket;
+  const last = forwardedFor?.split(',').pop()?.trim();
+  return last !== undefined && isIP(last) !== 0 ? last : socket;
+}
+
+/** A path segment as an id; one that is not valid percent-encoding is an id nobody has. */
+function idOf(segment: string | undefined): string {
+  try {
+    return decodeURIComponent(segment ?? '');
+  } catch {
+    return '';
   }
 }
 

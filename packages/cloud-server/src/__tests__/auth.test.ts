@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { type TestContext, test } from 'node:test';
 import type { Mailer } from '../challenges.js';
+import { clientAddress } from '../auth-routes.js';
 import { newConversation, postJson, startHarness } from './harness.js';
 import { AUD, type Signer, signer, token } from './oidc-fixtures.js';
 
@@ -12,7 +13,13 @@ interface Rig {
   /** An ID token for `sub`, signed by the fake provider, with the nonce the server just gave out. */
   idToken(provider: 'apple' | 'google', sub: string, nonce: string): string;
   nonce(): Promise<string>;
-  call(method: string, path: string, body?: unknown, bearer?: string | null): Promise<Response>;
+  call(
+    method: string,
+    path: string,
+    body?: unknown,
+    bearer?: string | null,
+    headers?: Record<string, string>,
+  ): Promise<Response>;
   google(sub: string, device?: string): Promise<Response>;
   /** Moves the clock of nonces, codes and rate limits on. */
   advance(ms: number): void;
@@ -21,6 +28,7 @@ interface Rig {
 async function rig(
   t: TestContext,
   limits: { perAddress?: number; guessesPerAddress?: number; total?: number } = {},
+  trustProxy = false,
 ): Promise<Rig> {
   const key = signer('k1');
   let skew = 0;
@@ -37,13 +45,15 @@ async function rig(
       mailer,
       jwks: async () => ({ keys: [key.jwk] }),
       now: () => Date.now() + skew,
+      ...(trustProxy ? { trustProxy: true } : {}),
       limits: { perAddress: 1_000, guessesPerAddress: 1_000, total: 10_000, ...limits },
     },
   });
-  const call: Rig['call'] = (method, path, body, bearer = null) =>
+  const call: Rig['call'] = (method, path, body, bearer = null, headers = {}) =>
     h.api(path, {
       method,
       token: bearer,
+      headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   const nonce = async () =>
@@ -447,13 +457,98 @@ test('one device can sign another out, never another account’s, and signing ou
   assert.equal((await r.call('POST', '/v1/auth/sign-out', {}, bobInvite.token)).status, 400);
 });
 
-test('an account whose invite was revoked cannot sign in, and its sessions are gone', async (t) => {
+test('an account whose invite was revoked cannot sign in, and its person can come back on a new invite', async (t) => {
   const r = await rig(t);
   const ada = await signUp(r, 'g-ada');
   r.h.server.invites.revoke(r.h.inviteId);
   assert.equal((await r.call('GET', '/v1/conversations', undefined, ada.token)).status, 401);
-  const res = await r.google('g-ada');
-  assert.equal(res.status, 401);
+  // no way in with the old account: asked for an invite, like anyone new
+  const again = (await (await r.google('g-ada')).json()) as NeedsInvite | SignedIn;
+  assert.equal(again.status, 'needs_invite');
+  const fresh = r.h.server.invites.create('ada again');
+  const claimed = await r.call('POST', '/v1/auth/claim', {
+    pendingToken: (again as NeedsInvite).pendingToken,
+    inviteToken: fresh.token,
+  });
+  assert.equal(claimed.status, 200);
+  const back = (await claimed.json()) as SignedIn;
+  assert.equal((await r.call('GET', '/v1/conversations', undefined, back.token)).status, 200);
+  // the old session stays dead, and the person signs in normally from now on
+  assert.equal((await r.call('GET', '/v1/conversations', undefined, ada.token)).status, 401);
+  assert.equal(((await (await r.google('g-ada')).json()) as SignedIn).status, 'signed_in');
+});
+
+test('an identity of a live account is never released by someone else’s claim', async (t) => {
+  const r = await rig(t);
+  await signUp(r, 'g-ada');
+  const other = r.h.server.invites.create('other');
+  const pending = (await (await r.google('g-ada', 'laptop')).json()) as SignedIn;
+  assert.equal(pending.status, 'signed_in', 'ada still signs in');
+  const bob = (await (await r.google('g-bob')).json()) as NeedsInvite;
+  // bob claims a new invite: ada's identity and account are untouched
+  assert.equal(
+    (
+      await r.call('POST', '/v1/auth/claim', {
+        pendingToken: bob.pendingToken,
+        inviteToken: other.token,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(((await (await r.google('g-ada')).json()) as SignedIn).status, 'signed_in');
+});
+
+test('behind a proxy each forwarded client has its own limits, and the header of a public caller is ignored', async (t) => {
+  const r = await rig(t, { perAddress: 2, guessesPerAddress: 2 }, true);
+  const wrong = (client: string) =>
+    r.call(
+      'POST',
+      '/v1/auth/email/verify',
+      { challengeId: 'x', deviceSecret: 'y', code: '000000' },
+      null,
+      { 'x-forwarded-for': `203.0.113.99, ${client}` },
+    );
+  assert.equal((await wrong('198.51.100.1')).status, 401);
+  assert.equal((await wrong('198.51.100.1')).status, 401);
+  assert.equal((await wrong('198.51.100.1')).status, 429, 'one client used its tries');
+  assert.equal((await wrong('198.51.100.2')).status, 401, 'another client is not held up');
+  // a client cannot pick its own bucket by forging earlier entries
+  assert.equal((await wrong('198.51.100.1')).status, 429);
+  // without the option the header means nothing
+  const plain = await rig(t, { perAddress: 2, guessesPerAddress: 2 }, false);
+  const call = (client: string) =>
+    plain.call(
+      'POST',
+      '/v1/auth/email/verify',
+      { challengeId: 'x', deviceSecret: 'y', code: '0' },
+      null,
+      {
+        'x-forwarded-for': client,
+      },
+    );
+  await call('198.51.100.1');
+  await call('198.51.100.2');
+  assert.equal((await call('198.51.100.3')).status, 429);
+});
+
+test('which address a request counts as', () => {
+  const proxy = true;
+  assert.equal(clientAddress('127.0.0.1', '198.51.100.7', proxy), '198.51.100.7');
+  assert.equal(clientAddress('172.18.0.3', 'evil, 198.51.100.7', proxy), '198.51.100.7');
+  assert.equal(clientAddress('::ffff:10.0.0.2', '2001:db8::1', proxy), '2001:db8::1');
+  assert.equal(clientAddress('127.0.0.1', undefined, proxy), '127.0.0.1');
+  assert.equal(clientAddress('127.0.0.1', 'not an address', proxy), '127.0.0.1');
+  assert.equal(clientAddress('127.0.0.1', '198.51.100.7, ', proxy), '127.0.0.1');
+  // a public socket is its own client, whatever it forwards
+  assert.equal(clientAddress('8.8.8.8', '198.51.100.7', proxy), '8.8.8.8');
+  // not behind a proxy: the header means nothing
+  assert.equal(clientAddress('127.0.0.1', '198.51.100.7', false), '127.0.0.1');
+});
+
+test('a malformed session id is an id nobody has', async (t) => {
+  const r = await rig(t);
+  const ada = await signUp(r, 'g-ada');
+  assert.equal((await r.call('DELETE', '/v1/auth/sessions/%zz', undefined, ada.token)).status, 404);
 });
 
 test('sign-in routes are rate limited per address, and the routes that try a secret more tightly', async (t) => {

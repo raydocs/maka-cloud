@@ -139,6 +139,15 @@ export class AccountStore {
   }
 
   private insertIdentity(accountId: string, identity: Identity): boolean {
+    // An identity left on an account whose invite was revoked belongs to nobody: it is released, so
+    // its person can come back on a new invite. An identity of a live account is never touched.
+    this.db
+      .prepare(
+        `DELETE FROM identities WHERE provider = ? AND subject = ? AND account_id IN (
+           SELECT a.account_id FROM accounts a JOIN invites i ON i.invite_id = a.invite_id
+           WHERE i.revoked_at IS NOT NULL)`,
+      )
+      .run(identity.provider, identity.subject);
     const result = this.db
       .prepare(
         `INSERT INTO identities (provider, subject, account_id, email, created_at)
