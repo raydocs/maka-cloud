@@ -37,6 +37,7 @@ import { ModePicker } from './ModePicker';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
+import { submitOnEnter } from './keys';
 
 export function QuestionCard({
   question,
@@ -431,6 +432,7 @@ export function ConversationView({
                 feed.draftEdited();
               }}
               placeholder="What would you like to do next?"
+              onKeyDown={submitOnEnter}
             />
             <button
               type="submit"
@@ -591,7 +593,7 @@ function AppearanceChoice() {
     <section className="card section-card" aria-label="Appearance">
       <h2>Appearance</h2>
       <div className="mode-choice" role="group" aria-label="Color mode">
-        {(['dark', 'light'] as const).map((value) => (
+        {(['light', 'dark'] as const).map((value) => (
           <button
             key={value}
             type="button"

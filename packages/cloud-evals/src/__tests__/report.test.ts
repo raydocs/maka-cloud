@@ -39,6 +39,7 @@ function row(
     costUsd,
     durationMs: 1,
     failureReason: null,
+    proof: null,
   };
 }
 

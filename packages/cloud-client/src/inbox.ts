@@ -4,6 +4,9 @@ import { displayJson, displayText, exactText, publicLink } from './presentation'
 /** Kinds the supervisor builds from a conductor question, which the conversation already shows as a decision card. */
 const QUESTION_KINDS = new Set(['approval', 'budget', 'decision']);
 
+/** The answers that approve a held call: this once, and the two that also keep the approval as a grant. */
+const APPROVING_OPTIONS = new Set(['approve', 'approve_task', 'approve_repository']);
+
 /**
  * The items to show, newest first within each state. An open item that repeats a question the
  * conversation is still asking word for word is left out: answering either one answers both, so a
@@ -91,7 +94,7 @@ export function inboxCardModel(item: InboxItem) {
   const approval = item.kind === 'approval';
   const exact = approval ? exactText(item.ask) : undefined;
   const options = [...item.options]
-    .filter((option) => !approval || exact !== undefined || option.id !== 'approve')
+    .filter((option) => !approval || exact !== undefined || !APPROVING_OPTIONS.has(option.id))
     .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   return {
     heading: inboxHeading(item.kind),
@@ -124,7 +127,7 @@ export function questionCardModel(question: Question, answered?: string) {
   const approval = question.reason === 'irreversible';
   const exact = approval ? exactText(question.question) : undefined;
   const options = [...question.options]
-    .filter((o) => !approval || exact !== undefined || o.id !== 'approve')
+    .filter((o) => !approval || exact !== undefined || !APPROVING_OPTIONS.has(o.id))
     .sort((a, b) => Number(b.id === question.recommended) - Number(a.id === question.recommended));
   return {
     heading: answered

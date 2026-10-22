@@ -28,7 +28,12 @@ export {
   MAX_ANSWER_TEXT_LENGTH,
 } from './http.js';
 export { type DutyOwners, type DutyService, type SuggestionsOverview } from './duties.js';
-export { type InboxAnswerResult, type InboxService } from './inbox.js';
+export {
+  type GrantsService,
+  type InboxAnswerResult,
+  type InboxService,
+  type PublicGrant,
+} from './inbox.js';
 export { type Mailer, EmailCodes, NonceStore, normalizeEmail } from './challenges.js';
 export {
   APPLE,
