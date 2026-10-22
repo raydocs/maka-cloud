@@ -47,16 +47,17 @@ passed all seven steps:
 | `backup-restore` (backup, restore, a task still runs) | passes |
 
 **Gate for the first live run: a coding task's checkout.** The `task` step runs the `free` playbook, which
-never clones a repository, so nothing in the rehearsal makes the agent account read or edit a checkout or
-write `handoff/repro.json`. A review of the launch-path PRs found that on the launch path it cannot
-(the checkout is cloned under `umask 077` and the agent account is not in its group; `repro.json` is
-written to a directory the agent cannot write). Until a rehearsal step shows the agent account editing a
-file in a real checkout and writing `handoff/repro.json`, and that step passes, no coding task has been
-shown to work and **the first live run does not start**. This is a gate, not an expected failure: it is
-not in `MAKA_REHEARSAL_XFAIL`, and the line below is struck out only when the step is in the flow and green.
+never clones a repository, so it cannot show the agent account working in a checkout. The launch-path
+review found that it could not: the checkout was cloned under `umask 077` with the agent outside its group
+(fixed on main by #312), `repro.json` is written to a directory the agent cannot write, and git as the agent
+refuses the checkout ("dubious ownership"; the sandbox user owns it). The rehearsal's `checkout` step runs
+a coding task through the server's own clone script and has the scripted agent, as the agent account, read
+its brief, edit a file of the checkout, run `git status` there and write the `repro.json` the brief names;
+it then needs the runner to read that file, run the reproduction test in its check namespace, and go on to the task's own tests. It is a gate, not an expected
+failure (it is not in `MAKA_REHEARSAL_XFAIL`): the `rehearsal` job is the launch check and stays red
+until the step passes, and **the first live run does not start until it does.**
 
-- [ ] Rehearsal step `checkout`: the agent account edits a file in the checkout of a coding task and writes
-  `handoff/repro.json`, and the host reads it.
+- [ ] `checkout` passes in CI (needs the `repro.json` move and the `safe.directory` fix to have landed).
 
 Still not verified by the rehearsal, so the first run on a real host is the first time they run:
 

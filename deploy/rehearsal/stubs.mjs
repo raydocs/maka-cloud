@@ -66,6 +66,31 @@ if (agentGroup) {
   chmodSync(ctl, 0o2775);
 }
 
+// A small repository the coding task clones: the sandbox's git is told that `rehearsal/sample` on
+// GitHub is this one (the runner's clone URL is fixed), so the real clone script runs against it
+// and nothing leaves the container. Its test, `sh check.sh`, passes once README.md says the line
+// the scripted `claude` appends.
+const sampleRepo = join(home, 'sample-repo');
+mkdirSync(sampleRepo, { recursive: true });
+writeFileSync(join(sampleRepo, 'README.md'), '# sample\n');
+writeFileSync(join(sampleRepo, 'check.sh'), 'grep -q rehearsal-fixed README.md\n');
+for (const args of [
+  ['init', '-q', '-b', 'main'],
+  ['add', '.'],
+  [
+    '-c',
+    'user.name=rehearsal',
+    '-c',
+    'user.email=rehearsal@example.invalid',
+    'commit',
+    '-q',
+    '-m',
+    'sample',
+  ],
+]) {
+  execFileSync('git', args, { cwd: sampleRepo });
+}
+
 const sandbox = await new FakeInstabox({
   host,
   port: ports.sandbox,
@@ -74,6 +99,11 @@ const sandbox = await new FakeInstabox({
   home,
   // The agent account is a real one, so what the runners end or read as root is done by real sudo.
   rootSudo: agentGroup !== undefined,
+  env: {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: `url.file://${sampleRepo}.insteadOf`,
+    GIT_CONFIG_VALUE_0: 'https://github.com/rehearsal/sample.git',
+  },
 }).start();
 
 // What the conductor says, by what it was last told. The user's message names the scenario; the
@@ -91,6 +121,32 @@ const delegate = (n, actionRef) =>
       mode: 'wait',
       timeoutMs: 120_000,
       budgetUsd: 1,
+      ...(actionRef === undefined ? {} : { actionRef }),
+    }),
+  );
+
+const CODING_BRIEF = [
+  'Make README.md of the sample repository say rehearsal-fixed.',
+  '',
+  '```coding-task',
+  JSON.stringify({
+    repo: 'rehearsal/sample',
+    baseRef: 'main',
+    testCommand: 'sh check.sh',
+    goal: 'Make README.md say rehearsal-fixed.',
+  }),
+  '```',
+].join('\n');
+
+const delegateCoding = (actionRef) =>
+  calls(
+    tool('delegate_task', {
+      runner: 'coding',
+      brief: CODING_BRIEF,
+      title: 'Rehearsal coding task',
+      mode: 'wait',
+      timeoutMs: 240_000,
+      budgetUsd: 3,
       ...(actionRef === undefined ? {} : { actionRef }),
     }),
   );
@@ -152,7 +208,8 @@ function conductor(request) {
       }
       return text(`The rehearsal step ${used?.name ?? ''} was refused.`);
     }
-    if (used?.name === 'start_playbook') return delegate(0);
+    if (used?.name === 'start_playbook')
+      return scenario === 'code' ? delegateCoding() : delegate(0);
     if (used?.name === 'delegate_task') {
       if (scenario === 'approve' && succeeded === 1) return delegate(1);
       const task = result.json?.task;
@@ -181,6 +238,11 @@ function conductor(request) {
         ],
         recommended: 'casual',
       }),
+    );
+  }
+  if (scenario === 'code') {
+    return calls(
+      tool('start_playbook', { playbook: 'coding', goal: 'Make README.md say rehearsal-fixed.' }),
     );
   }
   if (scenario === 'run' || scenario === 'approve') {
@@ -212,6 +274,10 @@ const control = createServer((req, res) => {
       mode: existsSync(join(ctl, 'mode')) ? readFileSync(join(ctl, 'mode'), 'utf8').trim() : 'ok',
       waiting: existsSync(join(ctl, 'waiting')),
       released: existsSync(join(ctl, 'go')),
+      // What the scripted `claude` did to the checkout in `code` mode, as the account it runs as.
+      code: existsSync(join(ctl, 'code-result.json'))
+        ? JSON.parse(readFileSync(join(ctl, 'code-result.json'), 'utf8'))
+        : undefined,
       cliRuns: sandbox.execRequests.length,
       modelRequests: model.requests.length,
     });

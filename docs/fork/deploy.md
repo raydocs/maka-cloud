@@ -509,6 +509,17 @@ socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or 
 not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
 out of the check.
 
+The box must also allow unprivileged user and PID namespaces (`unshare --user --map-current-user
+--pid` as the sandbox user): every check of a coding task (the repository's tests, the reproduction
+test) runs in one, and a box that refuses them, as Docker's default seccomp profile does, makes every
+check fail at once with exit 125 ("could not start the check in its own user and PID namespace"). On
+Ubuntu 24.04 that includes the host's AppArmor rule: set `kernel.apparmor_restrict_unprivileged_userns=0`
+(the rehearsal job does) or give the sandbox user a profile that allows user namespaces.
+
+The agent runs `git` in a checkout that the sandbox user owns. The server names that one workspace
+as git's `safe.directory` in the agent's environment (`asAgentUser`), so nothing is set on the box;
+the rehearsal's `checkout` step has the agent run `git status` there to show it.
+
 The server starts nothing as the sandbox user either. A run is a program and its arguments; the
 server quotes them and hands the whole command to the agent account itself, so no argument can add a
 command that runs as the sandbox user. The pinned CLI install, which writes the sandbox user's own
