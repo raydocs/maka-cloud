@@ -8,6 +8,7 @@ import type { RunnerEvent } from '@maka-cloud/orchestrator';
 import { verifyCodingManifest } from '../playbook.js';
 import { pullRequestBody } from '../pull-request.js';
 import { fixBrief, MAX_FIX_FINDINGS } from '../review.js';
+import { CodingRunner, type CodingRunnerOptions } from '../runner.js';
 import {
   type AgentScript,
   type AgentTurn,
@@ -216,10 +217,16 @@ test('the round cap is the runner’s fixRounds limit', async (t) => {
   zeroStats(h.runner);
 });
 
-test('a fixRounds limit outside 0 to 10 is refused', async (t) => {
+test('a fixRounds limit outside 0 to 10 is refused', () => {
+  // The constructor checks its limits before it touches anything it is given.
+  const options = { agents: {}, sandbox: {}, deliveries: {} } as unknown as CodingRunnerOptions;
   for (const fixRounds of [-1, 1.5, 11]) {
-    await assert.rejects(setup(t, { modes: MODES, limits: { fixRounds } }), /fixRounds must be/);
+    assert.throws(
+      () => new CodingRunner({ ...options, limits: { fixRounds } }),
+      /fixRounds must be/,
+    );
   }
+  for (const fixRounds of [0, 10]) new CodingRunner({ ...options, limits: { fixRounds } });
 });
 
 test('clean after round 2: the change of the second fix is delivered, with both rounds recorded', async (t) => {
