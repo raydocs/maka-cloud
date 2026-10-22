@@ -170,11 +170,11 @@ Every `exec` is `bash -lc` (instabox), so the control user's login files (`~/.ba
 are code the control user runs on every exec: a write into any of them is root in the box, and
 they must not be writable by the agent's account or group.
 *Enforced*: modes in `PREPARE_SCRIPT`, `PREPARE_AGENT_SCRIPT`, `CHANNEL_DIR_CHECK`; probe facts
-`agent_control_write`, `chan_*`, `task_list`, `task_file_write`.
+`agent_control_write`, `agent_login_files` (the login files the control user's shell reads on every
+exec, and their directories: regular, owned by it or root, not writable by the agent), `chan_*`,
+`task_list`, `task_file_write`.
 *Tested*: `agent-user.test.ts` (real account: channel, handoff, task directory), probe fixture in
-`firewall-account.test.ts`.
-*Enforced*: `agent_login_files` in the probe (`LOGIN_FILES_PROBE`): the control user's login files and the directories holding them are regular, owned by the control user or root, and not writable by the agent.
-*Tested*: `login-files.test.ts`, `firewall-account.test.ts`.
+`firewall-account.test.ts`, `login-files.test.ts`.
 
 **I4. The control user never follows a path through an agent-writable directory except in four
 ways**: (a) a read with every component checked for links, the last open `O_NOFOLLOW`, and a size
