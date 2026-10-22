@@ -24,6 +24,8 @@ services:
       MAKA_CLOUD_HOST: 0.0.0.0
       MAKA_CLOUD_MCP_HOST: 0.0.0.0
       MAKA_CLOUD_GATEWAY_HOST: 0.0.0.0
+      # Sign-in limits count the client Caddy forwards, and only from Caddy's own fixed address.
+      MAKA_CLOUD_TRUST_PROXY: 172.29.80.2
     volumes:
       - maka-data:/data
       - maka-backups:/backups
@@ -49,6 +51,9 @@ services:
     depends_on:
       maka-cloud:
         condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 172.29.80.2
     environment:
       MAKA_CLOUD_APP_NAME: ${MAKA_CLOUD_APP_NAME:?set the name of the app, for example app.example.com}
       MAKA_CLOUD_MCP_NAME: ${MAKA_CLOUD_MCP_NAME:?set the name of the MCP endpoint}
@@ -60,6 +65,12 @@ services:
     volumes:
       - caddy-data:/data
       - caddy-config:/config
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.80.0/24
 
 volumes:
   maka-data:

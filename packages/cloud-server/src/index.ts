@@ -39,6 +39,7 @@ export {
   jwksFromSafeFetch,
   type VerifiedIdentity,
 } from './identity.js';
+export { proxyList } from './auth-routes.js';
 export { AccountStore, type IssuedSession, type Session, SESSION_IDLE_MS } from './accounts.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
 export { scrubErrorText } from './public-view.js';

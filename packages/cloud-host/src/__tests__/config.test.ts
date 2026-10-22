@@ -717,9 +717,13 @@ test('deep mode is off unless MAKA_CLOUD_DEEP_MODE=1: off, deep holds standardâ€
   );
 });
 
-test('sign-in is off by default, behind a proxy, and the settings are checked', () => {
+test('sign-in is off by default, trusts only a proxy on this host, and the settings are checked', () => {
   const none = readStackConfig(ENV).signIn;
-  assert.deepEqual(none, { appleClientIds: [], googleClientIds: [], trustProxy: true });
+  assert.deepEqual(none, {
+    appleClientIds: [],
+    googleClientIds: [],
+    trustedProxies: ['127.0.0.1', '::1'],
+  });
   const on = readStackConfig({
     ...ENV,
     MAKA_CLOUD_APPLE_CLIENT_IDS: 'cloud.maka.app, web.maka.app',
@@ -727,28 +731,49 @@ test('sign-in is off by default, behind a proxy, and the settings are checked', 
     MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
     MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
     MAKA_CLOUD_MAIL_FROM: 'Maka <login@maka.example>',
-    MAKA_CLOUD_TRUST_PROXY: '0',
+    MAKA_CLOUD_TRUST_PROXY: '172.29.80.2, 10.1.0.0/16',
   }).signIn;
   assert.deepEqual(on, {
     appleClientIds: ['cloud.maka.app', 'web.maka.app'],
     googleClientIds: ['123-abc.apps.googleusercontent.com'],
     mail: { apiUrl: 'https://mail.example.test/send', from: 'Maka <login@maka.example>' },
-    trustProxy: false,
+    trustedProxies: ['172.29.80.2', '10.1.0.0/16'],
   });
+  assert.deepEqual(
+    readStackConfig({ ...ENV, MAKA_CLOUD_TRUST_PROXY: '0' }).signIn.trustedProxies,
+    [],
+  );
   const mail = {
     MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
     MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
     MAKA_CLOUD_MAIL_FROM: 'login@maka.example',
   };
+  for (const from of ['a@b.example', '<a@b.example>', 'Maka login <a@b.example>']) {
+    assert.equal(
+      readStackConfig({ ...ENV, ...mail, MAKA_CLOUD_MAIL_FROM: from }).signIn.mail?.from,
+      from,
+    );
+  }
   assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_APPLE_CLIENT_IDS: 'ok, bad id!' }), [
     'MAKA_CLOUD_APPLE_CLIENT_IDS must be client ids separated by commas',
   ]);
   assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_GOOGLE_CLIENT_IDS: 'a,,b' }), [
     'MAKA_CLOUD_GOOGLE_CLIENT_IDS must be client ids separated by commas',
   ]);
-  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_TRUST_PROXY: 'yes' }), [
-    'MAKA_CLOUD_TRUST_PROXY must be 1 or 0',
-  ]);
+  for (const bad of [
+    'yes',
+    '1',
+    'proxy.example.com',
+    '10.0.0.0/40',
+    '127.0.0.1,',
+    '127.0.0.1;::1',
+  ]) {
+    assert.match(
+      problemsOf({ ...ENV, MAKA_CLOUD_TRUST_PROXY: bad }).join(),
+      /MAKA_CLOUD_TRUST_PROXY must be 0 or IP addresses or ranges/u,
+      bad,
+    );
+  }
   for (const missing of Object.keys(mail)) {
     const partial = { ...ENV, ...mail, [missing]: undefined };
     assert.match(problemsOf(partial).join('\n'), /go together/u, missing);
@@ -773,7 +798,15 @@ test('sign-in is off by default, behind a proxy, and the settings are checked', 
     problemsOf({ ...ENV, ...mail, MAKA_CLOUD_MAIL_API_URL: 'nope' }).join(),
     /not a URL/u,
   );
-  for (const from of ['a\r\nBcc: x@y.z', 'not an address', 'x@y']) {
+  for (const from of [
+    'a\r\nBcc: x@y.z',
+    'not an address',
+    'x@y',
+    '<a@b.example',
+    'a@b.example>',
+    'Maka <a@b.example',
+    '<<a@b.example>>',
+  ]) {
     assert.match(
       problemsOf({ ...ENV, ...mail, MAKA_CLOUD_MAIL_FROM: from }).join(),
       /must be an address or Name <address>/u,
@@ -796,7 +829,10 @@ test('the check output says which ways to sign in are on and never shows the mai
       MAKA_CLOUD_MAIL_FROM: 'login@maka.example',
     }),
   ).join('\n');
-  assert.match(lines, /sign-in:\s+Google, emailed code and invite token/u);
+  assert.match(
+    lines,
+    /sign-in:\s+Google, emailed code and invite token; client address trusted from 127\.0\.0\.1, ::1/u,
+  );
   assert.equal(lines.includes('mail-key-secret'), false);
   assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /sign-in:\s+invite token only/u);
 });

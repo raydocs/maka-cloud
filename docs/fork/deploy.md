@@ -58,7 +58,7 @@ their invite code once, after the first sign-in. Nothing here is called until so
 | `MAKA_CLOUD_APPLE_CLIENT_IDS` | the iOS app's bundle id, and the Services id if the web uses Sign in with Apple |
 | `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | the Google OAuth client ids of the iOS, Android and web apps |
 | `MAKA_CLOUD_MAIL_API_URL`, `MAKA_CLOUD_MAIL_API_KEY`, `MAKA_CLOUD_MAIL_FROM` | a mail service that takes a POST of `{from, to, subject, text}` with a bearer key, and a sender it allows. All three or none |
-| `MAKA_CLOUD_TRUST_PROXY` | leave it at the default (1) behind the proxy in this runbook; `0` only if nothing sits in front |
+| `MAKA_CLOUD_TRUST_PROXY` | the address of the proxy in front of the server. The default `127.0.0.1,::1` is right for nginx or Caddy on the same host (systemd); `deploy/compose.yaml` sets Caddy's fixed address. Only that peer's `X-Forwarded-For` is believed, so a caller that reaches the server directly cannot choose its own rate limit. With no proxy at all, `0` |
 
 With none of them set the server answers invite tokens only. `check` prints a `sign-in:` line
 saying which ways are on.
@@ -440,7 +440,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_MAIL_API_URL` | https URL of the mail service that sends sign-in codes: it takes a POST of {from, to, subject, text} with a bearer key. With the next two, turns on sign-in by emailed code. All three or none |
 | `MAKA_CLOUD_MAIL_API_KEY` | the mail service’s bearer key, kept in memory only |
 | `MAKA_CLOUD_MAIL_FROM` | the sender of sign-in mail, an address or Name <address> your mail service allows |
-| `MAKA_CLOUD_TRUST_PROXY` | default 1: the server sits behind one reverse proxy that adds the client to X-Forwarded-For, so sign-in limits count each client (a request from a public address is never trusted). 0 only when nothing sits in front |
+| `MAKA_CLOUD_TRUST_PROXY` | comma separated IP addresses or ranges of the reverse proxy in front of the server. Only a request from one of them has its X-Forwarded-For client counted in the sign-in limits; from any other peer the header is ignored. Default 127.0.0.1,::1 (a proxy on the same host); under Compose the proxy’s fixed address. 0: trust none |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 

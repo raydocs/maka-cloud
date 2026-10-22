@@ -399,7 +399,7 @@ export async function startStack(
           }
         : {}),
       ...(dependencies.jwks ? { jwks: dependencies.jwks } : {}),
-      trustProxy: signIn.trustProxy,
+      ...(signIn.trustedProxies.length > 0 ? { trustedProxies: signIn.trustedProxies } : {}),
     };
     const signInOn = auth.apple || auth.google || auth.mailer;
     cloud = await startCloud({

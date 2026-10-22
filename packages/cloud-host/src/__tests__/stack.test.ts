@@ -1852,3 +1852,32 @@ test('with no sign-in settings the stack has invite tokens only', async (t) => {
   const res = await fetch(`${started.stack.cloud.server.url}/v1/auth/options`);
   assert.equal(res.status, 401, 'answers like any unknown path');
 });
+
+test('sign-in limits trust X-Forwarded-For only from the configured proxy', async (t) => {
+  const tries = async (trusted: string) => {
+    const started = await start(t, undefined, {
+      MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
+      MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
+      MAKA_CLOUD_MAIL_FROM: 'login@maka.example',
+      MAKA_CLOUD_TRUST_PROXY: trusted,
+    });
+    const base = started.stack.cloud.server.url;
+    const statuses: number[] = [];
+    // Twelve wrong codes, each claiming to come from another client.
+    for (let i = 1; i <= 12; i += 1) {
+      const res = await fetch(`${base}/v1/auth/email/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': `198.51.100.${i}` },
+        body: JSON.stringify({ challengeId: 'x', deviceSecret: 'y', code: '000000' }),
+      });
+      statuses.push(res.status);
+    }
+    return statuses;
+  };
+  // The test client is on loopback. Behind a proxy that is not loopback, the header is a forgery:
+  // every try counts against one address, so the guess limit stops it.
+  const forged = await tries('192.0.2.7');
+  assert.ok(forged.includes(429), `a forged header does not escape the limit: ${forged}`);
+  // Behind a loopback proxy each forwarded client has its own tries.
+  assert.ok(!(await tries('127.0.0.1,::1')).includes(429));
+});

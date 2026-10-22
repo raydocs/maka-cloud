@@ -11,7 +11,7 @@ import {
 import { scrubKeyShapes } from '@maka-cloud/orchestrator';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { assertAgentChannel } from '@maka-cloud/runners';
-import { pushConfigFromEnv } from '@maka-cloud/server';
+import { proxyList, pushConfigFromEnv } from '@maka-cloud/server';
 import { type BackupLayout, withoutSecretShapesInJson } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
@@ -19,6 +19,9 @@ import { type InboxConfig, readInboxConfig } from './inbox/config.js';
  * Everything the stack needs, read from the environment. Secret values are kept
  * only where they are used; `describeConfig` never prints them.
  */
+/** A reverse proxy on the same host: where the runbook's systemd setup puts it. */
+const DEFAULT_PROXIES = ['127.0.0.1', '::1'] as const;
+
 export interface StackConfig {
   dataDir: string;
   dbPath: string;
@@ -147,8 +150,11 @@ export interface StackConfig {
     appleClientIds: string[];
     googleClientIds: string[];
     mail?: { apiUrl: string; from: string };
-    /** One reverse proxy sits in front: sign-in limits count the client it forwards. */
-    trustProxy: boolean;
+    /**
+     * The addresses (IPs or CIDR ranges) of the reverse proxy in front: only a request from one of
+     * them is counted by the client it forwards in the sign-in limits. Empty: none is trusted.
+     */
+    trustedProxies: string[];
   };
 }
 
@@ -304,8 +310,12 @@ export const DEFAULT_SPEND_CAPS: SpendCaps = {
 };
 
 const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
-const MAIL_FROM =
-  /^(?:[A-Za-z0-9 ._'-]{1,60} )?<?[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+>?$/u;
+const MAIL_ADDRESS = '[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+';
+/** `a@b.c`, `<a@b.c>` or `Name <a@b.c>`: the brackets come as a pair. */
+const MAIL_FROM = new RegExp(
+  `^(?:${MAIL_ADDRESS}|(?:[A-Za-z0-9 ._'-]{1,60} )?<${MAIL_ADDRESS}>)$`,
+  'u',
+);
 
 function clientIds(raw: string | undefined, name: string, problems: string[]): string[] {
   if (raw === undefined) return [];
@@ -332,12 +342,21 @@ function readSignIn(
       'MAKA_CLOUD_GOOGLE_CLIENT_IDS',
       problems,
     ),
-    trustProxy: true,
+    trustedProxies: [...DEFAULT_PROXIES],
   };
   const proxy = value('MAKA_CLOUD_TRUST_PROXY');
-  if (proxy === '0') signIn.trustProxy = false;
-  else if (proxy !== undefined && proxy !== '1')
-    problems.push('MAKA_CLOUD_TRUST_PROXY must be 1 or 0');
+  if (proxy === '0') signIn.trustedProxies = [];
+  else if (proxy !== undefined) {
+    const entries = proxy.split(',').map((entry) => entry.trim());
+    try {
+      proxyList(entries);
+      signIn.trustedProxies = entries;
+    } catch {
+      problems.push(
+        'MAKA_CLOUD_TRUST_PROXY must be 0 or IP addresses or ranges separated by commas (for example 127.0.0.1,::1)',
+      );
+    }
+  }
   const apiUrl = value('MAKA_CLOUD_MAIL_API_URL');
   const key = value('MAKA_CLOUD_MAIL_API_KEY');
   const from = value('MAKA_CLOUD_MAIL_FROM');
@@ -542,7 +561,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_TRUST_PROXY',
-    'default 1: the server sits behind one reverse proxy that adds the client to X-Forwarded-For, so sign-in limits count each client (a request from a public address is never trusted). 0 only when nothing sits in front',
+    'comma separated IP addresses or ranges of the reverse proxy in front of the server. Only a request from one of them has its X-Forwarded-For client counted in the sign-in limits; from any other peer the header is ignored. Default 127.0.0.1,::1 (a proxy on the same host); under Compose the proxy’s fixed address. 0: trust none',
   ],
   [
     'MAKA_CLOUD_DUTY_REPOS',
@@ -676,7 +695,7 @@ export function readStackConfig(
     dutiesSet: false,
     cardsSet: false,
     dutyLinks: [],
-    signIn: { appleClientIds: [], googleClientIds: [], trustProxy: true },
+    signIn: { appleClientIds: [], googleClientIds: [], trustedProxies: [...DEFAULT_PROXIES] },
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
   if (modes !== undefined) config.modes = modes;
@@ -1047,7 +1066,11 @@ function describeSignIn(signIn: StackConfig['signIn']): string {
   ];
   if (ways.length === 0)
     return 'invite token only (set the Apple, Google or mail variables to add more)';
-  return `${ways.join(', ')} and invite token${signIn.trustProxy ? '' : '; limits count the socket address (no proxy)'}`;
+  const proxies =
+    signIn.trustedProxies.length > 0
+      ? `; client address trusted from ${signIn.trustedProxies.join(', ')}`
+      : '; limits count the socket address (no proxy trusted)';
+  return `${ways.join(', ')} and invite token${proxies}`;
 }
 
 function describeModes(modes: ModesConfig): string {
