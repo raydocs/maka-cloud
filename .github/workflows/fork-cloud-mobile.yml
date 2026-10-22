@@ -65,7 +65,8 @@ jobs:
 
   android:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The build is the long step: a cold Gradle cache and one ABI, then the emulator flows.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,15 +105,28 @@ jobs:
           npm --workspace @maka-cloud/playbooks run build
           npm --workspace @maka-cloud/supervisor run build
 
+      # Gradle's downloaded dependencies and wrapper, kept between runs. Keyed on the app's lockfile, so a
+      # new Expo or React Native version starts cold.
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('packages/cloud-mobile/package-lock.json') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       # A release build carries its own JavaScript, so no dev server is needed on the emulator. It is signed
-      # with the debug key Expo generates; it is never uploaded anywhere.
+      # with the debug key Expo generates; it is never uploaded anywhere. Only x86_64 is compiled, the one
+      # ABI the emulator below runs; all four took about 43 minutes.
       - name: Build the app
         working-directory: packages/cloud-mobile
         run: |
           npx expo prebuild --platform android --no-install
           # Gradle fetches its plugins from the public repositories; a reset connection is retried.
           for attempt in 1 2 3; do
-            (cd android && ./gradlew --no-daemon assembleRelease) && exit 0
+            (cd android && ./gradlew --no-daemon assembleRelease -PreactNativeArchitectures=x86_64) && exit 0
             echo "Gradle attempt $attempt failed" >&2
             sleep 15
           done
