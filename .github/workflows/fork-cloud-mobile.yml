@@ -285,7 +285,12 @@ jobs:
 
       - name: Start the scripted stack
         run: |
+          # A self-hosted Mac can still hold the stack of an earlier, cancelled run; its old code
+          # would answer instead of this build's, and the new stack could not take the port.
+          pids=$(lsof -ti tcp:4174 -ti tcp:4175 || true)
+          if [ -n "$pids" ]; then kill $pids || true; sleep 2; fi
           node packages/cloud-web/tests/support/serve.ts > "$RUNNER_TEMP/stack.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/stack.pid"
           for _ in $(seq 1 60); do
             curl -fs http://127.0.0.1:4175/health >/dev/null && exit 0
             sleep 1
@@ -309,6 +314,10 @@ jobs:
         env:
           # Maestro starts an XCTest driver on the simulator; a cold hosted Mac needs more than the default.
           MAESTRO_DRIVER_STARTUP_TIMEOUT: '240000'
+
+      - name: Stop the scripted stack
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/stack.pid")" 2>/dev/null || true
 
       - name: Keep the screenshots and logs
         if: always()
