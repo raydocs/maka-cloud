@@ -1547,6 +1547,18 @@ export class Orchestrator {
   ): Promise<void> {
     const task = this.tasks.get(taskId);
     const runner = this.runners.get(runnerName);
+    // A run that used its time before it could start again (a restored tree held for its turn) is
+    // stopped with the usual note, not left reading as running with nothing behind it.
+    if (
+      task !== undefined &&
+      runner !== undefined &&
+      !this.isStopping(taskId) &&
+      !this.ancestorStopped(taskId) &&
+      this.overRunTime(task)
+    ) {
+      await this.stopForRunTime(taskId);
+      return;
+    }
     if (
       !task ||
       !runner ||

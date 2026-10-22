@@ -305,6 +305,41 @@ test('trees that were all running before a restart resume one at a time when the
   assert.equal(after.h.fake.recoveries[1]?.taskId, two.taskId);
 });
 
+test('a restored tree that used its run time while it waited is stopped with a note, not left running', async (t) => {
+  const store = new MemoryTaskStore();
+  let now = 1_000_000;
+  const clock = { now: () => now, limits: { runMs: 60 * 60_000 } };
+  const before = await makeHarness(t, { store, orchestrator: clock });
+  const c = before.session();
+  const one = await before.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const two = await before.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(
+    () =>
+      before.orchestrator.taskStateOf(one.taskId) === 'running' &&
+      before.orchestrator.taskStateOf(two.taskId) === 'running',
+    'both running',
+  );
+  before.orchestrator.close();
+
+  const groups = new Map([[c.sessionId, 'invite-1']]);
+  const after = await grouped(t, {
+    store,
+    groups,
+    dir: before.dir,
+    fake: { recover: true },
+    orchestrator: clock,
+  });
+  await eventually(() => after.h.fake.recoveries.length === 1, 'one resumed');
+  now += 2 * 60 * 60_000;
+  await after.h.fake.runFor(one.taskId).complete();
+  await eventually(() => after.h.orchestrator.taskStateOf(two.taskId) === 'cancelled', 'stopped');
+  assert.equal(after.h.fake.recoveries.length, 1);
+  assert.match(
+    after.h.orchestrator.status(c, two.taskId).progress.join('\n'),
+    /stopped: the task used its 1 hour of run time/u,
+  );
+});
+
 test('a restart does not try to stop a task that never had its turn, nor fail it when stops fail', async (t) => {
   const store = new MemoryTaskStore();
   const groups = new Map<string, string>();
