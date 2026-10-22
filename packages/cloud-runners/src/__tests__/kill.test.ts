@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { buildRunScript } from '../scripts.js';
 import { exists, isRunning, setup, until, type Harness } from './harness.js';
 
-const STUBBORN_CHILD = `bash -c 'trap "" TERM; echo $$ > "$MAKA_DIR/child.pid"; while :; do sleep 1; done' > /dev/null 2>&1 &`;
+const STUBBORN_CHILD = `bash -c 'trap "" TERM; echo $$ > "$MAKA_DIR/child.pid.tmp" && mv -f "$MAKA_DIR/child.pid.tmp" "$MAKA_DIR/child.pid"; while :; do sleep 1; done' > /dev/null 2>&1 &`;
 
 async function runScript(
   h: Harness,

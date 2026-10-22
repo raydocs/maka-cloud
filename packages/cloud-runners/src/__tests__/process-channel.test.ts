@@ -324,6 +324,13 @@ test('kill stops the process on the machine, once, and the exit is reported once
     `a stopped run ends with 143 or SIGKILL, not ${JSON.stringify(result)}`,
   );
   assert.deepEqual(exits, [result], 'the exit is reported once');
+  // Each end has its own cause: 143 is what the run script wrote, SIGKILL is a run that died
+  // before it could write anything.
+  const exitFile = join(r.machine.taskDir(r.dir), `${r.run}.exit`);
+  const recorded = await fs.readFile(exitFile, 'utf8').catch(() => undefined);
+  if ((result as { code: number | null }).code === 143) {
+    assert.equal(recorded?.trim(), '143', 'the 143 is the run script’s own exit file');
+  } else assert.equal(recorded, undefined, 'a run reported killed left no exit file');
   assert.deepEqual(await processesOf(r.token), []);
   assert.equal(proc.kill('SIGKILL'), false, 'nothing to kill any more');
   assert.equal(r.h.runners.fleet.poller.watchCount(), 0);
