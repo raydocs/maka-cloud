@@ -380,7 +380,11 @@ export function ConversationView({
           {state.messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
               <span className="message-author">
-                {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}
+                {message.role === 'user'
+                  ? 'You'
+                  : message.role === 'notice'
+                    ? 'Update'
+                    : BRAND.name}
               </span>
               <p>{displayText(message.text)}</p>
             </article>
