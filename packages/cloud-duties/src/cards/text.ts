@@ -1,3 +1,4 @@
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import { UNSAFE } from '../brief.js';
 
 const UNSAFE_ONCE = new RegExp(UNSAFE.source, UNSAFE.flags.replace('g', ''));
@@ -23,7 +24,11 @@ const QUOTE_LIKE = /["ʺ˝ˮ״᳓“-‟″‶❝❞❠〃〝-〟＂]/gu;
  * inside a title or a detail, and it cannot hold a line break or a hidden character.
  */
 export function outside(text: string, max: number): string {
-  const flat = text.replace(QUOTE_LIKE, "'").replace(UNSAFE, ' ').replace(/ +/gu, ' ').trim();
+  const flat = scrubSecretShapes(text)
+    .replace(QUOTE_LIKE, "'")
+    .replace(UNSAFE, ' ')
+    .replace(/ +/gu, ' ')
+    .trim();
   const chars = [...flat];
   const cut =
     chars.length <= max

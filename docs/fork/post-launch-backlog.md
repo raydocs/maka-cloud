@@ -39,14 +39,13 @@ From the T27 review rounds. The pool is unreachable while `MAKA_CLOUD_BOXES` is 
 
 In the order to do them when cards come next, or before `MAKA_CLOUD_CARDS` is turned on anywhere:
 
-1. P1: scrub card text at the `CardStore` write boundary (propose and refresh, re-check the length
-   after), and before cutting in `candidates.ts` `outside()` and in `toCard` facts.
+1. (Done: `CardStore` scrubs proposed and refreshed text with the shared secret scrubber and
+   re-checks lengths; `outside()` and `toCard` facts scrub before cutting.)
 2. P1: recovery (`maintain()`, the supervisor's retry of `decide`) must re-check project access, the
    kind switch and the full precondition before starting an accepted card that has not started; look
    up the idempotent start first; changed content needs a new tap.
-3. P1: a failed refresh in `reconcile` (`scan.ts`) must fail verification, not count as fresh. P2: the
-   hash covers the title and the head SHA. P2: `cards.expire()` is scoped to the owner and project in
-   a project scan (a tenant leak in `ScanOutcome.expired`).
+3. (Done: failed refreshes fail verification; the precondition hash covers the full title and
+   head SHA; project scans expire cards only for their owner and project.)
 4. P2: `refresh()` obeys the kind switch, keeps the chain's first-shown time and is idempotent for
    the same precondition.
 5. P1: the scheduler scans repositories whose authorisation was withdrawn and uses the host token
