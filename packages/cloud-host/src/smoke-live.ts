@@ -45,11 +45,6 @@ const RESTART_TIMEOUT_MS = 60_000;
  */
 const STOP_CONFIRM_POLL_MS = 5_000;
 const STOP_CONFIRM_POLLS = 36;
-/**
- * An ended task is asked about again only when it ended this recently: the tree flag lives in the
- * server's memory, so a task that ended long ago, or before a restart, has nothing left to wait for.
- */
-const RECENT_END_MS = 10 * 60_000;
 const ENDED_STATES = ['succeeded', 'failed', 'cancelled'];
 
 export interface LiveSmokeIo {
@@ -242,7 +237,14 @@ export function createLiveSmokeDeps(
     async tasks(conversationId) {
       const found: SmokeTask[] = [];
       let after = 0;
-      for (let page = 0; page < MAX_TASK_PAGES; page += 1) {
+      // A list that is not read to its end is an error, not a shorter list: a task that was not
+      // seen is a task that was not stopped.
+      for (let page = 0; ; page += 1) {
+        if (page >= MAX_TASK_PAGES) {
+          throw new Error(
+            `the task list of ${conversationId} is longer than ${MAX_TASK_PAGES} pages`,
+          );
+        }
         const body = await request(
           'GET',
           `/v1/conversations/${encodeURIComponent(conversationId)}/tasks?after=${after}`,
@@ -252,12 +254,15 @@ export function createLiveSmokeDeps(
         }
         for (const raw of body.tasks) {
           const task = toTask(raw);
-          if (task) found.push(task);
+          if (!task) throw new Error('the task list holds an entry of an unexpected shape');
+          found.push(task);
         }
-        if (typeof body.next !== 'number') break;
+        if (body.next === undefined || body.next === null) return found;
+        if (typeof body.next !== 'number' || !Number.isInteger(body.next) || body.next <= after) {
+          throw new Error('the task list has a next cursor that does not move forward');
+        }
         after = body.next;
       }
-      return found;
     },
 
     async openQuestions(conversationId) {
@@ -314,15 +319,17 @@ export function createLiveSmokeDeps(
     /**
      * Stops every task of the smoke invite that is still going: what an earlier run left behind.
      * A task counts as stopped only when the server's own answer to a cancel says it ended and that
-     * neither its stop nor its tree's is pending: a task that ended a moment ago is asked about
-     * again, not skipped, and a cancel that failed (whatever the answer) is sent again at the next poll. Returns how many
+     * neither its stop nor its tree's is pending: every task of the invite is asked, even one that
+     * ended long ago, never skipped on the list's say-so, and a cancel that failed (whatever the answer) is sent again at the next poll. Returns how many
      * tasks were running when this started. A task not confirmed stopped, or a list that cannot be
      * read, is an error: the run must not start beside work it could not stop.
      */
     async cancelLeftovers() {
       const listed = await request('GET', '/v1/conversations');
-      const conversations =
-        isRecord(listed) && Array.isArray(listed.conversations) ? listed.conversations : [];
+      if (!isRecord(listed) || !Array.isArray(listed.conversations)) {
+        throw new Error('the conversation list has an unexpected shape');
+      }
+      const conversations: unknown[] = listed.conversations;
       const sleep = io.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
       const stopped = (task: SmokeTask): boolean =>
         ENDED_STATES.includes(task.state) &&
@@ -331,12 +338,13 @@ export function createLiveSmokeDeps(
       const open: Array<SmokeTask & { conversationId: string }> = [];
       for (const conversation of conversations) {
         const id = isRecord(conversation) ? conversation.conversationId : undefined;
-        if (typeof id !== 'string') continue;
+        if (typeof id !== 'string') {
+          throw new Error('the conversation list holds an entry of an unexpected shape');
+        }
         for (const task of await this.tasks(id)) {
-          const recent = task.finishedAt === undefined || task.finishedAt >= now() - RECENT_END_MS;
-          if (!ENDED_STATES.includes(task.state) || task.stopPending === true || recent) {
-            open.push({ ...task, conversationId: id });
-          }
+          // Every task is asked, however long ago it ended: the list cannot show a tree that is still
+          // stopping, and the server's flag has no age limit.
+          open.push({ ...task, conversationId: id });
         }
       }
       let cancelled = 0;
@@ -454,7 +462,6 @@ function toTask(raw: unknown): SmokeTask | undefined {
     ...(raw.budgetExceeded === true ? { budgetExceeded: true } : {}),
     ...(raw.stopPending === true ? { stopPending: true } : {}),
     ...(raw.treeStopPending === true ? { treeStopPending: true } : {}),
-    ...(typeof raw.finishedAt === 'number' ? { finishedAt: raw.finishedAt } : {}),
     ...(typeof raw.failureReason === 'string' ? { failureReason: raw.failureReason } : {}),
   };
 }

@@ -60,6 +60,9 @@ In the order to do them when cards come next, or before `MAKA_CLOUD_CARDS` is tu
 
 ## Deep research (T25)
 
+Deep mode is off at launch (`MAKA_CLOUD_DEEP_MODE`, see `launch-notes.md`) because of the item below:
+a request for it runs as standard. Turn it on once this is closed.
+
 1. Recheck 16 item 5: in a deep research run, `otherRunnerInput` only proves that some file of the
    other runner was read. Record provenance (draft, review task, judgment) and require the final
    result to use that review's artifact. Test: Claude reads its own draft plus an unrelated Codex
@@ -84,16 +87,49 @@ Still missing before it can merge:
 
 1. The stand-in sandbox has no real firewall (the egress rules are checked as text, no packet is
    filtered) and a scripted CLI. The first live run is the first time those run.
-2. With a task running, the server logs `server.closing` and then does not exit: the run's poller
-   keeps polling the sandbox. Compose kills it after the 60 second grace period, so a restart with a
-   running task takes about a minute. A clean detach on close would make it immediate.
+2. (Done: closing the server now lets go of its runs, `Orchestrator.detachRuns` and `RunHandle.detach`, and the
+   poller's sleep no longer keeps the process alive; the exit is forced after ten seconds. Check the restart time on
+   the first live run.)
 3. Running the flow against the owner's host after every merge and daily (needs a stand-in instance
    there and an ops script for systemd).
-4. The smoke test's 30 second window to confirm a stop (`smoke-live.ts`) is a guess; a slower real
-   stop makes a run refuse, which is safe but should be tuned after the first live run.
+4. The smoke test's 3 minute window per task to confirm a stop (36 asks, 5 seconds apart,
+   `smoke-live.ts`) is a guess; a slower real stop makes a run refuse, which is safe but should be
+   tuned after the first live run.
+5. Smoke cleanup cost grows with the invite's history, because it asks the live state of every task
+   of the invite (#317, P3 in its review). Fix by honouring retry-after on a 429, or by pruning old
+   smoke conversations after a good run.
+
+## Install output (`cloud-runners`)
+
+1. P2: the install-output window drops a field's parent key before the scrub when a certificate
+   line is over 24 KB, so a key can reach the output. A first user's `npm install` may print that
+   line, so this is on the first-user path; the owner's coordinator may want it in a lane instead.
+   Fix: stream-scrub with object and field state kept before windowing (`install-output.ts`). Test:
+   an install line over 24 KB that holds a certificate field and a key, which must not reach the
+   output. Source: batch29 A7 (owner's Codex recheck).
+
+## Smoke enumeration and the task list (from the #328 review)
+
+1. P3: the smoke should throw if the conversation list ever gains a `next` cursor, because it reads
+   one page today and would miss the rest. Test: a list reply with a `next` cursor makes the smoke
+   refuse to start.
+2. P3: the smoke should request `limit=200` per page, so an invite with a long history needs fewer
+   pages. Test: the request carries `limit=200`.
+3. P3, possibly user-visible: the server's `listTasks` can drop a task from a page, so the task list
+   may miss one. Check the lane's cursor logic first. Test: a page boundary that falls inside a run
+   of tasks returns each task exactly once. Source: the #328 review.
+
+## Kept changes and the handoff listing (from #336 and #341)
+
+1. P3: a second open of the same kept change should show the same change, not open it again.
+   Test: opening a kept change twice returns one record. Source: #336.
+2. P3: a task that is not kept gets refusal text that says why the change cannot be opened, not a
+   generic error. Test: a non-kept task's refusal names the reason. Source: #336.
+3. P3: the hash-named files are not listed in the handoff listing, so an owner cannot see them.
+   Test: a listing of a handoff directory with a hash-named file includes it. Source: #341.
 
 ## Reviews merged without an outside review
 
-Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. Pull requests merged
-since then without any outside review are rechecked once Codex is back; the list is kept in the
-project chat.
+Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
+requests merged since then, with the outside review each one had, is in
+`docs/fork/unreviewed-prs.md`. Recheck them once Codex is back.

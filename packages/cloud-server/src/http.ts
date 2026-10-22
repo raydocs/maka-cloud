@@ -698,7 +698,8 @@ export class PublicApi {
   private artifactRefs(invite: InviteInfo, taskId: string): string[] {
     this.ownTaskSession(invite, taskId);
     const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-    return record?.manifest?.artifacts ?? [];
+    // A task that ended without a result may still have a change kept for the owner.
+    return record?.manifest?.artifacts ?? record?.kept?.artifacts ?? [];
   }
 
   private listArtifacts(res: ServerResponse, invite: InviteInfo, taskId: string): void {

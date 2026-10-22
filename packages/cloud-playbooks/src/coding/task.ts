@@ -54,6 +54,15 @@ export function parseCodingBrief(brief: string): ParsedBrief {
   return { ok: true, task: parsed.data };
 }
 
+/**
+ * Where the agent writes its reproduction test record and its review, and where the files it reads
+ * (the change, a failed attempt) are put for it: `handoff/` of the task directory. The task
+ * directory itself only lets the agent's account pass through, so nothing in it is writable by it.
+ */
+export const REPRO_FILE = 'handoff/repro.json';
+export const REVIEW_FILE = 'handoff/review.json';
+export const AGENT_READS_DIR = 'handoff';
+
 /** What the agent records about its reproduction test, in `repro.json` next to the workspace. */
 export const ReproSchema = z
   .object({

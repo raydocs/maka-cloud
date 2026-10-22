@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { scrubErrorText, setKnownSecrets } from '@maka-cloud/server';
-import { createLogger, createScrubber } from '../log.js';
+import { createLogger, createScrubber, secretValuesOf } from '../log.js';
 
 const ENV = {
   ANTHROPIC_API_KEY: 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -364,4 +364,34 @@ test('a credential serialised again inside a string is scrubbed in the text a lo
   log.warn('upstream_refused', { detail: once, more: twice });
   const text = lines.join('\n');
   assert.ok(!text.includes(basic), text);
+});
+
+test('a short setting that holds a secret is scrubbed, and AUTH_PROVIDER=google does not make a word a secret', () => {
+  const scrub = createScrubber({
+    MAKA_GATEWAY_TOKEN: 'pw12',
+    DB_PASSWORD: 'hunter',
+    AUTH_PROVIDER: 'google',
+  });
+  assert.equal(
+    scrub('login pw12 then hunter via google'),
+    'login [secret] then [secret] via assistant',
+  );
+  assert.deepEqual(secretValuesOf({ AUTH_PROVIDER: 'google', API_KEY: 'abcd', X_TOKEN: 'abc' }), [
+    'abcd',
+  ]);
+});
+
+test('a number or a switch in a setting whose name smells of a secret is not registered', () => {
+  assert.deepEqual(
+    secretValuesOf({
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: '32000',
+      MAX_THINKING_TOKENS: '8000',
+      TOKENIZERS_PARALLELISM: 'false',
+      SECRET_ROTATION_DAYS: '30',
+      API_KEY_VERSION: '1.0.0',
+      DB_PASSWORD: 'hunter',
+      DB_PASSPHRASE: '48151623420000',
+    }),
+    ['48151623420000', 'hunter'],
+  );
 });

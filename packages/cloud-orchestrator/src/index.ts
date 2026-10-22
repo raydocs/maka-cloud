@@ -73,6 +73,7 @@ export {
   containsSecret,
   linkedSecretKeys,
   linkedSecretPair,
+  scrubKeyShapes,
   scrubSecretFields,
   scrubSecretShapes,
   scrubReading,

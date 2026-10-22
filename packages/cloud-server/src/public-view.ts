@@ -129,6 +129,7 @@ export function toPublicView(view: TaskView): PublicTaskView {
   return {
     ...rest,
     ...(rest.manifest === undefined ? {} : { manifest: toPublicManifest(rest.manifest) }),
+    ...(rest.kept === undefined ? {} : { kept: toPublicManifest(rest.kept) }),
     // The runner's progress notes carry whatever its tools printed.
     ...(Array.isArray(rest.progress) ? { progress: rest.progress.map(scrubErrorText) } : {}),
     ...(rest.failureReason === undefined
@@ -189,6 +190,13 @@ export function toPublicEvent(event: TaskEvent): unknown {
       return rest;
     }
     case 'task_failed':
+      return {
+        ...event,
+        reason: scrubErrorText(event.reason),
+        ...(event.kept === undefined ? {} : { kept: toPublicManifest(event.kept) }),
+      };
+    case 'task_cancelled':
+      return event.kept === undefined ? event : { ...event, kept: toPublicManifest(event.kept) };
     case 'task_pause_failed':
     case 'task_resume_failed':
       return { ...event, reason: scrubErrorText(event.reason) };

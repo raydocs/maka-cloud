@@ -19,7 +19,10 @@
  *   noise    print lines that are not messages around the messages, then like ok
  *   hang     report progress, then run until killed
  *   slowexit like ok, but leave 600 ms after its input ended
+ *   wait     like ok, but first run until `$HOME/fake-cli/go` exists (`waiting` says it is running)
+ *   waitinit like wait, but only after it reported its session, so a restart can resume it
  *   leak     like ok, but its transcript also holds the run's API key and MCP token
+ *   thinking like ok, but its transcript also holds a thinking block with a signature
  *   shape    like ok, but its transcript also holds a key the run was never given
  *
  * With `--session-mirror` it keeps a transcript like the real CLI: lines in
@@ -116,14 +119,22 @@ async function callHook(event, tool, extra) {
   return answer;
 }
 
+async function hold() {
+  fs.writeFileSync(path.join(ctl, 'waiting'), '');
+  while (!fs.existsSync(path.join(ctl, 'go'))) await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
 async function run(prompt) {
+  if (mode === 'wait') await hold();
   send({ type: 'system', subtype: 'init', session_id: sid });
   keep('user', { content: prompt });
   if (mode === 'leak') keep('assistant', { content: 'key ' + process.env.ANTHROPIC_API_KEY + ' token ' + process.env.MAKA_MCP_TOKEN });
+  if (mode === 'thinking') keep('assistant', { content: [{ type: 'thinking', thinking: 'plan', signature: 'EqQBCkYIBxgCKkA0Vh7Pq9m1ZtQ2w8d3Jx5sL0bN4cR6yU/aKfGhTeWnMoPzXvB1iDjE2lSq+u7CyHrAgFkIwVtQpZnYb' }, { type: 'redacted_thinking', data: 'EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxfnXrssn6jjZVM1UJ1' }] });
   if (mode === 'shape') keep('assistant', { content: 'the user pasted sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh and ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' });
   if (mode === 'noise') { console.log('some warning text'); console.error('stderr text'); console.log('{"level":"warn"}'); }
   send({ type: 'assistant', message: { id: 'm0', content: [{ type: 'text', text: 'working on it' }] } });
   keep('assistant', { content: 'working on it' });
+  if (mode === 'waitinit') await hold();
   if (mode === 'hang') { setInterval(() => {}, 1000); return; }
   if (mode === 'exit3') process.exit(3);
   if (mode === 'fail') {

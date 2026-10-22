@@ -2,13 +2,32 @@
  * Shell scripts the coding runner runs in the task's sandbox with exec, as the sandbox user.
  * Every script takes its input from `MAKA_*` variables (never interpolated into the script
  * text) and works inside `$MAKA_DIR`, the task's directory; the repository is
- * `$MAKA_DIR/workspace`. Git runs with hooks and fsmonitor off, so nothing the agent put in the
- * repository's config runs when the runner looks at the work.
+ * `$MAKA_DIR/workspace`. The agent owns the repository's own `.git` (its config, attributes and
+ * hooks), so the sandbox user never reads it: after the clone, git runs against `control.git` in
+ * the task directory, which only the sandbox user can enter, with no configuration of its own
+ * beyond what is on the command line and the working tree as the only thing it reads from the
+ * agent. A filter, a hook or a textconv named in the agent's `.git/config` or `.gitattributes` has
+ * no definition there and so nothing to run.
  */
 
 const GIT_FN = String.raw`
-export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1
-g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotepath=off -c advice.detachedHead=false "$@"; }
+export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_PAGER
+g() { git --git-dir="$MAKA_DIR/control.git" --work-tree="$MAKA_DIR/workspace" -c safe.directory='*' -c diff.ignoreSubmodules=all -c status.submoduleSummary=false -c submodule.recurse=false -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null -c core.quotepath=off -c advice.detachedHead=false "$@"; }
+`;
+
+/**
+ * A repository inside the workspace (a populated submodule, a `git init` in a directory) has a
+ * `.git` the agent owns, and git runs a child git in it for the directories it knows as gitlinks:
+ * that child would read the agent's configuration and attributes. None is allowed while the runner
+ * looks at the tree.
+ */
+const NO_NESTED_REPO = String.raw`nested=$(find "$MAKA_DIR/workspace" -mindepth 2 -name .git -print -quit 2>/dev/null)
+[ -z "$nested" ] || { echo "ERR nested repository $nested"; exit 0; }
+`;
+
+/** What every script that reads the repository first checks: the control repository was made at the clone. */
+const NEED_CONTROL = String.raw`[ -d "$MAKA_DIR/control.git" ] && [ ! -L "$MAKA_DIR/control.git" ] || { echo "ERR control repository missing"; exit 0; }
 `;
 
 /**
@@ -18,23 +37,45 @@ g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotepath=
  */
 export const CLONE_SCRIPT = `set -u
 umask 077
-${GIT_FN}
+export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotepath=off -c advice.detachedHead=false "$@"; }
 mkdir -p "$MAKA_DIR" || exit 1
 ws="$MAKA_DIR/workspace"
 tmp="$MAKA_DIR/workspace.clone"
-rm -rf -- "$tmp"
+cg="$MAKA_DIR/control.git"
+rm -rf -- "$tmp" "$MAKA_DIR/control.git.clone"
+# A base check a closed process left half-way: its copy of the change belongs to the tree this
+# clone replaces, and must not be put over the new one.
+rm -rf -- "$MAKA_DIR/base-check"
 mkdir "$tmp" && cd "$tmp" || exit 1
 g init -q
 if ! g fetch -q --depth=1 --no-tags "$MAKA_REPO_URL" "$MAKA_REF" > "$MAKA_DIR/clone.err" 2>&1; then
   echo CLONE_FAILED
-  tail -c 2000 "$MAKA_DIR/clone.err"
+  tail -c 2512 "$MAKA_DIR/clone.err"
   exit 0
 fi
 g checkout -q --detach FETCH_HEAD || { echo CLONE_FAILED; exit 0; }
 sha=$(g rev-parse HEAD) || { echo CLONE_FAILED; exit 0; }
+# The repository the runner itself reads: its own copy of the commit's objects and an index of the
+# commit, in a directory the agent cannot enter. Nothing of it comes from the workspace's \`.git\`
+# after this point (the agent writes that), and nothing runs from it.
+ccl="$MAKA_DIR/control.git.clone"
+git --git-dir="$ccl" init -q || { echo CLONE_FAILED; exit 0; }
+cp -a "$tmp/.git/objects/." "$ccl/objects/" || { echo CLONE_FAILED; exit 0; }
+[ ! -f "$tmp/.git/shallow" ] || cp "$tmp/.git/shallow" "$ccl/shallow" || { echo CLONE_FAILED; exit 0; }
+printf '%s\\n' "$sha" > "$ccl/HEAD"
+GIT_INDEX_FILE="$ccl/index" git --git-dir="$ccl" --work-tree="$tmp" -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null read-tree "$sha" || { echo CLONE_FAILED; exit 0; }
+# The checkout is made with the umask above, so only the sandbox user could read it: hand it to the
+# agent's group (when there is one) before the agent exists, so no file is swapped underneath.
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  chgrp -R -h -- "$MAKA_AGENT_GROUP" "$tmp" || { echo CLONE_FAILED; exit 0; }
+  find "$tmp" ! -type d ! -type l -exec chmod g+rwX {} + || { echo CLONE_FAILED; exit 0; }
+  find "$tmp" -type d -exec chmod 2770 {} + || { echo CLONE_FAILED; exit 0; }
+fi
 cd "$MAKA_DIR" || exit 1
-rm -rf -- "$ws"
+rm -rf -- "$ws" "$cg"
 mv "$tmp" "$ws"
+mv "$ccl" "$cg"
 echo "BASE $sha"
 `;
 
@@ -75,7 +116,7 @@ isolated=0
 [ -e "$mark/started" ] && isolated=1
 rm -rf -- "$mark"
 if [ "$isolated" = 0 ]; then
-  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare)' >&2
+  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed: the box must allow unprivileged user namespaces, which a container profile such as the Docker default seccomp refuses; no check can run until it does)' >&2
   exit 125
 fi
 exit "$rc"
@@ -159,6 +200,22 @@ if [ "$(printf '%s' "$data" | base64 -d | wc -c)" -gt "$MAKA_MAX" ]; then echo T
 echo "OK $data"
 `;
 
+/**
+ * Copies a file of the task directory into `handoff/`, where the agent's account can read it: the
+ * task directory only lets that account pass through it, and the runner's files there are private.
+ * The copy is group-readable and replaces any earlier one atomically. `handoff/` is made by the
+ * runner that starts the agent, and made here if the agent has not run yet.
+ */
+export const PUBLISH_FILE_SCRIPT = `set -eu
+umask 077
+cd "$MAKA_DIR"
+mkdir -p handoff
+tmp=$(mktemp handoff/.publish.XXXXXX)
+cat -- "$MAKA_FILE" > "$tmp"
+chmod 640 "$tmp"
+mv -fT -- "$tmp" "handoff/$MAKA_FILE"
+`;
+
 /** Writes stdin to a file in the task directory (the failure brief), replacing it atomically. */
 export const WRITE_FILE_SCRIPT = `set -eu
 umask 077
@@ -175,8 +232,11 @@ mv -f -- "$MAKA_FILE.tmp" "$MAKA_FILE"
  */
 export const SAMPLE_SCRIPT = `set -u
 ${GIT_FN}
+# Lets git keep the control repository's index fresh, so a sample hashes what changed, not every file.
+export GIT_OPTIONAL_LOCKS=1
+[ -d "$MAKA_DIR/control.git" ] || { echo "ERR control repository missing"; exit 0; }
 cd "$MAKA_DIR/workspace" 2>/dev/null || exit 0
-g status --porcelain=v1 -z --untracked-files=all --no-renames 2>/dev/null | head -c 500000 \\
+${NO_NESTED_REPO}g status --porcelain=v1 --ignore-submodules=all -z --untracked-files=all --no-renames 2>/dev/null | head -c 500000 \\
   | while IFS= read -r -d '' entry; do
     p="\${entry:3}"
     if [ -L "$p" ]; then echo "L $p"
@@ -186,6 +246,20 @@ g status --porcelain=v1 -z --untracked-files=all --no-renames 2>/dev/null | head
   done | head -n "$MAKA_MAX_FILES"
 `;
 
+/**
+ * `inside <path>` succeeds when the directory holding `<path>` resolves, symlinks followed, to
+ * somewhere in the real workspace (`$wsreal`). The agent can swap a directory for a symlink, and a
+ * script running as the sandbox user must not remove or write through it.
+ */
+const INSIDE_FN = String.raw`
+inside() {
+  local d
+  d=$(realpath -m -- "$(dirname -- "$1")") || return 1
+  case "$d/" in "$wsreal"/*) return 0 ;; esac
+  return 1
+}
+`;
+
 /** Lists, NUL-separated, every path that differs from the base commit (untracked included, ignored not). */
 const CHANGED_PATHS_FN = String.raw`
 changed_paths() {
@@ -193,7 +267,7 @@ changed_paths() {
   rm -f -- "$idx"
   GIT_INDEX_FILE="$idx" g read-tree "$MAKA_BASE" || return 1
   GIT_INDEX_FILE="$idx" g add -A . || return 1
-  GIT_INDEX_FILE="$idx" g diff --cached --no-renames --name-only -z "$MAKA_BASE"
+  GIT_INDEX_FILE="$idx" g diff --cached --ignore-submodules=all --no-renames --name-only -z "$MAKA_BASE"
   local rc=$?
   rm -f -- "$idx"
   return $rc
@@ -206,21 +280,36 @@ changed_paths() {
  * \`BASE_RESTORE_SCRIPT\` can put the change back. A leftover of an interrupted check is
  * restored first. Prints \`REVERTED <count>\`.
  */
-const RESTORE_FN = String.raw`
+const RESTORE_FN = `${INSIDE_FN}
 restore() {
   [ -d "$bk" ] || return 0
   if [ -f "$bk/reverted" ]; then
-    while IFS= read -r -d '' p; do rm -rf -- "$ws/$p"; done < "$bk/reverted"
-    cp -a "$bk/files/." "$ws/" || return 1
+    local p
+    while IFS= read -r -d '' p; do
+      inside "$ws/$p" || return 1
+      rm -rf -- "$ws/$p"
+    done < "$bk/reverted"
+    # One file at a time: a copy of the whole backup tree would put the backup's own directories
+    # (private to the sandbox user) over the workspace's, and the agent could not enter them.
+    local f rel
+    while IFS= read -r -d '' f; do
+      rel="\${f#"$bk/files/"}"
+      inside "$ws/$rel" || return 1
+      mkdir -p -- "$(dirname -- "$ws/$rel")" && cp -a --remove-destination -- "$f" "$ws/$rel" || return 1
+      # The backup kept the file's own mode; the agent writes the file as it did before the check.
+      [ -L "$ws/$rel" ] || chmod g+rw -- "$ws/$rel" || return 1
+    done < <(find "$bk/files" -mindepth 1 ! -type d -print0)
   fi
   rm -rf -- "$bk"
 }
 `;
 
 export const BASE_REVERT_SCRIPT = `set -u
-umask 077
+# What is put back is the agent's to read and write too (the directories hand their group down).
+umask 007
 ${GIT_FN}${CHANGED_PATHS_FN}${RESTORE_FN}
-ws="$MAKA_DIR/workspace"
+${NEED_CONTROL}${NO_NESTED_REPO}ws="$MAKA_DIR/workspace"
+wsreal=$(realpath -- "$ws") || exit 1
 bk="$MAKA_DIR/base-check"
 cd "$ws" || exit 1
 restore || { echo RESTORE_FAILED; exit 0; }
@@ -232,6 +321,7 @@ changed_paths > "$bk/paths" || { echo LIST_FAILED; exit 0; }
 count=0
 while IFS= read -r -d '' p; do
   [ -n "\${keep[$p]:-}" ] && continue
+  inside "$ws/$p" || { echo "UNSAFE_PATH $p"; exit 0; }
   if [ -e "$p" ] || [ -L "$p" ]; then
     mkdir -p "$bk/files/$(dirname -- "$p")" && cp -a -- "$p" "$bk/files/$p" || exit 1
   fi
@@ -240,9 +330,12 @@ while IFS= read -r -d '' p; do
 done < "$bk/paths"
 mv "$bk/reverted.tmp" "$bk/reverted"
 while IFS= read -r -d '' p; do
+  # An earlier path of this loop can have put a symlink where a directory of this one was.
+  inside "$ws/$p" || { echo "UNSAFE_PATH $p"; exit 0; }
   rm -rf -- "$p"
   mode=$(g ls-tree "$MAKA_BASE" -- "$p" | cut -d' ' -f1)
-  [ -n "$mode" ] || continue
+  # Only a file or a link has a base version to put back (a directory's files are listed on their own).
+  case "$mode" in 100644|100755|120000) ;; *) continue ;; esac
   mkdir -p "$(dirname -- "$p")"
   if [ "$mode" = 120000 ]; then ln -s "$(g cat-file blob "$MAKA_BASE:$p")" "$p"
   else
@@ -250,16 +343,25 @@ while IFS= read -r -d '' p; do
     [ "$mode" = 100755 ] && chmod +x "$p"
   fi
 done < "$bk/reverted"
+# A test that cannot read a file of the checkout fails with an ordinary exit status, which would be
+# taken for "the test fails on the base": refuse the base check when a file of the sandbox user's
+# making is not the agent group's to read (the agent's own files are its own).
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  bad=$(find "$ws" -xdev ! -type l -user "$(id -u)" \\( ! -group "$MAKA_AGENT_GROUP" -o \\( -type d ! -perm -g+rx \\) -o \\( ! -type d ! -perm -g+r \\) \\) -print -quit)
+  [ -z "$bad" ] || { echo "UNREADABLE_FOR_AGENT $bad"; exit 0; }
+fi
 echo "REVERTED $count"
 `;
 
 /** Puts the change back after a base check. Idempotent. Prints RESTORED. */
 export const BASE_RESTORE_SCRIPT = `set -u
+umask 007
 ${RESTORE_FN}
 ws="$MAKA_DIR/workspace"
 bk="$MAKA_DIR/base-check"
 [ -d "$ws" ] || { echo RESTORED; exit 0; }
-restore && echo RESTORED
+wsreal=$(realpath -- "$ws") || exit 1
+restore && echo RESTORED || echo RESTORE_FAILED
 `;
 
 /**
@@ -270,13 +372,13 @@ restore && echo RESTORED
 export const CHANGES_SCRIPT = `set -u
 umask 077
 ${GIT_FN}
-cd "$MAKA_DIR/workspace" || { echo "ERR workspace"; exit 0; }
-idx="$MAKA_DIR/changes.index"
+${NEED_CONTROL}cd "$MAKA_DIR/workspace" || { echo "ERR workspace"; exit 0; }
+${NO_NESTED_REPO}idx="$MAKA_DIR/changes.index"
 rm -f -- "$idx"
 export GIT_INDEX_FILE="$idx"
 g read-tree "$MAKA_BASE" 2>/dev/null || { echo "ERR base"; exit 0; }
-g add -A . 2> "$MAKA_DIR/changes.err" || { echo "ERR add $(tail -c 300 "$MAKA_DIR/changes.err" | tr '\\n' ' ')"; exit 0; }
-raw=$(g diff --cached --raw -z --no-renames --abbrev=40 "$MAKA_BASE" | base64 -w0) || { echo "ERR diff"; exit 0; }
+g add -A . 2> "$MAKA_DIR/changes.err" || { echo "ERR add $(tail -c 812 "$MAKA_DIR/changes.err" | tr '\\n' ' ')"; exit 0; }
+raw=$(g diff --cached --ignore-submodules=all --raw -z --no-renames --abbrev=40 "$MAKA_BASE" | base64 -w0) || { echo "ERR diff"; exit 0; }
 echo "RAW $raw"
 g diff --cached --binary --no-renames --no-ext-diff --no-textconv "$MAKA_BASE" > "$MAKA_DIR/change.patch" || { echo "ERR patch"; exit 0; }
 echo "PATCH $(stat -c %s "$MAKA_DIR/change.patch")"
@@ -288,6 +390,7 @@ rm -f -- "$idx"
 /** One chunk of a blob: base64 of \`$MAKA_LEN\` bytes from \`$MAKA_OFF\`. */
 export const BLOB_CHUNK_SCRIPT = `set -u
 ${GIT_FN}
+[ -d "$MAKA_DIR/control.git" ] || exit 1
 cd "$MAKA_DIR/workspace" || exit 1
 g cat-file blob "$MAKA_SHA" | tail -c +$((MAKA_OFF + 1)) | head -c "$MAKA_LEN" | base64 -w0
 `;

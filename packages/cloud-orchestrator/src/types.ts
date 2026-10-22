@@ -65,7 +65,19 @@ export type TaskEvent =
    * run starts counting from zero. An event without `epoch` (written before attempts were keyed)
    * counts as epoch 0.
    */
-  | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number; epoch?: number }
+  | {
+      type: 'task_cost';
+      taskId: TaskId;
+      fromTaskId: TaskId;
+      costUsd: number;
+      epoch?: number;
+      /**
+       * Set on spend recovered from a journal row that carries no attempt: a stable id of that row.
+       * The attempt it was booked under is kept with the task, so reading the same row again (a
+       * crash after the record and before the journal was told) books it under the same attempt.
+       */
+      recovery?: string;
+    }
   | { type: 'task_progress'; taskId: TaskId; note: string }
   /**
    * The run of a task that was cut off by a restart is going again, in `epoch`. `text` is what a
@@ -74,9 +86,14 @@ export type TaskEvent =
    */
   | { type: 'task_restarted'; taskId: TaskId; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: TaskId; manifest: ResultManifest }
-  | { type: 'task_failed'; taskId: TaskId; reason: string }
+  /**
+   * `kept` is the manifest of a change the runner kept for the owner to look at but could not
+   * deliver (the task failed or was stopped before its review ended). It is never a result: the
+   * task did not succeed. It only lets the owner see what was kept.
+   */
+  | { type: 'task_failed'; taskId: TaskId; reason: string; kept?: ResultManifest }
   | { type: 'task_cancel_requested'; taskId: TaskId; by: SessionId | 'system' }
-  | { type: 'task_cancelled'; taskId: TaskId }
+  | { type: 'task_cancelled'; taskId: TaskId; kept?: ResultManifest }
   /** Someone asked for the run to pause; the task stays `running` until `task_paused`. */
   | { type: 'task_pause_requested'; taskId: TaskId; by: SessionId }
   | { type: 'task_paused'; taskId: TaskId }
@@ -201,6 +218,8 @@ export interface TaskRecord {
    * (key `<epoch>:<taskId>`).
    */
   spendByRun?: Record<string, number>;
+  /** On a top-level task: the attempt each recovered journal row without one was booked under (by row id). */
+  recoveredRows?: Record<string, number>;
   /** On a top-level task: the sum of `spendByRun`, kept as it moves (`costUsd` is this, rounded). */
   spendSum?: number;
   /** On a top-level task: the sum of `spendByRun`. */
@@ -218,6 +237,8 @@ export interface TaskRecord {
   runSince?: number;
   progress: string[];
   manifest?: ResultManifest;
+  /** What the runner kept for the owner when the task ended without a result; see `task_failed`. */
+  kept?: ResultManifest;
   failureReason?: string;
   cancelRequestedBy?: SessionId | 'system';
   /** A pause was asked for and has neither happened nor failed yet, or has happened. Cleared by a failed pause or a resume. */
@@ -250,6 +271,8 @@ export interface TaskView {
   finishedAt?: number;
   progress: string[];
   manifest?: ResultManifest;
+  /** What the runner kept for the owner when the task ended without a result; see `task_failed`. */
+  kept?: ResultManifest;
   failureReason?: string;
   cancelRequested: boolean;
   /** On a top-level task: what its whole tree reported spending. Absent when no runner reported any. */

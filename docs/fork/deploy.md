@@ -417,6 +417,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
+| `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
@@ -516,7 +517,8 @@ command that runs as the sandbox user. The pinned CLI install, which writes the 
 Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
 test commands run as the agent account (the stop that ends them runs as root, since the processes are
 the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
-closed to everyone else, and the brief is written in the task directory and renamed into `handoff/`,
+closed to everyone else and then asks it for its version as the agent account, by absolute path, so
+the sandbox user never runs what the agent's tooling may have shaped, and the brief is written in the task directory and renamed into `handoff/`,
 so a link the agent leaves there is never followed.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
@@ -660,14 +662,16 @@ Preparation:
    on (the invite's generation in the journal moves up), and only then does the
    new run get a budget of its own, starting empty. Every run, takeover or not,
    first stops what an earlier run left going: it cancels each task that has not
-   ended, and asks again about each task that ended in the last ten minutes,
-   because only the server's answer to a cancel says whether the task's run or
+   ended, and asks about every task that has (however long ago, since the task
+   list cannot show a pending stop and the server's flag has no age limit), because only the server's answer to a cancel says whether the task's run or
    its tree is still being stopped. It sends the cancel again every 5 seconds,
    for up to 3 minutes a task (the server itself retries a stop that failed with
    a growing delay), until the answer says the task ended with nothing pending.
-   A task not seen stopped, or a task list it cannot read, means it starts
-   nothing and exits 2, naming the last error: stop those tasks by hand and run
-   again. A task that started after the list was read is not seen. The
+   A task not seen stopped, or a conversation or task list it cannot read to
+   its end (a next page after the last one it reads, a cursor that does not move
+   forward, an entry of an unexpected shape), means it starts nothing and exits
+   2, naming the last error: stop those tasks by hand and run again. A task that
+   started after the list was read is not seen. The
    cleanup is repeated by the next run even though the run that failed it has
    cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
