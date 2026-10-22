@@ -144,7 +144,8 @@ export function openPullRequestTool(
       if (!delivery || delivery.repo === '') return undefined;
       const loaded = await loadChange(delivery).catch(() => undefined);
       if (!loaded || loaded.verification.kept !== undefined) return undefined;
-      return { repository: delivery.repo };
+      // The card names the base branch too: a grant covers pull requests against that one.
+      return { repository: delivery.repo, fixed: { baseRef: delivery.baseRef } };
     },
     async impl(args, context) {
       const delegatedHere = options.ownsTask(context.runId, args.taskId);

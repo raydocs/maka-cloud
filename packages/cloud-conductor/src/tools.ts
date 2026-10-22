@@ -92,6 +92,11 @@ export interface ToolHost {
    * Off: a call decided on tainted context is held whatever the owner granted.
    */
   readonly grantsCoverTaint: boolean;
+  /**
+   * Whether grants can be offered and used at all: only where the host checks who approved
+   * (`ConductorOptions.approverAuthorized`). Without that check a grant could not be tied to its owner.
+   */
+  readonly grantsUsable: boolean;
 }
 
 /** What a tool says a scoped approval of one of its calls would cover (see `ConductorToolSpec.grantScope`). */
@@ -836,6 +841,7 @@ function holdUnlessApproved(
     // the conductor was set so), and the call's card is still built and shown to the tool.
     if (
       grant &&
+      host.grantsUsable &&
       shown !== undefined &&
       (!host.decidedOnTaint(turn) || host.grantsCoverTaint) &&
       !host.carriesSecret(args) &&
@@ -924,6 +930,7 @@ async function grantCandidateFor(
   spec: ConductorToolSpec | undefined,
   held: HeldCall,
 ): Promise<GrantKey | undefined> {
+  if (!host.grantsUsable) return undefined;
   if (host.state.run(turn.runId)?.authority) return undefined;
   if (host.state.taintOf(turn.conversationId) !== undefined && !host.grantsCoverTaint) {
     return undefined;
