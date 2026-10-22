@@ -217,8 +217,8 @@ export class InboxRoutes {
       take(this.limiter, invite);
       const grants = this.grants();
       this.checkActive(invite);
-      // Not yours, unknown and already revoked answer alike.
-      if (!grants.revoke(invite.inviteId, decodeURIComponent(grant[1] ?? ''))) {
+      // Not yours, unknown, expired, already revoked and not an id at all answer alike.
+      if (!grants.revoke(invite.inviteId, safeDecode(grant[1] ?? ''))) {
         throw new HttpError(404, 'not_found');
       }
       respond(res, 200, { revoked: true });
@@ -300,6 +300,15 @@ export class InboxRoutes {
       duplicate: result.duplicate,
       item: toPublicItem(result.item),
     });
+  }
+}
+
+/** A path piece decoded, or one that no grant id equals when it is not valid percent-encoding. */
+function safeDecode(piece: string): string {
+  try {
+    return decodeURIComponent(piece);
+  } catch {
+    return '';
   }
 }
 

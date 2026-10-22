@@ -302,6 +302,11 @@ test('a grant expires', async (t) => {
   env.clock.now += 2;
   assert.equal(await again(env, { repo: 'acme/widgets', title: 'Three' }), 'needs_approval');
   assert.deepEqual(env.h.conductor.state.grantsOf(OWNER), []);
+  // What cannot be listed cannot be revoked either.
+  const [expired] = env.h.conductor.state.grantsOf(OWNER, { all: true });
+  assert.ok(expired);
+  assert.equal(env.h.conductor.state.revokeGrant(OWNER, expired.grantId), false);
+  assert.equal(env.h.conductor.state.revokeGrants(OWNER), 0);
 });
 
 test('a grant is used only while its owner is still allowed: a revoked invite, or a conversation that is not theirs, gets a card', async (t) => {

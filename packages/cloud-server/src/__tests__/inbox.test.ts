@@ -411,6 +411,8 @@ test('the grants routes show and revoke the caller’s own approvals only, and a
     (await h.api('/v1/inbox/grants/revoke', { ...asMe, ...json({ owner: 'inv_x' }) })).status,
     400,
   );
+  // An id that is not valid percent-encoding is no grant, not a server error.
+  assert.equal((await h.api('/v1/inbox/grants/%E0', { ...asMe, method: 'DELETE' })).status, 404);
   assert.equal((await h.api('/v1/inbox/grants', { ...asMe, method: 'POST' })).status, 405);
   assert.equal((await h.api('/v1/inbox/grants/grant_me', asMe)).status, 405);
 });
