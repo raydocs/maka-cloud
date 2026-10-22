@@ -119,6 +119,15 @@ Still missing before it can merge:
    may miss one. Check the lane's cursor logic first. Test: a page boundary that falls inside a run
    of tasks returns each task exactly once. Source: the #328 review.
 
+## Kept changes and the handoff listing (from #336 and #341)
+
+1. P3: a second open of the same kept change should show the same change, not open it again.
+   Test: opening a kept change twice returns one record. Source: #336.
+2. P3: a task that is not kept gets refusal text that says why the change cannot be opened, not a
+   generic error. Test: a non-kept task's refusal names the reason. Source: #336.
+3. P3: the hash-named files are not listed in the handoff listing, so an owner cannot see them.
+   Test: a listing of a handoff directory with a hash-named file includes it. Source: #341.
+
 ## Reviews merged without an outside review
 
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
