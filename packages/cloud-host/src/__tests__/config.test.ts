@@ -478,6 +478,16 @@ test('the modes default to the built-in ones, and the built-in ones are priced b
   assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /modes: +quick, standard, deep/);
 });
 
+test('with no model configured, the built-in modes start: Codex reviews on a model the gateway prices', () => {
+  // No MAKA_CLOUD_GATEWAY_MODELS: the built-in modes name only models with a built-in price, or
+  // reading the config would fail with a "has no price" problem.
+  const config = readStackConfig(ENV);
+  assert.deepEqual(config.gateway.models, []);
+  const lines = describeConfig(config).join('\n');
+  assert.match(lines, /every role names its model/);
+  assert.match(lines, /gateway models: +built-in Claude and gpt-6\.1-sol prices only/);
+});
+
 test('MAKA_CLOUD_MODES replaces the modes, and a Codex model it names needs a gateway price', () => {
   const modes = structuredClone(DEFAULT_MODES);
   modes.modes.deep.reviewer.codex = { model: 'codex-test', effort: 'high' };
@@ -586,6 +596,23 @@ test('the limits of one task default to no turn limit and 4 hours, and take only
   assert.match(
     describeConfig(readStackConfig(ENV)).join('\n'),
     /task limits: +no limit per turn, 4 h of run time/u,
+  );
+});
+
+test('one task runs at a time per invite unless the owner sets another whole number up to 32', () => {
+  assert.equal(readStackConfig(ENV).tasksPerInvite, 1);
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_TASKS_PER_INVITE: '3' }).tasksPerInvite, 3);
+  for (const bad of ['0', '-1', '1.5', 'two', '33']) {
+    assert.ok(
+      problemsOf({ ...ENV, MAKA_CLOUD_TASKS_PER_INVITE: bad }).some((text) =>
+        /MAKA_CLOUD_TASKS_PER_INVITE must be/u.test(text),
+      ),
+      bad,
+    );
+  }
+  assert.match(
+    describeConfig(readStackConfig(ENV)).join('\n'),
+    /tasks at once: +1 per invite; the next one waits its turn/u,
   );
 });
 
