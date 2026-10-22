@@ -2,7 +2,7 @@ import type { InboxService } from '@maka-cloud/server';
 import {
   ITEM_KINDS,
   type ItemKind,
-  SettingsPatchSchema,
+  OwnerSettingsPatchSchema,
   type Supervisor,
 } from '@maka-cloud/supervisor';
 
@@ -11,17 +11,17 @@ export function inboxService(supervisor: Supervisor): InboxService {
   return {
     list: async (query) => supervisor.listItems(query),
     answer: async (request) => supervisor.answer(request),
-    setMute(kind, muted) {
+    setMute(owner, kind, muted) {
       if (!(ITEM_KINDS as readonly string[]).includes(kind)) return { ok: false };
-      return { ok: true, settings: supervisor.setMute(kind as ItemKind, muted) };
+      return { ok: true, settings: supervisor.setOwnerMute(owner, kind as ItemKind, muted) };
     },
-    settings: () => supervisor.getSettings(),
-    updateSettings(patch) {
-      const parsed = SettingsPatchSchema.safeParse(patch);
+    settings: (owner) => supervisor.getOwnerSettings(owner),
+    updateSettings(owner, patch) {
+      const parsed = OwnerSettingsPatchSchema.safeParse(patch);
       if (!parsed.success) return { ok: false };
-      return { ok: true, settings: supervisor.setSettings(parsed.data) };
+      return { ok: true, settings: supervisor.setOwnerSettings(owner, parsed.data) };
     },
-    digest: () => supervisor.digest(),
+    digest: (owner) => supervisor.digest(owner),
     stop: () => supervisor.stop(),
   };
 }

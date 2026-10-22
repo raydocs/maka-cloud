@@ -56,6 +56,30 @@ export function toPublicItem(item: unknown): unknown {
   return 'suggestion' in scrubbed ? toPublicSuggestion(scrubbed) : scrubbed;
 }
 
+/**
+ * A digest as clients see it: the summary is a model's text over agent-written asks, and each ask is
+ * what an item shows, so both are scrubbed like error text.
+ */
+export function toPublicDigest(digest: unknown): unknown {
+  if (typeof digest !== 'object' || digest === null) return digest;
+  const record = digest as { summary?: unknown; items?: unknown };
+  return {
+    ...digest,
+    ...(typeof record.summary === 'string' ? { summary: scrubErrorText(record.summary) } : {}),
+    ...(Array.isArray(record.items)
+      ? {
+          items: record.items.map((item) =>
+            typeof item === 'object' &&
+            item !== null &&
+            typeof (item as { ask?: unknown }).ask === 'string'
+              ? { ...item, ask: scrubErrorText((item as { ask: string }).ask) }
+              : item,
+          ),
+        }
+      : {}),
+  };
+}
+
 /** A proposed card's facts: its detail quotes a pull request or an issue, so it is scrubbed like the ask. */
 function toPublicSuggestion(item: object): unknown {
   const suggestion = (item as { suggestion?: unknown }).suggestion;
