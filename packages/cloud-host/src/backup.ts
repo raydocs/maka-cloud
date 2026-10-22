@@ -41,7 +41,9 @@ const SQLITE_COMPANION = /-(?:wal|shm|journal)$/u;
 const SCAN_CHUNK = 1 << 20;
 /** Shapes that are secrets wherever they appear: private keys and this system's own tokens. */
 const SECRET_SHAPES: readonly RegExp[] = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+  // The whole block, not its first line: the body is the key. Also inside a JSON string, where its
+  // line breaks are escapes (a run of backslashes is taken whole, so no escape is left cut in two).
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/=:,\s]|\\+[nrt]|-(?!----))*(?:-----END [A-Z ]*PRIVATE KEY-----)?/u,
   /\bmk[iog]_[\w.-]{16,}/u,
 ];
 

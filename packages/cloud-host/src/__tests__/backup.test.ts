@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -484,6 +484,42 @@ test('from outside, a database a running server holds exclusively is refused wit
     /held by a running server, which backs itself up/u,
   );
   assert.deepEqual(await readdir(backupDir), [], 'no scratch directory is left');
+});
+
+test('a private key in a stored conversation leaves no line of its body in the backup', async (t) => {
+  const { dataDir, backupDir } = await dirs(t);
+  await populate(dataDir);
+  const paths = dataPathsOf(dataDir);
+  const store = SqliteTranscriptStore.open(paths.transcriptsDbPath);
+  const session = '11111111-2222-4333-8444-555555555555';
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 1024,
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  });
+  const body = privateKey.split('\n').filter((line) => line !== '' && !line.startsWith('-----'));
+  await store.append('tsk_1', { projectKey: '-work-x', sessionId: session }, [
+    {
+      json: JSON.stringify({ type: 'user', uuid: 'a', text: `key.pem:\n${privateKey}after it` }),
+      uuid: 'a',
+    },
+  ]);
+  const done = await backupAll({
+    dataDir,
+    backupDir,
+    layout: backupLayoutOf(dataDir),
+    env,
+    now: () => T0,
+    inProcess: { 'transcripts.db': (to) => store.backupTo(to) },
+  });
+  const copy = SqliteTranscriptStore.open(join(done.path, 'transcripts.db'));
+  const lines = (await copy.read('tsk_1', session)).lines;
+  copy.close();
+  // Still one JSON line, and still the text around the key.
+  assert.equal(JSON.parse(lines[0] as string).text, 'key.pem:\n[secret removed]\nafter it');
+  for (const line of body) assert.ok(!(lines[0] as string).includes(line), 'a line of the body');
+  assert.doesNotMatch(lines[0] as string, /PRIVATE KEY/u);
+  store.close();
 });
 
 test('the stored conversations are backed up with key-shaped text taken out of the copy, and left in the live file', async (t) => {
