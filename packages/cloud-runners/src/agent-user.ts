@@ -108,39 +108,32 @@ chmod 2770 claude-config
 `;
 
 /**
- * Whether any program the agent can run carries a file capability, or is setuid or setgid to
- * anyone but the agent itself. Every directory under `/` is scanned (mounts under them included,
- * so `/data`, `/mnt` and a separate `/bin` are too), except the kernel's own (`/proc`, `/sys`,
- * `/dev`), symlinks (reached through their targets) and the task root: only the agent and the
- * sandbox user write there, and the agent can neither give a file a capability nor make it setuid
- * to anyone else. The scan runs as root, so an unreadable directory is read, and any failure of it
- * is `unchecked`, never `none`.
+ * Whether any program the agent can run carries a file capability, or is setuid to anyone but the
+ * agent or setgid to a group the agent is not in. The whole tree from `/` is walked (hidden
+ * directories, files at the top and every mount below included, the task root too: a privileged
+ * program there would be as dangerous as anywhere), except the kernel's own `/proc`, `/sys` and
+ * `/dev`. The walk runs as root, so an unreadable directory is read, and any failure of it, of
+ * `getcap`, or anything `getcap` says on stderr is `unchecked`, never `none`.
  *
- * `getcap` is handed the executable files one by one (never asked to list a tree and have its
- * output split back into a path), and a line it prints counts only when its path is one word; a
- * line that is not is `found`, so no file name can hide a capability. Every capability on a program
- * the agent can execute is `found`, except the few that the stock tools of a distribution carry
- * under their own paths and that cannot reach the firewall or the control user (raw sockets for
- * ping, the id-mapping helpers); likewise for the stock setuid and setgid tools (whose rules, like
- * sudo's, are checked on their own). Whether the agent can execute a file is asked of the agent
- * account and must be answered: a refusal of the account itself is `unchecked`, not "no".
- * `as_agent`, `root` and `tool_bin` are defined by the probe around it; `MAKA_SCAN_ROOTS` (one
- * directory per line) replaces the directories under `/` for a test.
+ * File names are never cut back out of text where a name could fake the cut: `getcap` gets the
+ * files whose path has no line break in bulk, and prints one line per file with its path first; a
+ * line whose path is not one word is `found`. A file whose path has a line break is asked about
+ * alone, by its own path. Every capability on a program the agent can execute is `found`, except
+ * the few that the stock tools of a distribution carry under their own paths and that cannot reach
+ * the firewall or the control user (raw sockets for ping, the id-mapping helpers); likewise for the
+ * stock setuid tools (whose rules, like sudo's, are checked on their own), matched on the whole
+ * path. Whether the agent can execute a file is asked of the agent account and must be answered: a
+ * refusal of the account itself is `unchecked`, not "no". `as_agent`, `root` and `tool_bin` are
+ * defined by the probe around it; `MAKA_SCAN_ROOTS` (one directory per line) replaces `/` for a
+ * test, and the probe unsets it.
  */
-export const FILE_CAPS_PROBE = `scan_roots() {
-  if [ -n "\${MAKA_SCAN_ROOTS:-}" ]; then printf '%s\\n' "$MAKA_SCAN_ROOTS"; return; fi
-  for dir in /*; do
-    case "$dir" in /proc|/sys|/dev) continue ;; esac
-    if [ -d "$dir" ] && [ ! -L "$dir" ]; then printf '%s\\n' "$dir"; fi
-  done
-}
-# Lists into $2 (NUL-separated) the files under every scan root that match the find test in $1...
-scan_files() {
-  out=$1; shift
-  : > "$out"
-  scan_roots | while IFS= read -r dir; do
-    root find "$dir" -ignore_readdir_race -path "$MAKA_ROOT" -prune -o -type f "$@" -print0 >> "$out" || echo failed
-  done
+export const FILE_CAPS_PROBE = `nl=$(printf '\\nx'); nl=\${nl%x}
+# One walk of every scan root; the find tests and actions given select and write the files (with
+# -fprint0 into files made beforehand, so they stay readable here). Prints failed when it did not finish.
+scan() {
+  roots=()
+  while IFS= read -r dir; do roots+=("$dir"); done < <(if [ -n "\${MAKA_SCAN_ROOTS:-}" ]; then printf '%s\\n' "$MAKA_SCAN_ROOTS"; else echo /; fi)
+  root find "\${roots[@]}" -ignore_readdir_race '(' -path /proc -o -path /sys -o -path /dev ')' -prune -o -type f '(' "$@" ')' >/dev/null || echo failed
 }
 # Prints yes for a path the agent can execute, nothing when it cannot, unchecked without an answer.
 agent_runs() {
@@ -156,44 +149,64 @@ verdict() {
   elif [ -n "$2" ]; then echo "FACT $1=found"
   else echo "FACT $1=none"; fi
 }
-files=$(mktemp) || files=""
+tmp=$(mktemp -d) || tmp=""
 getcap_bin=$(tool_bin getcap)
-if [ -z "$files" ] || [ -z "$getcap_bin" ]; then
+if [ -z "$tmp" ] || [ -z "$getcap_bin" ] || ! : > "$tmp/bulk" || ! : > "$tmp/odd" || ! : > "$tmp/errs"; then
   echo "FACT agent_filecaps=unchecked"
-elif [ -n "$(scan_files "$files" -perm /111)" ]; then
+elif [ -n "$(scan -perm /111 '(' -path "*$nl*" -fprint0 "$tmp/odd" -o -fprint0 "$tmp/bulk" ')')" ]; then
   echo "FACT agent_filecaps=unchecked"
 else
   rc=0
-  listing=$(root xargs -0 -r "$getcap_bin" < "$files" 2>/dev/null) || rc=$?
+  listing=$(root xargs -0 -r "$getcap_bin" < "$tmp/bulk" 2>>"$tmp/errs") || rc=$?
   if [ "$rc" != 0 ]; then
     echo "FACT agent_filecaps=unchecked"
   else
-    found=$(printf '%s\\n' "$listing" | while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
-      if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
-      if printf '%s\\n' "$line" | grep -Eq '^/[^[:space:]]+ (= )?[^[:space:]]+$'; then
-        agent_runs "\${line%% *}"
-      else
-        echo yes
-      fi
-    done)
-    verdict agent_filecaps "$found"
+    found=$(
+      # A line break in the path would split getcap's line: each such file alone, by its own path.
+      while IFS= read -r -d '' path; do
+        rc=0
+        one=$(root "$getcap_bin" "$path" 2>>"$tmp/errs") || rc=$?
+        if [ "$rc" != 0 ]; then echo unchecked; elif [ -n "$one" ]; then agent_runs "$path"; fi
+      done < "$tmp/odd"
+      printf '%s\\n' "$listing" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
+        if printf '%s\\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
+        if printf '%s\\n' "$line" | grep -Eq '^/[^[:space:]]+ (= )?[^[:space:]]+$'; then
+          agent_runs "\${line%% *}"
+        else
+          echo yes
+        fi
+      done
+    )
+    if [ -s "$tmp/errs" ]; then echo "FACT agent_filecaps=unchecked"; else verdict agent_filecaps "$found"; fi
   fi
 fi
-if [ -z "$files" ]; then
+# setuid to another account, or setgid to a group the agent does not already have.
+gids=$(as_agent id -G 2>/dev/null) || gids=""
+others=()
+for gid in $gids; do
+  case "$gid" in *[!0-9]*) gids="" ;; *) others+=('!' -group "$gid") ;; esac
+done
+if [ -z "$tmp" ] || [ -z "$gids" ] || ! : > "$tmp/setid"; then
   echo "FACT agent_setid=unchecked"
-elif [ -n "$(scan_files "$files" '(' -perm -4000 -o -perm -2000 ')' ! -user "$MAKA_AGENT_USER")" ]; then
+elif [ -n "$(scan '(' '(' -perm -4000 ! -user "$MAKA_AGENT_USER" ')' -o '(' -perm -2000 "\${others[@]}" ')' ')' -fprint0 "$tmp/setid")" ]; then
   echo "FACT agent_setid=unchecked"
 else
   found=$(while IFS= read -r -d '' path; do
-    if printf '%s\\n' "$path" | grep -Eq '^/(usr/)?s?bin/(su|sudo|passwd|chsh|chfn|gpasswd|newgrp|mount|umount|fusermount3?|chage|expiry|crontab|wall|write|ssh-agent|unix_chkpwd|pam_extrausers_chkpwd)$'; then continue; fi
-    if printf '%s\\n' "$path" | grep -Eq '^/usr/(lib|libexec)/(openssh/ssh-keysign|dbus-1\\.0/dbus-daemon-launch-helper)$'; then continue; fi
+    case "\${path%/*}" in
+      (/bin|/sbin|/usr/bin|/usr/sbin)
+        case "\${path##*/}" in
+          (su|sudo|passwd|chsh|chfn|gpasswd|newgrp|mount|umount|fusermount|fusermount3|chage|expiry|crontab|wall|write|ssh-agent|unix_chkpwd|pam_extrausers_chkpwd) continue ;;
+        esac ;;
+      (/usr/lib/openssh|/usr/libexec/openssh) [ "\${path##*/}" != ssh-keysign ] || continue ;;
+      (/usr/lib/dbus-1.0|/usr/libexec/dbus-1.0) [ "\${path##*/}" != dbus-daemon-launch-helper ] || continue ;;
+    esac
     agent_runs "$path"
-  done < "$files")
+  done < "$tmp/setid")
   verdict agent_setid "$found"
 fi
-[ -z "$files" ] || rm -f "$files"`;
+[ -z "$tmp" ] || rm -rf "$tmp"`;
 
 /**
  * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
@@ -249,6 +262,7 @@ caps=$(as_agent sh -c 'grep -E "^Cap(Prm|Eff|Amb):" /proc/self/status' 2>/dev/nu
 if [ -z "$caps" ]; then echo "FACT agent_caps=unknown"
 elif printf '%s\n' "$caps" | awk '{ if ($2 !~ /^0+$/) bad = 1 } END { exit bad ? 0 : 1 }'; then echo "FACT agent_caps=held"
 else echo "FACT agent_caps=none"; fi
+unset MAKA_SCAN_ROOTS
 ${FILE_CAPS_PROBE}
 # Groups that are root by another name, and the sockets that run containers for whoever may write them.
 groups=$(as_agent id -Gn 2>/dev/null || true)

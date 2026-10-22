@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -22,7 +30,7 @@ interface Box {
   root: string;
   /** A second one, standing in for a mount such as `/data`. */
   data: string;
-  /** The task root, which the scan leaves out. */
+  /** The task root. */
   tasks: string;
   /** Adds a file under `dir`; `caps` is the line the fake `getcap` prints for it. */
   file(dir: string, name: string, options?: { mode?: number; caps?: string }): string;
@@ -36,17 +44,30 @@ interface Probe {
   agentUser?: string;
   /** Extra scan roots, such as one that does not exist. */
   extraRoots?: string[];
+  /** What the fake `getcap` says on stderr. */
+  stderr?: string;
+  /** The groups the agent account answers with (default: the test account's own). */
+  agentGroups?: string;
+  /** Run as in production, without scan roots, and only record how `find` is called. */
+  production?: boolean;
 }
 
 /** Runs the privileged-file part of the probe over a scratch tree laid out by `setup`. */
 function probe(setup: (box: Box) => void, options: Probe = {}): Record<string, string> {
+  return probeWith(setup, options).facts;
+}
+
+function probeWith(
+  setup: (box: Box) => void,
+  options: Probe = {},
+): { facts: Record<string, string>; finds: string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'filecaps-'));
   try {
     const bin = join(dir, 'bin');
     mkdirSync(bin);
+    // The line the fake getcap prints for a file, kept by inode: any file name works.
     const caps = join(dir, 'caps');
-    writeFileSync(caps, '');
-    const lines: string[] = [];
+    mkdirSync(caps);
     const box: Box = {
       root: join(dir, 'root'),
       data: join(dir, 'data'),
@@ -55,30 +76,41 @@ function probe(setup: (box: Box) => void, options: Probe = {}): Record<string, s
         const path = join(parent, name);
         writeFileSync(path, '#!/bin/sh\n');
         chmodSync(path, mode);
-        if (line !== undefined) lines.push(`${path}\t${line}`);
+        if (line !== undefined) writeFileSync(join(caps, String(statSync(path).ino)), `${line}\n`);
         return path;
       },
     };
     for (const d of [box.root, box.data, box.tasks]) mkdirSync(d, { recursive: true });
     setup(box);
-    writeFileSync(caps, lines.length > 0 ? `${lines.join('\n')}\n` : '');
     // A getcap that prints, for each file it is given, the line the test set for it.
     writeFileSync(
       join(bin, 'getcap'),
-      `#!/bin/sh\nfor f in "$@"; do awk -F '\\t' -v f="$f" '$1 == f { print $2 }' '${caps}'; done\nexit ${options.status ?? 0}\n`,
+      `#!/bin/sh
+for f in "$@"; do
+  i=$(ls -di "$f" | head -n 1 | awk '{ print $1 }')
+  if [ -f '${caps}'/"$i" ]; then cat '${caps}'/"$i"; fi
+done
+${options.stderr === undefined ? '' : `echo '${options.stderr}' >&2`}
+exit ${options.status ?? 0}
+`,
     );
     chmodSync(join(bin, 'getcap'), 0o755);
     const roots = [box.root, box.data, ...(options.extraRoots ?? [])].join('\n');
+    const finds = join(dir, 'finds');
+    const root = options.production
+      ? `root() { if [ "$1" = find ]; then printf '%s\\n' "$*" >> '${finds}'; else "$@"; fi; }`
+      : 'root() { "$@"; }';
+    const agent =
+      options.agentGroups === undefined
+        ? AGENT[options.agent ?? 'real']
+        : `as_agent() { if [ "$1" = id ]; then echo '${options.agentGroups}'; else "$@"; fi; }`;
     const run = spawnSync(
       'bash',
-      [
-        '-c',
-        `tool_bin() { command -v "$1" || true; }\nroot() { "$@"; }\n${AGENT[options.agent ?? 'real']}\n${FILE_CAPS_PROBE}`,
-      ],
+      ['-c', `tool_bin() { command -v "$1" || true; }\n${root}\n${agent}\n${FILE_CAPS_PROBE}`],
       {
         env: {
           PATH: `${bin}:${process.env.PATH ?? ''}`,
-          MAKA_SCAN_ROOTS: roots,
+          ...(options.production ? {} : { MAKA_SCAN_ROOTS: roots }),
           MAKA_ROOT: box.tasks,
           MAKA_AGENT_USER: options.agentUser ?? 'nobody',
         },
@@ -90,7 +122,15 @@ function probe(setup: (box: Box) => void, options: Probe = {}): Record<string, s
       const match = /^FACT ([a-z_]+)=(.*)$/u.exec(line.trim());
       if (match) facts[match[1] as string] = match[2] as string;
     }
-    return facts;
+    let found: string[] = [];
+    try {
+      // One call per entry; a test in a call may hold a line break itself.
+      found = readFileSync(finds, 'utf8')
+        .split(/\n(?=find )/u)
+        .map((call) => call.trim())
+        .filter(Boolean);
+    } catch {}
+    return { facts, finds: found };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -216,12 +256,52 @@ test('the stock raw-socket and id-mapping helpers are allowed under their stock 
   );
 });
 
-test('the task root is left out: the agent cannot give a file a capability there', () => {
+test('the task root is scanned too: a privileged program put there by the image or a mount counts', () => {
   assert.equal(
     probe((box) => {
       box.file(box.tasks, 'tool', { caps: `${join(box.tasks, 'tool')} cap_chown=ep` });
     }).agent_filecaps,
-    'none',
+    'found',
+  );
+  assert.equal(
+    probe((box) => {
+      box.file(box.tasks, 'su-like', { mode: 0o4755 });
+    }).agent_setid,
+    'found',
+  );
+});
+
+test('the walk starts at / itself, so hidden directories and files at the top are in it', () => {
+  const { finds } = probeWith(() => {}, { production: true });
+  assert.ok(finds.length > 0, 'nothing was walked');
+  for (const call of finds) {
+    assert.ok(
+      call.startsWith(
+        'find / -ignore_readdir_race ( -path /proc -o -path /sys -o -path /dev ) -prune -o ',
+      ),
+      call,
+    );
+  }
+});
+
+test('a line break in a path cannot split a capability line into harmless ones', () => {
+  // getcap prints "<path> <caps>": with this path, the old parser read two lines naming
+  // "<data>/nonexistent" and "/nonexistent", neither of which exists.
+  assert.equal(
+    probe((box) => {
+      const dir = join(box.data, 'nonexistent cap_net_admin=ep\n');
+      mkdirSync(dir);
+      box.file(dir, 'nonexistent', { caps: `${join(dir, 'nonexistent')} cap_chown=ep` });
+    }).agent_filecaps,
+    'found',
+  );
+});
+
+test('a getcap that complains on stderr but exits 0 is not a clean scan', () => {
+  assert.equal(
+    probe((box) => box.file(box.root, 'x'), { stderr: "Failed to get capabilities of file 'x'" })
+      .agent_filecaps,
+    'unchecked',
   );
 });
 
@@ -233,9 +313,12 @@ test('a program setuid or setgid to another account that the agent can run fails
     'found',
   );
   assert.equal(
-    probe((box) => {
-      box.file(box.root, 'sg-like', { mode: 0o2755 });
-    }).agent_setid,
+    probe(
+      (box) => {
+        box.file(box.root, 'sg-like', { mode: 0o2755 });
+      },
+      { agentGroups: '999999' },
+    ).agent_setid,
     'found',
   );
   // One the agent cannot execute is not a finding.
@@ -243,6 +326,40 @@ test('a program setuid or setgid to another account that the agent can run fails
     probe((box) => {
       box.file(box.root, 'locked', { mode: 0o4600 });
     }).agent_setid,
+    'none',
+  );
+});
+
+test('the stock setuid tools are allowed by their whole path, not by one line of it', () => {
+  assert.equal(
+    probe((box) => {
+      const dir = join(box.data, 'payload\n', 'usr', 'bin');
+      mkdirSync(dir, { recursive: true });
+      box.file(dir, 'sudo', { mode: 0o4755 });
+    }).agent_setid,
+    'found',
+  );
+});
+
+test('a setgid program counts by its group, whoever owns it', () => {
+  // Owned by the agent, but setgid to a group it is not in (say disk): running it gives that group.
+  assert.equal(
+    probe(
+      (box) => {
+        box.file(box.root, 'sg', { mode: 0o2755 });
+      },
+      { agentUser: userInfo().username, agentGroups: '999999' },
+    ).agent_setid,
+    'found',
+  );
+  // Setgid to a group the agent already has gives it nothing.
+  assert.equal(
+    probe(
+      (box) => {
+        box.file(box.root, 'sg', { mode: 0o2755 });
+      },
+      { agentUser: userInfo().username },
+    ).agent_setid,
     'none',
   );
 });

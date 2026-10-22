@@ -502,11 +502,12 @@ cannot take them away. The sandbox user (it needs `sudo -n`, which the egress gu
 the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
 account is not allowed to run anything; a query that fails is a failed check. The account must hold no
 Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), and no program it can run anywhere on the
-box (every directory under `/` and the mounts below them, except `/proc`, `/sys`, `/dev` and the work
-root) may carry any file capability, or be setuid or setgid to another account, apart from the stock
-ping and id-mapping helpers and the stock setuid tools (`sudo`, `su`, `passwd`, `mount`, ...) under
-their own paths. The scan runs as root, needs GNU `find` and `getcap` (from `libcap2-bin`), and a scan
-that fails is a failed check. It must not be in a group that
+box (the whole tree from `/` and every mount below it, the work root included, except `/proc`, `/sys`
+and `/dev`) may carry any file capability, be setuid to another account, or be setgid to a group the
+agent is not in, apart from the stock ping and id-mapping helpers and the stock setuid tools (`sudo`,
+`su`, `passwd`, `mount`, ...) under their own paths. The scan runs as root, needs GNU `find` and
+`getcap` (from `libcap2-bin`), and a scan that fails, or a `getcap` that reports an error, is a failed
+check. It must not be in a group that
 is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
 socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
 not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
