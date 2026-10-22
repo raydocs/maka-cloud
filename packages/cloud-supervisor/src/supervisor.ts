@@ -372,8 +372,24 @@ export class Supervisor {
     return owner === undefined ? this.settings() : this.settingsOf(owner);
   }
 
+  /**
+   * The operator's settings with the owner's quiet hours and time zone over them. Mutes only add:
+   * what the operator muted stays muted for every owner, and an owner's own mutes come on top.
+   */
   private settingsOf(owner: string): Settings {
-    return { ...this.settings(), ...this.store.ownerSettings(owner) };
+    const operator = this.settings();
+    const own = this.ownerChoices(owner);
+    return {
+      ...operator,
+      ...own,
+      mutedKinds: [...new Set([...operator.mutedKinds, ...(own.mutedKinds ?? [])])],
+    };
+  }
+
+  private ownerChoices(owner: string): OwnerSettingsPatch {
+    return this.store.ownerSettings(owner, (error) =>
+      this.warn(`The supervisor ignored the unreadable settings of owner ${owner}`, error),
+    );
   }
 
   private capReached(at: number): boolean {
@@ -740,7 +756,7 @@ export class Supervisor {
   setOwnerSettings(owner: string, patch: OwnerSettingsPatch): Settings {
     const parsed = OwnerSettingsPatchSchema.parse(patch);
     return this.store.tx(() => {
-      this.store.putOwnerSettings(owner, { ...this.store.ownerSettings(owner), ...parsed });
+      this.store.putOwnerSettings(owner, { ...this.ownerChoices(owner), ...parsed });
       return this.settingsOf(owner);
     });
   }
@@ -748,7 +764,10 @@ export class Supervisor {
   /** Mutes or unmutes a kind's pushes for this owner only. */
   setOwnerMute(owner: string, kind: ItemKind, muted: boolean): Settings {
     if (!ITEM_KINDS.includes(kind)) throw new Error(`Unknown kind ${kind}`);
-    const current = this.settingsOf(owner).mutedKinds.filter((candidate) => candidate !== kind);
+    // Only the owner's own mutes are edited here; the operator's stay (and still read back muted).
+    const current = (this.ownerChoices(owner).mutedKinds ?? []).filter(
+      (candidate) => candidate !== kind,
+    );
     return this.setOwnerSettings(owner, { mutedKinds: muted ? [...current, kind] : current });
   }
 

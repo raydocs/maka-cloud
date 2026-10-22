@@ -76,3 +76,33 @@ test('held pushes are released by their own owner’s quiet hours', async () => 
   assert.equal(r.host.interrupts[0]?.batch, true);
   await r.stop();
 });
+
+test('an owner can add to the operator’s mutes and cannot lift them', async () => {
+  const r = await rig({ host: twoOwners(), settings: { mutedKinds: ['budget'] } });
+  const added = r.supervisor.setOwnerMute('inv_a', 'decision', true);
+  assert.deepEqual([...added.mutedKinds].sort(), ['budget', 'decision']);
+  // Unmuting the operator's kind changes nothing for the owner: it reads back still muted.
+  const lifted = r.supervisor.setOwnerMute('inv_a', 'budget', false);
+  assert.deepEqual([...lifted.mutedKinds].sort(), ['budget', 'decision']);
+  await r.question('qa', 'budget_overrun', 'cnv_a');
+  assert.equal(r.host.interrupts.length, 0, 'the operator’s mute still holds the push back');
+  // Unmuting the owner's own kind works.
+  assert.deepEqual(r.supervisor.setOwnerMute('inv_a', 'decision', false).mutedKinds, ['budget']);
+  await r.stop();
+});
+
+test('one owner’s unreadable settings row does not fail the pass for the others', async () => {
+  const r = await rig({ host: twoOwners() });
+  const store = (
+    r.supervisor as unknown as { store: { putOwnerSettings(o: string, s: never): void } }
+  ).store;
+  store.putOwnerSettings('inv_a', { mutedKinds: ['no_such_kind'] } as never);
+  await r.question('qa', 'taste', 'cnv_a');
+  await r.question('qb', 'taste', 'cnv_b');
+  assert.equal(r.host.interrupts.length, 2, 'both owners are still told');
+  assert.ok(
+    r.host.warnings.some((message) => /unreadable settings of owner inv_a/u.test(message)),
+    'and the row is reported',
+  );
+  await r.stop();
+});

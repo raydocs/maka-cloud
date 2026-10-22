@@ -200,10 +200,20 @@ export class Store {
     );
   }
 
-  /** What this owner chose for themselves; nothing for an owner who chose nothing. */
-  ownerSettings(owner: string): OwnerSettingsPatch {
+  /**
+   * What this owner chose for themselves; nothing for an owner who chose nothing. A row that no
+   * longer parses (a kind or a time zone the host stopped knowing) counts as nothing and is
+   * reported, so one owner's stale row never fails the pass for everyone else.
+   */
+  ownerSettings(owner: string, onProblem?: (error: unknown) => void): OwnerSettingsPatch {
     const row = this.get('SELECT value FROM owner_settings WHERE owner = ?', owner);
-    return row ? OwnerSettingsPatchSchema.parse(JSON.parse(str(row.value))) : {};
+    if (!row) return {};
+    try {
+      return OwnerSettingsPatchSchema.parse(JSON.parse(str(row.value)));
+    } catch (error) {
+      onProblem?.(error);
+      return {};
+    }
   }
 
   putOwnerSettings(owner: string, settings: OwnerSettingsPatch): void {
