@@ -424,9 +424,10 @@ is a failure (recheck A3). Add `agent_setuid` from `find / -xdev \( -perm -4000 
 call must yield `unchecked`; `/usr/lib/x cap_chown=ep` must yield `found`; `/opt/ping cap_net_raw=ep`
 (allowlisted name, wrong path) must yield `found`. `firewall-account.test.ts` fixture: a missing
 `agent_setuid` is refused.
-*Status*: #334 asks `getcap` about executable files one at a time (a path with a space or a line break
-cannot split a line into a harmless one; a line whose path is not one word counts as found; any
-stderr or non-zero exit is `unchecked`, which fails the box), walks from `/` and prunes only `/proc`,
+*Status*: #334 asks `getcap` about executable files by full path, in one batch, with a name that
+holds a line break asked alone (so a path with a space or a line break cannot split a line into a
+harmless one; a line whose path is not one word counts as found; any stderr or non-zero exit is
+`unchecked`, which fails the box), walks from `/` and prunes only `/proc`,
 `/sys` and `/dev` (so `/data`, `/mnt`, a split `/bin` and the work root are in), runs as root, and
 adds `agent_setid`: a setuid or setgid program owned by another account that the agent can execute
 fails the box unless it is a stock tool at its own full path; a setgid program counts unless its group
