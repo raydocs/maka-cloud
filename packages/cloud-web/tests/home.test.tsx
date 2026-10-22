@@ -81,6 +81,8 @@ const item = (over: Partial<InboxItem> = {}): InboxItem => ({
 
 interface Server {
   inbox?: InboxItem[] | 404;
+  /** True while reading the inbox should fail. */
+  inboxFails?: () => boolean;
   projects?: ProjectView[] | 404;
   tasks?: Record<string, TaskView[]>;
   answer?: (body: { answerId: string; optionId: string; preconditionHash: string }) => Response;
@@ -93,6 +95,7 @@ function serve(config: Server) {
     const path = String(input);
     calls.push(`${init?.method ?? 'GET'} ${path}`);
     if (path.startsWith('/v1/inbox/items') && init?.method === undefined) {
+      if (config.inboxFails?.()) return Response.json({}, { status: 500 });
       if (config.inbox === 404) return Response.json({}, { status: 404 });
       return Response.json({ items: config.inbox ?? [] });
     }
@@ -249,7 +252,7 @@ test('since you were last here: the results since the stored visit, three tiles,
   await within(region).findByText('Fix the login loop');
   expect(within(region).queryByText('Older job')).toBeNull();
   const tiles = region.querySelectorAll('.stat-tile');
-  expect([...tiles].map((t) => t.textContent)).toEqual(['Done2', 'Needs you1', 'Spent$0.50']);
+  expect([...tiles].map((t) => t.textContent)).toEqual(['Done2', 'Spent$0.50']);
   expect(within(region).getByText('The login page no longer loops.')).toBeTruthy();
   expect(within(region).getByText('The build broke.')).toBeTruthy();
   fireEvent.click(within(region).getByRole('button', { name: /Upgrade deps/u }));
@@ -485,4 +488,16 @@ test('a suggestion with text from outside says so, and the offer to turn a kind 
   expect(within(region).getByRole('button', { name: 'Turn off' })).toBeTruthy();
   expect(within(region).getByRole('button', { name: 'Keep' })).toBeTruthy();
   expect(within(region).getByText('Noticed for you (2)')).toBeTruthy();
+});
+
+test('where decisions would be: bars while loading, a retry when they could not load, then a calm line', async () => {
+  let fail = true;
+  renderHome({ inboxFails: () => fail });
+  expect(screen.getByRole('region', { name: 'Loading' })).toBeTruthy();
+  const failed = await screen.findByRole('region', { name: 'Decisions could not be loaded' });
+  fail = false;
+  fireEvent.click(within(failed).getByRole('button', { name: 'Try again' }));
+  const calm = await screen.findByRole('region', { name: 'Nothing needs you' });
+  expect(calm.textContent).toBe('Nothing needs you.');
+  expect(screen.queryByRole('region', { name: 'Loading' })).toBeNull();
 });

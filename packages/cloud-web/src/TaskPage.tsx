@@ -1,7 +1,8 @@
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   type CloudClient,
+  confidenceWords,
   displayText,
   dollars,
   errorText,
@@ -9,6 +10,8 @@ import {
   type LoadedResult,
   loadTaskResults,
   pullRequestOf,
+  reviewLineOf,
+  reviewWords,
   stepsOf,
   taskLabel,
   verdictOf,
@@ -16,6 +19,7 @@ import {
   Unsupported,
 } from '@maka-cloud/client';
 import { DiffLines, SourcesStack, useSources } from './Delivery';
+import { FailureNote } from './Failure';
 
 function ImageResult({ name, blob }: { name: string; blob: Blob }) {
   const [src, setSrc] = useState('');
@@ -88,9 +92,10 @@ export function TaskPage({
 
   const manifest = task.manifest;
   // The runner's own `review:` line says whether a second agent reviewed the change; it is shown
-  // on its own, in the runner's words, and left out of the plain list of what was done.
-  const reviewLine = manifest?.done.find((line) => line.startsWith('review: '));
+  // once, under Review, and left out of the plain list of what was done.
+  const reviewLine = reviewLineOf(manifest?.done);
   const done = manifest?.done.filter((line) => line !== reviewLine) ?? [];
+  const review = reviewWords(manifest?.done, verdict);
   const { steps } = stepsOf(task.progress);
   const pull = results ? pullRequestOf(results) : undefined;
   return (
@@ -99,13 +104,15 @@ export function TaskPage({
       aria-label={`Task: ${displayText(task.title ?? 'Task')}`}
     >
       <button type="button" className="back-link" onClick={onBack}>
-        ← Back
+        <ArrowLeft aria-hidden="true" size={16} className="icon-inline" /> Back
       </button>
       <h1>{displayText(task.title ?? 'Task')}</h1>
-      <p className="task-meta">
+      <p className="task-page-meta muted">
         <span className={`status-mark ${task.state}`} /> {taskLabel(task)} · Cost{' '}
-        {dollars(task.costUsd)}
-        {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+        <span className={task.costUsd === undefined ? undefined : 'mono'}>
+          {dollars(task.costUsd)}
+          {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+        </span>
         {pull && (
           <>
             {' · '}
@@ -115,27 +122,23 @@ export function TaskPage({
           </>
         )}
       </p>
-      {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
+      {task.failureReason && <FailureNote reason={task.failureReason} />}
       {manifest && (
         <section aria-label="Outcome">
           <h2>Outcome</h2>
           <p>{displayText(manifest.summary)}</p>
-          <p className="muted">Confidence the agent reported: {manifest.confidence}</p>
+          <p className="muted">{confidenceWords(manifest.confidence)}</p>
           <List title="Done" items={done} />
           <List title="Not done" items={manifest.notDone} />
           <List title="Known issues" items={manifest.knownIssues} />
         </section>
       )}
-      {reviewLine !== undefined && (
-        <section aria-label="Independent review">
-          <h2>Independent review</h2>
-          <p>{displayText(reviewLine.slice('review: '.length))}</p>
-        </section>
-      )}
-      {verdict && (
+      {review.length > 0 && (
         <section aria-label="Review">
           <h2>Review</h2>
-          <p>{displayText(verdict.ask)}</p>
+          {review.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
         </section>
       )}
       {steps.length > 0 && (

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ArrowUp } from 'lucide-react';
 import {
+  BRAND,
   type CloudClient,
   type Conversation,
   ConversationStarter,
@@ -51,8 +52,46 @@ function StatTile({ label, value }: { label: string; value: string }) {
   return (
     <div className="stat-tile">
       <span className="stat-label">{label}</span>
-      <strong className="stat-value">{value}</strong>
+      <strong className={/\d/u.test(value) ? 'stat-value mono' : 'stat-value'}>{value}</strong>
     </div>
+  );
+}
+
+/**
+ * What stands where the decisions would be when there are none: bars while they are read, a retry
+ * when they could not be (even if an earlier read was empty), a calm line when nothing waits. The
+ * phone's InboxStatus, on the web.
+ */
+function InboxStatus({
+  loaded,
+  failed,
+  onRetry,
+}: {
+  loaded: boolean;
+  failed: boolean;
+  onRetry: () => void;
+}) {
+  if (failed)
+    return (
+      <section className="card section-card" aria-label="Decisions could not be loaded">
+        <p className="muted">Decisions could not be loaded.</p>
+        <button type="button" className="quiet-action" onClick={onRetry}>
+          Try again
+        </button>
+      </section>
+    );
+  if (loaded)
+    return (
+      <section className="card section-card" aria-label="Nothing needs you">
+        <p className="muted">Nothing needs you.</p>
+      </section>
+    );
+  return (
+    <section className="card section-card" aria-label="Loading" aria-busy="true">
+      <span className="skeleton-line" style={{ width: '60%' }} />
+      <span className="skeleton-line" />
+      <span className="skeleton-line" style={{ width: '80%' }} />
+    </section>
   );
 }
 
@@ -87,10 +126,8 @@ export function Home({
   const clock = useRef(now);
   clock.current = now;
   const feed = useMemo(() => new HomeFeed(client, localVisits, () => clock.current()), [client]);
-  const { items, busy, answerError, since, done, projects } = useSyncExternalStore(
-    feed.subscribe,
-    feed.getSnapshot,
-  );
+  const { items, busy, inboxLoaded, inboxFailed, answerError, since, done, projects } =
+    useSyncExternalStore(feed.subscribe, feed.getSnapshot);
 
   // The last visit is read once; it is written when the person leaves, so a reload is a visit.
   // Come back to this tab and the decisions, results and schedule are read again.
@@ -117,7 +154,7 @@ export function Home({
   const live = Object.values(items)
     .filter((item) => item.state !== 'closed')
     .sort((a, b) => b.updatedAt - a.updatedAt);
-  // What the employee only suggests is not something that "needs you".
+  // What Maka only suggests is not something that "needs you".
   const { waiting: open, suggested } = splitSuggestions(live);
   const finished = since === undefined || done === undefined ? [] : doneSince(done, since);
   const spent = finished.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
@@ -177,6 +214,10 @@ export function Home({
               </p>
             )}
           </section>
+        )}
+
+        {open.length === 0 && (
+          <InboxStatus loaded={inboxLoaded} failed={inboxFailed} onRetry={() => feed.refresh()} />
         )}
 
         {suggested.length > 0 && (
@@ -240,7 +281,7 @@ export function Home({
 
         <section className="card start" aria-label="Start something">
           <h1>Make room for your next idea.</h1>
-          <p>Tell us what you’d like done, in a sentence. We’ll take it from there.</p>
+          <p>Tell {BRAND.name} what you’d like done, in a sentence. It takes it from there.</p>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -292,38 +333,35 @@ export function Home({
           )}
         </section>
 
-        {since !== undefined && done !== undefined && (finished.length > 0 || open.length > 0) && (
+        {since !== undefined && done !== undefined && finished.length > 0 && (
           <section className="card section-card" aria-label="Since you were last here">
             <h2>Since you were last here</h2>
             <div className="stat-tiles">
               <StatTile label="Done" value={String(finished.length)} />
-              <StatTile label="Needs you" value={String(open.length)} />
               <StatTile label="Spent" value={anySpend ? dollars(spent) : 'Not reported'} />
             </div>
-            {finished.length > 0 && (
-              <ul className="done-lines">
-                {finished.map((entry) => (
-                  <li key={entry.taskId}>
-                    <button
-                      type="button"
-                      className="done-line"
-                      onClick={() =>
-                        onOpenTask ? onOpenTask(entry.task) : onOpen(entry.conversationId)
-                      }
-                    >
-                      <span
-                        className={`status-mark ${entry.state === 'succeeded' ? 'succeeded' : 'failed'}`}
-                      />
-                      <span className="done-text">
-                        <strong>{displayText(entry.title)}</strong>
-                        <span className="muted">{displayText(entry.outcome)}</span>
-                      </span>
-                      <span className="done-cost muted">{dollars(entry.costUsd)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <ul className="done-lines">
+              {finished.map((entry) => (
+                <li key={entry.taskId}>
+                  <button
+                    type="button"
+                    className="done-line"
+                    onClick={() =>
+                      onOpenTask ? onOpenTask(entry.task) : onOpen(entry.conversationId)
+                    }
+                  >
+                    <span
+                      className={`status-mark ${entry.state === 'succeeded' ? 'succeeded' : 'failed'}`}
+                    />
+                    <span className="done-text">
+                      <strong>{displayText(entry.title)}</strong>
+                      <span className="muted">{displayText(entry.outcome)}</span>
+                    </span>
+                    <span className="done-cost muted">{dollars(entry.costUsd)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
 

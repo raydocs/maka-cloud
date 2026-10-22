@@ -9,7 +9,7 @@ appId: cloud.maka.app
     element:
       id: "delivery-picture"
 - assertVisible: "Login page after fix"
-- assertVisible: "Open pull request · github.com ↗"
+- assertVisible: "Open pull request · github.com"
 - takeScreenshot: delivery-card
 - tapOn:
     id: "delivery-picture"

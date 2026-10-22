@@ -252,7 +252,7 @@ test('a task page opens from the card, shows its changes and review on an opaque
   await page.screenshot({ path: info.outputPath('task-page.png') });
 
   // Back returns to the chat as it was, not a fresh one.
-  await page.getByRole('button', { name: '← Back' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('article', { name: /^Result: Fix the login loop/u })).toBeVisible();
 });
 
