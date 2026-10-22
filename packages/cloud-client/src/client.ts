@@ -46,13 +46,48 @@ export class ApiError extends Error {
 /** The server has no such feature: its route answered 404 or 405. */
 export class Unsupported extends Error {}
 
-/** Authenticated fetch SSE: native EventSource cannot carry the invite header. */
+/** Nothing, not even a heartbeat, arrived for longer than the stream may be silent. */
+export class StreamStalled extends Error {
+  constructor() {
+    super('The event stream went silent.');
+    this.name = 'StreamStalled';
+  }
+}
+
+/** The server writes a heartbeat every 15 s, so twice that and a margin of silence is a dead link. */
+export const STREAM_IDLE_MS = 35_000;
+
+/**
+ * Authenticated fetch SSE: native EventSource cannot carry the invite header.
+ *
+ * With `idleMs`, a read that brings nothing for that long throws `StreamStalled`: a connection that
+ * hangs without closing (a sleeping laptop, a proxy holding the socket, a phone changing networks)
+ * is given up instead of looking live. `onBytes` is called for every chunk, heartbeats included.
+ */
 export async function readEvents<T = FeedEvent>(
   response: Response,
   receive: (event: T) => void,
+  options: { idleMs?: number; onBytes?: () => void } = {},
 ): Promise<void> {
   if (!response.body) throw new Error('Missing event stream');
   const reader = response.body.getReader();
+  const { idleMs, onBytes } = options;
+  const read = () =>
+    idleMs === undefined
+      ? reader.read()
+      : new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new StreamStalled()), idleMs);
+          reader.read().then(
+            (result) => {
+              clearTimeout(timer);
+              resolve(result);
+            },
+            (error: unknown) => {
+              clearTimeout(timer);
+              reject(error);
+            },
+          );
+        });
   const decoder = new TextDecoder();
   let buffer = '';
   let kind = '';
@@ -85,8 +120,9 @@ export async function readEvents<T = FeedEvent>(
   };
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await read();
       if (done) break;
+      onBytes?.();
       buffer += decoder.decode(value, { stream: true });
       // Keep a trailing CR until the next chunk (CRLF may split across chunks).
       let match: RegExpExecArray | null;
@@ -108,6 +144,8 @@ export interface ClientOptions {
   baseUrl?: string;
   /** Called when the server says the invite is no longer valid (401). */
   onRevoked?: () => void;
+  /** How long the event stream may bring nothing before it is reconnected. Default `STREAM_IDLE_MS`. */
+  streamIdleMs?: number;
 }
 
 export class CloudClient {
@@ -116,6 +154,7 @@ export class CloudClient {
   private readonly fetcher: typeof fetch;
   private readonly baseUrl: string;
   private readonly onRevoked: (() => void) | undefined;
+  private readonly streamIdleMs: number;
   constructor(
     private readonly token: string,
     options: ClientOptions | typeof fetch = {},
@@ -126,6 +165,7 @@ export class CloudClient {
     this.fetcher = given ? (input, init) => given(input, init) : globalThis.fetch.bind(globalThis);
     this.baseUrl = resolved.baseUrl ?? '';
     this.onRevoked = resolved.onRevoked;
+    this.streamIdleMs = resolved.streamIdleMs ?? STREAM_IDLE_MS;
   }
 
   private async send(path: string, init: RequestInit = {}, feature?: string): Promise<Response> {
@@ -217,9 +257,13 @@ export class CloudClient {
   }
   async watchComputer(task: string, receive: (frame: ComputerFrame) => void, signal: AbortSignal) {
     const response = await this.send(`${routes.computer(task)}/stream`, { signal });
-    await readEvents<{ kind: string; data: ComputerFrame }>(response, (event) => {
-      if (!signal.aborted && event.kind === 'computer') receive(event.data);
-    });
+    await readEvents<{ kind: string; data: ComputerFrame }>(
+      response,
+      (event) => {
+        if (!signal.aborted && event.kind === 'computer') receive(event.data);
+      },
+      { idleMs: this.streamIdleMs },
+    );
     if (!signal.aborted) {
       // EOF can mean a revoked invite, not merely a broken connection.
       await this.send(routes.computer(task), { signal });
@@ -382,13 +426,25 @@ export class CloudClient {
         }
         if (!response.headers.get('content-type')?.includes('text/event-stream'))
           throw new Error('Not an event stream');
-        status('Live');
-        await readEvents(response, (event) => {
-          if (event.id <= lastId) return;
-          receive(event);
-          lastId = event.id;
-          delay = 500;
-        });
+        // Live once bytes arrive (the server opens with a comment), not when the request starts.
+        let live = false;
+        await readEvents(
+          response,
+          (event) => {
+            if (event.id <= lastId) return;
+            receive(event);
+            lastId = event.id;
+            delay = 500;
+          },
+          {
+            idleMs: this.streamIdleMs,
+            onBytes: () => {
+              if (live) return;
+              live = true;
+              status('Live');
+            },
+          },
+        );
       } catch {
         if (signal.aborted) return;
       }
