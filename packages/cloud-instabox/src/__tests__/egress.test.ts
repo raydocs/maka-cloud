@@ -346,6 +346,30 @@ describe('applyEgressGuard', () => {
     );
   });
 
+  it('refuses a home that another account could swap, through it or any directory above it', async () => {
+    // Writable by everyone and not sticky: anyone could rename the home and put another in its place.
+    const open = join(state, 'open');
+    await fs.mkdir(open);
+    await fs.chmod(open, 0o777);
+    const home = join(open, 'home');
+    await fs.mkdir(home);
+    await make({ home });
+    await assert.rejects(run(), /could be changed by another account/u);
+    assert.deepEqual(v4(), []);
+    await assert.rejects(fs.lstat(join(home, '.maka-egress')), /ENOENT/u, 'nothing was made');
+    // Sticky, as /tmp is: nobody else can rename what is ours in it.
+    await h.cleanup();
+    await fs.chmod(open, 0o1777);
+    await make({ home });
+    await run();
+    // The home itself, open to the group.
+    await h.cleanup();
+    await fs.chmod(open, 0o755);
+    await fs.chmod(home, 0o775);
+    await make({ home });
+    await assert.rejects(run(), /could be changed by another account/u);
+  });
+
   it('refuses when a rule cannot be added, and says which', async () => {
     await make({ env: { SHIM_FAIL: '169\\.254\\.0\\.0/16' } });
     await assert.rejects(run(), /cannot block 169\.254\.0\.0\/16/u);

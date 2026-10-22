@@ -35,10 +35,10 @@ export const EGRESS_CHAIN = 'MAKA_EGRESS';
 
 /**
  * Held while the rules are checked or rebuilt, so that two callers on one box do not trip over each
- * other. It lives in a directory of the sandbox user's home that only that user can enter (the box
- * check makes sure the agent cannot write the home), never in a directory anyone can write such as
- * `/tmp`: there the agent could create the path first, or open the file and hold the lock, and every
- * guard would time out.
+ * other. It lives in a directory of the sandbox user's home that only that user can enter, and the
+ * guard refuses a home where another account could change it or any directory above it; never in a
+ * directory anyone can write such as `/tmp`: there the agent could create the path first, or open
+ * the file and hold the lock, and every guard would time out.
  */
 const EGRESS_LOCK_DIR = '.maka-egress';
 
@@ -175,7 +175,22 @@ guard() {
 # and empty. A box that cannot give it is refused.
 command -v flock >/dev/null 2>&1 || fail "flock is not installed, so two guards could interleave"
 [ -n "\${HOME:-}" ] || fail "HOME is not set, so there is no private place for the lock"
-lockdir="$HOME/$MAKA_LOCK_DIR"
+# Owned by root or the sandbox user, and no other account can rename what is in it: writable by
+# nobody else, or sticky. Then no one else can swap the directory or any directory above it.
+closed_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  [ -O "$1" ] || [ -n "$(find "$1" -maxdepth 0 -user 0 -print 2>/dev/null)" ] || return 1
+  [ -n "$(find "$1" -maxdepth 0 \\( -perm -1000 -o \\( ! -perm -020 ! -perm -002 \\) \\) -print 2>/dev/null)" ]
+}
+# The home with every link resolved, checked from there up to the root.
+home=$(CDPATH= cd -P -- "$HOME" && pwd -P) || fail "cannot reach HOME"
+dir="$home"
+while :; do
+  closed_dir "$dir" || fail "$dir could be changed by another account, so the lock cannot live under it"
+  [ "$dir" = / ] && break
+  dir=$(dirname "$dir")
+done
+lockdir="$home/$MAKA_LOCK_DIR"
 lock="$lockdir/lock"
 (umask 077; mkdir -p "$lockdir") || fail "cannot make $lockdir"
 # Ours, a real directory, and closed to everyone else: then nobody else can make, replace or open the lock.
