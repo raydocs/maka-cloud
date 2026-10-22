@@ -21,7 +21,7 @@ fi
 
 mkdir -p e2e-output
 status=0
-for flow in first-visit:fresh decision:decision; do
+for flow in first-visit:fresh decision:decision delivery:delivery; do
   name="${flow%%:*}"
   seed="${flow##*:}"
   token="$(node scripts/e2e-seed.mjs http://127.0.0.1:4175 http://127.0.0.1:4174 "$seed" | sed -n 's/^TOKEN=//p')"

@@ -136,14 +136,11 @@ export class RemoteMachine {
   ) {}
 
   private guarding: Promise<void> | undefined;
-  /** No check has passed since this machine was made, woken here, or failed one: not verified. */
-  private unguarded = true;
   /** Errors the egress check threw: a retry must not start task code after one of these. */
   private readonly refusals = new WeakSet<object>();
 
   /** Wakes the box. Its rules may be gone, so nothing runs in it until the next check passes. */
   private async wake(signal?: AbortSignal): Promise<void> {
-    this.unguarded = true;
     await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
   }
 
@@ -153,6 +150,8 @@ export class RemoteMachine {
    * resumed may have lost its rules without anything telling us. A box that fails is refused.
    */
   private guardEgress(signal?: AbortSignal): Promise<void> {
+    // A caller that has already given up does not wait for a check.
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (!this.egress) {
       const missing = new Error('this sandbox has no egress guard, so no task starts in it');
       this.refusals.add(missing);
@@ -171,9 +170,7 @@ export class RemoteMachine {
             await this.wake();
             await egress();
           }
-          this.unguarded = false;
         } catch (error) {
-          this.unguarded = true;
           if (typeof error === 'object' && error !== null) this.refusals.add(error);
           throw error;
         }
@@ -225,8 +222,9 @@ export class RemoteMachine {
       ...(options.timeoutSeconds ? { timeoutSeconds: options.timeoutSeconds } : {}),
     };
     const call = options.signal ? { signal: options.signal } : {};
-    // A box nobody has checked yet, woken here, or whose last check failed may have no rules: look first.
-    if (options.taskCode && this.unguarded) await this.guardEgress(options.signal);
+    // Look first, every time: a box that passed before may have been restarted, restored or woken by
+    // someone else since, and lost its rules without this process seeing it.
+    if (options.taskCode) await this.guardEgress(options.signal);
     try {
       return await this.client.exec(this.machineId, request, call);
     } catch (error) {
@@ -309,6 +307,7 @@ export class RemoteMachine {
     const line = asAgentUser(
       [input.program, ...input.args].map((word) => shq(word)).join(' '),
       this.agentUser,
+      Object.keys(input.envs),
     );
     return await this.start(
       buildRunScript({

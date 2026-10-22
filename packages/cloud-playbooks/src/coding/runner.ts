@@ -743,6 +743,7 @@ class CodingRun implements RunHandle {
         'review.md',
         'verification.json',
         'failure_brief.json',
+        RECORDS_DIR,
       ],
       // Each agent run may spend what is left of its phase's limit.
       // The run's own limit is what is left of its phase (work, then review and fix). The whole
@@ -1625,7 +1626,11 @@ class CodingRun implements RunHandle {
     // swapped in one atomic write; the files under their plain names are what the task page lists.
     const changes = JSON.stringify(outcome.collected.changeSet);
     const changesSha256 = createHash('sha256').update(changes).digest('hex');
-    const changesPath = join(this.hostDir, `changes.${changesSha256.slice(0, 16)}.json`);
+    const changesPath = join(
+      this.hostDir,
+      RECORDS_DIR,
+      `changes.${changesSha256.slice(0, 16)}.json`,
+    );
     const reviewText = reviewMarkdown(review);
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
@@ -1646,6 +1651,7 @@ class CodingRun implements RunHandle {
     const verificationText = JSON.stringify(verification, null, 2);
     const verificationPath = join(
       this.hostDir,
+      RECORDS_DIR,
       `verification.${createHash('sha256').update(verificationText).digest('hex').slice(0, 16)}.json`,
     );
     await guard(writeHostFile(changesPath, changes));
@@ -1961,8 +1967,17 @@ function verifiedLine(task: CodingTask, repro: Repro, baseSha: string): string {
   return `verified: \`${task.testCommand}\` passed; the reproduction test \`${repro.command}\` failed on base ${baseSha.slice(0, 12)} and passes with the change`;
 }
 
+/**
+ * Where a delivery's immutable records (the change and its verification, each named by its hash)
+ * are kept, inside the task's handoff directory. An agent's exported artifact is a plain relative
+ * path, which never starts with a dot, so nothing it exports can land here, and the name is
+ * reserved besides. The records used to sit beside the plain-named files, where an artifact named
+ * `changes.<hash>.json` replaced an earlier delivery's change or record (recheck28 F4).
+ */
+const RECORDS_DIR = '.records';
+
 async function writeHostFile(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     await writeFile(temp, content, { flag: 'wx', mode: 0o600 });

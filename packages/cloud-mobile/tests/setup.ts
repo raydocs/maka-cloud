@@ -1,6 +1,7 @@
 // A secure store that lives in memory: the tests never touch a real Keychain.
 const mockStore = new Map<string, string>();
 jest.mock('expo-secure-store', () => ({
+  __esModule: true,
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'when-unlocked-this-device-only',
   isAvailableAsync: async () => true,
   getItemAsync: async (key: string) => mockStore.get(key) ?? null,
@@ -24,3 +25,9 @@ beforeEach(() => {
   mockStore.clear();
   mockFetch.mockReset();
 });
+
+// The real provider renders nothing until the native side reports the window, which never happens here.
+jest.mock(
+  'react-native-safe-area-context',
+  () => require('react-native-safe-area-context/jest/mock').default,
+);

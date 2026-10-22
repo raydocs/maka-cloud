@@ -256,7 +256,10 @@ export class SetupSnapshots {
         await this.run(
           box.machineId,
           '.agents/setup',
-          asRepoUser('cd "$MAKA_REPO_DIR" && exec ./.agents/setup', agent),
+          asRepoUser('cd "$MAKA_REPO_DIR" && exec ./.agents/setup', agent, [
+            'MAKA_REPO_DIR',
+            'MAKA_SETUP_HASH',
+          ]),
           { MAKA_REPO_DIR: repoDir(recipe.repoUrl), MAKA_SETUP_HASH: hash },
           this.options.setupTimeoutSeconds ?? DEFAULT_SETUP_TIMEOUT_SECONDS,
         );
