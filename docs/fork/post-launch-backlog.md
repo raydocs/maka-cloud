@@ -120,9 +120,10 @@ Still missing before it can merge:
    refuse to start.
 2. P3: the smoke should request `limit=200` per page, so an invite with a long history needs fewer
    pages. Test: the request carries `limit=200`.
-3. P3, possibly user-visible: the server's `listTasks` can drop a task from a page, so the task list
-   may miss one. Check the lane's cursor logic first. Test: a page boundary that falls inside a run
-   of tasks returns each task exactly once. Source: the #328 review.
+3. Fixed: `listTasks` now refuses a page with HTTP 500 if an indexed task has no creation log,
+   instead of silently dropping it. The existing unique `n > after ORDER BY n` keyset cursor is
+   unchanged. Tests cover the missing-log refusal at a page boundary and each task appearing
+   exactly once when creation times are equal. Source: the #328 review.
 
 ## Kept changes and the handoff listing (from #336 and #341)
 
@@ -152,10 +153,10 @@ Still missing before it can merge:
    leader exited normally`. Make each wait on an explicit handshake instead of a time. (The
    stop-obligations tests that raced the fast retry are fixed: the retry that would confirm the
    stop now waits for the test to open a gate.)
-5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
-   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
-   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
-   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
+5. Fixed: inbox settings replies allow only `mutedKinds`, `quietHours` and `timeZone`: the owner's
+   own choices with the operator's mutes and quiet-hour defaults. Operator caps, stall times and
+   `digestAt` stay private on GET, settings updates and mute changes. Tests cover both invites and
+   every settings reply; web, phone and shared clients read none of the removed fields. Source: #352.
 
 ## Reviews merged without an outside review
 

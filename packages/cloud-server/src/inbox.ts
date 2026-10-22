@@ -99,6 +99,12 @@ const ANSWER_FAILURE: Record<string, number> = {
 };
 
 const STATES = ['open', 'closed', 'all'] as const;
+/** Only the owner's choices and effective mute/quiet-hour defaults may leave the server. */
+const publicSettings = z.object({
+  mutedKinds: z.array(z.string()).optional(),
+  quietHours: z.object({ start: z.string(), end: z.string() }).nullable().optional(),
+  timeZone: z.string().optional(),
+});
 const revokeBody = z
   .object({
     tool: z.string().min(1).max(100).optional(),
@@ -129,8 +135,8 @@ export interface InboxOwners {
  * The `/v1/inbox/…` routes. They sit behind the same invite as every other
  * route, and an invite sees and answers the items of its own conversations
  * only. The mutes, the settings and the digest are kept per owner (the
- * invite): an invite reaches its own and nobody else's, and what the operator
- * owns (stall times, the hourly cap, the digest schedule) it can read and not set.
+ * invite): an invite reaches its own and nobody else's. Settings replies expose
+ * only its choices and the operator's mute and quiet-hour defaults.
  */
 export class InboxRoutes {
   constructor(
@@ -172,12 +178,14 @@ export class InboxRoutes {
         method === 'PUT',
       );
       if (!result.ok) throw new HttpError(404, 'not_found');
-      respond(res, 200, { settings: result.settings });
+      respond(res, 200, { settings: publicSettings.parse(result.settings) });
       return true;
     }
     if (path === '/v1/inbox/settings') {
       if (method === 'GET') {
-        respond(res, 200, { settings: this.service.settings(invite.inviteId) });
+        respond(res, 200, {
+          settings: publicSettings.parse(this.service.settings(invite.inviteId)),
+        });
         return true;
       }
       if (method !== 'PUT') throw new HttpError(405, 'method_not_allowed', { allow: 'GET, PUT' });
@@ -186,7 +194,7 @@ export class InboxRoutes {
       this.checkActive(invite);
       const result = this.service.updateSettings(invite.inviteId, patch);
       if (!result.ok) throw new HttpError(400, 'invalid_request');
-      respond(res, 200, { settings: result.settings });
+      respond(res, 200, { settings: publicSettings.parse(result.settings) });
       return true;
     }
     if (path === '/v1/inbox/grants') {
