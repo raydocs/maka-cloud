@@ -33,6 +33,14 @@ export const MAX_CARD_ESTIMATE_USD = 50;
 
 export type CardState = 'open' | 'accepted' | 'dismissed' | 'stale' | 'expired';
 
+/** How an accepted card's task ended. `stopped` is a person's stop; `abandoned` is a task that never began. */
+export type CardOutcome = 'completed' | 'failed' | 'stopped' | 'abandoned';
+
+/** A median of fewer finished tasks than this says too little to replace the table's estimate. */
+export const MIN_TASKS_FOR_TYPICAL = 3;
+/** The estimate is the median of this many of the latest finished tasks of the kind. */
+export const TASKS_FOR_TYPICAL = 5;
+
 export interface Card {
   cardId: string;
   owner: string;
@@ -49,6 +57,8 @@ export interface Card {
   mode: CardMode;
   authority: Authority;
   estimateUsd: number;
+  /** The estimate is what finished tasks of this kind typically spent, not the table's default. */
+  typical: boolean;
   /** Hash of the state the card was made from; a tap checks it again first. */
   preconditionHash: string;
   /** Text from outside the owner shaped the card: a task started from it runs tainted. */
@@ -59,6 +69,10 @@ export interface Card {
   createdAt: number;
   decidedAt: number | null;
   conversationId: string | null;
+  /** What the task spent, once it ended. */
+  spentUsd: number | null;
+  outcome: CardOutcome | null;
+  settledAt: number | null;
 }
 
 /** A card as a scan proposes it. Strict: authority and mode are not inputs. */
@@ -70,6 +84,7 @@ export const NewCardSchema = z
     detail: z.string().max(MAX_DETAIL_CHARS),
     brief: z.string().min(1).max(MAX_BRIEF_CHARS),
     estimateUsd: z.number().positive().max(MAX_CARD_ESTIMATE_USD),
+    typical: z.boolean().optional(),
     preconditionHash: z.string().regex(/^[0-9a-f]{64}$/u),
     external: z.boolean(),
   })
@@ -141,6 +156,10 @@ interface CardRow {
   created_at: number;
   decided_at: number | null;
   conversation_id: string | null;
+  typical: number;
+  spent_micro: number | null;
+  outcome: CardOutcome | null;
+  settled_at: number | null;
 }
 
 interface KindRow {
@@ -288,6 +307,83 @@ export class CardStore {
       )
       .run(conversationId, cardId, owner);
     return Number(result.changes) === 1;
+  }
+
+  /** When this project was last scanned for cards, or undefined if never. */
+  lastScan(projectId: string): number | undefined {
+    const row = this.db
+      .prepare('SELECT scanned_at FROM card_scans WHERE project_id = ?')
+      .get(projectId) as { scanned_at: number } | undefined;
+    return row?.scanned_at;
+  }
+
+  /** Remembers that the project was scanned now. */
+  markScanned(projectId: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO card_scans (project_id, scanned_at) VALUES (?, ?) ON CONFLICT (project_id) DO UPDATE SET scanned_at = excluded.scanned_at',
+      )
+      .run(projectId, this.now());
+  }
+
+  /** Accepted cards whose task started and has not been settled yet, oldest first. */
+  unsettled(): Card[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM cards WHERE state = 'accepted' AND conversation_id IS NOT NULL AND settled_at IS NULL ORDER BY decided_at, card_id",
+        )
+        .all() as unknown as CardRow[]
+    ).map(view);
+  }
+
+  /**
+   * Accepted cards whose task never started: the process died between spending the card and
+   * starting the task. Starting again under the card's key is safe.
+   */
+  unstarted(): Card[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM cards WHERE state = 'accepted' AND conversation_id IS NULL ORDER BY decided_at, card_id",
+        )
+        .all() as unknown as CardRow[]
+    ).map(view);
+  }
+
+  /** Records how an accepted card's task ended and what it spent. Once only; false if it was settled already. */
+  settle(cardId: string, outcome: CardOutcome, spentUsd: number): boolean {
+    if (!Number.isFinite(spentUsd) || spentUsd < 0) return false;
+    const result = this.db
+      .prepare(
+        "UPDATE cards SET settled_at = ?, outcome = ?, spent_micro = ? WHERE card_id = ? AND state = 'accepted' AND settled_at IS NULL",
+      )
+      .run(this.now(), outcome, toMicro(spentUsd), cardId);
+    return Number(result.changes) === 1;
+  }
+
+  /**
+   * What the owner's finished tasks of this kind typically spent: the median of the last
+   * `TASKS_FOR_TYPICAL` that ran (finished or failed with a spend). A task a person stopped or
+   * that never began says nothing about cost. Undefined until `MIN_TASKS_FOR_TYPICAL` exist.
+   */
+  typicalUsd(owner: string, kind: CardKind): number | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT spent_micro FROM cards
+         WHERE owner = ? AND kind = ? AND outcome IN ('completed', 'failed') AND spent_micro > 0
+         ORDER BY settled_at DESC, card_id DESC LIMIT ?`,
+      )
+      .all(owner, kind, TASKS_FOR_TYPICAL) as unknown as Array<{ spent_micro: number }>;
+    if (rows.length < MIN_TASKS_FOR_TYPICAL) return undefined;
+    const spent = rows.map((r) => r.spent_micro).sort((a, b) => a - b);
+    const mid = Math.floor(spent.length / 2);
+    const median =
+      spent.length % 2 === 1
+        ? (spent[mid] as number)
+        : ((spent[mid - 1] as number) + (spent[mid] as number)) / 2;
+    const usd = Math.round(fromMicro(median) * 100) / 100;
+    return usd > 0 ? Math.min(usd, MAX_CARD_ESTIMATE_USD) : undefined;
   }
 
   /**
@@ -441,8 +537,8 @@ export class CardStore {
     this.db
       .prepare(
         `INSERT INTO cards (card_id, owner, project_id, kind, subject_key, title, detail, brief,
-           estimate_micro, precondition, external, state, day, replaces, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+           estimate_micro, typical, precondition, external, state, day, replaces, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       )
       .run(
         cardId,
@@ -454,6 +550,7 @@ export class CardStore {
         card.detail,
         card.brief,
         toMicro(card.estimateUsd),
+        card.typical ? 1 : 0,
         card.preconditionHash,
         card.external ? 1 : 0,
         dayOf(at),
@@ -570,6 +667,7 @@ function view(row: CardRow): Card {
     mode: spec.mode,
     authority: spec.authority,
     estimateUsd: fromMicro(row.estimate_micro),
+    typical: row.typical === 1,
     preconditionHash: row.precondition,
     external: row.external === 1,
     state: row.state,
@@ -577,5 +675,8 @@ function view(row: CardRow): Card {
     createdAt: row.created_at,
     decidedAt: row.decided_at,
     conversationId: row.conversation_id,
+    spentUsd: row.spent_micro === null ? null : fromMicro(row.spent_micro),
+    outcome: row.outcome,
+    settledAt: row.settled_at,
   };
 }

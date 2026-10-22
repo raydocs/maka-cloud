@@ -3,13 +3,15 @@
  * `GET /files`). Values come in as environment variables, so nothing is spliced into
  * the script text except the fixed fragments below.
  *
- * Layout per task: `$MAKA_ROOT/<taskId>/` holds `brief.md`, `result.json`, a `workspace/`
- * directory, and for each CLI invocation ("run", `t1`, `t2`, ...) `<run>.lock`, `.sh`,
+ * Layout per task: `$MAKA_ROOT/<taskId>/` holds `handoff/` (the brief going down, `brief.md`, and
+ * the result coming back, `result.json`: the only files the agent account reads and writes there
+ * besides its workspace), a `workspace/` directory, and for each CLI invocation ("run", `t1`, `t2`, ...) `<run>.lock`, `.sh`,
  * `.token`, `.pid`, `.cancel` (a stop request) and `.exit` (written last). The raw stdout and
  * stderr of a run (`<run>.out`) can hold secrets the CLI printed, so it is kept in
  * `$MAKA_LOG_ROOT/<taskId>/`, on memory-backed storage that a snapshot of the sandbox's files
  * does not contain, and deleted when the run is stopped.
  */
+import { asAgentUser } from './agent-user.js';
 
 /**
  * True when `$1` is a live run whose environment carries its own token (guards pid reuse). A
@@ -74,13 +76,25 @@ group_is_run() {
 }
 `;
 
-/** stdin: the brief, when `MAKA_WRITE_BRIEF` is set. */
+/**
+ * stdin: the brief, when `MAKA_WRITE_BRIEF` is set. It goes to `handoff/brief.md`. This runs as the
+ * sandbox user while the agent can write `handoff/`, so nothing is opened, changed or created
+ * there by a name the agent could have planted a link under: the file is written whole in the task
+ * directory (which only the sandbox user writes), given the agent's group there, and renamed into
+ * place (a rename replaces a link and never follows one).
+ */
 export const PREPARE_SCRIPT = `set -eu
 umask 077
-mkdir -p "$MAKA_DIR/workspace"
+mkdir -p "$MAKA_DIR/workspace" "$MAKA_DIR/handoff"
 if [ -n "\${MAKA_WRITE_BRIEF:-}" ]; then
-  cat > "$MAKA_DIR/brief.md.tmp"
-  mv -f "$MAKA_DIR/brief.md.tmp" "$MAKA_DIR/brief.md"
+  tmp="$MAKA_DIR/.brief.tmp"
+  rm -rf -- "$tmp"
+  ( set -C; cat > "$tmp" )
+  if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+    chgrp "$MAKA_AGENT_GROUP" "$tmp"
+    chmod 640 "$tmp"
+  fi
+  mv -fT -- "$tmp" "$MAKA_DIR/handoff/brief.md"
 fi
 `;
 
@@ -98,7 +112,7 @@ mkdir -p "$MAKA_DIR"
 cd "$MAKA_DIR"
 if ! ( set -C; : > "$MAKA_RUN.lock" ) 2>/dev/null; then echo ALREADY; exit 0; fi
 if [ -e "$MAKA_RUN.cancel" ]; then echo CANCELLED; exit 0; fi
-rm -rf -- result.json result.read
+rm -rf -- handoff/result.json result.read
 cat > "$MAKA_RUN.sh"
 printf '%s' "$MAKA_RUN_TOKEN" > "$MAKA_RUN.token"
 setsid nohup bash "$MAKA_RUN.sh" > /dev/null 2>&1 < /dev/null &
@@ -191,12 +205,37 @@ done
  * With `MAKA_ONLY_RUNS` (run names, space separated) it touches those runs alone: their process
  * groups, locks and raw output files, never another run of the task. A run's cleanup uses this, so
  * that it cannot reach a later turn of the same task that has started since.
+ *
+ * With `MAKA_UP_TO_ATTEMPT` it leaves alone the runs of a later attempt: a run is named
+ * \`e<attempt>.t<turn>\` when its attempt is known, and one whose attempt is after the asking one is
+ * the new driver's own (a slow stop from an earlier attempt can arrive after another process took
+ * the task over). It prints \`LEFT <run>\` for each run it left alone; a run with no attempt in its
+ * name is older than attempts and is stopped.
  */
 export const KILL_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+newer_attempt() {
+  [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ] || return 1
+  case "$1" in
+    e[0-9]*.*)
+      n="\${1#e}"
+      n="\${n%%.*}"
+      case "$n" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$n" -gt "$MAKA_UP_TO_ATTEMPT" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
 cleanup_logs() {
   [ -n "\${MAKA_LOG_DIR:-}" ] || return 0
   if [ -n "\${MAKA_ONLY_RUNS:-}" ]; then
     for run in $MAKA_ONLY_RUNS; do rm -f -- "$MAKA_LOG_DIR/$run.out"; done
+  elif [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ]; then
+    for out in "$MAKA_LOG_DIR"/*.out; do
+      [ -f "$out" ] || continue
+      name="\${out##*/}"
+      name="\${name%.out}"
+      newer_attempt "$name" || rm -f -- "$out"
+    done
   else
     rm -rf -- "$MAKA_LOG_DIR"
   fi
@@ -214,6 +253,7 @@ for run in \${MAKA_CANCEL_RUNS:-}; do : > "$run.cancel"; done
 for lockf in $locks; do
   [ -f "$lockf" ] || continue
   lockbase="\${lockf%.lock}"
+  newer_attempt "\${lockbase#./}" && continue
   [ -f "$lockbase.exit" ] || : > "$lockbase.cancel"
 done
 found=0
@@ -221,6 +261,10 @@ survivors=0
 for pidf in $pids; do
   [ -f "$pidf" ] || continue
   base="\${pidf%.pid}"
+  if newer_attempt "\${base#./}"; then
+    echo "LEFT \${base#./}"
+    continue
+  fi
   pid=$(cat "$pidf" 2>/dev/null) || continue
   case "$pid" in ''|*[!0-9]*) continue ;; esac
   group_is_run "$base" "$pid" || continue
@@ -270,14 +314,16 @@ echo DONE
 `;
 
 /**
- * Copies result.json into a private file, capped at 1 MiB + 1, refusing symlinks and anything
+ * Copies handoff/result.json into a private file, capped at 1 MiB + 1, refusing symlinks and anything
  * that is not a regular file. The open uses O_NOFOLLOW (dd iflag=nofollow), so a symlink swapped
  * in after the check still fails. Prints one of MISSING, SYMLINK, NOTFILE, UNREADABLE, or
  * `OK <bytes>`.
  */
 export const RESULT_STAGE_SCRIPT = `set -u
 cd "$MAKA_DIR" 2>/dev/null || { echo MISSING; exit 0; }
-f=result.json
+f=handoff/result.json
+# The agent writes inside handoff, not above it: the directory itself is the sandbox user's to trust.
+if [ -L handoff ] || [ ! -d handoff ]; then echo MISSING; exit 0; fi
 if [ -L "$f" ]; then echo SYMLINK; exit 0; fi
 if [ ! -e "$f" ]; then echo MISSING; exit 0; fi
 if [ ! -f "$f" ]; then echo NOTFILE; exit 0; fi
@@ -440,10 +486,27 @@ fi
 
 export const TOOL_ABORT_SCRIPT = `rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`;
 
-/** True (exit 0) when the CLI at the pinned version is installed. */
-export function cliCheckScript(binary: string): string {
-  return `export PATH="$HOME/.maka-cli/bin:$PATH"
-[ -f "$MAKA_MARKER" ] && command -v ${binary} >/dev/null 2>&1 && ${binary} --version 2>&1 | grep -qF -- "$MAKA_VERSION"`;
+/**
+ * True (exit 0) when the CLI at the pinned version is installed. The version is asked of the CLI
+ * as the agent's account: the sandbox user runs nothing from `~/.maka-cli`, which holds a program
+ * and its dependencies the agent's tooling may have shaped. The CLI is named by its absolute path
+ * and `~/.maka-cli/bin` is never put on this script's PATH, so a file of that name in it cannot
+ * stand in for `readlink`, `find` or `id`. It must also be wholly the sandbox user's own and closed
+ * to everyone else (nothing under `~/.maka-cli` owned by another user, or writable by a group or the
+ * world), and be under `~/.maka-cli`; a refused CLI counts as not installed and the install
+ * replaces it. The marker (the sandbox user's own file) is what pins the version; the run of the CLI
+ * is a liveness check that it can be run as the agent account, and must print the pinned version as
+ * a whole word. It assumes `sudo` keeps the sandbox user's HOME (no `always_set_home`).
+ */
+export function cliCheckScript(binary: string, agentUser: string): string {
+  return `cli="$HOME/.maka-cli/bin/${binary}"
+[ -f "$MAKA_MARKER" ] && [ -x "$cli" ] || exit 1
+root=$(readlink -f "$HOME/.maka-cli") || exit 1
+exe=$(readlink -f "$cli") || exit 1
+case "$exe" in "$root"/*) ;; *) exit 1 ;; esac
+[ -z "$(find "$root" "$HOME/.maka-cli" \\( ! -user "$(id -un)" -o \\( ! -type l -a -perm /022 \\) \\) -print -quit 2>/dev/null)" ] || exit 1
+ver=$(printf '%s' "$MAKA_VERSION" | sed 's/[.+]/\\\\&/g')
+${asAgentUser('"$cli" --version', agentUser)} 2>&1 | grep -qE -- "(^|[^0-9A-Za-z.])$ver([^0-9A-Za-z.]|$)"`;
 }
 
 /**

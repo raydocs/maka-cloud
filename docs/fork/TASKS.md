@@ -842,6 +842,26 @@ out of scope. What closes the experience gap, in order:
 Depends on: T23, T24, T26 (merge tool). Takes the parts of T16 that T24
 did not.
 
+- Status (2026-10-21): built and merged behind `MAKA_CLOUD_CARDS=1` (off by
+  default; needs `MAKA_GITHUB_WEBHOOK_SECRET` and `MAKA_GITHUB_TOKEN`), with
+  the web Home and Projects screens. Not done: the phone screens (T29
+  mirrors them from `@maka-cloud/client`: `InboxKind` `suggestion`,
+  `InboxItem.suggestion`, `suggestionLine`, `splitSuggestions`,
+  `listSuggestions`, `setSuggestionKind`); a cheap ranking model (the seam
+  `CardRanker` exists and falls back to the fixed order, so a scan costs no
+  model money today); the employee's own results as a signal (`ownResults`
+  has no source yet); a scan after a finished duty run (only after a
+  finished card task). Gated off until their tool exists, never proposed
+  and tested as such: `merge_pr` (needs T26's merge tool) and `close_issues`
+  (needs an issue tool). Never run live: the scan is tested against a fake
+  GitHub.
+- Where it lives: kinds, store, scan and signals in
+  `packages/cloud-duties/src/cards/`; the tap, settling and schedule in
+  `packages/cloud-host/src/cards/`; the item in cloud-supervisor
+  (`suggestion`, effect `card`); routes `GET/PATCH
+  /v1/projects/:id/suggestions` in cloud-server. Authority and mode come
+  from the kind table in code and are never inputs; a tap is one
+  transaction on the card plus a conversation start keyed `card:<id>`.
 - Hark's Action Buttons, for a software employee: once a day per project,
   and after each finished task, a read-only scan proposes up to three
   verb-first cards on Home, each finished end to end with one tap: "Fix
@@ -976,7 +996,9 @@ Gmail scopes.
 
 Folded into T23 (duty proposals), T24 (Home cards) and T30 (cards the
 employee proposes by itself, with accept and dismiss tracking, backoff
-and a daily cap). Do not start it separately.
+and a daily cap). Do not start it separately. Done as of T30 (2026-10-21)
+except what T30's status lists as not done; the Gmail and personal-signal
+parts below stay out of scope.
 
 Depends on: T11, T12, T13, T20 (cards reuse its item store, delivery and
 noise limits).

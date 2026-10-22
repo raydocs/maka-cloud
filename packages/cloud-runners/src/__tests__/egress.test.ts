@@ -11,8 +11,9 @@ import { collect, setup, terminal } from './harness.js';
 
 const MUTATING = /(^| )(-N|-F|-A|-I|-D|-X) /u;
 // The scratch chain the policy is built in is not live: nothing routes to it.
+const SCRATCH = new RegExp(`-(N|F|X|A) ${EGRESS_CHAIN}_NEW`, 'u');
 const mutations = (calls: string[]) =>
-  calls.filter((call) => MUTATING.test(call) && !call.includes(`${EGRESS_CHAIN}_NEW`));
+  calls.filter((call) => MUTATING.test(call) && !SCRATCH.test(call));
 
 test('the box is closed and read back before the CLI starts', async (t) => {
   const h = await setup();
@@ -99,7 +100,8 @@ test('a box that is asleep is woken and checked again, and a failing guard refus
   t.after(() => h.cleanup());
   const events = await collect(await h.runners.claude.start(await h.spec('tsk_eg_wake')));
   assert.equal(terminal(events)?.type, 'finished');
-  assert.equal(calls, 2, 'checked again after waking');
+  // The CLI check guards first (asleep, woken, checked again), then the launch checks once more.
+  assert.equal(calls, 3, 'checked again after waking');
 
   const refused = await setup({
     cloud: {

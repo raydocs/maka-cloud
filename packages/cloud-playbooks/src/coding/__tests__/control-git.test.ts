@@ -1,0 +1,193 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import {
+  BASE_RESTORE_SCRIPT,
+  BASE_REVERT_SCRIPT,
+  BLOB_CHUNK_SCRIPT,
+  CHANGES_SCRIPT,
+  CLONE_SCRIPT,
+  SAMPLE_SCRIPT,
+} from '../scripts.js';
+
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync(
+    'git',
+    ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args],
+    { cwd, encoding: 'utf8' },
+  ).trim();
+
+function run(script: string, env: Record<string, string>): string {
+  return execFileSync('bash', ['-c', script], {
+    env: { PATH: process.env.PATH ?? '', HOME: env.MAKA_DIR ?? '/', ...env },
+    encoding: 'utf8',
+  });
+}
+
+async function setup(t: { after(fn: () => Promise<void>): void }) {
+  const tmp = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'control-git-')));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+  const origin = join(tmp, 'origin');
+  await fs.mkdir(join(origin, 'lib'), { recursive: true });
+  await fs.writeFile(join(origin, 'lib', 'a.txt'), 'one\n');
+  await fs.writeFile(join(origin, 'b.txt'), 'two\n');
+  git(origin, 'init', '-q');
+  git(origin, 'add', '-A');
+  git(origin, 'commit', '-q', '-m', 'base');
+  const dir = join(tmp, 'task');
+  const cloned = run(CLONE_SCRIPT, {
+    MAKA_DIR: dir,
+    MAKA_REPO_URL: `file://${origin}`,
+    MAKA_REF: 'HEAD',
+  });
+  const base = /^BASE ([0-9a-f]{40})$/mu.exec(cloned)?.[1];
+  assert.ok(base, cloned);
+  return { tmp, dir, base, ws: join(dir, 'workspace') };
+}
+
+test('what the agent put in its own .git or .gitattributes never runs when the runner looks at the work', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  const marker = join(tmp, 'ran-as-the-sandbox-user');
+  const script = join(tmp, 'filter.sh');
+  await fs.writeFile(script, `#!/bin/sh\n: > "${marker}"\ncat\n`, { mode: 0o755 });
+  // The agent controls these: a filter, an external diff, a textconv, a hook path, fsmonitor.
+  await fs.appendFile(
+    join(ws, '.git', 'config'),
+    `[filter "x"]\n\tclean = ${script}\n\tsmudge = ${script}\n\trequired = true\n` +
+      `[diff "x"]\n\ttextconv = ${script}\n\tcommand = ${script}\n` +
+      `[core]\n\tfsmonitor = ${script}\n\thooksPath = ${tmp}\n`,
+  );
+  await fs.writeFile(join(ws, '.gitattributes'), '* filter=x diff=x\n');
+  await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');
+  await fs.writeFile(join(ws, 'new.txt'), 'new\n');
+
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+  const changes = run(CHANGES_SCRIPT, env);
+  assert.match(changes, /^RAW /mu, changes);
+  assert.match(changes, /^PATCH \d+$/mu, changes);
+  const sample = run(SAMPLE_SCRIPT, { MAKA_DIR: dir, MAKA_MAX_FILES: '100' });
+  assert.match(sample, /^H [0-9a-f]{40} lib\/a\.txt$/mu, sample);
+  const reverted = run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' });
+  assert.match(reverted, /^REVERTED \d+$/mu, reverted);
+  assert.equal(await fs.readFile(join(ws, 'lib', 'a.txt'), 'utf8'), 'one\n');
+  assert.equal(existsSync(join(ws, 'new.txt')), false);
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /RESTORED/u);
+  assert.equal(await fs.readFile(join(ws, 'lib', 'a.txt'), 'utf8'), 'changed\n');
+  assert.equal(existsSync(marker), false, 'the agent’s filter ran as the sandbox user');
+});
+
+test('the change is read from the working tree whatever the agent did to its own repository', async (t) => {
+  const { dir, base, ws } = await setup(t);
+  // The agent replaces its repository outright and commits a different history over the base.
+  await fs.rm(join(ws, '.git'), { recursive: true, force: true });
+  git(ws, 'init', '-q');
+  await fs.writeFile(join(ws, 'b.txt'), 'rewritten\n');
+  git(ws, 'add', '-A');
+  git(ws, 'commit', '-q', '-m', 'other history');
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+  const changes = run(CHANGES_SCRIPT, env);
+  const raw = /^RAW (\S*)$/mu.exec(changes)?.[1] ?? '';
+  const entries = Buffer.from(raw, 'base64').toString('utf8').split('\0').filter(Boolean);
+  assert.ok(
+    entries.some((entry) => entry === 'b.txt'),
+    entries.join(' | '),
+  );
+  assert.ok(!entries.includes('lib/a.txt'), 'a file the work did not change is not listed');
+  const size = /^SIZE ([0-9a-f]{40}) (\d+)$/mu.exec(changes);
+  if (size) {
+    const blob = run(BLOB_CHUNK_SCRIPT, {
+      MAKA_DIR: dir,
+      MAKA_SHA: size[1] as string,
+      MAKA_OFF: '0',
+      MAKA_LEN: '100',
+    });
+    assert.ok(Buffer.from(blob, 'base64').length > 0);
+  }
+});
+
+test('a workspace without the control repository is refused, not read through its own .git', async (t) => {
+  const { dir, base } = await setup(t);
+  await fs.rm(join(dir, 'control.git'), { recursive: true, force: true });
+  const out = run(CHANGES_SCRIPT, { MAKA_DIR: dir, MAKA_BASE: base });
+  assert.match(out, /^ERR control repository missing$/mu, out);
+});
+
+test('a repository inside the checkout is refused before git runs a child in it', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  const marker = join(tmp, 'ran-in-the-nested-repository');
+  const script = join(tmp, 'monitor.sh');
+  await fs.writeFile(script, `#!/bin/sh\n: > "${marker}"\n`, { mode: 0o755 });
+  // A gitlink in the index makes git look inside the directory, with the agent's own configuration.
+  const nested = join(ws, 'lib', 'sub');
+  await fs.mkdir(nested, { recursive: true });
+  git(nested, 'init', '-q');
+  await fs.writeFile(join(nested, 'f'), 'x\n');
+  git(nested, 'add', '-A');
+  git(nested, 'commit', '-q', '-m', 'inner');
+  await fs.appendFile(join(nested, '.git', 'config'), `[core]\n\tfsmonitor = ${script}\n`);
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+  for (const [name, out] of [
+    ['changes', run(CHANGES_SCRIPT, env)],
+    ['sample', run(SAMPLE_SCRIPT, { MAKA_DIR: dir, MAKA_MAX_FILES: '100' })],
+    ['revert', run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' })],
+  ] as const) {
+    assert.match(out, /^ERR nested repository .*lib\/sub\/\.git$/mu, `${name}: ${out}`);
+  }
+  assert.equal(existsSync(marker), false, 'a program of the nested repository ran');
+});
+
+test('a directory the agent swapped for a symlink is not removed or written through', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  const outside = join(tmp, 'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(join(outside, 'a.txt'), 'not the checkout\n');
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+
+  // Before the check: lib/ is a link to somewhere else, and lib/a.txt would be "put back" through it.
+  await fs.rm(join(ws, 'lib'), { recursive: true });
+  await fs.symlink(outside, join(ws, 'lib'));
+  const refused = run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' });
+  assert.match(refused, /^UNSAFE_PATH lib\/a\.txt$/mu, refused);
+  assert.equal(await fs.readFile(join(outside, 'a.txt'), 'utf8'), 'not the checkout\n');
+  run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir });
+
+  // After the check: the restore finds a link where the backup's directory was.
+  await fs.rm(join(ws, 'lib'));
+  await fs.mkdir(join(ws, 'lib'));
+  await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');
+  const reverted = run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' });
+  assert.match(reverted, /^REVERTED \d+$/mu, reverted);
+  await fs.rm(join(ws, 'lib'), { recursive: true });
+  await fs.symlink(outside, join(ws, 'lib'));
+  const out = run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir });
+  assert.match(out, /^RESTORE_FAILED$/mu, out);
+  assert.equal(await fs.readFile(join(outside, 'a.txt'), 'utf8'), 'not the checkout\n');
+});
+
+test('a base check a closed process left half-way is not put over the tree the next run clones', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed by the earlier process\n');
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+  assert.match(run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' }), /^REVERTED \d+$/mu);
+  assert.equal(existsSync(join(dir, 'base-check')), true, 'the closed process left its copy');
+
+  // The next process runs the task again from a fresh clone.
+  const cloned = run(CLONE_SCRIPT, {
+    MAKA_DIR: dir,
+    MAKA_REPO_URL: `file://${join(tmp, 'origin')}`,
+    MAKA_REF: 'HEAD',
+  });
+  assert.match(cloned, /^BASE [0-9a-f]{40}$/mu, cloned);
+  assert.equal(existsSync(join(dir, 'base-check')), false);
+  assert.match(run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' }), /^REVERTED 0$/mu);
+  assert.equal(await fs.readFile(join(ws, 'lib', 'a.txt'), 'utf8'), 'one\n');
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /RESTORED/u);
+  assert.equal(
+    await fs.readFile(join(ws, 'lib', 'a.txt'), 'utf8'),
+    'one\n',
+    'the earlier process’s change did not come back',
+  );
+});

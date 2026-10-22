@@ -20,7 +20,7 @@ test('resume continues the recorded vendor session with the new prompt', async (
   assert.ok(prompt.startsWith('Also add the tests.'));
   assert.match(
     prompt,
-    /write \S+\/tsk_resume\/result\.json as a JSON object/,
+    /write \S+\/tsk_resume\/handoff\/result\.json as a JSON object/,
     'a resumed turn is told to write the result',
   );
   const record = await h.sessions.get('tsk_resume');
@@ -138,7 +138,7 @@ test('recover continues the recorded session with the recovery note, and an unre
   assert.equal(argv[argv.indexOf('--resume') + 1], 'sess-1');
   const prompt = argv[argv.indexOf('-p') + 1] ?? '';
   assert.ok(prompt.startsWith(note));
-  assert.match(prompt, /write \S+\/tsk_recover\/result\.json as a JSON object/);
+  assert.match(prompt, /write \S+\/tsk_recover\/handoff\/result\.json as a JSON object/);
 
   const none = await h.spec('tsk_unrecorded');
   const failed = terminal(

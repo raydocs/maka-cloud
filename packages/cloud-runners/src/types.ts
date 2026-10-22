@@ -1,4 +1,5 @@
 import type { TaskId } from '@maka-cloud/orchestrator';
+import type { SteerReceipt } from './steer-receipts.js';
 
 /** Spend the model gateway settled for one access, request by request. */
 export interface AccessMeter {
@@ -42,12 +43,16 @@ export interface ModelAccessProvider {
     budgetRootId?: TaskId;
     /** What this run alone may spend, when that is less than `budgetUsd` (`RunSpec.turnBudgetUsd`). */
     turnBudgetUsd?: number;
+    /** The attempt (epoch) of the task that drives the run (`RunSpec.epoch`). */
+    attempt?: number;
   }): Promise<ModelAccess>;
   /**
    * Revokes whatever was issued for `taskId`, from a process that no longer holds the
-   * `ModelAccess` (called when leftovers are stopped after a restart).
+   * `ModelAccess` (called when leftovers are stopped after a restart). With `upToAttempt` only
+   * the access issued for that attempt or an earlier one is revoked: a stop from an earlier
+   * attempt that arrives late must not cut the access of the attempt that took the task over.
    */
-  revokeForTask?(taskId: TaskId): Promise<void> | void;
+  revokeForTask?(taskId: TaskId, options?: { upToAttempt?: number }): Promise<void> | void;
 }
 
 export interface SandboxLease {
@@ -94,6 +99,12 @@ export interface RunnerSessionRecord {
    * when it became ready). Orders a machine's snapshots.
    */
   snapshotAt?: Record<string, number>;
+  /**
+   * What was written down for each message handed to the agent in a hook's answer, before the
+   * answer went out: the proof, with the kept transcript, that a message was given (see
+   * `steer-receipts.ts`).
+   */
+  steerReceipts?: SteerReceipt[];
   updatedAt: number;
 }
 

@@ -14,6 +14,7 @@ const choice = (over: Partial<SuggestionChoice> = {}): SuggestionChoice => ({
     kind: 'rebase_pr',
     mode: 'quick',
     estimateUsd: 1,
+    typical: false,
     repo: 'acme/widgets',
     detail: 'PR #12 "Add retries" cannot be merged as it is.',
     external: true,
@@ -376,5 +377,68 @@ test('suggestions are not in the digest, and a kind can be muted', async () => {
   assert.deepEqual(digest.items, []);
   assert.equal(digest.counts.open, 0);
   assert.ok(r.supervisor.setMute('suggestion', true).mutedKinds.includes('suggestion'));
+  await r.stop();
+});
+
+const offer = {
+  conversationId: CONVERSATION,
+  projectId: 'proj_1',
+  kind: 'update_dependencies',
+  label: 'Update vulnerable dependencies',
+  repo: 'acme/widgets',
+  ignored: 3,
+};
+
+test('the offer to turn a kind off is one item however often it is raised, and it never pushes', async () => {
+  const r = await rig();
+  withCards(r);
+  assert.equal(r.supervisor.raiseSuggestionOffer(offer), true);
+  assert.equal(r.supervisor.raiseSuggestionOffer(offer), true);
+  await r.supervisor.settled();
+  const items = open(r);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, 'suggestion');
+  assert.deepEqual(
+    items[0]?.options.map((o) => o.label),
+    ['Turn off', 'Keep'],
+  );
+  assert.match(
+    items[0]?.ask ?? '',
+    /3 suggestions in a row to update vulnerable dependencies on acme\/widgets/,
+  );
+  assert.equal(items[0]?.interrupts, false);
+  assert.equal(r.host.interrupts.length, 0, 'nobody is pushed');
+  await r.stop();
+});
+
+test('without a cards service the offer is not raised', async () => {
+  const r = await rig();
+  assert.equal(r.supervisor.raiseSuggestionOffer(offer), false);
+  await r.stop();
+});
+
+test('"Turn off" and "Keep" go to the cards service with the offer’s reference, once, with no repository check', async () => {
+  const r = await rig();
+  const cards = withCards(r);
+  r.supervisor.raiseSuggestionOffer(offer);
+  await r.supervisor.settled();
+  const result = await tap(r, 'turn-off', { answerId: 'ans_off' });
+  assert.equal(result.ok, true);
+  await r.supervisor.settled();
+  assert.deepEqual(cards.verified, [], 'nothing to read from GitHub');
+  assert.deepEqual(cards.decided, [
+    { cardId: 'offer:proj_1:update_dependencies', action: 'turn_off', caller: 'inv_a' },
+  ]);
+  assert.equal(open(r).length, 0, 'answered');
+  // Keep is the other option of a fresh offer.
+  r.supervisor.raiseSuggestionOffer({
+    ...offer,
+    kind: 'fix_main_ci',
+    label: 'Fix failing tests on the default branch',
+  });
+  await r.supervisor.settled();
+  await tap(r, 'keep', { answerId: 'ans_keep' });
+  await r.supervisor.settled();
+  assert.equal(cards.decided[1]?.action, 'keep');
   await r.stop();
 });

@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import type { InstaboxClient, InstaboxExecResult } from '@maka-cloud/instabox';
 import type { AgentChannel } from '@maka-cloud/runners';
 import { AGENT_CHECK_SCRIPT, agentProblems, asRepoUser } from './agent.js';
+import { SCRUB_SCRIPT } from './scrub.js';
 
 /** Bump when the way a snapshot is built changes, so old snapshots are no longer reused. */
-const RECIPE_VERSION = 1;
+const RECIPE_VERSION = 2;
 
 /** Where the checkout of a repository lives in a box that was made from its setup snapshot. */
 export const REPOS_ROOT = '/data/maka/repos';
@@ -260,6 +261,20 @@ export class SetupSnapshots {
           this.options.setupTimeoutSeconds ?? DEFAULT_SETUP_TIMEOUT_SECONDS,
         );
       }
+      // The snapshot is the whole disk and every box of the invite boots from it: take credentials,
+      // history, transcripts and other tasks' folders off it, then look again and refuse if any is left.
+      const scrubEnv = {
+        MAKA_REPO_DIR: repoDir(recipe.repoUrl),
+        ...(agent === undefined ? {} : { MAKA_AGENT_USER: agent.user }),
+      };
+      await this.run(box.machineId, 'scrub', SCRUB_SCRIPT, {
+        ...scrubEnv,
+        MAKA_SCRUB_MODE: 'clean',
+      });
+      await this.run(box.machineId, 'scrub check', SCRUB_SCRIPT, {
+        ...scrubEnv,
+        MAKA_SCRUB_MODE: 'check',
+      });
       await this.run(box.machineId, 'sync', 'sync', {});
       let snapshotId: string;
       try {

@@ -40,7 +40,7 @@ export function gatewayModelAccess(
   ownerOfTask: (taskId: string) => Owner | undefined,
 ): ModelAccessProvider {
   return {
-    async issue({ taskId, runner, budgetUsd, budgetRootId, turnBudgetUsd }) {
+    async issue({ taskId, runner, budgetUsd, budgetRootId, turnBudgetUsd, attempt }) {
       if (budgetUsd === undefined) {
         throw new Error('The task has no budget, so it gets no model access.');
       }
@@ -55,6 +55,7 @@ export function gatewayModelAccess(
         taskId,
         account: { inviteId: owner.inviteId },
         ...(owner.conversationId === undefined ? {} : { conversationId: owner.conversationId }),
+        ...(attempt === undefined ? {} : { attempt }),
         // A run is held to its turn's limit when that is the smaller, inside the pool of what its
         // whole tree has left.
         budget:
@@ -77,7 +78,7 @@ export function gatewayModelAccess(
         },
       };
     },
-    revokeForTask: (taskId) => gateway.revokeForTask(taskId),
+    revokeForTask: (taskId, options) => gateway.revokeForTask(taskId, options),
   };
 }
 

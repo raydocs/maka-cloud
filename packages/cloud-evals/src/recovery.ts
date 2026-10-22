@@ -63,7 +63,11 @@ export async function carrySpend(
   const carried = await readCarried(path);
   const fresh = recovered?.unrecorded() ?? [];
   if (recovered && fresh.length > 0) {
-    for (const { taskId, usd } of fresh)
+    // Rows are per task and attempt (an eval's grants have none, so one row each): a task's
+    // attempts add up, and a task already carried keeps the larger figure.
+    const perTask = new Map<string, number>();
+    for (const { taskId, usd } of fresh) perTask.set(taskId, (perTask.get(taskId) ?? 0) + usd);
+    for (const [taskId, usd] of perTask)
       carried.set(taskId, Math.max(carried.get(taskId) ?? 0, usd));
     await writeDurably(path, `${JSON.stringify(Object.fromEntries(carried), null, 2)}\n`);
   }

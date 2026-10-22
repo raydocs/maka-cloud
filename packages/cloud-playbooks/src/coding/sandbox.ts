@@ -1,5 +1,14 @@
-import type { Fleet, RemoteMachine } from '@maka-cloud/runners';
+import {
+  type AgentChannel,
+  asAgentScript,
+  asRootScript,
+  type Fleet,
+  type RemoteMachine,
+} from '@maka-cloud/runners';
 import { CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
+
+/** What CHECK_STOP_SCRIPT reads from its environment. */
+const CHECK_STOP_ENV = ['MAKA_CHECK_TAG', 'MAKA_CHECK_UP_TO'];
 
 export interface ExecResult {
   stdout: string;
@@ -23,6 +32,15 @@ export interface SandboxWorkspace {
   /** The task directory; the repository is `${dir}/workspace`. */
   readonly dir: string;
   exec(script: string, options?: ExecOptions): Promise<ExecResult>;
+  /**
+   * Runs a check (a repository's own test command, which is the agent's code) as the agent's
+   * account, never as the sandbox user who holds the channel, the task's files and the egress
+   * rules. It fails, running nothing, where no agent account is configured or the box does not
+   * keep it out.
+   */
+  execCheck(script: string, options?: ExecOptions): Promise<ExecResult>;
+  /** Ends checks run by `execCheck`: their processes belong to the agent's account, so this runs as root. */
+  execCheckStop(script: string, options?: ExecOptions): Promise<ExecResult>;
   /** Stops every process of the task: agent runs and checks. Idempotent. */
   stopAll(signal?: AbortSignal): Promise<void>;
   /** Whether the agent's runs for this task ran on this workspace's machine. */
@@ -32,9 +50,10 @@ export interface SandboxWorkspace {
 }
 
 export interface CodingSandbox {
-  open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace>;
+  /** `attempt`: the attempt (epoch) of the run that opens it; its stop leaves a later attempt's runs alone. */
+  open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace>;
   /** Stops whatever a task left running, found by id alone (after a restart). Idempotent. */
-  stopTask(taskId: string, signal?: AbortSignal): Promise<void>;
+  stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void>;
 }
 
 /**
@@ -44,7 +63,7 @@ export interface CodingSandbox {
 export class FleetCodingSandbox implements CodingSandbox {
   constructor(private readonly fleet: Fleet) {}
 
-  async open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace> {
+  async open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace> {
     const { fleet } = this;
     const lease = await fleet.sandboxes.acquire({ tenantId: fleet.tenantOf(taskId), taskId });
     if (signal?.aborted) {
@@ -53,21 +72,45 @@ export class FleetCodingSandbox implements CodingSandbox {
     }
     const machine: RemoteMachine = fleet.machine(lease.machineId);
     let released = false;
+    const channel = fleet.options.agentChannel;
+    const run = async (script: string, options: ExecOptions): Promise<ExecResult> => {
+      // Whatever runs in the workspace is the task's code: the egress guard is checked before it.
+      // The agent's group goes to every script, for the ones that hand files to the agent.
+      const envs =
+        channel === undefined ? options.envs : { ...options.envs, MAKA_AGENT_GROUP: channel.group };
+      const result = await machine.exec(script, {
+        ...options,
+        ...(envs === undefined ? {} : { envs }),
+        taskCode: true,
+      });
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        truncated: result.truncated,
+        timedOut: result.timedOut,
+      };
+    };
     return {
       dir: machine.taskDir(taskId),
-      exec: async (script, options = {}) => {
-        const result = await machine.exec(script, options);
-        return {
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
-          truncated: result.truncated,
-          timedOut: result.timedOut,
-        };
+      exec: (script, options = {}) => run(script, options),
+      execCheck: async (script, options = {}) => {
+        if (channel === undefined) {
+          throw new Error('checks run as the agent account, and none is configured');
+        }
+        await fleet.ensureAgentIsolation(machine, options.signal);
+        // The task directory and workspace belong to the agent's group before its tests enter them.
+        await machine.prepareAgent(taskId, channel.group, options.signal);
+        return run(asAgentScript(script, channel), options);
       },
+      execCheckStop: (script, options = {}) =>
+        run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options),
       stopAll: async (stopSignal) => {
-        await machine.kill(taskId, stopSignal ? { signal: stopSignal } : {});
-        await stopChecks(machine, taskId, stopSignal);
+        await machine.kill(taskId, {
+          ...(stopSignal ? { signal: stopSignal } : {}),
+          ...(attempt === undefined ? {} : { upToAttempt: attempt }),
+        });
+        await stopChecks(machine, taskId, stopSignal, channel, attempt);
       },
       agentOnSameMachine: async () =>
         (await fleet.sessions.get(taskId))?.machineId === lease.machineId,
@@ -79,17 +122,23 @@ export class FleetCodingSandbox implements CodingSandbox {
     };
   }
 
-  async stopTask(taskId: string, signal?: AbortSignal): Promise<void> {
+  async stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void> {
     const { fleet } = this;
     let failure: unknown;
-    await fleet.stopTask(taskId, signal).catch((error: unknown) => {
+    await fleet.stopTask(taskId, signal, upToAttempt).catch((error: unknown) => {
       failure = error;
     });
     // The checks ran on the machine the task's lease gives, as in open().
     try {
       const lease = await fleet.sandboxes.acquire({ tenantId: fleet.tenantOf(taskId), taskId });
       try {
-        await stopChecks(fleet.machine(lease.machineId), taskId, signal);
+        await stopChecks(
+          fleet.machine(lease.machineId),
+          taskId,
+          signal,
+          fleet.options.agentChannel,
+          upToAttempt,
+        );
       } finally {
         await lease.release();
       }
@@ -105,14 +154,28 @@ async function stopChecks(
   machine: RemoteMachine,
   taskId: string,
   signal: AbortSignal | undefined,
+  channel: AgentChannel | undefined,
+  upToAttempt?: number,
 ): Promise<void> {
-  const out = await machine.exec(CHECK_STOP_SCRIPT, {
-    envs: { MAKA_CHECK_TAG: checkTagPrefix(taskId) },
-    timeoutSeconds: 30,
-    ...(signal ? { signal } : {}),
-  });
+  // A bound that is not a whole attempt number would make the script stop everything.
+  if (upToAttempt !== undefined && !Number.isSafeInteger(upToAttempt)) {
+    throw new Error(`not an attempt number: ${upToAttempt}`);
+  }
+  const out = await machine.exec(
+    channel === undefined ? CHECK_STOP_SCRIPT : asRootScript(CHECK_STOP_SCRIPT, CHECK_STOP_ENV),
+    {
+      envs: {
+        MAKA_CHECK_TAG: checkTagPrefix(taskId),
+        ...(upToAttempt === undefined ? {} : { MAKA_CHECK_UP_TO: String(upToAttempt) }),
+      },
+      timeoutSeconds: 30,
+      ...(signal ? { signal } : {}),
+    },
+  );
   const status = out.stdout.trim();
   if (status !== 'NONE' && status !== 'STOPPED') {
-    throw new Error(`the checks of ${taskId} could not be stopped (${status.slice(0, 200)})`);
+    throw new Error(
+      `the checks of ${taskId} could not be stopped (${status.slice(0, 200)}${out.stderr.trim() ? ` ${out.stderr.trim().slice(0, 200)}` : ''})`,
+    );
   }
 }

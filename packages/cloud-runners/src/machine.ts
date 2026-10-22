@@ -5,7 +5,7 @@ import {
   type InstaboxExecResult,
 } from '@maka-cloud/instabox';
 import { scrubSecretShapes } from '@maka-cloud/orchestrator';
-import { PREPARE_AGENT_SCRIPT } from './agent-user.js';
+import { asAgentUser, PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
   FILE_CHUNK_SCRIPT,
   FILE_CLEAN_SCRIPT,
@@ -26,14 +26,21 @@ import {
   TOOL_ABORT_SCRIPT,
   TOOL_CHECK_SCRIPT,
   TOOL_CHUNK_SCRIPT,
+  buildRunScript,
 } from './scripts.js';
-import { assertSafeId } from './shell.js';
+import { FEED_FUNCTION, fedCommand } from './process-channel.js';
+import { assertSafeId, shq } from './shell.js';
 
 /**
  * Closes the box's network to its host's own addresses and says so only when the rules read back
  * right. It rejects when it cannot, and the box is not used.
  */
 export type EgressGuard = (signal?: AbortSignal) => Promise<void>;
+
+/** Installs run in a hidden `.setup-` directory of their own, never in a task's. */
+function assertInstallDir(dirName: string): void {
+  if (!dirName.startsWith('.setup-')) throw new Error(`not an install directory: ${dirName}`);
+}
 
 export const MAX_RESULT_BYTES = 1024 * 1024;
 export const DEFAULT_LOG_ROOT = '/dev/shm/maka-logs';
@@ -44,6 +51,25 @@ const TRANSCRIPT_CHUNK_BYTES = 256 * 1024;
 const TRANSCRIPT_ATTEMPTS = 3;
 
 /** Caps on what one task may copy from another's workspace. */
+export interface KillOptions {
+  signal?: AbortSignal;
+  graceTenths?: number;
+  cancelRuns?: string[];
+  runs?: string[];
+  /** Leave alone the runs of an attempt after this one. */
+  upToAttempt?: number;
+}
+
+function assertAttempt(attempt: number): number {
+  if (!Number.isInteger(attempt) || attempt < 0) throw new Error(`Unsafe attempt: ${attempt}`);
+  return attempt;
+}
+
+/** A run's name: the attempt that started it, when known, and its turn. Stops tell attempts apart by it. */
+export function runNameOf(attempt: number | undefined, turn: number): string {
+  return attempt === undefined ? `t${turn}` : `e${assertAttempt(attempt)}.t${turn}`;
+}
+
 export interface StageLimits {
   maxFiles: number;
   maxFileBytes: number;
@@ -68,6 +94,12 @@ interface ExecOptions {
    * (default). Task code turns this off: after a wake its caller must look at the box again first.
    */
   wake?: boolean;
+  /**
+   * The command runs repo, task or CLI code. Such a command only reaches a box whose egress was
+   * checked and passed since the box was made or last woken here: until then it is guarded first,
+   * and a failure is final (the box is awake, which is not the same as closed).
+   */
+  taskCode?: boolean;
   envs?: Record<string, string>;
   stdin?: string;
   timeoutSeconds?: number;
@@ -104,6 +136,16 @@ export class RemoteMachine {
   ) {}
 
   private guarding: Promise<void> | undefined;
+  /** No check has passed since this machine was made, woken here, or failed one: not verified. */
+  private unguarded = true;
+  /** Errors the egress check threw: a retry must not start task code after one of these. */
+  private readonly refusals = new WeakSet<object>();
+
+  /** Wakes the box. Its rules may be gone, so nothing runs in it until the next check passes. */
+  private async wake(signal?: AbortSignal): Promise<void> {
+    this.unguarded = true;
+    await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
+  }
 
   /**
    * The egress guard, checked right now. One check at a time: callers that arrive while it runs
@@ -112,19 +154,28 @@ export class RemoteMachine {
    */
   private guardEgress(signal?: AbortSignal): Promise<void> {
     if (!this.egress) {
-      return Promise.reject(new Error('this sandbox has no egress guard, so no task starts in it'));
+      const missing = new Error('this sandbox has no egress guard, so no task starts in it');
+      this.refusals.add(missing);
+      return Promise.reject(missing);
     }
     const egress = this.egress;
     this.guarding ??= (async () => {
       try {
         // No caller's signal: the check is shared and one caller giving up must not fail the rest.
         try {
-          await egress();
+          try {
+            await egress();
+          } catch (error) {
+            if (!isAsleep(error)) throw error;
+            // Asleep: wake it, and look again, because its rules may be gone.
+            await this.wake();
+            await egress();
+          }
+          this.unguarded = false;
         } catch (error) {
-          if (!isAsleep(error)) throw error;
-          // Asleep: wake it, and look again, because its rules may be gone.
-          await this.client.ensureRunning(this.machineId);
-          await egress();
+          this.unguarded = true;
+          if (typeof error === 'object' && error !== null) this.refusals.add(error);
+          throw error;
         }
       } finally {
         this.guarding = undefined;
@@ -174,11 +225,14 @@ export class RemoteMachine {
       ...(options.timeoutSeconds ? { timeoutSeconds: options.timeoutSeconds } : {}),
     };
     const call = options.signal ? { signal: options.signal } : {};
+    // A box nobody has checked yet, woken here, or whose last check failed may have no rules: look first.
+    if (options.taskCode && this.unguarded) await this.guardEgress(options.signal);
     try {
       return await this.client.exec(this.machineId, request, call);
     } catch (error) {
       if (!isAsleep(error) || options.wake === false) throw error;
-      await this.client.ensureRunning(this.machineId, call);
+      await this.wake(options.signal);
+      if (options.taskCode) await this.guardEgress(options.signal);
       return await this.client.exec(this.machineId, request, call);
     }
   }
@@ -195,10 +249,18 @@ export class RemoteMachine {
   }
 
   /** Creates the task directory and, when given, writes the brief into it. */
-  async prepare(dirName: string, brief?: string, signal?: AbortSignal): Promise<void> {
+  async prepare(
+    dirName: string,
+    brief?: string,
+    signal?: AbortSignal,
+    agentGroup?: string,
+  ): Promise<void> {
     await this.execOk(PREPARE_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
+        ...(agentGroup === undefined
+          ? {}
+          : { MAKA_AGENT_GROUP: assertSafeId('group', agentGroup) }),
         ...(brief === undefined ? {} : { MAKA_WRITE_BRIEF: '1' }),
       },
       ...(brief === undefined ? {} : { stdin: brief }),
@@ -215,13 +277,25 @@ export class RemoteMachine {
   }
 
   /**
-   * Starts a run at most once. After an answer that may or may not have reached the sandbox
-   * (transport failure), the lock file decides: locked means it started, free means it did not.
+   * Starts the program of a run, as the agent's account, at most once. The program and its
+   * arguments come as they are and are quoted here; nothing the caller passes is shell, so no
+   * argument can add a command that would run as the sandbox user, who may change the egress rules
+   * (the guard does, through sudo). Only `preamble` is shell: lines of the host's own (dropping
+   * login selectors, refusing a subscription login) that run before the program. A machine with no
+   * agent account starts nothing.
+   *
+   * After an answer that may or may not have reached the sandbox (transport failure), the lock
+   * file decides: locked means it started, free means it did not.
    */
   async launch(input: {
     dirName: string;
     run: string;
-    script: string;
+    /** Host shell run as the sandbox user before the program. Never built from task content. */
+    preamble: string;
+    program: string;
+    args: readonly string[];
+    /** The program's stdin is the run's input file (see `FEED_FUNCTION`). */
+    fed?: boolean;
     envs: Record<string, string>;
     runToken: string;
     workdir: string;
@@ -229,6 +303,55 @@ export class RemoteMachine {
     rawLogs?: boolean;
     signal?: AbortSignal;
   }): Promise<'started' | 'already' | 'cancelled'> {
+    if (this.agentUser === undefined) {
+      throw new Error('this sandbox has no agent account, so no task code starts in it');
+    }
+    const line = asAgentUser(
+      [input.program, ...input.args].map((word) => shq(word)).join(' '),
+      this.agentUser,
+    );
+    return await this.start(
+      buildRunScript({
+        preamble: input.fed ? `${input.preamble}\n${FEED_FUNCTION}` : input.preamble,
+        command: input.fed ? fedCommand(line) : line,
+      }),
+      input,
+    );
+  }
+
+  /**
+   * Runs the pinned install of a CLI, as the sandbox user: it writes the sandbox user's own
+   * `~/.maka-cli`, which the agent's account cannot. `install` is the operator's or the pinned
+   * command, never task content; nothing of an agent runs in it.
+   */
+  async launchInstall(input: {
+    dirName: string;
+    run: string;
+    install: string;
+    runToken: string;
+    signal?: AbortSignal;
+  }): Promise<'started' | 'already' | 'cancelled'> {
+    assertInstallDir(input.dirName);
+    return await this.start(buildRunScript({ preamble: '', command: input.install }), {
+      ...input,
+      envs: {},
+      workdir: this.taskDir(input.dirName),
+      rawLogs: false,
+    });
+  }
+
+  private async start(
+    script: string,
+    input: {
+      dirName: string;
+      run: string;
+      envs: Record<string, string>;
+      runToken: string;
+      workdir: string;
+      rawLogs?: boolean;
+      signal?: AbortSignal;
+    },
+  ): Promise<'started' | 'already' | 'cancelled'> {
     const envs = {
       ...input.envs,
       MAKA_DIR: this.taskDir(input.dirName),
@@ -244,14 +367,19 @@ export class RemoteMachine {
     await this.guardEgress(input.signal);
     for (let attempt = 0; ; attempt++) {
       try {
-        const out = await this.startOnce(options, input.script, input.signal);
+        const out = await this.startOnce(options, script, input.signal);
         if (out.includes('CANCELLED')) return 'cancelled';
         return out.includes('ALREADY') ? 'already' : 'started';
       } catch (error) {
         input.signal?.throwIfAborted();
+        // A box that failed its check is refused for good: retrying would find it awake and open.
+        if (typeof error === 'object' && error !== null && this.refusals.has(error)) throw error;
         if (error instanceof InstaboxApiError && !error.retryable) throw error;
         // The answer was lost. Look before trying again; the lock file makes a second try safe.
+        // The look does not wake the box: asleep, nothing of ours is running, and the retry below
+        // wakes it through startOnce, which checks it first.
         const state = await this.execOk(INSPECT_SCRIPT, {
+          wake: false,
           envs: { MAKA_DIR: envs.MAKA_DIR, MAKA_RUN: envs.MAKA_RUN },
           ...(input.signal ? { signal: input.signal } : {}),
         }).catch(() => undefined);
@@ -277,7 +405,7 @@ export class RemoteMachine {
       return await run();
     } catch (error) {
       if (!isAsleep(error)) throw error;
-      await this.client.ensureRunning(this.machineId, signal ? { signal } : {});
+      await this.wake(signal);
       await this.guardEgress(signal);
       return await run();
     }
@@ -290,15 +418,18 @@ export class RemoteMachine {
    * runs are touched (processes, lock, raw output): a run that is done uses this, because a later
    * turn of the same task may already be running.
    */
-  async kill(
+  async kill(dirName: string, options: KillOptions = {}): Promise<string[]> {
+    return (await this.killRuns(dirName, options)).killed;
+  }
+
+  /**
+   * `kill`, and also the runs it left alone: with `upToAttempt`, the runs of a later attempt are
+   * not touched (a stop that was slow must not reach the run of the attempt that took the task over).
+   */
+  async killRuns(
     dirName: string,
-    options: {
-      signal?: AbortSignal;
-      graceTenths?: number;
-      cancelRuns?: string[];
-      runs?: string[];
-    } = {},
-  ): Promise<string[]> {
+    options: KillOptions = {},
+  ): Promise<{ killed: string[]; left: string[] }> {
     const result = await this.exec(KILL_SCRIPT, {
       envs: {
         MAKA_DIR: this.taskDir(dirName),
@@ -313,6 +444,9 @@ export class RemoteMachine {
               MAKA_CANCEL_RUNS: options.cancelRuns.map((run) => assertSafeId('run', run)).join(' '),
             }
           : {}),
+        ...(options.upToAttempt === undefined
+          ? {}
+          : { MAKA_UP_TO_ATTEMPT: String(assertAttempt(options.upToAttempt)) }),
       },
       timeoutSeconds: 15,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -329,9 +463,11 @@ export class RemoteMachine {
         `sandbox command failed (exit ${result.exitCode}): ${commandOutputTail(result)}`,
       );
     }
-    return lines
-      .filter((line) => line.startsWith('KILLED '))
-      .map((line) => line.slice('KILLED '.length).trim());
+    const named = (prefix: string) =>
+      lines
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => line.slice(prefix.length).trim());
+    return { killed: named('KILLED '), left: named('LEFT ') };
   }
 
   /** Names of task directories that still have a live run. */

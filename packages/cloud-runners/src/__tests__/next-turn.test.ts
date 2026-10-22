@@ -2,8 +2,20 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { asAgent } from '../agent-user.js';
 import { buildRunScript } from '../scripts.js';
-import { collect, deferred, exists, isRunning, reader, setup, terminal, until } from './harness.js';
+import { shq } from '../shell.js';
+import {
+  collect,
+  deferred,
+  exists,
+  HARNESS_AGENT,
+  isRunning,
+  reader,
+  setup,
+  terminal,
+  until,
+} from './harness.js';
 
 test('the cleanup of a finished run cannot kill the turn that resumed after it', async (t) => {
   const h = await setup();
@@ -48,10 +60,9 @@ test('a kill that names runs leaves the other runs of the task, and their output
     await machine.launch({
       dirName: 'tsk_two',
       run,
-      script: buildRunScript({
-        preamble: '',
-        command: 'echo out-$MAKA_RUN; while :; do sleep 1; done',
-      }),
+      preamble: '',
+      program: 'sh',
+      args: ['-c', 'echo out-$MAKA_RUN; while :; do sleep 1; done'],
       envs: {},
       runToken: `token-${run}`,
       workdir: join(h.root, 'tsk_two'),

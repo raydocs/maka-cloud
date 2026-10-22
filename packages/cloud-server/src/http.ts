@@ -698,7 +698,8 @@ export class PublicApi {
   private artifactRefs(invite: InviteInfo, taskId: string): string[] {
     this.ownTaskSession(invite, taskId);
     const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-    return record?.manifest?.artifacts ?? [];
+    // A task that ended without a result may still have a change kept for the owner.
+    return record?.manifest?.artifacts ?? record?.kept?.artifacts ?? [];
   }
 
   private listArtifacts(res: ServerResponse, invite: InviteInfo, taskId: string): void {
@@ -918,10 +919,13 @@ export class PublicApi {
       const built = builder.build({ content, now: Date.now(), after, limit: size });
       if (!built) throw new HttpError(404, 'not_found');
       const timeline = scrubSecretFields(size < asked ? { ...built, truncated: true } : built);
-      if (size <= 1 || JSON.stringify(timeline).length <= limits.maxBytes) {
-        respond(res, 200, { timeline });
+      // The cap is on the bytes of the whole answer as sent, wrapper and multi-byte text included.
+      const body = JSON.stringify({ timeline });
+      if (Buffer.byteLength(body) <= limits.maxBytes) {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(body);
         return;
       }
+      if (size <= 1) throw new HttpError(413, 'timeline_too_large');
     }
   }
 

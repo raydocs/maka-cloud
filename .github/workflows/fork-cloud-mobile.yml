@@ -1,0 +1,276 @@
+# Checks the phone apps (T29): packages/cloud-mobile, one Expo codebase for iOS and Android, on the logic it
+# shares with the web app (packages/cloud-client). Neither package is a root workspace, so ci.yml does not
+# cover them. No keys, no model, no store: the end-to-end jobs run the app in a simulator or an emulator
+# against the same scripted stack the web tests use (the real server, a scripted runner, nothing live), and
+# nothing here is ever submitted to a store.
+#
+# Pull requests run it when they touch the apps or the shared logic; every push to main runs it.
+name: Fork cloud-mobile
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/cloud-mobile/**'
+      - 'packages/cloud-client/**'
+      - '.github/workflows/fork-cloud-mobile.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fork-cloud-mobile-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Maestro drives the app on the device. Pinned, and its archive is checked against this digest.
+  MAESTRO_VERSION: '2.11.0'
+  MAESTRO_SHA256: 5384593cb4e7a106489e75a821d157dd43f4e438df6bc308b72e82c685e1283a
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Install
+        run: |
+          npm --prefix packages/cloud-client ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-mobile ci --workspaces=false --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm --prefix packages/cloud-mobile run typecheck
+
+      - name: Component and session tests
+        run: npm --prefix packages/cloud-mobile test
+
+      # Metro resolves the shared package and every screen, once per platform: a bad import fails here, in
+      # a minute, rather than in a native build.
+      - name: Bundle for iOS and Android
+        working-directory: packages/cloud-mobile
+        run: npx expo export --platform ios --platform android --output-dir "$RUNNER_TEMP/export"
+        env:
+          CI: '1'
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the stack and the app
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-web ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-client ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-mobile ci --workspaces=false --ignore-scripts --no-audit --no-fund
+
+      - name: Build the stack the app talks to
+        run: |
+          npm --workspace @maka/core run build
+          npm --workspace @maka/storage run build
+          npm --workspace @maka/mcp run build
+          npm --workspace @maka/runtime run build
+          npm --workspace @maka-cloud/orchestrator run build
+          npm --workspace @maka-cloud/modes run build
+          npm --workspace @maka-cloud/memory run build
+          npm --workspace @maka-cloud/server run build
+          npm --workspace @maka-cloud/instabox run build
+          npm --workspace @maka-cloud/runners run build
+          npm --workspace @maka-cloud/conductor-checks run build
+          npm --workspace @maka-cloud/conductor run build
+          npm --workspace @maka-cloud/playbooks run build
+          npm --workspace @maka-cloud/supervisor run build
+
+      # A release build carries its own JavaScript, so no dev server is needed on the emulator. It is signed
+      # with the debug key Expo generates; it is never uploaded anywhere.
+      - name: Build the app
+        working-directory: packages/cloud-mobile
+        run: |
+          npx expo prebuild --platform android --no-install
+          # Gradle fetches its plugins from the public repositories; a reset connection is retried.
+          for attempt in 1 2 3; do
+            (cd android && ./gradlew --no-daemon assembleRelease) && exit 0
+            echo "Gradle attempt $attempt failed" >&2
+            sleep 15
+          done
+          exit 1
+        env:
+          CI: '1'
+          MAKA_E2E: '1'
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/maestro.zip" "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          echo "${MAESTRO_SHA256}  $RUNNER_TEMP/maestro.zip" | sha256sum --check -
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
+          echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Start the scripted stack
+        run: |
+          node packages/cloud-web/tests/support/serve.ts > "$RUNNER_TEMP/stack.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:4175/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/stack.log"
+          exit 1
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the flows on an Android emulator
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_7
+          ram-size: 4096M
+          disable-animations: true
+          script: bash packages/cloud-mobile/scripts/run-flows.sh android
+
+      - name: Keep the screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloud-mobile-android
+          path: |
+            packages/cloud-mobile/e2e-output
+            ${{ runner.temp }}/stack.log
+          retention-days: 7
+
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the stack and the app
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-web ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-client ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix packages/cloud-mobile ci --workspaces=false --ignore-scripts --no-audit --no-fund
+
+      - name: Build the stack the app talks to
+        run: |
+          npm --workspace @maka/core run build
+          npm --workspace @maka/storage run build
+          npm --workspace @maka/mcp run build
+          npm --workspace @maka/runtime run build
+          npm --workspace @maka-cloud/orchestrator run build
+          npm --workspace @maka-cloud/modes run build
+          npm --workspace @maka-cloud/memory run build
+          npm --workspace @maka-cloud/server run build
+          npm --workspace @maka-cloud/instabox run build
+          npm --workspace @maka-cloud/runners run build
+          npm --workspace @maka-cloud/conductor-checks run build
+          npm --workspace @maka-cloud/conductor run build
+          npm --workspace @maka-cloud/playbooks run build
+          npm --workspace @maka-cloud/supervisor run build
+
+      # Expo SDK 58 needs Swift tools 6.2 (Xcode 26); the runner's default Xcode is older.
+      - name: Select the newest Xcode
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
+          echo "Using $xcode"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      # A release build for the simulator carries its own JavaScript. Nothing is signed or uploaded.
+      - name: Build the app for the simulator
+        working-directory: packages/cloud-mobile
+        run: |
+          set -o pipefail
+          npx expo prebuild --platform ios
+          # The whole log is kept; the console shows only what failed and how it ended.
+          xcodebuild -workspace ios/Maka.xcworkspace -scheme Maka -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/ios-build" CODE_SIGNING_ALLOWED=NO build \
+            > "$RUNNER_TEMP/xcodebuild.log" 2>&1 \
+            || { grep -E "error:|\*\* BUILD" "$RUNNER_TEMP/xcodebuild.log" | head -n 40; exit 1; }
+          tail -n 3 "$RUNNER_TEMP/xcodebuild.log"
+          test -f "$RUNNER_TEMP/ios-build/Build/Products/Release-iphonesimulator/Maka.app/Info.plist"
+        env:
+          CI: '1'
+          MAKA_E2E: '1'
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/maestro.zip" "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          echo "${MAESTRO_SHA256}  $RUNNER_TEMP/maestro.zip" | shasum -a 256 --check -
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
+          echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Start the scripted stack
+        run: |
+          node packages/cloud-web/tests/support/serve.ts > "$RUNNER_TEMP/stack.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:4175/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/stack.log"
+          exit 1
+
+      - name: Boot a simulator and run the flows
+        run: |
+          udid=$(xcrun simctl list devices available -j | node -e '
+            const d = JSON.parse(require("node:fs").readFileSync(0, "utf8")).devices;
+            const phone = Object.entries(d).filter(([k]) => k.includes("iOS")).flatMap(([, v]) => v).find((x) => x.name.startsWith("iPhone"));
+            if (!phone) process.exit(1);
+            console.log(phone.udid);
+          ')
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" "$RUNNER_TEMP/ios-build/Build/Products/Release-iphonesimulator/Maka.app"
+          bash packages/cloud-mobile/scripts/run-flows.sh ios
+        env:
+          # Maestro starts an XCTest driver on the simulator; a cold hosted Mac needs more than the default.
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: '240000'
+
+      - name: Keep the screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloud-mobile-ios
+          path: |
+            packages/cloud-mobile/e2e-output
+            ${{ runner.temp }}/stack.log
+            ${{ runner.temp }}/xcodebuild.log
+          retention-days: 7

@@ -158,6 +158,15 @@ test('sources are listed by the server and their images come through it, in the 
   expect(paths).toEqual(['/v1/tasks/tsk%2F1/sources', '/v1/tasks/tsk%2F1/sources/0/image']);
 });
 
+test('a fetch that refuses a foreign `this` (as a browser’s does) still works', async () => {
+  const platformFetch = function (this: unknown) {
+    if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+    return Promise.resolve(Response.json({ conversations: [] }));
+  } as unknown as typeof fetch;
+  const client = new CloudClient('fake', { fetcher: platformFetch });
+  await expect(client.listConversations()).resolves.toEqual({ conversations: [] });
+});
+
 test('a restarted task shows the restart text as its latest note, once, and keeps running', () => {
   const frame = (id: number, event: unknown, at = id): FeedEvent =>
     ({ id, kind: 'task.event', data: { conversationId: 'c', seq: id, at, event } }) as FeedEvent;
@@ -178,4 +187,26 @@ test('a restarted task shows the restart text as its latest note, once, and keep
   const task = state.tasks.t;
   expect(task?.state).toBe('running');
   expect(task?.progress).toEqual(['reading the repo', 'The server restarted.']);
+});
+
+test('suggestion switches are read and set on the project, and a server without them is unsupported for that feature only', async () => {
+  const seen: Array<{ url: string; method: string; body?: string }> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    seen.push({ url: String(input), method: init?.method ?? 'GET', body: init?.body as string });
+    if (String(input).includes('/nope/')) return Response.json({}, { status: 404 });
+    if (init?.method === 'PATCH') return Response.json({ kind: 'fix_main_ci', enabled: false });
+    return Response.json({ suggestions: { kinds: [{ kind: 'fix_main_ci', enabled: true }] } });
+  };
+  const client = new CloudClient('t', fetcher);
+  expect((await client.listSuggestions('p 1')).kinds).toHaveLength(1);
+  await client.setSuggestionKind('p 1', 'fix_main_ci', false);
+  expect(seen[0]?.url).toBe('/v1/projects/p%201/suggestions');
+  expect(seen[1]).toMatchObject({
+    url: '/v1/projects/p%201/suggestions',
+    method: 'PATCH',
+    body: JSON.stringify({ kind: 'fix_main_ci', enabled: false }),
+  });
+  await expect(client.listSuggestions('nope')).rejects.toThrow();
+  expect(client.unsupported.has('suggestions')).toBe(true);
+  expect(client.unsupported.has('projects')).toBe(false);
 });

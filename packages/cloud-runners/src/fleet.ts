@@ -11,6 +11,7 @@ import {
 } from './machine.js';
 import { MachinePoller, type PollBackoff } from './poller.js';
 import { type AgentChannel, assertAgentChannel, checkAgentIsolation } from './agent-user.js';
+import { InstallOutput } from './install-output.js';
 import type { AgentSdk } from './sdk-turn.js';
 import { DEFAULT_TENANT, noModelAccess } from './providers.js';
 import { buildRunScript, cliCheckScript } from './scripts.js';
@@ -249,7 +250,11 @@ export class Fleet {
       vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
     const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
-    const check = await machine.exec(cliCheckScript(vendor.binary), {
+    // The check runs the CLI itself (`--version`), so the box is guarded first like for any task code.
+    const account = this.options.agentChannel;
+    if (account === undefined) throw new Error('no agent account is configured');
+    const check = await machine.exec(cliCheckScript(vendor.binary, account.user), {
+      taskCode: true,
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
     });
     if (check.exitCode === 0) return;
@@ -258,24 +263,17 @@ export class Fleet {
       this.options.installCommands?.[vendor.name] ??
       `command -v npm >/dev/null 2>&1 || { echo "npm is not installed in the sandbox image"; exit 1; }
 npm install -g --prefix "$HOME/.maka-cli" --no-audit --no-fund ${shq(`${vendor.npmPackage}@${version}`)}`;
-    const script = buildRunScript({
-      preamble: '',
-      command: `( set -e
+    const dirName = `.setup-${vendor.binary}`;
+    const run = `i-${version}`;
+    await machine.launchInstall({
+      dirName,
+      run,
+      install: `( set -e
 ${install}
 mkdir -p "$(dirname ${shq(marker)})"
 : > ${shq(marker)}
 )`,
-    });
-    const dirName = `.setup-${vendor.binary}`;
-    const run = `i-${version}`;
-    await machine.launch({
-      dirName,
-      run,
-      script,
-      envs: {},
       runToken: randomUUID(),
-      workdir: machine.taskDir(dirName),
-      rawLogs: false,
     });
 
     const watch = this.poller.watch(machine, { dir: dirName, run });
@@ -290,8 +288,19 @@ mkdir -p "$(dirname ${shq(marker)})"
         consumed += update.data.length;
         const state = update.state;
         if (typeof state === 'object' && consumed >= update.size) {
-          if (state.exit === 0) return;
-          throw new Error(`exit ${state.exit}: ${output.tail()}`);
+          if (state.exit !== 0) throw new Error(`exit ${state.exit}: ${output.tail()}`);
+          // The marker is written, but the CLI may still not be one the check can run as the agent
+          // account (a sudo that refuses, a home it cannot enter): say so now, not at every launch.
+          const again = await machine.exec(cliCheckScript(vendor.binary, account.user), {
+            taskCode: true,
+            envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
+          });
+          if (again.exitCode !== 0) {
+            throw new Error(
+              `the installed ${vendor.binary} cannot be run as the agent account ${account.user} (its version could not be read, or the sandbox image does not let that account run it)`,
+            );
+          }
+          return;
         }
         if (state === 'dead' && consumed >= update.size)
           throw new Error(`the install was killed: ${output.tail()}`);
@@ -500,8 +509,12 @@ mkdir -p "$(dirname ${shq(marker)})"
 
   // -- leftovers after a restart ---------------------------------------------------------------
 
-  /** Stops whatever runs for `taskId`, found by id alone. Idempotent. */
-  async stopTask(taskId: TaskId, signal?: AbortSignal): Promise<boolean> {
+  /**
+   * Stops whatever runs for `taskId`, found by id alone, and revokes its model access. Idempotent.
+   * With `upToAttempt` (the attempt that asks) it stops and revokes only what that attempt or an
+   * earlier one started: the run and the access of a later attempt are not its to touch.
+   */
+  async stopTask(taskId: TaskId, signal?: AbortSignal, upToAttempt?: number): Promise<boolean> {
     const record = await this.sessions.get(taskId);
     const machineIds = record ? [record.machineId] : await this.sandboxes.knownMachines();
     let stopped = false;
@@ -509,16 +522,25 @@ mkdir -p "$(dirname ${shq(marker)})"
     for (const machineId of machineIds) {
       try {
         const machine = this.machine(machineId);
-        const runs = await machine.kill(taskId, signal ? { signal } : {});
-        if (runs.length > 0) stopped = true;
-        await this.client
-          .deleteActivityLease(machineId, this.leaseId(taskId), signal ? { signal } : {})
-          .catch(() => undefined);
+        const { killed, left } = await machine.killRuns(taskId, {
+          ...(signal ? { signal } : {}),
+          ...(upToAttempt === undefined ? {} : { upToAttempt }),
+        });
+        if (killed.length > 0) stopped = true;
+        // The lease belongs to the task: while a later attempt's run is on the machine it is kept.
+        if (left.length === 0) {
+          await this.client
+            .deleteActivityLease(machineId, this.leaseId(taskId), signal ? { signal } : {})
+            .catch(() => undefined);
+        }
       } catch (error) {
         failure ??= error;
       }
     }
-    await this.modelAccess.revokeForTask?.(taskId);
+    await this.modelAccess.revokeForTask?.(
+      taskId,
+      upToAttempt === undefined ? undefined : { upToAttempt },
+    );
     if (failure !== undefined) throw failure;
     return stopped;
   }
@@ -581,60 +603,4 @@ function prepareTools(tools: readonly SandboxTool[]): PreparedTool[] {
 export interface SweepResult {
   stopped: TaskId[];
   failed: { machineId: string; taskId?: TaskId; error: string }[];
-}
-
-/** How much of an install's output is kept, scrubbed, for the error that names it. */
-const INSTALL_OUTPUT_TAIL = 1_500;
-/** The most an unfinished line or private key block is held back before it is judged as it is. */
-const INSTALL_OUTPUT_HELD = 1_000_000;
-
-/**
- * What an install printed, scrubbed as it arrives and only then cut to its tail. Cutting first
- * would leave the body of a private key whose BEGIN line fell outside the kept part, and nothing
- * would know it for a key. Complete lines are scrubbed and put away; an unfinished line, or a
- * private key block still open, is held until it ends (the scrubber reads a whole block).
- */
-class InstallOutput {
-  private scrubbed = '';
-  private held = '';
-
-  push(chunk: string): void {
-    this.held += chunk;
-    // Everything before the last line break is a whole line, unless a key block is open in it.
-    const cut = this.held.lastIndexOf('\n') + 1;
-    const open = openBlockStart(this.held);
-    const upTo = open === undefined ? cut : Math.min(cut, open);
-    if (this.held.length > INSTALL_OUTPUT_HELD) {
-      this.release(this.held.length);
-      return;
-    }
-    if (upTo > 0) this.release(upTo);
-  }
-
-  private release(upTo: number): void {
-    this.scrubbed = `${this.scrubbed}${scrubSecretShapes(this.held.slice(0, upTo))}`.slice(
-      -INSTALL_OUTPUT_TAIL,
-    );
-    this.held = this.held.slice(upTo);
-  }
-
-  tail(): string {
-    // What is still held reads as it is: a key block never closed is scrubbed to the end.
-    return `${this.scrubbed}${scrubSecretShapes(this.held)}`.trim().slice(-INSTALL_OUTPUT_TAIL);
-  }
-}
-
-/** Where a private key block that has not ended yet starts, if one is open. */
-function openBlockStart(text: string): number | undefined {
-  const begin = /-----BEGIN [A-Z ]*PRIVATE KEY-----/gu;
-  let open: number | undefined;
-  for (let match = begin.exec(text); match; match = begin.exec(text)) {
-    const end = text.indexOf('-----END', match.index + match[0].length);
-    if (end === -1) {
-      open = match.index;
-      break;
-    }
-    begin.lastIndex = end;
-  }
-  return open;
 }

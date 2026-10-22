@@ -10,11 +10,9 @@ import {
   type Conversation,
   ConversationFeed,
   conversationSummary,
-  displayJson,
   displayText,
   dollars,
   errorText,
-  exactText,
   type InboxItem,
   type Mode,
   publicLink,
@@ -27,6 +25,7 @@ import {
   TERMINAL,
   totalCost,
   openWorkspace,
+  questionCardModel,
   Unsupported,
 } from '@maka-cloud/client';
 import { Home } from './Home';
@@ -39,12 +38,6 @@ import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
 
-const REASON_HEADING = {
-  taste: 'Needs your decision',
-  budget_overrun: 'Needs your decision on the budget',
-  irreversible: 'Needs your approval',
-} as const;
-
 export function QuestionCard({
   question,
   answered,
@@ -56,47 +49,37 @@ export function QuestionCard({
   disabled: boolean;
   onAnswer: (option: string, text?: string) => void;
 }) {
-  // An approval binds the card's exact text: it is shown as sent, and a card that cannot be shown
-  // exactly cannot be approved here (T15).
-  const approval = question.reason === 'irreversible';
-  const exact = approval ? exactText(question.question) : undefined;
-  const options = [...question.options]
-    .filter((o) => !approval || exact !== undefined || o.id !== 'approve')
-    .sort((a, b) => Number(b.id === question.recommended) - Number(a.id === question.recommended));
-  const [selected, setSelected] = useState(options[0]?.id ?? '');
+  const card = questionCardModel(question, answered);
+  const [selected, setSelected] = useState(card.firstOption);
   const [note, setNote] = useState('');
   return (
     <section className="question" aria-label="Your decision">
       <div className="section-heading">
         <span className={`status-mark ${answered ? 'succeeded' : 'attention'}`} />
-        {answered ? 'Decision recorded' : (REASON_HEADING[question.reason] ?? REASON_HEADING.taste)}
+        {card.heading}
       </div>
-      <h3>{exact ?? displayText(question.question)}</h3>
-      {approval && exact === undefined && !answered && (
+      <h3>{card.text}</h3>
+      {card.cannotApproveHere && (
         <p className="muted">This card cannot be shown exactly, so it cannot be approved here.</p>
       )}
-      {question.note && <p className="muted">{displayText(question.note)}</p>}
-      {question.action && !answered && (
+      {card.note && <p className="muted">{card.note}</p>}
+      {card.held && (
         <p className="muted held-action">
-          Held until you answer: {question.action.tool}{' '}
-          <code>{displayJson(question.action.args)}</code>
+          Held until you answer: {card.held.tool} <code>{card.held.args}</code>
         </p>
       )}
       {answered ? (
-        <p className="acknowledged">
-          Answer recorded:{' '}
-          {displayText(question.options.find((o) => o.id === answered)?.label ?? 'Selected option')}
-        </p>
+        <p className="acknowledged">Answer recorded: {card.answeredLabel}</p>
       ) : (
         <>
           <ChoicePanel
             label="Choose an answer"
             value={selected}
             disabled={disabled}
-            options={options.map((o) => ({
+            options={card.options.map((o) => ({
               value: o.id,
-              label: displayText(o.label),
-              description: o.id === question.recommended ? 'Recommended' : undefined,
+              label: o.label,
+              description: o.recommended ? 'Recommended' : undefined,
             }))}
             onChange={setSelected}
             onConfirm={() => {

@@ -1,48 +1,6 @@
 import { Button } from '@astryxdesign/core';
 import { useState } from 'react';
-import {
-  displayText,
-  exactText,
-  type InboxEvidence,
-  type InboxItem,
-  publicLink,
-  visibleInbox,
-} from '@maka-cloud/client';
-
-const HEADING: Record<string, string> = {
-  approval: 'Needs your approval',
-  budget: 'Needs your decision on the budget',
-  decision: 'Needs your decision',
-  blocked: 'Might be stuck',
-  verification_failed: 'A check of the result failed',
-  finished: 'Finished',
-};
-
-function Evidence({ evidence, exact }: { evidence: InboxEvidence; exact: boolean }) {
-  if (evidence.kind === 'artifact') {
-    return <li>Result file: {displayText(evidence.name)}</li>;
-  }
-  if (evidence.kind === 'action') {
-    return (
-      <li className="held-action">
-        Held until you answer: {exact ? evidence.tool : displayText(evidence.tool)}{' '}
-        <code>{exact ? evidence.args : displayText(evidence.args)}</code>
-      </li>
-    );
-  }
-  const href = publicLink(evidence.url);
-  return (
-    <li>
-      {href ? (
-        <a href={href} target="_blank" rel="noreferrer noopener">
-          {displayText(evidence.label)} ↗
-        </a>
-      ) : (
-        displayText(evidence.label)
-      )}
-    </li>
-  );
-}
+import { displayText, type InboxItem, inboxCardModel, visibleInbox } from '@maka-cloud/client';
 
 export function InboxCard({
   item,
@@ -54,40 +12,46 @@ export function InboxCard({
   onAnswer: (optionId: string, text?: string) => void;
 }) {
   const [note, setNote] = useState('');
-  // An approval binds the card's exact text: it is shown as sent, with the held call's arguments,
-  // and a card that cannot be shown exactly cannot be approved here (T15).
-  const approval = item.kind === 'approval';
-  const exact = approval ? exactText(item.ask) : undefined;
-  const options = [...item.options]
-    .filter((option) => !approval || exact !== undefined || option.id !== 'approve')
-    .sort((a, b) => Number(b.recommended) - Number(a.recommended));
+  const card = inboxCardModel(item);
   return (
-    <section className="question" aria-label={HEADING[item.kind] ?? 'Needs you'}>
+    <section className="question" aria-label={card.heading}>
       <div className="section-heading">
         <span className={`status-mark ${item.state === 'open' ? 'attention' : 'succeeded'}`} />
-        {HEADING[item.kind] ?? 'Needs you'}
+        {card.heading}
       </div>
       {/* The supervisor's own sentence, including its check label, as sent. */}
-      <h3>{exact ?? displayText(item.ask)}</h3>
-      {approval && exact === undefined && (
+      <h3>{card.text}</h3>
+      {card.cannotApproveHere && (
         <p className="muted">This card cannot be shown exactly, so it cannot be approved here.</p>
       )}
-      {item.evidence.length > 0 && (
+      {card.evidence.length > 0 && (
         <ul className="muted">
-          {item.evidence.map((evidence, index) => (
-            <Evidence
+          {card.evidence.map((line, index) => (
+            <li
               key={`${item.itemId}-${index}`}
-              evidence={evidence}
-              exact={exact !== undefined}
-            />
+              className={line.kind === 'action' ? 'held-action' : undefined}
+            >
+              {line.kind === 'artifact' && line.text}
+              {line.kind === 'action' && (
+                <>
+                  Held until you answer: {line.tool} <code>{line.args}</code>
+                </>
+              )}
+              {line.kind === 'link' &&
+                (line.href ? (
+                  <a href={line.href} target="_blank" rel="noreferrer noopener">
+                    {line.label} ↗
+                  </a>
+                ) : (
+                  line.label
+                ))}
+            </li>
           ))}
         </ul>
       )}
-      {item.state === 'answering' ? (
+      {card.answering ? (
         <p className="acknowledged" role="status">
-          {item.delivery === 'retrying'
-            ? 'Your answer is chosen. Delivering it is taking a few tries, and it will keep trying.'
-            : 'Your answer is chosen and is being delivered.'}
+          {card.answering}
         </p>
       ) : (
         <>
@@ -104,7 +68,7 @@ export function InboxCard({
             </label>
           )}
           <div className="inbox-options">
-            {options.map((option) => (
+            {card.options.map((option) => (
               <Button
                 key={option.id}
                 label={displayText(option.label)}
@@ -114,7 +78,7 @@ export function InboxCard({
               />
             ))}
           </div>
-          {options.some((option) => option.recommended) && (
+          {card.hasRecommended && (
             <p className="muted">The filled button is the recommended answer.</p>
           )}
         </>

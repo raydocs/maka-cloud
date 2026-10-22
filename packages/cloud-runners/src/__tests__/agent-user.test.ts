@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -19,12 +20,25 @@ const GOOD = [
   'FACT dev_uid=0',
   'FACT agent_uid=65534',
   'FACT agent_sudo=no',
+  'FACT agent_sudo_list=no',
+  'FACT agent_sudo_policy=none',
+  'FACT agent_caps=none',
+  'FACT agent_filecaps=none',
+  'FACT agent_groups=maka-agent maka',
+  'FACT agent_sockets=none',
+  'FACT agent_control_write=none',
+  'FACT agent_iptables=no',
+  'FACT agent_ip6tables=absent',
   'FACT chan_enter=no',
   'FACT chan_list=no',
   'FACT chan_read=no',
   'FACT chan_write=no',
   'FACT chan_create=no',
   'FACT task_list=no',
+  'FACT task_file_write=no',
+  'FACT brief_read=yes',
+  'FACT result_write=yes',
+  'FACT result_cleanup=yes',
   'FACT workspace_write=yes',
   'FACT workspace_cleanup=yes',
 ];
@@ -47,6 +61,11 @@ test('a box passes only when every fact of the probe is as the channel needs it'
     [without('chan_write', 'yes'), /write the channel/u],
     [without('chan_create', 'yes'), /create files in the channel directory/u],
     [without('task_list', 'yes'), /list a task directory/u],
+    [without('task_file_write', 'yes'), /create files in the task directory/u],
+    [without('brief_read', 'no'), /cannot read the brief/u],
+    [without('result_write', 'no'), /cannot write the result/u],
+    [without('result_cleanup', 'no'), /cannot remove the result/u],
+    [without('brief_read'), /cannot read the brief/u],
     [without('workspace_write', 'no'), /cannot write a workspace/u],
     [without('workspace_cleanup', 'no'), /cannot remove what the agent wrote/u],
     // A missing answer is never taken as a good one.
@@ -82,8 +101,15 @@ function canSeparate(): string | undefined {
 }
 const skip = canSeparate();
 
-async function boxes(t: { after(fn: () => Promise<void>): void }, channel = CHANNEL) {
-  const h = await setup({ cloud: { agentChannel: channel } });
+async function boxes(
+  t: { after(fn: () => Promise<void>): void },
+  channel = CHANNEL,
+  execPath?: string,
+) {
+  const h = await setup({
+    cloud: { agentChannel: channel },
+    ...(execPath === undefined ? {} : { fake: { execPath } }),
+  });
   t.after(() => h.cleanup());
   // The account must be able to walk down to the work root: the box image's job.
   for (let dir = h.root; dir !== '/' && dir !== dirname(dir); dir = dirname(dir)) {
@@ -97,7 +123,12 @@ async function boxes(t: { after(fn: () => Promise<void>): void }, channel = CHAN
 test('on a box with a second account the probe passes and nothing is left behind', {
   skip,
 }, async (t) => {
-  const { machine, h } = await boxes(t);
+  // The machine running the test may carry capabilities of its own (a media helper, say); what is
+  // tested here is the probe's layout, so its capability scan reads an empty listing.
+  const bin = await fs.mkdtemp(join(tmpdir(), 'no-caps-'));
+  t.after(() => fs.rm(bin, { recursive: true, force: true }));
+  await fs.writeFile(join(bin, 'getcap'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const { machine, h } = await boxes(t, CHANNEL, `${bin}:${process.env.PATH ?? ''}`);
   await checkAgentIsolation(machine, CHANNEL);
   assert.deepEqual(
     (await fs.readdir(h.root)).filter((name) => name.startsWith('.probe')),
@@ -158,6 +189,75 @@ test('what the agent runs cannot write, replace or remove the channel, but works
   await fs.rm(join(taskDir, 'workspace', 'note.txt'));
 });
 
+test('the agent account reads the brief and writes the result in the handoff directory, and nothing else of the task directory', {
+  skip,
+}, async (t) => {
+  const { machine, h } = await boxes(t);
+  const dir = 'tsk_agent_handoff';
+  await machine.prepare(dir, '# the brief\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  const taskDir = machine.taskDir(dir);
+  const asAgentRun = (script: string) =>
+    spawnSync('bash', ['-c', asAgent(`sh -c ${JSON.stringify(script)}`, CHANNEL)], {
+      env: { PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+    });
+  // The two paths the agent is told about work for it.
+  assert.equal(asAgentRun(`cat ${taskDir}/handoff/brief.md`).stdout, '# the brief\n');
+  const manifest = '{"summary":"s","done":[],"notDone":[],"confidence":"high","knownIssues":[]}';
+  assert.equal(
+    asAgentRun(`umask 002; echo '${manifest}' > ${taskDir}/handoff/result.json`).status,
+    0,
+  );
+  const read = await machine.readResult(dir);
+  assert.ok(read.ok, JSON.stringify(read));
+  assert.equal(read.bytes.toString('utf8').trim(), manifest);
+  // The task directory and the channel stay out of its reach.
+  assert.notEqual(asAgentRun(`ls ${taskDir}`).status, 0);
+  assert.notEqual(asAgentRun(`: > ${taskDir}/result.json`).status, 0);
+  assert.notEqual(asAgentRun(`cat ${taskDir}/chan/t1.in`).status, 0);
+  // A new run clears what the last one wrote there, though the agent owns it.
+  await machine.launch({
+    dirName: dir,
+    run: 't2',
+    preamble: '',
+    program: 'true',
+    args: [],
+    envs: {},
+    runToken: 'tok',
+    workdir: join(taskDir, 'workspace'),
+  });
+  await assert.rejects(fs.stat(join(taskDir, 'handoff', 'result.json')));
+  assert.ok(h.root);
+});
+
+test('links the agent plants in handoff/ are not followed when the next brief is written', {
+  skip,
+}, async (t) => {
+  const { machine, h } = await boxes(t);
+  const dir = 'tsk_agent_links';
+  await machine.prepare(dir, 'first\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  const taskDir = machine.taskDir(dir);
+  const victim = join(h.tmp, 'victim.txt');
+  await fs.writeFile(victim, "the sandbox user's file\n", { mode: 0o600 });
+  const asAgentRun = (script: string) =>
+    spawnSync('bash', ['-c', asAgent(`sh -c ${JSON.stringify(script)}`, CHANNEL)], {
+      env: { PATH: process.env.PATH ?? '' },
+      encoding: 'utf8',
+    });
+  // Another account's link, aimed at a file only the sandbox user owns, where the next brief is staged.
+  assert.equal(asAgentRun(`ln -s ${victim} ${taskDir}/handoff/brief.md.tmp`).status, 0);
+  // handoff/ is sticky: the agent cannot remove or replace the runner's brief with a link of its own.
+  assert.notEqual(asAgentRun(`rm -f ${taskDir}/handoff/brief.md`).status, 0);
+  assert.notEqual(asAgentRun(`ln -sf ${victim} ${taskDir}/handoff/brief.md`).status, 0);
+  await machine.prepare(dir, 'second\n', undefined, CHANNEL.group);
+  await machine.prepareAgent(dir, CHANNEL.group);
+  assert.equal(await fs.readFile(victim, 'utf8'), "the sandbox user's file\n");
+  assert.equal((await fs.stat(victim)).mode & 0o777, 0o600);
+  assert.equal(asAgentRun(`cat ${taskDir}/handoff/brief.md`).stdout, 'second\n');
+});
+
 test('a conversation put back by the sandbox user is read and extended by the agent, and read again by the sandbox user', {
   skip,
 }, async (t) => {
@@ -196,7 +296,9 @@ test('a run of the agent account is stopped like any other, with its processes',
   const started = await machine.launch({
     dirName: dir,
     run: 't1',
-    script: buildRunScript({ preamble: '', command: asAgent('sleep 300', CHANNEL) }),
+    preamble: '',
+    program: 'sleep',
+    args: ['300'],
     envs: {},
     runToken: token,
     workdir: join(machine.taskDir(dir), 'workspace'),

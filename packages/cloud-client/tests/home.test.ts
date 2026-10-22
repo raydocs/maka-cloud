@@ -1,9 +1,12 @@
 import { expect, test } from 'vitest';
 import {
   doneSince,
+  type InboxItem,
   nextRuns,
   type ProjectView,
   relativeTime,
+  splitSuggestions,
+  suggestionLine,
   type TaskView,
   verbOf,
 } from '../src/index';
@@ -129,4 +132,32 @@ test('relative time and verbs', () => {
   expect(verbOf('approval')).toBe('Approve');
   expect(verbOf('finished')).toBe('Review');
   expect(verbOf('something_new')).toBe('Decide');
+});
+
+test('a suggestion has its own verb, and its line says mode, cost and repository in words', () => {
+  expect(verbOf('suggestion')).toBe('Suggested');
+  const facts = {
+    kind: 'fix_main_ci',
+    mode: 'standard' as const,
+    estimateUsd: 3,
+    typical: false,
+    repo: 'acme/widgets',
+    detail: '',
+    external: false,
+  };
+  expect(suggestionLine(facts)).toBe('Standard · about $3.00 · acme/widgets');
+  expect(suggestionLine({ ...facts, mode: 'quick', typical: true, estimateUsd: 0.5 })).toBe(
+    'Quick · about $0.50 (typical) · acme/widgets',
+  );
+});
+
+test('suggestions are kept apart from what needs a decision', () => {
+  const item = (itemId: string, kind: InboxItem['kind']) => ({ itemId, kind }) as InboxItem;
+  const { waiting, suggested } = splitSuggestions([
+    item('a', 'approval'),
+    item('b', 'suggestion'),
+    item('c', 'finished'),
+  ]);
+  expect(waiting.map((i) => i.itemId)).toEqual(['a', 'c']);
+  expect(suggested.map((i) => i.itemId)).toEqual(['b']);
 });

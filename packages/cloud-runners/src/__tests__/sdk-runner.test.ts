@@ -269,7 +269,7 @@ test('a step the log already holds as finished or running is not run again', asy
 });
 
 test('without an agent channel the SDK path refuses to run, and the CLI is never started', async (t) => {
-  const h = await setup({ cloud: { agentSdk: await loadAgentSdk() } });
+  const h = await setup({ noAgentChannel: true, cloud: { agentSdk: await loadAgentSdk() } });
   t.after(() => h.cleanup());
   await fs.writeFile(join(h.home, '.maka-cli', 'bin', 'claude'), SDK_CLI, { mode: 0o755 });
   await tools(h, [{ id: 'toolu_1', name: 'Bash', input: { command: 'gh pr create' } }]);
@@ -314,7 +314,7 @@ test('a secret in a tool call is not written to the step log', async (t) => {
   assert.equal(terminal(events)?.type, 'finished');
   assert.ok(steps.calls.length > 0);
   assert.ok(!steps.calls.join('\n').includes(API_KEY), 'the model key reached the step log');
-  assert.match(steps.calls[0] ?? '', /\[redacted\]/);
+  assert.match(steps.calls[0] ?? '', /\[(redacted|secret)\]/);
 });
 
 test('without step logging the SDK runs no hooks', async (t) => {
@@ -410,4 +410,15 @@ test('after a restart the SDK continues the recorded session with the recovery n
 test('the real SDK loads and exposes query', async () => {
   const sdk = await loadAgentSdk();
   assert.equal(typeof sdk.query, 'function');
+});
+
+test('waitinit reports the session, waits for the go file, then finishes', async (t) => {
+  const h = await sdkSetup(t);
+  await h.setMode('waitinit');
+  const handle = await h.runners.claude.start(await h.spec('tsk_sdk_waitinit'));
+  const done = collect(handle);
+  await until(() => exists(fakeFile(h, 'waiting')));
+  assert.equal(await settles(done, 300), 'stuck', 'it finished before it was released');
+  await fs.writeFile(fakeFile(h, 'go'), '');
+  assert.equal(terminal(await done)?.type, 'finished');
 });

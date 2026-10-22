@@ -1116,3 +1116,39 @@ test('the gateway’s own key is scrubbed from an error however short it is and 
     }
   }
 });
+
+test('a revoke bounded by an attempt leaves the grants of a later attempt alone', async () => {
+  const { gateway } = rig();
+  const issue = (attempt?: number) =>
+    gateway.issue({
+      vendor: 'anthropic',
+      subject: 'task-att',
+      taskId: 'task-att',
+      budget: { limitUsd: 1 },
+      ...(attempt === undefined ? {} : { attempt }),
+    });
+  const old = issue();
+  const second = issue(2);
+  const third = issue(3);
+  const other = gateway.issue({
+    vendor: 'anthropic',
+    subject: 'task-other',
+    taskId: 'task-other',
+    attempt: 1,
+    budget: { limitUsd: 1 },
+  });
+
+  await gateway.revokeForTask('task-att', { upToAttempt: 2 });
+  assert.equal(gateway.authenticate(old.token), undefined, 'issued with no attempt: older');
+  assert.equal(gateway.authenticate(second.token), undefined);
+  assert.ok(gateway.authenticate(third.token), 'attempt 3 keeps its access');
+  assert.ok(gateway.authenticate(other.token), 'another task is not touched');
+
+  await gateway.revokeForTask('task-att');
+  assert.equal(
+    gateway.authenticate(third.token),
+    undefined,
+    'without a bound it takes every grant',
+  );
+  assert.ok(gateway.authenticate(other.token));
+});

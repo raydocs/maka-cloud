@@ -1,4 +1,5 @@
 import { applyEgressGuard, type InstaboxClient } from '@maka-cloud/instabox';
+import type { AgentChannel } from '@maka-cloud/runners';
 import { BoxPool } from './pool.js';
 import type { BoxPoolOptions } from './types.js';
 
@@ -11,6 +12,11 @@ export interface BoxServiceOptions {
   templateId: string;
   /** At most this many boxes per invite. Default 3. */
   maxPerInvite?: number;
+  /**
+   * The unprivileged account repository scripts (`.agents/resume`, `.agents/setup`) run as. Without it
+   * no repository script is run.
+   */
+  agent?: AgentChannel;
   /**
    * Whether the orchestrator still considers a task live. Before the orchestrator exists the answer
    * must be `true`: a box labelled with a task is then kept claimed, never freed by a guess.
@@ -44,7 +50,7 @@ export interface BoxService {
 
 /**
  * The pool of an instabox account with its two loops: `sweepIdle` puts idle boxes to sleep, `cleanup`
- * retries lost boxes and removes long-idle ones. A loop that fails reports and goes on; neither
+ * retries lost boxes, frees claims of tasks that are no longer live and removes long-idle boxes. A loop that fails reports and goes on; neither
  * loop ever overlaps itself (the next run is set after the last one ends).
  */
 export function startBoxService(options: BoxServiceOptions): BoxService {
@@ -64,6 +70,7 @@ export function startBoxService(options: BoxServiceOptions): BoxService {
     onWarning: warn,
     timers,
     ...(options.maxPerInvite === undefined ? {} : { maxPerInvite: options.maxPerInvite }),
+    ...(options.agent === undefined ? {} : { agent: options.agent }),
     ...(options.conversationOf === undefined ? {} : { conversationOf: options.conversationOf }),
   });
 
@@ -90,7 +97,11 @@ export function startBoxService(options: BoxServiceOptions): BoxService {
     schedule();
   };
   loop('sweep', options.sweepEveryMs ?? DEFAULT_SWEEP_EVERY_MS, () => pool.sweepIdle());
-  loop('cleanup', options.cleanupEveryMs ?? DEFAULT_CLEANUP_EVERY_MS, () => pool.cleanup());
+  loop('cleanup', options.cleanupEveryMs ?? DEFAULT_CLEANUP_EVERY_MS, async () => {
+    // A box claimed by a task that ended while the server was down is freed first.
+    await pool.reconcile();
+    return await pool.cleanup();
+  });
 
   return {
     pool,

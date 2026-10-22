@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { collect, notes, setup, terminal } from './harness.js';
+import { asAgent } from '../agent-user.js';
+import { buildRunScript } from '../scripts.js';
+import { collect, HARNESS_AGENT, notes, setup, terminal } from './harness.js';
 
 function reasonOf(events: Parameters<typeof terminal>[0]): string {
   const last = terminal(events);
@@ -90,7 +92,7 @@ test('a result.json that is a fifo or directory is refused', async (t) => {
   t.after(() => h.cleanup());
   const machine = h.runners.fleet.machine(h.fake.machineId);
   await machine.prepare('tsk_dir');
-  await fs.mkdir(join(h.root, 'tsk_dir', 'result.json'));
+  await fs.mkdir(join(h.root, 'tsk_dir', 'handoff', 'result.json'));
   assert.deepEqual(await machine.readResult('tsk_dir'), {
     ok: false,
     reason: 'result.json is not a regular file',
@@ -115,7 +117,7 @@ test('a result copied back in several chunks arrives byte for byte', async (t) =
   await machine.prepare('tsk_chunks');
   const payload = Buffer.alloc(700_000);
   for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) % 256;
-  await fs.writeFile(join(h.root, 'tsk_chunks', 'result.json'), payload);
+  await fs.writeFile(join(h.root, 'tsk_chunks', 'handoff', 'result.json'), payload);
   const read = await machine.readResult('tsk_chunks');
   assert.ok(read.ok);
   assert.ok(read.ok && read.bytes.equals(payload));
@@ -146,16 +148,18 @@ test('a retried start does not delete the result a running turn already wrote', 
   const input = {
     dirName: 'tsk_keep',
     run: 't1',
-    script: 'exit 0\n',
+    preamble: '',
+    program: 'true',
+    args: [],
     envs: {},
     runToken: 'token-keep',
     workdir: join(h.root, 'tsk_keep'),
   };
   assert.equal(await machine.launch(input), 'started');
-  await fs.writeFile(join(h.root, 'tsk_keep', 'result.json'), '{"fresh":true}');
+  await fs.writeFile(join(h.root, 'tsk_keep', 'handoff', 'result.json'), '{"fresh":true}');
   assert.equal(await machine.launch(input), 'already');
   assert.equal(
-    await fs.readFile(join(h.root, 'tsk_keep', 'result.json'), 'utf8'),
+    await fs.readFile(join(h.root, 'tsk_keep', 'handoff', 'result.json'), 'utf8'),
     '{"fresh":true}',
   );
 });

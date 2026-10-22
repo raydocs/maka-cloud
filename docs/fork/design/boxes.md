@@ -133,6 +133,14 @@ with the sandbox user, so those files are not writable by the account.
   invite's, repository's and setup's; one with no description, or another one, is not ours and the
   build refuses (the name alone is never proof, and expiry skips such a snapshot too). The pool also
   refuses a `SetupChoice` whose `tenantId` is not the task's invite and starts from the template.
+- What a snapshot carries: it is the whole disk of the builder, and every box of the invite boots from it, so
+  before it is saved the builder is cleaned (`scrub.ts`): credential, history and transcript paths in the homes
+  of the sandbox user and the agent account (`.ssh`, `.aws`, `.config/gh`, `.netrc`, `.npmrc`, `.claude`,
+  `.codex`, shell histories and so on), everything in the task folders (`/data/work`, `/data/maka` except
+  `repos`), and untracked `.env`/`.env.*`/`.npmrc` files in the checkout are removed. A second pass only looks:
+  if it finds anything (it prints `FOUND <path>`, exit 7) the build fails at step `scrub check`, nothing is
+  saved, and the builder is given back. Tracked files and `*.example`/`*.sample`/`*.template` stay. The builder
+  is made fresh from the template for each build, so the list is a second line behind that, not the first.
 - `.agents/resume` of the checkout (`/data/maka/repos/<repo>`) runs after the guard, on every wake and on
   every box made from a setup snapshot, with a limit (default 120 s). If it fails, times out or cannot run,
   `onWarning` and `onResumeFailure` hear of it and the box is still handed out: the task starts without the

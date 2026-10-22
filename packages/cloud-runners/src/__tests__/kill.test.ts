@@ -18,7 +18,9 @@ async function runScript(
   return await machine.launch({
     dirName,
     run,
-    script: buildRunScript({ preamble: '', command }),
+    preamble: '',
+    program: 'bash',
+    args: ['-c', command],
     envs: {},
     runToken: `token-${dirName}-${run}`,
     workdir: join(h.root, dirName, 'workspace'),

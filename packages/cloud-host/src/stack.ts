@@ -1,11 +1,19 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, relative } from 'node:path';
+import {
+  type BoxService,
+  type BoxServiceOptions,
+  cliInstallCommands,
+  pinnedVersions,
+  startBoxService,
+} from '@maka-cloud/boxes';
 import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
+import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox';
 import {
   type Orchestrator,
   RunnerRegistry,
-  scrubSecretShapes,
+  containsSecret,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { researchPlaybook } from '@maka-cloud/playbooks';
@@ -37,6 +45,7 @@ import {
   scrubErrorText,
 } from '@maka-cloud/server';
 import { backupLayoutOf, type StackConfig } from './config.js';
+import { type CardsRuntime, createCards } from './cards/runtime.js';
 import { createDuties, type DutiesRuntime } from './duties/runtime.js';
 import {
   conductorGateway,
@@ -77,6 +86,8 @@ export interface StackDependencies {
   ownerOfTask?: (taskId: string) => string | undefined;
   /** Replaces the GitHub reader that proposals inspect repositories with, for tests. */
   dutyInspector?: import('@maka-cloud/duties').RepoInspector;
+  /** Replaces the GitHub reader and the timing of the card scans, for tests. */
+  cards?: Pick<NonNullable<Parameters<typeof createCards>[0]>, 'reader' | 'schedule'>;
   /** How often schedules are looked at and finished duty runs settled, in milliseconds. Default 60000. */
   dutyTickMs?: number;
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
@@ -91,6 +102,11 @@ export interface StackDependencies {
     retryAfterMs?: number;
     now?: () => number;
   };
+  /**
+   * Replaces the sandbox client, the egress guard and the timers of the box pool (`MAKA_CLOUD_BOXES=1`),
+   * for tests. Unset in the product: the pool uses the account's `INSTABOX_API_KEY` and the real guard.
+   */
+  boxes?: Pick<BoxServiceOptions, 'guard' | 'timers'> & { client?: InstaboxClient };
   onWarning?: (message: string, detail?: unknown) => void;
   /** Routine events worth a log line, such as a finished backup. */
   onInfo?: (event: string, fields: Record<string, string | number>) => void;
@@ -106,6 +122,8 @@ export interface Stack {
   pause: PauseSwitch;
   /** The standing duties; absent while `MAKA_GITHUB_WEBHOOK_SECRET` is not set. */
   duties?: DutiesRuntime;
+  /** Proposed cards; absent while `MAKA_CLOUD_CARDS` is not set. */
+  cards?: CardsRuntime;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -146,6 +164,9 @@ export async function startStack(
     | {
         backupTo(destination: string): Promise<void>;
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
+        raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
+        raiseSuggestionOffer(input: Parameters<Supervisor['raiseSuggestionOffer']>[0]): boolean;
+        closeSuggestion(lineage: string): boolean;
       }
     | undefined;
   let raiseCapHit:
@@ -217,6 +238,10 @@ export async function startStack(
   // has no duties: there is no webhook route and no project route.
   const webhookSecret = config.dutiesSet ? env.MAKA_GITHUB_WEBHOOK_SECRET?.trim() : undefined;
   let duties: DutiesRuntime | undefined;
+  // The box pool and its sleep and cleanup loops, made only with `MAKA_CLOUD_BOXES=1`.
+  let boxService: BoxService | undefined;
+  // Proposed cards (T30): only when asked for, on top of the duties' database.
+  let cards: CardsRuntime | undefined;
   // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
   // the Agent SDK, which needs the agent's account.
   let transcripts: SqliteTranscriptStore | undefined;
@@ -232,13 +257,58 @@ export async function startStack(
             dbPath: config.dutiesDbPath,
             webhookSecret,
             links: config.dutyLinks,
+            cards: config.cardsSet,
             ...(dependencies.dutyInspector === undefined
               ? {}
               : { inspector: dependencies.dutyInspector }),
             ...(dependencies.dutyTickMs === undefined ? {} : { tickMs: dependencies.dutyTickMs }),
             onWarning: warn,
           });
+    if (duties !== undefined && config.cardsSet) {
+      const modes = config.modes;
+      cards = createCards({
+        engine: duties.engine,
+        minRunUsd: (mode) => modes.modes[mode].budget.minRunUsd,
+        ...(dependencies.cards?.reader === undefined ? {} : { reader: dependencies.cards.reader }),
+        ...(dependencies.cards?.schedule === undefined
+          ? {}
+          : { schedule: dependencies.cards.schedule }),
+        onWarning: warn,
+      });
+    }
     const publicUrl = config.mcp.publicUrl;
+    if (config.boxes !== undefined) {
+      const apiKey = env.INSTABOX_API_KEY;
+      const client =
+        dependencies.boxes?.client ??
+        (apiKey === undefined || apiKey === ''
+          ? undefined
+          : new InstaboxClient({
+              apiKey,
+              baseUrl: config.instabox.apiUrl ?? DEFAULT_INSTABOX_BASE_URL,
+            }));
+      if (client === undefined) throw new Error('INSTABOX_API_KEY is not set.');
+      boxService = startBoxService({
+        client,
+        templateId: config.boxes.templateId,
+        maxPerInvite: config.boxes.maxPerInvite,
+        ...(config.agentChannel === undefined ? {} : { agent: config.agentChannel }),
+        // Until the orchestrator exists every task counts as live: a box is never freed by a guess.
+        isTaskLive: (taskId) => {
+          const state = orchestrator?.taskStateOf(taskId);
+          return (
+            orchestrator === undefined ||
+            state === 'queued' ||
+            state === 'running' ||
+            state === 'paused'
+          );
+        },
+        conversationOf: (taskId) => conversationOfTask?.(taskId),
+        onWarning: warn,
+        ...(dependencies.boxes?.guard === undefined ? {} : { guard: dependencies.boxes.guard }),
+        ...(dependencies.boxes?.timers === undefined ? {} : { timers: dependencies.boxes.timers }),
+      });
+    }
     const runnerOptions: Partial<CloudRunnersOptions> = {
       modelAccess: gatewayModelAccess(gateway.gateway, gateway.sandboxUrl, (taskId) => {
         const inviteId = dependencies.ownerOfTask
@@ -260,7 +330,12 @@ export async function startStack(
       ],
       inputs: sameConversationInputPolicy(directory),
       tenantOf,
-      sandboxes: new TenantMachineProvider(config.sandboxes),
+      // The pool makes, sleeps and deletes the boxes; the CLIs on them are the pinned, checked ones.
+      sandboxes:
+        boxService === undefined ? new TenantMachineProvider(config.sandboxes) : boxService.pool,
+      ...(boxService === undefined
+        ? {}
+        : { installCommands: cliInstallCommands(), versions: pinnedVersions() }),
       ...(config.agentChannel === undefined || transcripts === undefined
         ? {}
         : {
@@ -285,6 +360,8 @@ export async function startStack(
       // The token is read from MAKA_GITHUB_TOKEN when a pull request is opened, never earlier.
       publisher: new GitHubPublisher({ env }),
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
+      ownsConversationTask: (runId, taskId) =>
+        conductor?.state.conversationOwnsTask(runId, taskId) ?? false,
     });
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the
@@ -325,12 +402,13 @@ export async function startStack(
         },
         playbooks: STACK_PLAYBOOKS,
         modes: config.modes,
+        deepMode: config.deepMode,
         tools: [pullRequests],
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
         scrubTaskText: scrubErrorText,
-        carriesSecret: (text) => scrubSecretShapes(text) !== text,
+        carriesSecret: (value) => containsSecret(value),
       },
       supervisor: (context) =>
         startInbox(
@@ -345,6 +423,7 @@ export async function startStack(
               return inviteId === undefined ? undefined : { inviteId };
             },
             ...(duties === undefined ? {} : { proposals: duties.proposals }),
+            ...(cards === undefined ? {} : { suggestions: cards.suggestions }),
             onStarted: (supervisor) => {
               supervisorRef = supervisor;
               raiseCapHit = (input) => supervisor.raiseCapHit(input);
@@ -366,24 +445,38 @@ export async function startStack(
     // They are written only once this process holds the server's database, which keeps a second
     // server out: a start that fails on the way never changes what the running server published.
     journal.setSpendPolicy(config.spend);
+    // Boxes labelled with a task that ended while the server was down are freed (or kept, if live).
+    boxService?.pool
+      .reconcile()
+      .catch((error: unknown) => warn('Box pool reconcile failed', error));
+    const runsOf = (conversationId: string) => {
+      const conductorState = cloud.conductor.state;
+      return conductorState.runsOfConversation(conversationId).map((run) => ({
+        runId: run.runId,
+        dutyId: run.dutyId,
+        state: run.state,
+        spentUsd: conductorState.budget(run.runId).spentUsd,
+        endReason: run.endReason,
+      }));
+    };
     duties?.start({
       server: cloud.server,
-      runsOf: (conversationId) => {
-        const conductorState = cloud.conductor.state;
-        return conductorState.runsOfConversation(conversationId).map((run) => ({
-          runId: run.runId,
-          dutyId: run.dutyId,
-          state: run.state,
-          spentUsd: conductorState.budget(run.runId).spentUsd,
-          endReason: run.endReason,
-        }));
-      },
+      runsOf,
       postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
       raiseProposal: (input) => supervisorRef?.raiseProposal(input) ?? false,
     });
+    cards?.start({
+      server: cloud.server,
+      runsOf,
+      raiseSuggestion: (input) => supervisorRef?.raiseSuggestion(input) ?? false,
+      raiseOffer: (input) => supervisorRef?.raiseSuggestionOffer(input) ?? false,
+      closeSuggestion: (lineage) => supervisorRef?.closeSuggestion(lineage) ?? false,
+    });
   } catch (error) {
+    await cards?.stop();
     await duties?.stop();
     duties?.close();
+    await boxService?.close();
     transcripts?.close();
     await gateway.close();
     invites.close();
@@ -504,6 +597,7 @@ export async function startStack(
     gateway,
     pause,
     ...(duties === undefined ? {} : { duties }),
+    ...(cards === undefined ? {} : { cards }),
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
@@ -518,10 +612,12 @@ export async function startStack(
           try {
             // The timer and the launches stop first; the database closes once the server no
             // longer answers webhook requests.
+            await cards?.stop();
             await duties?.stop();
             await cloud.close();
           } finally {
             duties?.close();
+            await boxService?.close();
             transcripts?.close();
             await gateway.close();
             invites?.close();

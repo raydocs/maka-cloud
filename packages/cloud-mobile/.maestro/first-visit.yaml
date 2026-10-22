@@ -1,0 +1,16 @@
+# A first visit lands on Home; one sentence starts a conversation and opens it in Chat.
+appId: cloud.maka.app
+---
+- runFlow: subflows/sign-in.yaml
+- assertVisible: "Make room for your next idea."
+- takeScreenshot: home-first-visit
+- tapOn:
+    id: "field-What would you like to get done\\?"
+- inputText: "Summarise what changed this week"
+- hideKeyboard
+- tapOn:
+    id: "button-Start"
+- assertVisible: "Summarise what changed this week"
+- assertVisible:
+    id: "field-Keep the conversation going"
+- takeScreenshot: chat-started

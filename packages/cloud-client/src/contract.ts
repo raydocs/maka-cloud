@@ -41,6 +41,8 @@ export interface TaskView {
   finishedAt?: number;
   progress: string[];
   manifest?: Manifest;
+  /** What the runner kept for the owner when the task ended without a result. */
+  kept?: Manifest;
   failureReason?: string;
   cancelRequested: boolean;
   /** On a top-level task: what its whole tree reported spending. Absent until a run reports. */
@@ -70,9 +72,9 @@ export type TaskEvent =
   /** A cut-off run goes again: show `text` in place of what you had of its turn. */
   | { type: 'task_restarted'; taskId: string; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }
-  | { type: 'task_failed'; taskId: string; reason: string }
+  | { type: 'task_failed'; taskId: string; reason: string; kept?: Manifest }
   | { type: 'task_cancel_requested'; taskId: string; by: string }
-  | { type: 'task_cancelled'; taskId: string }
+  | { type: 'task_cancelled'; taskId: string; kept?: Manifest }
   | { type: 'task_pause_requested'; taskId: string; by: string }
   | { type: 'task_paused'; taskId: string }
   | { type: 'task_pause_failed'; taskId: string; reason: string }
@@ -121,7 +123,22 @@ export type InboxKind =
   | 'blocked'
   | 'verification_failed'
   | 'budget'
-  | 'finished';
+  | 'finished'
+  /** A proposed task the employee noticed (T30): a verb-first card, "Do it" or "Not now". */
+  | 'suggestion';
+
+/** What a proposed card shows beside its title. Absent on the offer to stop suggesting a kind. */
+export interface SuggestionFacts {
+  kind: string;
+  mode: 'quick' | 'standard' | 'deep';
+  estimateUsd: number;
+  /** The estimate is what finished tasks of this kind typically cost. */
+  typical: boolean;
+  repo: string;
+  detail: string;
+  /** Text from outside the owner shaped the card: the task it starts runs tainted. */
+  external: boolean;
+}
 
 export type InboxEvidence =
   | { kind: 'artifact'; taskId: string; name: string }
@@ -149,6 +166,8 @@ export interface InboxItem {
   preconditionHash: string;
   version: number;
   interrupts: boolean;
+  /** On `suggestion` items that are cards. */
+  suggestion?: SuggestionFacts;
   delivery: 'none' | 'sending' | 'retrying';
   createdAt: number;
   updatedAt: number;
@@ -184,6 +203,22 @@ export interface ProjectView {
   repo: string;
   defaultBranch: string;
   duties: DutyView[];
+}
+
+/** One kind of suggestion in one project: its switch and what the owner did with its cards. */
+export interface SuggestionKindView {
+  kind: string;
+  label: string;
+  enabled: boolean;
+  accepted: number;
+  dismissed: number;
+  ignored: number;
+  ignoredInARow: number;
+  backedOff: boolean;
+  offer: 'none' | 'due' | 'offered' | 'off';
+}
+export interface SuggestionsView {
+  kinds: SuggestionKindView[];
 }
 
 export interface AnswerRequest {

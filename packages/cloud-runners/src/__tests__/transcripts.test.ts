@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -17,6 +18,13 @@ import { setup } from './harness.js';
 
 const SESSION = '11111111-2222-4333-8444-555555555555';
 const OTHER_SESSION = '99999999-2222-4333-8444-555555555555';
+const THINKING = {
+  type: 'thinking',
+  thinking: 'The user wants the file renamed.',
+  signature:
+    'EqQBCkYIBxgCKkA0Vh7Pq9m1ZtQ2w8d3Jx5sL0bN4cR6yU/aKfGhTeWnMoPzXvB1iDjE2lSq+u7CyHrAgFkIwVtQpZnYb',
+};
+
 const KEY = { projectKey: '-work-tsk-a-workspace', sessionId: SESSION };
 
 const line = (n: number, extra: Record<string, unknown> = {}): TranscriptLine => {
@@ -49,6 +57,34 @@ for (const [name, make] of STORES) {
     const bare: TranscriptLine = { json: '{"type":"title","title":"x"}' };
     await store.append('tsk_a', KEY, [bare, bare]);
     assert.equal((await store.locate('tsk_a', SESSION))?.lines, 5);
+  });
+
+  test(`${name}: append answers with the lines it committed, not those it skipped as stored already`, async () => {
+    const store = make();
+    assert.deepEqual(await store.append('tsk_a', KEY, [line(1), line(2), line(2)]), [
+      line(1),
+      line(2),
+    ]);
+    assert.deepEqual(await store.append('tsk_a', KEY, [line(2), line(3)]), [line(3)]);
+    assert.deepEqual(await store.append('tsk_a', KEY, [line(1), line(3)]), []);
+    const bare: TranscriptLine = { json: '{"type":"title","title":"x"}' };
+    assert.deepEqual(await store.append('tsk_a', KEY, [bare, bare]), [bare, bare]);
+  });
+
+  test(`${name}: the mirror reports as kept only the lines the store committed`, async () => {
+    const store = make();
+    const kept: string[][] = [];
+    const mirror = transcriptSessionStore({
+      taskId: 'tsk_a',
+      store,
+      onKept: (lines) => kept.push(lines.map((entry) => entry.uuid ?? '')),
+    });
+    const entry = (n: number) => JSON.parse(line(n).json);
+    await mirror.append(KEY, [entry(1), entry(2)]);
+    // A batch sent again, with one new line among the old.
+    await mirror.append(KEY, [entry(2), entry(3)]);
+    await mirror.append(KEY, [entry(1)]);
+    assert.deepEqual(kept, [['u1', 'u2'], ['u3'], []]);
   });
 
   test(`${name}: a transcript is read in pages that cover it once`, async () => {
@@ -138,13 +174,12 @@ for (const [name, make] of STORES) {
   });
 }
 
-test('the SDK’s store scrubs every line, keeps them in order, and gives nothing back', async () => {
+test('the SDK’s store keeps every line exactly as written, in order, and gives nothing back', async () => {
   const kept = new MemoryTranscriptStore();
   const problems: string[] = [];
   const mirror = transcriptSessionStore({
     taskId: 'tsk_a',
     store: kept,
-    redact: (text) => text.replaceAll('sk-secret-123456', '[redacted]'),
     onProblem: (message) => problems.push(message),
   });
   // The first append is slow; the second must still land after it.
@@ -161,13 +196,19 @@ test('the SDK’s store scrubs every line, keeps them in order, and gives nothin
   await Promise.all([
     mirror.append(KEY, [
       { type: 'user', uuid: 'a', message: { content: 'key sk-secret-123456 here' } },
-      { type: 'assistant', uuid: 'b' },
+      { type: 'assistant', uuid: 'b', message: { content: [THINKING] } },
     ]),
     mirror.append(KEY, [{ type: 'assistant', uuid: 'c' }]),
   ]);
-  const text = (await kept.read('tsk_a', SESSION)).lines.join('\n');
-  assert.ok(!text.includes('sk-secret'), 'a secret reached the store');
-  assert.match(text, /\[redacted\]/);
+  const lines = (await kept.read('tsk_a', SESSION)).lines;
+  // The model checks its own history on a resume (the signature of a thinking block, the redacted
+  // blocks): a line the store changed would fail it.
+  assert.ok(lines[0]?.includes('sk-secret-123456'), 'the line was edited');
+  assert.deepEqual(JSON.parse(lines[1] ?? ''), {
+    type: 'assistant',
+    uuid: 'b',
+    message: { content: [THINKING] },
+  });
   assert.deepEqual(
     (await kept.read('tsk_a', SESSION)).lines.map((l) => JSON.parse(l).uuid),
     ['a', 'b', 'c'],
@@ -182,7 +223,6 @@ test('a refusal by the store is reported and passed to the SDK, and the next bat
   const mirror = transcriptSessionStore({
     taskId: 'tsk_a',
     store: kept,
-    redact: (text) => text,
     onProblem: (message) => problems.push(message),
   });
   await assert.rejects(
@@ -196,16 +236,33 @@ test('a refusal by the store is reported and passed to the SDK, and the next bat
   assert.equal((await kept.locate('tsk_a', SESSION))?.lines, 1);
 });
 
-test('a scrub that breaks a line, or a store that is down, keeps nothing and says so', async () => {
+test('an entry that is not an object with a type keeps nothing and says so', async () => {
   const kept = new MemoryTranscriptStore();
-  const mirror = transcriptSessionStore({
-    taskId: 'tsk_a',
-    store: kept,
-    // A scrub that cuts the text into something that is not one JSON object.
-    redact: (text) => text.slice(0, 10),
-  });
-  await assert.rejects(mirror.append(KEY, [{ type: 'user', uuid: 'a' }]), /could not be scrubbed/);
+  const mirror = transcriptSessionStore({ taskId: 'tsk_a', store: kept });
+  await assert.rejects(
+    mirror.append(KEY, [{ type: 'user', uuid: 'a' }, { uuid: 'b' } as never]),
+    /not an object with a type/,
+  );
   assert.equal(await kept.locate('tsk_a', SESSION), undefined);
+});
+
+test('the transcript database is readable by its owner only, with its log and journal', async (t) => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'transcripts-mode-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'transcripts.db');
+  // A database an earlier version made with the default mode is put right when it is opened.
+  await fs.writeFile(path, '', { mode: 0o644 });
+  const store = SqliteTranscriptStore.open(path);
+  t.after(() => store.close());
+  await store.append('tsk_a', KEY, [
+    { json: JSON.stringify({ type: 'user', uuid: 'a' }), uuid: 'a' },
+  ]);
+  const modes = new Map<string, number>();
+  for (const name of await fs.readdir(dir)) {
+    modes.set(name, (await fs.stat(join(dir, name))).mode & 0o777);
+  }
+  assert.ok(modes.size >= 1);
+  for (const [name, mode] of modes) assert.equal(mode & 0o077, 0, `${name} is ${mode.toString(8)}`);
 });
 
 // -- the sandbox side ----------------------------------------------------------------------------
@@ -342,7 +399,7 @@ test('a link where the configuration directory should be is not followed', async
   assert.deepEqual(await fs.readdir(outside), [`${SESSION}.jsonl`]);
 });
 
-test('a sandbox is brought up to the store’s transcript only when it is behind it', async (t) => {
+test('a sandbox always gets the store’s copy of the transcript, whatever the one it has holds', async (t) => {
   const r = await rig(t, 'tsk_restore');
   const store = new MemoryTranscriptStore();
   await store.append('tsk_restore', KEY, [line(1), line(2), line(3)]);
@@ -354,18 +411,23 @@ test('a sandbox is brought up to the store’s transcript only when it is behind
     lines: 3,
   });
   assert.equal((await fs.readFile(r.file, 'utf8')).split('\n').filter(Boolean).length, 3);
-  assert.deepEqual(await restoreTranscript(input), {
-    status: 'present',
-    projectKey: KEY.projectKey,
-  });
-
-  // A copy that is behind is replaced; one that is ahead (a mirror batch was lost) is left alone.
-  await fs.writeFile(r.file, `${(await store.read('tsk_restore', SESSION)).lines[0]}\n`);
+  // The server's copy is always the one put on the sandbox: a copy that has the same lines, fewer,
+  // more, or the same count with other words (the agent's to write) is replaced.
+  const kept = (await store.read('tsk_restore', SESSION)).lines;
+  const rewrites = [
+    `${kept[0]}\n`,
+    `${kept.join('\n')}\n{"type":"user","uuid":"later"}\n`,
+    `${kept.map((text) => text.replace('"type":"user"', '"type":"assistant"')).join('\n')}\n`,
+  ];
+  for (const text of rewrites) {
+    await fs.writeFile(r.file, text);
+    assert.equal((await restoreTranscript(input)).status, 'restored');
+    assert.equal(await fs.readFile(r.file, 'utf8'), `${kept.join('\n')}\n`);
+  }
+  // Same count of lines, same lengths: only the words differ.
+  await fs.writeFile(r.file, `${kept.join('\n').replaceAll('"n":', '"m":')}\n`);
   assert.equal((await restoreTranscript(input)).status, 'restored');
-  const ahead = `${(await store.read('tsk_restore', SESSION)).lines.join('\n')}\n{"type":"user","uuid":"later"}\n`;
-  await fs.writeFile(r.file, ahead);
-  assert.equal((await restoreTranscript(input)).status, 'present');
-  assert.equal(await fs.readFile(r.file, 'utf8'), ahead);
+  assert.equal(await fs.readFile(r.file, 'utf8'), `${kept.join('\n')}\n`);
 
   // Nothing stored, or a session id that is not one: nothing is put on the sandbox.
   assert.deepEqual(await restoreTranscript({ ...input, sessionId: OTHER_SESSION }), {

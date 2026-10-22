@@ -195,3 +195,28 @@ test('a log longer than the server folds for one request is refused, not answere
   assert.equal(res.status, 413);
   assert.equal(((await res.json()) as { error: string }).error, 'task_log_too_large');
 });
+
+test('the byte limit counts the bytes of the whole answer, not characters, and the wrapper', async (t) => {
+  const maxBytes = 12_000;
+  const { h, taskId, steps } = await setup(t, {
+    timelineContent: true,
+    timelineLimits: { maxBytes },
+  });
+  const label = '读取文件'.repeat(50);
+  for (let i = 0; i < 60; i += 1) {
+    await steps.intent({ stepId: `toolu_${i}`, kind: 'tool:Read', replay: 'safe', label });
+    await steps.outcome(`toolu_${i}`, { status: 'done' });
+  }
+  const res = await timelineOf(h, taskId);
+  assert.equal(res.status, 200);
+  const bytes = Buffer.byteLength(await res.text());
+  assert.ok(bytes <= maxBytes, `${bytes} bytes for a ${maxBytes} byte limit`);
+});
+
+test('an answer that cannot fit the byte limit even with one step is refused', async (t) => {
+  const { h, taskId, steps } = await setup(t, { timelineLimits: { maxBytes: 100 } });
+  await addSteps(steps, 3);
+  const res = await timelineOf(h, taskId);
+  assert.equal(res.status, 413);
+  assert.equal(((await res.json()) as { error: string }).error, 'timeline_too_large');
+});

@@ -19,6 +19,8 @@
 **/*.tsbuildinfo
 packages/cloud-web/playwright-report
 packages/cloud-web/test-results
+# A repository nested in an allowed directory carries remote URLs (with credentials) and history.
+**/.git
 
 # ... and so do settings and credentials, wherever they sit: environment files, package manager and
 # netrc credentials, private keys and certificates, key stores, cloud and SSH directories.

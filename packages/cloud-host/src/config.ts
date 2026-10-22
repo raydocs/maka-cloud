@@ -2,11 +2,13 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { type ModelPrice, modelTable, priceProblem } from '@maka-cloud/gateway';
 import {
   DEFAULT_MODES,
+  withoutDeep,
   type ModesConfig,
   modelsOf,
   parseModesConfig,
   unnamedModels,
 } from '@maka-cloud/modes';
+import { scrubKeyShapes } from '@maka-cloud/orchestrator';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { assertAgentChannel } from '@maka-cloud/runners';
 import { pushConfigFromEnv } from '@maka-cloud/server';
@@ -34,9 +36,10 @@ export interface StackConfig {
   /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
   transcriptsDbPath: string;
   /**
-   * The account the Claude CLI runs as inside a sandbox, and its group. With it Claude tasks are
-   * driven through the Agent SDK (step log, durable resume, stored conversation); without it they
-   * run the CLI directly, as before. See `agent-user.ts` in the runners for what the box must have.
+   * The account the CLIs run as inside a sandbox, and its group. Every CLI (Claude and Codex) runs
+   * as it, never as the sandbox user; without it no CLI is started. With it Claude tasks are also
+   * driven through the Agent SDK (step log, durable resume, stored conversation). See
+   * `agent-user.ts` in the runners for what the box must have.
    */
   agentChannel?: { user: string; group: string };
   /** Where the server writes its daily backups. Unset: it writes none. */
@@ -69,6 +72,12 @@ export interface StackConfig {
    * run tasks.
    */
   sandboxes: Record<string, string>;
+  /**
+   * Set with `MAKA_CLOUD_BOXES=1`: tasks run on a pool of boxes the server makes, sleeps and deletes
+   * itself, up to `maxPerInvite` per invite, instead of the fixed machine per invite in `sandboxes`
+   * (which is then empty).
+   */
+  boxes?: { templateId: string; maxPerInvite: number };
   /** The model gateway sandbox runs reach the vendors through. It reads the vendor keys itself. */
   gateway: {
     host: string;
@@ -88,6 +97,11 @@ export interface StackConfig {
    * of each. Every model it names has a price in the gateway, or the config is refused.
    */
   modes: ModesConfig;
+  /**
+   * Set with `MAKA_CLOUD_DEEP_MODE=1`. Off at launch: the conductor is not told about `deep`, a
+   * pick of it runs as `standard` with a notice, and `modes` holds `standard`'s values under `deep`.
+   */
+  deepMode: boolean;
   /**
    * What model spend may reach, in USD per UTC day or month. An invite with no limit of its own
    * (`cloud-server invite limits`) gets the invite defaults. Small on purpose: a server nobody
@@ -112,6 +126,11 @@ export interface StackConfig {
    * `/github/webhook`. The secret itself is read from the environment by the stack.
    */
   dutiesSet: boolean;
+  /**
+   * Proposed cards are on (T30): each project's daily read-only scan and the one-tap cards it makes.
+   * Needs standing duties and the GitHub token.
+   */
+  cardsSet: boolean;
   /**
    * The repositories a project may be registered for, each tied by the operator to the GitHub
    * App installation it lives in and to the one invite that owns it. Empty: none, whatever the
@@ -191,33 +210,35 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
           if (!/no such table/iu.test(String((error as Error).message))) throw error;
         }
       },
-      // The runs' own secrets were taken out when each line was kept. What a task read in a
-      // repository was not, and the backup scan refuses a copy that holds a key.
+      // The lines are kept exactly as the CLI wrote them (the model checks them on a resume), so a
+      // key a task saw (a pasted one, a file in a repository, a run's own) is still in the live
+      // file. A backup holds no keys: every line of the copy loses its key shapes, and only those
+      // (no field is blanked for its name, so the signature of a thinking block stays). A
+      // conversation restored from a backup loses only the lines that held a key.
       [rel(paths.transcriptsDbPath)]: (copy) => {
-        const lines = copy
-          .prepare(
-            `SELECT task_id, session_id, subpath, n, json FROM transcript_lines
-             WHERE instr(json, 'PRIVATE KEY-----') > 0 OR instr(json, 'mki_') > 0
-                OR instr(json, 'mko_') > 0 OR instr(json, 'mkg_') > 0`,
-          )
-          .all() as Array<{
-          task_id: string;
-          session_id: string;
-          subpath: string;
-          n: number;
-          json: string;
-        }>;
+        const page = copy.prepare(
+          `SELECT task_id, session_id, subpath, n, json FROM transcript_lines
+           ORDER BY task_id, session_id, subpath, n LIMIT ? OFFSET ?`,
+        );
         const update = copy.prepare(
           'UPDATE transcript_lines SET json = ? WHERE task_id = ? AND session_id = ? AND subpath = ? AND n = ?',
         );
-        for (const row of lines) {
-          update.run(
-            withoutSecretShapes(row.json),
-            row.task_id,
-            row.session_id,
-            row.subpath,
-            row.n,
-          );
+        const size = 500;
+        for (let offset = 0; ; offset += size) {
+          const rows = page.all(size, offset) as Array<{
+            task_id: string;
+            session_id: string;
+            subpath: string;
+            n: number;
+            json: string;
+          }>;
+          for (const row of rows) {
+            const clean = scrubKeyShapes(withoutSecretShapes(row.json));
+            if (clean !== row.json) {
+              update.run(clean, row.task_id, row.session_id, row.subpath, row.n);
+            }
+          }
+          if (rows.length < size) break;
         }
       },
     },
@@ -326,7 +347,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_AGENT_USER',
-    'the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly',
+    'the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started',
   ],
   [
     'MAKA_CLOUD_AGENT_GROUP',
@@ -354,7 +375,19 @@ export const ENV_VARIABLES = [
   ['INSTABOX_API_KEY', 'required: sandbox API key'],
   [
     'MAKA_CLOUD_SANDBOXES',
-    'required: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks',
+    'required unless MAKA_CLOUD_BOXES=1: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks',
+  ],
+  [
+    'MAKA_CLOUD_BOXES',
+    '1: the server makes, sleeps and deletes the sandboxes itself, a pool per invite, instead of a fixed machine per invite (do not set MAKA_CLOUD_SANDBOXES); needs MAKA_CLOUD_BOX_TEMPLATE',
+  ],
+  [
+    'MAKA_CLOUD_BOX_TEMPLATE',
+    'the sandbox template id new boxes start from; required with MAKA_CLOUD_BOXES=1',
+  ],
+  [
+    'MAKA_CLOUD_BOX_MAX',
+    'the most boxes one invite may have (1 to 32, default 3); when instabox refuses a create the task waits for a free box of its invite',
   ],
   ['INSTABOX_API_URL', 'sandbox API base URL'],
   ['OPENAI_API_KEY', 'the model gateway’s key for Codex runs'],
@@ -407,6 +440,14 @@ export const ENV_VARIABLES = [
   [
     'MAKA_GITHUB_WEBHOOK_SECRET',
     'the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties',
+  ],
+  [
+    'MAKA_CLOUD_DEEP_MODE',
+    '1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off',
+  ],
+  [
+    'MAKA_CLOUD_CARDS',
+    '1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off',
   ],
   [
     'MAKA_CLOUD_DUTY_REPOS',
@@ -523,6 +564,7 @@ export function readStackConfig(
     },
     inbox: readInboxConfig(value, problems),
     modes: DEFAULT_MODES,
+    deepMode: false,
     spend: {
       inviteDailyUsd: dollars('MAKA_CLOUD_INVITE_DAILY_USD', DEFAULT_SPEND_CAPS.inviteDailyUsd),
       inviteMonthlyUsd: dollars(
@@ -537,10 +579,14 @@ export function readStackConfig(
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
     dutiesSet: false,
+    cardsSet: false,
     dutyLinks: [],
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
   if (modes !== undefined) config.modes = modes;
+  config.deepMode = flag('MAKA_CLOUD_DEEP_MODE');
+  // Off, `deep` is `standard` for every consumer that reads the modes (see `StackConfig.deepMode`).
+  if (!config.deepMode) config.modes = withoutDeep(config.modes);
   try {
     config.pushSet = pushConfigFromEnv(env) !== undefined;
   } catch (error) {
@@ -578,6 +624,12 @@ export function readStackConfig(
   }
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
+  if (flag('MAKA_CLOUD_CARDS')) {
+    if (!config.dutiesSet) problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_WEBHOOK_SECRET');
+    else if (value('MAKA_GITHUB_TOKEN') === undefined) {
+      problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_TOKEN, which the scan reads with');
+    } else config.cardsSet = true;
+  }
   const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
   if (backupDir !== undefined) {
     const problem = backupDirProblem(dataDir, backupDir);
@@ -647,7 +699,15 @@ export function readStackConfig(
         'INSTABOX_MACHINE_ID is no longer used: one machine for every invite lets invites read each other, set MAKA_CLOUD_SANDBOXES',
       );
     }
-    config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
+    const boxes = readBoxes(value, problems);
+    if (boxes !== undefined) config.boxes = boxes;
+    // With the pool asked for, a problem with it is the only thing to report about where tasks run.
+    if (value('MAKA_CLOUD_BOXES') === undefined) {
+      config.sandboxes = sandboxTable(value('MAKA_CLOUD_SANDBOXES'), problems);
+    }
+  }
+  if (options.sandboxes === 'single-machine' && value('MAKA_CLOUD_BOXES') !== undefined) {
+    problems.push('MAKA_CLOUD_BOXES is not used with a single machine');
   }
   const apiUrl = url('INSTABOX_API_URL');
   if (apiUrl !== undefined) config.instabox.apiUrl = apiUrl;
@@ -702,6 +762,59 @@ function parseDutyLinks(text: string): DutyLink[] | string {
   return links;
 }
 const MACHINE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+/**
+ * The most boxes an invite may ask for: the pool's own bound (slot numbers are labels). The instabox
+ * account limit is not assumed; a refused create makes the task wait for a box of its invite.
+ */
+const MAX_BOXES_PER_INVITE = 32;
+const DEFAULT_BOXES_PER_INVITE = 3;
+
+/**
+ * `MAKA_CLOUD_BOXES=1` with its template, or nothing. Mixing it with `MAKA_CLOUD_SANDBOXES` is an
+ * error: it would be unclear which machine a task runs on. Settings of the pool without the switch
+ * are an error too, so a forgotten switch is not silently ignored.
+ */
+function readBoxes(
+  value: (name: string) => string | undefined,
+  problems: string[],
+): StackConfig['boxes'] {
+  const switchValue = value('MAKA_CLOUD_BOXES');
+  const template = value('MAKA_CLOUD_BOX_TEMPLATE');
+  const max = value('MAKA_CLOUD_BOX_MAX');
+  if (switchValue === undefined) {
+    if (template !== undefined || max !== undefined) {
+      problems.push('MAKA_CLOUD_BOX_TEMPLATE and MAKA_CLOUD_BOX_MAX need MAKA_CLOUD_BOXES=1');
+    }
+    return undefined;
+  }
+  if (switchValue !== '1') {
+    problems.push('MAKA_CLOUD_BOXES must be 1, or unset');
+    return undefined;
+  }
+  let ok = true;
+  if (value('MAKA_CLOUD_SANDBOXES') !== undefined) {
+    problems.push('MAKA_CLOUD_BOXES=1 and MAKA_CLOUD_SANDBOXES are both set: use one of them');
+    ok = false;
+  }
+  if (template === undefined) {
+    problems.push('MAKA_CLOUD_BOX_TEMPLATE is not set');
+    ok = false;
+  } else if (!MACHINE_ID.test(template)) {
+    problems.push('MAKA_CLOUD_BOX_TEMPLATE is not a template id');
+    ok = false;
+  }
+  let maxPerInvite = DEFAULT_BOXES_PER_INVITE;
+  if (max !== undefined) {
+    const parsed = Number(max);
+    if (!/^\d+$/u.test(max) || parsed < 1 || parsed > MAX_BOXES_PER_INVITE) {
+      problems.push(`MAKA_CLOUD_BOX_MAX must be a whole number from 1 to ${MAX_BOXES_PER_INVITE}`);
+      ok = false;
+    } else {
+      maxPerInvite = parsed;
+    }
+  }
+  return ok && template !== undefined ? { templateId: template, maxPerInvite } : undefined;
+}
 
 /** `{"<inviteId>": "<machine>"}`, at least one entry, and no machine used by two invites. */
 function sandboxTable(raw: string | undefined, problems: string[]): Record<string, string> {
@@ -802,7 +915,9 @@ export function describeConfig(config: StackConfig): string[] {
     `MCP URL for tasks:   ${config.mcp.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `model API base URL:  ${config.gateway.anthropicBaseUrl ?? '(default)'}`,
     `model connection id: ${config.conductor.connectionId ?? '(default)'}`,
-    `sandbox machines:    ${Object.keys(config.sandboxes).length} (one per invite)`,
+    config.boxes === undefined
+      ? `sandbox machines:    ${Object.keys(config.sandboxes).length} (one per invite)`
+      : `sandbox boxes:       up to ${config.boxes.maxPerInvite} per invite, from template ${config.boxes.templateId}`,
     `sandbox API URL:     ${config.instabox.apiUrl ?? '(default)'}`,
     `Codex runner key:    ${config.openAiKeySet ? 'set' : 'not set (Codex tasks will fail)'}`,
     `model gateway:       http://${config.gateway.host}:${config.gateway.port}`,
@@ -813,7 +928,9 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
-    `Claude runs:         ${config.agentChannel ? `through the Agent SDK as ${config.agentChannel.user} (group ${config.agentChannel.group}), conversation kept in ${config.transcriptsDbPath}` : 'directly (set MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP for the Agent SDK)'}`,
+    `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
+    `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
+    `CLIs run as:         ${config.agentChannel ? `${config.agentChannel.user} (group ${config.agentChannel.group}); Claude through the Agent SDK, conversation kept in ${config.transcriptsDbPath}` : 'nothing: no CLI starts until MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP are set'}`,
     `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,

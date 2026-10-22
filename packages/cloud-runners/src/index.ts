@@ -31,7 +31,13 @@ export {
 export { type PollBackoff } from './poller.js';
 export { ExecProcess, type ExecProcessOptions } from './process-channel.js';
 export { type ResumeInput, SandboxCliRunner } from './runner.js';
-export { type AgentChannel, asAgent, assertAgentChannel } from './agent-user.js';
+export {
+  type AgentChannel,
+  asAgent,
+  asAgentScript,
+  asRootScript,
+  assertAgentChannel,
+} from './agent-user.js';
 export { type AgentSdk, loadAgentSdk } from './sdk-turn.js';
 export {
   SqliteTranscriptStore,

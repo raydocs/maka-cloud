@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { collect, isRunning, reader, setup, terminal } from './harness.js';
+import { asAgent } from '../agent-user.js';
 import { buildRunScript } from '../scripts.js';
+import { shq } from '../shell.js';
+import { collect, HARNESS_AGENT, isRunning, reader, setup, terminal } from './harness.js';
 
 const WORKING = (event: { type: string; note?: string }) =>
   event.type === 'progress' && event.note === 'working on it';
@@ -16,10 +18,9 @@ test('a start sent twice launches one process: the second finds the lock', async
   const input = {
     dirName: 'tsk_once',
     run: 't1',
-    script: buildRunScript({
-      preamble: '',
-      command: 'echo started >> "$MAKA_DIR/counter"',
-    }),
+    preamble: '',
+    program: 'sh',
+    args: ['-c', 'echo started >> "$MAKA_DIR/counter"'],
     envs: {},
     runToken: 'token-once',
     workdir: join(h.root, 'tsk_once', 'workspace'),

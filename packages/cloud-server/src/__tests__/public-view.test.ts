@@ -194,6 +194,7 @@ test("a proposed card's facts are scrubbed like its ask, and nothing else about 
       kind: 'rebase_pr',
       mode: 'quick',
       estimateUsd: 1,
+      typical: false,
       repo: 'acme/widgets',
       detail:
         'PR #12 "Fix the Codex login with sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA" cannot be merged.',
@@ -209,4 +210,64 @@ test("a proposed card's facts are scrubbed like its ask, and nothing else about 
     kind: 'suggestion',
     ask: 'x',
   });
+});
+
+// -- recheck15 items 1 to 3 ---------------------------------------------------------------------
+
+test('a stored approval question that holds a key in its call is withheld, with no way to approve, and the call is not sent', () => {
+  const token = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const shown = toPublicConductorData('conductor.question', {
+    questionId: 'q1',
+    question: `Allow open_pull_request(token: "${token}")? It cannot be undone.`,
+    note: 'Open it?',
+    options: [
+      { id: 'approve', label: 'Go ahead' },
+      { id: 'reject', label: "Don't do it" },
+    ],
+    action: { tool: 'open_pull_request', args: { token } },
+  }) as { question: string; note: unknown; action: unknown; options: { id: string }[] };
+  assert.equal(shown.question, WITHHELD_APPROVAL);
+  assert.equal(shown.action, undefined);
+  assert.deepEqual(
+    shown.options.map((o) => o.id),
+    ['reject'],
+  );
+  assert.ok(!JSON.stringify(shown).includes(token));
+  // The key only in the call's arguments, not in the words of the card.
+  const argsOnly = toPublicConductorData('conductor.question', {
+    questionId: 'q2',
+    question: 'Allow publish()? It cannot be undone.',
+    options: [{ id: 'approve', label: 'Go ahead' }],
+    action: { tool: 'publish', args: { headers: { Authorization: `token ${token}` } } },
+  }) as { options: { id: string }[]; action: unknown };
+  assert.deepEqual(argsOnly.options, []);
+  assert.equal(argsOnly.action, undefined);
+});
+
+test('an approval that carries a key through percent escapes, \\u escapes or a second layer of JSON is withheld', () => {
+  const token = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const forms = [
+    token.replace('_', '%5F'),
+    token.replace('_', '\\u005f'),
+    encodeURIComponent(token),
+    JSON.stringify(JSON.stringify({ k: token })).slice(1, -1),
+    `${token.slice(0, 3)}​${token.slice(3)}`,
+  ];
+  for (const form of forms) {
+    const out = toPublicItem({
+      kind: 'approval',
+      ask: 'Allow x()?',
+      evidence: [`seen ${form}`],
+      options: [{ id: 'approve' }, { id: 'reject' }],
+    }) as { ask: string; options: { id: string }[] };
+    assert.equal(out.ask, WITHHELD_APPROVAL, form);
+    assert.deepEqual(
+      out.options.map((o) => o.id),
+      ['reject'],
+      form,
+    );
+  }
+  // A harmless escaped run is left alone.
+  const fine = { kind: 'approval', ask: 'Allow x(path: "a%20b")?', options: [{ id: 'approve' }] };
+  assert.deepEqual(toPublicItem(fine), fine);
 });

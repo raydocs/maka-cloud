@@ -474,7 +474,7 @@ test('standing duties need a long enough secret and a list of repositories, and 
 });
 
 test('the modes default to the built-in ones, and the built-in ones are priced by the gateway', () => {
-  assert.deepEqual(readStackConfig(ENV).modes, DEFAULT_MODES);
+  assert.deepEqual(readStackConfig({ ...ENV, MAKA_CLOUD_DEEP_MODE: '1' }).modes, DEFAULT_MODES);
   assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /modes: +quick, standard, deep/);
 });
 
@@ -492,6 +492,7 @@ test('MAKA_CLOUD_MODES replaces the modes, and a Codex model it names needs a ga
     ...ENV,
     MAKA_CLOUD_MODES: JSON.stringify(modes),
     MAKA_CLOUD_GATEWAY_MODELS: JSON.stringify([price]),
+    MAKA_CLOUD_DEEP_MODE: '1',
   });
   assert.deepEqual(config.modes, modes);
   assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_MODES: JSON.stringify(modes) }), [
@@ -541,7 +542,7 @@ test('"modes" prints the modes in force as JSON that MAKA_CLOUD_MODES accepts', 
   );
 });
 
-test('Claude runs through the Agent SDK only when its account and group are both set, and as plain names', () => {
+test('the CLIs run as an agent account, and Claude through the Agent SDK, only when its account and group are both set, and as plain names', () => {
   assert.equal(readStackConfig(ENV).agentChannel, undefined);
   assert.deepEqual(
     readStackConfig({ ...ENV, MAKA_CLOUD_AGENT_USER: 'maka-agent', MAKA_CLOUD_AGENT_GROUP: 'maka' })
@@ -562,7 +563,7 @@ test('Claude runs through the Agent SDK only when its account and group are both
     );
   }
   assert.ok(ENV_VARIABLES.some(([name]) => name === 'MAKA_CLOUD_AGENT_USER'));
-  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /Claude runs: +directly/u);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /CLIs run as: +nothing/u);
 });
 
 test('the limits of one task default to no turn limit and 4 hours, and take only plain positive numbers', () => {
@@ -623,4 +624,95 @@ test('a key too short for the scrubber to know is refused at start, naming the v
     const longer = problemsOf({ ...ENV, [name]: 'abc12345', MAKA_CLOUD_PORT: 'x' });
     assert.ok(!longer.some((problem) => problem.includes('too short')), longer.join('\n'));
   }
+});
+
+const POOL_ENV = (() => {
+  const { MAKA_CLOUD_SANDBOXES: _fixed, ...rest } = ENV;
+  return { ...rest, MAKA_CLOUD_BOXES: '1', MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' };
+})();
+
+test('MAKA_CLOUD_BOXES=1 with a template asks for the pool, three boxes per invite by default', () => {
+  const config = readStackConfig(POOL_ENV);
+  assert.deepEqual(config.boxes, { templateId: 'tpl_node', maxPerInvite: 3 });
+  assert.deepEqual(config.sandboxes, {});
+  // The account limit is not assumed to be 5: more than five is allowed, up to the pool's own bound.
+  for (const max of [5, 12, 32]) {
+    assert.deepEqual(readStackConfig({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: String(max) }).boxes, {
+      templateId: 'tpl_node',
+      maxPerInvite: max,
+    });
+  }
+  assert.equal(readStackConfig(ENV).boxes, undefined, 'the fixed machines stay the default');
+  assert.ok(describeConfig(config).some((line) => line.includes('up to 3 per invite')));
+});
+
+test('the pool needs its template, refuses a bad size, and is not mixed with fixed machines', () => {
+  const { MAKA_CLOUD_BOX_TEMPLATE: _template, ...noTemplate } = POOL_ENV;
+  assert.deepEqual(problemsOf(noTemplate), ['MAKA_CLOUD_BOX_TEMPLATE is not set']);
+  assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOX_TEMPLATE: 'a b' }), [
+    'MAKA_CLOUD_BOX_TEMPLATE is not a template id',
+  ]);
+  for (const bad of ['0', '33', '2.5', 'many', '-1']) {
+    assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOX_MAX: bad }), [
+      'MAKA_CLOUD_BOX_MAX must be a whole number from 1 to 32',
+    ]);
+  }
+  assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_BOXES: 'yes' }), [
+    'MAKA_CLOUD_BOXES must be 1, or unset',
+  ]);
+  assert.deepEqual(problemsOf({ ...POOL_ENV, MAKA_CLOUD_SANDBOXES: ENV.MAKA_CLOUD_SANDBOXES }), [
+    'MAKA_CLOUD_BOXES=1 and MAKA_CLOUD_SANDBOXES are both set: use one of them',
+  ]);
+});
+
+test('settings of the pool without the switch are an error, not ignored', () => {
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' }), [
+    'MAKA_CLOUD_BOX_TEMPLATE and MAKA_CLOUD_BOX_MAX need MAKA_CLOUD_BOXES=1',
+  ]);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_BOX_MAX: '2' }), [
+    'MAKA_CLOUD_BOX_TEMPLATE and MAKA_CLOUD_BOX_MAX need MAKA_CLOUD_BOXES=1',
+  ]);
+});
+
+test('proposed cards are off unless asked for, and need duties and a GitHub token', () => {
+  assert.equal(readStackConfig(ENV).cardsSet, false);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /proposed cards:\s+off/);
+  const duties = { ...ENV, MAKA_GITHUB_WEBHOOK_SECRET: DUTY_SECRET };
+  const token =
+    'github_pat_11AAAAAAA0abcdefghijkl_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345678';
+  assert.equal(readStackConfig({ ...duties, MAKA_GITHUB_TOKEN: token }).cardsSet, false);
+  const on = readStackConfig({ ...duties, MAKA_GITHUB_TOKEN: token, MAKA_CLOUD_CARDS: '1' });
+  assert.equal(on.cardsSet, true);
+  assert.match(describeConfig(on).join('\n'), /proposed cards:\s+on/);
+  assert.ok(!describeConfig(on).join('\n').includes(token));
+  assert.equal(readStackConfig({ ...duties, MAKA_CLOUD_CARDS: '0' }).cardsSet, false);
+  assert.ok(
+    problemsOf({ ...ENV, MAKA_CLOUD_CARDS: '1', MAKA_GITHUB_TOKEN: token }).some((p) =>
+      /needs MAKA_GITHUB_WEBHOOK_SECRET/u.test(p),
+    ),
+  );
+  assert.ok(
+    problemsOf({ ...duties, MAKA_CLOUD_CARDS: '1' }).some((p) =>
+      /needs MAKA_GITHUB_TOKEN/u.test(p),
+    ),
+  );
+  assert.ok(
+    problemsOf({ ...duties, MAKA_CLOUD_CARDS: 'yes' }).some((p) =>
+      /MAKA_CLOUD_CARDS must be 1 or 0/u.test(p),
+    ),
+  );
+});
+
+test('deep mode is off unless MAKA_CLOUD_DEEP_MODE=1: off, deep holds standard’s values', () => {
+  const off = readStackConfig(ENV);
+  assert.equal(off.deepMode, false);
+  assert.deepEqual(off.modes.modes.deep, off.modes.modes.standard);
+  assert.match(describeConfig(off).join('\n'), /deep mode: +off \(set MAKA_CLOUD_DEEP_MODE=1/);
+  const on = readStackConfig({ ...ENV, MAKA_CLOUD_DEEP_MODE: '1' });
+  assert.equal(on.deepMode, true);
+  assert.notDeepEqual(on.modes.modes.deep, on.modes.modes.standard);
+  assert.throws(
+    () => readStackConfig({ ...ENV, MAKA_CLOUD_DEEP_MODE: 'yes' }),
+    /MAKA_CLOUD_DEEP_MODE must be 1 or 0/,
+  );
 });

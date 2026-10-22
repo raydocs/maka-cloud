@@ -55,6 +55,13 @@ export interface FakeInstaboxOptions {
    * `none` leaves the real tools (or none) in reach, for a test of a box without a firewall tool.
    */
   firewall?: 'shim' | 'none';
+  /**
+   * With the firewall stand-ins on, `sudo -n tool ...` runs the tool as this user. With `rootSudo`,
+   * only the firewall tools do; anything else goes to the real `sudo`, for a machine where this user
+   * has passwordless sudo (the rehearsal's sandbox image), so what the runners end or read as root
+   * is really done as root.
+   */
+  rootSudo?: boolean;
   /** Runs every exec'd command behind this prefix (`nsenter --net=...`, to give it a network of its own). */
   commandPrefix?: string[];
 }
@@ -84,6 +91,13 @@ norm() {
     -e 's/-p ipv6-icmp --icmpv6-type neighbour-advertisement/-p ipv6-icmp -m icmp6 --icmpv6-type 136/' \\
     -e 's/-p ipv6-icmp --icmpv6-type router-solicitation/-p ipv6-icmp -m icmp6 --icmpv6-type 133/'
 }
+# While SHIM_ARMED exists the box is expected to have an OUTPUT hook to one of our chains at all
+# times; a call that leaves it without one is written to SHIM_STATE/gaps.
+gap_check() {
+  [ -e "$SHIM_STATE/armed" ] || return 0
+  grep -q -- ' -j MAKA_EGRESS' "$SHIM_STATE/$tool.OUTPUT" 2>/dev/null || echo "$tool $op $*" >> "$SHIM_STATE/gaps"
+}
+trap gap_check EXIT
 builtin() { [ "$1" = OUTPUT ] || [ "$1" = INPUT ] || [ "$1" = FORWARD ]; }
 exists() { builtin "$1" || [ -e "$(rules "$1")" ]; }
 case "$op" in
@@ -103,7 +117,15 @@ case "$op" in
       awk -v want="-A $chain $*" '!done && $0 == want { done = 1; found = 1; next } { print } END { exit found ? 0 : 1 }' "$(rules "$chain")" > "$SHIM_STATE/tmp" \\
         && mv "$SHIM_STATE/tmp" "$(rules "$chain")" ;;
   -C) chain="$1"; shift; grep -Fxq -- "-A $chain $*" "$(rules "$chain")" 2>/dev/null ;;
-  -S) [ -n "\${SHIM_LIE:-}" ] && exit 0; exists "$1" || exit 1
+  -S) [ -n "\${SHIM_LIE:-}" ] && exit 0
+      if [ -z "\${1:-}" ]; then
+        # Every chain and rule, as the tool prints them with no chain named.
+        echo "-P INPUT ACCEPT"; echo "-P FORWARD ACCEPT"; echo "-P OUTPUT ACCEPT"
+        for f in "$SHIM_STATE/$tool".*; do [ -e "$f" ] || continue; c="\${f##*.}"; builtin "$c" || echo "-N $c"; done
+        for f in "$SHIM_STATE/$tool".*; do [ -e "$f" ] && cat "$f"; done
+        exit 0
+      fi
+      exists "$1" || exit 1
       if builtin "$1"; then echo "-P $1 ACCEPT"; else echo "-N $1"; fi; cat "$(rules "$1")" 2>/dev/null; true ;;
   *) exit 2 ;;
 esac
@@ -111,11 +133,19 @@ esac
 
 /**
  * `sudo -n tool ...` runs the tool as this user. `sudo -u account ...` (the agent's account, which
- * the runners switch to) is a real change of user, so it goes to the real `sudo`, found behind the
- * stand-ins' own directory, which is first on PATH.
+ * the runners switch to) and `sudo -l -U account` (its sudo rules) are real, so it goes to the real `sudo`, found behind the
+ * stand-ins' own directory, which is first on PATH. With `SHIM_ROOT_SUDO` set, so does everything
+ * but the firewall tools.
  */
 const SUDO_SHIM = `#!/bin/bash
-for arg in "$@"; do [ "$arg" = -u ] && PATH="\${PATH#*:}" exec sudo "$@"; done
+for arg in "$@"; do { [ "$arg" = -u ] || [ "$arg" = -U ] || [ "$arg" = -l ]; } && PATH="\${PATH#*:}" exec sudo "$@"; done
+if [ -n "\${SHIM_ROOT_SUDO:-}" ]; then
+  rest=("$@"); [ "\${rest[0]:-}" = -n ] && rest=("\${rest[@]:1}")
+  case "$(basename "\${rest[0]:-}")" in
+    iptables|ip6tables) ;;
+    *) PATH="\${PATH#*:}" exec sudo "$@" ;;
+  esac
+fi
 [ "$1" = -n ] && shift
 exec "$@"
 `;
@@ -126,6 +156,10 @@ export interface FakeFirewall {
   rules(tool: 'iptables' | 'ip6tables', chain: string): string[];
   /** Every call, as `tool args`. */
   calls(): string[];
+  /** From now on, a call that leaves OUTPUT without a hook to one of our chains is recorded. */
+  arm(): void;
+  /** The calls that left OUTPUT without a hook while armed. */
+  gaps(): string[];
   /** Forgets every rule, as a box restored from a snapshot or resumed after a restart may have. */
   reset(): void;
 }
@@ -199,6 +233,7 @@ export class FakeInstabox {
   private readonly commandPrefix: string[];
   private readonly home: string;
   private readonly baseEnv: Record<string, string>;
+  private readonly rootSudo: boolean;
   private readonly listenOn: { host: string; port: number };
   private readonly firewallDir: string | undefined;
   readonly firewall: FakeFirewall;
@@ -213,6 +248,7 @@ export class FakeInstabox {
     this.commandPrefix = options.commandPrefix ?? [];
     this.home = options.home ?? '/tmp';
     this.baseEnv = options.env ?? {};
+    this.rootSudo = options.rootSudo ?? false;
     this.listenOn = { host: options.host ?? '127.0.0.1', port: options.port ?? 0 };
     if ((options.firewall ?? 'shim') === 'shim') {
       this.firewallDir = mkdtempSync(join(tmpdir(), 'fake-instabox-fw-'));
@@ -230,6 +266,10 @@ export class FakeInstabox {
     this.firewall = {
       rules: (tool, chain) => read(`${tool}.${chain}`).split('\n').filter(Boolean),
       calls: () => read('log').split('\n').filter(Boolean),
+      arm: () => {
+        if (state) writeFileSync(join(state, 'armed'), '');
+      },
+      gaps: () => read('gaps').split('\n').filter(Boolean),
       reset: () => {
         if (!state) return;
         for (const name of readdirSync(state)) if (name !== 'log') rmSync(join(state, name));
@@ -586,6 +626,7 @@ export class FakeInstabox {
       // firewall of the machine running the tests.
       env.PATH = [join(this.firewallDir, 'bin'), env.PATH].filter(Boolean).join(':');
       env.SHIM_STATE = join(this.firewallDir, 'state');
+      if (this.rootSudo) env.SHIM_ROOT_SUDO = '1';
     }
     return new Promise((resolve) => {
       if (this.closed) {

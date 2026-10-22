@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   implementerFor,
   type ModeId,
@@ -18,6 +18,7 @@ import {
   type Runner,
   type RunnerEvent,
   type RunSpec,
+  scrubSecretText,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { agentBrief, type CheckProblem, type FailureBrief, repairPrompt } from './briefs.js';
@@ -27,6 +28,7 @@ import {
   MAX_REVIEW_BYTES,
   parseReviewFile,
   plain,
+  type FixRecord,
   type ReviewRecord,
   fixBrief,
   MAX_FIX_FINDINGS,
@@ -44,11 +46,13 @@ import {
   CHANGES_SCRIPT,
   CHECK_SCRIPT,
   CHECK_STOP_SCRIPT,
+  checkAttemptMark,
   checkTagPrefix,
   CLONE_SCRIPT,
   PATCH_CHUNK_SCRIPT,
   READ_SMALL_SCRIPT,
   SAMPLE_SCRIPT,
+  PUBLISH_FILE_SCRIPT,
   WRITE_FILE_SCRIPT,
 } from './scripts.js';
 import {
@@ -56,8 +60,10 @@ import {
   isRepoPath,
   otherVendor,
   parseCodingBrief,
+  REPRO_FILE,
   type Repro,
   ReproSchema,
+  REVIEW_FILE,
   type Vendor,
 } from './task.js';
 
@@ -213,8 +219,11 @@ export class CodingRunner implements Runner {
   }
 
   /** Stops the agent runs and checks a task left in its sandbox. Idempotent. */
-  async stopOrphaned(taskId: TaskId, options: { signal?: AbortSignal } = {}): Promise<void> {
-    await this.options.sandbox.stopTask(taskId, options.signal);
+  async stopOrphaned(
+    taskId: TaskId,
+    options: { signal?: AbortSignal; epoch?: number } = {},
+  ): Promise<void> {
+    await this.options.sandbox.stopTask(taskId, options.signal, options.epoch);
   }
 }
 
@@ -297,8 +306,33 @@ interface Collected {
   patch: string;
 }
 
-function clipText(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+/**
+ * The sandbox cuts output to its last bytes before the host sees it, which can split a key at the
+ * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted and the host scrubs the
+ * whole of it. When the text was cut, what is left of the cut line is dropped before the last
+ * `max` characters are kept: a key never spans a line, so that partial first line is the only place
+ * a split key can be, and counting the margin in bytes against characters (a redaction shortens
+ * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
+ * line break (the git messages, folded onto one line) loses its first `TAIL_MARGIN` characters.
+ */
+export const TAIL_MARGIN = 512;
+
+export function scrubbedTail(text: string, max: number, cut = false): string {
+  let shown = scrubSecretText(text);
+  if (cut) {
+    const line = shown.indexOf('\n');
+    shown = line >= 0 ? shown.slice(line + 1) : shown.slice(Math.min(TAIL_MARGIN, shown.length));
+  }
+  return shown.length <= max ? shown : shown.slice(shown.length - max);
+}
+
+/** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
+const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
+
+export function clipText(text: string, max: number): string {
+  // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
+  const shown = scrubSecretText(text);
+  return shown.length <= max ? shown : `${shown.slice(0, max - 1)}…`;
 }
 
 /** How many serious (P1) findings a finished review still carries. */
@@ -313,6 +347,19 @@ function p1Of(review: ReviewRecord): number {
  * independent review could be made, or the review still has a serious (P1) problem after the one
  * fix. Undefined: nothing stands in the way of delivering it.
  */
+/**
+ * Why a fixed change has no second review. The first review's P1 findings were the reason for the
+ * fix, so the record says they were found and that their fix was never checked by a reviewer.
+ */
+function notReviewedAgain(first: ReviewRecord, why: string): string {
+  const found = first.status === 'reviewed' ? p1Of(first) : 0;
+  const earlier =
+    found > 0
+      ? `the first review found ${found} serious problem(s); the fix was not checked: `
+      : '';
+  return `${earlier}the fixed change could not be reviewed again (${why})`;
+}
+
 function keptReason(review: ReviewRecord): string | undefined {
   if (review.status !== 'reviewed') {
     return `the change passed the repository's checks but could not be independently reviewed (${plain(review.reason, 200)})`;
@@ -350,6 +397,8 @@ class CodingRun implements RunHandle {
   private ended = false;
   private terminal: RunnerEvent | undefined;
   private cleanupPromise: Promise<void> | undefined;
+  /** The write that keeps the verified change before its review starts, while it runs. */
+  private keeping: Promise<void> | undefined;
   private workspace: SandboxWorkspace | undefined;
   private agentHandle: RunHandle | undefined;
   private readonly agentReleases = new WeakMap<RunHandle, Promise<void>>();
@@ -378,6 +427,8 @@ class CodingRun implements RunHandle {
   /** Reads of agent streams that outlived the wait for their last spend; each adds to the total when it ends. */
   private readonly lateSpends = new Set<Promise<void>>();
   private readonly hostDir: string;
+  /** Set when the process is closing and let go of this run (see `detach`). */
+  private detached = false;
 
   constructor(
     private readonly runner: CodingRunner,
@@ -396,9 +447,27 @@ class CodingRun implements RunHandle {
       this.cancelled = true;
       this.abort.abort();
     }
+    // A change being kept is written from memory, not from the workspace: the stop waits for it
+    // so that the cancel, once it returns, leaves the change on disk.
+    await this.keeping?.catch(() => undefined);
     await this.cleanup();
     // A cancel that returns says everything the task started is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
+  }
+
+  /**
+   * Lets go of the task for a process that is closing: its agent run is let go of, its waits end,
+   * and nothing is stopped, restored or reported (the sandbox keeps what it has). The task stays
+   * unfinished in the log and the next process takes it over as it does after a crash.
+   */
+  detach(): void {
+    if (this.ended || this.detached) return;
+    this.detached = true;
+    this.agentHandle?.detach?.();
+    this.cancelled = true;
+    this.abort.abort();
+    this.cleanupPromise = Promise.resolve();
+    this.events.close();
   }
 
   private get signal(): AbortSignal {
@@ -438,15 +507,14 @@ class CodingRun implements RunHandle {
             }).mode
           : 'standard');
       // A task whose budget is below what its mode needs is refused before anything is acquired.
+      const allowance = this.allowance();
       const tooSmall =
-        modes && this.spec.budgetUsd !== undefined
-          ? budgetProblem(modes, this.mode, this.spec.budgetUsd)
-          : undefined;
+        modes && allowance !== undefined ? budgetProblem(modes, this.mode, allowance) : undefined;
       if (tooSmall) return this.setTerminal({ type: 'failed', reason: tooSmall });
       this.limitUsd = this.underTurnLimit(this.workLimit());
 
       this.adoptWorkspace(
-        await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal)),
+        await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal, this.spec.epoch)),
       );
       this.progress(`fetching ${task.repo} at ${task.baseRef}`);
       const baseSha = await this.clone(task, task.baseRef);
@@ -472,7 +540,17 @@ class CodingRun implements RunHandle {
         const outcome = await this.attempt(task, baseSha, brief, vendor, attempt, failureBrief);
         if (outcome.ok) {
           verification.result = 'verified';
-          const reviewed = await this.reviewAndFix(task, baseSha, brief, vendor, outcome);
+          // The verified change is on the host from here on: a stop, a crash or an error during the
+          // review cannot lose it. The delivery below replaces this record.
+          await this.keepUntilReviewed(task, verification, outcome);
+          const reviewed = await this.reviewAndFix(
+            task,
+            baseSha,
+            brief,
+            vendor,
+            outcome,
+            verification,
+          );
           // A change nobody could review, or one with a serious problem left after the one fix, is
           // not delivered: it is kept for the owner to look at, with the reason. The task is not
           // failed, because its work is not lost: the change, its branch and its review are kept.
@@ -574,8 +652,14 @@ class CodingRun implements RunHandle {
       }
       let problem: CheckProblem;
       if (!turn.ok) {
-        record.turns.push({ run, kind, outcome: 'agent_failed', detail: turn.reason, checks: [] });
-        runs.push({ run, outcome: `the agent's run failed: ${turn.reason}` });
+        record.turns.push({
+          run,
+          kind,
+          outcome: 'agent_failed',
+          detail: scrubSecretText(turn.reason),
+          checks: [],
+        });
+        runs.push({ run, outcome: scrubSecretText(`the agent's run failed: ${turn.reason}`) });
         problem = { problem: `your last run failed: ${turn.reason}` };
       } else {
         const checks: CheckResult[] = [];
@@ -592,7 +676,7 @@ class CodingRun implements RunHandle {
           outcome: checked.ok ? 'verified' : 'check_failed',
           checks: checks.map(({ output: _output, ...rest }) => rest),
         };
-        if (!checked.ok) turnRecord.detail = checked.problem;
+        if (!checked.ok) turnRecord.detail = scrubSecretText(checked.problem);
         record.turns.push(turnRecord);
         if (checked.ok && collected) {
           return { ok: true, repro: checked.repro, manifest: turn.manifest, collected };
@@ -600,7 +684,7 @@ class CodingRun implements RunHandle {
         if (checked.ok) throw new Error('unreachable: verified without a change set');
         runs.push({
           run,
-          outcome: `check failed: ${checked.problem}`,
+          outcome: scrubSecretText(`check failed: ${checked.problem}`),
           ...(checked.output ? { output: checked.output } : {}),
         });
         problem = checked;
@@ -635,6 +719,17 @@ class CodingRun implements RunHandle {
       runner: vendor,
       briefPath: join(this.hostDir, `agent-${n}-brief.md`),
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
+      // The files this runner writes itself: the task's result and the delivery. An agent's
+      // exported artifact must not replace them, or it could forge what the owner is shown.
+      reserved: [
+        basename(this.spec.resultPath),
+        basename(this.spec.briefPath),
+        'changes.json',
+        'change.patch',
+        'review.md',
+        'verification.json',
+        'failure_brief.json',
+      ],
       // Each agent run may spend what is left of its phase's limit.
       // The run's own limit is what is left of its phase (work, then review and fix). The whole
       // budget stays `budgetUsd`, so the gateway pool is the whole and not the first phase's share.
@@ -648,6 +743,7 @@ class CodingRun implements RunHandle {
       ...(options.effort === undefined ? {} : { effort: options.effort }),
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
+      ...(this.spec.epoch === undefined ? {} : { epoch: this.spec.epoch }),
     };
     // Every run reads its brief, a resume included.
     await this.guard(writeHostFile(spec.briefPath, brief()));
@@ -722,7 +818,10 @@ class CodingRun implements RunHandle {
       );
       return { ok: true, manifest };
     } catch (error) {
-      return { ok: false, reason: `its result could not be read (${errorMessage(error)})` };
+      return {
+        ok: false,
+        reason: scrubSecretText(`its result could not be read (${errorMessage(error)})`),
+      };
     }
   }
 
@@ -787,6 +886,7 @@ class CodingRun implements RunHandle {
     const { stats } = this.runner;
     const interval = this.options.sampleIntervalMs ?? 15_000;
     let stopped = false;
+    let told = false;
     let timer: NodeJS.Timeout | undefined;
     let inFlight: Promise<void> | undefined;
     stats.samplers++;
@@ -809,6 +909,13 @@ class CodingRun implements RunHandle {
           signal: this.signal,
         });
         if (stopped) return;
+        // The script refuses a tree it cannot look at safely (a repository inside the checkout): the
+        // loop check is blind until that is gone, and the owner sees why.
+        const refusal = /^ERR (.*)$/mu.exec(result.stdout);
+        if (refusal !== null && !told) {
+          told = true;
+          this.progress(`the loop check cannot look at the files: ${refusal[1]}`);
+        }
         const reason = detector.observe(parseSample(result.stdout));
         if (reason !== undefined) {
           stopped = true;
@@ -849,9 +956,17 @@ class CodingRun implements RunHandle {
     return Math.min(limit, turn);
   }
 
-  /** What the work may spend in all: the budget less the share the review keeps. */
+  /**
+   * What this run may spend in all: the task's budget, or this turn's allowance when that is
+   * smaller. The work/review split is made of this, so the review keeps its share of the turn.
+   */
+  private allowance(): number | undefined {
+    return this.underTurnLimit(this.spec.budgetUsd);
+  }
+
+  /** What the work may spend in all: the allowance less the share the review keeps. */
   private workLimit(): number | undefined {
-    const budget = this.spec.budgetUsd;
+    const budget = this.allowance();
     if (budget === undefined) return undefined;
     const { modes } = this.options;
     return modes ? splitBudget(modes, this.mode, budget).workUsd : budget;
@@ -898,7 +1013,7 @@ class CodingRun implements RunHandle {
       reviewer: reviewer.vendor,
       reason: plain(reason, 300),
     });
-    const budget = this.spec.budgetUsd;
+    const budget = this.allowance();
     if (budget !== undefined) {
       // One limit for the review, the fix and the second review together: it is set when the first
       // review starts and never grows, and it is below the task's budget.
@@ -915,7 +1030,8 @@ class CodingRun implements RunHandle {
     }
     try {
       this.progress('a second agent reviews the change');
-      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- review.json\n`, {});
+      await this.removeAgentFile(REVIEW_FILE);
+      await this.publishForAgent('change.patch');
       const turn = await this.agentTurn(
         reviewer.vendor,
         new LoopDetector(this.runner.loopLimits),
@@ -940,7 +1056,18 @@ class CodingRun implements RunHandle {
             : `the reviewer's run failed: ${turn.reason}`,
         );
       }
-      const text = await this.readTaskFile('review.json', MAX_REVIEW_BYTES);
+      // The first agent's account shares handoff/ with the reviewer's: what the reviewer was given
+      // to read must still be the runner's copy of the change, or it reviewed something else.
+      const same = await this.exec(
+        'set -u\ncd "$MAKA_DIR"\ncmp -s -- change.patch handoff/change.patch\n',
+        {},
+      );
+      if (same.exitCode !== 0) {
+        return unavailable(
+          'the copy of the change given to the reviewer was replaced, so its review was not used',
+        );
+      }
+      const text = await this.readTaskFile(REVIEW_FILE, MAX_REVIEW_BYTES);
       if (!text.ok) return unavailable(text.reason);
       const parsed = parseReviewFile(text.text);
       if (!parsed.ok) return unavailable(parsed.reason);
@@ -971,8 +1098,9 @@ class CodingRun implements RunHandle {
   /**
    * The review, and, when it found P1 problems, the one fix. The implementer's vendor gets the P1
    * findings once, in a fresh run (the task's session record is the reviewer's by now); the runner
-   * checks the result as it checked the first change, and the other vendor reviews it again. If any
-   * part of that fails, the first verified change is the one delivered, with its P1 findings. There
+   * checks the result as it checked the first change, and the other vendor reviews it again. If the
+   * fix does not run or fails the checks, the first verified change is the one delivered, with its P1
+   * findings; if only the second review fails, the fixed change is kept unreviewed. There
    * is no loop: this method runs `fix` at most once, and nothing calls it again.
    */
   private async reviewAndFix(
@@ -981,6 +1109,7 @@ class CodingRun implements RunHandle {
     conductorBrief: string,
     implementer: Vendor,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    verification: Verification,
   ): Promise<{
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected };
     review: ReviewRecord;
@@ -1007,6 +1136,9 @@ class CodingRun implements RunHandle {
         };
       }
     }
+    // Set once the fixed change has passed the checks and is kept on the host: from then on a
+    // second review that fails ends with it, not with the first change (which the fix replaced).
+    let kept: { outcome: typeof outcome; applied: FixRecord } | undefined;
     try {
       this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
       const turn = await this.agentTurn(
@@ -1054,16 +1186,41 @@ class CodingRun implements RunHandle {
       const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
       // The fix's own spend may have used the cap: the second review then cannot start, and says so.
       this.budgetStop = undefined;
+      // The fixed change has passed the checks: it, not the first one, is what a stop during the
+      // second review must leave kept.
+      const applied: FixRecord = { sent, result: 'applied' };
+      await this.keepUntilReviewed(task, verification, fixed, { ...first, fix: applied });
+      kept = { outcome: fixed, applied };
       const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
       if (second.status !== 'reviewed') {
         return {
-          outcome,
-          review: notApplied(`the fixed change could not be reviewed again (${second.reason})`),
+          outcome: fixed,
+          review: {
+            ...second,
+            reason: plain(notReviewedAgain(first, second.reason), 300),
+            fix: applied,
+          },
         };
       }
-      return { outcome: fixed, review: { ...second, fix: { sent, result: 'applied' } } };
+      return { outcome: fixed, review: { ...second, fix: applied } };
     } catch (error) {
       if (this.cancelled || error instanceof CancelledError) throw error;
+      if (kept) {
+        // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
+        return {
+          outcome: kept.outcome,
+          review: {
+            ...first,
+            status: 'unavailable',
+            reviewer: first.reviewer,
+            reason: plain(
+              `the fixed change could not be reviewed again (${errorMessage(error)})`,
+              300,
+            ),
+            fix: kept.applied,
+          },
+        };
+      }
       return { outcome, review: notApplied(errorMessage(error)) };
     } finally {
       this.budgetStop = undefined;
@@ -1155,7 +1312,7 @@ class CodingRun implements RunHandle {
   private async readRepro(): Promise<Repro | CheckProblem> {
     const out = (
       await this.exec(READ_SMALL_SCRIPT, {
-        MAKA_FILE: 'repro.json',
+        MAKA_FILE: REPRO_FILE,
         MAKA_MAX: String(MAX_REPRO_BYTES),
       })
     ).stdout.trim();
@@ -1238,20 +1395,20 @@ class CodingRun implements RunHandle {
    */
   private async runCheck(name: string, command: string): Promise<CheckResult> {
     const { stats } = this.runner;
-    const tag = `${checkTagPrefix(this.spec.taskId)}${++this.checkCount}-${randomBytes(8).toString('hex')}`;
+    const tag = `${checkTagPrefix(this.spec.taskId)}${checkAttemptMark(this.spec.epoch)}${++this.checkCount}-${randomBytes(8).toString('hex')}`;
     const timeoutSeconds = Math.max(1, Math.ceil(this.limits.checkTimeoutMs / 1000));
     stats.checks++;
     try {
       const startedAt = Date.now();
       let out: Awaited<ReturnType<SandboxWorkspace['exec']>>;
       try {
-        out = await this.exec(
+        out = await this.execCheck(
           CHECK_SCRIPT,
           {
             MAKA_CHECK_TAG: tag,
             MAKA_CMD: command,
             MAKA_TIMEOUT: String(timeoutSeconds),
-            MAKA_TAIL: String(this.limits.outputTailBytes),
+            MAKA_TAIL: String(this.limits.outputTailBytes + TAIL_MARGIN),
           },
           timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
         );
@@ -1263,7 +1420,16 @@ class CodingRun implements RunHandle {
       const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
       if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
-      const result = { name, command, outputBytes: Number(bytes?.[1] ?? 0), output: out.stdout };
+      const result = {
+        name,
+        command: scrubSecretText(command),
+        outputBytes: Number(bytes?.[1] ?? 0),
+        output: scrubbedTail(
+          out.stdout,
+          this.limits.outputTailBytes,
+          Number(bytes?.[1] ?? 0) > this.limits.outputTailBytes + TAIL_MARGIN,
+        ),
+      };
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
@@ -1277,7 +1443,9 @@ class CodingRun implements RunHandle {
 
   /** Stops one check's namespace, whatever its exec did. */
   private async stopCheck(tag: string): Promise<void> {
-    const out = (await this.exec(CHECK_STOP_SCRIPT, { MAKA_CHECK_TAG: tag })).stdout.trim();
+    const out = (
+      await this.execCheckStop(CHECK_STOP_SCRIPT, { MAKA_CHECK_TAG: tag })
+    ).stdout.trim();
     if (out !== 'NONE' && out !== 'STOPPED') {
       throw new Error(`a check's processes could not be stopped (${clipText(out, 200)})`);
     }
@@ -1294,7 +1462,10 @@ class CodingRun implements RunHandle {
     if (out.truncated) return { reason: 'the change is too large to read' };
     const lines = out.stdout.split('\n');
     const err = lines.find((line) => line.startsWith('ERR '));
-    if (err) return { reason: `git could not list the change (${err.slice(4)})` };
+    if (err)
+      return {
+        reason: `git could not list the change (${scrubbedTail(err.slice(4), 300, wasCut(err.slice(4), 812))})`,
+      };
     const raw = lines.find((line) => line.startsWith('RAW '));
     const patchLine = lines.find((line) => line.startsWith('PATCH '));
     if (raw === undefined || patchLine === undefined)
@@ -1394,43 +1565,93 @@ class CodingRun implements RunHandle {
     return Buffer.concat(parts);
   }
 
-  /** Writes the verified change and its record next to the result, and records the delivery. */
+  /**
+   * Keeps the change that passed the checks, as one the owner is to look at, before anything
+   * else happens to it. Its reason is the one that stands if the task ends in the review: a stop, a
+   * crash or an error. The write needs no workspace and no agent, and a stop that arrives during it
+   * does not cut it short (`cancel` waits for it).
+   */
+  private keepUntilReviewed(
+    task: CodingTask,
+    verification: Verification,
+    outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
+    earlier?: ReviewRecord,
+  ): Promise<void> {
+    const reason = earlier
+      ? "the fix passed the repository's checks, but the task ended before the independent review of the fixed change finished"
+      : "the change passed the repository's checks, but the task ended before its independent review finished";
+    // After a fix, the review so far (what it found and that the fix was applied) is kept with it.
+    const pending: ReviewRecord = earlier ?? {
+      mode: this.mode,
+      modesVersion: this.options.modes?.version ?? 0,
+      status: 'unavailable',
+      reason,
+    };
+    this.keeping = this.deliver(task, verification, outcome, pending, reason, false);
+    return this.keeping;
+  }
+
+  /**
+   * Writes the verified change and its record next to the result, and records the delivery.
+   * `cancellable: false` finishes the writes even when the task is stopped meanwhile.
+   */
   private async deliver(
     task: CodingTask,
     verification: Verification,
     outcome: { repro: Repro; manifest: ResultManifest; collected: Collected },
     review: ReviewRecord,
     kept?: string,
+    cancellable = true,
   ): Promise<void> {
-    const changesPath = join(this.hostDir, 'changes.json');
-    const verificationPath = join(this.hostDir, 'verification.json');
+    const guard = <T>(promise: Promise<T>): Promise<T> =>
+      cancellable ? this.guard(promise) : promise;
+    // The delivery record points at files that are never written twice: their names carry their
+    // hashes. A restart between the writes below then finds the earlier delivery as it was left, not
+    // a record whose change was replaced under it (`change_modified`, for good). The record is
+    // swapped in one atomic write; the files under their plain names are what the task page lists.
     const changes = JSON.stringify(outcome.collected.changeSet);
-    await this.guard(writeHostFile(changesPath, changes));
-    await this.guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
-    // review.md first: verification.json holds its hash, and the supervisor holds the two together.
+    const changesSha256 = createHash('sha256').update(changes).digest('hex');
+    const changesPath = join(this.hostDir, `changes.${changesSha256.slice(0, 16)}.json`);
     const reviewText = reviewMarkdown(review);
-    await this.guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
+    else delete verification.kept;
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
-    verification.repro = outcome.repro;
+    // What the agent wrote (the reproduction command, the names of the files) is scrubbed like any
+    // other text that reaches the owner.
+    verification.repro = {
+      ...outcome.repro,
+      command: scrubSecretText(outcome.repro.command),
+      files: outcome.repro.files.map((file) => scrubSecretText(file)),
+    };
     verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-      path: file.path,
+      path: scrubSecretText(file.path),
       status: file.status,
     }));
-    await this.guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
-    await this.guard(
+    const verificationText = JSON.stringify(verification, null, 2);
+    const verificationPath = join(
+      this.hostDir,
+      `verification.${createHash('sha256').update(verificationText).digest('hex').slice(0, 16)}.json`,
+    );
+    await guard(writeHostFile(changesPath, changes));
+    await guard(writeHostFile(verificationPath, verificationText));
+    await guard(
       this.options.deliveries.record({
         taskId: this.spec.taskId,
         repo: task.repo,
         baseRef: task.baseRef,
         baseSha: verification.baseSha,
         changesPath,
-        changesSha256: createHash('sha256').update(changes).digest('hex'),
+        changesSha256,
         verificationPath,
       }),
     );
+    // review.md before verification.json: that holds its hash, and the supervisor holds the two together.
+    await guard(writeHostFile(join(this.hostDir, 'changes.json'), changes));
+    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
+    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
+    await guard(writeHostFile(join(this.hostDir, 'verification.json'), verificationText));
     const agent = outcome.manifest;
     const files = outcome.collected.changeSet.files;
     const vendors = verification.attempts.map((attempt) => attempt.vendor);
@@ -1457,7 +1678,7 @@ class CodingRun implements RunHandle {
         kept === undefined ? agent.knownIssues : [plain(kept, 300), ...agent.knownIssues],
       artifacts: ['change.patch', 'changes.json', 'verification.json', 'review.md'],
     };
-    await this.guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));
+    await guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));
   }
 
   /** Both vendors failed: an honest manifest of what was tried. */
@@ -1506,7 +1727,9 @@ class CodingRun implements RunHandle {
     const json = JSON.stringify(failure, null, 2);
     await this.guard(writeHostFile(join(this.hostDir, 'failure_brief.json'), json));
     await this.writeSandboxFile('failure_brief.json', json);
-    await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- repro.json\n`, {});
+    await this.publishForAgent('failure_brief.json');
+    await this.publishForAgent('attempt-1.patch');
+    await this.removeAgentFile(REPRO_FILE);
     const sha = await this.clone(task, baseSha);
     if (sha !== baseSha) throw new Error(`the base commit changed from ${baseSha} to ${sha}`);
   }
@@ -1518,10 +1741,25 @@ class CodingRun implements RunHandle {
     if (!base) {
       const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${clipText(detail, 500)}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
+  }
+
+  /** Removes a file the agent wrote in handoff/; one that cannot be removed fails the step. */
+  private async removeAgentFile(name: string): Promise<void> {
+    const out = await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${name}\n`, {});
+    if (out.exitCode !== 0) throw new Error(`could not remove ${name} before the next agent run`);
+  }
+
+  /** A file of the task directory, copied where the agent's account can read it. */
+  private async publishForAgent(name: string): Promise<void> {
+    const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
+      envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
+      signal: this.signal,
+    });
+    if (out.exitCode !== 0) throw new Error(`could not make ${name} readable for the agent`);
   }
 
   private async writeSandboxFile(name: string, content: string): Promise<void> {
@@ -1543,6 +1781,27 @@ class CodingRun implements RunHandle {
   private exec(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
     return this.guard(
       this.ws.exec(script, {
+        envs: { MAKA_DIR: this.ws.dir, ...envs },
+        timeoutSeconds,
+        signal: this.signal,
+      }),
+    );
+  }
+
+  /** As `exec`, but for a check: it runs as the agent's account (see `SandboxWorkspace.execCheck`). */
+  private execCheck(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    return this.guard(
+      this.ws.execCheck(script, {
+        envs: { MAKA_DIR: this.ws.dir, ...envs },
+        timeoutSeconds,
+        signal: this.signal,
+      }),
+    );
+  }
+
+  private execCheckStop(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    return this.guard(
+      this.ws.execCheckStop(script, {
         envs: { MAKA_DIR: this.ws.dir, ...envs },
         timeoutSeconds,
         signal: this.signal,

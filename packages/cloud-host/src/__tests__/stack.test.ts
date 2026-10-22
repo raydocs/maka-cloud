@@ -10,7 +10,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
-import { DEFAULT_MODES } from '@maka-cloud/modes';
+import { DEFAULT_MODES, withoutDeep } from '@maka-cloud/modes';
+import { BoxPool } from '@maka-cloud/boxes';
+import type { InstaboxClient } from '@maka-cloud/instabox';
 import { InviteStore } from '@maka-cloud/server';
 import { FakeRunner } from '@maka-cloud/orchestrator';
 import { codingPlaybook } from '@maka-cloud/playbooks/coding';
@@ -90,13 +92,17 @@ async function start(
       ANTHROPIC_API_KEY: 'sk-test-not-a-key',
       ANTHROPIC_BASE_URL: modelUrl,
       INSTABOX_API_KEY: 'ibx-test-not-a-key',
-      MAKA_CLOUD_SANDBOXES: SANDBOXES,
+      ...(env.MAKA_CLOUD_BOXES === undefined ? { MAKA_CLOUD_SANDBOXES: SANDBOXES } : {}),
       ...(publicUrl === undefined ? {} : { MAKA_CLOUD_MCP_PUBLIC_URL: publicUrl }),
       ...Object.fromEntries(
         Object.entries(env).filter(
           ([name]) =>
             name.startsWith('CLOUD_PUSH_') ||
             name === 'MAKA_CLOUD_SANDBOXES' ||
+            name === 'MAKA_CLOUD_BOXES' ||
+            name === 'MAKA_CLOUD_BOX_TEMPLATE' ||
+            name === 'MAKA_CLOUD_AGENT_USER' ||
+            name === 'MAKA_CLOUD_AGENT_GROUP' ||
             name === 'MAKA_CLOUD_BACKUP_DIR' ||
             name === 'MAKA_CLOUD_SPEND_ALERT_USD' ||
             name === 'MAKA_CLOUD_OWNER_INVITE' ||
@@ -104,6 +110,8 @@ async function start(
             name === 'MAKA_CLOUD_INVITE_DAILY_USD' ||
             name === 'MAKA_CLOUD_INVITE_MONTHLY_USD' ||
             name === 'MAKA_GITHUB_WEBHOOK_SECRET' ||
+            name === 'MAKA_GITHUB_TOKEN' ||
+            name === 'MAKA_CLOUD_CARDS' ||
             name === 'MAKA_CLOUD_DUTY_REPOS',
         ),
       ),
@@ -151,7 +159,7 @@ async function start(
   t.after(async () => {
     await stack.close();
     await new Promise<void>((resolve) => model.close(() => resolve()));
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   return {
     stack,
@@ -344,7 +352,7 @@ test('the conductor’s model requests go through the gateway, which adds the ve
 
 test('a stack that fails to start closes its gateway', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const config = readStackConfig({
     MAKA_CLOUD_DATA_DIR: dir,
     ANTHROPIC_API_KEY: 'sk-test-not-a-key',
@@ -460,7 +468,7 @@ test('coding tasks go to the coding runner, and the stack runs the coding playbo
   );
   assert.equal(STACK_PLAYBOOKS[1], codingPlaybook);
   // The coding runner reviews with the modes in force, so a change is never shown done unreviewed by accident.
-  assert.deepEqual(stack.coding.options.modes, DEFAULT_MODES);
+  assert.deepEqual(stack.coding.options.modes, withoutDeep(DEFAULT_MODES));
 });
 
 /** A VAPID key pair the way a deployment would generate one: a P-256 key, base64url. */
@@ -501,7 +509,7 @@ test('the Web Push routes answer 404 without CLOUD_PUSH_* and serve the public k
 
 test('Web Push settings that cannot sign stop the start, without the key in the message', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-stack-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const vapid = vapidKeys();
   const env = {
     ANTHROPIC_API_KEY: 'sk-test-not-a-key',
@@ -1220,7 +1228,7 @@ test('a second start that fails never changes the caps the running server publis
 
 test('a data directory whose server never wrote its caps down is not booked to', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-host-nopolicy-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const config = readStackConfig(
     {
       MAKA_CLOUD_DATA_DIR: dir,
@@ -1494,6 +1502,138 @@ test('a project is set up from a proposal the owner decides, and only then does 
   void dataDir;
 });
 
+test('with cards on, a scan shows a card in the inbox and one tap starts one limited task', async (t) => {
+  const own = dutyOwner();
+  const failing = {
+    failingOnDefault: [{ name: 'CI', runId: 1, headSha: 'a'.repeat(40) }],
+    flaky: [],
+    advisories: [],
+    ownPulls: [],
+    newIssues: [],
+  };
+  const { stack } = await start(
+    t,
+    undefined,
+    { ...DUTY_ENV, MAKA_CLOUD_CARDS: '1', MAKA_GITHUB_TOKEN: 'github_pat_test_not_a_token' },
+    true,
+    {
+      cards: {
+        reader: { read: async () => failing },
+        // The test runs the pass itself: no timer.
+        schedule: { every: () => () => undefined },
+      },
+    },
+    own.prepare,
+  );
+  assert.ok(stack.cards, 'cards are on');
+  const api = (path: string, init: RequestInit = {}) =>
+    fetch(`${stack.cloud.server.url}${path}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${own.made.token}`,
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+    });
+  const added = await api('/v1/projects', {
+    method: 'POST',
+    body: JSON.stringify({
+      repo: 'acme/widgets',
+      installationId: 7,
+      defaultBranch: 'main',
+      selfLogins: ['maka-bot'],
+    }),
+  });
+  assert.equal(added.status, 201);
+  const { project } = (await added.json()) as { project: { projectId: string } };
+  await stack.cards.pass();
+  type Item = {
+    itemId: string;
+    kind: string;
+    ask: string;
+    preconditionHash: string;
+    options: Array<{ id: string; label: string }>;
+  };
+  const open = async () =>
+    ((await (await api('/v1/inbox/items?state=open')).json()) as { items: Item[] }).items;
+  const card = (await open()).find((item) => item.kind === 'suggestion');
+  assert.ok(card, 'the scan raised a card');
+  assert.equal(card.ask, 'Fix the failing test on main');
+  assert.deepEqual(
+    card.options.map((o) => o.label),
+    ['Do it', 'Not now'],
+  );
+  // A second pass the same day finds the project scanned: still one card.
+  await stack.cards.pass();
+  assert.equal((await open()).filter((item) => item.kind === 'suggestion').length, 1);
+
+  const shown = (await (await api(`/v1/projects/${project.projectId}/suggestions`)).json()) as {
+    suggestions: {
+      kinds: Array<{ kind: string; enabled: boolean }>;
+      cards: Array<{ kind: string; title: string }>;
+    };
+  };
+  assert.deepEqual(
+    shown.suggestions.cards.map((c) => c.title),
+    ['Fix the failing test on main'],
+  );
+  assert.equal(shown.suggestions.kinds.find((k) => k.kind === 'fix_main_ci')?.enabled, true);
+  assert.ok(
+    !shown.suggestions.kinds.some((k) => k.kind === 'merge_pr' || k.kind === 'close_issues'),
+    'gated kinds are not shown',
+  );
+
+  const tap = (answerId: string) =>
+    api(`/v1/inbox/items/${card.itemId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({
+        answerId,
+        optionId: 'do',
+        preconditionHash: card.preconditionHash,
+      }),
+    });
+  assert.equal((await tap('ans_1')).status, 200);
+  assert.equal((await tap('ans_1')).status, 200, 'the same tap again');
+  const conversations = (
+    (await (await api('/v1/conversations')).json()) as {
+      conversations: Array<{ conversationId: string }>;
+    }
+  ).conversations;
+  const state = stack.cloud.conductor.state;
+  const runs = conversations.flatMap((c) =>
+    state.runsOfConversation(c.conversationId).filter((run) => run.dutyId?.startsWith('card:')),
+  );
+  assert.equal(runs.length, 1, 'one tap, one task');
+  assert.equal(runs[0]?.authority, 'open-pr');
+  assert.equal(runs[0]?.hardBudget, true, 'a card run’s budget cannot be raised');
+  assert.equal(runs[0]?.budgetUsd, 6);
+
+  // The owner can turn the kind off for this project; nobody else can.
+  const off = await api(`/v1/projects/${project.projectId}/suggestions`, {
+    method: 'PATCH',
+    body: JSON.stringify({ kind: 'fix_main_ci', enabled: false }),
+  });
+  assert.equal(off.status, 200);
+  const after = (await (await api(`/v1/projects/${project.projectId}/suggestions`)).json()) as {
+    suggestions: { kinds: Array<{ kind: string; enabled: boolean }> };
+  };
+  assert.equal(after.suggestions.kinds.find((k) => k.kind === 'fix_main_ci')?.enabled, false);
+  const stranger = stack.cloud.server.invites.create('stranger');
+  const peek = await fetch(
+    `${stack.cloud.server.url}/v1/projects/${project.projectId}/suggestions`,
+    {
+      headers: { authorization: `Bearer ${stranger.token}` },
+    },
+  );
+  assert.equal(peek.status, 404);
+});
+
+test('cards need duties and a GitHub token, and are off by default', async (t) => {
+  const { stack } = await start(t);
+  assert.equal(stack.cards, undefined);
+  const { stack: duty } = await start(t, undefined, DUTY_ENV);
+  assert.equal(duty.cards, undefined, 'duties alone do not turn cards on');
+});
+
 test('the backup of a stack with duties holds the projects and never the webhook secret', async (t) => {
   const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
   t.after(() => rm(backupDir, { recursive: true, force: true }));
@@ -1549,4 +1689,88 @@ test('a page the agent fetched goes to the server’s sources of that task, and 
   // A task the server does not know keeps nothing, and says so by recording zero.
   server.recordOpenedPages = original;
   assert.doesNotThrow(() => options.onOpenedPage?.('tsk_unknown', 'https://docs.example/b'));
+});
+
+/** A sandbox account with no machines, whose create always fails, and the calls it saw. */
+function emptyAccount(): { client: InstaboxClient; calls: string[] } {
+  const calls: string[] = [];
+  const client = {
+    listMachines: async () => {
+      calls.push('listMachines');
+      return [];
+    },
+    createMachine: async () => {
+      calls.push('createMachine');
+      throw new Error('stub account: no machines');
+    },
+  } as unknown as InstaboxClient;
+  return { client, calls };
+}
+
+test('with MAKA_CLOUD_BOXES=1 the fleet runs on the box pool with the pinned CLIs, and closing stops its loops', async (t) => {
+  const account = emptyAccount();
+  const pending = new Set<number>();
+  let handles = 0;
+  const timers = {
+    setTimeout: () => {
+      handles += 1;
+      pending.add(handles);
+      return handles;
+    },
+    clearTimeout: (handle: unknown) => {
+      pending.delete(handle as number);
+    },
+  };
+  const { stack, options } = await start(
+    t,
+    undefined,
+    { MAKA_CLOUD_BOXES: '1', MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' },
+    true,
+    { boxes: { client: account.client, guard: async () => undefined, timers } },
+  );
+  const { sandboxes, installCommands, versions } = options;
+  assert.ok(sandboxes instanceof BoxPool, 'tasks get their boxes from the pool');
+  assert.ok(
+    installCommands && Object.keys(installCommands).length > 0,
+    'the CLIs are the pinned, checked ones',
+  );
+  assert.ok(versions && Object.keys(versions).length > 0, 'the fleet marks the pinned versions');
+  assert.ok(account.calls.includes('listMachines'), 'the start looks at the boxes that exist');
+  assert.equal(pending.size, 2, 'the sleep sweep and the cleanup are scheduled');
+  await assert.rejects(
+    sandboxes.acquire({
+      tenantId: stack.cloud.server.invites.list()[0]?.inviteId ?? 'inv',
+      taskId: 't1',
+    }),
+    /no machines/u,
+    'a task asks the pool, which asks the account',
+  );
+  await stack.close();
+  assert.equal(pending.size, 0, 'closing the stack stops both loops');
+});
+
+test('the box pool runs repository scripts as the configured agent account, and as nobody without one', async (t) => {
+  const account = emptyAccount();
+  const timers = { setTimeout: () => 1, clearTimeout: () => undefined };
+  const boxes = { client: account.client, guard: async () => undefined, timers };
+  const poolEnv = { MAKA_CLOUD_BOXES: '1', MAKA_CLOUD_BOX_TEMPLATE: 'tpl_node' };
+  const agentOf = (sandboxes: unknown) =>
+    (sandboxes as { options: { agent?: { user: string; group: string } } }).options.agent;
+
+  const without = await start(t, undefined, poolEnv, true, { boxes });
+  assert.equal(agentOf(without.options.sandboxes), undefined, 'no account, no repository script');
+  await without.stack.close();
+
+  const withAgent = await start(
+    t,
+    undefined,
+    { ...poolEnv, MAKA_CLOUD_AGENT_USER: 'maka-agent', MAKA_CLOUD_AGENT_GROUP: 'maka-work' },
+    true,
+    { boxes },
+  );
+  assert.deepEqual(agentOf(withAgent.options.sandboxes), {
+    user: 'maka-agent',
+    group: 'maka-work',
+  });
+  await withAgent.stack.close();
 });

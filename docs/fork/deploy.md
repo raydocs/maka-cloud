@@ -378,7 +378,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_TASK_TURN_USD` | the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit |
 | `MAKA_CLOUD_TASK_RUN_HOURS` | how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168) |
 | `MAKA_CLOUD_TIMELINE_CONTENT` | set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing |
-| `MAKA_CLOUD_AGENT_USER` | the account Claude runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it turns on Agent SDK runs, the step log and the stored conversation. Unset: Claude runs directly |
+| `MAKA_CLOUD_AGENT_USER` | the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started |
 | `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
 | `MAKA_CLOUD_SPEND_ALERT_USD` | send a push notification to the owner’s devices once a UTC day’s spend reaches this many dollars; needs MAKA_CLOUD_OWNER_INVITE and Web Push |
 | `MAKA_CLOUD_OWNER_INVITE` | the invite id (inv_…) whose devices get the spend alert; its devices turn notifications on in the web app |
@@ -391,7 +391,10 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `ANTHROPIC_BASE_URL` | Messages API base URL, for the conductor and the model gateway |
 | `MAKA_CLOUD_LLM_CONNECTION_ID` | stable id of the conductor’s model connection |
 | `INSTABOX_API_KEY` | required: sandbox API key |
-| `MAKA_CLOUD_SANDBOXES` | required: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks |
+| `MAKA_CLOUD_SANDBOXES` | required unless MAKA_CLOUD_BOXES=1: JSON object {"<inviteId>": "<sandbox machine>"}, one machine per invite; an invite with no machine runs no tasks |
+| `MAKA_CLOUD_BOXES` | 1: the server makes, sleeps and deletes the sandboxes itself, a pool per invite, instead of a fixed machine per invite (do not set MAKA_CLOUD_SANDBOXES); needs MAKA_CLOUD_BOX_TEMPLATE |
+| `MAKA_CLOUD_BOX_TEMPLATE` | the sandbox template id new boxes start from; required with MAKA_CLOUD_BOXES=1 |
+| `MAKA_CLOUD_BOX_MAX` | the most boxes one invite may have (1 to 32, default 3); when instabox refuses a create the task waits for a free box of its invite |
 | `INSTABOX_API_URL` | sandbox API base URL |
 | `OPENAI_API_KEY` | the model gateway’s key for Codex runs |
 | `OPENAI_BASE_URL` | Responses API base URL for the model gateway |
@@ -414,6 +417,8 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
+| `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
+| `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 
@@ -480,14 +485,41 @@ outside the owner, so the conversation is marked as such. A run has the duty's
 authority level for its whole life and a budget it cannot raise. The duties
 database is `duties.db` in the data directory and is part of the daily backup.
 
-### Claude through the Agent SDK
+### The agent account, and Claude through the Agent SDK
 
-Set `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` to run Claude tasks through the Agent SDK:
+Every CLI runs as an account that is not the sandbox user: the sandbox user holds the channel the
+SDK trusts, the task's files and the egress rules, and the agent's code must not be able to touch
+them. A host without `MAKA_CLOUD_AGENT_USER` and `MAKA_CLOUD_AGENT_GROUP` starts no CLI (Claude or
+Codex): the run fails at once and says so. Those two also run Claude tasks through the Agent SDK:
 the step log, resume after a restart and the stored conversation (`transcripts.db` in the data
 directory, part of the daily backup) need it. The box image must have that account (no sudo, not the
 sandbox user), a group the sandbox user shares with it, a `claude` binary it can read, and
 passwordless `sudo -n` for the sandbox user. Each box is checked before its first SDK turn and a box
-that fails the check refuses the turn with the reason. Unset, Claude runs the CLI directly as before.
+that fails the check refuses the turn with the reason.
+
+The check also looks at what the account could do to the egress rules, so code the agent runs
+cannot take them away. The sandbox user (it needs `sudo -n`, which the egress guard needs too) reads
+the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
+account is not allowed to run anything; a query that fails is a failed check. The account must hold no
+Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), no program under `/usr/sbin`, `/usr/bin`,
+`/sbin`, `/bin` or `/usr/local` may carry a capability such as `cap_net_admin` or `cap_setuid`
+(the box needs `getcap`, from `libcap2-bin`; without it the check fails), it must not be in a group that
+is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
+socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
+not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
+out of the check.
+
+The server starts nothing as the sandbox user either. A run is a program and its arguments; the
+server quotes them and hands the whole command to the agent account itself, so no argument can add a
+command that runs as the sandbox user. The pinned CLI install, which writes the sandbox user's own
+`~/.maka-cli`, is its own method and the only run that stays the sandbox user.
+
+Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
+test commands run as the agent account (the stop that ends them runs as root, since the processes are
+the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
+closed to everyone else and then asks it for its version as the agent account, by absolute path, so
+the sandbox user never runs what the agent's tooling may have shaped, and the brief is written in the task directory and renamed into `handoff/`,
+so a link the agent leaves there is never followed.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
 has at most 20 enabled duties; a duty whose runs fail 10 times in a row turns
@@ -627,10 +659,21 @@ Preparation:
    only holds that invite back; about two minutes after it stopped renewing it,
    the next smoke run takes it over. A takeover first fences the killed run:
    every model key and conductor session issued under it books nothing from then
-   on (the invite's generation in the journal moves up), the new run cancels the
-   tasks it left running (if it cannot cancel one, or cannot list them, it
-   starts nothing and exits 2: cancel them by hand and run again), and only then does the new run get a budget of its
-   own, starting empty. A run that ends clears its budget and fences its own
+   on (the invite's generation in the journal moves up), and only then does the
+   new run get a budget of its own, starting empty. Every run, takeover or not,
+   first stops what an earlier run left going: it cancels each task that has not
+   ended, and asks about every task that has (however long ago, since the task
+   list cannot show a pending stop and the server's flag has no age limit), because only the server's answer to a cancel says whether the task's run or
+   its tree is still being stopped. It sends the cancel again every 5 seconds,
+   for up to 3 minutes a task (the server itself retries a stop that failed with
+   a growing delay), until the answer says the task ended with nothing pending.
+   A task not seen stopped, or a conversation or task list it cannot read to
+   its end (a next page after the last one it reads, a cursor that does not move
+   forward, an entry of an unexpected shape), means it starts nothing and exits
+   2, naming the last error: stop those tasks by hand and run again. A task that
+   started after the list was read is not seen. The
+   cleanup is repeated by the next run even though the run that failed it has
+   cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row
    sequence, books nothing until the next run reopens it. A server on code from
    before run generations can no longer book on the smoke invite once that invite

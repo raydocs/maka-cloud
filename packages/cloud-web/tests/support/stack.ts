@@ -9,7 +9,13 @@ import {
   RunnerRegistry,
   type SessionInfo,
 } from '../../../cloud-orchestrator/dist/index.js';
-import { createSourceFetcher, Supervisor } from '../../../cloud-supervisor/dist/index.js';
+import {
+  createSourceFetcher,
+  type SuggestionCard,
+  type SuggestionChoice,
+  type SuggestionOfferChoice,
+  Supervisor,
+} from '../../../cloud-supervisor/dist/index.js';
 import {
   type AnswerOutcome,
   type CloudServer,
@@ -46,6 +52,14 @@ export interface Stack {
   computer: Awaited<ReturnType<typeof fakeComputer>>;
   /** Every Web Push message the server tried to send, as the (fake) push service received it. */
   pushed: Array<{ endpoint: string; headers: Record<string, string>; bytes: number }>;
+  /** Shows a proposed card (T30) as the host's cards service would. */
+  suggest(choice: SuggestionChoice): boolean;
+  /** Shows the offer to stop suggesting a kind. */
+  suggestOffer(offer: SuggestionOfferChoice): boolean;
+  /** What a tap on a suggestion was delivered as, in order. */
+  suggestionDecisions: Array<{ cardId: string; action: string; caller?: string }>;
+  /** The repository is read again before "Do it" acts: this card has moved on to `next`. */
+  moveSuggestion(cardId: string, next: SuggestionCard): void;
   /** Another invite, which owns nothing yet. */
   newInvite(): { token: string; inviteId: string };
   /** The assistant says something in a conversation. */
@@ -146,6 +160,10 @@ export async function startStack(
     { options: Set<string>; answered?: { optionId: string; text?: string } }
   >();
   const answers: Stack['answers'] = [];
+  const suggestionDecisions: Stack['suggestionDecisions'] = [];
+  const moved = new Map<string, SuggestionCard>();
+  const taken = new Set<string>();
+  let supervisorRef: Supervisor | undefined;
   let publisher!: ConversationPublisher;
   let remember!: (message: { eventId: string; conversationId: string; text: string }) => void;
   const handlerFor = (): ConversationHandler => ({
@@ -229,6 +247,19 @@ export async function startStack(
                 notifier: { interrupt: () => undefined },
                 answers: parts.answers,
                 messages: parts.messages,
+                // A scripted stand-in for the host's cards service: it reads no repository.
+                suggestions: {
+                  verify: async (request) => {
+                    const next = moved.get(request.cardId);
+                    return next ? { state: 'refreshed', card: next } : { state: 'fresh' };
+                  },
+                  decide: async (decision) => {
+                    suggestionDecisions.push(decision);
+                    const duplicate = taken.has(`${decision.cardId}/${decision.action}`);
+                    taken.add(`${decision.cardId}/${decision.action}`);
+                    return { accepted: true, duplicate };
+                  },
+                },
               },
               // The maintenance pass publishes item changes; the host's default is 15 s.
               tickMs: 50,
@@ -242,6 +273,7 @@ export async function startStack(
                 models: [],
               },
             });
+            supervisorRef = supervisor;
             return {
               list: async (query) => supervisor.listItems(query),
               answer: async (request) => supervisor.answer(request),
@@ -283,6 +315,12 @@ export async function startStack(
     computer,
     answers,
     pushed,
+    suggest: (choice) => supervisorRef?.raiseSuggestion(choice) ?? false,
+    suggestOffer: (offer) => supervisorRef?.raiseSuggestionOffer(offer) ?? false,
+    suggestionDecisions,
+    moveSuggestion: (cardId, next) => {
+      moved.set(cardId, next);
+    },
     newInvite: () => {
       const created = server.invites.create('other');
       return { token: created.token, inviteId: created.inviteId };

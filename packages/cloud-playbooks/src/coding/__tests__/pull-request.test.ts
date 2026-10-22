@@ -4,9 +4,11 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type TestContext, test } from 'node:test';
+import { setKnownSecrets } from '@maka-cloud/orchestrator';
 import { type ChangeSet, JsonFileCodingDeliveries, MemoryCodingDeliveries } from '../deliveries.js';
 import { GitHubPublisher, githubTokenProblem, type PullRequestPublisher } from '../github.js';
 import { openPullRequestTool, pullRequestBody } from '../pull-request.js';
+import { clipText } from '../runner.js';
 import { FakeGitHub } from './fake-github.js';
 
 const TOKEN = 'github_pat_11ABCDEFG_secretsecretsecret';
@@ -177,6 +179,11 @@ test('publishing refuses to start without a fine-grained token', async (t) => {
 
 // -- the conductor tool ---------------------------------------------------------------------------
 
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+const CHANGE_LABEL_TEXT = 'Change (sha256):';
+const CHANGE_LINE = `Change (sha256): ${sha256(JSON.stringify(CHANGES))}`;
+const RECORD_LINE = `Record (sha256): ${sha256(JSON.stringify(VERIFICATION))}`;
+
 async function deliveryFiles(t: TestContext, verification: object = VERIFICATION) {
   const dir = await fs.mkdtemp(join(tmpdir(), 'pr-tool-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -214,6 +221,15 @@ class CountingPublisher implements PullRequestPublisher {
   }
 }
 
+/** The call as the host makes it: the owner approved the card as it reads now. */
+async function call(
+  tool: ReturnType<typeof openPullRequestTool>,
+  args: { taskId: string; title: string; publishUnreviewed?: boolean },
+  runId = 'run_1',
+) {
+  return tool.impl(args, { ...context(runId), approved: await tool.approvalDetails?.(args) });
+}
+
 const context = (runId = 'run_1') => ({
   runId,
   conversationId: 'cnv_1',
@@ -232,14 +248,14 @@ test('the tool is irreversible and its approval card names the repository, branc
   assert.equal(tool.requiresAuthority, 'open-pr');
   assert.equal(
     await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' }),
-    'Repository: acme/calc\nBranch: maka/tsk_1\nTitle: "Fix add"',
+    `Repository: acme/calc\nBranch: maka/tsk_1\nTitle: "Fix add"\nBase branch: "main"\n${CHANGE_LINE}\n${RECORD_LINE}`,
   );
   // A title cannot add lines to the card or reorder what it shows (T15).
   const title = 'Fix add\nRepository: acme/other\u2028Branch: main \u202Eppa.lacc\u2066';
   const shown = (await tool.approvalDetails?.({ taskId: 'tsk_1', title })) ?? '';
   const lines = shown.split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/u);
   assert.deepEqual(lines.slice(0, 2), ['Repository: acme/calc', 'Branch: maka/tsk_1']);
-  assert.equal(lines.length, 3);
+  assert.equal(lines.length, 6);
   assert.equal(JSON.parse(lines[2]?.slice('Title: '.length) ?? ''), title);
   assert.doesNotMatch(shown, /[\p{Cf}\u2028]/u);
   const noToken = openPullRequestTool({
@@ -262,18 +278,18 @@ test('the tool refuses a task of another run, an unverified task, a changed chan
     ownsTask: (runId, taskId) => (runId === 'run_1' && taskId === 'tsk_1') || taskId === 'tsk_none',
   });
   await assert.rejects(
-    tool.impl({ taskId: 'tsk_1', title: 'x' }, context('run_2')),
+    call(tool, { taskId: 'tsk_1', title: 'x' }, 'run_2'),
     /^ToolRefusal: |not_your_task/,
   );
-  await assert.rejects(tool.impl({ taskId: 'tsk_none', title: 'x' }, context()), /not_verified/);
+  await assert.rejects(call(tool, { taskId: 'tsk_none', title: 'x' }), /not_verified/);
   publisher.problem = 'MAKA_GITHUB_TOKEN is not a fine-grained token';
   await assert.rejects(
-    tool.impl({ taskId: 'tsk_1', title: 'x' }, context()),
+    call(tool, { taskId: 'tsk_1', title: 'x' }),
     /github_token: MAKA_GITHUB_TOKEN is not a fine-grained token/,
   );
   publisher.problem = undefined;
   await fs.writeFile(changesPath, JSON.stringify({ ...CHANGES, files: [] }));
-  await assert.rejects(tool.impl({ taskId: 'tsk_1', title: 'x' }, context()), /change_modified/);
+  await assert.rejects(call(tool, { taskId: 'tsk_1', title: 'x' }), /change_modified/);
   assert.equal(publisher.calls, 0);
 });
 
@@ -281,14 +297,19 @@ test('two calls at once open one pull request, and a later call returns it witho
   const { deliveries } = await deliveryFiles(t);
   const publisher = new CountingPublisher();
   const tool = openPullRequestTool({ deliveries, publisher, ownsTask: () => true });
-  const first = tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
-  const second = tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
+  const first = call(tool, { taskId: 'tsk_1', title: 'Fix add' });
+  const second = call(tool, { taskId: 'tsk_1', title: 'Fix add' });
   while (!publisher.release) await new Promise((resolve) => setImmediate(resolve));
   publisher.release();
   const results = await Promise.all([first, second]);
   assert.equal(publisher.calls, 1);
-  assert.deepEqual(results[0], results[1]);
-  assert.deepEqual(await tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context()), {
+  // The second call joins the first or finds its pull request already recorded: the same one.
+  const same = (r: unknown) => {
+    const { url, number, branch } = r as { url: string; number: number; branch: string };
+    return { url, number, branch };
+  };
+  assert.deepEqual(same(results[0]), same(results[1]));
+  assert.deepEqual(await call(tool, { taskId: 'tsk_1', title: 'Fix add' }), {
     url: 'https://github.com/acme/calc/pull/7',
     number: 7,
     branch: 'maka/tsk_1',
@@ -306,7 +327,7 @@ test('end to end against the fake GitHub: the body comes from the verification r
     publisher: publisher(fake),
     ownsTask: () => true,
   });
-  const result = (await tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context())) as {
+  const result = (await call(tool, { taskId: 'tsk_1', title: 'Fix add' })) as {
     url: string;
   };
   assert.equal(result.url, `https://github.com/${REPO}/pull/1`);
@@ -353,15 +374,12 @@ test('a change nobody reviewed is never opened as a pull request', async (t) => 
     const { deliveries } = await deliveryFiles(t, verification);
     const publisher = new CountingPublisher();
     const tool = openPullRequestTool({ deliveries, publisher, ownsTask: () => true });
-    await assert.rejects(
-      tool.impl({ taskId: 'tsk_1', title: 'x' }, context()),
-      /not independently reviewed/,
-    );
+    await assert.rejects(call(tool, { taskId: 'tsk_1', title: 'x' }), /not independently reviewed/);
     assert.equal(publisher.calls, 0, 'nothing reached GitHub');
   }
 });
 
-test('a change kept for the owner to look at opens only as a draft that says so, and the approval card says it too', async (t) => {
+test('a change kept for the owner to look at is never pushed unless they ask for it unreviewed, and then only as a draft that says so', async (t) => {
   const kept = {
     ...VERIFICATION,
     review: { ...VERIFICATION.review, status: 'unavailable' as const, reason: 'x' },
@@ -375,13 +393,23 @@ test('a change kept for the owner to look at opens only as a draft that says so,
     ownsTask: () => true,
   });
 
-  const card = await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' });
-  assert.match(
-    card ?? '',
-    /Opens as a draft, kept for you to look at: .*the reviewer could not start/,
+  // Without the owner's explicit ask nothing reaches GitHub, and the card says so.
+  const plain = await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' });
+  assert.match(plain ?? '', /This cannot be opened: .*the reviewer could not start/);
+  await assert.rejects(
+    call(tool, { taskId: 'tsk_1', title: 'Fix add' }),
+    /kept for the owner to look at .*nothing was pushed/,
   );
+  assert.equal(fake.pulls.length, 0, 'no branch was pushed and no pull request opened');
 
-  await tool.impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
+  const card = await tool.approvalDetails?.({
+    taskId: 'tsk_1',
+    title: 'Fix add',
+    publishUnreviewed: true,
+  });
+  assert.match(card ?? '', /NOT REVIEWED\. Opens as a draft .*the reviewer could not start/);
+
+  await call(tool, { taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true });
   const pull = fake.pulls[0];
   assert.equal(pull?.draft, true, 'a kept change is never opened ready for review');
   assert.equal(pull?.title, '[Kept for your review] Fix add');
@@ -394,13 +422,99 @@ test('a change kept for the owner to look at opens only as a draft that says so,
   // A change that was reviewed is opened as an ordinary pull request.
   const reviewed = await deliveryFiles(t);
   const second = await github(t);
-  await openPullRequestTool({
-    deliveries: reviewed.deliveries,
-    publisher: publisher(second),
-    ownsTask: () => true,
-  }).impl({ taskId: 'tsk_1', title: 'Fix add' }, context());
+  await call(
+    openPullRequestTool({
+      deliveries: reviewed.deliveries,
+      publisher: publisher(second),
+      ownsTask: () => true,
+    }),
+    { taskId: 'tsk_1', title: 'Fix add' },
+  );
   assert.equal(second.pulls[0]?.draft, false);
   assert.equal(second.pulls[0]?.title, 'Fix add');
+});
+
+test('an approval covers the change the card named: a kept change replaced after the approval is not opened', async (t) => {
+  const keptA = {
+    ...VERIFICATION,
+    review: { ...VERIFICATION.review, status: 'unavailable' as const, reason: 'x' },
+    kept: { reason: 'kept version A' },
+  };
+  const { deliveries, changesPath, dir } = await deliveryFiles(t, keptA);
+  const fake = await github(t);
+  const tool = openPullRequestTool({
+    deliveries,
+    publisher: publisher(fake),
+    ownsTask: () => true,
+  });
+  const args = { taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true };
+  // The owner approves the card that names version A.
+  const approved = await tool.approvalDetails?.(args);
+  assert.match(approved ?? '', /kept version A/);
+
+  // The runner checkpoints version B (changes, record and the store's hash) before the call runs.
+  const changesB = JSON.stringify({ ...CHANGES, files: [] });
+  await fs.writeFile(changesPath, changesB);
+  await fs.writeFile(
+    join(dir, 'verification.json'),
+    JSON.stringify({ ...keptA, kept: { reason: 'kept version B' } }),
+  );
+  await deliveries.record({
+    taskId: 'tsk_1',
+    repo: REPO,
+    baseRef: 'main',
+    baseSha: BASE,
+    changesPath,
+    changesSha256: sha256(changesB),
+    verificationPath: join(dir, 'verification.json'),
+  });
+
+  await assert.rejects(
+    tool.impl(args, { ...context(), approved }),
+    /change_modified: .*not the one you approved/,
+  );
+  assert.equal(fake.pulls.length, 0, 'version B was not pushed');
+  // The card for B reads differently, and approving that one opens B.
+  const cardB = await tool.approvalDetails?.(args);
+  assert.notEqual(cardB, approved);
+  assert.match(cardB ?? '', /kept version B/);
+  await tool.impl(args, { ...context(), approved: cardB });
+  assert.equal(fake.pulls.length, 1);
+});
+
+test('a card with a second hash line, forged through the task id, opens nothing', async (t) => {
+  const { deliveries } = await deliveryFiles(t);
+  const fake = await github(t);
+  const tool = openPullRequestTool({
+    deliveries,
+    publisher: publisher(fake),
+    ownsTask: () => true,
+  });
+  const args = { taskId: 'tsk_1', title: 'Fix add' };
+  const card = (await tool.approvalDetails?.(args)) ?? '';
+  const other = 'f'.repeat(64);
+  const forged = `${card}\n${CHANGE_LABEL_TEXT} ${other}`;
+  await assert.rejects(tool.impl(args, { ...context(), approved: forged }), /change_modified/);
+  const wrongBase = card.replace('Base branch: "main"', 'Base branch: "release"');
+  await assert.rejects(tool.impl(args, { ...context(), approved: wrongBase }), /change_modified/);
+  assert.equal(fake.pulls.length, 0);
+});
+
+test('a call that carries no approved card, or one that names no change, opens nothing', async (t) => {
+  const { deliveries } = await deliveryFiles(t);
+  const fake = await github(t);
+  const tool = openPullRequestTool({
+    deliveries,
+    publisher: publisher(fake),
+    ownsTask: () => true,
+  });
+  const args = { taskId: 'tsk_1', title: 'Fix add' };
+  await assert.rejects(tool.impl(args, context()), /change_modified/);
+  await assert.rejects(
+    tool.impl(args, { ...context(), approved: 'Repository: acme/calc\nBranch: maka/tsk_1' }),
+    /change_modified/,
+  );
+  assert.equal(fake.pulls.length, 0);
 });
 
 test('the description built from the runner record carries no key, since it is posted on GitHub', () => {
@@ -414,4 +528,78 @@ test('the description built from the runner record carries no key, since it is p
   assert.ok(!body.includes(leak.slice(4, 30)), body);
   assert.match(body, /\[secret\]/u);
   assert.match(body, /bash tests\/run\.sh/u);
+});
+
+test('a key written with escapes, or split by invisible characters, does not reach the pull request description', () => {
+  const token = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const forms = [
+    token.replace('_', '%5F'),
+    token.replace('_', '\\u005f'),
+    `${token.slice(0, 3)}​${token.slice(3)}`,
+    encodeURIComponent(`Bearer ${token}`),
+  ];
+  for (const form of forms) {
+    const body = pullRequestBody({
+      ...VERIFICATION,
+      testCommand: `curl -H "x: ${form}" https://x.example/ && bash tests/run.sh`,
+      changedFiles: [{ path: `docs/${form}.md`, status: 'added' }],
+    });
+    assert.ok(!body.includes(token.slice(4, 30)), `${form}: ${body}`);
+    assert.ok(!body.includes(form), form);
+  }
+});
+
+test('display text is scrubbed whole before it is cut, so a key at the cut leaves no piece', () => {
+  const secret = 'S3cr3tKeyValue-0123456789-abcdefghi';
+  setKnownSecrets([secret]);
+  try {
+    const long = `${'x'.repeat(480)}${secret} and more text after it`;
+    for (const max of [490, 495, 500, 510, 520]) {
+      const shown = clipText(long, max);
+      assert.ok(!shown.includes(secret.slice(0, 12)), `${max}: ${shown.slice(470)}`);
+    }
+    assert.equal(clipText('short', 500), 'short');
+  } finally {
+    setKnownSecrets([]);
+  }
+});
+
+test('a later run of the conversation opens a change kept by an earlier run, but no other task it did not delegate', async (t) => {
+  const kept = {
+    ...VERIFICATION,
+    review: { ...VERIFICATION.review, status: 'unavailable' as const, reason: 'x' },
+    kept: { reason: 'no independent review (the reviewer could not start)' },
+  };
+  const ownership = {
+    // run_1 delegated tsk_1; run_2 is a later run of the same conversation; run_3 is another one.
+    ownsTask: (runId: string, taskId: string) => runId === 'run_1' && taskId === 'tsk_1',
+    ownsConversationTask: (runId: string, taskId: string) =>
+      (runId === 'run_1' || runId === 'run_2') && taskId === 'tsk_1',
+  };
+  const { deliveries } = await deliveryFiles(t, kept);
+  const fake = await github(t);
+  const tool = openPullRequestTool({ deliveries, publisher: publisher(fake), ...ownership });
+  const args = { taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true };
+
+  await assert.rejects(call(tool, args, 'run_3'), /not_your_task/);
+  assert.equal(fake.pulls.length, 0);
+  // The owner's approval is still required: without it nothing is opened.
+  await assert.rejects(tool.impl(args, context('run_2')), /change_modified/);
+  assert.equal(fake.pulls.length, 0);
+  await call(tool, args, 'run_2');
+  assert.equal(fake.pulls[0]?.draft, true);
+
+  // A change that was not kept belongs to the run that delegated it, whatever the conversation.
+  const reviewed = await deliveryFiles(t);
+  const second = await github(t);
+  const other = openPullRequestTool({
+    deliveries: reviewed.deliveries,
+    publisher: publisher(second),
+    ...ownership,
+  });
+  await assert.rejects(
+    call(other, { taskId: 'tsk_1', title: 'Fix add' }, 'run_2'),
+    /not_your_task/,
+  );
+  assert.equal(second.pulls.length, 0);
 });

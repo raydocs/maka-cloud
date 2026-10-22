@@ -391,6 +391,16 @@ const SCHEMA_V9 = `
 ALTER TABLE delegations ADD COLUMN other_runner_input INTEGER NOT NULL DEFAULT 0;
 `;
 
+/**
+ * A run that was open before tool history was recorded may already have called a tool: its
+ * history was not kept. It counts as having, so a later capacity error does not retry it as if
+ * nothing had happened. (A closed run is never retried.) A separate step, because databases
+ * already at v8 or v9 did not get this from the step that added the column.
+ */
+const SCHEMA_V10 = `
+UPDATE runs SET tool_called = 1 WHERE tool_called = 0 AND state IN ('active', 'waiting');
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -404,6 +414,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V7,
   SCHEMA_V8,
   SCHEMA_V9,
+  SCHEMA_V10,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -1185,6 +1196,17 @@ export class ConductorState {
         )
         .all(runId) as Row[]
     ).map((row) => String(row.task_id));
+  }
+
+  /** Whether a task was delegated by any run of the conversation the given run belongs to. */
+  conversationOwnsTask(runId: string, taskId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          'SELECT 1 FROM delegations d JOIN runs r ON r.conversation_id = d.conversation_id WHERE r.run_id = ? AND d.task_id = ?',
+        )
+        .get(runId, taskId) !== undefined
+    );
   }
 
   private appendLedger(runId: string, kind: string, usd: number, ref: string | null): number {

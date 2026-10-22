@@ -7,15 +7,28 @@ import { errorMessage } from './shell.js';
  * The conversation of a Claude task, kept off the sandbox. The Agent SDK mirrors every transcript
  * line the CLI writes to a `SessionStore`; this is what that store keeps, so a task can go on from
  * where it was on a sandbox that has none of its files. Lines are the CLI's own JSON lines, as
- * text, already scrubbed of the run's secrets.
+ * text, exactly as written.
+ *
+ * This is the model's history, for replay only, and it is never edited: a resumed conversation
+ * must show the model what it saw, and the model checks it (the signature on a thinking block,
+ * the order of the blocks), so a line with one character changed fails the resume. It is
+ * therefore not scrubbed, and nothing a person reads is made from it: it is kept in a database
+ * only the server's account can open (`SqliteTranscriptStore`), read back only to put it on the
+ * agent's sandbox, and deleted with the task. Text for readers (step notes, failures, results)
+ * is scrubbed where it is made, from the run's own events, never from this copy.
  */
 export interface TranscriptStore {
   /**
    * Adds lines to the end of a transcript. A line that carries a `uuid` already stored for the
    * same transcript is skipped, so a batch sent again lands once. Rejects with `TranscriptFull`
    * past the task's cap, and for a project key other than the one the task's transcripts use.
+   * Resolves with the lines it committed: those skipped as already stored are not in it.
    */
-  append(taskId: TaskId, key: TranscriptKey, lines: readonly TranscriptLine[]): Promise<void>;
+  append(
+    taskId: TaskId,
+    key: TranscriptKey,
+    lines: readonly TranscriptLine[],
+  ): Promise<TranscriptLine[]>;
   /** Where a task's main transcript of a session is kept, and how many lines it has. */
   locate(taskId: TaskId, sessionId: string): Promise<TranscriptInfo | undefined>;
   /** A page of a main transcript: lines after `cursor` (the `next` of the page before), up to ~`maxBytes`. */
@@ -139,7 +152,7 @@ export class MemoryTranscriptStore implements TranscriptStore {
     taskId: TaskId,
     key: TranscriptKey,
     lines: readonly TranscriptLine[],
-  ): Promise<void> {
+  ): Promise<TranscriptLine[]> {
     checkAppend(key, lines, this.limits);
     let task = this.tasks.get(taskId);
     if (task && task.projectKey !== key.projectKey) {
@@ -171,6 +184,7 @@ export class MemoryTranscriptStore implements TranscriptStore {
     };
     task.transcripts.set(name, transcript);
     const seen = new Set<string>();
+    const committed: TranscriptLine[] = [];
     for (const line of lines) {
       if (line.uuid !== undefined) {
         if (transcript.uuids.has(line.uuid) || seen.has(line.uuid)) continue;
@@ -179,7 +193,9 @@ export class MemoryTranscriptStore implements TranscriptStore {
       }
       transcript.lines.push(line.json);
       task.bytes += Buffer.byteLength(line.json);
+      committed.push(line);
     }
+    return committed;
   }
 
   async locate(taskId: TaskId, sessionId: string): Promise<TranscriptInfo | undefined> {
@@ -214,22 +230,26 @@ export class MemoryTranscriptStore implements TranscriptStore {
 export interface MirrorOptions {
   taskId: TaskId;
   store: TranscriptStore;
-  /** Takes the run's secrets out of a line before it is kept. */
-  redact(text: string): string;
   /** A batch that was refused or could not be kept. The SDK also reports it in its message stream. */
   onProblem?(message: string): void;
-  /** Called with a batch once the store holds it, never before. */
+  /** Called with the lines of a batch the store committed (not those it skipped as stored already), never before. */
   onKept?(lines: readonly TranscriptLine[]): void;
 }
 
-/** The SDK's store for a task, with a way to wait until everything it was given is kept or has failed. */
-export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
+/**
+ * The SDK's store for a task, with a way to wait until everything it was given is kept or has
+ * failed, and the first batch that is still not kept (the SDK offers a refused batch again, so a
+ * refusal that a retry then kept is not a failure).
+ */
+export type TranscriptMirror = SessionStore & {
+  drain(): Promise<void>;
+  unkept(): string | undefined;
+};
 
 /**
  * The SDK's `SessionStore` for one task. The SDK hands it every line the CLI writes to its
  * transcript, and it keeps them in the task's `TranscriptStore`: only under this task, only for
- * keys that are plain names, every line scrubbed of the run's secrets first, and in the order they
- * came.
+ * keys that are plain names, each line exactly as the CLI wrote it, and in the order they came.
  *
  * It never gives lines back to the SDK. A resumed conversation is put on the sandbox by
  * `restoreTranscript` before the CLI starts, where the CLI reads it as it reads any of its own
@@ -237,22 +257,29 @@ export type TranscriptMirror = SessionStore & { drain(): Promise<void> };
  * rewrite the CLI's environment.
  */
 export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror {
-  const { taskId, store, redact } = options;
+  const { taskId, store } = options;
   let chain: Promise<unknown> = Promise.resolve();
+  // Refused batches by content, until the same batch is kept.
+  const refused = new Map<string, string>();
   return {
     drain: async () => {
       await chain;
     },
+    unkept: () => refused.values().next().value,
     append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
       const run = async (): Promise<void> => {
-        const lines = entries.map((entry) => scrubbed(entry, redact));
-        await store.append(taskId, key, lines);
-        options.onKept?.(lines);
+        const lines = entries.map(asLine);
+        const committed = await store.append(taskId, key, lines);
+        refused.delete(batch);
+        options.onKept?.(committed);
       };
+      const batch = JSON.stringify([key, entries]);
       const next = chain.then(run, run);
       chain = next.catch(() => undefined);
       return next.catch((error) => {
-        options.onProblem?.(`a transcript batch was not kept: ${errorMessage(error)}`);
+        const message = `a transcript batch was not kept: ${errorMessage(error)}`;
+        if (!refused.has(batch)) refused.set(batch, message);
+        options.onProblem?.(message);
         throw error;
       });
     },
@@ -262,40 +289,26 @@ export function transcriptSessionStore(options: MirrorOptions): TranscriptMirror
   };
 }
 
-/**
- * One entry as a transcript line. The text is scrubbed whole and must still be one JSON object, or
- * the entry is refused (an entry that cannot be scrubbed safely is not kept).
- */
-function scrubbed(entry: SessionStoreEntry, redact: (text: string) => string): TranscriptLine {
+/** One entry as a transcript line: the entry as it is, which must be an object with a type. */
+function asLine(entry: SessionStoreEntry): TranscriptLine {
   if (typeof entry !== 'object' || entry === null || typeof entry.type !== 'string') {
     throw new Error('transcript refused: an entry is not an object with a type');
   }
-  const text = redact(JSON.stringify(entry));
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error('transcript refused: an entry could not be scrubbed');
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('transcript refused: an entry could not be scrubbed');
-  }
-  const uuid = (parsed as { uuid?: unknown }).uuid;
-  return typeof uuid === 'string' && uuid.length <= 100 ? { json: text, uuid } : { json: text };
+  const uuid = (entry as { uuid?: unknown }).uuid;
+  const json = JSON.stringify(entry);
+  return typeof uuid === 'string' && uuid.length <= 100 ? { json, uuid } : { json };
 }
 
 export type RestoreResult =
-  /** The sandbox has the transcript, as far as the store knows it. */
-  | { status: 'present'; projectKey: string }
+  /** The sandbox has the server's copy of the transcript, put there now. */
   | { status: 'restored'; projectKey: string; lines: number }
   /** The store has nothing for this session. */
   | { status: 'absent' };
 
 /**
- * Makes the sandbox hold a session's transcript before the CLI is asked to resume it. A sandbox
- * that has the file with at least as many lines as the store is left alone (it is the same
- * conversation, and its own copy may be ahead of what was mirrored); otherwise the store's copy is
- * written in place, atomically.
+ * Makes the sandbox hold the server's copy of a session's transcript before the CLI is asked to
+ * resume it. The server's copy is the only one that is trusted: the sandbox file is the agent's own
+ * to write, however many lines it has, so it is always replaced (atomically), never compared with.
  */
 export async function restoreTranscript(input: {
   machine: RemoteMachine;
@@ -310,9 +323,6 @@ export async function restoreTranscript(input: {
   if (!info) return { status: 'absent' };
   if (!isProjectKey(info.projectKey)) {
     throw new Error('the stored transcript is under a project key that is not a plain name');
-  }
-  if ((await machine.transcriptLines(taskId, info.projectKey, sessionId)) >= info.lines) {
-    return { status: 'present', projectKey: info.projectKey };
   }
   await machine.installTranscript({
     dirName: taskId,

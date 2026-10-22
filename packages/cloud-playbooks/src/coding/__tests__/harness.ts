@@ -1,5 +1,6 @@
+import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { TestContext } from 'node:test';
@@ -9,9 +10,11 @@ import { DEFAULT_MODES } from '@maka-cloud/modes';
 import type { RunHandle, RunnerEvent, RunSpec } from '@maka-cloud/orchestrator';
 import { Fleet, FixedMachineProvider } from '@maka-cloud/runners';
 import { MemoryCodingDeliveries } from '../deliveries.js';
+import { verifyCodingManifest } from '../playbook.js';
 import { type AgentRunner, CodingRunner, type CodingRunnerOptions } from '../runner.js';
 import {
   type CodingSandbox,
+  type ExecOptions,
   type ExecResult,
   FleetCodingSandbox,
   type SandboxWorkspace,
@@ -88,7 +91,7 @@ export const reviewsNothing: AgentScript = async (turn) => {
   const brief = await fs.readFile(turn.spec.briefPath, 'utf8');
   if (/# Review of a change/u.test(brief)) {
     await fs.writeFile(
-      join(turn.dir, 'review.json'),
+      join(turn.dir, 'handoff', 'review.json'),
       JSON.stringify({ summary: 'Nothing to report.', findings: [] }),
     );
   }
@@ -164,6 +167,9 @@ export class FakeAgent implements AgentRunner {
     };
     const finished = (async () => {
       try {
+        // The agent account's setup makes handoff/ before it runs, and it is where the agent writes.
+        // Synchronous: an abort that arrives meanwhile must still reach the script's listener.
+        mkdirSync(join(turn.dir, 'handoff'), { recursive: true });
         const outcome = await this.script(turn);
         if (abort.signal.aborted) return;
         if (outcome === 'ok') {
@@ -233,6 +239,8 @@ export interface Harness {
   hook: ExecHook | undefined;
   replace: ExecReplace | undefined;
   leases: { acquired: number; released: number };
+  /** The accounts the sandbox's `sudo` double was asked to run something as, one entry per use. */
+  sudoUsers(): Promise<string[]>;
   /** Resolves after the next workspace sample finishes. */
   nextSample(): Promise<void>;
   /** `lead` is written before the brief, as the conductor's code writes the `maka-mode:` line. */
@@ -247,6 +255,18 @@ function git(cwd: string, ...args: string[]): string {
   }).trim();
 }
 
+const SUDO_DOUBLE = `#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--preserve-env|-H) shift ;;
+    -u) echo "$2" >> "$(dirname "$0")/sudo-users"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+`;
+
 /** A sandbox that records every exec and lets a test hold one. */
 class RecordingSandbox implements CodingSandbox {
   constructor(
@@ -255,22 +275,33 @@ class RecordingSandbox implements CodingSandbox {
     private readonly samples: (() => void)[],
   ) {}
 
-  async open(taskId: string, signal?: AbortSignal): Promise<SandboxWorkspace> {
-    const ws = await this.inner.open(taskId, signal);
+  async open(taskId: string, signal?: AbortSignal, attempt?: number): Promise<SandboxWorkspace> {
+    const ws = await this.inner.open(taskId, signal, attempt);
     this.h.leases.acquired++;
     const { h, samples } = this;
+    const record = async (
+      script: string,
+      options: ExecOptions,
+      run: () => Promise<ExecResult>,
+    ): Promise<ExecResult> => {
+      const call = { script, envs: options.envs ?? {} };
+      h.calls.push(call);
+      await h.hook?.(call, 'before');
+      const result = (await h.replace?.(call, run)) ?? (await run());
+      await h.hook?.(call, 'after');
+      if (script.includes('hash-object --no-filters')) samples.splice(0).forEach((fn) => fn());
+      return result;
+    };
     return {
       dir: ws.dir,
       async exec(script, options = {}) {
-        const call = { script, envs: options.envs ?? {} };
-        h.calls.push(call);
-        await h.hook?.(call, 'before');
-        const result =
-          (await h.replace?.(call, () => ws.exec(script, options))) ??
-          (await ws.exec(script, options));
-        await h.hook?.(call, 'after');
-        if (script.includes('hash-object --no-filters')) samples.splice(0).forEach((fn) => fn());
-        return result;
+        return record(script, options, () => ws.exec(script, options));
+      },
+      async execCheck(script, options = {}) {
+        return record(script, options, () => ws.execCheck(script, options));
+      },
+      async execCheckStop(script, options = {}) {
+        return record(script, options, () => ws.execCheckStop(script, options));
       },
       stopAll: (s) => ws.stopAll(s),
       agentOnSameMachine: () => ws.agentOnSameMachine(),
@@ -281,15 +312,15 @@ class RecordingSandbox implements CodingSandbox {
     };
   }
 
-  stopTask(taskId: string, signal?: AbortSignal): Promise<void> {
-    return this.inner.stopTask(taskId, signal);
+  stopTask(taskId: string, signal?: AbortSignal, upToAttempt?: number): Promise<void> {
+    return this.inner.stopTask(taskId, signal, upToAttempt);
   }
 }
 
 export async function setup(
   t: TestContext,
   options: Partial<CodingRunnerOptions> = {},
-  sandbox: { execPath?: string } = {},
+  sandbox: { execPath?: string; noAgentChannel?: boolean } = {},
 ): Promise<Harness> {
   const tmp = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'coding-test-')));
   const home = join(tmp, 'home');
@@ -321,10 +352,15 @@ export async function setup(
 
   const pids = join(tmp, 'pids');
   await fs.mkdir(pids);
+  // Checks run as the agent's account, so the fleet has one; the fake sandbox has a single user,
+  // and its `sudo` runs the command as that user (the real second account has its own tests).
+  const shim = join(tmp, 'sudo-double');
+  await fs.mkdir(shim);
+  await fs.writeFile(join(shim, 'sudo'), SUDO_DOUBLE, { mode: 0o755 });
   const fake = await new FakeInstabox({
     home,
     env: { MAKA_TEST_PIDS: pids },
-    ...(sandbox.execPath ? { execPath: sandbox.execPath } : {}),
+    execPath: `${shim}:${sandbox.execPath ?? process.env.PATH ?? ''}`,
   }).start();
   const client = new InstaboxClient({
     apiKey: fake.apiKey,
@@ -338,7 +374,16 @@ export async function setup(
     workRoot: root,
     logRoot,
     pollIntervalMs: 5,
+    ...(sandbox.noAgentChannel
+      ? {}
+      : {
+          agentChannel: {
+            user: 'maka-agent',
+            group: execFileSync('id', ['-gn']).toString().trim(),
+          },
+        }),
   });
+  fleet.ensureAgentIsolation = async () => undefined;
   const samples: (() => void)[] = [];
   const h = {
     fake,
@@ -353,6 +398,10 @@ export async function setup(
     replace: undefined,
     leases: { acquired: 0, released: 0 },
     nextSample: () => new Promise<void>((resolve) => samples.push(resolve)),
+    async sudoUsers() {
+      const text = await fs.readFile(join(shim, 'sudo-users'), 'utf8').catch(() => '');
+      return text.split('\n').filter(Boolean);
+    },
   } as unknown as Harness;
   h.deliveries = new MemoryCodingDeliveries();
   h.claude = new FakeAgent('claude-agent-sdk', h);
@@ -459,7 +508,7 @@ export async function readJson<T = any>(path: string): Promise<T> {
 export async function writeRepro(turn: AgentTurn, test = REPRO_TEST): Promise<void> {
   await fs.writeFile(join(turn.workspace, 'tests', 'test_add.sh'), test);
   await fs.writeFile(
-    join(turn.dir, 'repro.json'),
+    join(turn.dir, 'handoff', 'repro.json'),
     JSON.stringify({ command: 'bash tests/test_add.sh', files: ['tests/test_add.sh'] }),
   );
 }
@@ -491,4 +540,23 @@ export function zeroStats(runner: CodingRunner): void {
   for (const [key, value] of Object.entries(stats)) {
     if (value !== 0) throw new Error(`${key} is ${value}, not 0: ${JSON.stringify(stats)}`);
   }
+}
+
+/**
+ * The task was stopped (or ended) while the review was not done: the change that passed the checks
+ * is already on the host, kept for the owner, with the reason and without a verdict of its own.
+ */
+export async function keptAfterStop(h: Harness, id: string) {
+  const dir = join(h.handoff, id);
+  const delivery = await h.deliveries.get(id);
+  assert.ok(delivery, 'the verified change is kept, not lost');
+  assert.equal(delivery.publishedPr, undefined);
+  const record = await readJson(join(dir, 'verification.json'));
+  assert.equal(record.result, 'verified');
+  assert.match(record.kept?.reason ?? '', /ended before (its|the) independent review/);
+  assert.ok(await fs.readFile(delivery.changesPath, 'utf8'), 'the change set is on disk');
+  assert.ok(await fs.readFile(join(dir, 'change.patch'), 'utf8'), 'the patch is on disk');
+  const manifest = await readJson(join(dir, 'result.json'));
+  assert.match(manifest.summary, /^Kept for you to look at, not delivered: /);
+  assert.equal(verifyCodingManifest(manifest).ok, false, 'never taken for a delivery');
 }
