@@ -11,7 +11,7 @@ import {
 import { scrubKeyShapes } from '@maka-cloud/orchestrator';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { assertAgentChannel } from '@maka-cloud/runners';
-import { pushConfigFromEnv } from '@maka-cloud/server';
+import { DEFAULT_TASKS_PER_INVITE, pushConfigFromEnv } from '@maka-cloud/server';
 import { type BackupLayout, withoutSecretShapesInJson } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
@@ -113,6 +113,11 @@ export interface StackConfig {
    * restart) may spend, and how long the task may run in all.
    */
   taskLimits: { turnUsd?: number; runMs: number };
+  /**
+   * Task trees one invite may run at once; a further top-level task waits its turn. 1 until each
+   * task gets an agent account of its own: the tasks of an invite share one machine and account.
+   */
+  tasksPerInvite: number;
   /** Task timelines show what each step did, not only its kind. */
   timelineContent: boolean;
   /** The codex runner needs it when a task starts; the stack starts without it. */
@@ -280,6 +285,23 @@ function taskLimits(
 /** How long a task may run in all, unless set. */
 const DEFAULT_TASK_RUN_HOURS = 4;
 
+/** The most `MAKA_CLOUD_TASKS_PER_INVITE` takes, the same as a conversation's unfinished tasks. */
+const MAX_TASKS_PER_INVITE = 32;
+
+/** Reads how many task trees one invite may run at once; a bad value is a problem, not a default. */
+function tasksPerInvite(value: (name: string) => string | undefined, problems: string[]): number {
+  const raw = value('MAKA_CLOUD_TASKS_PER_INVITE');
+  if (raw === undefined) return DEFAULT_TASKS_PER_INVITE;
+  const parsed = Number(raw);
+  if (!/^\d+$/u.test(raw) || parsed < 1 || parsed > MAX_TASKS_PER_INVITE) {
+    problems.push(
+      `MAKA_CLOUD_TASKS_PER_INVITE must be a whole number from 1 to ${MAX_TASKS_PER_INVITE}`,
+    );
+    return DEFAULT_TASKS_PER_INVITE;
+  }
+  return parsed;
+}
+
 export interface SpendCaps {
   inviteDailyUsd: number;
   inviteMonthlyUsd: number;
@@ -340,6 +362,10 @@ export const ENV_VARIABLES = [
   [
     'MAKA_CLOUD_TASK_RUN_HOURS',
     'how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168)',
+  ],
+  [
+    'MAKA_CLOUD_TASKS_PER_INVITE',
+    'how many tasks one invite may run at once; a further one waits its turn and says so (default 1, at most 32). Keep 1 until each task runs as an account of its own: the tasks of an invite share one machine and agent account',
   ],
   [
     'MAKA_CLOUD_TIMELINE_CONTENT',
@@ -574,6 +600,7 @@ export function readStackConfig(
       serverDailyUsd: dollars('MAKA_CLOUD_SERVER_DAILY_USD', DEFAULT_SPEND_CAPS.serverDailyUsd),
     },
     taskLimits: taskLimits(value, problems),
+    tasksPerInvite: tasksPerInvite(value, problems),
     timelineContent: flag('MAKA_CLOUD_TIMELINE_CONTENT'),
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
@@ -932,6 +959,7 @@ export function describeConfig(config: StackConfig): string[] {
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
     `CLIs run as:         ${config.agentChannel ? `${config.agentChannel.user} (group ${config.agentChannel.group}); Claude through the Agent SDK, conversation kept in ${config.transcriptsDbPath}` : 'nothing: no CLI starts until MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP are set'}`,
     `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,
+    `tasks at once:       ${config.tasksPerInvite} per invite; the next one waits its turn`,
     `invites file:        ${config.invitesPath}`,
     `backups:             ${config.backupDir ?? '(not set: no backups are written)'}`,
     `spend alert:         ${config.spendAlert ? `$${config.spendAlert.usd}/day to ${config.spendAlert.ownerInvite}'s devices` : '(not set)'}`,

@@ -377,6 +377,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_BACKUP_DIR` | directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups |
 | `MAKA_CLOUD_TASK_TURN_USD` | the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit |
 | `MAKA_CLOUD_TASK_RUN_HOURS` | how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168) |
+| `MAKA_CLOUD_TASKS_PER_INVITE` | how many tasks one invite may run at once; a further one waits its turn and says so (default 1, at most 32). Keep 1 until each task runs as an account of its own: the tasks of an invite share one machine and agent account |
 | `MAKA_CLOUD_TIMELINE_CONTENT` | set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing |
 | `MAKA_CLOUD_AGENT_USER` | the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started |
 | `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |

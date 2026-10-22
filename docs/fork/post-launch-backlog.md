@@ -82,6 +82,11 @@ Still missing before it can merge:
 2. Host configuration tests for `MAKA_CLOUD_AGENT_ACCOUNTS`.
 3. The text in `docs/fork/deploy.md`.
 4. The host's `taskOver` wiring, so the lease is released when a task is over.
+5. Lift the one-task-per-invite cap when per-task accounts land: raise the default of
+   `MAKA_CLOUD_TASKS_PER_INVITE` (`DEFAULT_TASKS_PER_INVITE` in `cloud-server.ts`) and update
+   `launch-notes.md` ("One task at a time per invite"). Until then the inbox's stall check reads a
+   task that only waits its turn as stalled after `queuedStallAfterMinutes`; teach it the wait, or
+   lift the cap.
 
 ## Go-live rehearsal
 
