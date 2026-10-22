@@ -26,9 +26,12 @@ import type { ChangedFile, ChangeSet, CodingDeliveries } from './deliveries.js';
 import { DEFAULT_LOOP_LIMITS, type LoopLimits, LoopDetector, parseSample } from './loop.js';
 import {
   MAX_REVIEW_BYTES,
+  clip,
   parseReviewFile,
   plain,
+  countBySeverity,
   type FixRecord,
+  type FixRound,
   type ReviewRecord,
   fixBrief,
   MAX_FIX_FINDINGS,
@@ -92,6 +95,13 @@ export interface CodingLimits {
   maxPatchBytes: number;
   /** Failed runs or checks of one vendor before the task goes to the other. Default 2. */
   failuresPerVendor: number;
+  /**
+   * Fix rounds after the review, at most: each sends the P1 and P2 findings back to the implementer,
+   * runs the checks again and has the other vendor review the fixed change afresh. The rounds stop
+   * early when a review has no P1 or P2, and when the review's share of the budget runs out.
+   * Default 3, at most 10; 0 sends nothing back.
+   */
+  fixRounds: number;
 }
 
 export const DEFAULT_CODING_LIMITS: CodingLimits = {
@@ -102,7 +112,11 @@ export const DEFAULT_CODING_LIMITS: CodingLimits = {
   maxTotalBytes: 8 * 1024 * 1024,
   maxPatchBytes: 1024 * 1024,
   failuresPerVendor: 2,
+  fixRounds: 3,
 };
+
+/** The most fix rounds a runner may be configured with. */
+export const MAX_FIX_ROUNDS = 10;
 
 export interface CodingRunnerOptions {
   agents: Record<Vendor, AgentRunner>;
@@ -211,6 +225,10 @@ export class CodingRunner implements Runner {
       throw new Error(
         `checkTimeoutMs must be above 0 and at most ${MAX_CHECK_MS} (a check is one sandbox exec, which ends after 10 minutes)`,
       );
+    }
+    const rounds = this.limits.fixRounds;
+    if (!(Number.isInteger(rounds) && rounds >= 0 && rounds <= MAX_FIX_ROUNDS)) {
+      throw new Error(`fixRounds must be a whole number from 0 to ${MAX_FIX_ROUNDS}`);
     }
     this.loopLimits = { ...DEFAULT_LOOP_LIMITS, ...options.loop };
   }
@@ -345,8 +363,7 @@ export function cloneFailure(out: string): string {
 
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
-  const shown = scrubSecretText(text);
-  return shown.length <= max ? shown : `${shown.slice(0, max - 1)}…`;
+  return clip(scrubSecretText(text), max);
 }
 
 /** How many serious (P1) findings a finished review still carries. */
@@ -357,35 +374,33 @@ function p1Of(review: ReviewRecord): number {
 }
 
 /**
- * Why a change that passed its checks is kept for the owner to look at instead of delivered: no
- * independent review could be made, or the review still has a serious (P1) problem after the one
- * fix. Undefined: nothing stands in the way of delivering it.
+ * Why a fixed change has no review of its own. The review before the fix found what the fix was
+ * for, so the record says how many serious problems it found and that their fix was never checked
+ * by a reviewer.
  */
-/**
- * Why a fixed change has no second review. The first review's P1 findings were the reason for the
- * fix, so the record says they were found and that their fix was never checked by a reviewer.
- */
-function notReviewedAgain(first: ReviewRecord, why: string): string {
-  const found = first.status === 'reviewed' ? p1Of(first) : 0;
+function notReviewedAgain(previous: ReviewRecord, why: string): string {
+  const found = p1Of(previous);
   const earlier =
     found > 0
-      ? `the first review found ${found} serious problem(s); the fix was not checked: `
+      ? `the review before the fix found ${found} serious problem(s); the fix was not checked: `
       : '';
   return `${earlier}the fixed change could not be reviewed again (${why})`;
 }
 
+/**
+ * Why a change that passed its checks is kept for the owner to look at instead of delivered: no
+ * independent review could be made, or the latest review still has a serious (P1) problem after the
+ * fix rounds. Undefined: nothing stands in the way of delivering it.
+ */
 function keptReason(review: ReviewRecord): string | undefined {
   if (review.status !== 'reviewed') {
     return `the change passed the repository's checks but could not be independently reviewed (${plain(review.reason, 200)})`;
   }
   const left = p1Of(review);
   if (left === 0) return undefined;
-  const fix = review.fix;
-  const unused =
-    fix?.result === 'not_applied'
-      ? ` (the fix was not used: ${fix.reason ?? 'no reason given'})`
-      : '';
-  return `the independent review still found ${left} serious problem(s) after the one fix it allows${unused}`;
+  const rounds = review.fix?.rounds ?? 0;
+  const why = review.fix?.reason ? ` (${review.fix.reason})` : '';
+  return `the independent review still found ${left} serious problem(s) after ${rounds} fix round(s)${why}`;
 }
 
 function roundUsd(value: number): number {
@@ -424,7 +439,7 @@ class CodingRun implements RunHandle {
   private lastReportedUsd: number | undefined;
   /** Set once the task has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
-  /** What the review, the fix and the second review may spend in all (the task's total, not theirs alone). */
+  /** What the review and every fix round and its review may spend in all (the task's total, not theirs alone). */
   private reviewCap: number | undefined;
   /** The mode the brief names; the work and the review follow its roles and its budget split. */
   private mode: ModeId = 'standard';
@@ -1030,7 +1045,7 @@ class CodingRun implements RunHandle {
     });
     const budget = this.allowance();
     if (budget !== undefined) {
-      // One limit for the review, the fix and the second review together: it is set when the first
+      // One limit for the review and every fix round and its review together: it is set when the first
       // review starts and never grows, and it is below the task's budget.
       const reviewLimit = (this.reviewCap ??= Math.min(
         budget,
@@ -1111,12 +1126,15 @@ class CodingRun implements RunHandle {
   }
 
   /**
-   * The review, and, when it found P1 problems, the one fix. The implementer's vendor gets the P1
-   * findings once, in a fresh run (the task's session record is the reviewer's by now); the runner
-   * checks the result as it checked the first change, and the other vendor reviews it again. If the
-   * fix does not run or fails the checks, the first verified change is the one delivered, with its P1
-   * findings; if only the second review fails, the fixed change is kept unreviewed. There
-   * is no loop: this method runs `fix` at most once, and nothing calls it again.
+   * The review, and the fix rounds after it. While the latest review has P1 or P2 findings, the
+   * implementer's vendor gets them (the worst first) in a fresh run (the task's session record is the
+   * reviewer's by now); the runner checks the result as it checked the first change, and the other
+   * vendor reviews the fixed change afresh. The rounds end when a review has no P1 or P2, after
+   * `fixRounds` rounds, when the review's share of the budget is too small for another round, or
+   * when a fix does not run or fails the checks. The change returned is then the last one that passed
+   * the checks and was reviewed, with that review; a fixed change that passed the checks but whose
+   * review did not finish is returned unreviewed. It is never one whose latest checks failed, and
+   * its review is always its own.
    */
   private async reviewAndFix(
     task: CodingTask,
@@ -1131,114 +1149,147 @@ class CodingRun implements RunHandle {
   }> {
     const first = await this.review(task, baseSha, conductorBrief, implementer, outcome);
     if (first.status !== 'reviewed') return { outcome, review: first };
-    const p1 = first.findings.filter((finding) => finding.severity === 'P1');
-    if (p1.length === 0) return { outcome, review: first };
-    const sent = Math.min(p1.length, MAX_FIX_FINDINGS);
-    const notApplied = (reason: string): ReviewRecord => ({
-      ...first,
-      fix: { sent, result: 'not_applied', reason: plain(reason, 300) },
+    const maxRounds = this.limits.fixRounds;
+    // `review` is the review of `current` throughout: a change is never shown with another's review.
+    let current = outcome;
+    let review = first;
+    const history: FixRound[] = [];
+    let sent = 0;
+    const fixOf = (reason?: string): FixRecord => ({
+      rounds: history.length,
+      sent,
+      result: current === outcome ? 'not_applied' : 'applied',
+      ...(reason === undefined ? {} : { reason: plain(reason, 300) }),
+      history: history.map((round) => ({ ...round })),
     });
-    const budget = this.spec.budgetUsd;
-    if (budget !== undefined && this.reviewCap !== undefined) {
-      // The review's limit, below the turn's allowance when that is the smaller.
-      const left = (this.limitUsd ?? this.reviewCap) - this.spentBefore;
-      if (left < 2 * MIN_REVIEW_USD) {
-        return {
-          outcome,
-          review: notApplied(
-            `the review's budget has $${Math.max(0, left).toFixed(2)} left, too little for a fix and a second review`,
-          ),
-        };
+    const ended = (reason?: string) => ({
+      outcome: current,
+      review:
+        history.length === 0 && reason === undefined ? review : { ...review, fix: fixOf(reason) },
+    });
+    for (let round = 1; ; round++) {
+      const open = review.findings.filter((finding) => finding.severity !== 'P3');
+      if (open.length === 0) return ended();
+      // With no rounds configured nothing is sent back, and the record says nothing of a fix.
+      if (round > maxRounds) {
+        return ended(
+          maxRounds === 0 ? undefined : `the cap of ${maxRounds} fix round(s) was reached`,
+        );
       }
-    }
-    // Set once the fixed change has passed the checks and is kept on the host: from then on a
-    // second review that fails ends with it, not with the first change (which the fix replaced).
-    let kept: { outcome: typeof outcome; applied: FixRecord } | undefined;
-    try {
-      this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
-      const turn = await this.agentTurn(
-        implementer,
-        new LoopDetector(this.runner.loopLimits),
-        undefined,
-        () =>
-          fixBrief({
-            repo: task.repo,
-            baseSha,
-            dir: this.ws.dir,
-            goal: task.goal,
-            testCommand: task.testCommand,
-            findings: p1,
-            conductorBrief,
-          }),
-        { phase: 'review', ...this.settingsOf(implementerFor, implementer) },
-      );
-      if ('loop' in turn) return { outcome, review: notApplied(`the fix stopped: ${turn.loop}`) };
-      if (!turn.ok) {
-        return {
-          outcome,
-          review: notApplied(
+      if (this.spec.budgetUsd !== undefined && this.reviewCap !== undefined) {
+        // The review's limit, below the turn's allowance when that is the smaller.
+        const left = (this.limitUsd ?? this.reviewCap) - this.spentBefore;
+        if (left < 2 * MIN_REVIEW_USD) {
+          return ended(
+            `the review's budget has $${Math.max(0, left).toFixed(2)} left, too little for a fix and a second review`,
+          );
+        }
+      }
+      const findings = open.slice(0, MAX_FIX_FINDINGS);
+      sent += findings.length;
+      const previous = review;
+      const before = current;
+      const notApplied = (reason: string) => {
+        history.push({ sent: findings.length, result: 'not_applied', reason: plain(reason, 300) });
+        return ended(`the fix of round ${round} was not used: ${reason}`);
+      };
+      // Set once the fixed change has passed the checks and is kept on the host: from then on a
+      // review that fails ends with it, not with the change before it (which the fix replaced).
+      let keptFixed = false;
+      try {
+        this.progress(
+          `${implementer} fixes the ${findings.length} problem(s) the review found (round ${round} of at most ${maxRounds})`,
+        );
+        const turn = await this.agentTurn(
+          implementer,
+          new LoopDetector(this.runner.loopLimits),
+          undefined,
+          () =>
+            fixBrief({
+              repo: task.repo,
+              baseSha,
+              dir: this.ws.dir,
+              goal: task.goal,
+              testCommand: task.testCommand,
+              findings,
+              conductorBrief,
+              round,
+              maxRounds,
+            }),
+          { phase: 'review', ...this.settingsOf(implementerFor, implementer) },
+        );
+        if ('loop' in turn) return notApplied(`the fix stopped: ${turn.loop}`);
+        if (!turn.ok) {
+          return notApplied(
             this.budgetStop
               ? `the fix ran out of the review's budget (${this.budgetStop})`
               : `the fix run failed: ${turn.reason}`,
-          ),
+          );
+        }
+        const checks: CheckResult[] = [];
+        const checked = await this.check(task, baseSha, checks);
+        if (!checked.ok)
+          return notApplied(`the fixed change failed the checks: ${checked.problem}`);
+        const collected = await this.collect(task, baseSha);
+        if ('reason' in collected) {
+          return notApplied(`the fixed change could not be read (${collected.reason})`);
+        }
+        const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
+        // The fix's own spend may have used the cap: the review then cannot start, and says so.
+        this.budgetStop = undefined;
+        // The fixed change has passed the checks: it, not the one before it, is what a stop during
+        // its review must leave kept, with the review so far.
+        history.push({ sent: findings.length, result: 'not_reviewed' });
+        current = fixed;
+        try {
+          await this.keepUntilReviewed(task, verification, fixed, { ...previous, fix: fixOf() });
+        } catch (error) {
+          current = before;
+          history.pop();
+          throw error;
+        }
+        keptFixed = true;
+        const next = await this.review(task, baseSha, conductorBrief, implementer, fixed);
+        if (next.status !== 'reviewed') {
+          const why = plain(notReviewedAgain(previous, next.reason), 300);
+          history[history.length - 1] = {
+            sent: findings.length,
+            result: 'not_reviewed',
+            reason: why,
+          };
+          return { outcome: fixed, review: { ...next, reason: why, fix: fixOf() } };
+        }
+        history[history.length - 1] = {
+          sent: findings.length,
+          result: 'applied',
+          counts: countBySeverity(next.findings),
         };
+        review = next;
+      } catch (error) {
+        if (this.cancelled || error instanceof CancelledError) throw error;
+        if (keptFixed) {
+          // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
+          const why = plain(notReviewedAgain(previous, errorMessage(error)), 300);
+          history[history.length - 1] = {
+            sent: findings.length,
+            result: 'not_reviewed',
+            reason: why,
+          };
+          return {
+            outcome: current,
+            review: {
+              ...previous,
+              status: 'unavailable',
+              reviewer: previous.reviewer,
+              reason: why,
+              fix: fixOf(),
+            },
+          };
+        }
+        return notApplied(errorMessage(error));
+      } finally {
+        this.budgetStop = undefined;
       }
-      const checks: CheckResult[] = [];
-      const checked = await this.check(task, baseSha, checks);
-      if (!checked.ok) {
-        return {
-          outcome,
-          review: notApplied(`the fixed change failed the checks: ${checked.problem}`),
-        };
-      }
-      const collected = await this.collect(task, baseSha);
-      if ('reason' in collected) {
-        return {
-          outcome,
-          review: notApplied(`the fixed change could not be read (${collected.reason})`),
-        };
-      }
-      const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
-      // The fix's own spend may have used the cap: the second review then cannot start, and says so.
-      this.budgetStop = undefined;
-      // The fixed change has passed the checks: it, not the first one, is what a stop during the
-      // second review must leave kept.
-      const applied: FixRecord = { sent, result: 'applied' };
-      await this.keepUntilReviewed(task, verification, fixed, { ...first, fix: applied });
-      kept = { outcome: fixed, applied };
-      const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
-      if (second.status !== 'reviewed') {
-        return {
-          outcome: fixed,
-          review: {
-            ...second,
-            reason: plain(notReviewedAgain(first, second.reason), 300),
-            fix: applied,
-          },
-        };
-      }
-      return { outcome: fixed, review: { ...second, fix: applied } };
-    } catch (error) {
-      if (this.cancelled || error instanceof CancelledError) throw error;
-      if (kept) {
-        // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
-        return {
-          outcome: kept.outcome,
-          review: {
-            ...first,
-            status: 'unavailable',
-            reviewer: first.reviewer,
-            reason: plain(
-              `the fixed change could not be reviewed again (${errorMessage(error)})`,
-              300,
-            ),
-            fix: kept.applied,
-          },
-        };
-      }
-      return { outcome, review: notApplied(errorMessage(error)) };
-    } finally {
-      this.budgetStop = undefined;
     }
   }
 
