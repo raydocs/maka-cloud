@@ -333,7 +333,9 @@ export function boundOpenAI(
     body: sent,
     inputTokens: sent.byteLength + limits.requestOverheadTokens,
     outputTokens: output,
-    inputMultiplier: 1,
+    // Any input token may be written to the cache, which GPT-5.6 and later bill at 1.25x input
+    // (the default 30-minute lifetime; the field that asks for 12 hours is refused).
+    inputMultiplier: CACHE_WRITE_5M,
     oneHourCache: false,
     stream: body.stream === true,
   };

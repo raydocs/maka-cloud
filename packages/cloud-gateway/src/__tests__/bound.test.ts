@@ -347,7 +347,8 @@ test("the built-in modes' Codex model is priced with no configuration, and confi
   const request = { model: 'gpt-6.1-sol', input: 'go', stream: true };
   const bounded = boundOpenAI(encode(request), request, builtIn, DEFAULT_BOUND_LIMITS);
   assert.ok(bounded.ok);
-  assert.equal(bounded.outputTokens, 128_000);
+  assert.equal(bounded.outputTokens, 32_000);
+  assert.equal(bounded.inputMultiplier, 1.25);
   const repriced = modelTable([
     {
       vendor: 'openai',

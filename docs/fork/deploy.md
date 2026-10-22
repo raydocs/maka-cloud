@@ -438,10 +438,12 @@ output, edit it and set `MAKA_CLOUD_MODES` to it (the whole config, version 1; a
 config of another version is refused). Every model it names needs a price in the
 gateway. Built in are the Claude models and `gpt-6.1-sol`, which the built-in modes
 give every Codex role, so a Codex run and the Codex review of a Claude change work
-with no configuration. Its built-in price is OpenAI's standard API list price, read
+with no setting beyond `OPENAI_API_KEY`. Its built-in price is OpenAI's standard API list price, read
 on 2026-10-22 from <https://developers.openai.com/api/docs/pricing>: $2 input,
-$0.10 cached input and $10 output per million tokens, and $4, $0.20 and $15 once a
-request's input passes 272K tokens, with output capped at 128K tokens. To price it
+$0.10 cached input, $2.50 cache write and $10 output per million tokens, and twice
+the input and cache rates and 1.5 times the output once a request's input passes
+272K tokens. The gateway caps its output at 32K tokens per request (the model
+allows 128K), because each request reserves its cap in full. To price it
 differently, add an `openai` entry for `gpt-6.1-sol` to `MAKA_CLOUD_GATEWAY_MODELS`
 (it replaces the built-in one). Any other Codex model needs its own entry there. A
 role whose model you remove runs on the Codex CLI's own default model, which the

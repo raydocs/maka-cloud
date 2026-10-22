@@ -51,15 +51,18 @@ export const BUILT_IN_MODELS: readonly ModelPrice[] = [
   // OpenAI API pricing, standard tier, read 2026-10-22 from
   // https://developers.openai.com/api/docs/pricing and
   // https://developers.openai.com/api/docs/models/gpt-6.1-sol: $2 input, $0.10 cached input,
-  // $10 output per million tokens; above 272K input tokens $4, $0.20 and $15; 128K output cap.
-  // The long tier's cached rate is the short one scaled by the input ratio, as `costUsd` does.
+  // $10 output per million tokens, cache writes $2.50 (1.25x input, as `CACHE_WRITE_5M`); above
+  // 272K input tokens the whole request is billed at 2x input and cache rates and 1.5x output.
+  // The long tier's cache rates are the short ones scaled by the input ratio, as `costUsd` does.
+  // The model allows 128K output tokens; the cap here is the gateway's: every request reserves
+  // its cap in full, and 128K at $10 alone ($1.28) is more than a standard review may spend.
   {
     vendor: 'openai',
     model: 'gpt-6.1-sol',
     inputPerMTokUsd: 2,
     outputPerMTokUsd: 10,
     cacheReadPerMTokUsd: 0.1,
-    maxOutputTokens: 128_000,
+    maxOutputTokens: 32_000,
     longContext: { aboveInputTokens: 272_000, inputPerMTokUsd: 4, outputPerMTokUsd: 15 },
   },
 ];

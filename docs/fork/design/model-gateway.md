@@ -115,9 +115,12 @@ whose cost it cannot bound is refused (400), never sent.
   the cache-write rate (1.25×, or 2× when the body asks for a one-hour cache), since any input token
   may be written to the cache. A model not in the table is refused. Built in: `claude-opus-5-5`,
   `claude-sonnet-5-5`, `claude-haiku-5-5` (list prices as of 2026-10), and OpenAI's
-  `gpt-6.1-sol`, the built-in modes' Codex model ($2 input, $0.10 cached input, $10 output per
-  million tokens; above 272K input tokens $4, $0.20 and $15; 128K output cap; standard tier, from
-  <https://developers.openai.com/api/docs/pricing>, read 2026-10-22). `MAKA_CLOUD_GATEWAY_MODELS`
+  `gpt-6.1-sol`, the built-in modes' Codex model ($2 input, $0.10 cached input, $2.50 cache
+  write, $10 output per million tokens; above 272K input tokens 2x the input and cache rates and
+  1.5x output; standard tier, from <https://developers.openai.com/api/docs/pricing> and
+  <https://developers.openai.com/api/docs/models/gpt-6.1-sol>, read 2026-10-22). Its output cap
+  here is 32K tokens, not the model's 128K: a request reserves its cap in full, and 128K at $10
+  is more than a standard review's share of the default budget. `MAKA_CLOUD_GATEWAY_MODELS`
   adds models and replaces a built-in price by vendor and model id; any other OpenAI model must be
   configured there.
 - **Allowlisted fields.** Request fields that change the price or add work the body does not
@@ -147,7 +150,10 @@ whose cost it cannot bound is refused (400), never sent.
   - OpenAI (one final usage object; a second one is malformed): input and output counts are
     required; `input_tokens_details` and `output_tokens_details`, when present, carry
     `cached_tokens` and `reasoning_tokens`, no larger than their totals; `total_tokens`, when
-    present, is their sum.
+    present, is their sum. Cache writes (GPT-5.6 and later bill them at 1.25x input) come as
+    `cache_write_tokens`, apart from the reads in `cached_tokens`, and reads and writes together
+    are no more than the input; a `cache_write_tokens_details` split gives both lifetimes and adds
+    up to it. A 12-hour write is malformed: the request field that asks for one is refused.
 
   An error status before any output (4xx, 5xx) settles at 0: the vendors do not bill those. A
   response that ends without complete, valid usage settles at the full reservation, since what

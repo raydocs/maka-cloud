@@ -62,7 +62,12 @@ const OPENAI_USAGE = new Set([
   'output_tokens_details',
   'total_tokens',
 ]);
-const OPENAI_INPUT_DETAILS = new Set(['cached_tokens']);
+const OPENAI_INPUT_DETAILS = new Set([
+  'cached_tokens',
+  'cache_write_tokens',
+  'cache_write_tokens_details',
+]);
+const OPENAI_WRITE_SPLIT = new Set(['ttl_30m_tokens', 'ttl_12h_tokens']);
 const OPENAI_OUTPUT_DETAILS = new Set(['reasoning_tokens']);
 
 /**
@@ -276,6 +281,12 @@ export class UsageTracker {
    * `reasoning_tokens`), no larger than the total it is part of; `total_tokens`, when present, is
    * their sum; every count is a non-negative integer, and an unlisted field may not carry a
    * charge. Anything else marks the usage malformed, and the request settles at its reservation.
+   *
+   * Cache writes (GPT-5.6 and later bill them, at 1.25x input for the default 30-minute lifetime):
+   * `cache_write_tokens` counts them apart from `cached_tokens` (billed reads), both inside
+   * `input_tokens`. A lifetime split, when present, adds up to it. The 12-hour lifetime needs a
+   * request field the gateway refuses, so a 12-hour write marks the usage malformed. See
+   * https://developers.openai.com/api/docs/guides/prompt-caching.
    */
   private openAI(raw: unknown): void {
     if (this.final) this.malformed = true;
@@ -295,17 +306,40 @@ export class UsageTracker {
       }
       return this.take(required(value[key])) ?? 0;
     };
-    const cached = detail(raw.input_tokens_details, OPENAI_INPUT_DETAILS, 'cached_tokens');
+    const details = raw.input_tokens_details;
+    const cached = detail(details, OPENAI_INPUT_DETAILS, 'cached_tokens');
+    const written = isObject(details) ? this.openAIWrites(details) : 0;
     const reasoning = detail(raw.output_tokens_details, OPENAI_OUTPUT_DETAILS, 'reasoning_tokens');
     const total = this.take(optional(raw.total_tokens));
     if (input === undefined || output === undefined) return;
-    if (cached > input || reasoning > output || (total !== undefined && total !== input + output)) {
+    if (
+      cached + written > input ||
+      reasoning > output ||
+      (total !== undefined && total !== input + output)
+    ) {
       this.malformed = true;
     }
-    u.input = input - Math.min(input, cached);
     u.cacheRead = Math.min(input, cached);
+    u.cacheWrite5m = Math.min(input - u.cacheRead, written);
+    u.input = input - u.cacheRead - u.cacheWrite5m;
     u.output = output;
     this.input = true;
     this.output = true;
+  }
+
+  /** The cache writes an OpenAI input details object reports, all at the 30-minute rate. */
+  private openAIWrites(details: Json): number {
+    const written = this.take(optional(details.cache_write_tokens)) ?? 0;
+    const split = details.cache_write_tokens_details;
+    if (split === undefined || split === null) return written;
+    if (!isObject(split) || unlisted(split, OPENAI_WRITE_SPLIT)) {
+      this.malformed = true;
+      return written;
+    }
+    const halfHour = this.take(required(split.ttl_30m_tokens));
+    const halfDay = this.take(required(split.ttl_12h_tokens));
+    if (halfHour === undefined || halfDay === undefined) return written;
+    if (halfDay > 0 || halfHour + halfDay !== written) this.malformed = true;
+    return written;
   }
 }
