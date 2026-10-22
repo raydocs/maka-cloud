@@ -6,6 +6,7 @@ import {
   type ArtifactContent,
   type ArtifactListing,
   BRAND,
+  pullRequestName,
   CloudClient,
   type Conversation,
   ConversationFeed,
@@ -188,35 +189,45 @@ function TaskBranch({
         )}
         {live && <Computer client={client} task={task} />}
         {live && (
+          // Quiet words, not three pills: the task is the thing to read, the controls are a glance.
           <div className="task-actions">
             {task.state === 'running' && !task.pauseRequested && !noPause.has(task.taskId) && (
-              <Button
-                label="Pause task"
-                variant="secondary"
-                isDisabled={busy}
+              <button
+                type="button"
+                className="quiet-action"
+                aria-label="Pause task"
+                disabled={busy}
                 onClick={() =>
                   void act(`pause-${task.taskId}`, () => control(task.taskId, 'pause'))
                 }
-              />
+              >
+                Pause
+              </button>
             )}
             {task.state === 'paused' && (
-              <Button
-                label="Resume task"
-                variant="secondary"
-                isDisabled={busy}
+              <button
+                type="button"
+                className="quiet-action"
+                aria-label="Resume task"
+                disabled={busy}
                 onClick={() =>
                   void act(`resume-${task.taskId}`, () => control(task.taskId, 'resume'))
                 }
-              />
+              >
+                Resume
+              </button>
             )}
-            <Button
-              label="Cancel task"
-              variant="secondary"
-              isDisabled={busy}
+            <button
+              type="button"
+              className="quiet-action"
+              aria-label="Cancel task"
+              disabled={busy}
               onClick={() =>
                 void act(`cancel-${task.taskId}`, () => control(task.taskId, 'cancel'))
               }
-            />
+            >
+              Cancel
+            </button>
           </div>
         )}
       </article>
@@ -236,12 +247,6 @@ function TaskBranch({
 }
 
 /** Where a result link points, said in the user's words; nothing here claims the result was checked. */
-/** "Pull request #42" for a GitHub pull request link, which would otherwise be named "github.com". */
-export function pullRequestName(url: string | undefined): string | undefined {
-  const number = url?.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)(?:[/?#]|$)/u)?.[1];
-  return number ? `Pull request #${number}` : undefined;
-}
-
 function artifactKind(listing: ArtifactListing, url: string | undefined): string {
   if (url && /\/pull\/\d+/u.test(url)) return 'Pull request';
   if (/\.(diff|patch)$/iu.test(listing.name)) return 'Changes';
@@ -683,18 +688,39 @@ export function Shell({
         <a className="brand" href="/">
           {BRAND.wordmark}
         </a>
-        <nav className="seg" aria-label="Sections">
-          {VIEWS.map((item) => (
-            <button
-              key={item.view}
-              type="button"
-              className="seg-item"
-              aria-current={view === item.view ? 'page' : undefined}
-              onClick={() => onView(item.view)}
-            >
-              {item.label}
-            </button>
-          ))}
+        {/* One row on a phone, as Hark's: the sections in a pill, Settings a round icon beside it. */}
+        <nav className="seg-nav" aria-label="Sections">
+          <div className="seg">
+            {VIEWS.filter((item) => item.view !== 'settings').map((item) => (
+              <button
+                key={item.view}
+                type="button"
+                className="seg-item"
+                aria-current={view === item.view ? 'page' : undefined}
+                onClick={() => onView(item.view)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="seg-settings"
+            aria-current={view === 'settings' ? 'page' : undefined}
+            onClick={() => onView('settings')}
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20">
+              <path
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.3l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.6 7.6 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.6 7.6 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z"
+              />
+            </svg>
+            <span className="sr-only">Settings</span>
+          </button>
         </nav>
       </header>
       <main>{children}</main>

@@ -162,7 +162,7 @@ textarea {
 }
 .shell-top {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -175,9 +175,44 @@ textarea {
   font-weight: var(--w-medium);
   letter-spacing: -0.04em;
 }
+.seg-nav {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+/* The narrowest phones keep the sections and Settings; Home is in the pill. */
+@media (max-width: 399px) {
+  .shell-top .brand {
+    display: none;
+  }
+}
+.seg-settings {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--card-edge);
+  background: var(--chip);
+  color: var(--ink-muted);
+  box-shadow: var(--card-shadow);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  cursor: pointer;
+}
+.seg-settings:hover,
+.seg-settings[aria-current="page"] {
+  color: var(--on-pill-on);
+  background: var(--pill-on);
+}
 .seg {
-  order: 3;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  max-width: 340px;
   display: flex;
   gap: 2px;
   padding: 4px;
@@ -191,7 +226,7 @@ textarea {
 .seg-item {
   flex: 1;
   min-height: 38px;
-  padding: 6px 14px;
+  padding: 6px 10px;
   border: 0;
   border-radius: var(--radius-pill);
   background: transparent;
@@ -237,6 +272,14 @@ textarea {
 .page {
   display: grid;
   gap: 16px;
+}
+/* Home on a phone: one column. The two wrappers step aside; what runs next goes last. */
+.home-side,
+.home-main {
+  display: contents;
+}
+.home section[aria-label="What runs next"] {
+  order: 1;
 }
 .section-card {
   padding: var(--space-5);
@@ -589,6 +632,66 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* A finished task on Home: "[Review] the title", the outcome, then small facts and chips. */
+.result-card {
+  padding: 16px;
+  border-radius: var(--radius-small);
+  background: var(--chip);
+  display: grid;
+  gap: 8px;
+}
+.result-card .action-sentence {
+  font-size: var(--t-md);
+  font-weight: var(--w-medium);
+  overflow-wrap: anywhere;
+}
+.result-card > p {
+  overflow-wrap: anywhere;
+}
+.result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: var(--t-sm);
+  color: var(--ink-muted);
+}
+.result-meta .checked::before,
+.result-meta .unchecked::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--warn);
+}
+.result-meta .checked::before {
+  background: var(--ok);
+}
+.evidence-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--card-edge);
+  background: var(--card-strong);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+a.evidence-chip:hover {
+  background: var(--pill-on);
+  color: var(--on-pill-on);
+}
+.decision > .quiet-action {
+  justify-self: start;
+  padding-left: 0;
+}
+
 /* Decisions */
 .question {
   padding: 16px;
@@ -721,8 +824,12 @@ textarea {
 .task-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin: 8px 0 0 16px;
+  gap: 4px 14px;
+  margin: 2px 0 0 16px;
+}
+.task-actions .quiet-action {
+  padding: 0;
+  font-size: var(--t-xs);
 }
 .computer {
   margin: 8px 0 0 16px;
@@ -942,9 +1049,8 @@ textarea {
   .shell {
     padding: 0 24px 48px;
   }
-  .seg {
-    order: 0;
-    width: auto;
+  .seg-nav {
+    flex: none;
   }
   .seg-item {
     flex: none;
@@ -952,6 +1058,28 @@ textarea {
   }
 }
 @media (min-width: 1000px) {
+  /* Home: what waits on you on the left, the start sentence and the results on the right. With
+     nothing waiting, the work is one calm column in the middle. */
+  .home {
+    grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    align-items: start;
+  }
+  .home-side,
+  .home-main {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+  }
+  .home section[aria-label="What runs next"] {
+    order: 0;
+  }
+  .home:has(> .home-side:empty) {
+    grid-template-columns: minmax(0, 760px);
+    justify-content: center;
+  }
+  .home:has(> .home-side:empty) > .home-side {
+    display: none;
+  }
   .chat {
     grid-template-columns: minmax(0, 1fr) 360px;
   }
@@ -1106,7 +1234,7 @@ textarea {
 }
 .current-step summary {
   cursor: pointer;
-  list-style-position: outside;
+  list-style: none;
 }
 
 /* The viewer: a result large over a blurred, dimmed page */
@@ -1394,18 +1522,64 @@ textarea {
   align-items: center;
 }
 
-/* The mode picker: how much care the next piece of work gets */
-.mode-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  border: 0;
+/* The mode picker: one quiet chip naming the current choice, opening to the four with a line each. */
+.mode-menu {
+  justify-self: start;
   min-width: 0;
+}
+.mode-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  color: var(--ink-muted);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.mode-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.mode-menu > summary:hover,
+.mode-menu[open] > summary {
+  color: var(--ink);
+  background: var(--chip);
+}
+.mode-menu > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.mode-caret {
+  font-size: 10px;
+  transition: transform var(--dur-fast) var(--ease);
+}
+.mode-menu[open] .mode-caret {
+  transform: rotate(180deg);
+}
+.mode-picker {
+  display: grid;
+  gap: 2px;
+  margin: 6px 0 0;
+  padding: 6px;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-small);
+  background: var(--card-strong);
+  box-shadow: var(--card-shadow);
+  min-width: 0;
+  max-width: 360px;
 }
 .mode-option {
   position: relative;
+  display: grid;
+  padding: 8px 12px;
+  border-radius: calc(var(--radius-small) - 4px);
+  min-height: 44px;
+}
+.mode-option:hover {
+  background: var(--chip);
 }
 .mode-option input {
   position: absolute;
@@ -1417,43 +1591,25 @@ textarea {
   cursor: pointer;
 }
 .mode-option label {
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  padding: 0 14px;
-  border-radius: var(--radius-pill);
-  background: var(--chip);
-  border: 1px solid var(--card-edge);
   font-size: var(--t-sm);
   font-weight: var(--w-medium);
   color: var(--ink);
 }
-.mode-option input:checked + label {
+.mode-hint {
+  font-size: var(--t-xs);
+  color: var(--ink-muted);
+}
+.mode-option:has(input:checked) {
   background: var(--pill-on);
-  border-color: var(--pill-on);
+}
+.mode-option input:checked + label,
+.mode-option:has(input:checked) .mode-hint {
   color: var(--on-pill-on);
 }
-.mode-option input:focus-visible + label {
+.mode-option:has(input:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 .mode-picker:disabled {
   opacity: 0.6;
-}
-/* Inside the chat composer the modes are a quiet single row under the field, never two lines. */
-.composer .mode-picker {
-  flex-wrap: nowrap;
-  gap: 2px;
-  padding: 0 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.composer .mode-option label {
-  min-height: 40px;
-  padding: 0 12px;
-  border-color: transparent;
-  background: transparent;
-  color: var(--ink-muted);
-  font-size: var(--t-xs);
-  white-space: nowrap;
 }

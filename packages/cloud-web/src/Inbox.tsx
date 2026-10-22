@@ -1,6 +1,13 @@
 import { Button } from '@astryxdesign/core';
 import { useState } from 'react';
-import { displayText, type InboxItem, inboxCardModel, visibleInbox } from '@maka-cloud/client';
+import {
+  displayText,
+  type InboxItem,
+  inboxCardModel,
+  pullRequestName,
+  verbOf,
+  visibleInbox,
+} from '@maka-cloud/client';
 
 export function InboxCard({
   item,
@@ -92,6 +99,86 @@ export function InboxCard({
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * A finished task on Home, read as an action sentence: "[Review] Fix the flaky login test", then
+ * the outcome, whether a second agent checked it, and its files and links as small chips. The verb
+ * opens the task; the answer buttons are the supervisor's own.
+ */
+export function ResultCard({
+  item,
+  parts,
+  disabled,
+  onAnswer,
+  onReview,
+}: {
+  item: InboxItem;
+  /** The supervisor's sentence, split by `finishedParts`. */
+  parts: { title: string; check: string; outcome: string };
+  disabled: boolean;
+  onAnswer: (optionId: string) => void;
+  onReview: () => void;
+}) {
+  const card = inboxCardModel(item);
+  const verb = verbOf(item.kind);
+  return (
+    <article className="result-card" aria-label={`${verb}: ${parts.title}`}>
+      <h3 className="action-sentence">
+        <button
+          type="button"
+          className="verb-chip"
+          aria-label={`${verb}: ${parts.title}`}
+          onClick={onReview}
+        >
+          {verb}
+        </button>{' '}
+        {parts.title}
+      </h3>
+      <p>{parts.outcome}</p>
+      <div className="result-meta">
+        <span className={parts.check === 'independently checked' ? 'checked' : 'unchecked'}>
+          {parts.check === 'independently checked'
+            ? 'Checked by a second agent'
+            : 'Not checked by a second agent'}
+        </span>
+        {card.evidence.map((line, index) =>
+          line.kind === 'link' && line.href ? (
+            <a
+              key={`${item.itemId}-${index}`}
+              className="evidence-chip"
+              href={line.href}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              {pullRequestName(line.href) ?? line.label} ↗
+            </a>
+          ) : line.kind === 'artifact' ? (
+            <span key={`${item.itemId}-${index}`} className="evidence-chip">
+              {line.text.replace(/^Result file: /u, '')}
+            </span>
+          ) : null,
+        )}
+      </div>
+      {card.answering ? (
+        <p className="acknowledged" role="status">
+          {card.answering}
+        </p>
+      ) : (
+        <div className="inbox-options">
+          {card.options.map((option) => (
+            <Button
+              key={option.id}
+              label={displayText(option.label)}
+              variant={option.recommended ? 'primary' : 'secondary'}
+              isDisabled={disabled}
+              onClick={() => onAnswer(option.id)}
+            />
+          ))}
+        </div>
+      )}
+    </article>
   );
 }
 
