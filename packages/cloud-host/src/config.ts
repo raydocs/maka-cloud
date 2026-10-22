@@ -2,6 +2,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { type ModelPrice, modelTable, priceProblem } from '@maka-cloud/gateway';
 import {
   DEFAULT_MODES,
+  withoutDeep,
   type ModesConfig,
   modelsOf,
   parseModesConfig,
@@ -96,6 +97,11 @@ export interface StackConfig {
    * of each. Every model it names has a price in the gateway, or the config is refused.
    */
   modes: ModesConfig;
+  /**
+   * Set with `MAKA_CLOUD_DEEP_MODE=1`. Off at launch: the conductor is not told about `deep`, a
+   * pick of it runs as `standard` with a notice, and `modes` holds `standard`'s values under `deep`.
+   */
+  deepMode: boolean;
   /**
    * What model spend may reach, in USD per UTC day or month. An invite with no limit of its own
    * (`cloud-server invite limits`) gets the invite defaults. Small on purpose: a server nobody
@@ -436,6 +442,10 @@ export const ENV_VARIABLES = [
     'the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties',
   ],
   [
+    'MAKA_CLOUD_DEEP_MODE',
+    '1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off',
+  ],
+  [
     'MAKA_CLOUD_CARDS',
     '1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off',
   ],
@@ -554,6 +564,7 @@ export function readStackConfig(
     },
     inbox: readInboxConfig(value, problems),
     modes: DEFAULT_MODES,
+    deepMode: false,
     spend: {
       inviteDailyUsd: dollars('MAKA_CLOUD_INVITE_DAILY_USD', DEFAULT_SPEND_CAPS.inviteDailyUsd),
       inviteMonthlyUsd: dollars(
@@ -573,6 +584,9 @@ export function readStackConfig(
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
   if (modes !== undefined) config.modes = modes;
+  config.deepMode = flag('MAKA_CLOUD_DEEP_MODE');
+  // Off, `deep` is `standard` for every consumer that reads the modes (see `StackConfig.deepMode`).
+  if (!config.deepMode) config.modes = withoutDeep(config.modes);
   try {
     config.pushSet = pushConfigFromEnv(env) !== undefined;
   } catch (error) {
@@ -914,6 +928,7 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
     `CLIs run as:         ${config.agentChannel ? `${config.agentChannel.user} (group ${config.agentChannel.group}); Claude through the Agent SDK, conversation kept in ${config.transcriptsDbPath}` : 'nothing: no CLI starts until MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP are set'}`,
     `task limits:         ${config.taskLimits.turnUsd === undefined ? 'no limit per turn' : `$${config.taskLimits.turnUsd} per turn`}, ${config.taskLimits.runMs / 3_600_000} h of run time`,

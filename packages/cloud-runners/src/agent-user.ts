@@ -36,6 +36,24 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
 }
 
 /**
+ * What runs as the agent before its command. The checkout belongs to the sandbox user, so git, run
+ * by the agent in it, refuses it as owned by someone else; the exact workspace is named as a safe
+ * directory through the environment (`GIT_CONFIG_COUNT`, which git reads as command-line
+ * configuration: the only place `safe.directory` is honoured besides the protected files, and not
+ * a file the agent can write). The workspace is `MAKA_WORKDIR` for a run, or the one beside
+ * `MAKA_DIR` for an exec; nothing else is trusted.
+ */
+const AGENT_ENTRY = [
+  'umask 002; PATH="$1"; shift',
+  'd="${MAKA_WORKDIR:-${MAKA_DIR:+$MAKA_DIR/workspace}}"',
+  'if [ -n "$d" ] && d=$(cd "$d" 2>/dev/null && pwd -P); then',
+  '  n=${GIT_CONFIG_COUNT:-0}',
+  '  export "GIT_CONFIG_KEY_$n=safe.directory" "GIT_CONFIG_VALUE_$n=$d" "GIT_CONFIG_COUNT=$((n + 1))"',
+  'fi',
+  'exec "$@"',
+].join('\n');
+
+/**
  * `commandLine` (already quoted) run as the agent's user. The environment is passed on, but PATH is
  * handed over explicitly since sudo replaces it; the shared umask lets the sandbox user read and
  * remove what the agent writes in the workspace.
@@ -47,7 +65,7 @@ export function asAgent(commandLine: string, channel: AgentChannel): string {
 /** `asAgent` for a caller that knows the account's name only. */
 export function asAgentUser(commandLine: string, user: string): string {
   assertAgentChannel({ user, group: 'x' });
-  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
+  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c ${shq(AGENT_ENTRY)} sh "$PATH" ${commandLine}`;
 }
 
 /** A whole script (any text, quoted here) run under bash as the agent's user, as `asAgent` does a command. */
@@ -88,6 +106,47 @@ mkdir -p claude-config
 chgrp "$MAKA_AGENT_GROUP" claude-config
 chmod 2770 claude-config
 `;
+
+/**
+ * Whether any program the agent can run carries a file capability. `getcap -r` is asked for every
+ * directory a program can live in that exists (not `/`, which would walk `/proc`), and its exit
+ * status counts: a listing that failed is `unchecked`, never `none`. Every capability on a program
+ * the agent can execute is `found`, except the few that the stock tools of a distribution carry
+ * under their own paths and that cannot reach the firewall or the control user (raw sockets for
+ * ping, the id-mapping helpers). Whether the agent can execute a file is asked of the agent
+ * account and must be answered: a refusal of the account itself is `unchecked`, not "no".
+ * `as_agent` and `tool_bin` are defined by the probe around it.
+ */
+export const FILE_CAPS_PROBE = `getcap_bin=$(tool_bin getcap)
+if [ -n "$getcap_bin" ]; then
+  capdirs=""
+  for dir in /usr /opt /etc /var /srv /home /snap; do
+    if [ -d "$dir" ]; then capdirs="$capdirs $dir"; fi
+  done
+  rc=0
+  listing=$("$getcap_bin" -r $capdirs 2>/dev/null) || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "FACT agent_filecaps=unchecked"
+  else
+    found=$(printf '%s\n' "$listing" | while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      if printf '%s\n' "$line" | grep -Eq '^/(usr/)?s?bin/(ping6?|mtr-packet|arping|traceroute6?) (= *)?cap_net_raw[=+][eip]+$'; then continue; fi
+      if printf '%s\n' "$line" | grep -Eq '^/(usr/)?s?bin/new[ug]idmap (= *)?cap_set[ug]id[=+][eip]+$'; then continue; fi
+      path=$(printf '%s\n' "$line" | sed -E 's/ (cap_|=).*$//')
+      can=$(as_agent sh -c '[ -x "$1" ] && echo x || echo -' sh "$path" 2>/dev/null) || can=""
+      case "$can" in
+        x) echo yes ;;
+        -) ;;
+        *) echo unchecked ;;
+      esac
+    done)
+    if printf '%s\n' "$found" | grep -q unchecked; then echo "FACT agent_filecaps=unchecked"
+    elif [ -n "$found" ]; then echo "FACT agent_filecaps=found"
+    else echo "FACT agent_filecaps=none"; fi
+  fi
+else
+  echo "FACT agent_filecaps=unchecked"
+fi`;
 
 /**
  * Checks, on a scratch directory laid out like a task's, that the agent's account is not the
@@ -143,12 +202,7 @@ caps=$(as_agent sh -c 'grep -E "^Cap(Prm|Eff|Amb):" /proc/self/status' 2>/dev/nu
 if [ -z "$caps" ]; then echo "FACT agent_caps=unknown"
 elif printf '%s\n' "$caps" | awk '{ if ($2 !~ /^0+$/) bad = 1 } END { exit bad ? 0 : 1 }'; then echo "FACT agent_caps=held"
 else echo "FACT agent_caps=none"; fi
-if command -v getcap >/dev/null 2>&1; then
-  filecaps=$(getcap -r /usr/sbin /usr/bin /sbin /bin /usr/local/bin /usr/local/sbin 2>/dev/null | grep -Ei 'cap_(net_admin|sys_admin|setuid|setgid|dac_override|dac_read_search|sys_ptrace|sys_module)' || true)
-  if [ -z "$filecaps" ]; then echo "FACT agent_filecaps=none"; else echo "FACT agent_filecaps=found"; fi
-else
-  echo "FACT agent_filecaps=unchecked"
-fi
+${FILE_CAPS_PROBE}
 # Groups that are root by another name, and the sockets that run containers for whoever may write them.
 groups=$(as_agent id -Gn 2>/dev/null || true)
 if [ -z "$groups" ]; then echo "FACT agent_groups=unknown"; else echo "FACT agent_groups=$groups"; fi
