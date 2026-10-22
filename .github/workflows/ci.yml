@@ -48,14 +48,14 @@ jobs:
     # the alias makes this required context wait at the tail, and the steps
     # below already assume this image. `ci-workflow-policy.test.mjs` holds the
     # rule for every lane.
-    # Fork: the repository variable CI_RUNNER_TEST, else CI_RUNNER (a JSON label list such as
-    # ["self-hosted","vps"]), moves this job to self-hosted Ubuntu 24.04 runners, which need this
-    # image's tools the steps do not install (Electron's desktop libraries, gpg, rustup); unset, it
-    # runs on GitHub's image. CI_RUNNER_TEST can name a label that more runners carry, so several
-    # pull requests' test jobs run at once.
+    # Fork: the repository variable CI_RUNNER_TEST (a JSON label list such as ["vps-test"]) moves
+    # this job to self-hosted Ubuntu 24.04 runners, which need this image's tools the steps do not
+    # install (Electron's desktop libraries, gpg, rustup); unset, it runs on GitHub's image. It does
+    # not read CI_RUNNER, so the lighter lanes can use the owner's machines while this one stays on
+    # GitHub's.
     # A pull request from a fork always gets GitHub's image: the repository is public, and an
     # outside contributor's code must never run on the owner's machines.
-    runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.CI_RUNNER_TEST && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST) || 'ubuntu-24.04' }}
     # A full run (a shared script or the lockfile changed) takes 34-35 minutes, and the Storybook smoke
     # and the slowest workspaces were cut off at 45 under load.
     timeout-minutes: 75

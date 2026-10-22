@@ -1,42 +1,48 @@
-# CI: GitHub's runners for Linux, the owner's Mac for the phone apps
+# CI: every machine busy, each job where it runs best
 
-The repository is public, so GitHub's standard runners cost nothing and run many jobs at once. Every
-Linux job runs there. The phone apps run on the owner's Mac mini, because GitHub's macOS queue was
-the slowest part of a pull request (85 minutes median wait for `ios`, against 7 minutes on the Mac).
-The VPS stays registered as a standby.
+The repository is public, so GitHub's standard runners cost nothing, and up to 20 of its jobs run at
+once. The owner's machines take the jobs that run well on them, which leaves GitHub's slots for the
+long `test` job.
 
 Where a job runs is decided by repository variables, so moving a lane needs no commit: set the
 variable and its jobs go to the owner's runners; delete it and they go back to GitHub's.
 
 ## Lanes
 
-| Job | Runs on today | Variable that moves it |
+| Job | Runs on | Variable |
 |---|---|---|
-| ci `test` | `ubuntu-24.04` (GitHub) | `CI_RUNNER_TEST`, else `CI_RUNNER` |
-| cloud-web, mobile `checks` | `ubuntu-24.04` (GitHub) | `CI_RUNNER` |
-| the rehearsal | `ubuntu-24.04` (GitHub) | `CI_RUNNER_DOCKER`, else `CI_RUNNER` |
-| mobile `ios` and `android` | the Mac mini | `CI_RUNNER_MAC` = `["self-hosted","mac"]` (set) |
+| ci `test` | `ubuntu-24.04` (GitHub) | `CI_RUNNER_TEST` (unset) |
+| cloud-web, mobile `checks` | the VPS: `vps-1`, `vps-3`, `vps-4`, `vps-5` | `CI_RUNNER` = `["self-hosted","vps"]` |
+| the rehearsal | the VPS, `vps-2` only | `CI_RUNNER_DOCKER` = `["vps-docker"]` |
+| mobile `ios` | the Mac mini, `mac-mini` | `CI_RUNNER_MAC` = `["self-hosted","mac"]` |
+| mobile `android` | the Mac mini, `mac-mini-2` | `CI_RUNNER_ANDROID` = `["mac-android"]` |
 
-A pull request from a fork never runs on the owner's machines, whatever the variables say: every
-`runs-on` falls back to GitHub's image when `github.event.pull_request.head.repo.fork` is true. The
-repository also requires approval before any workflow runs for an outside contributor
-(`all_external_contributors`).
+Each Mac label is on one runner only, so the Mac runs at most one iOS job and one emulator at a
+time, side by side. The rehearsal binds ports 80 and 443 and uses a fixed Compose project, so only
+one runner carries `vps-docker`.
+
+`test` stays on GitHub's runners because of the VPS:
+- One playbooks test ("a reproduction test that is killed by a signal…") fails there even when it
+  runs alone.
+- Timing-sensitive tests in `runtime` and `cli` failed when two full runs shared the server.
+
+**Pull requests from forks.** A fork's pull request never runs on the owner's machines:
+- The repository requires approval for every outside contributor's run.
+- Every `runs-on` falls back to GitHub's image for a fork.
+- The YAML can be edited by the pull request itself, so the real boundary is on the machines. Each
+  runner's job-started hook (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, outside the repository) refuses a
+  `pull_request*`, `workflow_run` or `issue_comment` job whose head repository is not this one,
+  before any step runs.
 
 ## Runners
 
 | Runner | Host | Labels |
 |---|---|---|
-| `mac-mini` | Mac mini (Apple silicon) | `self-hosted`, `mac` |
+| `mac-mini` | Mac mini (Apple silicon, 12 cores, 16 GB) | `self-hosted`, `mac` |
+| `mac-mini-2` | the same Mac, second instance | `mac-android` |
 | `vps-1` | Ubuntu 24.04 server (12 vCPU, 15 GB, no KVM) | `self-hosted`, `vps`, `vps-test` |
-| `vps-2` | the same server, second instance | `vps-test`, `vps-docker` |
-
-The VPS is a standby, not the default, for three reasons:
-- GitHub's runners are free and parallel here.
-- On the VPS, the playbooks test "a reproduction test that is killed by a signal…" fails even when
-  it runs alone.
-- Timing-sensitive tests in `runtime` and `cli` fail when two full runs share the server.
-
-To use it again, set `CI_RUNNER` to `["self-hosted","vps"]`, after that test passes there.
+| `vps-2` | the same server, kept for the rehearsal | `vps-test`, `vps-docker` |
+| `vps-3`, `vps-4`, `vps-5` | the same server | `self-hosted`, `vps` |
 
 The VPS has no `/dev/kvm`, so the Android emulator runs on the Mac: an arm64 emulator and an
 `arm64-v8a` build. On GitHub's image it is x86_64 under KVM.
@@ -58,9 +64,9 @@ The VPS has no `/dev/kvm`, so the Android emulator runs on the Mac: an arm64 emu
   - Electron's desktop libraries: `libgtk-3-0t64`, `libnss3`, `libasound2t64`, `libgbm1`, `libxss1`,
     `libxtst6`, `libatk-bridge2.0-0t64` and `libcups2t64`.
   - rustup on the runner's `.path`.
-- **Both:** a job-started hook (`ACTIONS_RUNNER_HOOK_JOB_STARTED` in the runner's `.env`) that empties
-  `RUNNER_TEMP`, as a fresh machine would. A left-over directory there once failed the DeepSeek
-  toolchain step.
+- **Every runner:** the job-started hook in the runner's `.env`. It refuses fork jobs (above), then
+  empties `RUNNER_TEMP`, as a fresh machine would. A left-over directory there once failed the
+  DeepSeek toolchain step.
 
 ## Keeping it fast
 
