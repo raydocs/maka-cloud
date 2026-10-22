@@ -60,6 +60,10 @@ export interface Stack {
   suggestionDecisions: Array<{ cardId: string; action: string; caller?: string }>;
   /** The repository is read again before "Do it" acts: this card has moved on to `next`. */
   moveSuggestion(cardId: string, next: SuggestionCard): void;
+  /** Mail the server tried to send (sign-in codes), as the fake mail service received it. */
+  mail: Array<{ to: string; subject: string; text: string }>;
+  /** The six-digit code in the latest mail to the address, or '' when none was sent. */
+  mailCode(address: string): string;
   /** Another invite, which owns nothing yet. */
   newInvite(): { token: string; inviteId: string };
   /** The assistant says something in a conversation. */
@@ -217,6 +221,7 @@ export async function startStack(
     });
     return { status: 201 };
   };
+  const mail: Stack['mail'] = [];
   const server = await startCloudServer({
     dbPath: join(dir, 'server.sqlite'),
     invitesPath: join(dir, 'invites.sqlite'),
@@ -224,6 +229,14 @@ export async function startStack(
     runners: new RunnerRegistry([fake]),
     previews: { fetch: previewFetch },
     computer: computer.source,
+    // Sign-in by emailed code with a mail service that only keeps what it was given.
+    auth: {
+      mailer: {
+        async send(message) {
+          mail.push(message);
+        },
+      },
+    },
     ...(options.port === undefined ? {} : { port: options.port }),
     host: '127.0.0.1',
     createHandler: (context) => {
@@ -320,6 +333,11 @@ export async function startStack(
     suggestionDecisions,
     moveSuggestion: (cardId, next) => {
       moved.set(cardId, next);
+    },
+    mail,
+    mailCode: (address) => {
+      const latest = [...mail].reverse().find((m) => m.to === address.toLowerCase());
+      return /\b(\d{6})\b/u.exec(latest?.text ?? '')?.[1] ?? '';
     },
     newInvite: () => {
       const created = server.invites.create('other');

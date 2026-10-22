@@ -19,6 +19,7 @@ import {
   type SuggestionsView,
   type RunTimeline,
   type SourceListing,
+  type SignedInDevices,
   type SourcePreview,
   type TaskControl,
   type TaskMessageState,
@@ -336,6 +337,22 @@ export class CloudClient {
       { method: 'PATCH', body: JSON.stringify({ kind, enabled }) },
       'suggestions',
     );
+  }
+  /** The devices signed in to this account, and the ways it signs in. Hidden where the server has no sign-in. */
+  devices() {
+    return this.request<SignedInDevices>('/v1/auth/sessions', {}, 'devices');
+  }
+  /** Signs another device out. */
+  signOutDevice(sessionId: string) {
+    return this.request<void>(
+      `/v1/auth/sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' },
+      'devices',
+    );
+  }
+  /** Ends this device's own session on the server. Refused (400) for an invite token, which is not a device. */
+  endSession() {
+    return this.request<void>('/v1/auth/sign-out', { method: 'POST' });
   }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {

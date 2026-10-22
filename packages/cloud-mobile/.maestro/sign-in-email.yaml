@@ -1,0 +1,58 @@
+# A new person signs in with an emailed code, gives the invite code once, and lands on Home.
+# The test server keeps the mail it would have sent; mail-code.js reads the code from its control port.
+appId: cloud.maka.app
+---
+- launchApp:
+    clearState: true
+- runFlow:
+    when:
+      visible: "Pixel Launcher isn't responding"
+    commands:
+      - tapOn: "Wait"
+- extendedWaitUntil:
+    visible:
+      id: "field-Server address"
+    timeout: 60000
+- tapOn:
+    id: "field-Server address"
+- inputText: ${SERVER}
+- tapOn:
+    id: "button-Continue"
+- extendedWaitUntil:
+    visible:
+      id: "field-Email"
+    timeout: 30000
+- takeScreenshot: sign-in-email-choose
+- tapOn:
+    id: "field-Email"
+- inputText: ${EMAIL}
+- tapOn:
+    id: "button-Email me a code"
+- extendedWaitUntil:
+    visible: "Check your email"
+    timeout: 30000
+- takeScreenshot: sign-in-email-code
+- runScript:
+    file: subflows/mail-code.js
+    env:
+      CONTROL: ${CONTROL}
+      EMAIL: ${EMAIL}
+- tapOn:
+    id: "field-Code"
+- inputText: ${output.code}
+- tapOn:
+    id: "button-Sign in"
+# A person with no account yet is asked for the invite code, once.
+- extendedWaitUntil:
+    visible: "Enter your invite code"
+    timeout: 30000
+- takeScreenshot: sign-in-email-invite
+- tapOn:
+    id: "field-Invite code"
+- inputText: ${TOKEN}
+- tapOn:
+    id: "button-Continue"
+- extendedWaitUntil:
+    visible: "Make room for your next idea."
+    timeout: 30000
+- takeScreenshot: sign-in-email-home

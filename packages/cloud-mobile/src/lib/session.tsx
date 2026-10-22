@@ -24,6 +24,10 @@ import { normalizeServer } from './server';
 const ACCOUNT_KEY = 'maka.account';
 /** Only a hint for the next sign-in screen; it holds no secret and outlives a sign-out. */
 const SERVER_KEY = 'maka.server';
+/** What a device session token starts with; an invite token does not. */
+const SESSION_PREFIX = 'mks_';
+/** How long signing out waits for the server before it removes the token anyway. */
+const SIGN_OUT_WAIT_MS = 5_000;
 
 interface Account {
   server: string;
@@ -61,6 +65,8 @@ export type Session =
       chosen: string;
       /** Where to land right after signing in: the latest conversation, or Home on a first visit. */
       landing: 'home' | 'chat';
+      /** Signed in as a device (a session token), so signing out also ends the session on the server. */
+      device: boolean;
     };
 
 interface SessionApi {
@@ -121,7 +127,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           setSession({
             status: 'out',
             server,
-            error: 'Your invite is no longer valid. Please sign in again.',
+            error: 'Your sign-in is no longer valid. Please sign in again.',
           });
         },
       });
@@ -132,6 +138,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         conversations: workspace.conversations,
         chosen: workspace.chosen,
         landing: workspace.landing,
+        device: token.startsWith(SESSION_PREFIX),
       } satisfies Session;
     },
     [serialise],
@@ -206,6 +213,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         const previous = generation.current;
         const mine = ++generation.current;
         await serialise(async () => {
+          // A device session is ended on the server first, so a lost token is no use. If the server
+          // cannot be reached the token is still removed here; the session then ends by itself when
+          // it has been idle, or from another device's list.
+          if (session.status === 'in' && session.device) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const wait = new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, SIGN_OUT_WAIT_MS);
+            });
+            try {
+              await Promise.race([session.client.endSession().catch(() => {}), wait]);
+            } finally {
+              clearTimeout(timer);
+            }
+          }
           // Access is reported removed only once the secret is gone; a failure is thrown to the caller.
           try {
             await removeSecure(ACCOUNT_KEY);

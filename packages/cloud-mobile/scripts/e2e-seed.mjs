@@ -4,6 +4,8 @@
 //   node scripts/e2e-seed.mjs <control url> <api url> fresh      a new invite with nothing in it
 //   node scripts/e2e-seed.mjs <control url> <api url> decision   a new invite with a finished task whose
 //                                                                 result waits on one decision
+//   node scripts/e2e-seed.mjs <control url> <api url> email      a new invite for a person who signs in by
+//                                                                 emailed code and gives it once
 //   node scripts/e2e-seed.mjs <control url> <api url> delivery   a new invite with a finished task that
 //                                                                 left a picture, a diff and a pull request
 import { crc32, deflateSync } from 'node:zlib';

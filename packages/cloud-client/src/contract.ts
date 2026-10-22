@@ -388,3 +388,18 @@ export const routes = {
   pushKey: '/v1/push/key',
   pushSubscriptions: '/v1/push/subscriptions',
 } as const;
+
+/** One device signed in to an account (`GET /v1/auth/sessions`). It never carries the token. */
+export interface DeviceSession {
+  sessionId: string;
+  deviceLabel: string;
+  createdAt: number;
+  lastSeenAt: number;
+  /** The device that asked. */
+  current: boolean;
+}
+
+export interface SignedInDevices {
+  sessions: DeviceSession[];
+  identities: Array<{ provider: 'apple' | 'google' | 'email'; email?: string }>;
+}
