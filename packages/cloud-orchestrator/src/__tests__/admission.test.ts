@@ -340,6 +340,50 @@ test('a restored tree that used its run time while it waited is stopped with a n
   );
 });
 
+test('a held tree whose leftover run could not be stopped still keeps the others waiting', async (t) => {
+  const store = new MemoryTaskStore();
+  const before = await makeHarness(t, { store });
+  const c = before.session();
+  const one = await before.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const two = await before.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  const child = await before.orchestrator.delegate(before.executorSession(two.taskId), {
+    runner: 'fake',
+    brief: 'c',
+  });
+  await eventually(
+    () =>
+      [one, two, child].every((task) => before.orchestrator.taskStateOf(task.taskId) === 'running'),
+    'all running',
+  );
+  before.orchestrator.close();
+
+  // The second tree's child left a run that cannot be stopped yet: it may still be on the machine.
+  let reachable = false;
+  const groups = new Map([[c.sessionId, 'invite-1']]);
+  const after = await grouped(t, {
+    store,
+    groups,
+    dir: before.dir,
+    fake: {
+      recover: true,
+      stopOrphaned: async (taskId) => {
+        if (taskId === child.taskId && !reachable) throw new Error('machine unreachable');
+      },
+    },
+    orchestrator: { stopRetry: { firstMs: 5, maxMs: 5 } },
+  });
+  await after.h.orchestrator.settled();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(after.h.fake.recoveries.length, 0);
+
+  reachable = true;
+  await eventually(
+    () => after.h.fake.recoveries.length === 1,
+    'one tree resumed once the stop held',
+  );
+  assert.equal(after.h.fake.recoveries[0]?.taskId, one.taskId);
+});
+
 test('a restart does not try to stop a task that never had its turn, nor fail it when stops fail', async (t) => {
   const store = new MemoryTaskStore();
   const groups = new Map<string, string>();

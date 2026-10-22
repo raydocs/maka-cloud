@@ -737,17 +737,19 @@ export class Orchestrator {
    */
   private runningTrees(admission: Admission): Map<string, TaskRecord[]> {
     const roots = new Map<TaskId, TaskRecord>();
-    const consider = (taskId: TaskId) => {
+    // An unfinished task of a held tree has no run yet. A run that may still be going counts
+    // whatever its tree waits for: it is on the machine now.
+    const consider = (taskId: TaskId, live: boolean) => {
       if (this.fenced.has(taskId)) return;
       const root = this.treeRoot(taskId);
-      if (root && !this.heldIds.has(root.taskId)) roots.set(root.taskId, root);
+      if (root && (live || !this.heldIds.has(root.taskId))) roots.set(root.taskId, root);
     };
-    for (const taskId of this.tasks.keys()) consider(taskId);
-    for (const taskId of this.starting) consider(taskId);
-    for (const taskId of this.handles.keys()) consider(taskId);
-    for (const taskId of this.readers.keys()) consider(taskId);
-    for (const taskId of this.cancelRetries.keys()) consider(taskId);
-    for (const taskId of this.store.stopPendingTaskIds()) consider(taskId);
+    for (const taskId of this.tasks.keys()) consider(taskId, false);
+    for (const taskId of this.starting) consider(taskId, true);
+    for (const taskId of this.handles.keys()) consider(taskId, true);
+    for (const taskId of this.readers.keys()) consider(taskId, true);
+    for (const taskId of this.cancelRetries.keys()) consider(taskId, true);
+    for (const taskId of this.store.stopPendingTaskIds()) consider(taskId, true);
     const byGroup = new Map<string, TaskRecord[]>();
     for (const root of [...roots.values()].sort((a, b) => a.createdAt - b.createdAt)) {
       const group = admission.groupOf(root.rootSessionId);
