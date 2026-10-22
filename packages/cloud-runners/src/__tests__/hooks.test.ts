@@ -56,6 +56,9 @@ test('a shell command is safe only when it is one plain read-only command', () =
     'grep -A3 -n foo src',
     'sort -k2 -t, data.csv',
     'tree -L 2 src',
+    // Quoted, a glob is plain text; a test or build command may take an unquoted one.
+    "grep 'a?' src",
+    'node --test dist/**/*.test.js',
   ]) {
     assert.equal(bash(command), 'safe', command);
   }
@@ -106,6 +109,15 @@ test('a shell command is safe only when it is one plain read-only command', () =
     'find . -newermt 2020-01-01 -delet',
     'grep --exclude-from=/etc/passwd x',
     'ls --hyperlink',
+    // The shell expands a glob or a tilde first: a file named `-delete` is then an option.
+    'find . *',
+    'uniq *',
+    'cat ~/.ssh/id_rsa',
+    'ls --color=~/x',
+    'ls src/?.ts',
+    'grep foo [a-z]*',
+    'git log -- src/*',
+    'ls "unclosed',
     'sort --output=out.txt in.txt',
     'uniq in.txt out.txt',
     'tree -o listing.txt',

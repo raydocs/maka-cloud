@@ -48,6 +48,12 @@ const SAFE_TOOLS = new Set([
  * an allowlist, because a list of banned flags is beaten by what the program also accepts (an
  * abbreviated long option, `git diff --ext-dif`, or a short option with its value attached,
  * `sort -oout.txt`). A program, a subcommand or a form that is not here is `never`.
+ *
+ * What the lists cannot see is configuration: `git status`, `git diff`, `git log` and `git show`
+ * run programs named in `.git/config` and `.gitattributes` (`core.fsmonitor`, `diff.external`,
+ * `diff.<driver>.textconv`), both in the agent's workspace, and `-c` is refused but the file is
+ * not. "Only looks" is a statement about the command line, not a guarantee against a
+ * repository's own configuration.
  */
 interface Flags {
   /** Single letters that may be given alone or together (`-la`). */
@@ -82,11 +88,7 @@ const flagsOnly =
       if (arg.startsWith('--')) {
         const eq = arg.indexOf('=');
         const name = eq === -1 ? arg : arg.slice(0, eq);
-        if (
-          eq === -1 ? long.has(name) || longValue.has(name) : longValue.has(name) || long.has(name)
-        ) {
-          continue;
-        }
+        if (long.has(name) || longValue.has(name)) continue;
         return false;
       }
       if (allowed.count === true && /^-\d+$/u.test(arg)) continue;
@@ -565,6 +567,18 @@ const READ_ONLY_SUBCOMMANDS: Record<string, Record<string, (args: string[]) => b
   make: { test: ANYTHING, check: ANYTHING, lint: ANYTHING, build: ANYTHING },
 };
 const SHELL_OPERATORS = /[;&|<>`$\n\r\\(){}]/u;
+/**
+ * The shell expands these before the program sees them, and the agent writes the workspace: a file
+ * named `-delete` turns `find . *` into `find . -delete`. Quoted, they are plain text. A tilde
+ * counts only where the shell expands it (the start of a word, after `=` or `:`), not in `HEAD~1`.
+ */
+const SHELL_EXPANSIONS = /[*?[]|(?:^|[\s=:])~/u;
+
+/** Whether the command has a glob or tilde the shell would expand; an unbalanced quote counts. */
+function expandsUnquoted(command: string): boolean {
+  const bare = command.replaceAll(/"[^"]*"|'[^']*'/gu, '');
+  return /["']/u.test(bare) || SHELL_EXPANSIONS.test(bare);
+}
 
 /** Whether a tool call can be run again after a crash. Unknown tools and commands are `never`. */
 export function replayClassOf(toolName: string, toolInput: unknown): ReplayClass {
@@ -590,11 +604,15 @@ function readsOnly(command: string): boolean {
   if (subcommands !== undefined) {
     const [subcommand, ...rest] = args;
     const rule = subcommand === undefined ? undefined : subcommands[subcommand];
-    return rule !== undefined && Object.hasOwn(subcommands, subcommand as string) && rule(rest);
+    return (
+      rule !== undefined &&
+      Object.hasOwn(subcommands, subcommand as string) &&
+      (rule === ANYTHING || !expandsUnquoted(command)) &&
+      rule(rest)
+    );
   }
-  return (
-    Object.hasOwn(READ_ONLY_PROGRAMS, program) && (READ_ONLY_PROGRAMS[program]?.(args) ?? false)
-  );
+  const rule = Object.hasOwn(READ_ONLY_PROGRAMS, program) ? READ_ONLY_PROGRAMS[program] : undefined;
+  return rule !== undefined && (rule === ANYTHING || !expandsUnquoted(command)) && rule(args);
 }
 
 function commandOf(toolInput: unknown): string | undefined {
