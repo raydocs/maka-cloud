@@ -302,7 +302,7 @@ class Run implements RunHandle {
       this.cancelled = true;
       this.abort.abort();
     }
-    if (!this.detached && (this.cancelled || this.budgetStop !== undefined)) this.unneeded.abort();
+    this.letGoOfInstalls();
     await this.cleanup();
     // A cancel that returns says the run is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
@@ -1478,7 +1478,13 @@ class Run implements RunHandle {
     return this.cleanupPromise;
   }
 
+  /** A run cancelled before its end, or stopped on its budget, has no later run needing its CLIs. */
+  private letGoOfInstalls(): void {
+    if (!this.detached && (this.cancelled || this.budgetStop !== undefined)) this.unneeded.abort();
+  }
+
   private async runCleanup(): Promise<void> {
+    this.letGoOfInstalls();
     if (this.renewTimer) {
       clearInterval(this.renewTimer);
       this.renewTimer = undefined;

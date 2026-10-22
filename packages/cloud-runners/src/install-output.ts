@@ -12,6 +12,10 @@ const END = /-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/u;
 /** The longest end marker; kept from a dropped stretch so that one cut in two by a chunk is still found. */
 const MARKER_TAIL = 64;
 
+/** What npm puts in front of each line it logs (`npm ERR! `, `npm warn `). */
+const LOG_PREFIX =
+  /^[ \t]*npm (?:ERR!|error|WARN|warn|notice|info|http|verb|verbose|sill|silly|timing)[ \t]+/u;
+
 /**
  * Where the value of a secret field stands when its line ended before it did: the name was seen and
  * the value has not started, or it is a string, an array or object, or a bare word under way.
@@ -80,7 +84,9 @@ function holdBack(
 ): { kept: string; open: OpenValue | undefined } {
   let at = 0;
   if (open) {
-    const read = readValue(open, text, 0);
+    // A value that starts on the next line may come after the prefix the tool puts on every line.
+    const from = open.kind === 'start' ? (LOG_PREFIX.exec(text)?.[0].length ?? 0) : 0;
+    const read = readValue(open, text, from);
     if ('open' in read) return { kept: '', open: read.open };
     at = read.end;
   }

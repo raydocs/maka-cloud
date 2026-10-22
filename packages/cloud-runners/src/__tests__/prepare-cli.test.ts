@@ -247,3 +247,27 @@ test('an install goes on while any caller still wants it, and stops when the las
   assert.equal(await lines(join(h.home, 'codex-install-count')), 1);
   assert.deepEqual(rejections, []);
 });
+
+test('a run that stops on its budget lets go of the install it started for a later run', async (t) => {
+  const rejections = watchRejections(t);
+  const h = await claudeOnly(t, {
+    prices: { 'claude-agent-sdk': { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 } },
+  });
+  await h.setMode('spendhang');
+  await fs.writeFile(join(h.home, 'fake-cli', 'hold-spend'), '');
+  const handle = await h.runners.claude.start(
+    await h.spec('tsk_prep_budget', { budgetUsd: 0.3, prepareRunners: ['codex'] }),
+  );
+  const work = collect(handle);
+  await until(() => exists(join(h.home, 'codex-install-started')), 'the codex install to start');
+  const [pid] = await installPids(h);
+  assert.ok(pid !== undefined);
+  await fs.writeFile(join(h.home, 'fake-cli', 'go'), '');
+  const end = terminal(await work);
+  assert.equal(end?.type, 'failed');
+  assert.match(end?.type === 'failed' ? end.reason : '', /budget/);
+  // Nobody cancels the run: its own end is enough.
+  await until(async () => !(await running(pid)), 'the install nobody needs to be killed');
+  await until(async () => !(await exists(join(h.root, '.setup-codex'))), 'its lock to go');
+  assert.deepEqual(rejections, []);
+});

@@ -9,7 +9,7 @@ import {
   RemoteMachine,
   type StageLimits,
 } from './machine.js';
-import { MachinePoller, type PollBackoff } from './poller.js';
+import { MachinePoller, type PollBackoff, type Watch } from './poller.js';
 import { type AgentChannel, assertAgentChannel, checkAgentIsolation } from './agent-user.js';
 import { InstallOutput } from './install-output.js';
 import type { AgentSdk } from './sdk-turn.js';
@@ -333,27 +333,27 @@ export class Fleet {
 npm install -g --prefix "$HOME/.maka-cli" --no-audit --no-fund ${shq(`${vendor.npmPackage}@${version}`)}`;
     const dirName = `.setup-${vendor.binary}`;
     const run = `i-${version}`;
-    // The marker goes first: an install stopped half way leaves no marker a later check trusts.
-    await machine.launchInstall({
-      dirName,
-      run,
-      install: `( set -e
-rm -f -- ${shq(marker)}
-${install}
-mkdir -p "$(dirname ${shq(marker)})"
-: > ${shq(marker)}
-)`,
-      runToken: randomUUID(),
-    });
-
-    // Not cut short by `stop`: a launch let go of half way could start the install after its kill.
-    const watch = this.poller.watch(machine, { dir: dirName, run });
-    const onStop = (): void => watch.stop();
+    let watch: Watch | undefined;
+    const onStop = (): void => watch?.stop();
     stop.addEventListener('abort', onStop, { once: true });
     const deadline = this.now() + (this.options.setupTimeoutMs ?? SETUP_TIMEOUT_MS);
     const output = new InstallOutput();
     let consumed = 0;
     try {
+      // The marker goes first: an install stopped half way leaves no marker a later check trusts.
+      // The launch is not cut short by `stop`: one let go of half way could start after the kill.
+      await machine.launchInstall({
+        dirName,
+        run,
+        install: `( set -e
+rm -f -- ${shq(marker)}
+${install}
+mkdir -p "$(dirname ${shq(marker)})"
+: > ${shq(marker)}
+)`,
+        runToken: randomUUID(),
+      });
+      watch = this.poller.watch(machine, { dir: dirName, run });
       for (;;) {
         if (stop.aborted) throw stop.reason;
         if (this.now() > deadline) throw new Error('timed out');
@@ -394,7 +394,7 @@ mkdir -p "$(dirname ${shq(marker)})"
       );
     } finally {
       stop.removeEventListener('abort', onStop);
-      watch.stop();
+      watch?.stop();
     }
   }
 

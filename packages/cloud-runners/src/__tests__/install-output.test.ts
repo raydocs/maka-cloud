@@ -105,3 +105,15 @@ test('a secret field whose value starts on the next line is held back the same w
   assert.ok(!tail.includes('kq7-held-back-value'), tail.slice(-300));
   assert.match(tail, /install failed/u);
 });
+
+test('a secret value that starts on the next line after the log prefix is held back too', () => {
+  const certificate = 'QmFsdGltb3JlQ3liZXJUcnVzdFJvb3Q'.repeat(1_000);
+  const out = new InstallOutput();
+  out.push('npm ERR! {"credentials":\n');
+  out.push(`npm ERR! {"certificate": "${certificate}",\n`);
+  out.push('npm ERR! "key": "kq7-held-back-value-0195"}}\n');
+  out.push('npm ERR! install failed\n');
+  const tail = out.tail();
+  assert.ok(!tail.includes('kq7-held-back-value'), tail.slice(-300));
+  assert.match(tail, /install failed/u);
+});
