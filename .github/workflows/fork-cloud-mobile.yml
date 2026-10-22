@@ -172,7 +172,9 @@ jobs:
           retention-days: 7
 
   ios:
-    runs-on: macos-15
+    # CI_RUNNER_MAC (a JSON label list such as ["self-hosted","mac"]) moves this job to a Mac of the
+    # owner's; unset, it runs on GitHub's macos-15. Deleting the variable is the way back.
+    runs-on: ${{ vars.CI_RUNNER_MAC && fromJSON(vars.CI_RUNNER_MAC) || 'macos-15' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -215,9 +217,13 @@ jobs:
       # Expo SDK 58 needs Swift tools 6.2 (Xcode 26); the runner's default Xcode is older.
       - name: Select the newest Xcode
         run: |
-          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
-          echo "Using $xcode"
-          sudo xcode-select -s "$xcode"
+          # GitHub's image keeps several Xcodes as Xcode_N.app; a self-hosted Mac has its one Xcode
+          # selected already, so nothing is switched there (and no sudo is needed).
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -n "$xcode" ]; then
+            echo "Using $xcode"
+            sudo xcode-select -s "$xcode"
+          fi
           xcodebuild -version
 
       # A release build for the simulator carries its own JavaScript. Nothing is signed or uploaded.
