@@ -26,6 +26,9 @@ export interface PollBackoff {
   maxMs: number;
 }
 
+/** How a run's output is polled unless configured otherwise: a turn's end is seen within a second. */
+export const RUN_POLL_BACKOFF: PollBackoff = { minMs: 150, maxMs: 1_000 };
+
 interface WatchInternal {
   dir: string;
   run: string;

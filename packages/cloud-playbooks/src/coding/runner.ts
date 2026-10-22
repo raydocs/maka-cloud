@@ -797,6 +797,7 @@ class CodingRun implements RunHandle {
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
       ...(this.spec.epoch === undefined ? {} : { epoch: this.spec.epoch }),
+      ...(options.phase === 'work' ? this.reviewerAhead(vendor) : {}),
     };
     // Every run reads its brief, a resume included.
     await this.guard(writeHostFile(spec.briefPath, brief()));
@@ -1034,6 +1035,21 @@ class CodingRun implements RunHandle {
     if (!modes) return {};
     const agent = role(modes, this.mode, vendor);
     return { ...(agent.model ? { model: agent.model } : {}), effort: agent.effort };
+  }
+
+  /**
+   * The reviewer of `implementer`'s change, named in the work's runs so its CLI can install while
+   * the work goes on. Nothing when no review will run: no modes, or a review share of the budget
+   * too small to start one.
+   */
+  private reviewerAhead(implementer: Vendor): { prepareRunners?: string[] } {
+    const { modes } = this.options;
+    if (!modes) return {};
+    const budget = this.allowance();
+    if (budget !== undefined && splitBudget(modes, this.mode, budget).reviewUsd < MIN_REVIEW_USD) {
+      return {};
+    }
+    return { prepareRunners: [reviewerFor(modes, this.mode, implementer).vendor] };
   }
 
   /**
