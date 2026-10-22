@@ -69,6 +69,10 @@ Still not verified by the rehearsal, so the first run on a real host is the firs
 - The firewall is a stand-in that keeps its rules in files: the egress guard's rules are checked as
   text, no packet is filtered.
 - The CLI is scripted: the real `claude`'s flags, its own files and its network use are not exercised.
+- The agent starts under `env -i` with named variables only (`asAgentUser`, isolation F8). `USER`, `LOGNAME`
+  and `SHELL` are set by the entry from the agent account; whether the real `claude -p` starts without any
+  other variable the box's exec carried is not shown. Before the first task, run the real `claude -p` once
+  under the exact `asAgentUser` line on the real box.
 - The sandbox user may run any command as root in the stand-in; a real box need not allow that.
 - Any model, GitHub, certificate or domain, and the owner's keys and budget.
 

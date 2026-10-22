@@ -34,7 +34,7 @@ function boxWith(t: TestContext) {
   mkdirSync(shim);
   writeFileSync(
     join(shim, 'sudo'),
-    '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|--preserve-env) shift ;; -u) shift 2 ;; --) shift; break ;; *) break ;; esac; done\nMAKA_TEST_VIA_SUDO=agent exec "$@"\n',
+    '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|--preserve-env) shift ;; -u) shift 2 ;; --) shift; break ;; *) break ;; esac; done\nif [ "$1" = env ] && [ "$2" = -i ]; then shift 2; exec env -i MAKA_TEST_VIA_SUDO=agent "$@"; fi\nMAKA_TEST_VIA_SUDO=agent exec "$@"\n',
     { mode: 0o755 },
   );
   const marker = join(home, 'marker.ok');

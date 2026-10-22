@@ -45,6 +45,9 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
  */
 const AGENT_ENTRY = [
   'umask 002; PATH="$1"; shift',
+  // `env -i` leaves no account variables: the CLI and its tools read these before the passwd entry.
+  'USER=$(id -un 2>/dev/null) && LOGNAME=$USER && export USER LOGNAME',
+  'SHELL=/bin/sh; [ -x /bin/bash ] && SHELL=/bin/bash; export SHELL',
   'd="${MAKA_WORKDIR:-${MAKA_DIR:+$MAKA_DIR/workspace}}"',
   'if [ -n "$d" ] && d=$(cd "$d" 2>/dev/null && pwd -P); then',
   '  n=${GIT_CONFIG_COUNT:-0}',
@@ -54,23 +57,64 @@ const AGENT_ENTRY = [
 ].join('\n');
 
 /**
- * `commandLine` (already quoted) run as the agent's user. The environment is passed on, but PATH is
- * handed over explicitly since sudo replaces it; the shared umask lets the sandbox user read and
- * remove what the agent writes in the workspace.
+ * What the agent's process may inherit from the sandbox user's exec environment, besides the names
+ * a caller passes with the command: where it runs, its locale and temporary files, where its CLI
+ * keeps configuration, and the run's own token. Everything else the exec carries (what the
+ * provider's exec sets, what a login file or a preamble exports) stays behind.
  */
-export function asAgent(commandLine: string, channel: AgentChannel): string {
-  return asAgentUser(commandLine, assertAgentChannel(channel).user);
+const AGENT_ENV_BASE = [
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TERM',
+  'TMPDIR',
+  'CLAUDE_CONFIG_DIR',
+  'CODEX_HOME',
+  'MAKA_DIR',
+  'MAKA_WORKDIR',
+  'MAKA_RUN_TOKEN',
+] as const;
+
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/u;
+
+/**
+ * `commandLine` (already quoted) run as the agent's user. The environment is built, not passed on:
+ * `env -i` with `PATH` (sudo replaces it, so it is handed over explicitly) and each of the base
+ * names and the caller's `names` that is set in the sandbox user's exec (`${NAME+...}` adds
+ * nothing for one that is not). The shared umask lets the sandbox user read and remove what the
+ * agent writes in the workspace.
+ */
+export function asAgent(
+  commandLine: string,
+  channel: AgentChannel,
+  names: readonly string[] = [],
+): string {
+  return asAgentUser(commandLine, assertAgentChannel(channel).user, names);
 }
 
 /** `asAgent` for a caller that knows the account's name only. */
-export function asAgentUser(commandLine: string, user: string): string {
+export function asAgentUser(
+  commandLine: string,
+  user: string,
+  names: readonly string[] = [],
+): string {
   assertAgentChannel({ user, group: 'x' });
-  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c ${shq(AGENT_ENTRY)} sh "$PATH" ${commandLine}`;
+  const kept = [...new Set([...AGENT_ENV_BASE, ...names])].filter((name) => name !== 'PATH');
+  for (const name of kept) {
+    if (!ENV_NAME.test(name)) throw new Error(`Unsafe variable name: ${name}`);
+  }
+  const vars = kept.map((name) => `\${${name}+"${name}=$${name}"}`).join(' ');
+  return `sudo -n -u ${shq(user)} -- env -i PATH="$PATH" ${vars} sh -c ${shq(AGENT_ENTRY)} sh "$PATH" ${commandLine}`;
 }
 
 /** A whole script (any text, quoted here) run under bash as the agent's user, as `asAgent` does a command. */
-export function asAgentScript(script: string, channel: AgentChannel): string {
-  return asAgent(`bash -c ${shq(script)}`, channel);
+export function asAgentScript(
+  script: string,
+  channel: AgentChannel,
+  names: readonly string[] = [],
+): string {
+  return asAgent(`bash -c ${shq(script)}`, channel, names);
 }
 
 /**

@@ -247,10 +247,15 @@ directory refused), `cli-check.test.ts`.
 **I9. The agent's environment is an allowlist.** The agent process sees the variables the run needs
 (PATH, HOME, locale, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, the gateway and MCP variables, the search
 tool variables, `MAKA_RUN_TOKEN`) and nothing else from the control user's exec environment.
-*Enforced*: partly. `allowedSdkEnv` filters what the SDK passes; `asAgentUser` then runs
-`sudo --preserve-env`, which hands the whole control-user exec environment over.
-*Tested*: `process-channel.test.ts` (SDK side only).
-*Still violated*: F8.
+*Enforced*: `allowedSdkEnv` filters what the SDK passes; `asAgentUser` runs
+`sudo -- env -i PATH=... <name>=...` and hands over only the base names (`HOME`, which is the
+sandbox user's, as before, not the agent account's; locale, `TMPDIR`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `MAKA_DIR`, `MAKA_WORKDIR`, `MAKA_RUN_TOKEN`) and the names its
+caller passes (the run's own envs; an exec's envs), each only when set; `AGENT_ENTRY` sets `USER`,
+`LOGNAME` and `SHELL` from the agent account. The box scripts (`.agents/setup`, `.agents/resume`) see
+the base plus `MAKA_REPO_DIR` and `MAKA_SETUP_HASH` only: note it when the pool is turned on.
+*Tested*: `process-channel.test.ts` (SDK side), `agent-user.test.ts` (a variable the exec carried
+does not reach the agent).
 
 **I10. The SDK channel is written only by the host.** Hook answers (a `deny` in `hooks.ts`), the
 prompt, steering from the owner and permission decisions reach the CLI through `chan/<run>.in`,
@@ -317,7 +322,7 @@ a finding that fits none means this section is incomplete.
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
 | Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` and the restore, raced by a sibling's agent (#312 checks then re-resolves by path; recheck A2, open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
 | Control user's login files | I3 | `bash -lc` on every exec; not probed (open, F13) |
-| Whole environment handed to the agent | I9 | `--preserve-env` (open, F8) |
+| Whole environment handed to the agent | I9 | `env -i` plus named variables (F8, closed) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
 
 ## 7. Fix specs: where the code violates an invariant today

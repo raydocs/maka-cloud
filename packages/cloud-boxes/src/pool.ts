@@ -734,7 +734,7 @@ export class BoxPool implements SandboxProvider {
       }
       await this.checkAgent(machineId, agent);
       const result = await this.api.exec(machineId, {
-        cmd: asRepoUser(RESUME_SCRIPT, agent),
+        cmd: asRepoUser(RESUME_SCRIPT, agent, ['MAKA_REPO_DIR']),
         envs: { MAKA_REPO_DIR: `${REPOS_ROOT}/${box.repo}` },
         timeoutSeconds,
       });

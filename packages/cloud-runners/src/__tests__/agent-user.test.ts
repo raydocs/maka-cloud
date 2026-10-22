@@ -312,3 +312,67 @@ test('a run of the agent account is stopped like any other, with its processes',
   await machine.kill(dir, { runs: ['t1'], graceTenths: 2 });
   await until(async () => !(await sleeping()));
 });
+
+test('the agent starts with the variables it was handed and nothing else of the exec environment', async (t) => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'maka-agent-env-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // A `sudo` that only runs what it is given, as the fake sandbox of the other tests does.
+  await fs.writeFile(
+    join(dir, 'sudo'),
+    '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|--preserve-env) shift ;; -u) shift 2 ;; --) shift; break ;; *) break ;; esac; done\nexec "$@"\n',
+    { mode: 0o755 },
+  );
+  const run = (names: readonly string[]) =>
+    spawnSync('bash', ['-c', asAgent('env', CHANNEL, names)], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        HOME: dir,
+        LANG: 'C.UTF-8',
+        MAKA_RUN_TOKEN: 'run-token',
+        ANTHROPIC_API_KEY: 'sk-run',
+        MAKA_REPO_DIR: '/repo',
+        MAKA_TEST_LEAK: '1',
+        GITHUB_TOKEN: 'ghp_leak',
+        BASH_ENV: '/nonexistent',
+        LD_PRELOAD: '/nonexistent.so',
+      },
+    }).stdout.split('\n');
+  const seen = run(['ANTHROPIC_API_KEY', 'MAKA_REPO_DIR', 'MAKA_UNSET_BY_EXEC']);
+  for (const kept of [
+    `HOME=${dir}`,
+    'LANG=C.UTF-8',
+    'MAKA_RUN_TOKEN=run-token',
+    'ANTHROPIC_API_KEY=sk-run',
+    'MAKA_REPO_DIR=/repo',
+  ]) {
+    assert.ok(seen.includes(kept), `${kept} reaches the agent`);
+  }
+  assert.ok(seen.some((line) => line.startsWith('PATH=')));
+  // The account variables `env -i` removed are set from the account the entry runs as.
+  const me = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(seen.includes(`USER=${me}`));
+  assert.ok(seen.includes(`LOGNAME=${me}`));
+  assert.ok(seen.some((line) => /^SHELL=\/bin\/(ba)?sh$/u.test(line)));
+  // Whatever else the exec carried stays behind, and a name that was never set is not made up.
+  for (const left of [
+    'MAKA_TEST_LEAK',
+    'GITHUB_TOKEN',
+    'BASH_ENV',
+    'LD_PRELOAD',
+    'MAKA_UNSET_BY_EXEC',
+  ]) {
+    assert.equal(
+      seen.some((line) => line.startsWith(`${left}=`)),
+      false,
+      `${left} does not reach the agent`,
+    );
+  }
+  // A name that is not a variable name never reaches the command line.
+  assert.throws(() => asAgent('env', CHANNEL, ['A; reboot']), /Unsafe variable name/u);
+  // Without the names, the caller's variables are not handed over either.
+  assert.equal(
+    run([]).some((line) => line.startsWith('ANTHROPIC_API_KEY=')),
+    false,
+  );
+});

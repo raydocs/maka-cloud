@@ -101,7 +101,7 @@ export class FleetCodingSandbox implements CodingSandbox {
         await fleet.ensureAgentIsolation(machine, options.signal);
         // The task directory and workspace belong to the agent's group before its tests enter them.
         await machine.prepareAgent(taskId, channel.group, options.signal);
-        return run(asAgentScript(script, channel), options);
+        return run(asAgentScript(script, channel, Object.keys(options.envs ?? {})), options);
       },
       execCheckStop: (script, options = {}) =>
         run(channel === undefined ? script : asRootScript(script, CHECK_STOP_ENV), options),
