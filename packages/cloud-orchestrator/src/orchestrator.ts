@@ -8,6 +8,7 @@ import {
 } from './auth.js';
 import { BoundedCache, type CacheLimits } from './cache.js';
 import { Handoff, type HandoffPaths } from './handoff.js';
+import { displayEvent, MAX_NARRATIONS_PER_TASK, MAX_PANEL_UPDATES_PER_TASK } from './panels.js';
 import { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits, quotaExceeded } from './quota.js';
 import { applyEvent, reduce, runTimeMs, spendKey, type TaskMap, toView } from './reducer.js';
 import { MAX_RESUMES_IN_A_ROW, recoveryNote, resumesInARow } from './recovery.js';
@@ -1642,6 +1643,20 @@ export class Orchestrator {
             { type: 'task_progress', taskId, note: event.note },
             fence,
           );
+        } else if (event.type === 'narration' || event.type === 'panel') {
+          // Reader copies: checked against fixed shapes and scrubbed on the way in, and capped per
+          // task inside the write chain.
+          const shown = displayEvent(taskId, event);
+          if (shown !== undefined) {
+            await this.recordRunnerOutcome(shown, fence, () => {
+              const task = this.lookup(taskId);
+              if (shown.type === 'task_narration') {
+                if ((task?.narrations ?? 0) >= MAX_NARRATIONS_PER_TASK) throw new Superseded();
+              } else if ((task?.panelUpdates ?? 0) >= MAX_PANEL_UPDATES_PER_TASK) {
+                throw new Superseded();
+              }
+            });
+          }
         } else if (event.type === 'failed') {
           this.runnerOver(taskId, handle);
           await this.markUnseen(taskId, fence);
@@ -1759,12 +1774,14 @@ export class Orchestrator {
   private recordRunnerOutcome(
     event: TaskEvent & { taskId: TaskId },
     fence: Fence,
+    guard?: () => void,
   ): Promise<StoredEvent | undefined> {
     return this.withKept(event).then((withKept) =>
       this.record(
         withKept,
         () => {
           if (this.isStopping(event.taskId)) throw new Superseded();
+          guard?.();
         },
         fence,
       ),

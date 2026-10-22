@@ -41,6 +41,18 @@ export {
   resumesInARow,
 } from './recovery.js';
 export { DEFAULT_QUOTAS, KeyedCounter, type QuotaLimits } from './quota.js';
+export {
+  cleanNarration,
+  cleanPanel,
+  cleanTail,
+  displayEvent,
+  MAX_NARRATION_CHARS,
+  MAX_NARRATIONS_PER_TASK,
+  MAX_PANEL_TAIL_BYTES,
+  MAX_PANEL_TAIL_LINES,
+  MAX_PANEL_TITLE_CHARS,
+  MAX_PANEL_UPDATES_PER_TASK,
+} from './panels.js';
 export { applyEvent, reduce, runTimeMs, type TaskMap, toView } from './reducer.js';
 export {
   claudeAgentSdkRunner,

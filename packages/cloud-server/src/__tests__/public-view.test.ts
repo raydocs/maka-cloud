@@ -271,3 +271,42 @@ test('an approval that carries a key through percent escapes, \\u escapes or a s
   const fine = { kind: 'approval', ask: 'Allow x(path: "a%20b")?', options: [{ id: 'approve' }] };
   assert.deepEqual(toPublicItem(fine), fine);
 });
+
+test('a narration line and a panel reach clients without vendor names or keys, and keep their shape', () => {
+  const leak = 'Bearer sk-live-0123456789abcdef.payload';
+  const line = toPublicEvent({
+    type: 'task_narration',
+    taskId: 'tsk_1',
+    line: `Codex is running the tests ${leak}`,
+  } as TaskEvent) as { type: string; line: string };
+  assert.equal(line.type, 'task_narration');
+  assert.ok(!/codex/iu.test(line.line), line.line);
+  assert.ok(!line.line.includes('sk-live-0123'), line.line);
+
+  const panel = toPublicEvent({
+    type: 'task_panel',
+    taskId: 'tsk_1',
+    panelId: 'tests',
+    kind: 'tests',
+    state: 'failed',
+    title: 'Claude tests',
+    summary: '41 passed, 1 failed',
+    tail: `not ok 7 - gpt-5 said ${leak}`,
+  } as TaskEvent) as { title: string; summary: string; state: string; tail: string };
+  assert.equal(panel.summary, '41 passed, 1 failed');
+  assert.equal(panel.state, 'failed');
+  assert.ok(!/claude|gpt/iu.test(panel.title + panel.tail), `${panel.title} ${panel.tail}`);
+  assert.ok(!panel.tail.includes('sk-live-0123'), panel.tail);
+  assert.ok(panel.tail.startsWith('not ok 7'));
+
+  const bare = toPublicEvent({
+    type: 'task_panel',
+    taskId: 'tsk_1',
+    panelId: 'diff',
+    kind: 'diff',
+    state: 'passed',
+    title: 'Change',
+    summary: '+1 −0 in 1 file',
+  } as TaskEvent);
+  assert.ok(!('tail' in (bare as object)));
+});

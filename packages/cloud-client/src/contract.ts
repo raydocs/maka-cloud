@@ -30,6 +30,20 @@ export interface Manifest {
 export type TaskState = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
 export const TERMINAL: ReadonlySet<TaskState> = new Set(['succeeded', 'failed', 'cancelled']);
 
+export type PanelKind = 'shell' | 'tests' | 'diff' | 'review' | 'search';
+export type PanelState = 'running' | 'passed' | 'failed' | 'stopped';
+
+export interface TaskPanel {
+  panelId: string;
+  kind: PanelKind;
+  state: PanelState;
+  title: string;
+  /** A fixed shape per kind: "41 passed, 1 failed", "+12 −3 in 2 files", "0 P1, 2 P2, 0 P3". */
+  summary: string;
+  /** The last lines (at most 40, 4 KiB), scrubbed. */
+  tail?: string;
+}
+
 /** A task as the public API shows it: the runner id never leaves the server. */
 export interface TaskView {
   taskId: string;
@@ -40,6 +54,10 @@ export interface TaskView {
   startedAt?: number;
   finishedAt?: number;
   progress: string[];
+  /** What the task is doing now, in the run's latest narration line. Built from events only. */
+  narration?: string;
+  /** The task's panels in the order they first appeared. Built from events only. */
+  panels?: TaskPanel[];
   manifest?: Manifest;
   /** What the runner kept for the owner when the task ended without a result. */
   kept?: Manifest;
@@ -69,6 +87,10 @@ export type TaskEvent =
   | { type: 'task_started'; taskId: string }
   | { type: 'task_cost'; taskId: string; fromTaskId: string; costUsd: number }
   | { type: 'task_progress'; taskId: string; note: string }
+  /** One short present-tense line for what the task is doing now; it replaces the last. */
+  | { type: 'task_narration'; taskId: string; line: string }
+  /** A panel of the task's work, replaced in place by `panelId`. A reader copy, not evidence. */
+  | ({ type: 'task_panel'; taskId: string } & TaskPanel)
   /** A cut-off run goes again: show `text` in place of what you had of its turn. */
   | { type: 'task_restarted'; taskId: string; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }

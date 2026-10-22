@@ -82,6 +82,17 @@ fails with that reason: a check is never run unisolated, and no result is report
 reverted workspace, and releases the sandbox lease. The terminal event is published only after that. After a restart,
 `stopOrphaned` stops a task's leftovers by id, checks included.
 
+**Narration and panels.** The runner reports what it is doing at its phase boundaries (`panels.ts`; the
+orchestrator side is in `orchestrator.md`, "Narration and panels"): a narration line for each phase
+(fetching, the agent working, each check, the review, the fix) and a panel for the reproduction test with the
+change (`repro`), the repository's tests (`tests`), the reproduction test without the change (`repro-base`, which
+passes by failing), the change (`diff`) and the review (`review`). A panel is `running` while its check runs and
+settles when it ends, and a later round (the repair, the fix) replaces it in place. Summaries are built here from
+the sandbox's exit status, the change as git listed it and the review's counts, never by a model. The totals of the
+repository's tests (`41 passed, 1 failed`) are what the check printed, shown only when they fit the exit status; the
+reproduction test is the agent's own, so its panels show the verdict only. What an agent's stream says about itself
+(`narration`, `panel`) is ignored. Panels are not evidence and are not written to `verification.json`.
+
 ## Opening the pull request
 
 `open_pull_request {taskId, title}` is irreversible, so T5 holds every call until the user approves it. Its

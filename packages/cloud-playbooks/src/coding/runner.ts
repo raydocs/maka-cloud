@@ -20,6 +20,7 @@ import {
   type RunSpec,
   scrubSecretText,
   type TaskId,
+  type TaskPanel,
 } from '@maka-cloud/orchestrator';
 import { agentBrief, type CheckProblem, type FailureBrief, repairPrompt } from './briefs.js';
 import type { ChangedFile, ChangeSet, CodingDeliveries } from './deliveries.js';
@@ -38,6 +39,7 @@ import {
   type ReviewSummary,
   summarizeReview,
 } from './review.js';
+import { diffPanel, reviewPanel, runningPanel, testsPanel } from './panels.js';
 import type { CodingSandbox, SandboxWorkspace } from './sandbox.js';
 import {
   BASE_RESTORE_SCRIPT,
@@ -531,6 +533,7 @@ class CodingRun implements RunHandle {
         await this.guard(this.options.sandbox.open(this.spec.taskId, this.signal, this.spec.epoch)),
       );
       this.progress(`fetching ${task.repo} at ${task.baseRef}`);
+      this.narrate('Fetching the repository');
       const baseSha = await this.clone(task, task.baseRef);
 
       const first = task.runner ?? this.options.firstVendor ?? 'claude-agent-sdk';
@@ -644,6 +647,11 @@ class CodingRun implements RunHandle {
     let prompt: string | undefined;
     for (;;) {
       const kind = prompt === undefined ? 'start' : 'resume';
+      this.narrate(
+        prompt === undefined
+          ? 'An agent is working on the change'
+          : 'The agent is fixing what the checks found',
+      );
       const turn = await this.agentTurn(
         vendor,
         detector,
@@ -682,7 +690,10 @@ class CodingRun implements RunHandle {
         if (checked.ok) {
           const result = await this.collect(task, baseSha);
           if ('reason' in result) checked = { ok: false, problem: result.reason };
-          else collected = result;
+          else {
+            collected = result;
+            this.panel(diffPanel(result.changeSet.files, result.patch));
+          }
         }
         const turnRecord: TurnRecord = {
           run,
@@ -790,6 +801,9 @@ class CodingRun implements RunHandle {
         if (next.done) break;
         const event = next.value;
         if (event.type === 'progress') this.progress(event.note);
+        // What an agent's stream says it is doing is not shown: the narration and the panels of a
+        // coding task are the runner's own, built from its checks.
+        else if (event.type === 'narration' || event.type === 'panel') continue;
         else if (event.type === 'usage') {
           runCost = event.costUsd;
           if (this.meter(this.spentBefore + runCost)) {
@@ -1011,6 +1025,20 @@ class CodingRun implements RunHandle {
     implementer: Vendor,
     outcome: { repro: Repro; collected: Collected },
   ): Promise<ReviewRecord> {
+    const record = await this.makeReview(task, baseSha, conductorBrief, implementer, outcome);
+    // The panel shows the counts the review reported, whatever it found; with no reviewer
+    // configured there was no review to show.
+    if (record.status !== 'not_configured') this.panel(reviewPanel(record));
+    return record;
+  }
+
+  private async makeReview(
+    task: CodingTask,
+    baseSha: string,
+    conductorBrief: string,
+    implementer: Vendor,
+    outcome: { repro: Repro; collected: Collected },
+  ): Promise<ReviewRecord> {
     const { modes } = this.options;
     if (!modes) {
       return {
@@ -1045,6 +1073,8 @@ class CodingRun implements RunHandle {
     }
     try {
       this.progress('a second agent reviews the change');
+      this.narrate('A second agent is reviewing the change');
+      this.panel(runningPanel('review', 'review', 'Second review'));
       await this.removeAgentFile(REVIEW_FILE);
       await this.publishForAgent('change.patch');
       const turn = await this.agentTurn(
@@ -1156,6 +1186,7 @@ class CodingRun implements RunHandle {
     let kept: { outcome: typeof outcome; applied: FixRecord } | undefined;
     try {
       this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
+      this.narrate('Fixing the problems the review found');
       const turn = await this.agentTurn(
         implementer,
         new LoopDetector(this.runner.loopLimits),
@@ -1277,8 +1308,14 @@ class CodingRun implements RunHandle {
     if ('problem' in repro) return { ok: false, ...repro };
 
     this.progress('running the reproduction test');
+    this.narrate('Running the reproduction test with the change');
+    this.panel(runningPanel('repro', 'tests', 'Reproduction test with the change'));
     const onChange = await this.runCheck('repro', repro.command);
     checks.push(onChange);
+    // The reproduction test is the agent's own: its verdict is shown, not the totals it prints.
+    this.panel(
+      testsPanel('repro', 'Reproduction test with the change', onChange, { counts: false }),
+    );
     if (onChange.exitCode !== 0) {
       return {
         ok: false,
@@ -1288,8 +1325,11 @@ class CodingRun implements RunHandle {
     }
 
     this.progress(`running ${task.testCommand}`);
+    this.narrate("Running the repository's tests");
+    this.panel(runningPanel('tests', 'tests', 'Repository tests'));
     const tests = await this.runCheck('tests', task.testCommand);
     checks.push(tests);
+    this.panel(testsPanel('tests', 'Repository tests', tests));
     if (tests.exitCode !== 0) {
       return {
         ok: false,
@@ -1299,11 +1339,20 @@ class CodingRun implements RunHandle {
     }
 
     this.progress('running the reproduction test without the change');
+    this.narrate('Running the reproduction test without the change, where it must fail');
+    this.panel(runningPanel('repro-base', 'tests', 'Reproduction test without the change'));
     const onBase = await this.onBase(baseSha, repro, () =>
       this.runCheck('repro-base', repro.command),
     );
     if ('problem' in onBase) return { ok: false, ...onBase };
     checks.push(onBase);
+    // It shows the problem by failing: the panel passes when the test fails by itself.
+    this.panel(
+      testsPanel('repro-base', 'Reproduction test without the change', onBase, {
+        expect: 'fail',
+        counts: false,
+      }),
+    );
     if (onBase.exitCode === 0) {
       return {
         ok: false,
@@ -1924,6 +1973,18 @@ class CodingRun implements RunHandle {
   private progress(note: string): void {
     if (this.ended) return;
     this.events.push({ type: 'progress', note: clipText(note, MAX_NOTE_CHARS) });
+  }
+
+  /** The line a viewer shows for what the task is doing now. Fixed text: no model writes it. */
+  private narrate(line: string): void {
+    if (this.ended) return;
+    this.events.push({ type: 'narration', line });
+  }
+
+  /** A panel of the task's work, built by `panels.ts` from a check, the change or the review. */
+  private panel(panel: TaskPanel): void {
+    if (this.ended) return;
+    this.events.push({ type: 'panel', ...panel });
   }
 
   /** A failing step is reported and the cleanup goes on; one that `stops` something also fails `cancel`. */
