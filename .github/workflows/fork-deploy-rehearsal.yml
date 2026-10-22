@@ -31,6 +31,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # A coding task's checks run in a new user and PID namespace (unshare). Ubuntu 24.04 refuses
+      # that to unprivileged users by default (AppArmor), whatever the container's own profile says,
+      # and a real box on 24.04 has to allow it the same way (docs/fork/deploy.md, "The agent account").
+      - name: Allow unprivileged user namespaces, as the sandbox box must
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Build the images and bring the stack up behind Caddy
         run: |
           export MAKA_REHEARSAL_DIR="$RUNNER_TEMP/rehearsal"
