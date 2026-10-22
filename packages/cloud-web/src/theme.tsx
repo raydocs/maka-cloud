@@ -9,21 +9,21 @@ const STORAGE_KEY = 'maka.theme';
 const makaTheme = defineTheme({
   name: 'maka',
   tokens: {
-    '--color-accent': ['#245bbb', '#8db8ff'],
-    '--color-on-accent': ['#ffffff', '#0b1730'],
-    '--color-text-accent': ['#245bbb', '#8db8ff'],
+    '--color-accent': ['#3043c4', '#a3b1ff'],
+    '--color-on-accent': ['#ffffff', '#0d1322'],
+    '--color-text-accent': ['#3043c4', '#a3b1ff'],
   },
   components: {
-    button: { base: { borderRadius: '9999px', fontWeight: '600' } },
+    button: { base: { borderRadius: '9999px', fontWeight: '500' } },
   },
 });
 
-/** Dark is the default; a stored choice wins. Storage can be missing or throw (private windows). */
+/** Light is the default; a stored choice wins. Storage can be missing or throw (private windows). */
 export function readMode(): Mode {
   try {
-    return globalThis.localStorage?.getItem(STORAGE_KEY) === 'light' ? 'light' : 'dark';
+    return globalThis.localStorage?.getItem(STORAGE_KEY) === 'dark' ? 'dark' : 'light';
   } catch {
-    return 'dark';
+    return 'light';
   }
 }
 
@@ -36,7 +36,7 @@ function saveMode(mode: Mode) {
 }
 
 const ModeContext = createContext<{ mode: Mode; setMode: (mode: Mode) => void }>({
-  mode: 'dark',
+  mode: 'light',
   setMode: () => {},
 });
 
