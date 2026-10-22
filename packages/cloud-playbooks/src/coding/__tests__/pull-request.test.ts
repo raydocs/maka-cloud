@@ -8,7 +8,7 @@ import { setKnownSecrets } from '@maka-cloud/orchestrator';
 import { type ChangeSet, JsonFileCodingDeliveries, MemoryCodingDeliveries } from '../deliveries.js';
 import { GitHubPublisher, githubTokenProblem, type PullRequestPublisher } from '../github.js';
 import { openPullRequestTool, pullRequestBody } from '../pull-request.js';
-import { clipText, scrubbedTail } from '../runner.js';
+import { clipText, cloneFailure, scrubbedTail } from '../runner.js';
 import { FakeGitHub } from './fake-github.js';
 
 const TOKEN = 'github_pat_11ABCDEFG_secretsecretsecret';
@@ -579,6 +579,18 @@ test('a cut output with no line break shows none of it, however long the key the
   assert.equal(scrubbedTail('one line, not cut', 100), 'one line, not cut');
   // Cut at a line break: what follows it stays.
   assert.equal(scrubbedTail('ken-tail\nnext line', 100, true), 'next line');
+});
+
+test('a fetch error the sandbox cut is judged cut before its trailing spaces are trimmed', () => {
+  // 2512 bytes of git's error, the scheme's B cut off, eight spaces and a line break at the end.
+  const tail = `earer ${'c'.repeat(2497)}        \n`;
+  assert.equal(Buffer.byteLength(tail), 2512);
+  assert.equal(cloneFailure(`CLONE_FAILED\n${tail}`), '');
+  // A short error is shown as it is.
+  assert.equal(
+    cloneFailure('CLONE_FAILED\nfatal: repository not found\n'),
+    'fatal: repository not found',
+  );
 });
 
 test('a later run of the conversation opens a change kept by an earlier run, but no other task it did not delegate', async (t) => {

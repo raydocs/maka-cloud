@@ -333,6 +333,16 @@ export function scrubbedTail(text: string, max: number, cut = false): string {
 /** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
 const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
 
+/**
+ * What CLONE_SCRIPT says of a failed fetch (\`CLONE_FAILED\`, then the last 2512 bytes of git's
+ * error), scrubbed and cut to 500 characters. Whether the sandbox cut it is judged on the bytes as
+ * they came, before any space is trimmed: trimmed first, a cut one could pass as whole.
+ */
+export function cloneFailure(out: string): string {
+  const tail = out.replace(/^CLONE_FAILED\n?/u, '');
+  return scrubbedTail(tail, 500, wasCut(tail, 2512)).trim();
+}
+
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
   const shown = scrubSecretText(text);
@@ -1743,9 +1753,9 @@ class CodingRun implements RunHandle {
     const out = (await this.exec(CLONE_SCRIPT, { MAKA_REPO_URL: url, MAKA_REF: ref }, 600)).stdout;
     const base = /^BASE ([0-9a-f]{40})$/mu.exec(out);
     if (!base) {
-      const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
+      const detail = cloneFailure(out);
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${detail}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
