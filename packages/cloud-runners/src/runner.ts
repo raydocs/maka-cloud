@@ -266,6 +266,8 @@ class Run implements RunHandle {
   /** Every CLI run this object started, which are the only ones its cleanup may stop. */
   private readonly runNames: string[] = [];
   private stopWatch: (() => void) | undefined;
+  /** Set once the CLIs of `spec.prepareRunners` have been started. */
+  private preparedLater = false;
   private renewTimer: NodeJS.Timeout | undefined;
   private renewing: Promise<void> | undefined;
   private cleanupPromise: Promise<void> | undefined;
@@ -501,10 +503,6 @@ class Run implements RunHandle {
       await this.guard(fleet.ensureCli(machine, vendor));
       await this.guard(fleet.ensureTools(machine));
       this.checkCancelled();
-      // The CLIs a later run of this task needs (its reviewer) install while this one works.
-      for (const name of spec.prepareRunners ?? []) {
-        if (name !== vendor.name) fleet.prepareCli(machine, name);
-      }
 
       const dir = machine.taskDir(spec.taskId);
       const resumed = this.resumePrompt !== undefined;
@@ -939,8 +937,8 @@ class Run implements RunHandle {
         ? { MAKA_SEARCH_URL: access.searchUrl, MAKA_SEARCH_TOKEN: access.apiKey }
         : {}),
     };
-    const launchRun = (task: RunProgram, extraEnvs: Record<string, string> = {}) =>
-      machine.launch({
+    const launchRun = async (task: RunProgram, extraEnvs: Record<string, string> = {}) => {
+      const launched = await machine.launch({
         dirName: spec.taskId,
         run,
         ...task,
@@ -949,6 +947,9 @@ class Run implements RunHandle {
         workdir: `${dir}/workspace`,
         signal: this.signal,
       });
+      if (launched !== 'cancelled') this.prepareLater(machine);
+      return launched;
+    };
 
     const sdk = vendor.name === 'claude-agent-sdk' ? fleet.options.agentSdk : undefined;
     // Whatever the CLI is, it runs the agent's code: as an account of its own, never the sandbox
@@ -1620,6 +1621,19 @@ class Run implements RunHandle {
       return this.scrubForReader(errorMessage(error));
     }
     return undefined;
+  }
+
+  /**
+   * Once this run's CLI is going, the CLIs a later run of the task needs (its reviewer) start to
+   * install beside it, so nothing this run does before its launch shares their checks of the box.
+   * Once per run; a failure is not this run's (see `Fleet.prepareCli`).
+   */
+  private prepareLater(machine: RemoteMachine): void {
+    if (this.preparedLater) return;
+    this.preparedLater = true;
+    for (const name of this.spec.prepareRunners ?? []) {
+      if (name !== this.vendor.name) this.fleet.prepareCli(machine, name);
+    }
   }
 
   private fail(reason: string): void {

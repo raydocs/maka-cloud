@@ -12,10 +12,10 @@ async function until(check: () => Promise<boolean>, what: string): Promise<void>
   throw new Error(`timed out waiting for ${what}`);
 }
 
-// The machine's own interval stays slow (2 s); the CLI's run is watched with a backoff that starts
-// at 150 ms, so the end of a short quiet spell is seen well before the next 2 s tick.
-test('a CLI run that ends after a short quiet spell is noticed well under the 2 s poll', async (t) => {
-  const h = await setup({ cloud: { pollIntervalMs: 2_000 } });
+// The machine's own interval is slow (10 s here, 2 s by default); the CLI's run is watched with a
+// backoff that starts at 150 ms and grows to 1 s, so its end is seen long before the next slow tick.
+test('a CLI run that ends after a short quiet spell is noticed long before the slow machine poll', async (t) => {
+  const h = await setup({ cloud: { pollIntervalMs: 10_000 } });
   t.after(() => h.cleanup());
   await h.setMode('wait');
   const handle = await h.runners.claude.start(await h.spec('tsk_poll_fast'));
@@ -35,5 +35,5 @@ test('a CLI run that ends after a short quiet spell is noticed well under the 2 
   await fs.writeFile(join(ctl, 'go'), '');
   assert.equal(terminal(await events)?.type, 'finished');
   const noticed = Date.now() - go;
-  assert.ok(noticed < 1_200, `the end was noticed ${noticed} ms after the CLI was let go`);
+  assert.ok(noticed < 4_000, `the end was noticed ${noticed} ms after the CLI was let go`);
 });
