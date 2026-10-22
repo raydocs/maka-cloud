@@ -169,6 +169,8 @@ const CHECK_EXEC_SLACK_SECONDS = 30;
  * whether timeout sent it or the command answered TERM by killing itself. Either way the command
  * ran for the whole limit, so `ranMs` is how long the check ran inside the box (`RAN_MS` from
  * `CHECK_SCRIPT`, without the box's exec and setup). A command that killed itself early ran for less.
+ * `ranMs` includes the namespace's start, so a start as long as the limit would make an early exit a
+ * timeout; that errs the safe way, since a timeout never counts as a test failing.
  */
 export function checkTimedOut(exitCode: number, ranMs: number, timeoutSeconds: number): boolean {
   return (exitCode === 124 || exitCode === 137) && ranMs >= timeoutSeconds * 1000;
