@@ -263,6 +263,44 @@ const SCHEMA_V11 = `
 ALTER TABLE message_meta ADD COLUMN mode TEXT;
 `;
 
+/**
+ * v12 (T28, Hark pattern 4): what the server keeps of an owner's Home. The visit is when the owner
+ * last left Home (what finished since is new); a card's seen time and the owner's own order are per
+ * owner and per card; notes are the employee's one-fact cards, kept as a template and typed
+ * parameters, never as text.
+ */
+const SCHEMA_V12 = `
+CREATE TABLE home_visits (
+  owner TEXT PRIMARY KEY,
+  visited_at INTEGER NOT NULL
+);
+
+CREATE TABLE home_seen (
+  owner TEXT NOT NULL,
+  card_id TEXT NOT NULL,
+  seen_at INTEGER NOT NULL,
+  PRIMARY KEY (owner, card_id)
+);
+
+CREATE TABLE home_order (
+  owner TEXT NOT NULL,
+  card_id TEXT NOT NULL,
+  pos INTEGER NOT NULL,
+  PRIMARY KEY (owner, card_id)
+);
+
+CREATE TABLE home_notes (
+  note_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  dedupe TEXT NOT NULL,
+  template TEXT NOT NULL,
+  params TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (owner, dedupe)
+);
+CREATE INDEX home_notes_owner ON home_notes (owner, created_at);
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -275,6 +313,7 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V9,
   SCHEMA_V10,
   SCHEMA_V11,
+  SCHEMA_V12,
 ];
 
 /**
