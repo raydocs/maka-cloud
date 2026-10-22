@@ -160,7 +160,11 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # adb's mDNS discovery aborts on a malformed service name from the local network (seen on
+      # the owner's Mac); the emulator is reached over TCP, so discovery is not needed.
       - name: Run the flows on an Android emulator
+        env:
+          ADB_MDNS: '0'
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: 34
