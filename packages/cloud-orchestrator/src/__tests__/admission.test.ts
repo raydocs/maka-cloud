@@ -300,6 +300,11 @@ test('trees that were all running before a restart resume one at a time when the
   await eventually(() => after.h.fake.recoveries.length === 1, 'one resumed');
   assert.equal(after.h.fake.recoveries[0]?.taskId, one.taskId);
   assert.equal(after.h.orchestrator.stats().heldTasks, 1);
+  // It still reads as running (its log says so), and says why nothing of it moves.
+  await eventually(
+    () => isHoldNote(after.h.orchestrator.status(c, two.taskId).progress.at(-1)),
+    'the hold note on the held tree',
+  );
 
   await after.h.fake.runFor(one.taskId).complete();
   await eventually(() => after.h.fake.recoveries.length === 2, 'the other resumed');

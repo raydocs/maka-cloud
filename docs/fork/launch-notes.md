@@ -22,7 +22,8 @@ it waits as `queued`, says "One task runs at a time on this workspace for now. T
 <title> finishes.", and starts when the running tree has ended and nothing of it can still be running.
 Tasks the running task delegates belong to its tree and start at once. A restart keeps the line: a
 task that was waiting waits again (nothing of it is stopped or resumed), and trees that were running
-beyond the limit (a lowered setting, or the first start of this version) resume one at a time. The
+beyond the limit (a lowered setting, or the first start of this version) resume one at a time; such a
+tree still reads as running while it waits (with the same note) and cannot be paused until it resumes. The
 start-up summary says
 `tasks at once:       1 per invite; the next one waits its turn`.
 

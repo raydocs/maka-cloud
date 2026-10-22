@@ -795,11 +795,7 @@ export class Orchestrator {
     try {
       await this.record({ type: 'task_progress', taskId, note }, () => {
         const task = this.tasks.get(taskId);
-        if (
-          !this.heldIds.has(taskId) ||
-          task?.state !== 'queued' ||
-          task.progress.at(-1) === note
-        ) {
+        if (!this.heldIds.has(taskId) || task === undefined || task.progress.at(-1) === note) {
           throw new Superseded();
         }
       });
