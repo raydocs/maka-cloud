@@ -32,6 +32,7 @@ import {
   PublicApi,
   type TimelineLimits,
 } from './http.js';
+import { HomeRoutes, HomeStore } from './home.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { AccountStore } from './accounts.js';
 import { type AuthLimits, AuthRoutes } from './auth-routes.js';
@@ -327,6 +328,11 @@ export interface CloudServer {
   pushAlert(inviteId: string, key: string): Promise<boolean>;
   /** The ids of the conversations `inviteId` owns, oldest first. */
   conversationsOf(inviteId: string): string[];
+  /**
+   * Puts one fact on `owner`'s Home: a known template with typed parameters (`HomeNote`), never
+   * text. The same fact twice is one card; anything else is `invalid`.
+   */
+  addHomeNote(owner: string, note: unknown): 'added' | 'duplicate' | 'invalid';
   /**
    * Starts a conversation owned by `owner` with a first message that carries `meta`, for a
    * standing duty. Idempotent on `key`. The message is delivered at least once with its meta.
@@ -627,6 +633,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             removePush: (inviteId, endpoint) => push?.remove(inviteId, endpoint) ?? false,
           })
         : undefined;
+    const homeStore = new HomeStore(db);
     const api = new PublicApi({
       db,
       memory,
@@ -662,6 +669,12 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             ),
           }
         : {}),
+      home: new HomeRoutes(
+        homeStore,
+        { ...(inbox ? { inbox } : {}), ...(options.duties ? { duties: options.duties } : {}) },
+        new RateLimiter(limits.controlPerMinute),
+        { active: callerActive, conversationsOf: (inviteId) => conversations.idsOf(inviteId) },
+      ),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
@@ -768,6 +781,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         };
       },
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
+      addHomeNote: (owner, note) => homeStore.addNote(owner, note),
       close: () => {
         closing ??= shutdown();
         return closing;
