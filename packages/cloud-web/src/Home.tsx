@@ -12,12 +12,13 @@ import {
   nextRuns,
   recentConversations,
   relativeTime,
+  resultParts,
   splitSuggestions,
   type TaskView,
   verbOf,
   type VisitStore,
 } from '@maka-cloud/client';
-import { InboxCard } from './Inbox';
+import { InboxCard, ResultCard } from './Inbox';
 import { ModePicker } from './ModePicker';
 import { SuggestionCard } from './Suggestion';
 import { submitOnEnter } from './keys';
@@ -133,23 +134,39 @@ export function Home({
       {open.length > 0 && (
         <section className="card section-card" aria-label="Decisions waiting">
           <h2>Waiting on you ({open.length})</h2>
-          {open.map((item) => (
-            <div key={item.itemId} className="decision">
-              <span className="chip verb">{verbOf(item.kind)}</span>
-              <InboxCard
+          {open.map((item) => {
+            const parts = resultParts(item);
+            const task = done?.get(item.conversationId)?.find((t) => t.taskId === item.taskId);
+            return parts ? (
+              <ResultCard
+                key={item.itemId}
                 item={item}
+                parts={parts}
                 disabled={busy}
-                onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+                onAnswer={(optionId) => void feed.answer(item, optionId)}
+                onReview={() =>
+                  task && onOpenTask ? onOpenTask(task) : onOpen(item.conversationId)
+                }
               />
-              <button
-                type="button"
-                className="link-button"
-                onClick={() => onOpen(item.conversationId)}
-              >
-                Open “{titleOf(item.conversationId)}”
-              </button>
-            </div>
-          ))}
+            ) : (
+              <div key={item.itemId} className="decision">
+                <span className="chip verb">{verbOf(item.kind)}</span>
+                <InboxCard
+                  item={item}
+                  disabled={busy}
+                  onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+                />
+                <button
+                  type="button"
+                  className="quiet-action"
+                  aria-label={`Open “${titleOf(item.conversationId)}”`}
+                  onClick={() => onOpen(item.conversationId)}
+                >
+                  Open conversation
+                </button>
+              </div>
+            );
+          })}
           {answerError && (
             <p role="alert" className="error">
               {answerError}

@@ -6,6 +6,7 @@ import {
   type ArtifactContent,
   type ArtifactListing,
   BRAND,
+  pullRequestName,
   CloudClient,
   type Conversation,
   ConversationFeed,
@@ -236,12 +237,6 @@ function TaskBranch({
 }
 
 /** Where a result link points, said in the user's words; nothing here claims the result was checked. */
-/** "Pull request #42" for a GitHub pull request link, which would otherwise be named "github.com". */
-export function pullRequestName(url: string | undefined): string | undefined {
-  const number = url?.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)(?:[/?#]|$)/u)?.[1];
-  return number ? `Pull request #${number}` : undefined;
-}
-
 function artifactKind(listing: ArtifactListing, url: string | undefined): string {
   if (url && /\/pull\/\d+/u.test(url)) return 'Pull request';
   if (/\.(diff|patch)$/iu.test(listing.name)) return 'Changes';

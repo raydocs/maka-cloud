@@ -148,3 +148,38 @@ export function questionCardModel(question: Question, answered?: string) {
     firstOption: options[0]?.id ?? '',
   };
 }
+
+/** A finished task's card, read back into its parts: the supervisor writes it in one fixed shape. */
+export interface ResultParts {
+  title: string;
+  failed: boolean;
+  /** True or false when the supervisor said whether a second agent checked it; else undefined. */
+  checked: boolean | undefined;
+  detail: string;
+}
+
+const RESULT =
+  /^“([^”]*)” (finished|failed)(?: \((independently checked|not independently checked)\))?: “([^”]*)”$/su;
+
+/**
+ * The parts of a `finished` card's sentence, so a client can show the title, the outcome and the
+ * check as separate lines. Undefined when the sentence is not in that shape: show it as sent.
+ */
+export function resultParts(item: Pick<InboxItem, 'kind' | 'ask'>): ResultParts | undefined {
+  if (item.kind !== 'finished') return undefined;
+  const match = RESULT.exec(displayText(item.ask));
+  if (!match) return undefined;
+  const [, title = '', end, check, detail = ''] = match;
+  return {
+    title,
+    failed: end === 'failed',
+    checked: check === undefined ? undefined : check === 'independently checked',
+    detail,
+  };
+}
+
+/** "Pull request #42" for a GitHub pull request link, which would otherwise be named "github.com". */
+export function pullRequestName(url: string | undefined): string | undefined {
+  const number = url?.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)(?:[/?#]|$)/u)?.[1];
+  return number ? `Pull request #${number}` : undefined;
+}

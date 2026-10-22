@@ -27,8 +27,10 @@ test('Home leads with what waits on you, answers it once, and says what was done
   await openSection(page, 'Home');
   const waiting = page.getByRole('region', { name: 'Decisions waiting' });
   await expect(waiting.getByText('Waiting on you (1)')).toBeVisible({ timeout: 20_000 });
-  await expect(waiting.locator('.chip.verb')).toHaveText('Review');
+  // An action sentence: "[Review] Weekly report", the outcome, and whether it was checked.
+  await expect(waiting.getByRole('button', { name: 'Review: Weekly report' })).toHaveText('Review');
   expect(await waiting.getByRole('heading', { level: 3 }).innerText()).toContain('Weekly report');
+  await expect(waiting.getByText('The weekly report is ready. Sales are up.')).toBeVisible();
   // Decisions come before the start sentence.
   const order = await page
     .getByRole('region')

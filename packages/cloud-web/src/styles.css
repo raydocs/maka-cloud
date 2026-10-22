@@ -589,6 +589,66 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* A finished task on Home: "[Review] the title", the outcome, then small facts and chips. */
+.result-card {
+  padding: 16px;
+  border-radius: var(--radius-small);
+  background: var(--chip);
+  display: grid;
+  gap: 8px;
+}
+.result-card .action-sentence {
+  font-size: var(--t-md);
+  font-weight: var(--w-medium);
+  overflow-wrap: anywhere;
+}
+.result-card > p {
+  overflow-wrap: anywhere;
+}
+.result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: var(--t-sm);
+  color: var(--ink-muted);
+}
+.result-meta .checked::before,
+.result-meta .unchecked::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--warn);
+}
+.result-meta .checked::before {
+  background: var(--ok);
+}
+.evidence-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--card-edge);
+  background: var(--card-strong);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+a.evidence-chip:hover {
+  background: var(--pill-on);
+  color: var(--on-pill-on);
+}
+.decision > .quiet-action {
+  justify-self: start;
+  padding-left: 0;
+}
+
 /* Decisions */
 .question {
   padding: 16px;
