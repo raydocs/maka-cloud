@@ -8,6 +8,10 @@
  * beyond what is on the command line and the working tree as the only thing it reads from the
  * agent. A filter, a hook or a textconv named in the agent's `.git/config` or `.gitattributes` has
  * no definition there and so nothing to run.
+ *
+ * Two scripts run as the agent's account instead, through `execCheck`: `BASE_REVERT_SCRIPT` and
+ * `BASE_RESTORE_SCRIPT` edit the workspace, and the sandbox user must never write through a path
+ * there (see `BASE_STAGE_SCRIPT`).
  */
 
 const GIT_FN = String.raw`
@@ -46,7 +50,7 @@ cg="$MAKA_DIR/control.git"
 rm -rf -- "$tmp" "$MAKA_DIR/control.git.clone"
 # A base check a closed process left half-way: its copy of the change belongs to the tree this
 # clone replaces, and must not be put over the new one.
-rm -rf -- "$MAKA_DIR/base-check"
+rm -rf -- "$MAKA_DIR/base-check" "$MAKA_DIR/base-stage"
 mkdir "$tmp" && cd "$tmp" || exit 1
 g init -q
 if ! g fetch -q --depth=1 --no-tags "$MAKA_REPO_URL" "$MAKA_REF" > "$MAKA_DIR/clone.err" 2>&1; then
@@ -99,7 +103,8 @@ export function checkAttemptMark(attempt: number | undefined): string {
  * isolated, and the script exits 125 with a \`maka-check:\` line on stderr (which the check cannot
  * write to). \`timeout\` ends the command after \`$MAKA_TIMEOUT\` seconds (TERM, then KILL 5 s
  * later); an outer one ends the namespace 10 s after that. Prints the last \`$MAKA_TAIL\` bytes of
- * the output on stdout and \`BYTES <output bytes>\` on stderr. \`$MAKA_CHECK_TAG\` is an argument
+ * the output on stdout, and \`BYTES <output bytes>\` and \`PERMS <lines>\` (the lines that match
+ * \`$MAKA_PERMISSION_ERROR\`, over the whole output) on stderr. \`$MAKA_CHECK_TAG\` is an argument
  * of the processes outside the namespace and of its first process, so CHECK_STOP_SCRIPT finds them.
  */
 export const CHECK_SCRIPT = `set -u
@@ -112,13 +117,19 @@ timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
   unshare --user --map-current-user --pid --fork --kill-child -- \\
   bash -c ': > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
   "$MAKA_CHECK_TAG" "$mark" "$MAKA_CMD" "$MAKA_TIMEOUT" < /dev/null 2>&1 |
-  { tee >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
+  { tee >(fold -b -w 65536 | LC_ALL=C grep -ciE -e "$MAKA_PERMISSION_ERROR" > "$mark/perms.part"; [ "\${PIPESTATUS[1]}" -le 1 ] && mv -f -- "$mark/perms.part" "$mark/perms") \\
+    >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
 rc=\${PIPESTATUS[0]}
 isolated=0
 [ -e "$mark/started" ] && isolated=1
 t1=\${EPOCHREALTIME:-}
 # Microseconds on both clocks; without EPOCHREALTIME (bash before 5) nothing is reported.
 [ -n "$t0" ] && [ -n "$t1" ] && echo "RAN_MS $(( (10#\${t1//[^0-9]/} - 10#\${t0//[^0-9]/}) / 1000 ))" >&2
+# The count of lines with a permission error, over the whole output and not only its tail, in lines
+# of at most 64 KiB so the count takes no more memory than that; none when grep failed.
+i=0
+while [ ! -e "$mark/perms" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$mark/perms" ] && echo "PERMS $(cat -- "$mark/perms")" >&2
 rm -rf -- "$mark"
 if [ "$isolated" = 0 ]; then
   echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed: the box must allow unprivileged user namespaces, which a container profile such as the Docker default seccomp refuses; no check can run until it does)' >&2
@@ -251,20 +262,6 @@ ${NO_NESTED_REPO}g status --porcelain=v1 --ignore-submodules=all -z --untracked-
   done | head -n "$MAKA_MAX_FILES"
 `;
 
-/**
- * `inside <path>` succeeds when the directory holding `<path>` resolves, symlinks followed, to
- * somewhere in the real workspace (`$wsreal`). The agent can swap a directory for a symlink, and a
- * script running as the sandbox user must not remove or write through it.
- */
-const INSIDE_FN = String.raw`
-inside() {
-  local d
-  d=$(realpath -m -- "$(dirname -- "$1")") || return 1
-  case "$d/" in "$wsreal"/*) return 0 ;; esac
-  return 1
-}
-`;
-
 /** Lists, NUL-separated, every path that differs from the base commit (untracked included, ignored not). */
 const CHANGED_PATHS_FN = String.raw`
 changed_paths() {
@@ -279,93 +276,189 @@ changed_paths() {
 }
 `;
 
+const UNDER_LINK_FN = `
+# Whether a directory above the workspace path \$2 is a link: a removal or a write under it would
+# follow the link out of the workspace (a kept path, or one the test put there).
+under_link() {
+  # Cut with the shell, not \$(dirname): a command substitution drops the newlines a name ends with.
+  local d="$2"
+  while :; do
+    case "$d" in */*) d="\${d%/*}" ;; *) return 1 ;; esac
+    [ -L "$1/$d" ] && return 0
+  done
+}
+`;
+
 /**
- * Puts the base commit's version of every changed file back, except the files in
- * \`$MAKA_KEEP\` (newline-separated: the reproduction test), keeping a copy of each so
- * \`BASE_RESTORE_SCRIPT\` can put the change back. A leftover of an interrupted check is
- * restored first. Prints \`REVERTED <count>\`.
+ * Puts the agent's copy of every reverted file back (the part of a base check that edits the
+ * workspace, so it runs as the agent: see \`BASE_REVERT_SCRIPT\`). A leftover of an interrupted
+ * check is put back by the same function. The backup directory itself belongs to the sandbox user,
+ * who made it: only what is in it is emptied.
  */
-const RESTORE_FN = `${INSIDE_FN}
+const RESTORE_FN = `
+${UNDER_LINK_FN}
 restore() {
+  [ -L "$bk" ] && return 1
   [ -d "$bk" ] || return 0
   if [ -f "$bk/reverted" ]; then
     local p
     while IFS= read -r -d '' p; do
-      inside "$ws/$p" || return 1
+      under_link "$ws" "$p" && return 1
       rm -rf -- "$ws/$p"
     done < "$bk/reverted"
-    # One file at a time: a copy of the whole backup tree would put the backup's own directories
-    # (private to the sandbox user) over the workspace's, and the agent could not enter them.
     local f rel
     while IFS= read -r -d '' f; do
       rel="\${f#"$bk/files/"}"
-      inside "$ws/$rel" || return 1
+      under_link "$ws" "$rel" && return 1
       mkdir -p -- "$(dirname -- "$ws/$rel")" && cp -a --remove-destination -- "$f" "$ws/$rel" || return 1
       # The backup kept the file's own mode; the agent writes the file as it did before the check.
       [ -L "$ws/$rel" ] || chmod g+rw -- "$ws/$rel" || return 1
     done < <(find "$bk/files" -mindepth 1 ! -type d -print0)
   fi
-  rm -rf -- "$bk"
+  find "$bk" -mindepth 1 -delete
 }
 `;
 
-export const BASE_REVERT_SCRIPT = `set -u
-# What is put back is the agent's to read and write too (the directories hand their group down).
-umask 007
-${GIT_FN}${CHANGED_PATHS_FN}${RESTORE_FN}
+/**
+ * The sandbox user's part of the base check: works out what the base version of every changed file
+ * is, and hands it to the agent in \`$MAKA_DIR/base-stage\`. It runs as the sandbox user and so
+ * never reads or writes a path in the workspace: the agent can swap a workspace directory for a
+ * symlink at any moment (every task of a box shares one agent account), and no check of a path
+ * holds until the next use of it. What it reads of the workspace goes through git against
+ * \`control.git\`, which does not follow symlinked directories. The stage is made here, where the
+ * agent cannot write, and only read: the list of paths (\`paths\`), their base modes (\`modes\`,
+ * \`-\` for a path with no file or link in the base) and the base content of each as \`blobs/<n>\`
+ * (n counts from 0), never a tree shaped like the paths. The backup directory \`base-check\` is made
+ * here too, for the agent to write into. Files in \`$MAKA_KEEP\` (newline-separated: the
+ * reproduction test) are left out. Prints \`STAGED <count>\`.
+ */
+export const BASE_STAGE_SCRIPT = `set -u
+umask 027
+${GIT_FN}${CHANGED_PATHS_FN}
 ${NEED_CONTROL}${NO_NESTED_REPO}ws="$MAKA_DIR/workspace"
-wsreal=$(realpath -- "$ws") || exit 1
+st="$MAKA_DIR/base-stage"
 bk="$MAKA_DIR/base-check"
+nl=$'\\n'
+keep="$nl\${MAKA_KEEP:-}$nl"
+kept() {
+  case "$1" in *"$nl"*) return 1 ;; esac
+  case "$keep" in *"$nl$1$nl"*) return 0 ;; esac
+  return 1
+}
+[ ! -L "$bk" ] || { echo "ERR base-check is a link"; exit 0; }
 cd "$ws" || exit 1
-restore || { echo RESTORE_FAILED; exit 0; }
+rm -rf -- "$st"
+mkdir -p "$st/blobs" || exit 1
+changed_paths > "$st/all" || { echo LIST_FAILED; exit 0; }
+: > "$st/paths"
+: > "$st/modes"
+n=0
+while IFS= read -r -d '' p; do
+  kept "$p" && continue
+  mode=$(g ls-tree "$MAKA_BASE" -- "$p" | cut -d' ' -f1)
+  printf '%s\\0' "$p" >> "$st/paths"
+  # Only a file or a link has a base version to put back (a directory's files are listed on their own).
+  case "$mode" in
+    100644|100755|120000)
+      g cat-file blob "$MAKA_BASE:$p" > "$st/blobs/$n" || { echo STAGE_FAILED; exit 0; }
+      printf '%s\\0' "$mode" >> "$st/modes" ;;
+    *) printf '%s\\0' - >> "$st/modes" ;;
+  esac
+  n=$((n + 1))
+done < "$st/all"
+rm -f -- "$st/all"
+# A test that cannot read a file of the checkout fails with an ordinary exit status, which would be
+# taken for "the test fails on the base": refuse the base check when a file of the sandbox user's
+# making is not the agent group's to read (the agent's own files are its own). find does not
+# follow links.
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  bad=$(find "$ws" -xdev ! -type l -user "$(id -u)" \\( ! -group "$MAKA_AGENT_GROUP" -o \\( -type d ! -perm -g+rx \\) -o \\( ! -type d ! -perm -g+r \\) \\) -print -quit)
+  [ -z "$bad" ] || { printf 'UNREADABLE_FOR_AGENT %q\\n' "$bad"; exit 0; }
+fi
+# The agent reads the stage and writes the backup; the stage is not the agent's to change.
+mkdir -p -- "$bk" || exit 1
+if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
+  chgrp -R -- "$MAKA_AGENT_GROUP" "$st" && chgrp -- "$MAKA_AGENT_GROUP" "$bk" || exit 1
+fi
+chmod 2750 "$st" "$st/blobs" && chmod 2770 "$bk" || exit 1
+echo "STAGED $n"
+`;
+
+/**
+ * The agent's part of the base check: runs as the agent's account (\`execCheck\`) because it edits
+ * the agent's workspace, where a sandbox-user write could be sent through a symlink the agent put
+ * there. Backs up every staged path into \`base-check\`, then removes it and puts the staged base
+ * version in its place. A leftover of an interrupted check must be put back (\`BASE_RESTORE_SCRIPT\`)
+ * before the stage is made, since the stage lists what differs from the base. Prints
+ * \`REVERTED <count>\`.
+ */
+export const BASE_REVERT_SCRIPT = `set -u
+${UNDER_LINK_FN}
+# What is put back is the agent's own; the sandbox user is in its group and reads and removes it.
+umask 007
+ws="$MAKA_DIR/workspace"
+bk="$MAKA_DIR/base-check"
+st="$MAKA_DIR/base-stage"
+cd "$ws" || exit 1
+[ -d "$bk" ] && [ ! -L "$bk" ] && [ ! -e "$bk/reverted" ] || { echo RESTORE_FAILED; exit 0; }
+[ -f "$st/paths" ] && [ -f "$st/modes" ] || { echo LIST_FAILED; exit 0; }
 mkdir -p "$bk/files" || exit 1
-declare -A keep
-while IFS= read -r k; do [ -n "$k" ] && keep["$k"]=1; done <<< "$MAKA_KEEP"
-changed_paths > "$bk/paths" || { echo LIST_FAILED; exit 0; }
-: > "$bk/reverted.tmp"
+: > "$bk/reverted.tmp" || exit 1
 count=0
 while IFS= read -r -d '' p; do
-  [ -n "\${keep[$p]:-}" ] && continue
-  inside "$ws/$p" || { echo "UNSAFE_PATH $p"; exit 0; }
+  case "/$p/" in //*|*/../*|*/./*) printf 'UNSAFE_PATH %q\\n' "$p"; exit 0 ;; esac
+  under_link "$ws" "$p" && { printf 'UNSAFE_PATH %q\\n' "$p"; exit 0; }
   if [ -e "$p" ] || [ -L "$p" ]; then
     mkdir -p "$bk/files/$(dirname -- "$p")" && cp -a -- "$p" "$bk/files/$p" || exit 1
   fi
   printf '%s\\0' "$p" >> "$bk/reverted.tmp"
   count=$((count + 1))
-done < "$bk/paths"
-mv "$bk/reverted.tmp" "$bk/reverted"
-while IFS= read -r -d '' p; do
-  # An earlier path of this loop can have put a symlink where a directory of this one was.
-  inside "$ws/$p" || { echo "UNSAFE_PATH $p"; exit 0; }
-  rm -rf -- "$p"
-  mode=$(g ls-tree "$MAKA_BASE" -- "$p" | cut -d' ' -f1)
-  # Only a file or a link has a base version to put back (a directory's files are listed on their own).
+done < "$st/paths"
+mv "$bk/reverted.tmp" "$bk/reverted" || exit 1
+# Everything goes first, and only then is the base put in: a link of the base put back before a path
+# under it is removed would have that removal follow the link out of the workspace.
+while IFS= read -r -d '' p; do rm -rf -- "$p"; done < "$st/paths"
+n=0
+exec 3< "$st/paths" 4< "$st/modes"
+while IFS= read -r -d '' p <&3 && IFS= read -r -d '' mode <&4; do
+  i=$n
+  n=$((n + 1))
   case "$mode" in 100644|100755|120000) ;; *) continue ;; esac
   mkdir -p "$(dirname -- "$p")"
-  if [ "$mode" = 120000 ]; then ln -s "$(g cat-file blob "$MAKA_BASE:$p")" "$p"
+  if [ "$mode" = 120000 ]; then ln -s -- "$(cat -- "$st/blobs/$i")" "$p" || exit 1
   else
-    g cat-file blob "$MAKA_BASE:$p" > "$p" || exit 1
+    cat -- "$st/blobs/$i" > "$p" || exit 1
     [ "$mode" = 100755 ] && chmod +x "$p"
   fi
-done < "$bk/reverted"
-# A test that cannot read a file of the checkout fails with an ordinary exit status, which would be
-# taken for "the test fails on the base": refuse the base check when a file of the sandbox user's
-# making is not the agent group's to read (the agent's own files are its own).
-if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then
-  bad=$(find "$ws" -xdev ! -type l -user "$(id -u)" \\( ! -group "$MAKA_AGENT_GROUP" -o \\( -type d ! -perm -g+rx \\) -o \\( ! -type d ! -perm -g+r \\) \\) -print -quit)
-  [ -z "$bad" ] || { echo "UNREADABLE_FOR_AGENT $bad"; exit 0; }
-fi
+done
+# A link put back must lead inside the workspace, or nowhere: through one that leads out, or past a
+# directory the agent cannot search, the test meets a permission error, an ordinary exit status that
+# would be taken for "the test fails on the base". Resolved as the agent, after every link is back.
+wsr=$(pwd -P) || exit 1
+exec 3< "$st/paths" 4< "$st/modes"
+while IFS= read -r -d '' p <&3 && IFS= read -r -d '' mode <&4; do
+  [ "$mode" = 120000 ] || continue
+  if to=$(LC_ALL=C realpath -e -- "$p" 2>&1); then
+    case "$to/" in "$wsr"/*) continue ;; esac
+  else
+    case "$to" in *": No such file or directory"|*": Not a directory") continue ;; esac
+  fi
+  printf 'LINK_LEADS_OUT %q\\n' "$p"
+  exit 0
+done
 echo "REVERTED $count"
 `;
 
-/** Puts the change back after a base check. Idempotent. Prints RESTORED. */
+/**
+ * Puts the change back after a base check. Idempotent. Prints RESTORED. It moves the agent's own
+ * backup into the agent's workspace, so it runs as the agent's account (\`execCheck\`), like the revert.
+ */
 export const BASE_RESTORE_SCRIPT = `set -u
 umask 007
 ${RESTORE_FN}
 ws="$MAKA_DIR/workspace"
 bk="$MAKA_DIR/base-check"
 [ -d "$ws" ] || { echo RESTORED; exit 0; }
-wsreal=$(realpath -- "$ws") || exit 1
 restore && echo RESTORED || echo RESTORE_FAILED
 `;
 

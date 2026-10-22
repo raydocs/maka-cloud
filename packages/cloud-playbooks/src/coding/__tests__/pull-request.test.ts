@@ -332,10 +332,13 @@ test('end to end against the fake GitHub: the body comes from the verification r
   };
   assert.equal(result.url, `https://github.com/${REPO}/pull/1`);
   assert.equal(fake.pulls[0]?.body, pullRequestBody(VERIFICATION));
-  assert.match(fake.pulls[0]?.body ?? '', /`bash tests\/run.sh` passed/);
   assert.match(
     fake.pulls[0]?.body ?? '',
-    /failed on the base commit aaaaaaaaaaaa with the rest of this change reverted, and passes with it/,
+    /\| Repository tests `bash tests\/run\.sh` \| ✅ Passed \|/,
+  );
+  assert.match(
+    fake.pulls[0]?.body ?? '',
+    /✅ Failed on the base commit `aaaaaaaaaaaa` with the rest of this change reverted, and passes with it/,
   );
 });
 
@@ -631,6 +634,78 @@ test('a later run of the conversation opens a change kept by an earlier run, but
     /not_your_task/,
   );
   assert.equal(second.pulls.length, 0);
+});
+
+test('the proof table: cost and the run link when the host gives them, a different vendor named only when true, and no cell broken by a pipe', () => {
+  const body = pullRequestBody(
+    {
+      ...VERIFICATION,
+      testCommand: 'npm test | tee out.log',
+      review: { ...VERIFICATION.review, reviewer: 'codex' },
+    },
+    { costUsd: 1.4234, budgetUsd: 5, runUrl: 'https://maka.example/tasks/tsk_1' },
+  );
+  assert.match(body, /^### Proof$/mu);
+  assert.match(body, /\| Repository tests `npm test \\\| tee out\.log` \| ✅ Passed \|/u);
+  assert.match(body, /\| Cost \| \$1\.42 of a \$5\.00 budget \|/u);
+  assert.match(
+    body,
+    /\[The steps, the review and the log\]\(https:\/\/maka\.example\/tasks\/tsk_1\)/u,
+  );
+  assert.match(body, /no findings\*\* A different vendor wrote the change\./u);
+  // Every table row has exactly two cells.
+  for (const row of body
+    .split('\n')
+    .filter((line) => line.startsWith('| ') && !line.startsWith('| ---'))) {
+    assert.equal(row.replaceAll('\\|', '').split('|').length, 4, row);
+  }
+  // Same vendor, or no reviewer named: no claim about vendors.
+  const same = pullRequestBody({
+    ...VERIFICATION,
+    review: { ...VERIFICATION.review, reviewer: 'claude-agent-sdk' },
+  });
+  assert.ok(!same.includes('different vendor'), same);
+});
+
+test('the proof table leaves out a run link that is not plain https, and anything the host did not give', () => {
+  for (const runUrl of [
+    'javascript:alert(1)',
+    'http://maka.example/t',
+    'https://user:pw@maka.example/t',
+    'not a url',
+  ]) {
+    const body = pullRequestBody(VERIFICATION, { runUrl });
+    assert.ok(!body.includes('| Run |'), runUrl);
+  }
+  const bare = pullRequestBody(VERIFICATION);
+  assert.ok(!bare.includes('| Cost |'));
+  assert.ok(!bare.includes('| Run |'));
+  const unreviewed = pullRequestBody({ ...VERIFICATION, review: undefined });
+  assert.match(unreviewed, /\| Independent review \| ❌ Not reviewed \|/u);
+  const fixed = pullRequestBody({
+    ...VERIFICATION,
+    review: {
+      ...VERIFICATION.review,
+      fix: { rounds: 2, sent: 3, result: 'applied' as const, history: [] },
+    },
+  });
+  assert.match(fixed, /\| Fix after review \| ✅ 3 finding\(s\) sent back over 2 fix round\(s\);/u);
+  const unfinished = pullRequestBody({
+    ...VERIFICATION,
+    review: {
+      ...VERIFICATION.review,
+      fix: {
+        rounds: 1,
+        sent: 1,
+        result: 'applied' as const,
+        history: [{ sent: 1, result: 'not_reviewed' as const }],
+      },
+    },
+  });
+  assert.match(
+    unfinished,
+    /\| Fix after review \| ⚠️ 1 finding\(s\) .*its review did not finish \|/u,
+  );
 });
 
 test('a scoped approval may cover this tool only for the repository its card names, and never for a kept, unreviewed, unknown or modified change', async (t) => {

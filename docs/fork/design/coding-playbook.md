@@ -161,9 +161,11 @@ Decided by win (2026-10-19):
   a filter, textconv, hook or fsmonitor the agent configures has nothing to run. A workspace without it is refused, and
   so is one with a repository inside it (a `.git` below the top, such as a populated submodule): git would run a child
   git there with the agent's configuration, so the changes, the sample and the base check print `ERR nested repository`
-  and the owner sees a progress note. Submodules are never followed in status or diff. The base check and its restore
-  put files back only through directories that resolve inside the workspace (the agent can swap a directory for a
-  symlink), and a restored file is group-writable so the agent can edit it as before.
+  and the owner sees a progress note. Submodules are never followed in status or diff. The base check is split by
+  account: the sandbox user only reads (git against `control.git`) and stages the base version of every changed file
+  outside the workspace, and the revert and the restore edit the workspace as the agent's account, so a directory the
+  agent swaps for a symlink is never written through by the sandbox user. A restored file is group-writable so the
+  agent can edit it as before.
   Delivered contents are what git would commit from the working
   tree and are hash-checked in transit; the tree is built on GitHub's own base tree, and the repository's CI runs on
   the pull request.
