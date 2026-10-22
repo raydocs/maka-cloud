@@ -118,7 +118,7 @@ which is T6's to arrange without giving it the root.
 ## Runners
 
 `Runner.start(spec)` returns a `RunHandle` with an `events` stream (`progress`,
-`finished`, `failed`) and `cancel()`. A stream that ends without `finished` or
+`narration`, `panel`, `finished`, `failed`) and `cancel()`. A stream that ends without `finished` or
 `failed` fails the task. Once a cancel is requested, whatever the runner does
 next is ignored. A handle that is still registered when its task ends (the
 stream broke or ended without a result, or the runner came up late) is
@@ -127,6 +127,28 @@ interrupt the rest of the cleanup; a runner that reported `finished` or
 `failed` is not cancelled. `FakeRunner` is scriptable for tests. `claudeAgentSdkRunner`
 and `codexRunner` are stubs that fail the task with "not implemented yet"; T6
 replaces them.
+
+### Narration and panels
+
+A runner may report `narration` (one short present-tense line for what the task is doing now)
+and `panel` (`panelId`, `kind`, `state`, `title`, `summary`, `tail?`). The orchestrator records them
+as `task_narration` and `task_panel`, and they are **reader copies** (`panels.ts`):
+
+- Checked on the way in. The panel id, kind and state must be exactly what is allowed, and the
+  summary one of a few fixed shapes of its kind (`41 passed, 1 failed`, `+12 −3 in 2 files`,
+  `0 P1, 2 P2, 0 P3`): free text is refused, so a summary cannot carry a sentence. A report that is
+  not a panel is dropped, not repaired.
+- Scrubbed with the reader scrub (`scrubSecretText`) before anything is written: the log never holds
+  the raw text. The narration line (160 characters) and the title (60) are one line; the tail is
+  the last 40 lines and 4 KiB, without colour codes. Clients add the vendor-name scrub
+  (`toPublicEvent`).
+- Capped per task in the write chain (400 lines, 400 panel updates); later ones are dropped like a
+  report after a stop. Fenced by epoch like `task_progress`.
+- Never read back. The reducer only counts them: they are not in `TaskView`, not in the recovery
+  note, not in a brief, and the supervisor does not parse them (so they are no signal that a task is
+  alive). They are never evidence: a coding task's proof stays `verification.json`.
+- Clients build `TaskView.narration` and `TaskView.panels` from the event stream (`cloud-client`);
+  a task that ends or restarts shows no panel as `running`.
 
 ## Cancel
 
