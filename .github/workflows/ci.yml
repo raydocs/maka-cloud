@@ -48,10 +48,12 @@ jobs:
     # the alias makes this required context wait at the tail, and the steps
     # below already assume this image. `ci-workflow-policy.test.mjs` holds the
     # rule for every lane.
-    # Fork: the repository variable CI_RUNNER (a JSON label list such as ["self-hosted","vps"])
-    # moves this job to a self-hosted Ubuntu 24.04 runner, which needs this image's tools the steps
-    # do not install (Electron's desktop libraries, gpg, rustup); unset, it runs on GitHub's image.
-    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
+    # Fork: the repository variable CI_RUNNER_TEST, else CI_RUNNER (a JSON label list such as
+    # ["self-hosted","vps"]), moves this job to self-hosted Ubuntu 24.04 runners, which need this
+    # image's tools the steps do not install (Electron's desktop libraries, gpg, rustup); unset, it
+    # runs on GitHub's image. CI_RUNNER_TEST can name a label that more runners carry, so several
+    # pull requests' test jobs run at once.
+    runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
