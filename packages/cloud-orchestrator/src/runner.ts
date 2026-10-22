@@ -1,5 +1,5 @@
 import type { StepLog } from './steps.js';
-import type { TaskId } from './types.js';
+import type { TaskId, TaskPanel } from './types.js';
 
 /** Everything a runner is given to start one task. */
 export interface RunSpec {
@@ -75,6 +75,14 @@ export interface Recovery {
 
 export type RunnerEvent =
   | { type: 'progress'; note: string }
+  /**
+   * What the run is doing now, and a panel of its work. The orchestrator checks both against fixed
+   * shapes and caps (`cleanNarration`, `cleanPanel`), scrubs them and records them as reader
+   * copies. Only a runner the platform wrote reports these: a vendor agent's stream is read by the
+   * playbook, which does not pass them on.
+   */
+  | { type: 'narration'; line: string }
+  | ({ type: 'panel' } & TaskPanel)
   /** Dollars this run has spent so far, as its CLI reports them. Cumulative: each replaces the last. */
   | { type: 'usage'; costUsd: number }
   /** The runner wrote `resultPath`. The orchestrator validates it. */

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -346,12 +347,8 @@ test('a chunk sent again lands once, a chunk out of step is refused, and a damag
       },
       stdin: Buffer.from(stdin).toString('base64'),
     });
-  const tmp = join(
-    r.machine.configDir('tsk_up_chunks'),
-    'projects',
-    KEY.projectKey,
-    `.restore-${SESSION}.tmp`,
-  );
+  // In the task directory, which the agent's group cannot write, not in the configuration directory.
+  const tmp = join(r.machine.taskDir('tsk_up_chunks'), `.restore-${SESSION}.tmp`);
   await run({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n');
   await run({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n'); // the first chunk again: starts over
   await run({ MAKA_OFFSET: '4', MAKA_LEN: '3' }, 'de\n');
@@ -365,6 +362,39 @@ test('a chunk sent again lands once, a chunk out of step is refused, and a damag
   );
   await assert.rejects(fs.stat(r.file), 'a damaged file is not put in place');
   await assert.rejects(fs.stat(tmp), 'and its temporary file is removed');
+});
+
+test('a link planted where the upload is being built is not written through between two chunks', async (t) => {
+  const r = await rig(t, 'tsk_up_plant');
+  const run = (extra: Record<string, string>, stdin: string) =>
+    r.machine.execOk(TRANSCRIPT_CHUNK_SCRIPT, {
+      envs: {
+        MAKA_DIR: r.machine.taskDir('tsk_up_plant'),
+        MAKA_KEY: KEY.projectKey,
+        MAKA_SESSION: SESSION,
+        MAKA_LAST: '0',
+        MAKA_HASH: '',
+        ...extra,
+      },
+      stdin: Buffer.from(stdin).toString('base64'),
+    });
+  const victim = join(r.h.tmp, 'victim.txt');
+  await fs.writeFile(victim, 'xxxx');
+  await run({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n');
+  // What the agent's group could do in the configuration directory between two chunks: a link, of the
+  // size the next chunk expects, at the name an upload built there would have.
+  const planted = join(r.machine.configDir('tsk_up_plant'), 'projects', KEY.projectKey);
+  await fs.mkdir(planted, { recursive: true });
+  const name = join(planted, `.restore-${SESSION}.tmp`);
+  await fs.rm(name, { force: true });
+  await fs.symlink(victim, name);
+  await run({ MAKA_OFFSET: '4', MAKA_LEN: '3' }, 'de\n');
+  assert.equal(await fs.readFile(victim, 'utf8'), 'xxxx', 'the link was not written through');
+  const hash = createHash('sha256').update('abc\nde\n').digest('hex');
+  await run({ MAKA_OFFSET: '7', MAKA_LEN: '0', MAKA_LAST: '1', MAKA_HASH: hash }, '');
+  assert.equal(await fs.readFile(r.file, 'utf8'), 'abc\nde\n');
+  assert.equal((await fs.stat(r.file)).mode & 0o777, 0o660);
+  assert.equal(await fs.readFile(victim, 'utf8'), 'xxxx');
 });
 
 test('a link where the configuration directory should be is not followed', async (t) => {
