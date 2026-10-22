@@ -37,8 +37,13 @@ jobs:
       # A coding task's checks run in a new user and PID namespace (unshare). Ubuntu 24.04 refuses
       # that to unprivileged users by default (AppArmor), whatever the container's own profile says,
       # and a real box on 24.04 has to allow it the same way (docs/fork/deploy.md, "The agent account").
+      # Ubuntu gates unprivileged user namespaces through AppArmor; a runner without that knob
+      # (Debian, or an already-open kernel) needs nothing, as in ci.yml.
       - name: Allow unprivileged user namespaces, as the sandbox box must
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Build the images and bring the stack up behind Caddy
         run: |
