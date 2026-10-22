@@ -76,7 +76,8 @@ async function finished(h: Harness, id: string, extra: Record<string, unknown> =
 }
 
 test('the other vendor reviews a change, and the review is part of what is delivered', async (t) => {
-  const h = await setup(t, { modes: MODES });
+  // No fix rounds, so the review's P2 stays as found (the rounds are in fix-rounds.test.ts).
+  const h = await setup(t, { modes: MODES, limits: { fixRounds: 0 } });
   h.claude.script = fixes;
   h.codex.script = reviews();
   const { events, spec, dir } = await finished(h, 'tsk_rev1');
