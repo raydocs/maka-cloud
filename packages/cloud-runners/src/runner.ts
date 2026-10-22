@@ -786,6 +786,7 @@ class Run implements RunHandle {
             store: transcripts,
             taskId: spec.taskId,
             sessionId: resumeSessionId,
+            agentGroup: fleet.options.agentChannel?.group,
             signal: this.signal,
           }),
         );
