@@ -128,7 +128,7 @@ Still missing before it can merge:
 3. P3: the hash-named files are not listed in the handoff listing, so an owner cannot see them.
    Test: a listing of a handoff directory with a hash-named file includes it. Source: #341.
 
-## Restarts, the kept conversation and CI timing (from #325, #337, #345)
+## Restarts, the kept conversation and CI timing (from #325, #337, #345, #352)
 
 1. P3: a restart runs every running coding task again from a fresh clone, spend so far included. The
    result card or the inbox should say "restarted after a server restart" when it happens, so a
@@ -146,6 +146,10 @@ Still missing before it can merge:
    leader exited normally`, and `a cancel the runner refuses leaves the task cancelled and owing a
    stop, which is retried by id` (the fast retry can confirm the stop before the view is read).
    Make each wait on an explicit handshake instead of a time.
+5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
+   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
+   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
+   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
 
 ## Reviews merged without an outside review
 
