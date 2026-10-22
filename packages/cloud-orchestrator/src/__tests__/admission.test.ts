@@ -483,7 +483,9 @@ test('a restart does not try to stop a task that never had its turn, nor fail it
     orchestrator: { stopRetry: { firstMs: 5, maxMs: 5 } },
   });
   await after.h.orchestrator.settled();
-  assert.deepEqual(after.h.fake.orphanStops, [running.taskId]);
+  // Only the task that had its turn is stopped. A failed stop is retried every 5 ms, so how many
+  // attempts have been made by now depends on timing.
+  assert.deepEqual([...new Set(after.h.fake.orphanStops)], [running.taskId]);
   assert.equal(after.h.orchestrator.taskStateOf(waiting.taskId), 'queued');
   // It still waits: the first task's run may still be going on the machine.
   assert.equal(started(after.h, waiting.taskId), false);

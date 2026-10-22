@@ -48,8 +48,17 @@ jobs:
     # the alias makes this required context wait at the tail, and the steps
     # below already assume this image. `ci-workflow-policy.test.mjs` holds the
     # rule for every lane.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Fork: the repository variable CI_RUNNER_TEST, else CI_RUNNER (a JSON label list such as
+    # ["self-hosted","vps"]), moves this job to self-hosted Ubuntu 24.04 runners, which need this
+    # image's tools the steps do not install (Electron's desktop libraries, gpg, rustup); unset, it
+    # runs on GitHub's image. CI_RUNNER_TEST can name a label that more runners carry, so several
+    # pull requests' test jobs run at once.
+    # A pull request from a fork always gets GitHub's image: the repository is public, and an
+    # outside contributor's code must never run on the owner's machines.
+    runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
+    # A full run (a shared script or the lockfile changed) takes 34-35 minutes, and the Storybook smoke
+    # and the slowest workspaces were cut off at 45 under load.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -196,15 +205,16 @@ jobs:
       # selection that a new lane had to remember to join (#4475).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
-          cache: npm
+          node-version: '24.22.1'
+          # Fork: a self-hosted runner keeps ~/.npm itself; GitHub's cache would only download it again.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
       - name: Select the release npm toolchain
         if: steps.plan.outputs.cli_package == 'true'
         run: npm install --global --no-audit --no-fund "$(node -p 'require("./package.json").packageManager')"
 
       - name: Restore Electron artifact cache
-        if: steps.plan.outputs.code == 'true'
+        if: steps.plan.outputs.code == 'true' && runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/electron
@@ -354,7 +364,7 @@ jobs:
           if [[ "$STORAGE_STRESS" == "true" ]]; then
             export MAKA_STORAGE_STRESS=1
           fi
-          node scripts/run-workspace-tests-parallel.mjs --concurrency=3 --workspaces="$WORKSPACES"
+          node scripts/run-workspace-tests-parallel.mjs --concurrency=3 --workspace-timeout-minutes=30 --workspaces="$WORKSPACES"
 
       - name: Run live Eval egress proxy test
         if: contains(steps.plan.outputs.standard_workspaces, 'packages/eval')

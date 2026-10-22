@@ -1,7 +1,7 @@
 # The build context is an allowlist: only what is named here reaches the Docker build, so nothing a
 # developer or a CI job left in the checkout (an .env, an .npmrc with a token, a key) can end up in
 # an image layer. The images are built from the root manifests, the packages, the one script
-# @maka/core's build runs (deploy/Dockerfile) and deploy/Caddyfile (the proxy stage).
+# @maka/core's build runs (deploy/Dockerfile) and deploy/Caddyfile (the proxy stage) and deploy/real-account-tests.sh (the CI test image).
 *
 !package.json
 !package-lock.json
@@ -12,6 +12,7 @@
 !scripts/sync-model-metadata.mjs
 !scripts/model-metadata
 !deploy/Caddyfile
+!deploy/real-account-tests.sh
 
 # Inside what is allowed, build output stays out (it is rebuilt) ...
 **/node_modules

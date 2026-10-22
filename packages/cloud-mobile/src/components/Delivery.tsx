@@ -2,6 +2,7 @@ import {
   type ArtifactListing,
   type CloudClient,
   type DeliveryModel,
+  type DeliveryView,
   deliveryModel,
   displayText,
   LABEL_WORDS,
@@ -12,7 +13,7 @@ import {
   stackOf,
   type TaskView,
 } from '@maka-cloud/client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Image, Linking, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useBlobUri, usePicture } from '@/lib/picture';
@@ -125,6 +126,80 @@ interface Opened {
  * A finished task as one result card: the outcome in one sentence, one visual proof from the box, a
  * caption and at most two one-tap actions. The visual opens large over the screen.
  */
+const VIEW_SHAPE = {
+  Desktop: { flex: 5, aspectRatio: 16 / 10, borderRadius: radius.small },
+  Tablet: { flex: 2.4, aspectRatio: 3 / 4, borderRadius: 14 },
+  Phone: { flex: 1.3, aspectRatio: 9 / 19.5, borderRadius: 16 },
+} as const;
+
+/** One screenshot at one viewport, framed like that device, labelled, opening large on a tap. */
+function ViewShot({
+  client,
+  taskId,
+  view,
+  onOpen,
+  onFailed,
+}: {
+  client: CloudClient;
+  taskId: string;
+  view: DeliveryView;
+  onOpen: (blob: Blob) => void;
+  onFailed: () => void;
+}) {
+  const t = useTheme();
+  const [blob, setBlob] = useState<Blob | undefined>();
+  const { uri, failed } = usePicture(blob);
+  const index = view.listing.index;
+  useEffect(() => {
+    let current = true;
+    client
+      .readArtifact(taskId, index)
+      .then((content) => current && content.kind === 'image' && setBlob(content.blob))
+      .catch(() => current && onFailed());
+    return () => {
+      current = false;
+    };
+  }, [client, taskId, index, onFailed]);
+  useEffect(() => {
+    if (failed) onFailed();
+  }, [failed, onFailed]);
+  const { flex, aspectRatio, borderRadius } = VIEW_SHAPE[view.viewport];
+  return (
+    <View style={{ flex, gap: 4, alignItems: 'center' }}>
+      <Pressable
+        accessibilityRole="imagebutton"
+        accessibilityLabel={`Open large: ${view.viewport}`}
+        disabled={!blob}
+        onPress={() => blob && onOpen(blob)}
+        style={{ width: '100%' }}
+      >
+        <View
+          style={{
+            width: '100%',
+            aspectRatio,
+            borderRadius,
+            borderWidth: 1,
+            borderColor: t.cardEdge,
+            backgroundColor: t.chip,
+            overflow: 'hidden',
+          }}
+        >
+          {uri ? (
+            <Image
+              source={{ uri }}
+              accessibilityLabel={`${view.viewport}: ${displayText(view.listing.name)}`}
+              resizeMode="cover"
+              resizeMethod="resize"
+              style={{ width: '100%', height: '100%' }}
+            />
+          ) : null}
+        </View>
+      </Pressable>
+      <T kind="small">{view.viewport}</T>
+    </View>
+  );
+}
+
 export function DeliveryCard({
   client,
   task,
@@ -137,11 +212,14 @@ export function DeliveryCard({
   onOpenTask?: (task: TaskView) => void;
 }) {
   const t = useTheme();
-  const { shot, diff, outcome, caption, actions } = model;
+  const { diff, outcome, caption, actions, views } = model;
+  // With views each screenshot loads itself; the single picture is not loaded a second time.
+  const shot = views ? undefined : model.shot;
   const [proof, setProof] = useState<Blob | undefined>();
   const { uri: proofUri, failed: proofFailed } = usePicture(proof);
   const [opened, setOpened] = useState<Opened | undefined>();
   const [failed, setFailed] = useState(false);
+  const markFailed = useCallback(() => setFailed(true), []);
   const shotIndex = shot?.index;
   useEffect(() => {
     if (shotIndex === undefined) return;
@@ -188,7 +266,23 @@ export function DeliveryCard({
         )}
       </View>
       <T kind="heading">{outcome}</T>
-      {shot && proofUri ? (
+      {views ? (
+        <View
+          accessibilityLabel={caption}
+          style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 10 }}
+        >
+          {views.map((view) => (
+            <ViewShot
+              key={view.viewport}
+              client={client}
+              taskId={task.taskId}
+              view={view}
+              onOpen={(blob) => setOpened({ kind: 'image', title: view.viewport, blob })}
+              onFailed={markFailed}
+            />
+          ))}
+        </View>
+      ) : shot && proofUri ? (
         <Pressable
           testID="delivery-picture"
           accessibilityRole="imagebutton"
@@ -211,7 +305,7 @@ export function DeliveryCard({
       ) : (
         diff && <PillButton label="View the changes" onPress={() => void openDiff()} />
       )}
-      {caption ? <T kind="muted">{caption}</T> : null}
+      {caption && !views ? <T kind="muted">{caption}</T> : null}
       {(failed || proofFailed) && (
         <T kind="muted">The picture is too large or could not be loaded.</T>
       )}

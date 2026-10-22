@@ -44,6 +44,8 @@ export function applyInboxItem(state: ConversationState, item: unknown): Convers
 }
 
 const MAX_PROGRESS_NOTES = 20;
+/** Panels kept per task; the oldest go first. */
+const MAX_PANELS = 12;
 
 /**
  * The same rules as the orchestrator's reducer, applied to the events the feed
@@ -151,21 +153,40 @@ function applyLive(
       task.startedAt = at;
       // The task's story starts here, so a replay of the stream rebuilds its notes instead of doubling them.
       task.progress = [];
+      delete task.narration;
+      delete task.panels;
       break;
+    case 'task_narration':
+      task.narration = event.line;
+      break;
+    case 'task_panel': {
+      const { type: _type, taskId: _taskId, ...panel } = event;
+      const panels = task.panels ?? [];
+      const at = panels.findIndex((shown) => shown.panelId === panel.panelId);
+      // Replaced where it stands, so a chip does not move when it updates.
+      const next =
+        at < 0 ? [...panels, panel] : panels.map((shown, i) => (i === at ? panel : shown));
+      task.panels = next.slice(-MAX_PANELS);
+      break;
+    }
     case 'task_progress':
       task.progress = [...task.progress, event.note].slice(-MAX_PROGRESS_NOTES);
       break;
     case 'task_restarted':
       // The client keeps no partial reply of a task, only its notes, so the text is the note.
       task.progress = [...task.progress, event.text].slice(-MAX_PROGRESS_NOTES);
+      // The cut-off run's panels are no longer running; the new run reports its own.
+      settlePanels(task);
       break;
     case 'task_succeeded':
       task.state = 'succeeded';
+      settlePanels(task);
       task.manifest = event.manifest;
       task.finishedAt = at;
       break;
     case 'task_failed':
       task.state = 'failed';
+      settlePanels(task);
       task.failureReason = event.reason;
       if (event.kept !== undefined) task.kept = event.kept;
       task.finishedAt = at;
@@ -175,6 +196,7 @@ function applyLive(
       break;
     case 'task_cancelled':
       task.state = 'cancelled';
+      settlePanels(task);
       if (event.kept !== undefined) task.kept = event.kept;
       task.finishedAt = at;
       break;
@@ -194,6 +216,15 @@ function applyLive(
       }
       break;
   }
+}
+
+/** A task that ended or restarted shows no panel as running and no "doing now" line. */
+function settlePanels(task: TaskView): void {
+  delete task.narration;
+  if (task.panels?.some((panel) => panel.state === 'running'))
+    task.panels = task.panels.map((panel) =>
+      panel.state === 'running' ? { ...panel, state: 'stopped' } : panel,
+    );
 }
 
 /**

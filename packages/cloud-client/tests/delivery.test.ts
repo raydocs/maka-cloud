@@ -162,3 +162,42 @@ test('pages a task opened: none when the server has no route or the read fails',
   });
   expect(await loadSources(broken, 't1')).toEqual([]);
 });
+
+test('screenshots of two or more viewports become views, widest first, with a caption that names them', () => {
+  const model = deliveryModel(
+    task(),
+    [
+      file(0, 'out/home-phone.png', true),
+      file(1, 'out/notes.md'),
+      file(2, 'out/home-desktop.png', true),
+      file(3, 'out/home-tablet.png', true),
+      file(4, 'out/home-iphone-2.png', true),
+    ],
+    [],
+  );
+  expect(model?.views?.map((view) => [view.viewport, view.listing.name])).toEqual([
+    ['Desktop', 'out/home-desktop.png'],
+    ['Tablet', 'out/home-tablet.png'],
+    ['Phone', 'out/home-phone.png'],
+  ]);
+  expect(model?.shot?.name).toBe('out/home-desktop.png');
+  expect(model?.caption).toBe('Desktop, tablet and phone');
+  expect(
+    deliveryModel(task(), [file(0, 'a-mobile.png', true), file(1, 'a-laptop.png', true)], [])
+      ?.caption,
+  ).toBe('Desktop and phone');
+});
+
+test('one viewport, or names that only contain the words, is an ordinary picture', () => {
+  const single = deliveryModel(task(), [file(0, 'out/home-phone.png', true)], []);
+  expect(single?.views).toBeUndefined();
+  expect(single?.caption).toBe('Out/home phone');
+  // "telephone" and "desktops2" are not viewport words; a non-image never is.
+  const words = deliveryModel(
+    task(),
+    [file(0, 'telephone.png', true), file(1, 'mydesktops.png', true), file(2, 'desktop.txt')],
+    [],
+  );
+  expect(words?.views).toBeUndefined();
+  expect(words?.shot?.name).toBe('telephone.png');
+});
