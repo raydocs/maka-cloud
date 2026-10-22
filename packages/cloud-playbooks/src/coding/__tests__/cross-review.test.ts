@@ -323,6 +323,24 @@ test('a reviewer that changes the repository did not review what would be delive
   zeroStats(h.runner);
 });
 
+test('a copy of the change swapped under the reviewer is not a review of the change: nothing is delivered', async (t) => {
+  const h = await setup(t, { modes: MODES });
+  h.claude.script = fixes;
+  // What a process left running by the first agent does once the reviewer's copy of the diff exists.
+  h.codex.script = async (turn) => {
+    await fs.writeFile(join(turn.dir, 'handoff', 'change.patch'), 'a harmless diff\n');
+    return reviews([])(turn);
+  };
+  const { events } = await finished(h, 'tsk_swap');
+  await notDelivered(
+    h,
+    'tsk_swap',
+    events,
+    /the copy of the change given to the reviewer was replaced, so its review was not used/,
+  );
+  zeroStats(h.runner);
+});
+
 test('what a reviewer writes cannot pose as something else in the manifest, the report or the pull request', async (t) => {
   const h = await setup(t, { modes: MODES });
   h.claude.script = fixes;

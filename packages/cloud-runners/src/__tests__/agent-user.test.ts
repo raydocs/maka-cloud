@@ -246,13 +246,11 @@ test('links the agent plants in handoff/ are not followed when the next brief is
       env: { PATH: process.env.PATH ?? '' },
       encoding: 'utf8',
     });
-  // Another account's links, aimed at a file only the sandbox user owns.
-  assert.equal(
-    asAgentRun(
-      `ln -s ${victim} ${taskDir}/handoff/brief.md.tmp && rm -f ${taskDir}/handoff/brief.md && ln -s ${victim} ${taskDir}/handoff/brief.md`,
-    ).status,
-    0,
-  );
+  // Another account's link, aimed at a file only the sandbox user owns, where the next brief is staged.
+  assert.equal(asAgentRun(`ln -s ${victim} ${taskDir}/handoff/brief.md.tmp`).status, 0);
+  // handoff/ is sticky: the agent cannot remove or replace the runner's brief with a link of its own.
+  assert.notEqual(asAgentRun(`rm -f ${taskDir}/handoff/brief.md`).status, 0);
+  assert.notEqual(asAgentRun(`ln -sf ${victim} ${taskDir}/handoff/brief.md`).status, 0);
   await machine.prepare(dir, 'second\n', undefined, CHANNEL.group);
   await machine.prepareAgent(dir, CHANNEL.group);
   assert.equal(await fs.readFile(victim, 'utf8'), "the sandbox user's file\n");

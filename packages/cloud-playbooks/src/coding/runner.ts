@@ -970,7 +970,7 @@ class CodingRun implements RunHandle {
     }
     try {
       this.progress('a second agent reviews the change');
-      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${REVIEW_FILE}\n`, {});
+      await this.removeAgentFile(REVIEW_FILE);
       await this.publishForAgent('change.patch');
       const turn = await this.agentTurn(
         reviewer.vendor,
@@ -994,6 +994,17 @@ class CodingRun implements RunHandle {
           this.budgetStop
             ? `the review ran out of its budget (${this.budgetStop})`
             : `the reviewer's run failed: ${turn.reason}`,
+        );
+      }
+      // The first agent's account shares handoff/ with the reviewer's: what the reviewer was given
+      // to read must still be the runner's copy of the change, or it reviewed something else.
+      const same = await this.exec(
+        'set -u\ncd "$MAKA_DIR"\ncmp -s -- change.patch handoff/change.patch\n',
+        {},
+      );
+      if (same.exitCode !== 0) {
+        return unavailable(
+          'the copy of the change given to the reviewer was replaced, so its review was not used',
         );
       }
       const text = await this.readTaskFile(REVIEW_FILE, MAX_REVIEW_BYTES);
@@ -1629,7 +1640,7 @@ class CodingRun implements RunHandle {
     await this.writeSandboxFile('failure_brief.json', json);
     await this.publishForAgent('failure_brief.json');
     await this.publishForAgent('attempt-1.patch');
-    await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${REPRO_FILE}\n`, {});
+    await this.removeAgentFile(REPRO_FILE);
     const sha = await this.clone(task, baseSha);
     if (sha !== baseSha) throw new Error(`the base commit changed from ${baseSha} to ${sha}`);
   }
@@ -1645,6 +1656,12 @@ class CodingRun implements RunHandle {
       );
     }
     return base[1] as string;
+  }
+
+  /** Removes a file the agent wrote in handoff/; one that cannot be removed fails the step. */
+  private async removeAgentFile(name: string): Promise<void> {
+    const out = await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${name}\n`, {});
+    if (out.exitCode !== 0) throw new Error(`could not remove ${name} before the next agent run`);
   }
 
   /** A file of the task directory, copied where the agent's account can read it. */

@@ -210,7 +210,7 @@ mkdir -p handoff
 tmp=$(mktemp handoff/.publish.XXXXXX)
 cat -- "$MAKA_FILE" > "$tmp"
 chmod 640 "$tmp"
-mv -f -- "$tmp" "handoff/$MAKA_FILE"
+mv -fT -- "$tmp" "handoff/$MAKA_FILE"
 `;
 
 /** Writes stdin to a file in the task directory (the failure brief), replacing it atomically. */
