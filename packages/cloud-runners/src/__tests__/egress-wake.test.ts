@@ -138,3 +138,58 @@ test('a machine nobody has checked is not trusted: task code and the CLI check w
   assert.equal(ok.exitCode, 0);
   assert.deepEqual(reached, ['code']);
 });
+
+test('a box that passed once is checked again before the next task code: someone else may have restarted it', async (t) => {
+  // The box's rules: put in by the guard, gone after a restart this process never saw.
+  let rules = false;
+  const h = await setup({
+    cloud: {
+      egressGuard: async () => {
+        rules = true;
+      },
+    },
+  });
+  t.after(() => h.cleanup());
+  const reached: boolean[] = [];
+  h.fake.onExec = (request) => {
+    if (typeof request.body?.cmd === 'string' && request.body.cmd.includes('restart-marker')) {
+      reached.push(rules);
+    }
+    return undefined;
+  };
+  const machine = h.runners.fleet.machine(h.fake.machineId);
+  await machine.exec('echo restart-marker', { taskCode: true });
+  // Restarted by an operator or another host process: awake, answering, and without rules.
+  rules = false;
+  await machine.exec('echo restart-marker', { taskCode: true });
+  await h.runners.fleet.ensureCli(machine, claudeAdapter);
+  assert.deepEqual(reached, [true, true], 'task code ran in a box whose rules were gone');
+});
+
+test('a task-code exec whose caller already gave up does not wait for the guard', async (t) => {
+  let release: () => void = () => {};
+  let hold = false;
+  const h = await setup({
+    cloud: {
+      egressGuard: () =>
+        hold
+          ? new Promise<void>((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve(),
+    },
+  });
+  t.after(() => {
+    release();
+    return h.cleanup();
+  });
+  const machine = h.runners.fleet.machine(h.fake.machineId);
+  await machine.exec('true', { taskCode: true });
+  hold = true;
+  const gone = new AbortController();
+  gone.abort(new Error('caller gave up'));
+  await assert.rejects(
+    machine.exec('echo late-marker', { taskCode: true, signal: gone.signal }),
+    /caller gave up/u,
+  );
+});
