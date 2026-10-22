@@ -181,6 +181,25 @@ test('Home fills in as data arrives: a card is answered once, a stale card refre
   feed.stop();
 });
 
+test('Home tells "nothing waits" from "not read yet" and from "could not be read"', async () => {
+  let fail = true;
+  const { client } = served({
+    '/v1/inbox/items': () =>
+      fail ? new Response('{}', { status: 500 }) : Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  expect(feed.getSnapshot().inboxLoaded).toBe(false);
+  feed.start([]);
+  await until(() => feed.getSnapshot().inboxFailed, 'the failed read');
+  expect(feed.getSnapshot().inboxLoaded).toBe(false);
+  fail = false;
+  feed.refresh();
+  await until(() => feed.getSnapshot().inboxLoaded, 'the empty list');
+  expect(feed.getSnapshot().inboxFailed).toBe(false);
+  feed.stop();
+});
+
 test('Home remembers the visit when the person leaves, under the invite fingerprint, never the token', async () => {
   const { client } = served({
     '/v1/inbox/items': () => Response.json({ items: [] }),
@@ -312,4 +331,42 @@ test('the timeline is read from the task’s timeline route', async () => {
   });
   expect((await client.timeline('tsk_1')).timeline.taskId).toBe('tsk_1');
   expect(calls[0]?.url).toBe('/v1/tasks/tsk_1/timeline');
+});
+
+test('a feed stopped and started again replays from the start without doubling anything', async () => {
+  const seen: (string | null)[] = [];
+  const notice = (id: number) =>
+    `id: ${id}\nevent: conductor.notice\ndata: {"conversationId":"c1","noticeId":"n${id}","text":"note ${id}","at":${id}}\n\n`;
+  const task = (id: number, event: object) =>
+    `id: ${id}\nevent: task.event\ndata: ${JSON.stringify({ conversationId: 'c1', at: id, event })}\n\n`;
+  const replay = () =>
+    sse(
+      posted(1, 'hello'),
+      notice(2),
+      task(3, { type: 'task_created', taskId: 't1', sessionId: 's', mode: 'async' }),
+      task(4, { type: 'task_started', taskId: 't1' }),
+      task(5, { type: 'task_progress', taskId: 't1', note: 'step one' }),
+      task(6, { type: 'task_progress', taskId: 't1', note: 'step two' }),
+    );
+  const { client } = served({
+    '/v1/events': (_url, init) => {
+      seen.push(new Headers(init.headers).get('Last-Event-ID'));
+      return replay();
+    },
+  });
+  const feed = new ConversationFeed(client, 'c1');
+  feed.start();
+  await until(() => feed.getSnapshot().state.tasks.t1?.progress.length === 2, 'the first run');
+  feed.stop();
+  feed.start();
+  await until(() => seen.length === 2, 'the second request');
+  await until(() => feed.getSnapshot().state.tasks.t1?.progress.length === 2, 'the second run');
+  await new Promise((r) => setTimeout(r, 30));
+  // No remembered id is sent (after a restored backup it would be higher than the server's), and
+  // the replay changes nothing.
+  expect(seen).toEqual([null, null]);
+  const { state } = feed.getSnapshot();
+  expect(state.messages.map((m) => m.text)).toEqual(['hello', 'note 2']);
+  expect(state.tasks.t1?.progress).toEqual(['step one', 'step two']);
+  feed.stop();
 });

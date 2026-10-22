@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import {
-  type ArtifactListing,
   type CloudClient,
   displayText,
   dollars,
   errorText,
   type InboxItem,
-  publicLink,
+  type LoadedResult,
+  loadTaskResults,
+  pullRequestOf,
   stepsOf,
   taskLabel,
   verdictOf,
@@ -14,17 +15,6 @@ import {
   Unsupported,
 } from '@maka-cloud/client';
 import { DiffLines, SourcesStack, useSources } from './Delivery';
-
-/** What a result is, said in a person's words; a name is only a name. */
-const isDiff = (listing: ArtifactListing) =>
-  listing.kind === 'file' && /\.(diff|patch)$/iu.test(listing.name);
-
-type Loaded =
-  | { kind: 'diff'; name: string; text: string }
-  | { kind: 'report'; name: string; text: string }
-  | { kind: 'image'; name: string; blob: Blob }
-  | { kind: 'link'; name: string; url: string }
-  | { kind: 'failed'; name: string };
 
 function ImageResult({ name, blob }: { name: string; blob: Blob }) {
   const [src, setSrc] = useState('');
@@ -65,7 +55,7 @@ export function TaskPage({
   task: TaskView;
   onBack: () => void;
 }) {
-  const [results, setResults] = useState<Loaded[] | undefined>();
+  const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
   const [error, setError] = useState('');
   const sources = useSources(client, task.taskId, task.state);
@@ -74,32 +64,7 @@ export function TaskPage({
     let current = true;
     (async () => {
       try {
-        const { artifacts } = await client.listArtifacts(task.taskId);
-        const loaded: Loaded[] = [];
-        for (const listing of artifacts) {
-          if (listing.kind === 'link') {
-            const url = publicLink(listing.url);
-            if (url) loaded.push({ kind: 'link', name: listing.name, url });
-            continue;
-          }
-          try {
-            const content = await client.readArtifact(task.taskId, listing.index);
-            if (content.kind === 'image')
-              loaded.push({
-                kind: 'image',
-                name: listing.name,
-                blob: content.blob,
-              });
-            else if (content.kind === 'text')
-              loaded.push({
-                kind: isDiff(listing) ? 'diff' : 'report',
-                name: listing.name,
-                text: content.text,
-              });
-          } catch {
-            loaded.push({ kind: 'failed', name: listing.name });
-          }
-        }
+        const loaded = await loadTaskResults(client, task.taskId);
         if (current) setResults(loaded);
       } catch (e) {
         if (current) {
@@ -126,10 +91,7 @@ export function TaskPage({
   const reviewLine = manifest?.done.find((line) => line.startsWith('review: '));
   const done = manifest?.done.filter((line) => line !== reviewLine) ?? [];
   const { steps } = stepsOf(task.progress);
-  const pull = results?.find(
-    (result): result is Extract<Loaded, { kind: 'link' }> =>
-      result.kind === 'link' && /\/pull\/\d+/u.test(result.url),
-  );
+  const pull = results ? pullRequestOf(results) : undefined;
   return (
     <article
       className="page task-page solid"
@@ -146,7 +108,7 @@ export function TaskPage({
         {pull && (
           <>
             {' · '}
-            <a href={pull.url} target="_blank" rel="noreferrer noopener">
+            <a href={pull} target="_blank" rel="noreferrer noopener">
               Pull request ↗
             </a>
           </>

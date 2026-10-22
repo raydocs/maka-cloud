@@ -5,13 +5,13 @@ import { Card, Field, PillButton, Screen, T } from '@/components/ui';
 import { useSession } from '@/lib/session';
 
 export default function SignIn() {
-  const { session, signIn } = useSession();
+  const { session, signIn, retry } = useSession();
   const remembered = session.status === 'out' ? session.server : '';
   const [server, setServer] = useState(remembered);
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  const shown = problem || (session.status === 'out' ? session.error : '');
+  const shown = problem || (session.status === 'out' && !session.saved ? session.error : '');
   return (
     <Screen>
       <KeyboardAvoidingView
@@ -19,7 +19,8 @@ export default function SignIn() {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: 20, gap: 16, flexGrow: 1, justifyContent: 'center' }}
+          // Top-aligned, so the form does not slide when the keyboard opens.
+          contentContainerStyle={{ padding: 20, paddingTop: 56, gap: 20 }}
           keyboardShouldPersistTaps="handled"
         >
           <View style={{ gap: 8 }}>
@@ -27,9 +28,16 @@ export default function SignIn() {
             <T kind="title">Your next big thing, one conversation away.</T>
             <T kind="muted">A place to plan, follow the work, and bring it home.</T>
           </View>
+          {session.status === 'out' && session.saved && (
+            <Card label="Saved access">
+              <T kind="muted">You are still signed in on this device. {session.error}</T>
+              <PillButton label="Try again" primary onPress={retry} />
+            </Card>
+          )}
           <Card label="Sign in">
             <Field
               label="Server address"
+              showLabel
               placeholder="maka.example.com"
               value={server}
               onChangeText={setServer}
@@ -41,6 +49,7 @@ export default function SignIn() {
             />
             <Field
               label="Invite token"
+              showLabel
               placeholder="Invite token"
               value={token}
               onChangeText={setToken}

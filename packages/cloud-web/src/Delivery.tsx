@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react';
 import {
   type ArtifactListing,
-  captionOf,
   type CloudClient,
+  type DeliveryModel,
+  deliveryModel,
   displayText,
-  firstSentence,
   LABEL_WORDS,
+  loadSources,
   publicLink,
   type SourceListing,
   stackOf,
   type SourcePreview,
   type TaskView,
-  Unsupported,
 } from '@maka-cloud/client';
 import { Viewer } from './Viewer';
 
@@ -37,12 +37,7 @@ export function useSources(
   const [sources, setSources] = useState<SourceListing[]>([]);
   useEffect(() => {
     let current = true;
-    client
-      .listSources(taskId)
-      .then((result) => current && setSources(Array.isArray(result.sources) ? result.sources : []))
-      .catch((error: unknown) => {
-        if (current && !(error instanceof Unsupported)) setSources([]);
-      });
+    void loadSources(client, taskId).then((loaded) => current && setSources(loaded));
     return () => {
       current = false;
     };
@@ -175,9 +170,6 @@ interface Opened {
   text?: string;
 }
 
-const isDiff = (listing: ArtifactListing) =>
-  listing.kind === 'file' && /\.(diff|patch)$/iu.test(listing.name);
-
 /**
  * A finished task as one result card: the outcome in one sentence, one visual proof from the box,
  * a caption, and at most two one-tap actions. The visual opens large over a blurred page.
@@ -196,8 +188,9 @@ export function DeliveryCard({
   /** Opens the task's own page (plan, steps, changes, review, cost). */
   onOpenTask?: (task: TaskView) => void;
 }) {
-  const shot = listings.find((listing) => listing.image);
-  const diff = listings.find(isDiff);
+  const model = deliveryModel(task, listings, sources);
+  const shot = model?.shot;
+  const diff = model?.diff;
   const [proof, setProof] = useState<Blob | undefined>();
   const proofUrl = useObjectUrl(proof);
   const [opened, setOpened] = useState<Opened | undefined>();
@@ -216,21 +209,8 @@ export function DeliveryCard({
     };
   }, [client, task.taskId, shotIndex]);
 
-  const summary = task.manifest?.summary;
-  if (task.state !== 'succeeded' || summary === undefined) return null;
-  const outcome = displayText(firstSentence(summary));
-  const caption = shot ? captionOf(displayText(shot.name)) : diff ? 'The changes' : '';
-
-  // The first two things a person would do next: the pull request, then the live preview.
-  const pull = listings
-    .filter((listing) => listing.kind === 'link')
-    .map((listing) => publicLink(listing.url))
-    .find((url) => url !== undefined && /\/pull\/\d+/u.test(url));
-  const preview = publicLink(sources.find((source) => source.label === 'preview')?.url);
-  const actions = [
-    pull ? { label: 'Open pull request', href: pull } : undefined,
-    preview ? { label: 'Open preview', href: preview } : undefined,
-  ].filter((action) => action !== undefined);
+  if (!model) return null;
+  const { outcome, caption, actions } = model;
 
   async function openDiff() {
     if (!diff) return;
@@ -289,11 +269,11 @@ export function DeliveryCard({
       {failed && <p className="muted">The picture could not be loaded.</p>}
       {actions.length > 0 && (
         <div className="delivery-actions">
-          {actions.slice(0, 2).map((action) => (
+          {actions.map((action) => (
             <a
               key={action.label}
               className="action-pill"
-              href={action.href}
+              href={action.url}
               target="_blank"
               rel="noreferrer noopener"
             >

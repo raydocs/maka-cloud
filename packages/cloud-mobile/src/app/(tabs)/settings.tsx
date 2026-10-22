@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { Card, PillButton, Screen, T } from '@/components/ui';
 import { useAppearance } from '@/lib/appearance';
@@ -6,6 +7,7 @@ import { useSession } from '@/lib/session';
 export default function Settings() {
   const { signOut } = useSession();
   const { mode, setMode } = useAppearance();
+  const [signOutError, setSignOutError] = useState('');
   return (
     <Screen>
       <ScrollView contentContainerStyle={{ padding: 16, gap: 14 }}>
@@ -31,7 +33,16 @@ export default function Settings() {
           <T kind="muted">
             Signing out removes this device’s access. Your work stays on the server.
           </T>
-          <PillButton label="Sign out" onPress={() => void signOut()} />
+          {signOutError ? <T kind="error">{signOutError}</T> : null}
+          <PillButton
+            label="Sign out"
+            onPress={() => {
+              setSignOutError('');
+              signOut().catch(() =>
+                setSignOutError('This device’s access could not be removed. Try again.'),
+              );
+            }}
+          />
         </Card>
       </ScrollView>
     </Screen>

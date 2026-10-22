@@ -1,5 +1,6 @@
 export * from './client';
 export * from './conversation';
+export * from './delivery';
 export * from './contract';
 export * from './duties';
 export * from './errors';
