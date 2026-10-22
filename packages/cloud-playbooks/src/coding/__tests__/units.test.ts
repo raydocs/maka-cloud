@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { LoopDetector, parseSample } from '../loop.js';
 import { codingPlaybook, verifyCodingManifest } from '../playbook.js';
+import { checkTimedOut } from '../runner.js';
 import { isRepoPath, parseCodingBrief } from '../task.js';
 
 const block = (json: string) => `Plan.\n\n\`\`\`coding-task\n${json}\n\`\`\`\n`;
@@ -132,4 +133,15 @@ test('the coding runner wires onto the T6 runners', async () => {
   assert.equal(runner.name, 'coding');
   assert.equal(runner.options.agents['claude-agent-sdk'], cloud.claude);
   assert.equal(runner.options.agents.codex, cloud.codex);
+});
+
+test('a check killed by signal 9 is a timeout only when timeout itself had to send KILL', () => {
+  // TERM at the limit: timeout exits 124.
+  assert.equal(checkTimedOut(124, 1_000, 1), true);
+  assert.equal(checkTimedOut(124, 400, 1), false);
+  // KILL comes 5 s after the limit. A command that killed itself, on a machine whose sandbox took
+  // over a second to start, is not a timeout.
+  assert.equal(checkTimedOut(137, 1_500, 1), false);
+  assert.equal(checkTimedOut(137, 6_000, 1), true);
+  assert.equal(checkTimedOut(1, 60_000, 1), false);
 });

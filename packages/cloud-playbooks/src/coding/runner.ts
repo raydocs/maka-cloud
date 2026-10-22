@@ -162,6 +162,24 @@ const MAX_REPRO_BYTES = 16 * 1024;
 const MAX_CHECK_MS = 570_000;
 /** Seconds an exec of CHECK_SCRIPT may take beyond the check's own limit. */
 const CHECK_EXEC_SLACK_SECONDS = 30;
+/** The `timeout -k 5` in `CHECK_SCRIPT`: KILL follows TERM this many seconds after the limit. */
+const CHECK_KILL_GRACE_SECONDS = 5;
+
+/**
+ * Whether `timeout` ended a check, from its exit and how long the whole check took. `timeout`
+ * exits 124 when TERM ended the command at the limit, and 137 only when it had to send KILL, the
+ * grace after that. The time includes the sandbox's own setup, so a command that killed itself
+ * with signal 9 on a slow machine is not taken for one that ran out of time.
+ */
+export function checkTimedOut(
+  exitCode: number,
+  elapsedMs: number,
+  timeoutSeconds: number,
+): boolean {
+  if (exitCode === 124) return elapsedMs >= timeoutSeconds * 1000;
+  if (exitCode === 137) return elapsedMs >= (timeoutSeconds + CHECK_KILL_GRACE_SECONDS) * 1000;
+  return false;
+}
 
 class CancelledError extends Error {}
 
@@ -1515,8 +1533,7 @@ class CodingRun implements RunHandle {
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
-      const timedOut =
-        (out.exitCode === 124 || out.exitCode === 137) && elapsedMs >= timeoutSeconds * 1000;
+      const timedOut = checkTimedOut(out.exitCode, elapsedMs, timeoutSeconds);
       return { ...result, exitCode: out.exitCode, ...(timedOut ? { timedOut: true } : {}) };
     } finally {
       stats.checks--;
