@@ -248,9 +248,12 @@ directory refused), `cli-check.test.ts`.
 (PATH, HOME, locale, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, the gateway and MCP variables, the search
 tool variables, `MAKA_RUN_TOKEN`) and nothing else from the control user's exec environment.
 *Enforced*: `allowedSdkEnv` filters what the SDK passes; `asAgentUser` runs
-`sudo -- env -i PATH=... <name>=...` and hands over only the base names (`HOME`, locale, `TMPDIR`,
+`sudo -- env -i PATH=... <name>=...` and hands over only the base names (`HOME`, which is the
+sandbox user's, as before, not the agent account's; locale, `TMPDIR`,
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `MAKA_DIR`, `MAKA_WORKDIR`, `MAKA_RUN_TOKEN`) and the names its
-caller passes (the run's own envs; an exec's envs), each only when set.
+caller passes (the run's own envs; an exec's envs), each only when set; `AGENT_ENTRY` sets `USER`,
+`LOGNAME` and `SHELL` from the agent account. The box scripts (`.agents/setup`, `.agents/resume`) see
+the base plus `MAKA_REPO_DIR` and `MAKA_SETUP_HASH` only: note it when the pool is turned on.
 *Tested*: `process-channel.test.ts` (SDK side), `agent-user.test.ts` (a variable the exec carried
 does not reach the agent).
 

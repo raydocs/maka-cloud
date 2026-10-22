@@ -351,6 +351,11 @@ test('the agent starts with the variables it was handed and nothing else of the 
     assert.ok(seen.includes(kept), `${kept} reaches the agent`);
   }
   assert.ok(seen.some((line) => line.startsWith('PATH=')));
+  // The account variables `env -i` removed are set from the account the entry runs as.
+  const me = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(seen.includes(`USER=${me}`));
+  assert.ok(seen.includes(`LOGNAME=${me}`));
+  assert.ok(seen.some((line) => /^SHELL=\/bin\/(ba)?sh$/u.test(line)));
   // Whatever else the exec carried stays behind, and a name that was never set is not made up.
   for (const left of [
     'MAKA_TEST_LEAK',

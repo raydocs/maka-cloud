@@ -45,6 +45,9 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
  */
 const AGENT_ENTRY = [
   'umask 002; PATH="$1"; shift',
+  // `env -i` leaves no account variables: the CLI and its tools read these before the passwd entry.
+  'USER=$(id -un 2>/dev/null) && LOGNAME=$USER && export USER LOGNAME',
+  'SHELL=/bin/sh; [ -x /bin/bash ] && SHELL=/bin/bash; export SHELL',
   'd="${MAKA_WORKDIR:-${MAKA_DIR:+$MAKA_DIR/workspace}}"',
   'if [ -n "$d" ] && d=$(cd "$d" 2>/dev/null && pwd -P); then',
   '  n=${GIT_CONFIG_COUNT:-0}',
