@@ -85,3 +85,9 @@ restart that takes longer than that lets the sandbox go to sleep under its runni
 process stops what is left and runs the task again from a fresh clone, as it does after a crash.
 A forced exit (the process was still closing after ten seconds) exits with code 1 and logs
 `server.exit_forced`.
+
+Run one server per data directory. A second one over the same directory refuses to start
+(`DatabaseInUseError`) before it touches the spend journal or the task log, and the first keeps
+running. With a fixed gateway port on the same machine the second one is refused earlier, by the
+port (`EADDRINUSE`): same outcome, nothing of the first touched. See
+`design/durable-tasks.md`, "One process owns a task store".
