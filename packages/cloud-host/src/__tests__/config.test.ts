@@ -716,3 +716,87 @@ test('deep mode is off unless MAKA_CLOUD_DEEP_MODE=1: off, deep holds standardâ€
     /MAKA_CLOUD_DEEP_MODE must be 1 or 0/,
   );
 });
+
+test('sign-in is off by default, behind a proxy, and the settings are checked', () => {
+  const none = readStackConfig(ENV).signIn;
+  assert.deepEqual(none, { appleClientIds: [], googleClientIds: [], trustProxy: true });
+  const on = readStackConfig({
+    ...ENV,
+    MAKA_CLOUD_APPLE_CLIENT_IDS: 'cloud.maka.app, web.maka.app',
+    MAKA_CLOUD_GOOGLE_CLIENT_IDS: '123-abc.apps.googleusercontent.com',
+    MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
+    MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
+    MAKA_CLOUD_MAIL_FROM: 'Maka <login@maka.example>',
+    MAKA_CLOUD_TRUST_PROXY: '0',
+  }).signIn;
+  assert.deepEqual(on, {
+    appleClientIds: ['cloud.maka.app', 'web.maka.app'],
+    googleClientIds: ['123-abc.apps.googleusercontent.com'],
+    mail: { apiUrl: 'https://mail.example.test/send', from: 'Maka <login@maka.example>' },
+    trustProxy: false,
+  });
+  const mail = {
+    MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
+    MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
+    MAKA_CLOUD_MAIL_FROM: 'login@maka.example',
+  };
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_APPLE_CLIENT_IDS: 'ok, bad id!' }), [
+    'MAKA_CLOUD_APPLE_CLIENT_IDS must be client ids separated by commas',
+  ]);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_GOOGLE_CLIENT_IDS: 'a,,b' }), [
+    'MAKA_CLOUD_GOOGLE_CLIENT_IDS must be client ids separated by commas',
+  ]);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_TRUST_PROXY: 'yes' }), [
+    'MAKA_CLOUD_TRUST_PROXY must be 1 or 0',
+  ]);
+  for (const missing of Object.keys(mail)) {
+    const partial = { ...ENV, ...mail, [missing]: undefined };
+    assert.match(problemsOf(partial).join('\n'), /go together/u, missing);
+  }
+  assert.match(
+    problemsOf({
+      ...ENV,
+      ...mail,
+      MAKA_CLOUD_MAIL_API_URL: 'http://mail.example.test/send',
+    }).join(),
+    /must be an https URL/u,
+  );
+  assert.match(
+    problemsOf({
+      ...ENV,
+      ...mail,
+      MAKA_CLOUD_MAIL_API_URL: 'https://u:p@mail.example.test/',
+    }).join(),
+    /must not carry credentials/u,
+  );
+  assert.match(
+    problemsOf({ ...ENV, ...mail, MAKA_CLOUD_MAIL_API_URL: 'nope' }).join(),
+    /not a URL/u,
+  );
+  for (const from of ['a\r\nBcc: x@y.z', 'not an address', 'x@y']) {
+    assert.match(
+      problemsOf({ ...ENV, ...mail, MAKA_CLOUD_MAIL_FROM: from }).join(),
+      /must be an address or Name <address>/u,
+      from,
+    );
+  }
+  assert.match(
+    problemsOf({ ...ENV, ...mail, MAKA_CLOUD_MAIL_API_KEY: 'short' }).join(),
+    /too short to be a key/u,
+  );
+});
+
+test('the check output says which ways to sign in are on and never shows the mail key', () => {
+  const lines = describeConfig(
+    readStackConfig({
+      ...ENV,
+      MAKA_CLOUD_GOOGLE_CLIENT_IDS: '123-abc.apps.googleusercontent.com',
+      MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
+      MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
+      MAKA_CLOUD_MAIL_FROM: 'login@maka.example',
+    }),
+  ).join('\n');
+  assert.match(lines, /sign-in:\s+Google, emailed code and invite token/u);
+  assert.equal(lines.includes('mail-key-secret'), false);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /sign-in:\s+invite token only/u);
+});

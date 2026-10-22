@@ -29,6 +29,15 @@ each is off unless its setting is present, so the launch environment file simply
 - The go-live rehearsal (`deploy/rehearsal/`, the `rehearsal` CI job) runs with the same three off.
   Read its green run for what it covers (below), not as proof of the launch path on a real host.
 
+## Sign-in: what to check with the first real token
+
+- Sign in with Apple: the app passes the server's nonce to Apple unchanged, and the token's nonce
+  claim must equal it. Check this form with a real Apple token in the live run. The tests use a
+  fake signer, so a mismatch (for example if Apple returns the nonce hashed) would show only then.
+  Until then, email code and Google are the other ways in, and the invite token always works.
+- Behind the proxy `MAKA_CLOUD_TRUST_PROXY` stays at 1, so sign-in limits count each client and
+  not the proxy. Check that two phones on different networks do not share one limit.
+
 ## What the rehearsal verifies, and what it does not
 
 The rehearsal's sandbox stand-in has a real second OS account (`maka-agent`), a group it shares with

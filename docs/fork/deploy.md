@@ -47,6 +47,22 @@ and Compose were not run.
 | `OPENAI_API_KEY`, `MAKA_CLOUD_GATEWAY_MODELS`, `MAKA_CLOUD_VERIFIER_MODELS` | recommended | a model of another vendor that checks finished work; without a verifier model only the checks that need none run |
 | `CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` | optional | Web Push; make the pair with `node_modules/.bin/web-push generate-vapid-keys` in the checkout (it works offline) |
 
+**2b. Sign-in (owner items, none of them set by us)**
+
+The apps and the web open on "Continue with Apple / Google / email". Each way is off until
+you set what it needs, and the invite token box stays for the beta. A new person is asked for
+their invite code once, after the first sign-in. Nothing here is called until someone signs in.
+
+| Variable | What you provide |
+| --- | --- |
+| `MAKA_CLOUD_APPLE_CLIENT_IDS` | the iOS app's bundle id, and the Services id if the web uses Sign in with Apple |
+| `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | the Google OAuth client ids of the iOS, Android and web apps |
+| `MAKA_CLOUD_MAIL_API_URL`, `MAKA_CLOUD_MAIL_API_KEY`, `MAKA_CLOUD_MAIL_FROM` | a mail service that takes a POST of `{from, to, subject, text}` with a bearer key, and a sender it allows. All three or none |
+| `MAKA_CLOUD_TRUST_PROXY` | leave it at the default (1) behind the proxy in this runbook; `0` only if nothing sits in front |
+
+With none of them set the server answers invite tokens only. `check` prints a `sign-in:` line
+saying which ways are on.
+
 **3. A sandbox machine for each invite**
 
 - Create the machine in the sandbox provider's console, from an image with
@@ -419,6 +435,12 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
 | `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
+| `MAKA_CLOUD_APPLE_CLIENT_IDS` | comma separated Sign in with Apple client ids (the app’s bundle id, the web Services id) a token may be made for. Unset: no Sign in with Apple |
+| `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | comma separated Google OAuth client ids (iOS, Android, web) a token may be made for. Unset: no Sign in with Google |
+| `MAKA_CLOUD_MAIL_API_URL` | https URL of the mail service that sends sign-in codes: it takes a POST of {from, to, subject, text} with a bearer key. With the next two, turns on sign-in by emailed code. All three or none |
+| `MAKA_CLOUD_MAIL_API_KEY` | the mail service’s bearer key, kept in memory only |
+| `MAKA_CLOUD_MAIL_FROM` | the sender of sign-in mail, an address or Name <address> your mail service allows |
+| `MAKA_CLOUD_TRUST_PROXY` | default 1: the server sits behind one reverse proxy that adds the client to X-Forwarded-For, so sign-in limits count each client (a request from a public address is never trusted). 0 only when nothing sits in front |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 

@@ -112,7 +112,13 @@ async function start(
             name === 'MAKA_GITHUB_WEBHOOK_SECRET' ||
             name === 'MAKA_GITHUB_TOKEN' ||
             name === 'MAKA_CLOUD_CARDS' ||
-            name === 'MAKA_CLOUD_DUTY_REPOS',
+            name === 'MAKA_CLOUD_DUTY_REPOS' ||
+            name === 'MAKA_CLOUD_APPLE_CLIENT_IDS' ||
+            name === 'MAKA_CLOUD_GOOGLE_CLIENT_IDS' ||
+            name === 'MAKA_CLOUD_MAIL_API_URL' ||
+            name === 'MAKA_CLOUD_MAIL_API_KEY' ||
+            name === 'MAKA_CLOUD_MAIL_FROM' ||
+            name === 'MAKA_CLOUD_TRUST_PROXY',
         ),
       ),
     }),
@@ -1773,4 +1779,76 @@ test('the box pool runs repository scripts as the configured agent account, and 
     group: 'maka-work',
   });
   await withAgent.stack.close();
+});
+
+test('sign-in by emailed code works through the stack, with the mail sent through the owner’s service and nothing set meaning invite tokens only', async (t) => {
+  const mails: Array<{ url: string; authorization: string; body: Record<string, unknown> }> = [];
+  const started = await start(
+    t,
+    undefined,
+    {
+      MAKA_CLOUD_APPLE_CLIENT_IDS: 'cloud.maka.app',
+      MAKA_CLOUD_GOOGLE_CLIENT_IDS: '123-abc.apps.googleusercontent.com',
+      MAKA_CLOUD_MAIL_API_URL: 'https://mail.example.test/send',
+      MAKA_CLOUD_MAIL_API_KEY: 'mail-key-secret-0123456789',
+      MAKA_CLOUD_MAIL_FROM: 'Maka <login@maka.example>',
+    },
+    true,
+    {
+      mailFetch: (async (url: string, init: RequestInit) => {
+        mails.push({
+          url: String(url),
+          authorization: String((init.headers as Record<string, string>).authorization),
+          body: JSON.parse(String(init.body)) as Record<string, unknown>,
+        });
+        return new Response(null, { status: 202 });
+      }) as typeof fetch,
+    },
+  );
+  const base = started.stack.cloud.server.url;
+  const post = (path: string, body: unknown) =>
+    fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const options = (await (await fetch(`${base}/v1/auth/options`)).json()) as Record<
+    string,
+    boolean
+  >;
+  assert.deepEqual(options, { apple: true, google: true, email: true });
+  const asked = (await (await post('/v1/auth/email', { address: 'ada@example.com' })).json()) as {
+    challengeId: string;
+    deviceSecret: string;
+  };
+  assert.equal(mails.length, 1);
+  assert.equal(mails[0]?.url, 'https://mail.example.test/send');
+  assert.equal(mails[0]?.authorization, 'Bearer mail-key-secret-0123456789');
+  assert.equal(mails[0]?.body.from, 'Maka <login@maka.example>');
+  assert.deepEqual(mails[0]?.body.to, ['ada@example.com']);
+  const code = /\b(\d{6})\b/u.exec(String(mails[0]?.body.text))?.[1] ?? '';
+  const verified = (await (
+    await post('/v1/auth/email/verify', {
+      challengeId: asked.challengeId,
+      deviceSecret: asked.deviceSecret,
+      code,
+      device: 'phone',
+    })
+  ).json()) as { status: string; pendingToken: string };
+  assert.equal(verified.status, 'needs_invite');
+  const invite = started.stack.cloud.server.invites.create('ada');
+  const claimed = (await (
+    await post('/v1/auth/claim', { pendingToken: verified.pendingToken, inviteToken: invite.token })
+  ).json()) as { token: string };
+  const mine = await fetch(`${base}/v1/conversations`, {
+    headers: { authorization: `Bearer ${claimed.token}` },
+  });
+  assert.equal(mine.status, 200);
+  assert.deepEqual(started.warnings, []);
+});
+
+test('with no sign-in settings the stack has invite tokens only', async (t) => {
+  const started = await start(t);
+  const res = await fetch(`${started.stack.cloud.server.url}/v1/auth/options`);
+  assert.equal(res.status, 401, 'answers like any unknown path');
 });
