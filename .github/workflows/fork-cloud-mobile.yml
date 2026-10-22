@@ -269,7 +269,8 @@ jobs:
             if (!phone) process.exit(1);
             console.log(phone.udid);
           ')
-          xcrun simctl boot "$udid"
+          # A self-hosted Mac keeps the simulator from the last run; booting a booted one is an error.
+          xcrun simctl boot "$udid" 2>/dev/null || true
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl install "$udid" "$RUNNER_TEMP/ios-build/Build/Products/Release-iphonesimulator/Maka.app"
           bash packages/cloud-mobile/scripts/run-flows.sh ios
