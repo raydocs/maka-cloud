@@ -4,6 +4,7 @@ import {
   clip,
   countBySeverity,
   type Finding,
+  fixBrief,
   MAX_FINDINGS,
   parseReviewFile,
   plain,
@@ -255,4 +256,86 @@ test('what verification.json keeps of a review is small whatever the reviewer wr
   }
   assert.deepEqual(summarizeReview(reviewed, 'x').counts, { P1: 20, P2: 0, P3: 0 });
   assert.deepEqual(summarizeReview(unavailable, 'x').counts, { P1: 0, P2: 0, P3: 0 });
+});
+
+test('the fix rounds are said in the review line and review.md, with how many rounds and why they stopped', () => {
+  const reviewed: ReviewRecord = {
+    ...base,
+    status: 'reviewed',
+    reviewer: 'codex',
+    findings: [{ severity: 'P1', title: 'still wrong' }],
+  };
+  const fix = {
+    rounds: 2,
+    sent: 3,
+    result: 'applied' as const,
+    reason: 'the fix of round 2 was not used: the fixed change failed the checks',
+    history: [
+      { sent: 2, result: 'applied' as const, counts: { P1: 1, P2: 0, P3: 0 } },
+      { sent: 1, result: 'not_applied' as const, reason: 'the fixed change failed the checks' },
+    ],
+  };
+  const line = reviewLine({ ...reviewed, fix });
+  assert.match(line, /3 finding\(s\) were sent back to the implementer over 2 fix round\(s\)/);
+  assert.match(line, /the fix of round 2 was not used/);
+  assert.ok(!/codex|claude/iu.test(line));
+  assert.match(reviewMarkdown({ ...reviewed, fix }), /over 2 fix round\(s\)/);
+  assert.match(
+    reviewLine({
+      ...reviewed,
+      fix: { rounds: 0, sent: 0, result: 'not_applied', reason: 'no budget', history: [] },
+    }),
+    /no finding was sent back for fixing \(no budget\)/,
+  );
+  assert.match(
+    reviewLine({ ...reviewed, fix: { ...fix, result: 'not_applied' } }),
+    /no fix was used .*so the first verified change is the one shown/,
+  );
+});
+
+test('what verification.json keeps of the fix rounds is scrubbed and one line, each round included', () => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const summary = summarizeReview(
+    {
+      ...base,
+      status: 'reviewed',
+      reviewer: 'codex',
+      findings: [],
+      fix: {
+        rounds: 1,
+        sent: 1,
+        result: 'not_applied',
+        reason: `stopped ${key}`,
+        history: [{ sent: 1, result: 'not_applied', reason: `failed\n${key}` }],
+      },
+    },
+    '# Review\n',
+  );
+  const text = JSON.stringify(summary.fix);
+  assert.doesNotMatch(text, /ghp_/);
+  assert.equal(summary.fix?.rounds, 1);
+  assert.ok(!(summary.fix?.history[0]?.reason ?? '').includes('\n'));
+});
+
+test('the fix brief says which round it is, and that the last one is the last', () => {
+  const input = {
+    repo: 'o/r',
+    baseSha: 'a'.repeat(40),
+    dir: '/work/t',
+    goal: 'make add add',
+    testCommand: 'bash tests/run.sh',
+    findings: [
+      { severity: 'P1' as const, title: 'wrong' },
+      { severity: 'P2' as const, title: 'no test' },
+    ],
+    conductorBrief: 'Plan.',
+  };
+  const first = fixBrief({ ...input, round: 1, maxRounds: 3 });
+  assert.match(first, /fix round 1 of at most 3/);
+  assert.match(first, /1\. wrong/);
+  assert.match(first, /2\. no test/);
+  assert.match(
+    fixBrief({ ...input, round: 3, maxRounds: 3 }),
+    /the last one\. There is no further round/,
+  );
 });
