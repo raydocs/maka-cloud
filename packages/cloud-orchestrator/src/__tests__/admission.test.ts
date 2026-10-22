@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SessionInfo } from '../auth.js';
 import type { FakeRunnerOptions } from '../fake-runner.js';
-import { holdNote, type OrchestratorOptions } from '../orchestrator.js';
+import { holdNote, isHoldNote, type OrchestratorOptions } from '../orchestrator.js';
+import { MAX_RESUMES_IN_A_ROW } from '../recovery.js';
 import { MemoryTaskStore } from '../store.js';
 import { eventually, type Harness, makeHarness } from './harness.js';
 
@@ -225,6 +226,58 @@ test('after a restart a task that was waiting still waits for the one that is re
   await eventually(() => started(after.h, second.taskId), 'the second run');
 });
 
+test('a waiting task is not lost with a restart its runner cannot resume', async (t) => {
+  const store = new MemoryTaskStore();
+  const groups = new Map<string, string>();
+  const before = await grouped(t, { store, groups });
+  const c = before.conductor('invite-1');
+  const running = await before.h.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const waiting = await before.h.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(() => started(before.h, running.taskId), 'the first run');
+  before.h.orchestrator.close();
+
+  // No `recover` (the coding runner has none): the running task ends as orphaned, and the one that
+  // never started starts now instead of failing with it.
+  const after = await grouped(t, { store, groups, dir: before.h.dir });
+  assert.deepEqual(after.h.orchestrator.orphanedTaskIds, [running.taskId]);
+  await eventually(() => started(after.h, waiting.taskId), 'the waiting run');
+  await eventually(
+    () => after.h.orchestrator.taskStateOf(waiting.taskId) === 'running',
+    'the waiting task running',
+  );
+});
+
+test('a task may wait through more restarts than a stuck resume is allowed', async (t) => {
+  const store = new MemoryTaskStore();
+  const groups = new Map<string, string>();
+  let current = await grouped(t, { store, groups, fake: { recover: true } });
+  const c = current.conductor('invite-1');
+  const running = await current.h.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const waiting = await current.h.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(() => started(current.h, running.taskId), 'the first run');
+  for (let restart = 1; restart <= MAX_RESUMES_IN_A_ROW + 2; restart += 1) {
+    // The running task gets somewhere each time (it spends), so only the waiting one piles up
+    // restarts without a step or spend.
+    current.h.fake.runFor(running.taskId).usage(restart / 100);
+    await eventually(
+      () => (current.h.orchestrator.status(c, running.taskId).costUsd ?? 0) >= restart / 100,
+      'the spend recorded',
+    );
+    current.h.orchestrator.close();
+    current = await grouped(t, { store, groups, dir: current.h.dir, fake: { recover: true } });
+    await eventually(() => started(current.h, running.taskId), `resume ${restart}`);
+    await current.h.orchestrator.settled();
+    assert.equal(
+      current.h.orchestrator.taskStateOf(waiting.taskId),
+      'queued',
+      `restart ${restart}`,
+    );
+    assert.equal(started(current.h, waiting.taskId), false);
+  }
+  await current.h.fake.runFor(running.taskId).complete();
+  await eventually(() => started(current.h, waiting.taskId), 'the waiting run');
+});
+
 test('without admission nothing is held', async (t) => {
   const h = await makeHarness(t);
   const c = h.session();
@@ -246,6 +299,13 @@ test('the note names no title it does not have', () => {
     holdNote(3, 'A', 1),
     '3 tasks run at a time on this workspace for now. This one starts after the task waiting before it.',
   );
+});
+
+test('a hold note is told apart from other notes', () => {
+  assert.ok(isHoldNote(holdNote(1, 'A', 0)));
+  assert.ok(isHoldNote(holdNote(4, undefined, 2)));
+  assert.equal(isHoldNote('resuming after a restart (resume 1 in a row)'), false);
+  assert.equal(isHoldNote(undefined), false);
 });
 
 test('a room of zero is refused', async (t) => {

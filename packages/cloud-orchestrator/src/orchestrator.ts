@@ -1224,8 +1224,16 @@ export class Orchestrator {
     task: TaskRecord,
   ): { kind: 'resume'; resumes: number } | { kind: 'give_up'; reason: string } | undefined {
     const runner = this.runners.get(task.runner);
+    // A top-level task still waiting its turn never ran: it waits again and starts like a new one,
+    // whatever its runner can recover, and waiting through restarts is not a resume that got nowhere.
+    const waitingTurn =
+      this.admission !== undefined &&
+      task.parentTaskId === undefined &&
+      task.state === 'queued' &&
+      isHoldNote(task.progress.at(-1));
     if (
-      !runner?.recover ||
+      runner === undefined ||
+      (!runner.recover && !waitingTurn) ||
       task.cancelRequestedBy !== undefined ||
       task.state === 'paused' ||
       task.pauseRequested === true ||
@@ -1245,7 +1253,7 @@ export class Orchestrator {
       .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
       .map(({ seq }) => seq);
     const resumes = resumesInARow(this.store.readTask(task.taskId), costSeqs);
-    if (resumes > MAX_RESUMES_IN_A_ROW) {
+    if (resumes > MAX_RESUMES_IN_A_ROW && !waitingTurn) {
       return {
         kind: 'give_up',
         reason: `needs you: this task was resumed ${MAX_RESUMES_IN_A_ROW} times in a row without finishing a step or spending anything, so it stopped; open it and decide whether to start it again`,
@@ -2112,8 +2120,8 @@ export class Orchestrator {
   }
 
   private afterApply(event: TaskEvent): void {
-    // Any change may be the end of what a running tree had left.
-    this.wakeAdmission();
+    // An end or a confirmed stop may be the last of what a running tree had left.
+    if (isTerminalEvent(event) || event.type === 'task_stopped') this.wakeAdmission();
     if (event.type === 'task_cost' && !this.tasks.has(event.taskId)) {
       // Spend that settled after the end changed the ended record.
       this.archive.delete(event.taskId);
@@ -2558,6 +2566,14 @@ export function holdNote(perGroup: number, title: string | undefined, ahead: num
   return ahead === 0
     ? `${rule} This one starts when ${running} finishes.`
     : `${rule} This one starts after ${running} and ${others} waiting before it.`;
+}
+
+/** Whether a progress note is one `holdNote` wrote: the task was waiting its turn. */
+export function isHoldNote(note: string | undefined): boolean {
+  return (
+    note !== undefined &&
+    /^(?:One task runs|\d+ tasks run) at a time on this workspace for now\. /u.test(note)
+  );
 }
 
 /** A run `restore` decided to start again, held until `startRestored`. */

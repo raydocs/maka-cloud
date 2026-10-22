@@ -26,6 +26,7 @@ export {
   DEFAULT_WAIT_MS,
   type DelegateInput,
   holdNote,
+  isHoldNote,
   MAX_PENDING_STEERS,
   MAX_STEER_CHARS,
   MAX_WAIT_MS,
