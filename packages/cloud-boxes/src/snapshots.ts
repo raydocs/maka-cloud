@@ -129,9 +129,24 @@ export function ownerRecord(tenantId: string, repoUrl: string, hash: string): st
   return `maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=${hash}`;
 }
 
-const ownsPrefix = (description: string | undefined, tenantId: string, repoUrl: string): boolean =>
-  description !== undefined &&
-  description.startsWith(`maka-setup v1 invite=${sha(tenantId)} repo=${sha(repoUrl)} setup=`);
+const OWNER_RECORD =
+  /^maka-setup v1 invite=([0-9a-f]{64}) repo=([0-9a-f]{64}) setup=([0-9a-f]{64})$/;
+
+/**
+ * Whether a snapshot is one of this invite's setup snapshots of this repository: its description must
+ * be a whole owner record (nothing before or after it, every digest complete) for this invite and
+ * repository, and its name must be the name that record gives.
+ */
+const ownsSnapshot = (snapshot: SnapshotRecord, tenantId: string, repoUrl: string): boolean => {
+  const owner = OWNER_RECORD.exec(snapshot.description ?? '');
+  if (owner === null) return false;
+  const [, invite, repo, setup] = owner as unknown as [string, string, string, string];
+  return (
+    invite === sha(tenantId) &&
+    repo === sha(repoUrl) &&
+    snapshot.name === snapshotName(tenantId, repoUrl, setup)
+  );
+};
 
 export class SnapshotOwnerError extends Error {}
 
@@ -374,7 +389,7 @@ export class SetupSnapshots {
       .filter(
         (snapshot) =>
           snapshot.name.startsWith(prefix) &&
-          ownsPrefix(snapshot.description, recipe.tenantId, recipe.repoUrl),
+          ownsSnapshot(snapshot, recipe.tenantId, recipe.repoUrl),
       )
       .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
     const keep = Math.max(1, this.options.keep ?? 2);

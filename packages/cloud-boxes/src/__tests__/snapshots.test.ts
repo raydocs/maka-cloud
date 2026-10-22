@@ -266,6 +266,33 @@ describe('SetupSnapshots', () => {
     assert.equal(t.fleet.callsTo('deleteSnapshot').length, 0);
   });
 
+  it('expiry deletes only a snapshot whose whole owner record is this invite’s and repository’s, under the name it gives', async () => {
+    const t = setup({ keep: 1 });
+    const first = await t.snapshots.ensure(recipe());
+    const prefix = snapshotName(A, REPO, '0'.repeat(64)).slice(0, -16);
+    const owner = ownerRecord(A, REPO, '1'.repeat(64));
+    const box = t.fleet.seed({ name: 'elsewhere' });
+    const lookalikes = [
+      // More after the record.
+      {
+        name: `${prefix}${'2'.repeat(16)}`,
+        description: `${ownerRecord(A, REPO, '2'.repeat(64))} x`,
+      },
+      // A setup digest that is cut short, or not a digest.
+      { name: `${prefix}${'3'.repeat(16)}`, description: `${owner.slice(0, -40)}` },
+      { name: `${prefix}${'4'.repeat(16)}`, description: `${owner.slice(0, -64)}not-a-digest` },
+      // A whole record whose setup is not the one the name carries.
+      { name: `${prefix}${'5'.repeat(16)}`, description: owner },
+    ];
+    const ids: string[] = [];
+    for (const lookalike of lookalikes) {
+      ids.push((await t.fleet.createSnapshot(box.id, lookalike)).id);
+    }
+    await t.snapshots.ensure(recipe({ setupScript: `${SCRIPT}# v2\n` }));
+    assert.equal(t.fleet.snapshots.has(first.snapshotId), false, 'our own older one goes');
+    for (const id of ids) assert.ok(t.fleet.snapshots.has(id), `${id} is not proved ours`);
+  });
+
   it('two callers in one process for the same setup share one build', async () => {
     const t = setup();
     const [one, two] = await Promise.all([

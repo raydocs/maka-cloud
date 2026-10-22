@@ -16,18 +16,16 @@ finding came from. Keep the order within a section as the order to do them in.
 
 From the T27 review rounds. The pool is unreachable while `MAKA_CLOUD_BOXES` is unset.
 
-1. R17 #1 to #3: `acquire` can return a refused box; a refused box is not swept; sleep and restore
-   ignore another task's label.
-2. R14 #2: a task owns its box across phases; sub-runs only borrow it.
-3. R18 #6: a deleted leftover box blocks builds.
-4. A6: quota race and acquire abort; shutdown waits for in-flight creates.
-5. Scrub A1 to A4: git run as the control user (fsmonitor), the scrub list and content check,
+Items 1 to 4 and Snapshots 1 and 2 were fixed in #411, each with a test that fails on
+the main it started from; what is left is below.
+
+1. Pool 4, not done: `SandboxProvider.acquire` takes no abort signal, so a task cancelled while it
+   waits for a box still waits out `waitMs`; passing one needs a change in `packages/cloud-runners`.
+2. Pool 2, not done: a task a running task delegates is its own task and gets its own box; whether it
+   should borrow its parent's box (to read its files) is a design question. A task between runs keeps
+   its box awake only as long as instabox lets it (the sweep sleeps only free boxes).
+3. Scrub A1 to A4: git run as the control user (fsmonitor), the scrub list and content check,
    unreadable directories, setup descendants.
-
-## Snapshots
-
-1. R16 #3: parse snapshot ownership strictly.
-2. R16 #4: recheck the box state before deleting a recovered lost box.
 
 ## Plan tokens and the plan vault (T27, not wired)
 
