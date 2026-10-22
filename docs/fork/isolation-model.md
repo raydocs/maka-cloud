@@ -515,7 +515,13 @@ task directory, not under `claude-config/`.
 *Done*: `TRANSCRIPT_CHUNK_SCRIPT` builds `$MAKA_DIR/.restore-<session>.tmp` (mode 600, sandbox user only),
 checks the hash, gives it the agent group and 660, and `mv -fT`s it into place. The test is in
 `transcripts.test.ts` (it fails on `main`): a link planted at the old name between two chunks is not
-written through. What is left: the destination's directories are checked by name just before the
+written through. Follow-ups: the group now comes from the configured agent channel, passed as
+`MAKA_AGENT_GROUP`, never from the destination directory, which a sibling's agent could swap.
+The device and inode of the built file must match the destination after the rename, or the upload
+fails closed. The tests in `transcripts.test.ts` fail on the code from #401: the group test gives the
+destination directory a different group and expects the file to keep the configured group; the rename test substitutes an identical-content
+file with a new inode and expects refusal.
+What is left: the destination's directories are checked by name just before the
 rename, so a sibling's agent that swaps `projects/<key>` for a link inside that window can redirect
 the rename; the file it could place is the hash-checked transcript, not content the agent chooses.
 I12 (one agent account per task) closes that window.
@@ -524,7 +530,12 @@ I12 (one agent account per task) closes that window.
 
 **F12 (P3, I14 + I15): a test that greps.** One test in `cloud-runners` that fails if `getFile(`
 appears in `cloud-runners` or `cloud-playbooks` sources, or if any `*_SCRIPT` constant lacks
-`set -u`, or if `asAgentUser` is called with a string built by concatenation outside `machine.ts`.
+`set -u`, or if `asAgentUser` is called with a string built by concatenation or a template outside
+`machine.ts`.
+*Done*: `isolation-source.test.ts` reads both packages' source trees, excluding tests, and checks
+exported script constants (including `set -eu` and fixed-fragment templates), fixed versus built
+`asAgentUser` arguments, and `getFile` calls. It found 13 runner scripts without nounset; each now
+starts with `set -u`. The guard fails on those scripts before the fix.
 
 **F13 (P2, I3): the probe checks the control user's login files.** `AGENT_PROBE_SCRIPT` adds
 `agent_login_files`: for `$HOME/.bash_profile`, `.bash_login`, `.profile`, `.bashrc`, `/etc/profile`,

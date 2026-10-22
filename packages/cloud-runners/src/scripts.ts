@@ -120,7 +120,8 @@ echo STARTED
 `;
 
 /** Read-only: does the lock of this run exist? */
-export const INSPECT_SCRIPT = `if [ -e "$MAKA_DIR/$MAKA_RUN.lock" ]; then echo LOCKED; else echo FREE; fi`;
+export const INSPECT_SCRIPT = `set -u
+if [ -e "$MAKA_DIR/$MAKA_RUN.lock" ]; then echo LOCKED; else echo FREE; fi`;
 
 /**
  * The script a run executes. It is its own process group leader (setsid), records its pid, honours
@@ -168,7 +169,8 @@ exit "$rc"
  * Per line: `T <dir> <run> <state> <size> <base64 bytes from offset>`. The state is read before
  * the bytes, so a run reported as exited has all its output in what follows.
  */
-export const POLL_SCRIPT = `${ALIVE_FN}
+export const POLL_SCRIPT = `set -u
+${ALIVE_FN}
 while IFS=' ' read -r dir run off cap; do
   [ -n "$dir" ] || continue
   d="$MAKA_ROOT/$dir"
@@ -212,7 +214,8 @@ done
  * the task over). It prints \`LEFT <run>\` for each run it left alone; a run with no attempt in its
  * name is older than attempts and is stopped.
  */
-export const KILL_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+export const KILL_SCRIPT = `set -u
+${ALIVE_FN}${GROUP_FN}
 newer_attempt() {
   [ -n "\${MAKA_UP_TO_ATTEMPT:-}" ] || return 1
   case "$1" in
@@ -298,7 +301,8 @@ cleanup_logs
 `;
 
 /** Prints `LIVE <dir>` for every task directory with a run still alive, or a leftover of one. */
-export const SWEEP_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+export const SWEEP_SCRIPT = `set -u
+${ALIVE_FN}${GROUP_FN}
 for d in "$MAKA_ROOT"/*/; do
   [ -d "$d" ] || continue
   name=$(basename "$d")
@@ -333,12 +337,15 @@ echo "OK $(stat -c %s result.read)"
 `;
 
 /** Prints `MAKA_OFF`..`MAKA_OFF + MAKA_LEN` of the staged copy as base64. */
-export const RESULT_CHUNK_SCRIPT = `cd "$MAKA_DIR" && tail -c +$((MAKA_OFF + 1)) result.read | head -c "$MAKA_LEN" | base64 -w0`;
+export const RESULT_CHUNK_SCRIPT = `set -u
+cd "$MAKA_DIR" && tail -c +$((MAKA_OFF + 1)) result.read | head -c "$MAKA_LEN" | base64 -w0`;
 
-export const RESULT_CLEAN_SCRIPT = `rm -f "$MAKA_DIR/result.read"`;
+export const RESULT_CLEAN_SCRIPT = `set -u
+rm -f "$MAKA_DIR/result.read"`;
 
 /** Removes a task's directory entry for a failed install, so the next task can try again. */
-export const REMOVE_DIR_SCRIPT = `rm -rf -- "$MAKA_DIR"`;
+export const REMOVE_DIR_SCRIPT = `set -u
+rm -rf -- "$MAKA_DIR"`;
 
 /**
  * Copies files of another task's workspace into this task's `workspace/inputs/<from>/`, as the
@@ -351,7 +358,8 @@ export const REMOVE_DIR_SCRIPT = `rm -rf -- "$MAKA_DIR"`;
  * Env: MAKA_ROOT, MAKA_FROM, MAKA_DIR (target task), MAKA_PATHS (one relative path per line),
  * MAKA_MAX_FILES, MAKA_MAX_FILE_BYTES, MAKA_MAX_TOTAL_BYTES.
  */
-export const STAGE_INPUTS_SCRIPT = `${ALIVE_FN}${GROUP_FN}
+export const STAGE_INPUTS_SCRIPT = `set -u
+${ALIVE_FN}${GROUP_FN}
 umask 077
 parent="$MAKA_DIR/workspace/inputs"
 tmp="$parent/.stage-$MAKA_FROM.$$"
@@ -458,12 +466,15 @@ echo "OK $size"
 `;
 
 /** Prints `MAKA_OFF`..`MAKA_OFF + MAKA_LEN` of the stage file as base64. */
-export const FILE_CHUNK_SCRIPT = `cd "$MAKA_DIR" && tail -c +$((MAKA_OFF + 1)) "$MAKA_STAGE" | head -c "$MAKA_LEN" | base64 -w0`;
+export const FILE_CHUNK_SCRIPT = `set -u
+cd "$MAKA_DIR" && tail -c +$((MAKA_OFF + 1)) "$MAKA_STAGE" | head -c "$MAKA_LEN" | base64 -w0`;
 
-export const FILE_CLEAN_SCRIPT = `rm -f -- "$MAKA_DIR/$MAKA_STAGE"`;
+export const FILE_CLEAN_SCRIPT = `set -u
+rm -f -- "$MAKA_DIR/$MAKA_STAGE"`;
 
 /** True (exit 0) when the tool is installed with the content that has this hash. */
-export const TOOL_CHECK_SCRIPT = `[ "$(cat "$MAKA_TOOL_MARKER" 2>/dev/null)" = "$MAKA_TOOL_HASH" ] && [ -x "$HOME/.maka-cli/bin/$MAKA_TOOL_NAME" ]`;
+export const TOOL_CHECK_SCRIPT = `set -u
+[ "$(cat "$MAKA_TOOL_MARKER" 2>/dev/null)" = "$MAKA_TOOL_HASH" ] && [ -x "$HOME/.maka-cli/bin/$MAKA_TOOL_NAME" ]`;
 
 /**
  * One chunk (base64 on stdin) of a tool's file. The file is assembled under a temporary name next
@@ -484,7 +495,8 @@ if [ "$MAKA_LAST" = 1 ]; then
 fi
 `;
 
-export const TOOL_ABORT_SCRIPT = `rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`;
+export const TOOL_ABORT_SCRIPT = `set -u
+rm -f -- "$HOME/.maka-cli/bin/$MAKA_TOOL_TMP"`;
 
 /**
  * True (exit 0) when the CLI at the pinned version is installed. The version is asked of the CLI
@@ -519,7 +531,8 @@ dir="$cfg/projects/$MAKA_KEY"
 file="$dir/$MAKA_SESSION.jsonl"`;
 
 /** Prints how many lines the session's transcript has in the sandbox (0 when there is none). */
-export const TRANSCRIPT_PROBE_SCRIPT = `${TRANSCRIPT_DIRS}
+export const TRANSCRIPT_PROBE_SCRIPT = `set -u
+${TRANSCRIPT_DIRS}
 for p in "$cfg" "$cfg/projects" "$dir" "$file"; do
   if [ -L "$p" ]; then echo 0; exit 0; fi
 done
@@ -569,9 +582,11 @@ if [ "$MAKA_LAST" = 1 ]; then
   [ "$(sha256sum < "$tmp" | cut -d' ' -f1)" = "$MAKA_HASH" ] || { rm -f -- "$tmp"; echo "the transcript arrived damaged" >&2; exit 1; }
   refuse_links
   # The agent's account reads and appends to the file through the shared group (see agent-user.ts).
-  chgrp --reference="$dir" -- "$tmp"
+  if [ -n "\${MAKA_AGENT_GROUP:-}" ]; then chgrp "$MAKA_AGENT_GROUP" -- "$tmp"; fi
   chmod 660 -- "$tmp"
+  built=$(stat -c %d:%i -- "$tmp")
   mv -fT -- "$tmp" "$file"
+  [ "$(stat -c %d:%i -- "$file")" = "$built" ] || { echo "the transcript file changed during rename" >&2; exit 1; }
 fi
 `;
 
