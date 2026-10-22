@@ -21,6 +21,7 @@ import { type InputRequest, parseBriefHeader } from './inputs.js';
 import { LineSplitter } from './lines.js';
 import { type AgentChannel, asAgent } from './agent-user.js';
 import { ExecProcess, FEED_FUNCTION, fedCommand } from './process-channel.js';
+import { RUN_POLL_BACKOFF } from './poller.js';
 import { type AgentSdk, startAgentQuery } from './sdk-turn.js';
 import {
   restoreTranscript,
@@ -500,6 +501,10 @@ class Run implements RunHandle {
       await this.guard(fleet.ensureCli(machine, vendor));
       await this.guard(fleet.ensureTools(machine));
       this.checkCancelled();
+      // The CLIs a later run of this task needs (its reviewer) install while this one works.
+      for (const name of spec.prepareRunners ?? []) {
+        if (name !== vendor.name) fleet.prepareCli(machine, name);
+      }
 
       const dir = machine.taskDir(spec.taskId);
       const resumed = this.resumePrompt !== undefined;
@@ -1096,7 +1101,9 @@ class Run implements RunHandle {
       return { ended: false, outcome: { ok: false, reason: 'the start was cancelled' } };
     }
     let consumed = 0;
-    const watch = fleet.poller.watch(machine, { dir: spec.taskId, run });
+    // Polled fast while output comes and backing off while it is quiet, so the turn's end is seen
+    // well before the machine's own interval would see it.
+    const watch = fleet.poller.watch(machine, { dir: spec.taskId, run, backoff: RUN_POLL_BACKOFF });
     this.stopWatch = () => watch.stop();
     try {
       for (;;) {
@@ -1181,7 +1188,7 @@ class Run implements RunHandle {
         const watch = fleet.poller.watch(machine, {
           dir: spec.taskId,
           run: input.run,
-          backoff: fleet.options.agentSdkPollMs ?? { minMs: 150, maxMs: 1_000 },
+          backoff: fleet.options.agentSdkPollMs ?? RUN_POLL_BACKOFF,
         });
         const created = new ExecProcess({
           machine,
