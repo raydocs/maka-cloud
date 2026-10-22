@@ -15,11 +15,35 @@ export interface DeliveryAction {
   host: string;
 }
 
+export type ViewportName = 'Desktop' | 'Tablet' | 'Phone';
+
+/** The viewport a screenshot shows, read from words in its name ("home-phone.png"). */
+const VIEWPORT_WORDS: ReadonlyArray<[ViewportName, RegExp]> = [
+  ['Desktop', /(^|[^a-z])(desktop|laptop)([^a-z]|$)/iu],
+  ['Tablet', /(^|[^a-z])(tablet|ipad)([^a-z]|$)/iu],
+  ['Phone', /(^|[^a-z])(phone|mobile|iphone|android)([^a-z]|$)/iu],
+];
+
+export function viewportOf(name: string): ViewportName | undefined {
+  return VIEWPORT_WORDS.find(([, words]) => words.test(name))?.[0];
+}
+
+/** One screenshot of the same result at one viewport. */
+export interface DeliveryView {
+  viewport: ViewportName;
+  listing: ArtifactListing;
+}
+
 /** A finished task as one result card: the outcome, one visual proof, a caption, at most two actions. */
 export interface DeliveryModel {
   outcome: string;
   /** The picture to show; the diff is shown only when there is none. */
   shot?: ArtifactListing;
+  /**
+   * The same result at two or more viewports (desktop, tablet, phone), widest first: shown side by
+   * side, as proof that a page works at every size. `shot` is then the first of them.
+   */
+  views?: DeliveryView[];
   diff?: ArtifactListing;
   caption: string;
   actions: DeliveryAction[];
@@ -36,7 +60,15 @@ export function deliveryModel(
 ): DeliveryModel | undefined {
   const summary = task.manifest?.summary;
   if (task.state !== 'succeeded' || summary === undefined) return undefined;
-  const shot = listings.find((listing) => listing.image);
+  const images = listings.filter((listing) => listing.image);
+  const views = (['Desktop', 'Tablet', 'Phone'] as const)
+    .map((viewport) => {
+      const listing = images.find((image) => viewportOf(image.name) === viewport);
+      return listing ? { viewport, listing } : undefined;
+    })
+    .filter((view) => view !== undefined);
+  const multi = views.length >= 2;
+  const shot = multi ? views[0]?.listing : images[0];
   const diff = listings.find(isDiffListing);
   const pull = listings
     .filter((listing) => listing.kind === 'link')
@@ -49,10 +81,25 @@ export function deliveryModel(
   return {
     outcome: displayText(firstSentence(summary)),
     ...(shot ? { shot } : {}),
+    ...(multi ? { views } : {}),
     ...(diff ? { diff } : {}),
-    caption: shot ? captionOf(displayText(shot.name)) : diff ? 'The changes' : '',
+    caption: multi
+      ? viewportList(views.map((view) => view.viewport))
+      : shot
+        ? captionOf(displayText(shot.name))
+        : diff
+          ? 'The changes'
+          : '',
     actions: actions.slice(0, 2),
   };
+}
+
+/** "Desktop and phone", "Desktop, tablet and phone". */
+function viewportList(names: readonly ViewportName[]): string {
+  const words = names.map((name, index) => (index === 0 ? name : name.toLowerCase()));
+  return words.length <= 1
+    ? (words[0] ?? '')
+    : `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`;
 }
 
 /** One result of a task, read once. A picture keeps its bytes; a text result is shown inert. */
