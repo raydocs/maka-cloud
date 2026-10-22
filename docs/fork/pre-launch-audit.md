@@ -1,6 +1,7 @@
 # Pre-launch audit: the first user's path
 
-Read-only audit of the path a first user takes, on `main` at `952c388` (2026-10-21, after #312):
+Read-only audit of the path a first user takes, on `main` at `952c388` (2026-10-21, after #312),
+brought up to `c6b9ff1` (2026-10-22, after #365):
 sign-in, one sandbox machine per invite, the model gateway, approvals, the inbox, a restart and a
 backup. Nothing was run, live or otherwise. Each section says what holds the step up (code and the
 test that covers it), what is open, and what the first live run is the first to show. Off-at-launch
@@ -9,19 +10,24 @@ features (box pool, proposed cards, plan vault) are out of scope; findings on th
 
 ## Verdict
 
-Three things stood between `main` and a first user. The first two are known and owned by a lane;
-the third came out of the #323 review and was closed by #331 (a9d9faa, 2026-10-21 23:45Z):
+Three things stood between `main` and a first user. The second and third are closed (#337 and
+#331); the first is owned by a lane:
 
 1. **Sign-in is an invite-token box, held in memory only.** The web app's first screen asks for the
    token, keeps it in React state and nowhere else (`packages/cloud-web/src/App.tsx:676-830`,
    `main.tsx` passes no initial token), so every reload, every tap on a push notification and every
    tab the phone browser drops asks for the token again. Owner direction (2026-10-21 21:38) makes
    Apple/Google/email-link sign-in (T31) the launch gate; it is in the T29 lane and not merged.
-2. **A restart with a task running is a kill, not a close.** `server.closing` is logged, the stack
-   closes its servers and stores, and the process stays up until Compose or systemd kills it 60 s
-   later (mechanism in "Restart" below). The rehearsal passes because its restart step tolerates the
-   kill; a real task has never been restarted. T28 owns the fix (`post-launch-backlog.md`, "Go-live
-   rehearsal" item 2).
+   Its first part, accounts and sessions with a token the browser keeps (#367), was read by this
+   thread (ok, three P3s) and is open.
+2. **A restart with a task running was a kill, not a close (closed by #337, 8e5abee).** The stack
+   closed its servers and stores and the process stayed up until Compose or systemd killed it 60 s
+   later. #337 adds `Orchestrator.detachRuns` (`orchestrator.ts:384`, called from
+   `cloud-server.ts:619`): pollers, timers and calls end at once, nothing is cancelled or recorded,
+   the task stays `running` for the next process, and the exit is forced after ten seconds. #362
+   (8d674a3) makes a restart that ends a task show the change its runner kept, and the launch notes
+   say the coding runner is not resumed. Left from the #337 review, told to T28: a detach during the
+   base check leaves the workspace reverted (section 6).
 3. **The agent's git refused its own checkout (closed by #331).** The clone is owned by the
    sandbox user and no `safe.directory` reached the agent, so the real CLI's `git status` failed
    with "dubious ownership" (section 2). File edits worked, which is why the `checkout` gate (#323)
@@ -98,13 +104,18 @@ Findings:
   workspace's real path in the agent's entry (`agent-user.ts`, `AGENT_ENTRY`, both the run and the
   exec branch), command-line scope being the one protected configuration git reads it from, with a
   real-account test; the `git status` as the agent in the rehearsal's `checkout` step is in #323.
-- **P2**: every check runs under `unshare --user --map-current-user --pid` (`CHECK_SCRIPT`), which
-  needs unprivileged user namespaces on the box. Docker's default seccomp profile refuses it, so
-  the rehearsal's coding task fails its verification with exit 125 and the `checkout` gate (#323)
-  only shows the agent's writes. Whether an instabox box allows it is unknown until the first live
-  run; if not, every check fails at once with "could not start the check in its own user and PID
-  namespace". Add it to the box requirements in the runbook and, for the rehearsal, either say the
-  coding path ends at the writes or run the stand-in with `seccomp=unconfined` (it holds no keys).
+- **P2, settled by #338 and #323**: every check runs under `unshare --user --map-current-user --pid`
+  (`CHECK_SCRIPT`), which needs unprivileged user namespaces on the box. #338 (ea98710) makes a
+  refused namespace fail at once with "could not start the check in its own user and PID
+  namespace" and lists it in the launch notes as a live-run check. The rehearsal's `checkout` step
+  now runs the reproduction test in that namespace and goes on to the task's own tests, which took
+  `kernel.apparmor_restrict_unprivileged_userns=0` on the CI runner
+  (`fork-deploy-rehearsal.yml:38`); a real Ubuntu 24.04 box needs the same (`deploy.md:520`).
+  Whether an instabox box allows it is still unknown until the first live run.
+- **P3 (live-run check, from #353)**: the agent starts under `env -i` with named variables only
+  (`asAgentUser`, `cloud-runners/src/agent-user.ts:108`; `USER`, `LOGNAME` and `SHELL` come from
+  the account's passwd entry in `AGENT_ENTRY`). The real `claude -p` has never started this way:
+  the launch notes say to run it once under the exact `asAgentUser` line before the first task.
 - **P3**: the box checks are the first thing a real machine meets, and the rehearsal's box is made
   for them (real `sudo`, `getcap`, a second account, a firewall that keeps rules in files). A real
   machine without one of those refuses every task at once (`launch-notes.md`, "What to check at
@@ -128,12 +139,15 @@ on restart. `MAKA_CLOUD_GATEWAY_PUBLIC_URL` must be `https` except on loopback (
 #316 (merged) and #302 (merged) close the clip-before-scrub paths in manifests, asks and text.
 
 Findings:
-- **P2 (follow-up to #316, told to the Modes lane)**: `CHECK_SCRIPT` cuts a test's output with
-  `tail -c` in the sandbox before any scrub, and that tail reaches the owner raw through
-  `failure_brief.json` (`runs[].output`) and `verification.json` (`turns[].detail`), which the server
-  serves as artifact bytes without scrubbing. A test that prints its environment puts a key in the
-  owner's download. Fix in the runner: scrub `out.stdout` in `runCheck`, ask the sandbox for
-  `MAKA_TAIL + 512` and cut on the host after the scrub.
+- **P2 (follow-up to #316), closed by #320 (a3ae7a3)**: `CHECK_SCRIPT` cut a test's output with
+  `tail -c` in the sandbox before any scrub, and that tail reached the owner raw through
+  `failure_brief.json` and `verification.json`. Now `runCheck` asks the sandbox for
+  `TAIL_MARGIN` (512) more bytes than it wants, scrubs on the host and drops the margin through
+  the first line break (`scrubbedTail`, `cloud-playbooks/src/coding/runner.ts:321`). Left, told to
+  the Egress lane, which has a detector next on its list: the margin is a fixed count and a PEM
+  block is about 1.7 KiB, so a private key that starts more than 512 bytes before the tail arrives
+  as a headerless body that no secret shape matches. A test that prints its key at the end of a
+  long output still puts most of it in the owner's download.
 - **P1 (found in the #322 review, told to the Egress lane)**: the secret scrubber is quadratic on
   text with many `"value":`/`"token":`/`"scheme":` fields and no braces (`SECRET_PAIRS`,
   `cloud-orchestrator/src/secret-shapes.ts:70`, `between = '[^{}]*?'`): 273 ms at 60 KB, 4.5 s at
@@ -190,25 +204,17 @@ and the run resumes from the kept session (`cloud-orchestrator/src/orchestrator.
 `restart` and `restart-reply` cover both, with the stand-in CLI parked at `waitinit`.
 
 Findings:
-- **P1 (owned by T28, backlog item 2)**: no clean detach. `stack.close()` closes the servers,
-  the conductor, the orchestrator's retries and clocks, the database and then the gateway
-  (`cloud-host/src/stack.ts:602-626`, `cloud-server/src/cloud-server.ts:616-641`,
-  `orchestrator.ts:373-382`), but nothing cancels or detaches the running `Run` handles: a run's
-  cancel happens only when it ends (`cloud-runners/src/runner.ts:289-297`), its poller sleeps on a
-  timer that is not unref'd (`poller.ts:73`) and its exec requests are in flight with a 60 s
-  timeout. The process stays up; Compose (`stop_grace_period: 60s`) and systemd (`TimeoutStopSec=60`)
-  send SIGKILL. Two effects to expect on a real host:
-  - every restart with a task running takes about a minute and ends in a kill, so the restart path
-    the rehearsal proves is the kill path, which is also the crash path: recovery is from the store
-    (`synchronous = FULL`), not from a handover;
-  - between `cloud.close()` and `gateway.close()` the run still works against a closed orchestrator
-    and database: a run event in that window throws inside the runner's callbacks. Whether that
-    surfaces as an unhandled rejection (exit 1, systemd's `Restart=on-failure` restarts the unit) or
-    is swallowed was not traced; either way the task resumes at the next start.
-  Fix shape: on close, cancel every run handle with a "restart" reason that leaves the task
-  unfinished in the store, stop the pollers and resolve `close()` once the handles are gone, or
-  mark the run as detached before closing the stores. Test: start a task, close the stack, assert
-  the process has no handles left and the task is still `running` in the store.
+- **P1 (gate 2), closed by #337 (8e5abee)**: no clean detach. `stack.close()` closed the servers,
+  the conductor, the orchestrator's retries and clocks, the database and then the gateway, but
+  nothing cancelled or detached the running `Run` handles, so the process stayed up until Compose
+  (`stop_grace_period: 60s`) or systemd (`TimeoutStopSec=60`) sent SIGKILL, and a run event
+  between `cloud.close()` and `gateway.close()` threw inside a closed orchestrator. #337 adds
+  `Orchestrator.detachRuns` and `RunHandle.detach`: pollers, timers and calls end at once, nothing
+  is cancelled or recorded, the task stays `running` for the next process, the poller's sleep is
+  unref'd and the exit is forced after ten seconds. Read by this thread at merge with one P2, told
+  to T28 and in the backlog: a detach during the base check leaves the workspace reverted until
+  the next process restores it. The first live run is the first restart of a real task; the
+  rehearsal's `restart` step now proves the detach path, not the kill path.
 - **P3**: the first `restart` with a real task is also the first `stopLeftover` as root against a
   real agent process (`CHECK_STOP_SCRIPT`, `machine.kill`). A stop that reports survivors leaves the
   task owed a stop and the user sees "could not stop the leftover runner"; the owed stop is retried
@@ -256,12 +262,19 @@ the host's name-guessed list, merged with the filter), #331 (gate 3, ok), #335 (
 the reviewer's `change.patch` can be swapped by the first agent's leftover process), #336 (a later
 run opens a kept change, ok), #337 (clean detach on close, gate 2, P2: a detach during the base
 check leaves the workspace reverted), #340 (CLI check as the agent, ok with a P2 on reinstalls),
-#341 (delivery files by hash, ok). The
-PRs merged between 17:27Z
-and 22:28Z had no outside review at all; of those, the ones on the launch path are #232, #233,
-#240, #242, #243, #244, #246, #247, #250, #254, #256, #260, #263 and #237. Recheck them with Codex
-when it is back; until then, hold further changes to the same files or give them a second Claude
-review.
+#341 (delivery files by hash, ok), #345 (recovered journal rows booked once, ok), #338 (namespace
+refusal says why, ok), #320 (scrub before the tail, P2 then ok at 2c7f3f2), #350 (script file name
+and keep list checked, ok, merged), #352 (inbox per owner, P2 then ok at 0a785b3), #353 (agent
+environment from an allowlist, P2 fixed, merged), #354 (replay allowlist of flags, ok at
+4e2c92d), #356 (one process owns a task store, ok), #323 (final, ok at 2f76673), #360 (login-file
+probe, P2 open: the link target's directories are not walked), #362 (restart shows the kept
+change, ok), #364 (isolation model after E1-E3, ok), #365 (delivery records in `.records/`, ok),
+#367 (accounts and sessions, ok with three P3s, open) and #368 (stop-obligations gate, ok). The
+PRs merged between 17:27Z and 22:28Z had no outside review on GitHub at merge time; of those, the
+ones on the launch path are #232, #233, #240, #242, #243, #244, #246, #247, #250, #254, #256, #260,
+#263 and #237. `unreviewed-prs.md` (#361) now records that the owner's local Codex reviewed every
+commit through da8705f after the fact and sent its findings as batches 18 to 29; those findings
+are open and belong to their lanes.
 
 ## 9. What the first live run must show, in order
 
@@ -270,11 +283,12 @@ review.
 2. `/healthz` through the proxy over TLS; the event stream keeps alive through the proxy.
 3. Sign in on the web with the smoke invite; a reload asks for the token again (known, T31).
 4. One task on the smoke invite's machine: the box check passes (or says what the machine lacks),
-   the CLI installs, the clone works, the result card arrives, the PR opens on the scratch
-   repository, `verification.json` carries no key.
+   the real `claude -p` starts under the `env -i` entry, the CLI installs, the clone works, the
+   check starts in its own namespace (on Ubuntu 24.04 after the `sysctl` in `deploy.md`), the
+   result card arrives, the PR opens on the scratch repository, `verification.json` carries no key.
 5. One approval answered once from the phone and once from the web; the second is a duplicate.
-6. A restart while that task runs: about 60 s to the kill (known, T28), the task says it resumed,
-   one result, the cut-off call charged in full.
+6. A restart while that task runs: the server exits at once (#337), the task says it resumed or
+   shows the change its runner kept (#362), one result, the cut-off call charged in full (#345).
 7. `backup` with the server stopped, `backups` lists it, `restore` refuses with the server running
    and works with it stopped; revokes since the backup re-run.
 8. The gateway journal and the invite's spend after the run match the vendor's dashboard to within
