@@ -126,6 +126,40 @@ test('a journal that is read again after a crash books each attempt where it bel
   );
 });
 
+test('a row without an attempt that is read again after a crash between its record and the journal being told is booked once', async (t) => {
+  const { store, first, taskId } = await capped(t);
+  first.fake.runFor(taskId).usage(3);
+  await recorded(store, taskId, 3);
+
+  // Spend written before the journal kept attempts. The process books it and dies before it tells
+  // the journal, so the next one is handed the same row, and the one after it too.
+  const journal = {
+    unrecorded: () => [{ taskId, usd: 3.4 }],
+    recorded: () => undefined,
+  };
+  const second = await makeHarness(t, {
+    store,
+    dir: first.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: journal },
+  });
+  assert.equal(costOf(store, taskId), 3.4);
+  await eventually(() => second.fake.runs.length === 1, 'the second attempt');
+  const third = await makeHarness(t, {
+    store,
+    dir: second.dir,
+    fake: { recover: true },
+    orchestrator: { recoveredSpend: journal },
+  });
+  await eventually(() => third.fake.runs.length === 1, 'the third attempt');
+  assert.equal(costOf(store, taskId), 3.4, 'the same row is not booked under another attempt');
+  assert.equal(
+    third.fake.runFor(taskId).spec.budgetUsd,
+    1.6,
+    'a $5 task has $1.60 left, not a stop for $6.80 of spend',
+  );
+});
+
 test('real spend under the cap is not stopped because a row was booked under the wrong attempt', async (t) => {
   const { store, first, taskId } = await capped(t);
   first.fake.runFor(taskId).usage(3);

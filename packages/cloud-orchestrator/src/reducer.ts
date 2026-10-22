@@ -49,6 +49,9 @@ export function applyEvent(tasks: TaskMap, { at, event }: StoredEvent): void {
   if (event.type === 'task_cost') {
     const spend = (task.spendByRun ??= {});
     const run = spendKey(event);
+    if (event.recovery !== undefined) {
+      (task.recoveredRows ??= {})[event.recovery] ??= event.epoch ?? 0;
+    }
     // The total moves by what this run's figure rose, so a report costs the same however many runs
     // the task has had (a sum over all of them made replaying a long log quadratic).
     task.spendSum ??= Object.values(spend).reduce((sum, usd) => sum + usd, 0);
