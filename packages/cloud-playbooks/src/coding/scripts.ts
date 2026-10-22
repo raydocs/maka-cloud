@@ -116,7 +116,7 @@ isolated=0
 [ -e "$mark/started" ] && isolated=1
 rm -rf -- "$mark"
 if [ "$isolated" = 0 ]; then
-  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare)' >&2
+  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed: the box must allow unprivileged user namespaces, which a container profile such as the Docker default seccomp refuses; no check can run until it does)' >&2
   exit 125
 fi
 exit "$rc"
