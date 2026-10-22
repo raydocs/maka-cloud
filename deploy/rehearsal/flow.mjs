@@ -444,7 +444,7 @@ const steps = [
       // so a box that refuses those namespaces, or a repro.json that was not written, fails here.
       assert(
         notes.some((note) => note === 'running sh check.sh'),
-        `the runner never got past the reproduction test to the task's own tests: ${notes.join(' | ').slice(0, 600)}`,
+        `the runner never got past the reproduction test to the task's own tests: ${notes.join(' | ').slice(0, 600)}; the task ended: ${ended.slice(-900)}`,
       );
       console.log(`  the coding task: ${ended.slice(0, 300)}`);
     },
