@@ -10,7 +10,7 @@ health check that never goes green.
 | `compose.yaml` | adds the `stubs` service (the `rehearsal-sandbox` image target of `deploy/Dockerfile`) to `deploy/compose.yaml`, and gives the rehearsal its own project name (`maka-rehearsal`) and image tags |
 | `lib.sh` | the one place that runs Compose (`-p maka-rehearsal`), and `guard_rehearsal`, which every script calls before it changes the stack |
 | `compose.env` | the three names (`app`, `mcp`, `models` on `.localhost`) and Caddy's own certificate authority (`local_certs`) |
-| `server.env` | the server's settings: fake keys, the stand-ins as the model and sandbox APIs |
+| `server.env` | the server's settings: fake keys, the stand-ins as the model and sandbox APIs; `up.sh` completes it with `maka-cloud setup --from-env`, as an operator would |
 | `stubs.mjs` | the model API and the sandbox API, and a control API for the scripted `claude` |
 | `up.sh`, `down.sh` | build and bring the stack up behind Caddy and check it over TLS; take it down |
 | `flow.mjs` | the flow: sign in, a task and its result card, an approval, a restart, a backup and a restore |

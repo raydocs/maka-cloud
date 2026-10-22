@@ -21,26 +21,37 @@ work="$(cd "$work" && pwd)"
 export MAKA_CLOUD_ENV_FILE="$work/server.env"
 
 # Compose reads the server's env file before it runs anything, so it exists first.
-{ cat "$here/server.env"; echo "MAKA_CLOUD_SANDBOXES='{}'"; } > "$work/server.env"
+cp "$here/server.env" "$work/server.env"
 
 guard_rehearsal
 compose build
 
-# The invite lives in the server's data volume, so it is made there before the first start.
-compose run --rm --no-deps --entrypoint node maka-cloud \
-  packages/cloud-server/dist/cli.js invite create --invites /data/invites.db --label rehearsal \
-  > "$work/invite.txt"
-invite="$(awk '/^inviteId:/ { print $2 }' "$work/invite.txt")"
-token="$(awk '/^token:/ { print $2 }' "$work/invite.txt")"
-if [ -z "$invite" ] || [ -z "$token" ]; then
-  echo "up.sh: the invite could not be made" >&2
+# The settings are made the way an operator makes them: "maka-cloud setup --from-env" runs in the
+# server's image, makes the owner's invite in the data volume and fills in everything not asked,
+# keeping what server.env already sets (the stand-ins as the APIs, the agent account). It writes
+# as the image's user, so the directory it writes to is handed to that user and back again.
+mkdir -p "$work/setup"
+as_image_root() {
+  compose run --rm --no-deps -T --user 0 --entrypoint "$1" -v "$work/setup:/setup" maka-cloud "${@:2}"
+}
+cp "$work/server.env" "$work/setup/server.env"
+as_image_root chown -R node:node /setup
+compose run --rm --no-deps -T -v "$work/setup:/setup" \
+  -e MAKA_CLOUD_SETUP_DOMAIN=localhost -e MAKA_CLOUD_SETUP_MACHINE=m_rehearsal0000000000000000 \
+  maka-cloud setup --from-env --no-verify --settings /setup/server.env --names /setup/names.env \
+  > "$work/setup.txt" || { grep -v '^Your sign-in token' "$work/setup.txt" >&2; exit 1; }
+as_image_root chown -R "$(id -u):$(id -g)" /setup
+grep -v '^Your sign-in token' "$work/setup.txt"
+token="$(sed -n 's/^Your sign-in token[^:]*: //p' "$work/setup.txt")"
+rm -f "$work/setup.txt"
+if [ -z "$token" ]; then
+  echo "up.sh: setup made no invite" >&2
   exit 1
 fi
-rm -f "$work/invite.txt"
 umask 077
 printf '%s' "$token" > "$work/token"
-{ cat "$here/server.env"; echo "MAKA_CLOUD_SANDBOXES='{\"$invite\":\"m_rehearsal0000000000000000\"}'"; } \
-  > "$work/server.env"
+cp "$work/setup/server.env" "$work/server.env"
+rm -rf "$work/setup"
 
 compose up -d --wait --wait-timeout 180
 

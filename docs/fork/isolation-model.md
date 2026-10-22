@@ -136,7 +136,9 @@ Each: the statement, how the code enforces it today, how it is tested today, and
 section 7 that it still needs. "Real-account test" means a test that only runs as root on a machine
 with a second account (`canSeparate()` in `check-real-account.test.ts`, `agent-user.test.ts`). The
 rehearsal job runs the whole task flow with a real second account since #301, but the unit suites'
-real-account tests still skip on hosted runners (section 7, F9).
+real-account tests ran only on a machine with root until F9: the `real-accounts` job of
+`fork-deploy-rehearsal.yml` now runs them in the `real-account-tests` image target (`deploy/Dockerfile`)
+with `MAKA_REQUIRE_REAL_ACCOUNTS=1`, which makes them fail instead of skip.
 
 **I1. Task-steerable code runs only as the agent account.** The control user never executes a
 file the agent can write, and never runs a program whose behaviour is configured by a file the
