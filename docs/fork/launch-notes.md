@@ -87,5 +87,6 @@ A forced exit (the process was still closing after ten seconds) exits with code 
 
 Run one server per data directory. A second one over the same directory refuses to start
 (`DatabaseInUseError`) before it touches the spend journal or the task log, and the first keeps
-running. See
+running. With a fixed gateway port on the same machine the second one is refused earlier, by the
+port (`EADDRINUSE`): same outcome, nothing of the first touched. See
 `design/durable-tasks.md`, "One process owns a task store".

@@ -27,7 +27,7 @@ What enforces it:
 
 - `openDatabase` (`cloud-server/src/db.ts`) takes `locking_mode=EXCLUSIVE` and an immediate write transaction at open, so a second server over the same file fails there with `DatabaseInUseError` instead of waiting. The lock is the kernel's: a crashed server leaves nothing to clean up. The supervisor's and the transcripts' databases do the same (`SupervisorDatabaseInUseError`, `TranscriptDatabaseInUseError`).
 - The host opens the server database before `restore()` and before it writes the spend caps, so a second stack is refused before it can touch the journal (`start-failure.test.ts`: a second stack over a running one fails with the lock error, the first one's open hold is still in the journal and its caps are unchanged; `lock.test.ts` for the file itself).
-- The spend journal is the one file other processes may open (the evals read the server's caps and book spend through `openServerLedger`); they take no epoch of their own and never run `unrecorded`/`recorded`.
+- The spend journal is the one file other processes may open: the evals read the server's caps and book account spend on it through `openServerLedger`, which takes no epoch of its own and never touches the per-task rows. They do run `unrecorded`/`recorded`, but on their own journal in their own experiment directory (`live.ts` refuses a directory whose journal is the server's).
 
 What it does not cover: two processes on different machines over a copied or network-mounted file (kernel locks are not reliable there), and a process that is given a different data directory. Epoch fencing stays as the second line for those: a driver that lost a task is refused at its next write. Do not rely on it as a substitute; run one server.
 
