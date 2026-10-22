@@ -527,20 +527,28 @@ if [ -f "$file" ]; then wc -l < "$file" | tr -d ' '; else echo 0; fi
 `;
 
 /**
- * Writes the transcript in chunks into a temporary file, checks its sha256 at the last chunk and
- * renames it into place, so the CLI never reads a half-written file. A chunk sent again after a
- * lost answer is recognized by the file's size and not written twice.
+ * Writes the transcript in chunks into a temporary file in the task directory, checks its sha256 at
+ * the last chunk and renames it into place, so the CLI never reads a half-written file. The
+ * temporary file is not in `claude-config/`, which the agent's group writes: every chunk reopens it
+ * by name, and a link the agent (or a sibling task's agent) planted there between two chunks would
+ * be followed. The task directory is the sandbox user's alone to write, and the file takes the
+ * agent's group only after the hash is checked, just before the rename (a rename replaces a link and
+ * never follows one), as `PREPARE_SCRIPT` does for the brief. A chunk sent again after a lost answer
+ * is recognized by the file's size and not written twice.
  */
 export const TRANSCRIPT_CHUNK_SCRIPT = `set -eu
-# The agent's account reads and appends to this file through the shared group (see agent-user.ts).
-umask 007
+umask 077
 ${TRANSCRIPT_DIRS}
-tmp="$dir/.restore-$MAKA_SESSION.tmp"
-if [ "$MAKA_OFFSET" = 0 ]; then
+tmp="$MAKA_DIR/.restore-$MAKA_SESSION.tmp"
+refuse_links() {
   for p in "$cfg" "$cfg/projects" "$dir"; do
     if [ -L "$p" ]; then echo "refused: $p is a symbolic link" >&2; exit 1; fi
   done
-  mkdir -p "$dir"
+}
+if [ "$MAKA_OFFSET" = 0 ]; then
+  refuse_links
+  # The directories are the agent's to enter and write (see agent-user.ts); the file is not, yet.
+  ( umask 007; mkdir -p "$dir" )
   rm -f -- "$tmp"
   # Created or refused: a link planted at the name after the rm is not written through.
   set -C
@@ -559,10 +567,14 @@ else
 fi
 if [ "$MAKA_LAST" = 1 ]; then
   [ "$(sha256sum < "$tmp" | cut -d' ' -f1)" = "$MAKA_HASH" ] || { rm -f -- "$tmp"; echo "the transcript arrived damaged" >&2; exit 1; }
-  mv -f -- "$tmp" "$file"
+  refuse_links
+  # The agent's account reads and appends to the file through the shared group (see agent-user.ts).
+  chgrp --reference="$dir" -- "$tmp"
+  chmod 660 -- "$tmp"
+  mv -fT -- "$tmp" "$file"
 fi
 `;
 
-export const TRANSCRIPT_ABORT_SCRIPT = `${TRANSCRIPT_DIRS}
-rm -f -- "$dir/.restore-$MAKA_SESSION.tmp"
+export const TRANSCRIPT_ABORT_SCRIPT = `set -eu
+rm -f -- "$MAKA_DIR/.restore-$MAKA_SESSION.tmp"
 `;
