@@ -122,9 +122,10 @@ Still missing before it can merge:
    refuse to start.
 2. P3: the smoke should request `limit=200` per page, so an invite with a long history needs fewer
    pages. Test: the request carries `limit=200`.
-3. P3, possibly user-visible: the server's `listTasks` can drop a task from a page, so the task list
-   may miss one. Check the lane's cursor logic first. Test: a page boundary that falls inside a run
-   of tasks returns each task exactly once. Source: the #328 review.
+3. Not a bug (checked in #410): `listTasks` pages by the unique `n > after ORDER BY n` cursor, so a
+   full listing never skips or repeats a task; a test now pins that with equal creation times. A page
+   is short only for an index row without a creation log, which no code path writes (both are in one
+   transaction, and the log cannot change). Source: the #328 review.
 
 ## Kept changes and the handoff listing (from #336 and #341)
 
@@ -154,13 +155,27 @@ Still missing before it can merge:
    leader exited normally`. Make each wait on an explicit handshake instead of a time. (The
    stop-obligations tests that raced the fast retry are fixed: the retry that would confirm the
    stop now waits for the test to open a gate.)
-5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
-   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
-   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
-   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
+5. Fixed: inbox settings replies allow only `mutedKinds`, `quietHours` and `timeZone`: the owner's
+   own choices with the operator's mutes and quiet-hour defaults. Operator caps, stall times and
+   `digestAt` stay private on GET, settings updates and mute changes. Tests cover both invites and
+   every settings reply; web, phone and shared clients read none of the removed fields. Source: #352.
 
 ## Reviews merged without an outside review
 
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
 requests merged since then, with the outside review each one had, is in
 `docs/fork/unreviewed-prs.md`. Recheck them once Codex is back.
+
+## LayerFS workspaces (phase 2, C6)
+
+From the owner's review of LayerFS (2026-10-21). The proposal and its gates are in
+`docs/fork/design/layerfs.md`.
+
+1. Gate 1, isolation: a LayerFS FUSE workspace on instabox, run by the unprivileged agent account,
+   breaks no invariant of `docs/fork/isolation-model.md`. Test: every invariant check passes with a
+   LayerFS mount in place.
+2. Gate 2, measured gain: mounting beats clone plus install by at least 3x to the first test run on
+   two real repositories. Test: the benchmark harness records both.
+3. Only then: a `WorkspaceStore` interface (clone stays the default), kept-change checkpoints as
+   immutable commits (closes the P2-2 class), parallel tasks on one repository, and blame lines in
+   the PR evidence block.
