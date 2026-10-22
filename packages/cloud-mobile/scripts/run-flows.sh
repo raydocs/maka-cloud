@@ -8,8 +8,8 @@ cd "$here"
 
 case "$platform" in
   # The Android emulator reaches this machine as 10.0.2.2; the iOS simulator shares its network.
-  android) server="http://10.0.2.2:${CLOUD_WEB_API_PORT:-4174}"; control="http://10.0.2.2:${CLOUD_WEB_CONTROL_PORT:-4175}" ;;
-  ios) server="http://localhost:${CLOUD_WEB_API_PORT:-4174}"; control="http://localhost:${CLOUD_WEB_CONTROL_PORT:-4175}" ;;
+  android) server="http://10.0.2.2:${CLOUD_WEB_API_PORT:-4174}" ;;
+  ios) server="http://localhost:${CLOUD_WEB_API_PORT:-4174}" ;;
   *) echo "unknown platform $platform" >&2; exit 2 ;;
 esac
 
@@ -18,6 +18,9 @@ if [ "$platform" = android ]; then
   adb shell settings put global hide_error_dialogs 1
   adb install -r android/app/build/outputs/apk/release/app-release.apk
 fi
+
+# Maestro runs a flow's scripts on this machine, not on the device, so they reach the control port here.
+control="http://127.0.0.1:${CLOUD_WEB_CONTROL_PORT:-4175}"
 
 mkdir -p e2e-output
 status=0
