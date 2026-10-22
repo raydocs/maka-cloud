@@ -1440,6 +1440,7 @@ export class Conductor {
       ...(this.modes ? { modes: this.modes } : {}),
       deepMode: this.deepMode,
       grantsCoverTaint: this.grantsCoverTaint,
+      grantsUsable: this.approverAuthorized !== undefined,
       turnFor: (ctx: MakaToolContext) => {
         const turn = this.turns.get(ctx.sessionId);
         if (!turn) throw new ToolRefusal('no_run', 'This session has no running conductor turn.');

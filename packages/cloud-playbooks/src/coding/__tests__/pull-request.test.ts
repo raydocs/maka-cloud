@@ -641,7 +641,7 @@ test('a scoped approval may cover this tool only for the repository its card nam
     ownsTask: () => true,
   });
   const scope = await tool.grantScope?.({ taskId: 'tsk_1', title: 'Fix add' });
-  assert.deepEqual(scope, { repository: REPO });
+  assert.deepEqual(scope, { repository: REPO, fixed: { baseRef: 'main' } });
   // The owner approving a scope sees this repository on the card.
   const card = (await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' })) ?? '';
   assert.ok(card.split('\n').includes(`Repository: ${scope?.repository}`));

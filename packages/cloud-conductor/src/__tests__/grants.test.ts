@@ -539,3 +539,20 @@ test('the migration adds grants to a database from before them and keeps its que
   assert.throws(() => db.exec('UPDATE grant_uses SET at = 1'), /never changed/);
   assert.throws(() => db.exec('DELETE FROM grant_uses'), /never changed/);
 });
+
+test('without a host check of who approved, no scope is offered and no grant is used', async (t) => {
+  const env = await setup(t, {
+    conductor: { approverAuthorized: undefined } as Partial<ConductorOptions>,
+  });
+  const card = await held(env, { repo: 'acme/widgets', title: 'One' });
+  assert.deepEqual(idsOf(card.question), ['approve', 'reject']);
+  // A grant that exists anyway (written by hand) is not used either.
+  const { state } = env.h.conductor;
+  state.db
+    .prepare(
+      `INSERT INTO grants (grant_id, owner, tool, repository, fixed, scope, conversation_id, run_id, question_id, created_at, expires_at)
+       VALUES ('g', ?, ?, 'acme/widgets', '{"draft":false}', 'repository', 'cnv_1', NULL, 'q_x', ?, ?)`,
+    )
+    .run(OWNER, TOOL, env.clock.now, env.clock.now + 1000);
+  assert.equal(await again(env, { repo: 'acme/widgets', title: 'Two' }), 'needs_approval');
+});
