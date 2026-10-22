@@ -25,7 +25,7 @@ import type {
   SandboxProvider,
   SandboxTool,
 } from './types.js';
-import type { TokenPrices, VendorAdapter } from './vendors.js';
+import { claudeAdapter, codexAdapter, type TokenPrices, type VendorAdapter } from './vendors.js';
 
 export type RunnerName = 'claude-agent-sdk' | 'codex';
 
@@ -111,7 +111,8 @@ export interface CloudRunnersOptions {
   /**
    * How often a run driven by the SDK is polled: every hook the CLI waits for costs a poll, so
    * these runs are polled much faster than `pollIntervalMs` while output is coming, and back off
-   * (doubling) towards `maxMs` while it is quiet. Default 150 ms and 1 s.
+   * (doubling) towards `maxMs` while it is quiet. Default 150 ms and 1 s, as for runs of the CLI
+   * without the SDK.
    */
   agentSdkPollMs?: PollBackoff;
   /** Consecutive failed polls before a run fails with "sandbox unreachable". */
@@ -242,6 +243,17 @@ export class Fleet {
       this.setups.set(key, pending);
     }
     return pending;
+  }
+
+  /**
+   * Starts installing the CLI of runner `name` on the machine and does not wait for it, for a run
+   * that will need it later. A failure is dropped here: the run that needs the CLI calls
+   * `ensureCli`, which shares an install still going or tries again, and fails there as it would.
+   */
+  prepareCli(machine: RemoteMachine, name: string): void {
+    const vendor = [claudeAdapter, codexAdapter].find((adapter) => adapter.name === name);
+    if (vendor === undefined) return;
+    this.ensureCli(machine, vendor).catch(() => undefined);
   }
 
   private async installCli(machine: RemoteMachine, vendor: VendorAdapter): Promise<void> {

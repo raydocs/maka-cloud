@@ -52,6 +52,12 @@ export interface RunSpec {
    * booked under, so spend that a restart recovers lands on the same figure as the live report.
    */
   epoch?: number;
+  /**
+   * Runners a later run of this task will use on the same sandbox (a reviewer of the other
+   * vendor). A runner may start installing their CLIs in the background while this run works; a
+   * failed install is not this run's failure, and the later run installs or fails as it would.
+   */
+  prepareRunners?: string[];
 }
 
 /** Why and how a task is being driven again after its previous attempt ended without an outcome. */
