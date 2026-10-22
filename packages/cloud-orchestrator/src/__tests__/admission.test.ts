@@ -345,6 +345,41 @@ test('restarts spent waiting do not count against the task once it runs', async 
   await eventually(() => current.h.fake.recoveries.length === 1, 'resumed');
 });
 
+test('a running tree held through many restarts is not given up on', async (t) => {
+  const store = new MemoryTaskStore();
+  const before = await makeHarness(t, { store, fake: { recover: true } });
+  const c = before.session();
+  const one = await before.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const two = await before.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(
+    () =>
+      before.orchestrator.taskStateOf(one.taskId) === 'running' &&
+      before.orchestrator.taskStateOf(two.taskId) === 'running',
+    'both running',
+  );
+  before.orchestrator.close();
+
+  const groups = new Map([[c.sessionId, 'invite-1']]);
+  let current = await grouped(t, { store, groups, dir: before.dir, fake: { recover: true } });
+  for (let n = 1; n <= MAX_RESUMES_IN_A_ROW + 2; n += 1) {
+    await eventually(() => current.h.fake.recoveries.length === 1, `one resumed ${n}`);
+    assert.equal(current.h.fake.recoveries[0]?.taskId, one.taskId);
+    current.h.fake.runFor(one.taskId).usage(n / 100);
+    await eventually(
+      () => (current.h.orchestrator.status(c, one.taskId).costUsd ?? 0) >= n / 100,
+      'the spend recorded',
+    );
+    current.h.orchestrator.close();
+    current = await grouped(t, { store, groups, dir: current.h.dir, fake: { recover: true } });
+    await current.h.orchestrator.settled();
+    assert.equal(current.h.orchestrator.taskStateOf(two.taskId), 'running', `restart ${n}`);
+  }
+  await eventually(() => current.h.fake.recoveries.length === 1, 'one resumed');
+  await current.h.fake.runFor(one.taskId).complete();
+  await eventually(() => current.h.fake.recoveries.length === 2, 'the held tree resumed');
+  assert.equal(current.h.fake.recoveries[1]?.taskId, two.taskId);
+});
+
 test('a restored tree that used its run time while it waited is stopped with a note, not left running', async (t) => {
   const store = new MemoryTaskStore();
   let now = 1_000_000;

@@ -1302,16 +1302,23 @@ export class Orchestrator {
       };
     }
     const root = this.treeRoot(task.taskId);
-    const costSeqs = (root ? this.store.readTask(root.taskId) : [])
+    const rootLog = root ? this.store.readTask(root.taskId) : [];
+    const costSeqs = rootLog
       .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
       .map(({ seq }) => seq);
-    const log = this.store.readTask(task.taskId);
-    // Restarts it spent waiting its turn are not resumes that got nowhere: count from its turn.
-    const turnSeqs = log
-      .filter(({ event }) => event.type === 'task_progress' && event.note === TURN_NOTE)
+    // Restarts its tree spent waiting its turn are not resumes that got nowhere: they are counted
+    // from the tree's latest hold or turn note, and not at all while the tree still waits.
+    const waitSeqs = rootLog
+      .filter(
+        ({ event }) =>
+          event.type === 'task_progress' && (event.note === TURN_NOTE || isHoldNote(event.note)),
+      )
       .map(({ seq }) => seq);
-    const resumes = resumesInARow(log, [...costSeqs, ...turnSeqs]);
-    if (resumes > MAX_RESUMES_IN_A_ROW && !waitingTurn) {
+    const treeWaits =
+      waitingTurn ||
+      (this.admission !== undefined && root !== undefined && isHoldNote(root.progress.at(-1)));
+    const resumes = resumesInARow(this.store.readTask(task.taskId), [...costSeqs, ...waitSeqs]);
+    if (resumes > MAX_RESUMES_IN_A_ROW && !treeWaits) {
       return {
         kind: 'give_up',
         reason: `needs you: this task was resumed ${MAX_RESUMES_IN_A_ROW} times in a row without finishing a step or spending anything, so it stopped; open it and decide whether to start it again`,
