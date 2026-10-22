@@ -121,4 +121,36 @@ describe('box service', () => {
     );
     await t.service.close();
   });
+
+  it('waits on close for a create that is under way, and hands its box to no one', async () => {
+    const t = start();
+    const creating = t.fleet.hold('createMachine');
+    const asking = t.service.pool.acquire({ tenantId: A, taskId: 't1' });
+    await creating.reached;
+    let closed = false;
+    const closing = t.service.close().then(() => {
+      closed = true;
+    });
+    await flush();
+    assert.equal(closed, false, 'close waits for the create');
+    creating.release();
+    await assert.rejects(asking, /shut down/);
+    await closing;
+    assert.equal(t.service.pool.state()[0]?.state, 'ready');
+  });
+
+  it('frees the box of a task that ended on the sweep timer, so a waiting task gets it', async () => {
+    const live = new Set(['t1']);
+    const t = start({ isTaskLive: (taskId) => live.has(taskId), maxPerInvite: 1 });
+    const run = await t.service.pool.acquire({ tenantId: A, taskId: 't1' });
+    await run.release();
+    const waiting = t.service.pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(t.service.pool.waiting(A), 1);
+    live.delete('t1');
+    t.timers.fire(MIN);
+    await flush();
+    assert.equal((await waiting).machineId, run.machineId);
+    await t.service.close();
+  });
 });

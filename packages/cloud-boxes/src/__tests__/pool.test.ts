@@ -586,3 +586,138 @@ describe('BoxPool', () => {
     });
   });
 });
+
+describe('review fixes before the pool goes on', () => {
+  it('never hands out a box that a newer ask of the same task refused while the older one looked', async () => {
+    const { pool, fleet } = setup();
+    const first = await pool.acquire({ tenantId: A, taskId: 't1' });
+    const machine = fleet.machines.get(first.machineId);
+    assert.ok(machine);
+    machine.metadata = { ...machine.metadata, [LABEL.invite]: B };
+    const looking = fleet.hold('getMachine');
+    const older = pool.acquire({ tenantId: A, taskId: 't1' });
+    await looking.reached;
+    // The newer ask reads the box, refuses it and takes another slot.
+    const newer = await pool.acquire({ tenantId: A, taskId: 't1' });
+    assert.notEqual(newer.machineId, first.machineId);
+    looking.release();
+    const lease = await older;
+    assert.notEqual(lease.machineId, first.machineId, 'the refused box is not handed out');
+    assert.equal(lease.machineId, newer.machineId, 'the task stays on one box');
+    assert.equal(pool.state().find((row) => row.machineId === first.machineId)?.state, 'refused');
+  });
+
+  it('a restore refuses, and does not mark lost, a box whose label names another live task', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 2 });
+    const old = await pool.acquire({ tenantId: A, taskId: 't1' });
+    live.add('t1');
+    live.add('elsewhere');
+    const machine = fleet.machines.get(old.machineId);
+    assert.ok(machine);
+    machine.state = 'error';
+    machine.metadata = { ...machine.metadata, [LABEL.task]: 'elsewhere' };
+    const lease = await pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' });
+    assert.notEqual(lease.machineId, old.machineId);
+    assert.equal(pool.state().find((row) => row.machineId === old.machineId)?.state, 'refused');
+    assert.equal(labelsOf(fleet, old.machineId)?.[LABEL.task], 'elsewhere', 'left as it was');
+
+    // The restoring task's own label is not a reason to refuse: that box is lost, as before.
+    const own = setup({ maxPerInvite: 2 });
+    const mine = await own.pool.acquire({ tenantId: A, taskId: 't1' });
+    own.live.add('t1');
+    const broken = own.fleet.machines.get(mine.machineId);
+    assert.ok(broken);
+    broken.state = 'error';
+    await own.pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' });
+    assert.equal(own.pool.state().find((row) => row.machineId === mine.machineId)?.state, 'lost');
+  });
+
+  it('a task keeps its box across its runs: a run that ends while the task is live frees nothing', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const run1 = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await run1.release();
+    assert.equal(pool.state()[0]?.taskId, 't1', 'the task still holds its box between runs');
+    assert.equal(labelsOf(fleet, run1.machineId)?.[LABEL.task], 't1');
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    let otherGot = false;
+    void other.then(
+      () => {
+        otherGot = true;
+      },
+      () => undefined,
+    );
+    await flush();
+    assert.equal(otherGot, false, 'another task does not get the box between the runs');
+    // The next run borrows the same box, and its end frees nothing either.
+    const run2 = await pool.acquire({ tenantId: A, taskId: 't1' });
+    assert.equal(run2.machineId, run1.machineId);
+    await run2.release();
+    await flush();
+    assert.equal(otherGot, false);
+    // Once the task has ended the box is free for the next one.
+    live.delete('t1');
+    await pool.reconcile();
+    assert.equal((await other).machineId, run1.machineId);
+    assert.equal(labelsOf(fleet, run1.machineId)?.[LABEL.task], 't2');
+  });
+
+  it('frees the box of a task that ended for the next ask, without waiting for reconcile', async () => {
+    const { pool, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const run = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await run.release();
+    live.delete('t1');
+    const next = await pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.equal(next.machineId, run.machineId);
+  });
+
+  it('gives a task of another invite that waits at the account limit the room a deleted box leaves', async () => {
+    const { pool, fleet, clock } = setup({ cleanup: { idleDeleteMs: 60_000 } });
+    fleet.accountLimit = 1;
+    const a = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await assert.rejects(pool.acquire({ tenantId: B, taskId: 't2' }), NoFreeBoxError);
+    const waiting = pool.acquire({ tenantId: B, taskId: 't3' });
+    await flush();
+    assert.equal(pool.waiting(B), 1, 'the limit is known, so it waits');
+    await a.release();
+    clock.now += 61_000;
+    assert.deepEqual((await pool.cleanup()).deleted, [a.machineId]);
+    await flush();
+    assert.equal(pool.waiting(B), 0, 'the room went to the waiting invite');
+    const lease = await waiting;
+    assert.notEqual(lease.machineId, a.machineId);
+  });
+
+  it('makes nothing for an ask that was under way when the pool shut down', async () => {
+    const { pool, fleet } = setup();
+    const listing = fleet.hold('listMachines');
+    const asking = pool.acquire({ tenantId: A, taskId: 't1' });
+    await listing.reached;
+    pool.dispose();
+    listing.release();
+    await assert.rejects(asking, /shut down/);
+    assert.equal(fleet.callsTo('createMachine').length, 0);
+  });
+
+  it('hands out no box whose create ended after the shutdown, and keeps the box, free', async () => {
+    const { pool, fleet } = setup();
+    const creating = fleet.hold('createMachine');
+    const asking = pool.acquire({ tenantId: A, taskId: 't1' });
+    await creating.reached;
+    pool.dispose();
+    let settled = false;
+    const waiting = pool.settled().then(() => {
+      settled = true;
+    });
+    await flush();
+    assert.equal(settled, false, 'the shutdown waits for the create');
+    creating.release();
+    await assert.rejects(asking, /shut down/);
+    await waiting;
+    const [box] = pool.state();
+    assert.equal(box?.state, 'ready');
+    assert.equal(box?.taskId, undefined);
+    assert.equal(labelsOf(fleet, box?.machineId as string)?.[LABEL.task], undefined);
+  });
+});
