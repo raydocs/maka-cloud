@@ -31,7 +31,7 @@ import { TaskRow } from '@/components/TaskRow';
 import { Card, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
-import { useTheme } from '@/lib/theme';
+import { mono, useTheme } from '@/lib/theme';
 
 type Message = ConversationState['messages'][number];
 
@@ -120,15 +120,20 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         <View
           style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
         >
-          <View
-            accessible
-            accessibilityRole="text"
-            accessibilityLabel={status === 'Live' ? 'Live' : status}
-            style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}
-          >
-            <StatusMark tone={status === 'Live' ? 'ok' : 'idle'} />
-            <T kind="small">{status === 'Live' ? 'Live' : status}</T>
-          </View>
+          {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
+          {status === 'Live' ? (
+            <View />
+          ) : (
+            <View
+              accessible
+              accessibilityRole="text"
+              accessibilityLabel={status}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}
+            >
+              {status !== 'Connecting…' && <StatusMark tone="attention" />}
+              <T kind="small">{status}</T>
+            </View>
+          )}
           {conversations.length > 1 && (
             <Pressable
               accessibilityRole="button"
@@ -160,11 +165,16 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         ListEmptyComponent={
           <Card label="Empty conversation">
             <T kind="heading">What would you like to get done?</T>
-            <T kind="muted">Bring a question, a project, or a plan. We’ll keep the work here.</T>
+            <T kind="muted">
+              Bring a question, a project, or a plan. {BRAND.name} keeps the work here.
+            </T>
           </Card>
         }
         renderItem={({ item: message }) => (
+          // Who said it is plain from the side it sits on; a screen reader still hears the name.
           <View
+            accessible
+            accessibilityLabel={`${message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}: ${displayText(message.text)}`}
             style={[
               { maxWidth: '88%', gap: 2, marginBottom: 14 },
               message.role === 'user'
@@ -177,9 +187,6 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 : { alignSelf: 'flex-start' },
             ]}
           >
-            <T kind="small">
-              {message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}
-            </T>
             <T kind="body" selectable>
               {displayText(message.text)}
             </T>
@@ -199,9 +206,12 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               </View>
             )}
             {roots.length > 0 && (
-              <Card label="The work">
+              <Card label="Running">
                 <T kind="small">
-                  {running} running · Total cost so far: {dollars(total.usd)}
+                  {running} running · Total cost so far:{' '}
+                  <T kind="small" style={mono}>
+                    {dollars(total.usd)}
+                  </T>
                   {total.usd !== undefined && !total.complete && ' (not all reported)'}
                 </T>
                 {roots.map((task) => (
@@ -268,7 +278,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         </View>
         <RoundButton
           label={busy === 'message' ? 'Sending…' : 'Send message'}
-          glyph="↑"
+          icon="send"
           disabled={Boolean(busy) || !draft.trim()}
           onPress={() => {
             const sending = draft;

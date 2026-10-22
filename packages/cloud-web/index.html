@@ -1,10 +1,25 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#b4cbee" />
     <title>Maka — your work, together</title>
+    <script>
+      // The scheme before the first paint, as theme.tsx reads it: a stored choice, else the device's.
+      (function () {
+        var stored;
+        try {
+          stored = localStorage.getItem('maka.theme');
+        } catch (e) {}
+        var dark =
+          stored === 'dark' ||
+          (stored !== 'light' &&
+            !!window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

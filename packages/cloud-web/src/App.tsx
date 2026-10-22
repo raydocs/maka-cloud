@@ -1,7 +1,8 @@
-import { ArrowUp, ArrowUpRight, Settings as SettingsIcon } from 'lucide-react';
+import { ArrowUp, ArrowUpRight, FileText, Settings as SettingsIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
-import { useMode } from './theme';
+import { type ModeChoice, useMode } from './theme';
+import { FailureNote } from './Failure';
 import {
   ApiError,
   type ArtifactContent,
@@ -84,7 +85,7 @@ export function QuestionCard({
           )}
           {noting && (
             <label className="note-label">
-              Additional context (optional)
+              Note
               <textarea
                 rows={2}
                 maxLength={4000}
@@ -169,8 +170,11 @@ function TaskBranch({
           <span>{taskLabel(task)}</span>
           {task.parentTaskId === undefined && (
             <span>
-              {live ? 'Cost so far' : 'Cost'}: {dollars(task.costUsd)}
-              {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+              {live ? 'Cost so far' : 'Cost'}:{' '}
+              <span className={task.costUsd === undefined ? undefined : 'mono'}>
+                {dollars(task.costUsd)}
+                {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+              </span>
             </span>
           )}
         </div>
@@ -181,10 +185,8 @@ function TaskBranch({
           <p className="muted">Still stopping. The cost may change until it has stopped.</p>
         )}
         {/* A finished task has no "current step", and a top-level result is on its own card. */}
-        {task.progress.length > 0 && task.state !== 'succeeded' && (
-          <StepLine notes={task.progress} />
-        )}
-        {task.failureReason && <p className="failure">{displayText(task.failureReason)}</p>}
+        {task.progress.length > 0 && live && <StepLine notes={task.progress} />}
+        {task.failureReason && <FailureNote reason={task.failureReason} />}
         {task.manifest && task.parentTaskId !== undefined && (
           <p>{displayText(task.manifest.summary)}</p>
         )}
@@ -291,9 +293,7 @@ function ArtifactList({
         return (
           <article className="artifact card" key={`${taskId}-${listing.index}`}>
             <div className="artifact-heading">
-              <span className="file-symbol" aria-hidden="true">
-                ▤
-              </span>
+              <FileText aria-hidden="true" size={18} strokeWidth={1.8} className="file-symbol" />
               <h3>{displayText(pullRequestName(link) ?? listing.name)}</h3>
             </div>
             <span className="artifact-kind">
@@ -379,15 +379,22 @@ export function ConversationView({
       .filter((task) => task.state === 'succeeded' && task.manifest?.summary !== undefined)
       .map((task) => task.taskId),
   );
+  const unshown = withResults.filter((task) => !shown.has(task.taskId));
 
   return (
     <div className="chat">
       <section className="conversation card" aria-label="Conversation">
         <div className="conversation-heading">
           <h1>{displayText(conversation.title ?? 'A fresh start')}</h1>
+          {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
           <span className="connection" role="status">
-            <span className={`status-mark ${status === 'Live' ? 'succeeded' : 'attention'}`} />
-            {status}
+            {status === 'Connecting…' && <span className="muted">{status}</span>}
+            {status !== 'Live' && status !== 'Connecting…' && (
+              <>
+                <span className="status-mark attention" />
+                {status}
+              </>
+            )}
           </span>
           {picker}
         </div>
@@ -395,7 +402,7 @@ export function ConversationView({
           {state.messages.length === 0 && (
             <div className="empty">
               <h2>What would you like to get done?</h2>
-              <p>Bring a question, a project, or a plan. We’ll keep the work here.</p>
+              <p>Bring a question, a project, or a plan. {BRAND.name} keeps the work here.</p>
             </div>
           )}
           {state.messages.map((message) => (
@@ -488,17 +495,17 @@ export function ConversationView({
         </form>
       </section>
       <aside className="work-panel" aria-label="Work and results">
-        <section className="card section-card work-summary">
+        <section className="card section-card work-summary" aria-label="Running">
           <div className="section-heading">
-            <h2>The work</h2>
+            <h2>Running</h2>
             <span className="count">{running} running</span>
           </div>
           <div className="spend">
             <span>Total cost so far</span>
-            <strong>
-              {dollars(total.usd)}
-              {total.usd !== undefined && !total.complete && ' (not all reported)'}
-            </strong>
+            <strong className="mono">{dollars(total.usd)}</strong>
+            {total.usd !== undefined && !total.complete && (
+              <span className="muted">Not all reported</span>
+            )}
           </div>
         </section>
         <section className="card section-card" aria-label="Task tree">
@@ -517,23 +524,26 @@ export function ConversationView({
             <p className="muted">Tasks will appear as the plan takes shape.</p>
           )}
         </section>
-        <section className="artifacts" aria-label="Artifacts">
-          <h2 className="panel-heading">Ready to review</h2>
-          {!withResults.some((task) => artifacts[task.taskId]?.listings.length) && (
-            <p className="muted">Reports, changes, and pull requests will collect here.</p>
-          )}
-          {withResults.map((task) => (
-            <ArtifactList
-              key={task.taskId}
-              client={client}
-              taskId={task.taskId}
-              title={task.title ?? 'Task'}
-              entry={artifacts[task.taskId] as TaskArtifacts}
-              busy={Boolean(busy)}
-              act={act}
-            />
-          ))}
-        </section>
+        {/* A result with its own card in the conversation is not listed again here. */}
+        {(withResults.length === 0 || unshown.length > 0) && (
+          <section className="artifacts" aria-label="Artifacts">
+            <h2 className="panel-heading">Review</h2>
+            {!unshown.some((task) => artifacts[task.taskId]?.listings.length) && (
+              <p className="muted">Reports, changes, and pull requests will collect here.</p>
+            )}
+            {unshown.map((task) => (
+              <ArtifactList
+                key={task.taskId}
+                client={client}
+                taskId={task.taskId}
+                title={task.title ?? 'Task'}
+                entry={artifacts[task.taskId] as TaskArtifacts}
+                busy={Boolean(busy)}
+                act={act}
+              />
+            ))}
+          </section>
+        )}
       </aside>
     </div>
   );
@@ -620,21 +630,27 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
   );
 }
 
-/** Light or dark, kept in this browser. */
+const MODE_CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+];
+
+/** System, light or dark, kept in this browser. */
 function AppearanceChoice() {
-  const { mode, setMode } = useMode();
+  const { choice, setMode } = useMode();
   return (
     <section className="card section-card" aria-label="Appearance">
       <h2>Appearance</h2>
       <div className="mode-choice" role="group" aria-label="Color mode">
-        {(['light', 'dark'] as const).map((value) => (
+        {MODE_CHOICES.map(({ value, label }) => (
           <button
             key={value}
             type="button"
-            aria-pressed={mode === value}
+            aria-pressed={choice === value}
             onClick={() => setMode(value)}
           >
-            {value === 'dark' ? 'Dark' : 'Light'}
+            {label}
           </button>
         ))}
       </div>

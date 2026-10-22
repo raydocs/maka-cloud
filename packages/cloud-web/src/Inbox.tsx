@@ -75,7 +75,7 @@ export function InboxCard({
           )}
           {item.allowText && noting && (
             <label className="note-label">
-              Additional context (optional)
+              Note
               <textarea
                 rows={2}
                 maxLength={4000}

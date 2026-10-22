@@ -8,11 +8,13 @@ import {
   questionCardModel,
 } from '@maka-cloud/client';
 import { useState } from 'react';
-import { Linking, View } from 'react-native';
+import { Linking, Pressable, View } from 'react-native';
 import { Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
-import { mono } from '@/lib/theme';
+import { mono, useTheme } from '@/lib/theme';
+import { Icon } from './Icon';
 
 function Evidence({ line }: { line: EvidenceLine }) {
+  const t = useTheme();
   if (line.kind === 'artifact') return <T kind="small">{line.text}</T>;
   if (line.kind === 'action')
     return (
@@ -25,14 +27,17 @@ function Evidence({ line }: { line: EvidenceLine }) {
     );
   const href = line.href;
   return href ? (
-    <T
-      kind="small"
+    <Pressable
       accessibilityRole="link"
-      style={{ textDecorationLine: 'underline' }}
+      accessibilityLabel={line.label}
       onPress={() => void Linking.openURL(href)}
+      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 44 }}
     >
-      {line.label} ↗
-    </T>
+      <T kind="small" style={{ textDecorationLine: 'underline' }}>
+        {line.label}
+      </T>
+      <Icon name="external" size={13} color={t.inkMuted} />
+    </Pressable>
   ) : (
     <T kind="small">{line.label}</T>
   );
@@ -51,8 +56,8 @@ function Note({
   const [open, setOpen] = useState(false);
   return open ? (
     <Field
-      label="Additional context (optional)"
-      placeholder="Additional context (optional)"
+      label="Note"
+      placeholder="Note"
       multiline
       maxLength={4000}
       value={value}

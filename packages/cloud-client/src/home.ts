@@ -1,4 +1,5 @@
 import { TERMINAL, type ProjectView, type TaskView } from './contract';
+import { failureWords } from './failure';
 import { firstSentence } from './presentation';
 
 export const DAY_MS = 86_400_000;
@@ -30,7 +31,9 @@ export function doneSince(
           ? firstSentence(task.manifest?.summary ?? 'Finished.')
           : task.state === 'cancelled'
             ? 'Stopped before it finished.'
-            : firstSentence(task.failureReason ?? 'It did not finish.');
+            : task.failureReason === undefined
+              ? 'It did not finish.'
+              : failureWords(task.failureReason).sentence;
       entries.push({
         conversationId,
         taskId: task.taskId,

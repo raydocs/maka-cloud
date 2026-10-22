@@ -17,3 +17,4 @@ export * from './starter';
 export * from './state';
 export * from './store';
 export * from './workspace';
+export * from './failure';

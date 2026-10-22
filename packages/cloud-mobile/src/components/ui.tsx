@@ -2,7 +2,8 @@ import { BlurView } from 'expo-blur';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import type { ReactNode } from 'react';
+import { displayText, failureWords } from '@maka-cloud/client';
+import { type ReactNode, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -16,7 +17,8 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { type Edge, SafeAreaView } from 'react-native-safe-area-context';
-import { radius, TOUCH, useTheme } from '@/lib/theme';
+import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
+import { Icon, type IconName } from './Icon';
 
 /**
  * The soft full-bleed background every screen sits on. On iOS the tab bar floats over the screen, so
@@ -131,18 +133,23 @@ const TEXT: Record<TextKind, TextStyle> = {
   error: { fontSize: 15, lineHeight: 21 },
 };
 
-/** A button: filled with ink when it is the recommended answer, outlined otherwise. At least 44 pt tall. */
+/**
+ * A button: filled with ink when it is the recommended answer, outlined otherwise. At least 44 pt
+ * tall. `external` adds the arrow of a link that leaves the app.
+ */
 export function PillButton({
   label,
   onPress,
   primary = false,
   disabled = false,
+  external = false,
   accessibilityLabel,
 }: {
   label: string;
   onPress: () => void;
   primary?: boolean;
   disabled?: boolean;
+  external?: boolean;
   accessibilityLabel?: string;
 }) {
   const t = useTheme();
@@ -165,9 +172,12 @@ export function PillButton({
         { opacity: disabled ? 0.5 : pressed ? 0.8 : 1 },
       ]}
     >
-      <Text style={[styles.pillText, { color: primary ? t.onPillOn : t.ink }]} allowFontScaling>
-        {label}
-      </Text>
+      <View style={styles.pillRow}>
+        <Text style={[styles.pillText, { color: primary ? t.onPillOn : t.ink }]} allowFontScaling>
+          {label}
+        </Text>
+        {external && <Icon name="external" size={15} color={primary ? t.onPillOn : t.ink} />}
+      </View>
     </Pressable>
   );
 }
@@ -209,12 +219,12 @@ export function QuietButton({
  */
 export function RoundButton({
   label,
-  glyph,
+  icon,
   onPress,
   disabled,
 }: {
   label: string;
-  glyph: string;
+  icon: IconName;
   onPress: () => void;
   disabled: boolean;
 }) {
@@ -237,12 +247,7 @@ export function RoundButton({
           : { backgroundColor: t.pillOn, borderColor: t.pillOn, borderWidth: 1.5 },
       ]}
     >
-      <Text
-        style={{ color: disabled ? t.inkMuted : t.onPillOn, fontSize: 20, fontWeight: '700' }}
-        allowFontScaling={false}
-      >
-        {glyph}
-      </Text>
+      <Icon name={icon} size={20} color={disabled ? t.inkMuted : t.onPillOn} />
     </Pressable>
   );
 }
@@ -268,6 +273,34 @@ export function StatusMark({ tone }: { tone: 'ok' | 'attention' | 'bad' | 'idle'
       importantForAccessibility="no"
       style={[styles.mark, { backgroundColor: color }]}
     />
+  );
+}
+
+/** Why a task failed, in a plain sentence and a next step; the server's own words behind "Details". */
+export function FailureNote({ reason }: { reason: string }) {
+  const t = useTheme();
+  const words = failureWords(displayText(reason));
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={{ gap: 2 }}>
+      <T kind="error">
+        {words.sentence} <Text style={{ color: t.ink }}>{words.next}</Text>
+      </T>
+      {words.detail !== words.sentence && (
+        <>
+          <QuietButton
+            label={open ? 'Hide details' : 'Details'}
+            accessibilityLabel="Details"
+            onPress={() => setOpen(!open)}
+          />
+          {open && (
+            <T kind="small" selectable style={mono}>
+              {words.detail}
+            </T>
+          )}
+        </>
+      )}
+    </View>
   );
 }
 
@@ -327,6 +360,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   pillText: { fontSize: 16, fontWeight: '600', textAlign: 'center' },
+  pillRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
   round: {
     width: TOUCH,
     height: TOUCH,
