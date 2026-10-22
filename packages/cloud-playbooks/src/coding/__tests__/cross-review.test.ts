@@ -88,6 +88,9 @@ test('the other vendor reviews a change, and the review is part of what is deliv
   assert.equal(h.codex.turns.length, 1);
   assert.equal(h.codex.turns[0]?.kind, 'start');
   assert.equal(h.codex.turns[0]?.spec.runner, 'codex');
+  // The reviewer's CLI may install while the work runs; the review itself names nothing ahead.
+  assert.deepEqual(h.claude.turns[0]?.spec.prepareRunners, ['codex']);
+  assert.equal(h.codex.turns[0]?.spec.prepareRunners, undefined);
   // Each role runs with the model and effort its mode gives it.
   assert.deepEqual(
     [h.claude.turns[0]?.spec.model, h.claude.turns[0]?.spec.effort],
@@ -523,6 +526,7 @@ test('a budget with too little left for a review keeps the change for the owner 
   const spec = { ...(await h.spec('tsk_small')), budgetUsd: 0.2 };
   const events = await collect(await h.runner.start(spec));
   assert.equal(h.codex.turns.length, 0, 'no reviewer was started');
+  assert.equal(h.claude.turns[0]?.spec.prepareRunners, undefined, 'no review, so no CLI ahead');
   await notDelivered(
     h,
     'tsk_small',
@@ -538,6 +542,7 @@ test('without modes there is no reviewer, so a change that passes its checks is 
   const { events } = await finished(h, 'tsk_nomodes');
   await notDelivered(h, 'tsk_nomodes', events, /no reviewer is configured/);
   assert.equal(h.codex.turns.length, 0);
+  assert.equal(h.claude.turns[0]?.spec.prepareRunners, undefined, 'no review, so no CLI ahead');
   zeroStats(h.runner);
   assert.deepEqual(h.leases, { acquired: 1, released: 1 });
 });
