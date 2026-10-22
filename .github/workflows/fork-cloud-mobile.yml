@@ -81,6 +81,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The release build leaves the disk too full for the emulator's system image (the runner then fails
+      # with "No space left on device" while installing it). These toolchains are not used by this job.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY/CodeQL"
+          df -h /
+
       - name: Install the stack and the app
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
@@ -157,6 +164,9 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      - name: Disk before the emulator
+        run: df -h /
 
       - name: Run the flows on an Android emulator
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
