@@ -141,8 +141,9 @@ export class AuthFlow extends Store<AuthState> {
     const before = this.state;
     this.set({ step: 'working', ways: this.ways });
     try {
-      this.challenge = await this.call<Challenge>('POST', '/v1/auth/email', { address: to });
+      const challenge = await this.call<Challenge>('POST', '/v1/auth/email', { address: to });
       if (mine !== this.turn) return;
+      this.challenge = challenge;
       this.set({ step: 'emailSent', address: to, error: '' });
     } catch (e) {
       if (mine !== this.turn) return;
@@ -210,7 +211,16 @@ export class AuthFlow extends Store<AuthState> {
   }
 
   private async finish(mine: number, outcome: Outcome): Promise<void> {
-    if (mine !== this.turn) return;
+    if (!validOutcome(outcome)) {
+      // Not what a Maka server answers (a proxy's page, another service): a plain error, nothing handed on.
+      if (mine === this.turn) this.choose(failure(new ApiError(502), 'provider'));
+      return;
+    }
+    if (mine !== this.turn) {
+      // The person left this step, but the server has already issued a session for it: end it.
+      if (outcome.status === 'signed_in') void this.endSession(outcome.token);
+      return;
+    }
     if (outcome.status === 'needs_invite') {
       this.forget();
       this.pendingToken = outcome.pendingToken;
@@ -221,12 +231,26 @@ export class AuthFlow extends Store<AuthState> {
     try {
       await this.onSignedIn(outcome.token);
     } catch (e) {
+      // The device did not take the session (for example the secure store refused it): end it.
+      void this.endSession(outcome.token);
       if (mine !== this.turn) return;
       // Our own words (a failed save on the device) are shown as written; anything else is described.
       this.choose(e instanceof Error && e.constructor === Error ? e.message : failure(e, 'open'));
       return;
     }
     if (mine === this.turn) this.set({ step: 'signedIn' });
+  }
+
+  /** Best effort: a session no device holds should not sit in the list of signed-in devices. */
+  private async endSession(token: string): Promise<void> {
+    try {
+      await this.fetcher(`${this.baseUrl}/v1/auth/sign-out`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // It ends by itself when idle.
+    }
   }
 
   private forget(): void {
@@ -264,6 +288,16 @@ export class AuthFlow extends Store<AuthState> {
     if (parsed === undefined) throw new Error('The server sent no answer.');
     return parsed;
   }
+}
+
+/** A device session token, as the server issues it. */
+const SESSION_PREFIX = 'mks_';
+
+function validOutcome(outcome: unknown): outcome is Outcome {
+  if (typeof outcome !== 'object' || outcome === null) return false;
+  const { status, token, pendingToken } = outcome as Record<string, unknown>;
+  if (status === 'signed_in') return typeof token === 'string' && token.startsWith(SESSION_PREFIX);
+  return status === 'needs_invite' && typeof pendingToken === 'string' && pendingToken !== '';
 }
 
 type Step = 'options' | 'provider' | 'email-request' | 'email-verify' | 'claim' | 'open';

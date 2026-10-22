@@ -1,5 +1,6 @@
 import {
   activeWords,
+  displayText,
   type CloudClient,
   errorText,
   identityWords,
@@ -39,13 +40,13 @@ export function Devices({ client, now = Date.now }: { client: CloudClient; now?:
       {devices.sessions.map((device) => (
         <View key={device.sessionId} style={{ gap: 6 }} accessible={false}>
           <T>
-            {device.deviceLabel}
+            {displayText(device.deviceLabel)}
             {device.current ? ' · this device' : ''}
           </T>
           <T kind="small">{activeWords(device.lastSeenAt, now())}</T>
           {device.current ? null : (
             <PillButton
-              label={`Sign out ${device.deviceLabel}`}
+              label={`Sign out ${displayText(device.deviceLabel)}`}
               disabled={busy === device.sessionId}
               onPress={() => {
                 setBusy(device.sessionId);

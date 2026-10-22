@@ -16,13 +16,21 @@ interface Call {
   body: Record<string, unknown> | undefined;
 }
 
+const until = async (check: () => boolean, what = 'the condition') => {
+  for (let i = 0; i < 400 && !check(); i += 1) await new Promise((r) => setTimeout(r, 5));
+  if (!check()) throw new Error(`Timed out waiting for ${what}`);
+};
+
 type Reply = { status?: number; body: unknown };
 type Route = (call: Call) => Reply | Promise<Reply>;
 
 /** A server that is a function of the call. Nothing leaves the process. */
 function scripted(routes: Record<string, Route>) {
   const calls: Call[] = [];
+  const auths: string[] = [];
   const fetcher = (async (url, init) => {
+    const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    if (authorization) auths.push(authorization);
     const call: Call = {
       method: init?.method ?? 'GET',
       path: String(url).replace('https://maka.test', ''),
@@ -33,7 +41,7 @@ function scripted(routes: Record<string, Route>) {
     const reply = route ? await route(call) : { status: 404, body: { error: 'not_found' } };
     return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200 });
   }) as typeof fetch;
-  return { calls, fetcher };
+  return { calls, auths, fetcher };
 }
 
 const ALL = { apple: true, google: true, email: true };
@@ -399,4 +407,89 @@ test('the devices of an account: listed, one signed out, this one ended; a serve
   });
   await expect(old.devices()).rejects.toThrow(Unsupported);
   expect(old.unsupported.has('devices')).toBe(true);
+});
+
+test('a session the device did not take is ended on the server: a late answer, or a device that cannot save it', async () => {
+  let release: (reply: Reply) => void = () => {};
+  const saved: string[] = [];
+  const late = flow(
+    {
+      'POST /v1/auth/nonce': () => ({ body: { nonce: 'n' } }),
+      'POST /v1/auth/session': () => new Promise<Reply>((resolve) => (release = resolve)),
+      'POST /v1/auth/sign-out': () => ({ body: {} }),
+    },
+    {},
+    (token) => void saved.push(token),
+  );
+  await late.auth.start();
+  const signing = late.auth.signInWith('apple');
+  await until(() => step(late.auth) === 'working');
+  await until(() => late.calls.some((c) => c.path === '/v1/auth/session'));
+  void late.auth.start(); // the person leaves; the request is still out
+  release({ body: { status: 'signed_in', token: 'mks_late.tok', sessionId: 's' } });
+  await signing;
+  await until(() => late.calls.some((c) => c.path === '/v1/auth/sign-out'));
+  expect(saved).toEqual([]);
+  expect(late.auths.at(-1)).toBe('Bearer mks_late.tok');
+
+  const failed = flow(
+    {
+      'POST /v1/auth/nonce': () => ({ body: { nonce: 'n' } }),
+      'POST /v1/auth/session': () => ({
+        body: { status: 'signed_in', token: 'mks_x.y', sessionId: 's' },
+      }),
+      'POST /v1/auth/sign-out': () => ({ body: {} }),
+    },
+    {},
+    () => {
+      throw new Error('This device could not save your sign-in.');
+    },
+  );
+  await failed.auth.start();
+  await failed.auth.signInWith('google');
+  await until(() => failed.calls.some((c) => c.path === '/v1/auth/sign-out'));
+  expect(failed.auths.at(-1)).toBe('Bearer mks_x.y');
+});
+
+test('an answer that is not what a Maka server sends is a plain error and nothing is handed on', async () => {
+  for (const body of [
+    {},
+    { status: 'signed_in' },
+    { status: 'signed_in', token: 'plain-token' },
+    { status: 'needs_invite' },
+    { status: 'other' },
+  ]) {
+    const saved: string[] = [];
+    const { auth, calls } = flow(
+      {
+        'POST /v1/auth/nonce': () => ({ body: { nonce: 'n' } }),
+        'POST /v1/auth/session': () => ({ body }),
+      },
+      {},
+      (token) => void saved.push(token),
+    );
+    await auth.start();
+    await auth.signInWith('google');
+    expect(saved).toEqual([]);
+    expect(auth.getSnapshot()).toMatchObject({ step: 'choose' });
+    expect(errorOf(auth)).not.toBe('');
+    expect(calls.some((c) => c.path === '/v1/auth/sign-out')).toBe(false);
+  }
+});
+
+test('a code abandoned before its answer arrives leaves nothing in the flow', async () => {
+  let release: (reply: Reply) => void = () => {};
+  const { auth, calls } = flow({
+    'POST /v1/auth/email': () => new Promise<Reply>((resolve) => (release = resolve)),
+    'POST /v1/auth/email/verify': () => ({ status: 401, body: { error: 'sign_in_failed' } }),
+  });
+  await auth.start();
+  const asking = auth.sendEmail('ada@example.com');
+  await until(() => calls.some((c) => c.path === '/v1/auth/email'));
+  void auth.start(); // the person leaves
+  release({ body: { challengeId: 'c1', deviceSecret: 'device-secret', expiresAt: 1 } });
+  await asking;
+  await until(() => step(auth) === 'choose');
+  await auth.verifyEmail('123456');
+  expect(calls.some((c) => c.path === '/v1/auth/email/verify')).toBe(false);
 });
