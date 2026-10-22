@@ -74,7 +74,8 @@ test('without a handler a message is stored and nothing else happens', async (t)
 
 test('sweepOrphans gets every task id in the log after the restart has ended the orphans', async (t) => {
   const { handler, seen } = recordingHandler();
-  const h = await startHarness(t, { handler });
+  // Two tasks of the invite run at once here, so both have runs before the restart.
+  const h = await startHarness(t, { handler, tasksPerInvite: 2 });
   const conversationId = await newConversation(h);
   const { session } = await conductorSession(h, seen, conversationId);
   const orchestrator = h.server.orchestrator;
