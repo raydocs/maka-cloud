@@ -12,6 +12,64 @@ Every command below that starts with `maka-cloud` is
 alias or a one-line script if you want the short form. `cloud-server` is
 `node /opt/maka-cloud/packages/cloud-server/dist/cli.js`.
 
+## Quick install
+
+On a Linux host with Docker and the Compose plugin, one command installs maka-cloud, asks the
+first-run questions and starts it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/raydocs/maka-cloud/main/deploy/install.sh | sh
+```
+
+From a checkout, `./deploy/install.sh` does the same. It clones (or updates) the checkout into
+`/opt/maka-cloud`, builds the images, runs `maka-cloud setup` in the server's image and starts the
+stack under Compose behind Caddy. It uses `sudo` when it is not root. Run it again to update and
+restart: the settings are kept, and it asks before running the questions again. `MAKA_CLOUD_DIR`,
+`MAKA_CLOUD_REF` and `MAKA_CLOUD_SETUP` (`ask`, `always`, `never`, or `env` for no questions)
+change what it does; the head of the script says how.
+
+`maka-cloud setup` asks only for what it cannot choose:
+
+1. your domain: the app is at `app.<domain>`, the MCP endpoint at `mcp.<domain>` and the model
+   gateway at `models.<domain>`; point all three at the host;
+2. the Anthropic API key (required);
+3. the OpenAI API key, which the second-vendor review needs (Enter skips it: then no Codex run
+   starts, and a coding change gets no review from a second vendor);
+4. the instabox API key and the machine id of your sandbox (both required);
+5. a fine-grained GitHub token, to open pull requests (optional);
+6. a contact address for the push services (optional).
+
+Keys are read without echo. Before anything is written it checks each key and the machine with a
+free call (`--no-verify` skips that): a key the vendor refuses stops it, a service it cannot reach
+is reported and does not. It fills in the rest with safe defaults: the public URLs, the agent
+account (`maka-agent` in the group `maka-box`, which the box image must have), a new Web Push key
+pair, the spend caps at their defaults ($5 a day and $50 a month for an invite, $25 a day for the
+server), a spend alert to you at $5 a day, and the models that check finished work. The built-in
+modes already name and price a Codex model (see "Modes"). It makes your invite, gives it your
+sandbox machine, checks the result as `maka-cloud check` would, and only then writes
+`/etc/maka-cloud.env` and `/etc/maka-cloud.compose.env`, mode 600. Your sign-in token is printed
+once at the end.
+
+Run again, setup edits the files: Enter keeps a value, `-` removes an optional key, and every
+setting it does not ask about is kept, as are your invite and the Web Push keys (so devices stay
+subscribed). `--settings` and `--names` write elsewhere. `--from-env` asks nothing and reads the
+answers from the environment instead:
+
+<!-- setup:start -->
+| Variable | What it does |
+| --- | --- |
+| `MAKA_CLOUD_SETUP_DOMAIN` | your domain: the app is app.<domain>, the MCP endpoint mcp.<domain> and the model gateway models.<domain> |
+| `MAKA_CLOUD_SETUP_MACHINE` | the instabox machine id of the owner’s sandbox |
+| `MAKA_CLOUD_SETUP_EMAIL` | optional: a contact address for the Web Push services (default: the app’s URL) |
+| `ANTHROPIC_API_KEY` | required, as for the server |
+| `OPENAI_API_KEY` | recommended, as for the server: without it no change is reviewed by a second vendor |
+| `INSTABOX_API_KEY` | required, as for the server |
+| `MAKA_GITHUB_TOKEN` | optional, as for the server |
+<!-- setup:end -->
+
+The sections below are the same install done by hand, and what to check before you give someone
+else a token.
+
 ## First live run: what you provide
 
 Everything the first live run needs from you, in the order you will need it.
