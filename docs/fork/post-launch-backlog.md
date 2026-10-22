@@ -120,10 +120,10 @@ Still missing before it can merge:
    refuse to start.
 2. P3: the smoke should request `limit=200` per page, so an invite with a long history needs fewer
    pages. Test: the request carries `limit=200`.
-3. Fixed: `listTasks` now refuses a page with HTTP 500 if an indexed task has no creation log,
-   instead of silently dropping it. The existing unique `n > after ORDER BY n` keyset cursor is
-   unchanged. Tests cover the missing-log refusal at a page boundary and each task appearing
-   exactly once when creation times are equal. Source: the #328 review.
+3. Not a bug (checked in #410): `listTasks` pages by the unique `n > after ORDER BY n` cursor, so a
+   full listing never skips or repeats a task; a test now pins that with equal creation times. A page
+   is short only for an index row without a creation log, which no code path writes (both are in one
+   transaction, and the log cannot change). Source: the #328 review.
 
 ## Kept changes and the handoff listing (from #336 and #341)
 

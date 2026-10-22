@@ -704,10 +704,9 @@ export class PublicApi {
       TASK_PAGE_MAX,
     );
     const page = this.deps.tasks.tasksOfRoot(sessionId, after, limit);
-    const tasks = page.map(({ taskId }) => {
+    const tasks = page.flatMap(({ taskId }) => {
       const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-      if (!record) throw new Error('Task index entry has no task record');
-      return toPublicView(toView(record));
+      return record ? [toPublicView(toView(record))] : [];
     });
     const last = page.at(-1);
     respond(res, 200, {

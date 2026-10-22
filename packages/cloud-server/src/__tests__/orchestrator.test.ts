@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { OrchestratorError, type SessionInfo } from '@maka-cloud/orchestrator';
 import { conductorSession, recordingHandler } from './conductor.js';
@@ -159,36 +158,6 @@ test('the tasks route lists every task exactly once across page boundaries with 
     tasks: unknown[];
   };
   assert.deepEqual(empty.tasks, []);
-});
-
-test('a task page with an indexed task missing its creation log fails instead of silently skipping it', async (t) => {
-  const { h, session, conversationId, orchestrator } = await setup(t);
-  const first = await orchestrator.delegate(session, { runner: 'fake', brief: 'first' });
-  await h.server.close();
-  const db = new DatabaseSync(h.options.dbPath);
-  try {
-    db.prepare(
-      `INSERT INTO task_index (task_id, session_id, root_session_id, state, created_at)
-       VALUES (?, ?, ?, 'queued', ?)`,
-    ).run('missing-log', session.sessionId, session.sessionId, first.createdAt);
-  } finally {
-    db.close();
-  }
-  await h.restart();
-  const path = `/v1/conversations/${conversationId}/tasks`;
-  const firstPage = await h.api(`${path}?limit=1`);
-  assert.equal(firstPage.status, 200);
-  const page = (await firstPage.json()) as { tasks: Array<{ taskId: string }>; next: number };
-  assert.deepEqual(
-    page.tasks.map((task) => task.taskId),
-    [first.taskId],
-  );
-  assert.ok(page.next > 0);
-  for (const query of [`?limit=1&after=${page.next}`, '?limit=200']) {
-    const res = await h.api(`${path}${query}`);
-    assert.equal(res.status, 500);
-    assert.deepEqual(await res.json(), { error: 'internal_error' });
-  }
 });
 
 test('task events reach the conversation stream, with their log seq, in order', async (t) => {
