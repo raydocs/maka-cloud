@@ -68,7 +68,7 @@ RUN apt-get update \
 USER node
 
 # Only CI uses this one (.github/workflows/fork-deploy-rehearsal.yml, job `real-accounts`): the
-# cloud-runners and cloud-playbooks test suites, built in the `build` stage above, run as root next
+# cloud-runners suite and the `coding` suite of cloud-playbooks, built in the `build` stage above, run as root next
 # to a second account made like the rehearsal sandbox's (`maka-agent` in `maka-box`, real `sudo`,
 # `getcap`, `git`), on a machine with nothing else on it. A hosted runner cannot do this: it is not
 # root for the tests and its own setuid tools and capabilities fail the box check. With
@@ -83,7 +83,8 @@ RUN apt-get update \
  && useradd --no-create-home --gid maka-box --shell /bin/bash maka-agent
 ENV MAKA_REQUIRE_REAL_ACCOUNTS=1 MAKA_TEST_AGENT_USER=maka-agent MAKA_TEST_AGENT_GROUP=maka-box
 WORKDIR /app/packages
-CMD ["sh", "-c", "set -eu; cd cloud-runners && node --test dist/__tests__/*.test.js && cd ../cloud-playbooks && node --test dist/coding/__tests__/*.test.js dist/__tests__/*.test.js"]
+COPY deploy/real-account-tests.sh /usr/local/bin/real-account-tests
+CMD ["real-account-tests"]
 
 FROM caddy:2-alpine AS proxy
 COPY --from=build /web-dist /srv/web

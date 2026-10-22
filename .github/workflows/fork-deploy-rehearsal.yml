@@ -69,7 +69,7 @@ jobs:
         if: always()
         run: deploy/rehearsal/down.sh || true
 
-  # The tests of cloud-runners and cloud-playbooks that need a second account (the agent boundary:
+  # The tests of cloud-runners and the coding suite of cloud-playbooks that need a second account (the agent boundary:
   # channel, handoff, checkout, checks, the box check itself) are skipped on a hosted runner. This
   # job runs them as root beside `maka-agent`, in the same kind of image the rehearsal's sandbox is
   # made from (deploy/Dockerfile, target `real-account-tests`). They fail here instead of skipping.
