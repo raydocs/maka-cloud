@@ -99,7 +99,9 @@ root=$(dirname "$MAKA_DIR")
 mkdir -p handoff
 chgrp "$MAKA_AGENT_GROUP" "$root" . workspace handoff
 chmod 710 "$root" .
-chmod 2770 workspace handoff
+chmod 2770 workspace
+# Sticky: the agent writes its own files in handoff but cannot remove or replace the runner's.
+chmod 3770 handoff
 # The CLI's configuration directory (its transcripts): the agent writes it, the sandbox user puts a
 # kept conversation back into it.
 mkdir -p claude-config
@@ -175,7 +177,8 @@ mkdir "$scratch/workspace" "$scratch/handoff"
 : > "$scratch/handoff/brief.md"
 chgrp "$MAKA_AGENT_GROUP" "$MAKA_ROOT" "$scratch" "$scratch/workspace" "$scratch/handoff" "$scratch/handoff/brief.md" 2>/dev/null || echo "FACT group=no"
 chmod 710 "$MAKA_ROOT" "$scratch"
-chmod 2770 "$scratch/workspace" "$scratch/handoff"
+chmod 2770 "$scratch/workspace"
+chmod 3770 "$scratch/handoff"
 chmod 640 "$scratch/handoff/brief.md"
 as_agent() { sudo -n -u "$MAKA_AGENT_USER" --preserve-env -- "$@"; }
 yes_no() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }

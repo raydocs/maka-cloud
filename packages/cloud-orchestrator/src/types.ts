@@ -65,7 +65,19 @@ export type TaskEvent =
    * run starts counting from zero. An event without `epoch` (written before attempts were keyed)
    * counts as epoch 0.
    */
-  | { type: 'task_cost'; taskId: TaskId; fromTaskId: TaskId; costUsd: number; epoch?: number }
+  | {
+      type: 'task_cost';
+      taskId: TaskId;
+      fromTaskId: TaskId;
+      costUsd: number;
+      epoch?: number;
+      /**
+       * Set on spend recovered from a journal row that carries no attempt: a stable id of that row.
+       * The attempt it was booked under is kept with the task, so reading the same row again (a
+       * crash after the record and before the journal was told) books it under the same attempt.
+       */
+      recovery?: string;
+    }
   | { type: 'task_progress'; taskId: TaskId; note: string }
   /**
    * The run of a task that was cut off by a restart is going again, in `epoch`. `text` is what a
@@ -206,6 +218,8 @@ export interface TaskRecord {
    * (key `<epoch>:<taskId>`).
    */
   spendByRun?: Record<string, number>;
+  /** On a top-level task: the attempt each recovered journal row without one was booked under (by row id). */
+  recoveredRows?: Record<string, number>;
   /** On a top-level task: the sum of `spendByRun`, kept as it moves (`costUsd` is this, rounded). */
   spendSum?: number;
   /** On a top-level task: the sum of `spendByRun`. */

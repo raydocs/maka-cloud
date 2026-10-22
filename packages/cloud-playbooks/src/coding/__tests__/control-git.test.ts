@@ -166,3 +166,28 @@ test('a directory the agent swapped for a symlink is not removed or written thro
   assert.match(out, /^RESTORE_FAILED$/mu, out);
   assert.equal(await fs.readFile(join(outside, 'a.txt'), 'utf8'), 'not the checkout\n');
 });
+
+test('a base check a closed process left half-way is not put over the tree the next run clones', async (t) => {
+  const { tmp, dir, base, ws } = await setup(t);
+  await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed by the earlier process\n');
+  const env = { MAKA_DIR: dir, MAKA_BASE: base };
+  assert.match(run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' }), /^REVERTED \d+$/mu);
+  assert.equal(existsSync(join(dir, 'base-check')), true, 'the closed process left its copy');
+
+  // The next process runs the task again from a fresh clone.
+  const cloned = run(CLONE_SCRIPT, {
+    MAKA_DIR: dir,
+    MAKA_REPO_URL: `file://${join(tmp, 'origin')}`,
+    MAKA_REF: 'HEAD',
+  });
+  assert.match(cloned, /^BASE [0-9a-f]{40}$/mu, cloned);
+  assert.equal(existsSync(join(dir, 'base-check')), false);
+  assert.match(run(BASE_REVERT_SCRIPT, { ...env, MAKA_KEEP: '' }), /^REVERTED 0$/mu);
+  assert.equal(await fs.readFile(join(ws, 'lib', 'a.txt'), 'utf8'), 'one\n');
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /RESTORED/u);
+  assert.equal(
+    await fs.readFile(join(ws, 'lib', 'a.txt'), 'utf8'),
+    'one\n',
+    'the earlier process’s change did not come back',
+  );
+});

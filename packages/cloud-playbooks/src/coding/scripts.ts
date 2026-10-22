@@ -44,11 +44,14 @@ ws="$MAKA_DIR/workspace"
 tmp="$MAKA_DIR/workspace.clone"
 cg="$MAKA_DIR/control.git"
 rm -rf -- "$tmp" "$MAKA_DIR/control.git.clone"
+# A base check a closed process left half-way: its copy of the change belongs to the tree this
+# clone replaces, and must not be put over the new one.
+rm -rf -- "$MAKA_DIR/base-check"
 mkdir "$tmp" && cd "$tmp" || exit 1
 g init -q
 if ! g fetch -q --depth=1 --no-tags "$MAKA_REPO_URL" "$MAKA_REF" > "$MAKA_DIR/clone.err" 2>&1; then
   echo CLONE_FAILED
-  tail -c 2000 "$MAKA_DIR/clone.err"
+  tail -c 2512 "$MAKA_DIR/clone.err"
   exit 0
 fi
 g checkout -q --detach FETCH_HEAD || { echo CLONE_FAILED; exit 0; }
@@ -113,7 +116,7 @@ isolated=0
 [ -e "$mark/started" ] && isolated=1
 rm -rf -- "$mark"
 if [ "$isolated" = 0 ]; then
-  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare)' >&2
+  echo 'maka-check: the sandbox could not start the check in its own user and PID namespace (unshare --user --pid failed: the box must allow unprivileged user namespaces, which a container profile such as the Docker default seccomp refuses; no check can run until it does)' >&2
   exit 125
 fi
 exit "$rc"
@@ -195,6 +198,22 @@ if [ ! -f "$f" ]; then echo NOTFILE; exit 0; fi
 data=$(dd if="$f" iflag=nofollow,nonblock status=none 2>/dev/null | head -c "$((MAKA_MAX + 1))" | base64 -w0)
 if [ "$(printf '%s' "$data" | base64 -d | wc -c)" -gt "$MAKA_MAX" ]; then echo TOOBIG; exit 0; fi
 echo "OK $data"
+`;
+
+/**
+ * Copies a file of the task directory into `handoff/`, where the agent's account can read it: the
+ * task directory only lets that account pass through it, and the runner's files there are private.
+ * The copy is group-readable and replaces any earlier one atomically. `handoff/` is made by the
+ * runner that starts the agent, and made here if the agent has not run yet.
+ */
+export const PUBLISH_FILE_SCRIPT = `set -eu
+umask 077
+cd "$MAKA_DIR"
+mkdir -p handoff
+tmp=$(mktemp handoff/.publish.XXXXXX)
+cat -- "$MAKA_FILE" > "$tmp"
+chmod 640 "$tmp"
+mv -fT -- "$tmp" "handoff/$MAKA_FILE"
 `;
 
 /** Writes stdin to a file in the task directory (the failure brief), replacing it atomically. */
@@ -358,7 +377,7 @@ ${NO_NESTED_REPO}idx="$MAKA_DIR/changes.index"
 rm -f -- "$idx"
 export GIT_INDEX_FILE="$idx"
 g read-tree "$MAKA_BASE" 2>/dev/null || { echo "ERR base"; exit 0; }
-g add -A . 2> "$MAKA_DIR/changes.err" || { echo "ERR add $(tail -c 300 "$MAKA_DIR/changes.err" | tr '\\n' ' ')"; exit 0; }
+g add -A . 2> "$MAKA_DIR/changes.err" || { echo "ERR add $(tail -c 812 "$MAKA_DIR/changes.err" | tr '\\n' ' ')"; exit 0; }
 raw=$(g diff --cached --ignore-submodules=all --raw -z --no-renames --abbrev=40 "$MAKA_BASE" | base64 -w0) || { echo "ERR diff"; exit 0; }
 echo "RAW $raw"
 g diff --cached --binary --no-renames --no-ext-diff --no-textconv "$MAKA_BASE" > "$MAKA_DIR/change.patch" || { echo "ERR patch"; exit 0; }

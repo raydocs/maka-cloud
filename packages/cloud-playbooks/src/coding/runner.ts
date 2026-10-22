@@ -52,6 +52,7 @@ import {
   PATCH_CHUNK_SCRIPT,
   READ_SMALL_SCRIPT,
   SAMPLE_SCRIPT,
+  PUBLISH_FILE_SCRIPT,
   WRITE_FILE_SCRIPT,
 } from './scripts.js';
 import {
@@ -59,8 +60,10 @@ import {
   isRepoPath,
   otherVendor,
   parseCodingBrief,
+  REPRO_FILE,
   type Repro,
   ReproSchema,
+  REVIEW_FILE,
   type Vendor,
 } from './task.js';
 
@@ -303,6 +306,29 @@ interface Collected {
   patch: string;
 }
 
+/**
+ * The sandbox cuts output to its last bytes before the host sees it, which can split a key at the
+ * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted and the host scrubs the
+ * whole of it. When the text was cut, what is left of the cut line is dropped before the last
+ * `max` characters are kept: a key never spans a line, so that partial first line is the only place
+ * a split key can be, and counting the margin in bytes against characters (a redaction shortens
+ * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
+ * line break (the git messages, folded onto one line) loses its first `TAIL_MARGIN` characters.
+ */
+export const TAIL_MARGIN = 512;
+
+export function scrubbedTail(text: string, max: number, cut = false): string {
+  let shown = scrubSecretText(text);
+  if (cut) {
+    const line = shown.indexOf('\n');
+    shown = line >= 0 ? shown.slice(line + 1) : shown.slice(Math.min(TAIL_MARGIN, shown.length));
+  }
+  return shown.length <= max ? shown : shown.slice(shown.length - max);
+}
+
+/** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
+const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
+
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
   const shown = scrubSecretText(text);
@@ -401,6 +427,8 @@ class CodingRun implements RunHandle {
   /** Reads of agent streams that outlived the wait for their last spend; each adds to the total when it ends. */
   private readonly lateSpends = new Set<Promise<void>>();
   private readonly hostDir: string;
+  /** Set when the process is closing and let go of this run (see `detach`). */
+  private detached = false;
 
   constructor(
     private readonly runner: CodingRunner,
@@ -425,6 +453,21 @@ class CodingRun implements RunHandle {
     await this.cleanup();
     // A cancel that returns says everything the task started is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
+  }
+
+  /**
+   * Lets go of the task for a process that is closing: its agent run is let go of, its waits end,
+   * and nothing is stopped, restored or reported (the sandbox keeps what it has). The task stays
+   * unfinished in the log and the next process takes it over as it does after a crash.
+   */
+  detach(): void {
+    if (this.ended || this.detached) return;
+    this.detached = true;
+    this.agentHandle?.detach?.();
+    this.cancelled = true;
+    this.abort.abort();
+    this.cleanupPromise = Promise.resolve();
+    this.events.close();
   }
 
   private get signal(): AbortSignal {
@@ -609,8 +652,14 @@ class CodingRun implements RunHandle {
       }
       let problem: CheckProblem;
       if (!turn.ok) {
-        record.turns.push({ run, kind, outcome: 'agent_failed', detail: turn.reason, checks: [] });
-        runs.push({ run, outcome: `the agent's run failed: ${turn.reason}` });
+        record.turns.push({
+          run,
+          kind,
+          outcome: 'agent_failed',
+          detail: scrubSecretText(turn.reason),
+          checks: [],
+        });
+        runs.push({ run, outcome: scrubSecretText(`the agent's run failed: ${turn.reason}`) });
         problem = { problem: `your last run failed: ${turn.reason}` };
       } else {
         const checks: CheckResult[] = [];
@@ -627,7 +676,7 @@ class CodingRun implements RunHandle {
           outcome: checked.ok ? 'verified' : 'check_failed',
           checks: checks.map(({ output: _output, ...rest }) => rest),
         };
-        if (!checked.ok) turnRecord.detail = checked.problem;
+        if (!checked.ok) turnRecord.detail = scrubSecretText(checked.problem);
         record.turns.push(turnRecord);
         if (checked.ok && collected) {
           return { ok: true, repro: checked.repro, manifest: turn.manifest, collected };
@@ -635,7 +684,7 @@ class CodingRun implements RunHandle {
         if (checked.ok) throw new Error('unreachable: verified without a change set');
         runs.push({
           run,
-          outcome: `check failed: ${checked.problem}`,
+          outcome: scrubSecretText(`check failed: ${checked.problem}`),
           ...(checked.output ? { output: checked.output } : {}),
         });
         problem = checked;
@@ -769,7 +818,10 @@ class CodingRun implements RunHandle {
       );
       return { ok: true, manifest };
     } catch (error) {
-      return { ok: false, reason: `its result could not be read (${errorMessage(error)})` };
+      return {
+        ok: false,
+        reason: scrubSecretText(`its result could not be read (${errorMessage(error)})`),
+      };
     }
   }
 
@@ -978,7 +1030,8 @@ class CodingRun implements RunHandle {
     }
     try {
       this.progress('a second agent reviews the change');
-      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- review.json\n`, {});
+      await this.removeAgentFile(REVIEW_FILE);
+      await this.publishForAgent('change.patch');
       const turn = await this.agentTurn(
         reviewer.vendor,
         new LoopDetector(this.runner.loopLimits),
@@ -1003,7 +1056,18 @@ class CodingRun implements RunHandle {
             : `the reviewer's run failed: ${turn.reason}`,
         );
       }
-      const text = await this.readTaskFile('review.json', MAX_REVIEW_BYTES);
+      // The first agent's account shares handoff/ with the reviewer's: what the reviewer was given
+      // to read must still be the runner's copy of the change, or it reviewed something else.
+      const same = await this.exec(
+        'set -u\ncd "$MAKA_DIR"\ncmp -s -- change.patch handoff/change.patch\n',
+        {},
+      );
+      if (same.exitCode !== 0) {
+        return unavailable(
+          'the copy of the change given to the reviewer was replaced, so its review was not used',
+        );
+      }
+      const text = await this.readTaskFile(REVIEW_FILE, MAX_REVIEW_BYTES);
       if (!text.ok) return unavailable(text.reason);
       const parsed = parseReviewFile(text.text);
       if (!parsed.ok) return unavailable(parsed.reason);
@@ -1248,7 +1312,7 @@ class CodingRun implements RunHandle {
   private async readRepro(): Promise<Repro | CheckProblem> {
     const out = (
       await this.exec(READ_SMALL_SCRIPT, {
-        MAKA_FILE: 'repro.json',
+        MAKA_FILE: REPRO_FILE,
         MAKA_MAX: String(MAX_REPRO_BYTES),
       })
     ).stdout.trim();
@@ -1344,7 +1408,7 @@ class CodingRun implements RunHandle {
             MAKA_CHECK_TAG: tag,
             MAKA_CMD: command,
             MAKA_TIMEOUT: String(timeoutSeconds),
-            MAKA_TAIL: String(this.limits.outputTailBytes),
+            MAKA_TAIL: String(this.limits.outputTailBytes + TAIL_MARGIN),
           },
           timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
         );
@@ -1356,7 +1420,16 @@ class CodingRun implements RunHandle {
       const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
       if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
-      const result = { name, command, outputBytes: Number(bytes?.[1] ?? 0), output: out.stdout };
+      const result = {
+        name,
+        command: scrubSecretText(command),
+        outputBytes: Number(bytes?.[1] ?? 0),
+        output: scrubbedTail(
+          out.stdout,
+          this.limits.outputTailBytes,
+          Number(bytes?.[1] ?? 0) > this.limits.outputTailBytes + TAIL_MARGIN,
+        ),
+      };
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
@@ -1389,7 +1462,10 @@ class CodingRun implements RunHandle {
     if (out.truncated) return { reason: 'the change is too large to read' };
     const lines = out.stdout.split('\n');
     const err = lines.find((line) => line.startsWith('ERR '));
-    if (err) return { reason: `git could not list the change (${err.slice(4)})` };
+    if (err)
+      return {
+        reason: `git could not list the change (${scrubbedTail(err.slice(4), 300, wasCut(err.slice(4), 812))})`,
+      };
     const raw = lines.find((line) => line.startsWith('RAW '));
     const patchLine = lines.find((line) => line.startsWith('PATCH '));
     if (raw === undefined || patchLine === undefined)
@@ -1529,25 +1605,37 @@ class CodingRun implements RunHandle {
   ): Promise<void> {
     const guard = <T>(promise: Promise<T>): Promise<T> =>
       cancellable ? this.guard(promise) : promise;
-    const changesPath = join(this.hostDir, 'changes.json');
-    const verificationPath = join(this.hostDir, 'verification.json');
+    // The delivery record points at files that are never written twice: their names carry their
+    // hashes. A restart between the writes below then finds the earlier delivery as it was left, not
+    // a record whose change was replaced under it (`change_modified`, for good). The record is
+    // swapped in one atomic write; the files under their plain names are what the task page lists.
     const changes = JSON.stringify(outcome.collected.changeSet);
-    await guard(writeHostFile(changesPath, changes));
-    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
-    // review.md first: verification.json holds its hash, and the supervisor holds the two together.
+    const changesSha256 = createHash('sha256').update(changes).digest('hex');
+    const changesPath = join(this.hostDir, `changes.${changesSha256.slice(0, 16)}.json`);
     const reviewText = reviewMarkdown(review);
-    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
     else delete verification.kept;
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
-    verification.repro = outcome.repro;
+    // What the agent wrote (the reproduction command, the names of the files) is scrubbed like any
+    // other text that reaches the owner.
+    verification.repro = {
+      ...outcome.repro,
+      command: scrubSecretText(outcome.repro.command),
+      files: outcome.repro.files.map((file) => scrubSecretText(file)),
+    };
     verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-      path: file.path,
+      path: scrubSecretText(file.path),
       status: file.status,
     }));
-    await guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
+    const verificationText = JSON.stringify(verification, null, 2);
+    const verificationPath = join(
+      this.hostDir,
+      `verification.${createHash('sha256').update(verificationText).digest('hex').slice(0, 16)}.json`,
+    );
+    await guard(writeHostFile(changesPath, changes));
+    await guard(writeHostFile(verificationPath, verificationText));
     await guard(
       this.options.deliveries.record({
         taskId: this.spec.taskId,
@@ -1555,10 +1643,15 @@ class CodingRun implements RunHandle {
         baseRef: task.baseRef,
         baseSha: verification.baseSha,
         changesPath,
-        changesSha256: createHash('sha256').update(changes).digest('hex'),
+        changesSha256,
         verificationPath,
       }),
     );
+    // review.md before verification.json: that holds its hash, and the supervisor holds the two together.
+    await guard(writeHostFile(join(this.hostDir, 'changes.json'), changes));
+    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
+    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
+    await guard(writeHostFile(join(this.hostDir, 'verification.json'), verificationText));
     const agent = outcome.manifest;
     const files = outcome.collected.changeSet.files;
     const vendors = verification.attempts.map((attempt) => attempt.vendor);
@@ -1634,7 +1727,9 @@ class CodingRun implements RunHandle {
     const json = JSON.stringify(failure, null, 2);
     await this.guard(writeHostFile(join(this.hostDir, 'failure_brief.json'), json));
     await this.writeSandboxFile('failure_brief.json', json);
-    await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- repro.json\n`, {});
+    await this.publishForAgent('failure_brief.json');
+    await this.publishForAgent('attempt-1.patch');
+    await this.removeAgentFile(REPRO_FILE);
     const sha = await this.clone(task, baseSha);
     if (sha !== baseSha) throw new Error(`the base commit changed from ${baseSha} to ${sha}`);
   }
@@ -1646,10 +1741,25 @@ class CodingRun implements RunHandle {
     if (!base) {
       const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${clipText(detail, 500)}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
+  }
+
+  /** Removes a file the agent wrote in handoff/; one that cannot be removed fails the step. */
+  private async removeAgentFile(name: string): Promise<void> {
+    const out = await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${name}\n`, {});
+    if (out.exitCode !== 0) throw new Error(`could not remove ${name} before the next agent run`);
+  }
+
+  /** A file of the task directory, copied where the agent's account can read it. */
+  private async publishForAgent(name: string): Promise<void> {
+    const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
+      envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
+      signal: this.signal,
+    });
+    if (out.exitCode !== 0) throw new Error(`could not make ${name} readable for the agent`);
   }
 
   private async writeSandboxFile(name: string, content: string): Promise<void> {

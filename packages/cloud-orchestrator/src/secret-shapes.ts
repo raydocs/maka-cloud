@@ -362,6 +362,23 @@ export function scrubSecretShapes(text: string): string {
   return scrubShapes(out);
 }
 
+/**
+ * `text` with the vendor key shapes taken out and nothing else: no field is blanked for its name
+ * and nothing is parsed. For a copy of text that must stay otherwise exact (the backup of the kept
+ * conversations), where a field called `signature` is the model's own. The private key block is
+ * not among them: it runs to the end of the text and would take the closing quote of a JSON
+ * string with it, so the caller removes it its own way.
+ */
+export function scrubKeyShapes(text: string): string {
+  let out = text;
+  for (const shape of SECRET_SHAPES.slice(1)) {
+    out = out.replace(shape, (match, name: unknown) =>
+      typeof name === 'string' ? `${name}[secret]` : '[secret]',
+    );
+  }
+  return out;
+}
+
 /** The patterns, on text as it is written. */
 function scrubShapes(text: string): string {
   let out = knownSecrets ? text.replace(knownSecrets, '[secret]') : text;
