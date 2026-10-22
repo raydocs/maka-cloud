@@ -525,6 +525,21 @@ export function planTests(changedFiles, options = {}) {
     // the suite that parses it and asserts the required contexts.
     if (path === '.asf.yaml') continue;
     if (path.startsWith('.github/')) continue;
+    // maka-cloud fork: the web app, the phone apps and the client and design code they share are
+    // not root workspaces, and no root workspace imports them. fork-cloud-web.yml and
+    // fork-cloud-mobile.yml own their tests. Lint and formatting cover them, so they are code,
+    // but not unknown code: they made a web or phone change wait for the full suite.
+    if (/^packages\/cloud-(web|mobile|client|design)\//.test(path)) {
+      code = true;
+      continue;
+    }
+    // maka-cloud fork: the rehearsal lane builds and runs deploy/; cloud-host's tests read the
+    // image's inputs (docker-context.test.ts reads .dockerignore).
+    if (path.startsWith('deploy/') || path === '.dockerignore') {
+      code = true;
+      directWorkspaces.add('packages/cloud-host');
+      continue;
+    }
     code = true;
     unknownCode = true;
   }

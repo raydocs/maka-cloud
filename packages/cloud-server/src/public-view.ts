@@ -211,6 +211,15 @@ export function toPublicEvent(event: TaskEvent): unknown {
       return { ...event, manifest: toPublicManifest(event.manifest) };
     case 'task_progress':
       return { ...event, note: scrubErrorText(event.note) };
+    case 'task_narration':
+      return { ...event, line: scrubErrorText(event.line) };
+    case 'task_panel':
+      // The summary is one of a fixed few shapes; the title and the tail are the run's own words.
+      return {
+        ...event,
+        title: scrubErrorText(event.title),
+        ...(event.tail === undefined ? {} : { tail: scrubErrorText(event.tail) }),
+      };
     case 'step_intent':
     case 'step_outcome':
       // A step's label and output are one line of what a tool did or printed.

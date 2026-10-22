@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { type TestContext, test } from 'node:test';
 import type { Mailer } from '../challenges.js';
-import { clientAddress } from '../auth-routes.js';
+import { clientAddress, proxyList } from '../auth-routes.js';
 import { newConversation, postJson, startHarness } from './harness.js';
 import { AUD, type Signer, signer, token } from './oidc-fixtures.js';
+
+const LOOPBACK = ['127.0.0.1', '::1'];
 
 interface Rig {
   h: Awaited<ReturnType<typeof startHarness>>;
@@ -28,7 +30,7 @@ interface Rig {
 async function rig(
   t: TestContext,
   limits: { perAddress?: number; guessesPerAddress?: number; total?: number } = {},
-  trustProxy = false,
+  trustedProxies: readonly string[] = [],
 ): Promise<Rig> {
   const key = signer('k1');
   let skew = 0;
@@ -45,7 +47,7 @@ async function rig(
       mailer,
       jwks: async () => ({ keys: [key.jwk] }),
       now: () => Date.now() + skew,
-      ...(trustProxy ? { trustProxy: true } : {}),
+      ...(trustedProxies.length > 0 ? { trustedProxies } : {}),
       limits: { perAddress: 1_000, guessesPerAddress: 1_000, total: 10_000, ...limits },
     },
   });
@@ -499,7 +501,7 @@ test('an identity of a live account is never released by someone else’s claim'
 });
 
 test('behind a proxy each forwarded client has its own limits, and the header of a public caller is ignored', async (t) => {
-  const r = await rig(t, { perAddress: 2, guessesPerAddress: 2 }, true);
+  const r = await rig(t, { perAddress: 2, guessesPerAddress: 2 }, LOOPBACK);
   const wrong = (client: string) =>
     r.call(
       'POST',
@@ -514,10 +516,10 @@ test('behind a proxy each forwarded client has its own limits, and the header of
   assert.equal((await wrong('198.51.100.2')).status, 401, 'another client is not held up');
   // a client cannot pick its own bucket by forging earlier entries
   assert.equal((await wrong('198.51.100.1')).status, 429);
-  // without the option the header means nothing
-  const plain = await rig(t, { perAddress: 2, guessesPerAddress: 2 }, false);
+  // from a peer that is not the configured proxy the header means nothing, so it cannot pick a bucket
+  const other = await rig(t, { perAddress: 2, guessesPerAddress: 2 }, ['192.0.2.7', '10.9.0.0/16']);
   const call = (client: string) =>
-    plain.call(
+    other.call(
       'POST',
       '/v1/auth/email/verify',
       { challengeId: 'x', deviceSecret: 'y', code: '0' },
@@ -532,17 +534,40 @@ test('behind a proxy each forwarded client has its own limits, and the header of
 });
 
 test('which address a request counts as', () => {
-  const proxy = true;
+  const proxy = proxyList(['127.0.0.1', '::1', '172.29.80.0/24', '2001:db8::/32']);
   assert.equal(clientAddress('127.0.0.1', '198.51.100.7', proxy), '198.51.100.7');
-  assert.equal(clientAddress('172.18.0.3', 'evil, 198.51.100.7', proxy), '198.51.100.7');
-  assert.equal(clientAddress('::ffff:10.0.0.2', '2001:db8::1', proxy), '2001:db8::1');
+  assert.equal(clientAddress('::1', '198.51.100.7', proxy), '198.51.100.7');
+  assert.equal(clientAddress('::ffff:127.0.0.1', '198.51.100.7', proxy), '198.51.100.7');
+  assert.equal(clientAddress('172.29.80.2', 'evil, 198.51.100.7', proxy), '198.51.100.7');
+  assert.equal(clientAddress('2001:db8::5', '198.51.100.7', proxy), '198.51.100.7');
   assert.equal(clientAddress('127.0.0.1', undefined, proxy), '127.0.0.1');
   assert.equal(clientAddress('127.0.0.1', 'not an address', proxy), '127.0.0.1');
   assert.equal(clientAddress('127.0.0.1', '198.51.100.7, ', proxy), '127.0.0.1');
-  // a public socket is its own client, whatever it forwards
+  // a peer that is not a configured proxy is its own client, whatever it forwards: a public one,
+  // and a private one on the same network (a neighbour container, another process on the LAN)
   assert.equal(clientAddress('8.8.8.8', '198.51.100.7', proxy), '8.8.8.8');
-  // not behind a proxy: the header means nothing
-  assert.equal(clientAddress('127.0.0.1', '198.51.100.7', false), '127.0.0.1');
+  assert.equal(clientAddress('172.29.81.2', '198.51.100.7', proxy), '172.29.81.2');
+  assert.equal(clientAddress('10.0.0.2', '198.51.100.7', proxy), '10.0.0.2');
+  assert.equal(clientAddress('::ffff:172.29.81.2', '198.51.100.7', proxy), '::ffff:172.29.81.2');
+  // no proxy configured: the header means nothing
+  assert.equal(clientAddress('127.0.0.1', '198.51.100.7', undefined), '127.0.0.1');
+});
+
+test('a proxy list is read strictly', () => {
+  for (const bad of [
+    '',
+    'proxy.example.com',
+    '10.0.0.0/33',
+    '::1/129',
+    '10.0.0.1/',
+    '1.2.3.4/8/9',
+    '10.0.0.1/x',
+  ]) {
+    assert.throws(() => proxyList([bad]), /not an IP address or range/u, bad);
+  }
+  assert.equal(proxyList(['192.0.2.7'])('192.0.2.7'), true);
+  assert.equal(proxyList(['192.0.2.7'])('192.0.2.8'), false);
+  assert.equal(proxyList([])('127.0.0.1'), false);
 });
 
 test('a malformed session id is an id nobody has', async (t) => {

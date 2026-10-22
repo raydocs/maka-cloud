@@ -88,3 +88,28 @@ jobs:
       - name: Take the stack down
         if: always()
         run: deploy/rehearsal/down.sh || true
+
+  # The tests of cloud-runners and the coding suite of cloud-playbooks that need a second account (the agent boundary:
+  # channel, handoff, checkout, checks, the box check itself) are skipped on a hosted runner. This
+  # job runs them as root beside `maka-agent`, in the same kind of image the rehearsal's sandbox is
+  # made from (deploy/Dockerfile, target `real-account-tests`). They fail here instead of skipping.
+  real-accounts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The checks run in a new user and PID namespace, as in the rehearsal.
+      - name: Allow unprivileged user namespaces, as the sandbox box must
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build the test image
+        run: docker build -f deploy/Dockerfile --target real-account-tests -t maka-real-account-tests .
+
+      - name: Run the real-account tests as root
+        run: >-
+          docker run --rm
+          --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+          maka-real-account-tests
