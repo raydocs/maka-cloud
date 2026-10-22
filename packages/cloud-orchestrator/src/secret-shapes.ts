@@ -406,9 +406,14 @@ const INVISIBLE_NOT_MARKS =
 /** A combining mark after an ASCII character: Latin text has no use for one that NFKC could not compose. */
 const MARK_AFTER_ASCII = /([\x21-\x7e])[\p{Mn}\p{Me}]+/gu;
 
-/** `value` as it reads: compatibility forms folded, invisible characters gone. For finding secrets, not for showing. */
+/**
+ * `value` as it reads: compatibility forms folded, invisible characters gone. For finding secrets,
+ * not for showing. Decomposed before the marks go: composed first, `c` and a combining acute would
+ * become one letter `ć` with no mark left to remove, and a key written that way would not be found.
+ * Composed again after, so Hangul reads as its syllables.
+ */
 export function withoutInvisible(value: string): string {
-  return value.normalize('NFKC').replace(INVISIBLE, '');
+  return value.normalize('NFKD').replace(INVISIBLE, '').normalize('NFC');
 }
 
 /** Like `withoutInvisible`, but the combining marks of other scripts stay, so it can be shown: the text of an outside page, or of a message with a secret cut out of it. */
