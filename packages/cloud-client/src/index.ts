@@ -10,6 +10,7 @@ export * from './homeFeed';
 export * from './ids';
 export * from './inboxAnswer';
 export * from './inbox';
+export * from './pending';
 export * from './presentation';
 export * from './sources';
 export * from './suggestions';
