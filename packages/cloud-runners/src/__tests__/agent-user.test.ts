@@ -24,6 +24,7 @@ const GOOD = [
   'FACT agent_sudo_policy=none',
   'FACT agent_caps=none',
   'FACT agent_filecaps=none',
+  'FACT agent_setid=none',
   'FACT agent_groups=maka-agent maka',
   'FACT agent_sockets=none',
   'FACT agent_control_write=none',
@@ -69,6 +70,9 @@ test('a box passes only when every fact of the probe is as the channel needs it'
     [without('brief_read'), /cannot read the brief/u],
     [without('workspace_write', 'no'), /cannot write a workspace/u],
     [without('workspace_cleanup', 'no'), /cannot remove what the agent wrote/u],
+    [without('agent_setid', 'found'), /setuid or setgid/u],
+    [without('agent_setid', 'unchecked'), /setuid or setgid/u],
+    [without('agent_setid'), /setuid or setgid/u],
     // A missing answer is never taken as a good one.
     [without('chan_write'), /write the channel/u],
     [without('workspace_cleanup'), /cannot remove/u],

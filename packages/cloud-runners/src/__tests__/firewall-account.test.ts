@@ -106,6 +106,7 @@ const FACTS = [
   'FACT agent_sudo_policy=none',
   'FACT agent_caps=none',
   'FACT agent_filecaps=none',
+  'FACT agent_setid=none',
   'FACT agent_groups=maka-agent maka',
   'FACT agent_sockets=none',
   'FACT agent_control_write=none',
