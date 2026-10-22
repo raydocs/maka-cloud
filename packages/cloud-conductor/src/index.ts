@@ -23,4 +23,9 @@ export { callCostUsd } from './pricing.js';
 export { conductorSystemPrompt, PLANNER_SYSTEM_PROMPT } from './prompts.js';
 export { printable, shownValue } from './shown.js';
 export * from './state.js';
-export { type ActiveTurn, type ConductorToolSpec, ToolRefusal } from './tools.js';
+export {
+  type ActiveTurn,
+  type ConductorToolSpec,
+  type GrantScopeKey,
+  ToolRefusal,
+} from './tools.js';
