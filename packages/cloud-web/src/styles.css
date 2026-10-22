@@ -1144,6 +1144,66 @@ a.evidence-chip:hover {
   object-position: top;
   border-radius: 0;
 }
+/* The result at each size, side by side like the devices: widest first, sitting on one line. */
+.delivery-views {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+.view-shot {
+  margin: 0;
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+}
+.view-desktop {
+  flex: 5 1 0;
+}
+.view-tablet {
+  flex: 2.4 1 0;
+}
+.view-phone {
+  flex: 1.3 1 0;
+  max-width: 150px;
+}
+.view-frame {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--card-edge);
+  border-radius: var(--radius-small);
+  background: var(--chip);
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+  cursor: zoom-in;
+}
+.view-frame:disabled {
+  cursor: default;
+}
+.view-desktop .view-frame {
+  aspect-ratio: 16 / 10;
+}
+.view-tablet .view-frame {
+  aspect-ratio: 3 / 4;
+  border-radius: 18px;
+}
+.view-phone .view-frame {
+  aspect-ratio: 9 / 19.5;
+  border-radius: 22px;
+}
+.view-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+}
+.view-shot figcaption {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
 .delivery-diff-tile {
   padding: 16px;
   text-align: left;

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ArrowUpRight, FileDiff } from 'lucide-react';
 import {
   type ArtifactListing,
   type CloudClient,
   type DeliveryModel,
+  type DeliveryView,
   deliveryModel,
   displayText,
   LABEL_WORDS,
@@ -164,6 +165,52 @@ export function DiffLines({ text }: { text: string }) {
   );
 }
 
+/**
+ * One screenshot of the result at one viewport, framed like that device: it loads its own bytes,
+ * shows its viewport's name under it, and opens large when tapped.
+ */
+function ViewShot({
+  client,
+  taskId,
+  view,
+  onOpen,
+  onFailed,
+}: {
+  client: CloudClient;
+  taskId: string;
+  view: DeliveryView;
+  onOpen: (blob: Blob) => void;
+  onFailed: () => void;
+}) {
+  const [blob, setBlob] = useState<Blob | undefined>();
+  const url = useObjectUrl(blob);
+  const index = view.listing.index;
+  useEffect(() => {
+    let current = true;
+    client
+      .readArtifact(taskId, index)
+      .then((content) => current && content.kind === 'image' && setBlob(content.blob))
+      .catch(() => current && onFailed());
+    return () => {
+      current = false;
+    };
+  }, [client, taskId, index, onFailed]);
+  return (
+    <figure className={`view-shot view-${view.viewport.toLowerCase()}`}>
+      <button
+        type="button"
+        className="view-frame"
+        aria-label={`Open large: ${view.viewport}`}
+        disabled={!blob}
+        onClick={() => blob && onOpen(blob)}
+      >
+        {url ? <img src={url} alt={`${view.viewport}: ${displayText(view.listing.name)}`} /> : null}
+      </button>
+      <figcaption>{view.viewport}</figcaption>
+    </figure>
+  );
+}
+
 interface Opened {
   kind: 'image' | 'diff';
   title: string;
@@ -190,12 +237,15 @@ export function DeliveryCard({
   onOpenTask?: (task: TaskView) => void;
 }) {
   const model = deliveryModel(task, listings, sources);
-  const shot = model?.shot;
+  const views = model?.views;
+  // With views each screenshot loads itself; the single picture is not loaded a second time.
+  const shot = views ? undefined : model?.shot;
   const diff = model?.diff;
   const [proof, setProof] = useState<Blob | undefined>();
   const proofUrl = useObjectUrl(proof);
   const [opened, setOpened] = useState<Opened | undefined>();
   const [failed, setFailed] = useState(false);
+  const markFailed = useCallback(() => setFailed(true), []);
   const shotIndex = shot?.index;
 
   useEffect(() => {
@@ -240,6 +290,20 @@ export function DeliveryCard({
         )}
       </div>
       <p className="delivery-outcome">{outcome}</p>
+      {views && (
+        <div className="delivery-views" role="group" aria-label={caption}>
+          {views.map((view) => (
+            <ViewShot
+              key={view.viewport}
+              client={client}
+              taskId={task.taskId}
+              view={view}
+              onOpen={(blob) => setOpened({ kind: 'image', title: view.viewport, blob })}
+              onFailed={markFailed}
+            />
+          ))}
+        </div>
+      )}
       {shot && proofUrl && (
         <button
           type="button"
@@ -256,7 +320,7 @@ export function DeliveryCard({
           <img className="picture" src={proofUrl} alt={displayText(shot.name)} />
         </button>
       )}
-      {!(shot && proofUrl) && diff && (
+      {!views && !(shot && proofUrl) && diff && (
         <button
           type="button"
           className="delivery-visual delivery-diff-tile"
@@ -266,7 +330,8 @@ export function DeliveryCard({
           <FileDiff aria-hidden="true" size={16} className="icon-inline" /> View the changes
         </button>
       )}
-      {/* The caption names a picture; the changes tile already says what it is. */}
+      {/* The caption names a single picture: the changes tile already says what it is, and with
+          views each frame is labelled while the caption names the group instead. */}
       {shot && caption && <p className="delivery-caption muted">{caption}</p>}
       {failed && <p className="muted">The picture could not be loaded.</p>}
       {actions.length > 0 && (

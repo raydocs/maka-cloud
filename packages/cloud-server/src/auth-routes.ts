@@ -1,13 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isIP } from 'node:net';
+import { BlockList, isIP } from 'node:net';
 import { z } from 'zod';
 import type { AccountStore, Identity } from './accounts.js';
 import type { EmailCodes, NonceStore } from './challenges.js';
 import { HttpError, readJson, respond } from './http.js';
 import type { IdentityVerifier } from './identity.js';
 import type { InviteInfo, InviteStore } from './invites.js';
-import { isPublicAddress } from './public-address.js';
 import { RateLimiter } from './rate-limit.js';
 
 /** How often sign-in routes may be called, per minute. Tests lower or raise them. */
@@ -64,12 +63,14 @@ export interface AuthOptions {
   emailCodes?: EmailCodes;
   limits?: Partial<AuthLimits>;
   /**
-   * The server sits behind one reverse proxy (the deployment's Caddy or nginx). Then a request whose
-   * socket address is private (the proxy) is counted against the client address the proxy put last
-   * in `X-Forwarded-For`; a request from a public address is counted against that address and its
-   * header is ignored. Without it every person would share the proxy's address and its limits.
+   * The addresses (IPs or CIDR ranges) of the reverse proxy in front of the server (the
+   * deployment's Caddy or nginx). A request whose socket address is one of them is counted against
+   * the client address the proxy put last in `X-Forwarded-For`; a request from any other address is
+   * counted against its own address and its header is ignored, so a caller that reaches the server
+   * directly cannot choose its bucket. Without any, every person would share the proxy's address
+   * and its limits.
    */
-  trustProxy?: boolean;
+  trustedProxies?: readonly string[];
 }
 
 export interface AuthDeps extends AuthOptions {
@@ -104,8 +105,10 @@ export class AuthRoutes {
   private readonly guesses: RateLimiter;
   private readonly total: RateLimiter;
   private readonly now: () => number;
+  private readonly proxies: ProxyList | undefined;
 
   constructor(private readonly deps: AuthDeps) {
+    this.proxies = deps.trustedProxies?.length ? proxyList(deps.trustedProxies) : undefined;
     const limits = { ...DEFAULT_AUTH_LIMITS, ...deps.limits };
     this.now = deps.now ?? Date.now;
     this.perAddress = new RateLimiter(limits.perAddress, this.now);
@@ -119,7 +122,7 @@ export class AuthRoutes {
     return clientAddress(
       req.socket.remoteAddress ?? 'unknown',
       Array.isArray(header) ? header.join(',') : header,
-      this.deps.trustProxy === true,
+      this.proxies,
     );
   }
 
@@ -389,17 +392,48 @@ export class AuthRoutes {
   }
 }
 
+/** Whether a socket address is one of the configured proxies. */
+export type ProxyList = (address: string) => boolean;
+
+/** An address as `net` compares it: an IPv4 address inside an IPv6 one (`::ffff:a.b.c.d`) is the IPv4 address. */
+function plainAddress(address: string): string {
+  return address.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/iu, '');
+}
+
+/** Reads IPs and CIDR ranges (`10.0.0.2`, `172.29.80.0/24`, `::1`). Throws on an entry it cannot read. */
+export function proxyList(entries: readonly string[]): ProxyList {
+  const list = new BlockList();
+  for (const raw of entries) {
+    const [address = '', prefix, ...extra] = plainAddress(raw.trim()).split('/');
+    const family = isIP(address);
+    if (family === 0 || extra.length > 0) throw new Error(`"${raw}" is not an IP address or range`);
+    const type = family === 4 ? 'ipv4' : 'ipv6';
+    if (prefix === undefined) list.addAddress(address, type);
+    else {
+      const bits = Number(prefix);
+      if (!/^\d{1,3}$/u.test(prefix) || bits > (family === 4 ? 32 : 128))
+        throw new Error(`"${raw}" is not an IP address or range`);
+      list.addSubnet(address, bits, type);
+    }
+  }
+  return (address) => {
+    const plain = plainAddress(address);
+    const family = isIP(plain);
+    return family !== 0 && list.check(plain, family === 4 ? 'ipv4' : 'ipv6');
+  };
+}
+
 /**
- * The address a request is counted against. Behind a trusted proxy a private socket address is the
- * proxy, and the client is the last `X-Forwarded-For` entry (the one the proxy itself added; earlier
- * entries are the client's to forge). A public socket address is always its own client.
+ * The address a request is counted against. When the socket address is a configured proxy the
+ * client is the last `X-Forwarded-For` entry (the one the proxy itself added; earlier entries are
+ * the client's to forge). From any other peer the header means nothing.
  */
 export function clientAddress(
   socket: string,
   forwardedFor: string | undefined,
-  trustProxy: boolean,
+  proxies: ProxyList | undefined,
 ): string {
-  if (!trustProxy || isPublicAddress(socket)) return socket;
+  if (!proxies?.(socket)) return socket;
   const last = forwardedFor?.split(',').pop()?.trim();
   return last !== undefined && isIP(last) !== 0 ? last : socket;
 }

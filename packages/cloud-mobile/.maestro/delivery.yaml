@@ -5,9 +5,21 @@ appId: cloud.maka.app
 - runFlow: subflows/sign-in.yaml
 - assertVisible:
     id: "field-Keep the conversation going"
+# The chat scrolls itself to the end when something waits on the person, which can leave the result
+# card above the screen (a taller simulator shows more below it), so look down first, then up.
 - scrollUntilVisible:
     element:
       id: "delivery-picture"
+    optional: true
+- runFlow:
+    when:
+      notVisible:
+        id: "delivery-picture"
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: "delivery-picture"
+          direction: UP
 - assertVisible: "Login page after fix"
 # The pull request button sits under the picture; a longer conversation title above can leave it
 # just below the fold, so scroll to it rather than assume it fits.

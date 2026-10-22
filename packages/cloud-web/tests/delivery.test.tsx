@@ -449,3 +449,27 @@ test('a picture named in model text is text: nothing is loaded and nothing is as
   // It is shown as the text it is.
   expect(container.textContent).toContain('![chart](https://evil.example/pixel.png?d=secret)');
 });
+
+test('screenshots at several sizes are shown side by side, widest first, each loaded once and opening large', async () => {
+  const views: ArtifactListing[] = [
+    { index: 0, name: 'home-phone.png', kind: 'file', image: true },
+    { index: 1, name: 'home-desktop.png', kind: 'file', image: true },
+  ];
+  const { client, reads } = fakeClient({
+    0: { name: 'home-phone.png', type: 'image/png', body: PNG },
+    1: { name: 'home-desktop.png', type: 'image/png', body: PNG },
+  });
+  render(<DeliveryCard client={client} task={task()} listings={views} sources={[]} />);
+  const group = screen.getByRole('group', { name: 'Desktop and phone' });
+  const frames = await within(group).findAllByRole('button', { name: /^Open large: / });
+  expect(frames.map((frame) => frame.getAttribute('aria-label'))).toEqual([
+    'Open large: Desktop',
+    'Open large: Phone',
+  ]);
+  await waitFor(() =>
+    expect(frames.every((frame) => !(frame as HTMLButtonElement).disabled)).toBe(true),
+  );
+  expect([...reads].sort()).toEqual([0, 1]);
+  fireEvent.click(frames[1] as HTMLElement);
+  expect(screen.getByRole('dialog', { name: 'Phone' })).toBeTruthy();
+});
