@@ -47,7 +47,8 @@ be shown exactly cannot be approved (`questionCardModel`, supervisor R1). Every 
 - An approval offers up to three scopes. **This once** is today's yes. **For this task** covers
   calls with the same tool and argument pattern until the task ends. **For this repository** covers
   them until the owner revokes it.
-- A wider yes is stored as a **grant**: owner, repository, tool, an argument pattern (exact values
+- A wider yes is stored as a **grant** (its exact shape, with required expiry and a withdrawal list,
+  is in `grok-bot-patterns.md` pattern 3): owner, repository, tool, an argument pattern (exact values
   or a closed set, never a free wildcard), scope, created at, expires at, and revoked at. The
   conductor checks grants before it asks. A call a grant covers runs and is logged with the grant
   id, so the transcript says why nothing was asked.
