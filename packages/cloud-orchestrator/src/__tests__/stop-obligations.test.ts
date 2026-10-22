@@ -54,6 +54,8 @@ function stopsOnceOpened(failures: number) {
 test('a stop that fails at restart is owed and retried until it is confirmed; the task ending does not count as stopped', async (t) => {
   const { store, dir, taskId, conductor } = await leftRunning(t);
   const stops = stopsOnceOpened(2);
+  // A failed assertion before the gate is opened must not leave the retry hanging in `close`.
+  t.after(stops.open);
   const second = await makeHarness(t, {
     store,
     dir,
@@ -124,6 +126,7 @@ test('close stops the retries and leaves the obligation in the log', async (t) =
 test('a cancel the runner refuses leaves the task cancelled and owing a stop, which is retried by id', async (t) => {
   const store = new MemoryTaskStore();
   const stops = stopsOnceOpened(1);
+  t.after(stops.open);
   const h = await makeHarness(t, {
     store,
     orchestrator: FAST,
@@ -286,6 +289,7 @@ test("a task's view says its tree may still run while a task below it owes a sto
   const stopOpened = new Promise<void>((resolve) => {
     openStop = resolve;
   });
+  t.after(openStop);
   const h = await makeHarness(t, {
     store,
     orchestrator: FAST,

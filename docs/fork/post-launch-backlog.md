@@ -147,6 +147,10 @@ Still missing before it can merge:
    leader exited normally`. Make each wait on an explicit handshake instead of a time. (The
    stop-obligations tests that raced the fast retry are fixed: the retry that would confirm the
    stop now waits for the test to open a gate.)
+5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
+   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
+   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
+   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
 
 ## Reviews merged without an outside review
 
