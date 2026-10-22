@@ -128,6 +128,25 @@ Still missing before it can merge:
 3. P3: the hash-named files are not listed in the handoff listing, so an owner cannot see them.
    Test: a listing of a handoff directory with a hash-named file includes it. Source: #341.
 
+## Restarts, the kept conversation and CI timing (from #325, #337, #345)
+
+1. P3: a restart runs every running coding task again from a fresh clone, spend so far included. The
+   result card or the inbox should say "restarted after a server restart" when it happens, so a
+   second `fetching` is not read as a loop. Test: a task resumed by a second process shows the note.
+   Source: #337.
+2. P3: the backup copy of `transcripts.db` walks `transcript_lines` with `LIMIT ? OFFSET ?`, which
+   is quadratic in the table size. Use keyset pagination on the ordering columns, or one iterated
+   `SELECT` with the updates batched in a transaction. Source: #325.
+3. P3: the recovery id of a journal row without an attempt is a hash of the row's sum, so it holds
+   only while no new row without an attempt is written for the task. If the journal ever writes
+   them again, key the rows by their own id. Source: #345.
+4. P3: three timing tests failed on a loaded CI runner (the suite took 306 s against 128 s on a
+   dev machine) with nothing in the PR touching them: `cancelling the task stops the CLI in the
+   sandbox` (the pid file is awaited 5 s), `children that ignore TERM are killed even after the
+   leader exited normally`, and `a cancel the runner refuses leaves the task cancelled and owing a
+   stop, which is retried by id` (the fast retry can confirm the stop before the view is read).
+   Make each wait on an explicit handshake instead of a time.
+
 ## Reviews merged without an outside review
 
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
