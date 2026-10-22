@@ -24,11 +24,51 @@ const MAX_REASON = 300;
  */
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}͏ᅟᅠ឴឵᠋-᠏⠀ㅤ︀-️ﾠ\u{E0100}-\u{E01EF}]/gu;
 
+const SECRET_MARK = '[secret]';
+
+/** Breaks that read as the space between two words; a key split by one is shown split, as written. */
+const BREAKS = /[\t\n\v\f\r]/gu;
+
 export function plain(text: string, max: number): string {
-  // Flattened and scrubbed whole, and only then cut: a key cut in two is no longer a key the
-  // scrubber knows, and what is left of it would be shown.
-  const flat = scrubSecretText(text.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim());
-  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+  // Scrubbed before anything is flattened: a key split by a character that becomes a space here is
+  // no longer one the scrubber knows. The scrubber reads zero-width characters away itself; the
+  // rest of these (private-use, unassigned, control, line separators) are read away here, from the
+  // text as written. When that reading has a key the text as shown does not hide the same way, where
+  // the key ends is not known (a tail after the split, or a word after it read into it), so none of
+  // the text is shown. Then scrubbed whole once more and only then cut: a key cut in two is no
+  // longer a key the scrubber knows, and what is left of it would be shown.
+  const spaced = text.replace(BREAKS, ' ');
+  const shown = scrubSecretText(spaced);
+  const joined = spaced.replace(UNPRINTABLE, '');
+  const scrubbedJoined = scrubSecretText(joined);
+  if (scrubbedJoined !== joined && shown.replace(UNPRINTABLE, '') !== scrubbedJoined) {
+    return clip(SECRET_MARK, max);
+  }
+  return clip(scrubSecretText(shown.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim()), max);
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * `text` cut to at most `max` UTF-16 units, the last one an ellipsis: at a character boundary (never
+ * half of a surrogate pair or a letter without its marks), and never inside a `[secret]` mark, which
+ * cut short would no longer say what was there.
+ */
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const ends = [0];
+  for (const { index, segment } of graphemes.segment(text)) {
+    if (index + segment.length > max - 1) break;
+    ends.push(index + segment.length);
+  }
+  let end = ends.at(-1) ?? 0;
+  const mark = text.lastIndexOf(SECRET_MARK, end - 1);
+  // Before the mark, and still where a character ends: the mark's [ can be part of one before it.
+  if (mark !== -1 && mark + SECRET_MARK.length > end) {
+    end = 0;
+    for (const at of ends) if (at <= mark) end = at;
+  }
+  return `${text.slice(0, end)}…`;
 }
 
 const FindingSchema = z.object({

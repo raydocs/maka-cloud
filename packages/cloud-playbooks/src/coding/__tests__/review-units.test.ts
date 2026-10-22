@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  clip,
   countBySeverity,
   type Finding,
   MAX_FINDINGS,
@@ -94,6 +95,57 @@ test('plain text scrubs a secret before it clips, so no piece of a key is left a
   } as const;
   assert.doesNotMatch(reviewLine(review as never), /ghp_/);
   assert.doesNotMatch(reviewMarkdown(review as never), /ghp_/);
+});
+
+test('plain text scrubs a key split by a character that shows nothing before that character becomes a space', () => {
+  const shown = plain('token ghp_01234567\u200b89abcdef0123456789abcdef01234567 here', 200);
+  assert.doesNotMatch(shown, /89abcdef/u);
+  assert.match(shown, /\[secret\]/u);
+  // Characters that become a space here, and that the scrubber does not read away itself.
+  for (const split of ['\ue000', '\u0000', '\u0378', '\u2028', '\u2029', '\u0007']) {
+    const out = plain(`token ghp_01234567${split}89abcdef0123456789abcdef0123 here`, 200);
+    assert.doesNotMatch(out, /89abcdef/u, `U+${split.codePointAt(0)?.toString(16)}`);
+  }
+  // A cut that would fall inside the mark falls before it.
+  assert.doesNotMatch(
+    plain(`${'a'.repeat(10)} ghp_0123456789abcdef0123456789abcdef0123 tail`, 15),
+    /\[se/u,
+  );
+});
+
+test('a key split after enough of it to be found is not shown in part, and no word is read into it', () => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  for (const split of ['\u0000', '\ue000', '\u0378', '\u2028', '\u2029', '\u0007']) {
+    // Enough before the split to be a key on its own: the part after it was shown.
+    const late = plain(`${key.slice(0, 20)}${split}${key.slice(20)}`, 200);
+    assert.equal(late, '[secret]', `U+${split.codePointAt(0)?.toString(16)}`);
+  }
+  // Read without the split, the key runs into the word after the line break: the text is not shown
+  // rather than shown without its "not".
+  const warning = plain(`${key.slice(0, 12)}\u0000${key.slice(12)}\nnot safe to deploy`, 200);
+  assert.doesNotMatch(warning, /^\[secret\] safe/u);
+  assert.doesNotMatch(warning, /89abcdef/u);
+  // A whole key with a line break after it keeps the word after it.
+  assert.equal(plain(`${key}\nnot safe to deploy`, 200), '[secret] not safe to deploy');
+  // A key whole as written, and a hidden character elsewhere, keep the text.
+  assert.equal(plain(`${key} is bad\u0000ly placed`, 200), '[secret] is bad ly placed');
+});
+
+test('a clip never cuts a [secret] mark, half a character or a letter from its marks', () => {
+  // The mark would be cut: the cut moves before it.
+  assert.equal(clip(`${'a'.repeat(10)}[secret] tail`, 15), `${'a'.repeat(10)}…`);
+  // Two UTF-16 units of one emoji are kept together or dropped together.
+  assert.equal(clip('ab\u{1F600}cdef', 4), 'ab…');
+  // e with its acute stays one letter.
+  assert.equal(clip('abe\u0301cdef', 4), 'ab…');
+  assert.equal(clip('short', 10), 'short');
+  // The dot reph joins the [ of the mark into one character: the cut goes before both.
+  assert.equal(clip('a\u0d4e[secret] tail', 6), 'a…');
+  for (const text of ['x[secret]', 'xxxxx[secret]yyyy', '[secret][secret]']) {
+    for (let max = 2; max < text.length; max++) {
+      assert.doesNotMatch(clip(text, max), /\[(?!secret\])[^…]*…$/u, `${text} at ${max}`);
+    }
+  }
 });
 
 test('plain text has no control, direction or look-alike characters and is one clipped line', () => {
