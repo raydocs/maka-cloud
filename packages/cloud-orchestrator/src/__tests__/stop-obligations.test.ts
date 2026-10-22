@@ -32,13 +32,33 @@ function stopsAfter(failures: number): FakeRunnerOptions['stopOrphaned'] {
   };
 }
 
+/**
+ * Like `stopsAfter`, but the call that would succeed waits until the test opens the gate. A retry
+ * on a short timer therefore cannot confirm the stop before the test has read the task as it
+ * stands while the stop is still owed; no sleep decides which comes first.
+ */
+function stopsOnceOpened(failures: number) {
+  let release!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const stopOrphaned: FakeRunnerOptions['stopOrphaned'] = async () => {
+    calls += 1;
+    if (calls <= failures) throw new Error('sandbox unreachable');
+    await opened;
+  };
+  return { stopOrphaned, open: release };
+}
+
 test('a stop that fails at restart is owed and retried until it is confirmed; the task ending does not count as stopped', async (t) => {
   const { store, dir, taskId, conductor } = await leftRunning(t);
+  const stops = stopsOnceOpened(2);
   const second = await makeHarness(t, {
     store,
     dir,
     orchestrator: FAST,
-    fake: { stopOrphaned: stopsAfter(2) },
+    fake: { stopOrphaned: stops.stopOrphaned },
   });
   t.after(() => second.orchestrator.close());
   const ended = second.orchestrator.status(conductor, taskId);
@@ -51,6 +71,7 @@ test('a stop that fails at restart is owed and retried until it is confirmed; th
   ]);
 
   await eventually(() => second.fake.orphanStops.length === 3, 'two retries');
+  stops.open();
   await eventually(
     () => second.orchestrator.status(conductor, taskId).stopPending === undefined,
     'the stop confirmed',
@@ -102,6 +123,7 @@ test('close stops the retries and leaves the obligation in the log', async (t) =
 
 test('a cancel the runner refuses leaves the task cancelled and owing a stop, which is retried by id', async (t) => {
   const store = new MemoryTaskStore();
+  const stops = stopsOnceOpened(1);
   const h = await makeHarness(t, {
     store,
     orchestrator: FAST,
@@ -111,7 +133,7 @@ test('a cancel the runner refuses leaves the task cancelled and owing a stop, wh
           throw new Error('sandbox unreachable');
         };
       },
-      stopOrphaned: stopsAfter(1),
+      stopOrphaned: stops.stopOrphaned,
     },
   });
   t.after(() => h.orchestrator.close());
@@ -127,6 +149,7 @@ test('a cancel the runner refuses leaves the task cancelled and owing a stop, wh
     log.indexOf('task_stop_pending') < log.indexOf('task_cancelled'),
     'owed before the task ended',
   );
+  stops.open();
   await eventually(() => store.stopPendingTaskIds().length === 0, 'the stop confirmed');
   assert.deepEqual(h.fake.orphanStops, [taskId, taskId]);
 });
@@ -258,6 +281,11 @@ test("a task's view says its tree may still run while a task below it owes a sto
   let parentId = '';
   let starts = 0;
   let childStops = 0;
+  // The child's stop that would succeed waits for the test to have read the views while it is owed.
+  let openStop!: () => void;
+  const stopOpened = new Promise<void>((resolve) => {
+    openStop = resolve;
+  });
   const h = await makeHarness(t, {
     store,
     orchestrator: FAST,
@@ -275,6 +303,7 @@ test("a task's view says its tree may still run while a task below it owes a sto
         if (taskId === parentId) return;
         childStops += 1;
         if (childStops <= 2) throw new Error('sandbox unreachable');
+        await stopOpened;
         // The run is gone, and its stream with it: the spend it reported is all there is.
         h.fake.runFor(taskId).end();
       },
@@ -308,6 +337,7 @@ test("a task's view says its tree may still run while a task below it owes a sto
   );
   assert.equal(h.orchestrator.status(conductor, child.taskId).stopPending, true);
 
+  openStop();
   await eventually(() => store.stopPendingTaskIds().length === 0, 'the child stop confirmed');
   assert.equal(h.orchestrator.status(conductor, parentId).treeStopPending, undefined);
 });

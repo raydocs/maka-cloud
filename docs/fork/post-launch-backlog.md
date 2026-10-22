@@ -141,16 +141,12 @@ Still missing before it can merge:
 3. P3: the recovery id of a journal row without an attempt is a hash of the row's sum, so it holds
    only while no new row without an attempt is written for the task. If the journal ever writes
    them again, key the rows by their own id. Source: #345.
-4. P3: three timing tests failed on a loaded CI runner (the suite took 306 s against 128 s on a
+4. P3: two timing tests failed on a loaded CI runner (the suite took 306 s against 128 s on a
    dev machine) with nothing in the PR touching them: `cancelling the task stops the CLI in the
-   sandbox` (the pid file is awaited 5 s), `children that ignore TERM are killed even after the
-   leader exited normally`, and `a cancel the runner refuses leaves the task cancelled and owing a
-   stop, which is retried by id` (the fast retry can confirm the stop before the view is read).
-   Make each wait on an explicit handshake instead of a time.
-5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
-   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
-   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
-   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
+   sandbox` (the pid file is awaited 5 s) and `children that ignore TERM are killed even after the
+   leader exited normally`. Make each wait on an explicit handshake instead of a time. (The
+   stop-obligations tests that raced the fast retry are fixed: the retry that would confirm the
+   stop now waits for the test to open a gate.)
 
 ## Reviews merged without an outside review
 
