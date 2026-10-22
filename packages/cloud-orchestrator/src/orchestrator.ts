@@ -1305,7 +1305,12 @@ export class Orchestrator {
     const costSeqs = (root ? this.store.readTask(root.taskId) : [])
       .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
       .map(({ seq }) => seq);
-    const resumes = resumesInARow(this.store.readTask(task.taskId), costSeqs);
+    const log = this.store.readTask(task.taskId);
+    // Restarts it spent waiting its turn are not resumes that got nowhere: count from its turn.
+    const turnSeqs = log
+      .filter(({ event }) => event.type === 'task_progress' && event.note === TURN_NOTE)
+      .map(({ seq }) => seq);
+    const resumes = resumesInARow(log, [...costSeqs, ...turnSeqs]);
     if (resumes > MAX_RESUMES_IN_A_ROW && !waitingTurn) {
       return {
         kind: 'give_up',

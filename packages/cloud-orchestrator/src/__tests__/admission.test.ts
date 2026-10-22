@@ -311,6 +311,40 @@ test('trees that were all running before a restart resume one at a time when the
   assert.equal(after.h.fake.recoveries[1]?.taskId, two.taskId);
 });
 
+test('restarts spent waiting do not count against the task once it runs', async (t) => {
+  const store = new MemoryTaskStore();
+  const groups = new Map<string, string>();
+  let current = await grouped(t, { store, groups, fake: { recover: true } });
+  const c = current.conductor('invite-1');
+  const running = await current.h.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const waiting = await current.h.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(() => started(current.h, running.taskId), 'the first run');
+  const restart = async () => {
+    current.h.orchestrator.close();
+    current = await grouped(t, { store, groups, dir: current.h.dir, fake: { recover: true } });
+    await current.h.orchestrator.settled();
+  };
+  for (let n = 1; n <= MAX_RESUMES_IN_A_ROW + 2; n += 1) {
+    current.h.fake.runFor(running.taskId).usage(n / 100);
+    await eventually(
+      () => (current.h.orchestrator.status(c, running.taskId).costUsd ?? 0) >= n / 100,
+      'the spend recorded',
+    );
+    await restart();
+    await eventually(() => started(current.h, running.taskId), `resume ${n}`);
+  }
+  await current.h.fake.runFor(running.taskId).complete();
+  await eventually(() => started(current.h, waiting.taskId), 'the waiting run');
+  await eventually(
+    () => current.h.orchestrator.taskStateOf(waiting.taskId) === 'running',
+    'the waiting task running',
+  );
+  // Its first restart since it got its turn resumes it.
+  await restart();
+  assert.deepEqual(current.h.orchestrator.resumedTaskIds, [waiting.taskId]);
+  await eventually(() => current.h.fake.recoveries.length === 1, 'resumed');
+});
+
 test('a restored tree that used its run time while it waited is stopped with a note, not left running', async (t) => {
   const store = new MemoryTaskStore();
   let now = 1_000_000;
