@@ -111,8 +111,10 @@ has ended: by `reconcile()` (the service runs it before every sweep and every cl
 for a box of that invite.
 
 An ask under way when the pool is shut down hands out nothing: it fails, and a box its create made is kept,
-free. The service's `close()` waits for creates under way (task boxes and builders), so a stopping process
-does not leave a box it was making unrecorded.
+free (a live task keeps its claim). The service's `close()` waits for hand-outs and builder leases under way,
+their guard, give-back write and failure delete included, so a stopping process does not leave a box it was
+making unrecorded or a builder undeleted. A builder whose guard ends after the shutdown is deleted, not handed
+out. A failed repeat ask of a live task keeps the task's claim, like a run's release.
 
 Every `acquire` gets its own claim token. A task that asks again (a repeat, a resume) gets a new token and
 the older call's lease stops matching, so releasing it frees nothing; only the lease whose token is the

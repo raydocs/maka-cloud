@@ -178,7 +178,7 @@ export class BoxPool implements SandboxProvider {
   /** A builder box of an invite that could not be deleted: the next build removes it first. */
   private readonly leftoverBuilders = new Map<string, string>();
   private closed = false;
-  /** Creates (of task boxes and builders) under way, for `settled`. */
+  /** Hand-outs and builder leases under way, for `settled`. */
   private readonly inFlight = new Set<Promise<void>>();
   /** The most boxes the account let the pool have, once instabox refused a create. */
   private learned: { boxes: number; at: number } | undefined;
@@ -327,26 +327,24 @@ export class BoxPool implements SandboxProvider {
         }
         this.assertOpen();
         this.builders.add(tenantId);
+        // Tracked to the end, the failure's delete included, so a shutdown waits for it.
+        const end = this.begin();
         let machineId: string | undefined;
         try {
           const name = builderName(tenantId);
           let machine: InstaboxMachine;
           try {
-            const creating = (async () => {
-              const operation = await this.api.createMachine(
-                {
-                  name,
-                  ...this.options.source(tenantId),
-                  metadata: builderLabels(tenantId, job),
-                },
-                { idempotencyKey: `maka-box-${name}-${randomUUID()}` },
-              );
-              machineId = operation.machineId;
-              await this.api.waitForOperation(operation.id);
-              return await this.api.getMachine(operation.machineId);
-            })();
-            this.track(creating);
-            machine = await creating;
+            const operation = await this.api.createMachine(
+              {
+                name,
+                ...this.options.source(tenantId),
+                metadata: builderLabels(tenantId, job),
+              },
+              { idempotencyKey: `maka-box-${name}-${randomUUID()}` },
+            );
+            machineId = operation.machineId;
+            await this.api.waitForOperation(operation.id);
+            machine = await this.api.getMachine(operation.machineId);
           } catch (error) {
             if (isQuotaExceeded(error)) {
               throw new NoFreeBoxError('the account has no room for a builder box right now');
@@ -358,6 +356,8 @@ export class BoxPool implements SandboxProvider {
             throw new BoxRefusedError(`the builder box ${machine.id} does not carry its labels`);
           }
           await this.options.beforeUse?.(machine.id, 'create');
+          // Shut down meanwhile: the builder is deleted below, not handed out.
+          this.assertOpen();
           const id = machine.id;
           let released = false;
           return {
@@ -386,6 +386,8 @@ export class BoxPool implements SandboxProvider {
           }
           this.builders.delete(tenantId);
           throw error;
+        } finally {
+          end();
         }
       },
     };
@@ -507,14 +509,20 @@ export class BoxPool implements SandboxProvider {
     return holder;
   }
 
-  /** The async tail of a decision: write the label, or make the box. A failure gives the box back. */
-  private async finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Held> {
+  /** The async tail of a decision, tracked to its end so a shutdown waits for it (`settled`). */
+  private finish(plan: Exclude<Plan, { kind: 'none' }>): Promise<Held> {
+    const work = this.complete(plan);
+    this.track(work);
+    return work;
+  }
+
+  /** Writes the label, or makes the box. A failure gives the box back. */
+  private async complete(plan: Exclude<Plan, { kind: 'none' }>): Promise<Held> {
     const { box, holder } = plan;
     const taskId = box.taskId as TaskId;
     try {
       if (plan.kind === 'create') {
         box.creation = this.create(plan);
-        this.track(box.creation);
         await box.creation;
       } else {
         // A task that asks again while its box is still being made waits for the same creation.
@@ -546,7 +554,7 @@ export class BoxPool implements SandboxProvider {
         // A box that was accepted but could not be read back stays, as lost.
         if (box.state !== 'lost') this.forget(box);
         else this.pump(box.tenantId);
-      } else if (box.holder === holder) this.free(box);
+      } else if (box.holder === holder) this.giveBack(box);
       // The account has no room for another box but the invite has boxes: wait for one of them.
       if (error instanceof QuotaWait) {
         if (plan.kind === 'create' && plan.why === 'restore') {
@@ -806,6 +814,11 @@ export class BoxPool implements SandboxProvider {
 
   private wait(tenantId: string, taskId: TaskId, choice?: SetupChoice): Promise<Held> {
     return new Promise<Held>((resolve, reject) => {
+      // A create refused for the account's limit after the shutdown must not queue a waiter.
+      if (this.closed) {
+        reject(new PoolClosedError());
+        return;
+      }
       const waiter: Waiter = {
         tenantId,
         taskId,
@@ -1043,20 +1056,26 @@ export class BoxPool implements SandboxProvider {
     if (this.closed) throw new PoolClosedError();
   }
 
-  /** Keeps a create until it settles, so a shutdown can wait for it (`settled`). */
-  private track(work: Promise<unknown>): void {
-    const done = work.then(
-      () => undefined,
-      () => undefined,
-    );
+  /** Marks work under way until the returned function is called, so a shutdown can wait for it. */
+  private begin(): () => void {
+    let end!: () => void;
+    const done = new Promise<void>((resolve) => {
+      end = resolve;
+    });
     this.inFlight.add(done);
     void done.then(() => this.inFlight.delete(done));
+    return end;
+  }
+
+  private track(work: Promise<unknown>): void {
+    const end = this.begin();
+    void work.then(end, end);
   }
 
   /**
-   * Resolves once every create that was under way has ended, with the boxes it made recorded (or
-   * given back). For a shutdown, after `dispose`: a process that stops sooner may leave a box made
-   * for nothing, or a builder that is deleted by no one.
+   * Resolves once every hand-out and builder lease that was under way has ended, with the boxes it
+   * made recorded, given back or deleted. For a shutdown, after `dispose`: a process that stops sooner
+   * may leave a box made for nothing, or a builder that is deleted by no one.
    */
   async settled(): Promise<void> {
     while (this.inFlight.size > 0) await Promise.all([...this.inFlight]);

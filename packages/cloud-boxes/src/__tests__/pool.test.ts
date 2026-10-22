@@ -720,4 +720,61 @@ describe('review fixes before the pool goes on', () => {
     assert.equal(box?.taskId, undefined);
     assert.equal(labelsOf(fleet, box?.machineId as string)?.[LABEL.task], undefined);
   });
+
+  it('keeps a live task’s box when its next ask fails on the way, so no other task gets it', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const run1 = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await run1.release();
+    const real = fleet.getMachine.bind(fleet);
+    let failures = 1;
+    fleet.getMachine = async (id: string) => {
+      if (failures-- > 0) throw new Error('instabox is unreachable');
+      return await real(id);
+    };
+    await assert.rejects(pool.acquire({ tenantId: A, taskId: 't1' }), /unreachable/);
+    assert.equal(pool.state()[0]?.taskId, 't1', 'the task still holds its box');
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(pool.waiting(A), 1, 'another task waits instead of taking it');
+    const again = await pool.acquire({ tenantId: A, taskId: 't1' });
+    assert.equal(again.machineId, run1.machineId);
+    void other.catch(() => undefined);
+  });
+
+  it('queues no waiter for a create the account refused after the shutdown', async () => {
+    const { pool, fleet } = setup();
+    await pool.acquire({ tenantId: A, taskId: 't1' });
+    fleet.accountLimit = 1;
+    const creating = fleet.hold('createMachine');
+    const asking = pool.acquire({ tenantId: A, taskId: 't2' });
+    await creating.reached;
+    pool.dispose();
+    const refused = assert.rejects(asking, /shut down/);
+    creating.release();
+    await flush();
+    assert.equal(pool.waiting(), 0, 'nothing waits after the shutdown');
+    await refused;
+    await pool.settled();
+  });
+
+  it('waits on shutdown for the label write that gives back a box made after it', async () => {
+    const { pool, fleet } = setup();
+    const creating = fleet.hold('createMachine');
+    const asking = pool.acquire({ tenantId: A, taskId: 't1' });
+    await creating.reached;
+    pool.dispose();
+    const clearing = fleet.hold('patchMachineMetadata');
+    let settled = false;
+    const waiting = pool.settled().then(() => {
+      settled = true;
+    });
+    creating.release();
+    await clearing.reached;
+    await flush();
+    assert.equal(settled, false, 'the give-back write is still under way');
+    clearing.release();
+    await assert.rejects(asking, /shut down/);
+    await waiting;
+  });
 });

@@ -537,4 +537,34 @@ describe('a builder box left over from an earlier build', () => {
     await second.release();
     assert.equal(t.fleet.machines.get(second.machineId)?.state, 'deleted');
   });
+
+  it('is waited for at shutdown while its guard runs, then deleted, not handed out', async () => {
+    let guardDone!: () => void;
+    let guardReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      guardReached = resolve;
+    });
+    const t = setup({
+      beforeUse: async () => {
+        guardReached();
+        await new Promise<void>((resolve) => {
+          guardDone = resolve;
+        });
+      },
+    });
+    const leasing = t.pool.builderBoxes().lease({ tenantId: A, job: 'setup-abc' });
+    await reached;
+    t.pool.dispose();
+    let settled = false;
+    const waiting = t.pool.settled().then(() => {
+      settled = true;
+    });
+    await flush();
+    assert.equal(settled, false, 'the shutdown waits for the builder');
+    guardDone();
+    await assert.rejects(leasing, /shut down/);
+    await waiting;
+    const [machineId] = t.fleet.callsTo('deleteMachine')[0] as [string];
+    assert.equal(t.fleet.machines.get(machineId)?.state, 'deleted');
+  });
 });

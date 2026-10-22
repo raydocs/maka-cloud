@@ -16,7 +16,7 @@ finding came from. Keep the order within a section as the order to do them in.
 
 From the T27 review rounds. The pool is unreachable while `MAKA_CLOUD_BOXES` is unset.
 
-Items 1 to 4 and Snapshots 1 and 2 were fixed in `fix/box-pool-review`, each with a test that fails on
+Items 1 to 4 and Snapshots 1 and 2 were fixed in #411, each with a test that fails on
 the main it started from; what is left is below.
 
 1. Pool 4, not done: `SandboxProvider.acquire` takes no abort signal, so a task cancelled while it
