@@ -356,7 +356,7 @@ jobs:
           if [[ "$STORAGE_STRESS" == "true" ]]; then
             export MAKA_STORAGE_STRESS=1
           fi
-          node scripts/run-workspace-tests-parallel.mjs --concurrency=3 --workspaces="$WORKSPACES"
+          node scripts/run-workspace-tests-parallel.mjs --concurrency=3 --workspace-timeout-minutes=30 --workspaces="$WORKSPACES"
 
       - name: Run live Eval egress proxy test
         if: contains(steps.plan.outputs.standard_workspaces, 'packages/eval')
