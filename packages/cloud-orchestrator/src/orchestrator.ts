@@ -371,17 +371,28 @@ export class Orchestrator {
     const pending = this.pendingResumes;
     this.pendingResumes = [];
     if (this.closed) return;
+    // The resumes of one tree go together: a tree beyond its group's room (a limit lowered, or
+    // trees from before there was one) waits whole, like a new task. Trees that were running come
+    // first, then the ones that were waiting, each in the order they were made.
+    const trees = new Map<TaskId, PendingResume[]>();
     for (const resume of pending) {
-      const { task } = resume;
-      // A top-level task that never started waits its turn again, like a new one.
-      if (
-        task.parentTaskId === undefined &&
-        task.state === 'queued' &&
-        this.queueHeld(task.taskId, task.rootSessionId, () => this.resumeRun(resume))
-      ) {
-        continue;
-      }
-      this.track(this.resumeRun(resume));
+      const rootId = this.treeRoot(resume.task.taskId)?.taskId ?? resume.task.taskId;
+      const tree = trees.get(rootId) ?? [];
+      tree.push(resume);
+      trees.set(rootId, tree);
+    }
+    const order = [...trees.entries()].sort(
+      ([a], [b]) =>
+        Number(this.tasks.get(a)?.state === 'queued') -
+        Number(this.tasks.get(b)?.state === 'queued'),
+    );
+    for (const [rootId, resumes] of order) {
+      const root = this.tasks.get(rootId);
+      const start = async () => {
+        await Promise.all(resumes.map((resume) => this.resumeRun(resume)));
+      };
+      if (root !== undefined && this.queueHeld(rootId, root.rootSessionId, start)) continue;
+      this.track(start());
     }
     this.admit();
   }
@@ -644,6 +655,19 @@ export class Orchestrator {
   // Admission (see `Admission`). Which trees run is read from what may still run (as `view` reads
   // it for `treeStopPending`), not counted, so nothing can leak a slot or free one too early.
 
+  /**
+   * A top-level task whose latest note says it waits its turn. It never had a run: a held task
+   * that gets its turn writes `TURN_NOTE` before its run starts.
+   */
+  private waitingTurn(task: TaskRecord): boolean {
+    return (
+      this.admission !== undefined &&
+      task.parentTaskId === undefined &&
+      task.state === 'queued' &&
+      isHoldNote(task.progress.at(-1))
+    );
+  }
+
   /** Puts a top-level task at the back of its group's line. False when it has no group to wait in. */
   private queueHeld(taskId: TaskId, rootSessionId: SessionId, start: () => Promise<void>): boolean {
     if (this.admission === undefined) return false;
@@ -688,9 +712,10 @@ export class Orchestrator {
       const ahead = waiting.get(entry.group) ?? 0;
       if (ahead === 0 && trees.length < admission.perGroup) {
         this.heldIds.delete(entry.taskId);
-        trees.push(this.tasks.get(entry.taskId) as TaskRecord);
+        const task = this.tasks.get(entry.taskId) as TaskRecord;
+        trees.push(task);
         running.set(entry.group, trees);
-        this.track(entry.start());
+        this.track(this.takeTurn(task, entry.start));
         continue;
       }
       kept.push(entry);
@@ -732,6 +757,28 @@ export class Orchestrator {
       byGroup.set(group, trees);
     }
     return byGroup;
+  }
+
+  /**
+   * Starts a held task. One that was told it waits is told its turn came first, durably, so a
+   * restart from here on knows it may have a run (`waitingTurn`).
+   */
+  private async takeTurn(task: TaskRecord, start: () => Promise<void>): Promise<void> {
+    if (isHoldNote(task.progress.at(-1))) {
+      try {
+        const noted = await this.record(
+          { type: 'task_progress', taskId: task.taskId, note: TURN_NOTE },
+          () => {
+            if (this.isStopping(task.taskId)) throw new Superseded();
+          },
+        );
+        // Cancelled while its turn came: the cancel ends it, with no run to stop.
+        if (noted === undefined) return;
+      } catch {
+        // The store failed; the start below records its own outcome, or fails the same way.
+      }
+    }
+    await start();
   }
 
   /** Writes what a held task waits for, unless it started meanwhile or already says so. */
@@ -1133,8 +1180,13 @@ export class Orchestrator {
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
+    // A task still waiting its turn never had a run, so there is nothing of it to stop.
     const stops = await Promise.all(
-      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch)),
+      orphans.map((task) =>
+        this.waitingTurn(task)
+          ? Promise.resolve<LeftoverStop>('none')
+          : this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch),
+      ),
     );
     const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
@@ -1226,11 +1278,7 @@ export class Orchestrator {
     const runner = this.runners.get(task.runner);
     // A top-level task still waiting its turn never ran: it waits again and starts like a new one,
     // whatever its runner can recover, and waiting through restarts is not a resume that got nowhere.
-    const waitingTurn =
-      this.admission !== undefined &&
-      task.parentTaskId === undefined &&
-      task.state === 'queued' &&
-      isHoldNote(task.progress.at(-1));
+    const waitingTurn = this.waitingTurn(task);
     if (
       runner === undefined ||
       (!runner.recover && !waitingTurn) ||
@@ -2567,6 +2615,9 @@ export function holdNote(perGroup: number, title: string | undefined, ahead: num
     ? `${rule} This one starts when ${running} finishes.`
     : `${rule} This one starts after ${running} and ${others} waiting before it.`;
 }
+
+/** What a held task says when its turn comes, before its run starts. */
+export const TURN_NOTE = 'Its turn came: starting now.';
 
 /** Whether a progress note is one `holdNote` wrote: the task was waiting its turn. */
 export function isHoldNote(note: string | undefined): boolean {

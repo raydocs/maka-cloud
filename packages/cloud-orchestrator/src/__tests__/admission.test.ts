@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SessionInfo } from '../auth.js';
 import type { FakeRunnerOptions } from '../fake-runner.js';
-import { holdNote, isHoldNote, type OrchestratorOptions } from '../orchestrator.js';
+import { holdNote, isHoldNote, type OrchestratorOptions, TURN_NOTE } from '../orchestrator.js';
 import { MAX_RESUMES_IN_A_ROW } from '../recovery.js';
 import { MemoryTaskStore } from '../store.js';
 import { eventually, type Harness, makeHarness } from './harness.js';
@@ -276,6 +276,86 @@ test('a task may wait through more restarts than a stuck resume is allowed', asy
   }
   await current.h.fake.runFor(running.taskId).complete();
   await eventually(() => started(current.h, waiting.taskId), 'the waiting run');
+});
+
+test('trees that were all running before a restart resume one at a time when the room is one', async (t) => {
+  const store = new MemoryTaskStore();
+  // Before: no limit (an older server, or a higher one), so two trees of the invite run.
+  const before = await makeHarness(t, { store });
+  const c = before.session();
+  const one = await before.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const two = await before.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(
+    () =>
+      before.orchestrator.taskStateOf(one.taskId) === 'running' &&
+      before.orchestrator.taskStateOf(two.taskId) === 'running',
+    'both running',
+  );
+  before.orchestrator.close();
+
+  const groups = new Map([[c.sessionId, 'invite-1']]);
+  const after = await grouped(t, { store, groups, dir: before.dir, fake: { recover: true } });
+  await after.h.orchestrator.settled();
+  await eventually(() => after.h.fake.recoveries.length === 1, 'one resumed');
+  assert.equal(after.h.fake.recoveries[0]?.taskId, one.taskId);
+  assert.equal(after.h.orchestrator.stats().heldTasks, 1);
+
+  await after.h.fake.runFor(one.taskId).complete();
+  await eventually(() => after.h.fake.recoveries.length === 2, 'the other resumed');
+  assert.equal(after.h.fake.recoveries[1]?.taskId, two.taskId);
+});
+
+test('a restart does not try to stop a task that never had its turn, nor fail it when stops fail', async (t) => {
+  const store = new MemoryTaskStore();
+  const groups = new Map<string, string>();
+  const before = await grouped(t, { store, groups });
+  const c = before.conductor('invite-1');
+  const running = await before.h.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const waiting = await before.h.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(() => started(before.h, running.taskId), 'the first run');
+  before.h.orchestrator.close();
+
+  // The machine does not answer at first: the running task's leftover cannot be stopped.
+  let reachable = false;
+  const after = await grouped(t, {
+    store,
+    groups,
+    dir: before.h.dir,
+    fake: {
+      stopOrphaned: async () => {
+        if (!reachable) throw new Error('machine unreachable');
+      },
+    },
+    orchestrator: { stopRetry: { firstMs: 5, maxMs: 5 } },
+  });
+  await after.h.orchestrator.settled();
+  assert.deepEqual(after.h.fake.orphanStops, [running.taskId]);
+  assert.equal(after.h.orchestrator.taskStateOf(waiting.taskId), 'queued');
+  // It still waits: the first task's run may still be going on the machine.
+  assert.equal(started(after.h, waiting.taskId), false);
+
+  reachable = true;
+  await eventually(() => started(after.h, waiting.taskId), 'the waiting run, once the stop held');
+});
+
+test('a held task says its turn came before its run starts, so a later restart treats it as run', async (t) => {
+  const store = new MemoryTaskStore();
+  const groups = new Map<string, string>();
+  const before = await grouped(t, { store, groups });
+  const c = before.conductor('invite-1');
+  const first = await before.h.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const second = await before.h.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(() => started(before.h, first.taskId), 'the first run');
+  await before.h.fake.runFor(first.taskId).complete();
+  await eventually(() => started(before.h, second.taskId), 'the second run');
+  const notes = before.h.orchestrator.status(c, second.taskId).progress;
+  assert.ok(isHoldNote(notes.at(-2)));
+  assert.equal(notes.at(-1), TURN_NOTE);
+  before.h.orchestrator.close();
+
+  // Its run is a run like any other now: a runner that cannot recover ends it at a restart.
+  const after = await grouped(t, { store, groups, dir: before.h.dir });
+  assert.deepEqual(after.h.orchestrator.orphanedTaskIds, [second.taskId]);
 });
 
 test('without admission nothing is held', async (t) => {

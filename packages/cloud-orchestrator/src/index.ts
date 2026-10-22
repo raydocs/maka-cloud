@@ -32,6 +32,7 @@ export {
   MAX_WAIT_MS,
   Orchestrator,
   type OperatorAccess,
+  TURN_NOTE,
   type OrchestratorOptions,
   type RecoveredSpend,
   type OrchestratorStats,

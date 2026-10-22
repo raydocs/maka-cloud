@@ -20,7 +20,10 @@ account of its own, the server runs one task tree per invite at a time (`MAKA_CL
 default 1). A second task, from the same conversation or another one of the invite, is not refused:
 it waits as `queued`, says "One task runs at a time on this workspace for now. This one starts when
 <title> finishes.", and starts when the running tree has ended and nothing of it can still be running.
-Tasks the running task delegates belong to its tree and start at once. The start-up summary says
+Tasks the running task delegates belong to its tree and start at once. A restart keeps the line: a
+task that was waiting waits again (nothing of it is stopped or resumed), and trees that were running
+beyond the limit (a lowered setting, or the first start of this version) resume one at a time. The
+start-up summary says
 `tasks at once:       1 per invite; the next one waits its turn`.
 
 A task that waits counts as queued for the inbox's stall check, so one that waits longer than
