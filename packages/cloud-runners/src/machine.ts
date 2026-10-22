@@ -309,6 +309,7 @@ export class RemoteMachine {
     const line = asAgentUser(
       [input.program, ...input.args].map((word) => shq(word)).join(' '),
       this.agentUser,
+      Object.keys(input.envs),
     );
     return await this.start(
       buildRunScript({
