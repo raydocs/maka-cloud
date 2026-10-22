@@ -116,7 +116,12 @@ export function timeAgo(at: number, now: number): string {
 
 /** A kept approval in a person's words: how far it reaches, how it was used, when it ends. */
 export function grantFacts(
-  grant: { scope: 'task' | 'repository'; uses: number; lastUsedAt: number | null; expiresAt: number },
+  grant: {
+    scope: 'task' | 'repository';
+    uses: number;
+    lastUsedAt: number | null;
+    expiresAt: number;
+  },
   now: number,
 ): { scope: string; uses: string; ends: string } {
   const uses =

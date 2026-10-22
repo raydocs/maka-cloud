@@ -1,12 +1,25 @@
 import { useEffect, useState } from 'react';
-import { type CloudClient, displayText, errorText, type Grant, grantFacts, Unsupported } from '@maka-cloud/client';
+import {
+  type CloudClient,
+  displayText,
+  errorText,
+  type Grant,
+  grantFacts,
+  Unsupported,
+} from '@maka-cloud/client';
 
 /**
  * The approvals the person kept ("for this task", "for this repository"), by repository: what each
  * lets the agent do again without asking, how it was used, when it ends, and a one-tap revoke. Hidden
  * on a server that keeps none.
  */
-export function GrantsPanel({ client, now = Date.now }: { client: CloudClient; now?: () => number }) {
+export function GrantsPanel({
+  client,
+  now = Date.now,
+}: {
+  client: CloudClient;
+  now?: () => number;
+}) {
   const [grants, setGrants] = useState<Grant[] | undefined>();
   const [hidden, setHidden] = useState(false);
   const [busy, setBusy] = useState(false);

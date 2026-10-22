@@ -33,14 +33,23 @@ function server(grants: Grant[], status = 200) {
 test('kept approvals are listed by repository with their reach, use and end, and revoke in one tap', async () => {
   const { client, calls } = server([
     grant({}),
-    grant({ grantId: 'g2', tool: 'merge_pull_request', scope: 'task', uses: 0, lastUsedAt: null, expiresAt: NOW + 2 * H }),
+    grant({
+      grantId: 'g2',
+      tool: 'merge_pull_request',
+      scope: 'task',
+      uses: 0,
+      lastUsedAt: null,
+      expiresAt: NOW + 2 * H,
+    }),
     grant({ grantId: 'g3', repository: 'acme/site', tool: 'post_comment' }),
   ]);
   render(<GrantsPanel client={client} now={() => NOW} />);
   const panel = await screen.findByRole('region', { name: 'Kept approvals' });
   await within(panel).findByText('acme/widgets');
   expect(
-    within(panel).getAllByText('For this repository · Used 2 times, last 3 h ago · Ends in 28 days'),
+    within(panel).getAllByText(
+      'For this repository · Used 2 times, last 3 h ago · Ends in 28 days',
+    ),
   ).toHaveLength(2);
   expect(within(panel).getByText('For one task · Not used yet · Ends in 2 h')).toBeTruthy();
   fireEvent.click(within(panel).getByRole('button', { name: 'Revoke post_comment in acme/site' }));

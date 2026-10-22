@@ -5,19 +5,29 @@ const H = 3_600_000;
 
 test('a kept approval in words: its reach, its use, its end', () => {
   const now = 1_000 * H;
-  expect(grantFacts({ scope: 'repository', uses: 0, lastUsedAt: null, expiresAt: now + 28 * 24 * H }, now)).toEqual({
+  expect(
+    grantFacts(
+      { scope: 'repository', uses: 0, lastUsedAt: null, expiresAt: now + 28 * 24 * H },
+      now,
+    ),
+  ).toEqual({
     scope: 'For this repository',
     uses: 'Not used yet',
     ends: 'Ends in 28 days',
   });
-  expect(grantFacts({ scope: 'task', uses: 1, lastUsedAt: now - 5 * 60_000, expiresAt: now + 2 * H }, now)).toEqual({
+  expect(
+    grantFacts(
+      { scope: 'task', uses: 1, lastUsedAt: now - 5 * 60_000, expiresAt: now + 2 * H },
+      now,
+    ),
+  ).toEqual({
     scope: 'For one task',
     uses: 'Used once, last 5 min ago',
     ends: 'Ends in 2 h',
   });
-  expect(grantFacts({ scope: 'task', uses: 3, lastUsedAt: now - 3 * H, expiresAt: now }, now).uses).toBe(
-    'Used 3 times, last 3 h ago',
-  );
+  expect(
+    grantFacts({ scope: 'task', uses: 3, lastUsedAt: now - 3 * H, expiresAt: now }, now).uses,
+  ).toBe('Used 3 times, last 3 h ago');
   expect(timeAgo(now, now)).toBe('just now');
   expect(timeAgo(now - 72 * H, now)).toBe('3 days ago');
 });
@@ -38,6 +48,7 @@ test('listing and revoking kept approvals use their routes; a server without the
     'DELETE /v1/inbox/grants/g%2F1',
     'POST /v1/inbox/grants/revoke {"repository":"acme/widgets"}',
   ]);
-  const none = new CloudClient('t', (async () => Response.json({}, { status: 404 })) as typeof fetch);
+  const none = new CloudClient('t', (async () =>
+    Response.json({}, { status: 404 })) as typeof fetch);
   await expect(none.listGrants()).rejects.toBeInstanceOf(Unsupported);
 });
