@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -17,6 +18,13 @@ import { setup } from './harness.js';
 
 const SESSION = '11111111-2222-4333-8444-555555555555';
 const OTHER_SESSION = '99999999-2222-4333-8444-555555555555';
+const THINKING = {
+  type: 'thinking',
+  thinking: 'The user wants the file renamed.',
+  signature:
+    'EqQBCkYIBxgCKkA0Vh7Pq9m1ZtQ2w8d3Jx5sL0bN4cR6yU/aKfGhTeWnMoPzXvB1iDjE2lSq+u7CyHrAgFkIwVtQpZnYb',
+};
+
 const KEY = { projectKey: '-work-tsk-a-workspace', sessionId: SESSION };
 
 const line = (n: number, extra: Record<string, unknown> = {}): TranscriptLine => {
@@ -69,7 +77,6 @@ for (const [name, make] of STORES) {
     const mirror = transcriptSessionStore({
       taskId: 'tsk_a',
       store,
-      redact: (text) => text,
       onKept: (lines) => kept.push(lines.map((entry) => entry.uuid ?? '')),
     });
     const entry = (n: number) => JSON.parse(line(n).json);
@@ -167,13 +174,12 @@ for (const [name, make] of STORES) {
   });
 }
 
-test('the SDK’s store scrubs every line, keeps them in order, and gives nothing back', async () => {
+test('the SDK’s store keeps every line exactly as written, in order, and gives nothing back', async () => {
   const kept = new MemoryTranscriptStore();
   const problems: string[] = [];
   const mirror = transcriptSessionStore({
     taskId: 'tsk_a',
     store: kept,
-    redact: (text) => text.replaceAll('sk-secret-123456', '[redacted]'),
     onProblem: (message) => problems.push(message),
   });
   // The first append is slow; the second must still land after it.
@@ -190,13 +196,19 @@ test('the SDK’s store scrubs every line, keeps them in order, and gives nothin
   await Promise.all([
     mirror.append(KEY, [
       { type: 'user', uuid: 'a', message: { content: 'key sk-secret-123456 here' } },
-      { type: 'assistant', uuid: 'b' },
+      { type: 'assistant', uuid: 'b', message: { content: [THINKING] } },
     ]),
     mirror.append(KEY, [{ type: 'assistant', uuid: 'c' }]),
   ]);
-  const text = (await kept.read('tsk_a', SESSION)).lines.join('\n');
-  assert.ok(!text.includes('sk-secret'), 'a secret reached the store');
-  assert.match(text, /\[redacted\]/);
+  const lines = (await kept.read('tsk_a', SESSION)).lines;
+  // The model checks its own history on a resume (the signature of a thinking block, the redacted
+  // blocks): a line the store changed would fail it.
+  assert.ok(lines[0]?.includes('sk-secret-123456'), 'the line was edited');
+  assert.deepEqual(JSON.parse(lines[1] ?? ''), {
+    type: 'assistant',
+    uuid: 'b',
+    message: { content: [THINKING] },
+  });
   assert.deepEqual(
     (await kept.read('tsk_a', SESSION)).lines.map((l) => JSON.parse(l).uuid),
     ['a', 'b', 'c'],
@@ -211,7 +223,6 @@ test('a refusal by the store is reported and passed to the SDK, and the next bat
   const mirror = transcriptSessionStore({
     taskId: 'tsk_a',
     store: kept,
-    redact: (text) => text,
     onProblem: (message) => problems.push(message),
   });
   await assert.rejects(
@@ -225,16 +236,33 @@ test('a refusal by the store is reported and passed to the SDK, and the next bat
   assert.equal((await kept.locate('tsk_a', SESSION))?.lines, 1);
 });
 
-test('a scrub that breaks a line, or a store that is down, keeps nothing and says so', async () => {
+test('an entry that is not an object with a type keeps nothing and says so', async () => {
   const kept = new MemoryTranscriptStore();
-  const mirror = transcriptSessionStore({
-    taskId: 'tsk_a',
-    store: kept,
-    // A scrub that cuts the text into something that is not one JSON object.
-    redact: (text) => text.slice(0, 10),
-  });
-  await assert.rejects(mirror.append(KEY, [{ type: 'user', uuid: 'a' }]), /could not be scrubbed/);
+  const mirror = transcriptSessionStore({ taskId: 'tsk_a', store: kept });
+  await assert.rejects(
+    mirror.append(KEY, [{ type: 'user', uuid: 'a' }, { uuid: 'b' } as never]),
+    /not an object with a type/,
+  );
   assert.equal(await kept.locate('tsk_a', SESSION), undefined);
+});
+
+test('the transcript database is readable by its owner only, with its log and journal', async (t) => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'transcripts-mode-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'transcripts.db');
+  // A database an earlier version made with the default mode is put right when it is opened.
+  await fs.writeFile(path, '', { mode: 0o644 });
+  const store = SqliteTranscriptStore.open(path);
+  t.after(() => store.close());
+  await store.append('tsk_a', KEY, [
+    { json: JSON.stringify({ type: 'user', uuid: 'a' }), uuid: 'a' },
+  ]);
+  const modes = new Map<string, number>();
+  for (const name of await fs.readdir(dir)) {
+    modes.set(name, (await fs.stat(join(dir, name))).mode & 0o777);
+  }
+  assert.ok(modes.size >= 1);
+  for (const [name, mode] of modes) assert.equal(mode & 0o077, 0, `${name} is ${mode.toString(8)}`);
 });
 
 // -- the sandbox side ----------------------------------------------------------------------------

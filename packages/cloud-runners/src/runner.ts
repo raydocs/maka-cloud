@@ -11,6 +11,7 @@ import {
   ResultManifestSchema,
   type RunSpec,
   scrubSecretShapes,
+  secretForms,
   type TaskId,
 } from '@maka-cloud/orchestrator';
 import { attestExports, exportArtifacts } from './export.js';
@@ -796,9 +797,6 @@ class Run implements RunHandle {
     const kept = transcriptSessionStore({
       taskId: spec.taskId,
       store: transcripts,
-      // A key the run was never given, pasted by the user or read from a file, is shaped like one:
-      // the kept conversation is read by people and by later sandboxes, and holds none.
-      redact: (text) => this.scrubForReader(text),
       onProblem: (message) => this.progress(message),
       onKept: (lines) => this.mirrorKept(lines),
     });
@@ -1175,7 +1173,9 @@ class Run implements RunHandle {
       ...(spec.steps ? { steps: spec.steps } : {}),
       steer: { take: (maxChars) => this.takeSteers(maxChars) },
       ...(input.mirror ? { mirror: input.mirror } : {}),
-      redact: (text) => this.scrub(text),
+      // What the hooks give the model is what the kept conversation holds word for word, and the
+      // receipt of a steering message is over the same text.
+      redact: (text) => this.scrubForReader(text),
       onProblem: (message) => this.progress(message),
       spawn: ({ args, env, signal }) => {
         const watch = fleet.poller.watch(machine, {
@@ -1650,7 +1650,7 @@ class Run implements RunHandle {
   /**
    * Text a person will read (a failure, a note, a quote of the CLI): the run's own secrets, then
    * anything shaped like a key or a credential header, which also catches a key this run was
-   * never given. The kept transcript goes through it too, so no key shape is ever stored.
+   * never given. The kept transcript does not go through it (see `transcripts.ts`).
    */
   private scrubForReader(text: string): string {
     return scrubSecretShapes(this.scrub(text));
@@ -1659,8 +1659,12 @@ class Run implements RunHandle {
   /** Replaces every secret of the run in `text`. Nothing is cut: call this before clipping. */
   private scrub(text: string): string {
     let out = text;
-    for (const secret of this.secrets)
-      if (secret.length >= 6) out = out.split(secret).join('[redacted]');
+    // The secret as it is, and as it shows up when something is built from it (URL-encoded, escaped
+    // for JSON, the base64 of a Basic credential).
+    for (const secret of this.secrets) {
+      if (secret.length < 6) continue;
+      for (const form of secretForms(secret)) out = out.split(form).join('[redacted]');
+    }
     return out;
   }
 }
