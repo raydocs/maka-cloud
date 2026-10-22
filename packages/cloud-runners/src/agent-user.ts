@@ -154,6 +154,42 @@ chmod 2770 claude-config
 `;
 
 /**
+ * Part of the probe: the files the control user's login shell reads on every exec. Needs
+ * `as_agent`.
+ */
+export const LOGIN_FILES_PROBE = `# Every exec of the control user runs under a login shell, which reads these files first: whoever
+# can write one (or the directory it is in) runs code as the control user. Each must be a regular
+# file (a link is followed to its target) the control user or root owns, which the agent cannot write.
+mine=$(id -u)
+login_bad=""
+login_safe() {
+  local target owner
+  target=$(readlink -f -- "$1" 2>/dev/null) || return 1
+  [ -f "$target" ] || return 1
+  owner=$(stat -c %u -- "$target" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  as_agent test -w "$target" >/dev/null 2>&1 && return 1
+  return 0
+}
+dir_safe() {
+  local owner
+  owner=$(stat -c %u -- "$1" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  as_agent test -w "$1" >/dev/null 2>&1 && return 1
+  return 0
+}
+for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" /etc/profile /etc/bash.bashrc /etc/profile.d/*; do
+  { [ -e "$f" ] || [ -L "$f" ]; } || continue
+  login_safe "$f" || login_bad="$login_bad $f"
+done
+for d in "$HOME" /etc /etc/profile.d; do
+  [ -d "$d" ] || continue
+  dir_safe "$d" || login_bad="$login_bad $d"
+done
+if [ -z "$login_bad" ]; then echo "FACT agent_login_files=none"; else echo "FACT agent_login_files=$login_bad"; fi
+`;
+
+/**
  * Whether any program the agent can run carries a file capability. `getcap -r` is asked for every
  * directory a program can live in that exists (not `/`, which would walk `/proc`), and its exit
  * status counts: a listing that failed is `unchecked`, never `none`. Every capability on a program
@@ -264,6 +300,7 @@ for path in "$HOME" "$HOME/.maka-cli" "$HOME/.maka-cli/bin" "$MAKA_ROOT" "$(dirn
   if [ -e "$path" ] && as_agent test -w "$path" >/dev/null 2>&1; then writable="$writable $path"; fi
 done
 if [ -z "$writable" ]; then echo "FACT agent_control_write=none"; else echo "FACT agent_control_write=$writable"; fi
+${LOGIN_FILES_PROBE}
 # The firewall itself: can this account change network policy (a capability, a setuid tool)? A
 # scratch chain is made and taken away again (also on the way out, if this stops half way).
 chain="MAKA_PROBE_$$"
@@ -347,6 +384,11 @@ export function agentIsolationProblems(output: string): string[] {
     'agent_filecaps',
     'none',
     'a program carries a capability the agent could use (or file capabilities could not be listed)',
+  );
+  mustBe(
+    'agent_login_files',
+    'none',
+    'the agent account can change a file or directory that the login shell of the control user reads (or they could not be checked)',
   );
   mustBe('agent_sockets', 'none', 'the agent account can reach a container or VM socket');
   mustBe(

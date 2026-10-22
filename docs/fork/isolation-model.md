@@ -173,7 +173,8 @@ they must not be writable by the agent's account or group.
 `agent_control_write`, `chan_*`, `task_list`, `task_file_write`.
 *Tested*: `agent-user.test.ts` (real account: channel, handoff, task directory), probe fixture in
 `firewall-account.test.ts`.
-*Still violated*: F13 (the probe checks the home directory, not the login files in it).
+*Enforced*: `agent_login_files` in the probe (`LOGIN_FILES_PROBE`): the control user's login files and the directories holding them are regular, owned by the control user or root, and not writable by the agent.
+*Tested*: `login-files.test.ts`, `firewall-account.test.ts`.
 
 **I4. The control user never follows a path through an agent-writable directory except in four
 ways**: (a) a read with every component checked for links, the last open `O_NOFOLLOW`, and a size
@@ -321,7 +322,7 @@ a finding that fits none means this section is incomplete.
 | Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
 | Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` and the restore, raced by a sibling's agent (#312 checks then re-resolves by path; recheck A2, open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
-| Control user's login files | I3 | `bash -lc` on every exec; not probed (open, F13) |
+| Control user's login files | I3 | `bash -lc` on every exec; probed (`agent_login_files`, F13, closed) |
 | Whole environment handed to the agent | I9 | `env -i` plus named variables (F8, closed) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
 
