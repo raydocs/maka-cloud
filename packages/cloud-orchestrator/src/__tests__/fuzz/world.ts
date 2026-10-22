@@ -296,14 +296,30 @@ class FuzzRun implements RunHandle {
         const kind = this.world.rng.weighted([
           ['progress', draining ? 0 : 55],
           ['usage', draining ? 0 : 15],
+          ['display', draining ? 0 : 10],
           ['finished', 8],
           ['failed', 8],
           ['eof', 6],
           ['throw', 8],
         ] as const);
-        if (kind !== 'progress' && kind !== 'usage') this.over = true;
+        if (kind !== 'progress' && kind !== 'usage' && kind !== 'display') this.over = true;
         if (kind === 'progress') resolve({ done: false, value: { type: 'progress', note: 'p' } });
-        else if (kind === 'usage') {
+        else if (kind === 'display') {
+          // Reader copies interleave with everything else and change no task state.
+          resolve({
+            done: false,
+            value: this.world.rng.int(2)
+              ? { type: 'narration', line: 'working' }
+              : {
+                  type: 'panel',
+                  panelId: 'tests',
+                  kind: 'tests',
+                  state: 'running',
+                  title: 'Tests',
+                  summary: 'running',
+                },
+          });
+        } else if (kind === 'usage') {
           this.cents += 5 + this.world.rng.int(60);
           this.reportedUsd = this.cents / 100;
           resolve({ done: false, value: { type: 'usage', costUsd: this.cents / 100 } });
