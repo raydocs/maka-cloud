@@ -94,13 +94,13 @@ test('false confidence is the share of hands-off changes the hidden tests reject
   assert.equal(playbook?.autoMergeReady, false);
   assert.equal(codex?.handsOffRate, null, 'a subject without a proof record shows n/a');
   assert.equal(codex?.falseConfidence, null);
-  assert.equal(codex?.costPerResolvedUsd, 1, 'a cell without a cost is left out, not zero');
+  assert.equal(codex?.costPerResolvedUsd, null, 'a cell without a cost leaves the total unknown');
   const md = renderScorecard(card);
   assert.match(
     md,
     /\| coding-playbook \| 2 of 4 \(50\.0%\) \| 75\.0% \| 33\.3% \| \$4\.00 \| 2\.0 min \| not yet \(3 of 30 hands-off seen\) \|/u,
   );
-  assert.match(md, /\| codex \| 1 of 2 \(50\.0%\) \| n\/a \| n\/a \|/u);
+  assert.match(md, /\| codex \| 1 of 2 \(50\.0%\) \| n\/a \| n\/a \| n\/a \|/u);
 });
 
 test('merge on its own needs enough hands-off changes and few wrong ones', () => {
@@ -129,6 +129,10 @@ test('the sign test: nothing changed, a coin flip, and a clear win', () => {
   assert.equal(signTest(3, 0), 0.25);
   assert.equal(signTest(8, 0), 0.007813);
   assert.equal(signTest(0, 8), 0.007813);
+  // Past about a thousand pairs 0.5 ** n is zero; the test must still say "a coin flip".
+  assert.equal(signTest(550, 550), 1);
+  assert.ok((signTest(551, 549) as number) > 0.9);
+  assert.ok((signTest(700, 400) as number) < 1e-6);
 });
 
 test('against a baseline: tasks fixed and broken, the verdict, and deltas over shared tasks only', () => {

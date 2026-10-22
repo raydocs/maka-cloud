@@ -78,12 +78,15 @@ export function signTest(a: number, b: number): number | null {
   const n = a + b;
   if (n === 0) return null;
   const k = Math.min(a, b);
-  let tail = 0;
-  let term = 0.5 ** n;
+  // In logs: 0.5 ** n is zero past about a thousand pairs, and every term with it.
+  const logs: number[] = [];
+  let log = n * Math.log(0.5);
   for (let i = 0; i <= k; i += 1) {
-    tail += term;
-    term = (term * (n - i)) / (i + 1);
+    logs.push(log);
+    log += Math.log(n - i) - Math.log(i + 1);
   }
+  const top = Math.max(...logs);
+  const tail = Math.exp(top) * logs.reduce((sum, value) => sum + Math.exp(value - top), 0);
   return Math.min(1, round(2 * tail, 6) as number);
 }
 
@@ -101,9 +104,9 @@ function score(subjectId: string, rows: readonly CellRow[]): SubjectScore {
     cells: own.length,
     resolved: resolved.length,
     resolveRate: own.length === 0 ? null : round(resolved.length / own.length),
-    // A cell without a reported cost is left out of the dollars, never counted as zero.
+    // One cell without a reported cost leaves the total unknown: it is never counted as zero.
     costPerResolvedUsd:
-      resolved.length === 0 || known.length === 0 ? null : round(cost / resolved.length),
+      resolved.length === 0 || known.length < own.length ? null : round(cost / resolved.length),
     medianMinutes: round(median(own.map((row) => row.durationMs / 60_000)), 1),
     handsOffRate: keepsProof && own.length > 0 ? round(off.length / own.length) : null,
     handsOff: off.length,
