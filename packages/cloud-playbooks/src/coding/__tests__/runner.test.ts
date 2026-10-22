@@ -235,6 +235,31 @@ test('a key in a check’s output is scrubbed before the sandbox’s cut, in the
   zeroStats(h.runner);
 });
 
+test('a key the agent put in its reproduction command or a file name is scrubbed from verification.json', async (t) => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    await fixes(turn);
+    await fs.writeFile(join(turn.workspace, 'tests', `notes-${key}.txt`), 'x');
+    await fs.writeFile(
+      join(turn.dir, 'handoff', 'repro.json'),
+      JSON.stringify({
+        command: `bash tests/test_add.sh # ${key}`,
+        files: ['tests/test_add.sh', `tests/notes-${key}.txt`],
+      }),
+    );
+    return 'ok';
+  };
+  h.codex.script = reviewsNothing;
+  const spec = await h.spec('tsk_keyname');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const dir = join(h.handoff, 'tsk_keyname');
+  const record = await fs.readFile(join(dir, 'verification.json'), 'utf8');
+  assert.doesNotMatch(record, /ghp_|0123456789abcdef/);
+  assert.match(record, /tests\/test_add\.sh/, 'the rest of the command is kept');
+  zeroStats(h.runner);
+});
+
 test('a brief without a valid coding-task block fails before anything is acquired', async (t) => {
   const h = await setup(t);
   const spec = await h.spec('tsk_badbrief', { repo: 'not a repo' });

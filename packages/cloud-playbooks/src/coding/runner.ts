@@ -1409,7 +1409,7 @@ class CodingRun implements RunHandle {
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
       const result = {
         name,
-        command,
+        command: scrubSecretText(command),
         outputBytes: Number(bytes?.[1] ?? 0),
         output: scrubbedTail(out.stdout, this.limits.outputTailBytes),
       };
@@ -1599,9 +1599,15 @@ class CodingRun implements RunHandle {
     else delete verification.kept;
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
-    verification.repro = outcome.repro;
+    // What the agent wrote (the reproduction command, the names of the files) is scrubbed like any
+    // other text that reaches the owner.
+    verification.repro = {
+      ...outcome.repro,
+      command: scrubSecretText(outcome.repro.command),
+      files: outcome.repro.files.map((file) => scrubSecretText(file)),
+    };
     verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-      path: file.path,
+      path: scrubSecretText(file.path),
       status: file.status,
     }));
     const verificationText = JSON.stringify(verification, null, 2);
