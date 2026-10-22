@@ -547,6 +547,9 @@ textarea {
   padding: var(--space-5);
   display: grid;
   gap: var(--space-4);
+  /* The steps go side by side only when the card itself is wide enough: on desktop Home it can
+     sit in the narrower column beside what waits on you. */
+  container-type: inline-size;
 }
 .onboarding-head {
   display: flex;
@@ -608,6 +611,7 @@ textarea {
   background: var(--chip);
   color: var(--ink);
   text-align: left;
+  overflow-wrap: anywhere;
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease);
 }
@@ -622,7 +626,7 @@ textarea {
   opacity: 0.5;
   cursor: not-allowed;
 }
-@media (min-width: 720px) {
+@container (min-width: 640px) {
   .onboarding-steps {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

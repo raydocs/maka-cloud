@@ -452,6 +452,7 @@ test('an inbox card puts the recommended answer first, takes context only when a
 test('an item with no text field offers none, and an answer being delivered offers no buttons', () => {
   const { rerender } = render(<InboxCard item={item} disabled={false} onAnswer={() => {}} />);
   expect(screen.queryByLabelText('Note')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Add a note' })).toBeNull();
   rerender(
     <InboxCard
       item={{ ...item, state: 'answering', delivery: 'retrying' }}
