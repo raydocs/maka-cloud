@@ -33,7 +33,10 @@ env:
 
 jobs:
   checks:
-    runs-on: ubuntu-24.04
+    # The repository variable CI_RUNNER (a JSON label list such as ["self-hosted","boat"]) moves
+    # this job to a self-hosted runner; unset, it runs on GitHub's pinned image. Deleting the
+    # variable is the way back, with no commit.
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,7 +67,10 @@ jobs:
           CI: '1'
 
   android:
-    runs-on: ubuntu-24.04
+    # The repository variable CI_RUNNER (a JSON label list such as ["self-hosted","boat"]) moves
+    # this job to a self-hosted runner; unset, it runs on GitHub's pinned image. Deleting the
+    # variable is the way back, with no commit.
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
