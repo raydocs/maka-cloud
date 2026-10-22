@@ -431,8 +431,10 @@ owned by the control user, opened with `O_NOFOLLOW` (`[ -L ]` refused, `umask 07
 stop the guard.
 
 **F7 (P2, I4): `WRITE_FILE_SCRIPT`, `READ_SMALL_SCRIPT` and the kept paths are explicit about where
-they may point.** `MAKA_FILE` and `MAKA_KEEP` entries must satisfy `PLAIN_PATH` and contain no `/`
-(`MAKA_FILE`) before the script runs; today the host passes fixed names, so this is a guard against
+they may point.** `MAKA_FILE` must be a task file (`isTaskFile`: plain parts, no `..`, no dotted part; one
+`handoff/<name>` slash is allowed because the runner names `handoff/repro.json` itself, and
+`publishForAgent` refuses any slash) and `MAKA_KEEP` entries must be repository paths
+(`isRepoPath`) before the script runs; today the host passes fixed names, so this is a guard against
 the next caller, not a live hole. *Test*: a `MAKA_FILE` of `handoff/x` or `../x` is refused.
 
 **F8 (P2, I9): the agent's environment is built from an allowlist.**

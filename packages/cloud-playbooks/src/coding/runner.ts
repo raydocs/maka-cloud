@@ -58,6 +58,7 @@ import {
 import {
   type CodingTask,
   isRepoPath,
+  refusedScriptEnv,
   otherVendor,
   parseCodingBrief,
   REPRO_FILE,
@@ -1749,12 +1750,17 @@ class CodingRun implements RunHandle {
 
   /** Removes a file the agent wrote in handoff/; one that cannot be removed fails the step. */
   private async removeAgentFile(name: string): Promise<void> {
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${name}\n`, {});
     if (out.exitCode !== 0) throw new Error(`could not remove ${name} before the next agent run`);
   }
 
   /** A file of the task directory, copied where the agent's account can read it. */
   private async publishForAgent(name: string): Promise<void> {
+    // The script copies into `handoff/` directly, which has no subdirectories: no slash here.
+    if (name.includes('/'))
+      throw new Error('a sandbox script was refused: MAKA_FILE is not a plain file name');
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
       signal: this.signal,
@@ -1763,6 +1769,7 @@ class CodingRun implements RunHandle {
   }
 
   private async writeSandboxFile(name: string, content: string): Promise<void> {
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.ws.exec(WRITE_FILE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
       stdin: content,
@@ -1773,12 +1780,19 @@ class CodingRun implements RunHandle {
 
   // -- plumbing ------------------------------------------------------------------------------------
 
+  /** A script's path inputs are checked here, before any script runs (fail closed). */
+  private refuseEnv(envs: Record<string, string>): void {
+    const refused = refusedScriptEnv(envs);
+    if (refused) throw new Error(`a sandbox script was refused: ${refused}`);
+  }
+
   private get ws(): SandboxWorkspace {
     if (!this.workspace) throw new CancelledError();
     return this.workspace;
   }
 
   private exec(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    this.refuseEnv(envs);
     return this.guard(
       this.ws.exec(script, {
         envs: { MAKA_DIR: this.ws.dir, ...envs },
