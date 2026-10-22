@@ -60,6 +60,37 @@ test('a link to a file the agent can write is a finding, and a directory it can 
     chmodSync(home, 0o775);
   });
   assert.match(dir, /^FACT agent_login_files=\s*\S+$/u);
+  // The link's target is a root-owned (here: the test's own) file that nobody can write, but the
+  // directory it sits in is the agent's: it renames the file away and puts its own there.
+  const swappable = probe((home) => {
+    mkdirSync(join(home, 'dotfiles'));
+    writeFileSync(join(home, 'dotfiles', 'bashrc'), 'true\n', { mode: 0o644 });
+    chmodSync(join(home, 'dotfiles'), 0o775);
+    symlinkSync(join(home, 'dotfiles', 'bashrc'), join(home, '.bashrc'));
+  });
+  assert.match(swappable, /\.bashrc$/u);
+  // ... and a link whose target is in a directory the agent cannot write is fine.
+  assert.equal(
+    probe((home) => {
+      mkdirSync(join(home, 'dotfiles'));
+      writeFileSync(join(home, 'dotfiles', 'bashrc'), 'true\n', { mode: 0o644 });
+      symlinkSync(join(home, 'dotfiles', 'bashrc'), join(home, '.bashrc'));
+    }),
+    'FACT agent_login_files=none',
+  );
+  // A sticky directory (the real /tmp above these) lets the agent add entries, not replace ours.
+  const sticky = probe((home) => {
+    mkdirSync(join(home, 'dotfiles'));
+    writeFileSync(join(home, 'dotfiles', 'bashrc'), 'true\n', { mode: 0o644 });
+    chmodSync(join(home, 'dotfiles'), 0o1777);
+    symlinkSync(join(home, 'dotfiles', 'bashrc'), join(home, '.bashrc'));
+  });
+  assert.equal(sticky, 'FACT agent_login_files=none');
+  // A link to nowhere is refused.
+  assert.match(
+    probe((home) => symlinkSync(join(home, 'gone'), join(home, '.profile'))),
+    /\.profile$/u,
+  );
   const notAFile = probe((home) => {
     mkdirSync(join(home, '.bash_login'));
   });

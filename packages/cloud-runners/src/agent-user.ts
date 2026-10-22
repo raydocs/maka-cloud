@@ -159,9 +159,30 @@ chmod 2770 claude-config
  */
 export const LOGIN_FILES_PROBE = `# Every exec of the control user runs under a login shell, which reads these files first: whoever
 # can write one (or the directory it is in) runs code as the control user. Each must be a regular
-# file (a link is followed to its target) the control user or root owns, which the agent cannot write.
+# file (a link is followed to its target) the control user or root owns, which the agent cannot write,
+# in directories (all the way up) that it cannot write either, apart from sticky ones.
 mine=$(id -u)
 login_bad=""
+dir_safe() {
+  local owner
+  owner=$(stat -c %u -- "$1" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  if as_agent test -w "$1" >/dev/null 2>&1; then
+    # A sticky directory (/tmp) lets the agent add entries but not rename or remove ours.
+    case "$(stat -c %a -- "$1" 2>/dev/null)" in 1???|3???|5???|7???) return 0 ;; esac
+    return 1
+  fi
+  return 0
+}
+# A directory and every one above it: a writable one lets the agent swap what is below.
+chain_safe() {
+  local d="$1"
+  while :; do
+    dir_safe "$d" || return 1
+    [ "$d" = / ] && return 0
+    d=$(dirname -- "$d")
+  done
+}
 login_safe() {
   local target owner
   target=$(readlink -f -- "$1" 2>/dev/null) || return 1
@@ -169,14 +190,7 @@ login_safe() {
   owner=$(stat -c %u -- "$target" 2>/dev/null) || return 1
   [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
   as_agent test -w "$target" >/dev/null 2>&1 && return 1
-  return 0
-}
-dir_safe() {
-  local owner
-  owner=$(stat -c %u -- "$1" 2>/dev/null) || return 1
-  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
-  as_agent test -w "$1" >/dev/null 2>&1 && return 1
-  return 0
+  chain_safe "$(dirname -- "$target")"
 }
 for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" /etc/profile /etc/bash.bashrc /etc/profile.d/*; do
   { [ -e "$f" ] || [ -L "$f" ]; } || continue
@@ -184,7 +198,7 @@ for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bash
 done
 for d in "$HOME" /etc /etc/profile.d; do
   [ -d "$d" ] || continue
-  dir_safe "$d" || login_bad="$login_bad $d"
+  chain_safe "$(readlink -f -- "$d")" || login_bad="$login_bad $d"
 done
 if [ -z "$login_bad" ]; then echo "FACT agent_login_files=none"; else echo "FACT agent_login_files=$login_bad"; fi
 `;
@@ -388,7 +402,7 @@ export function agentIsolationProblems(output: string): string[] {
   mustBe(
     'agent_login_files',
     'none',
-    'the agent account can change a file or directory that the login shell of the control user reads (or they could not be checked)',
+    'the agent account can change a file or directory that the login shell of the control user reads (or one of them is a link to nowhere, or could not be checked)',
   );
   mustBe('agent_sockets', 'none', 'the agent account can reach a container or VM socket');
   mustBe(

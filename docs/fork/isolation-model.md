@@ -171,7 +171,7 @@ are code the control user runs on every exec: a write into any of them is root i
 they must not be writable by the agent's account or group.
 *Enforced*: modes in `PREPARE_SCRIPT`, `PREPARE_AGENT_SCRIPT`, `CHANNEL_DIR_CHECK`; probe facts
 `agent_control_write`, `agent_login_files` (the login files the control user's shell reads on every
-exec, and their directories: regular, owned by it or root, not writable by the agent), `chan_*`,
+exec, and the directories above them: regular, owned by it or root, not writable by the agent, sticky directories aside), `chan_*`,
 `task_list`, `task_file_write`.
 *Tested*: `agent-user.test.ts` (real account: channel, handoff, task directory), probe fixture in
 `firewall-account.test.ts`, `login-files.test.ts`.
