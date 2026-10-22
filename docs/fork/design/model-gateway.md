@@ -153,7 +153,9 @@ whose cost it cannot bound is refused (400), never sent.
     present, is their sum. Cache writes (GPT-5.6 and later bill them at 1.25x input) come as
     `cache_write_tokens`, apart from the reads in `cached_tokens`, and reads and writes together
     are no more than the input; a `cache_write_tokens_details` split gives both lifetimes and adds
-    up to it. A 12-hour write is malformed: the request field that asks for one is refused.
+    up to it. A 12-hour write is malformed: what asks for one (`prompt_cache_options`, or a
+    `prompt_cache_breakpoint` with a `ttl` other than `30m`) is refused, and OpenAI input is
+    reserved at the 30-minute write rate.
 
   An error status before any output (4xx, 5xx) settles at 0: the vendors do not bill those. A
   response that ends without complete, valid usage settles at the full reservation, since what

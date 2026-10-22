@@ -363,6 +363,28 @@ test("the built-in modes' Codex model is priced with no configuration, and confi
   assert.equal(builtIn.get('anthropic:gpt-6.1-sol'), undefined);
 });
 
+test('a cache breakpoint may not choose a lifetime dearer than the bound reserves', () => {
+  const at = (breakpoint: unknown) => ({
+    model: 'codex-test',
+    input: [
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'go', prompt_cache_breakpoint: breakpoint }],
+      },
+    ],
+  });
+  assert.equal(openai(at({ mode: 'explicit' })).ok, true);
+  assert.equal(openai(at({ mode: 'explicit', ttl: '30m' })).ok, true);
+  for (const refused of [{ mode: 'explicit', ttl: '12h' }, 'explicit', null]) {
+    const bounded = openai(at(refused));
+    assert.equal(bounded.ok, false, JSON.stringify(refused));
+    assert.match(bounded.ok ? '' : bounded.reason, /30-minute cache lifetime/);
+  }
+  const options = { model: 'codex-test', input: 'go', prompt_cache_options: { ttl: '12h' } };
+  assert.equal(openai(options).ok, false);
+});
+
 test('configured prices are checked', () => {
   assert.equal(
     priceProblem({

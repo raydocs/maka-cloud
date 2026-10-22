@@ -285,7 +285,7 @@ export class UsageTracker {
    * Cache writes (GPT-5.6 and later bill them, at 1.25x input for the default 30-minute lifetime):
    * `cache_write_tokens` counts them apart from `cached_tokens` (billed reads), both inside
    * `input_tokens`. A lifetime split, when present, adds up to it. The 12-hour lifetime needs a
-   * request field the gateway refuses, so a 12-hour write marks the usage malformed. See
+   * request field or breakpoint `ttl` the gateway refuses, so a 12-hour write marks the usage malformed. See
    * https://developers.openai.com/api/docs/guides/prompt-caching.
    */
   private openAI(raw: unknown): void {

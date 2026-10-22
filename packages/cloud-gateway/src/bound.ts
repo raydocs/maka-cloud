@@ -384,6 +384,16 @@ function refusedContent(input: unknown): string | undefined {
       continue;
     }
     if (!isObject(node)) continue;
+    // A breakpoint may not choose a cache lifetime: a 12-hour write costs 2.5x input, above
+    // the 1.25x the bound reserves. `prompt_cache_options`, which sets it for the request, is
+    // not an allowed field.
+    const breakpoint = node.prompt_cache_breakpoint;
+    if (
+      breakpoint !== undefined &&
+      (!isObject(breakpoint) || (breakpoint.ttl !== undefined && breakpoint.ttl !== '30m'))
+    ) {
+      return 'only the default 30-minute cache lifetime is allowed';
+    }
     if (node.type !== undefined) {
       if (node.type === 'item_reference') return 'stored items are not allowed';
       if (typeof node.type !== 'string' || !OPENAI_INPUT_TYPES.has(node.type)) {
