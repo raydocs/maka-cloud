@@ -8,8 +8,8 @@ cd "$here"
 
 case "$platform" in
   # The Android emulator reaches this machine as 10.0.2.2; the iOS simulator shares its network.
-  android) server="http://10.0.2.2:4174"; control="http://10.0.2.2:4175" ;;
-  ios) server="http://localhost:4174"; control="http://localhost:4175" ;;
+  android) server="http://10.0.2.2:${CLOUD_WEB_API_PORT:-4174}"; control="http://10.0.2.2:${CLOUD_WEB_CONTROL_PORT:-4175}" ;;
+  ios) server="http://localhost:${CLOUD_WEB_API_PORT:-4174}"; control="http://localhost:${CLOUD_WEB_CONTROL_PORT:-4175}" ;;
   *) echo "unknown platform $platform" >&2; exit 2 ;;
 esac
 
@@ -24,7 +24,7 @@ status=0
 for flow in first-visit:fresh sign-in-email:email decision:decision delivery:delivery; do
   name="${flow%%:*}"
   seed="${flow##*:}"
-  token="$(node scripts/e2e-seed.mjs http://127.0.0.1:4175 http://127.0.0.1:4174 "$seed" | sed -n 's/^TOKEN=//p')"
+  token="$(node scripts/e2e-seed.mjs "http://127.0.0.1:${CLOUD_WEB_CONTROL_PORT:-4175}" "http://127.0.0.1:${CLOUD_WEB_API_PORT:-4174}" "$seed" | sed -n 's/^TOKEN=//p')"
   maestro test ".maestro/$name.yaml" \
     -e "SERVER=$server" -e "TOKEN=$token" -e "CONTROL=$control" -e "EMAIL=maka-$platform@example.com" \
     --format junit --output "e2e-output/$platform-$name.xml" \
