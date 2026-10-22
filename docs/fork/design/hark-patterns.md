@@ -152,6 +152,68 @@ The order is code, "seen" is the browser's last visit, and the employee cannot p
 **Tests.** Ranking is stable. Seen is per owner. Another owner's cards never appear. Note cards are
 template-only.
 
+## 5. How results are shown: websites, artifacts, projects, slides
+
+What Hark does, with what was seen in the app marked **[seen]**, and what comes only from type names
+in the package marked **[names]**.
+
+**Websites.**
+- **[names]** Coding work is a live panel with sections, a validation report (a list of issues)
+  and a viewport check: the page is looked at in more than one screen size.
+- **[names]** A running site has a preview address.
+- **[names]** The live view of a screen carries the agent's cursor.
+
+**Artifacts.**
+- **[names]** A reply is built from typed blocks (document, table, code, summary, image, link, plus
+  domain cards such as an order or a flight), not only text.
+- **[seen]** Links come as a fanned stack of preview cards (image, title, source).
+- **[names]** A media gallery, a PDF viewer and an in-app web view open results without leaving the
+  app.
+- **[names]** An artifact made in a chat can be promoted into a project.
+
+**Projects.**
+- **[seen]** A plain list on the sky, the message box at the bottom.
+- **[names]** A project holds conversations and artifacts, has statuses, can be shared, and can own
+  scheduled tasks.
+
+**Slides.** Nothing in the package mentions slides, decks or pptx. There is nothing to copy; a deck
+is our own decision.
+
+### What Maka takes
+
+1. **The result at each size (built: #384).** When a finished task leaves screenshots named for
+   desktop, tablet or phone, the result card shows them side by side like the devices.
+2. **A viewport check the runner makes itself (next).** Screenshots the agent attaches are only what
+   it chose to show. For a change to a web page, the coding runner, as trusted code like the other
+   checks, starts the preview, screenshots it at 1280 and 390 wide, and records:
+   - horizontal overflow
+   - console errors
+   - controls under 44 px on the phone
+   It writes `viewport-desktop.png`, `viewport-phone.png` and the issues into `verification.json`.
+   The proof block in the pull request gains a "Fits desktop and phone" row with ✅ or the issues.
+   The same rule as the tests applies: nothing the checked page writes is read as the result.
+   Owner: playbook, with the instabox lane (a headless browser in the sandbox).
+3. **Typed reply blocks, three kinds first:** table, code and summary. The conductor marks a block
+   with a typed fence the client recognizes. Anything unknown stays text. The client renders a
+   table as a real table and code with copy, never as HTML from the model. Owner: conductor and
+   design lane.
+4. **Link previews done on the server.** A preview needs the page fetched, and the client never
+   fetches what the agent named. The server fetches the title, site name and image under the egress
+   allowlist, with a size cap and no cookies, and caches the result. The client shows the stack of
+   cards. Pages the task itself opened already have a stack (`SourcesStack`), so this extends it to
+   links in replies. Owner: server, then the design lane.
+5. **Keep in project.**
+   - A result in a chat gets **Keep in project**, which adds it to the project of its repository.
+   - The project page then shows three sections: kept results, the conversations about that
+     repository, and its standing duties (what it shows today).
+   - Server side: `POST /v1/projects/:id/kept {taskId, artifactIndex}` and `GET` for the list,
+     owner-scoped, referencing the task's stored artifact rather than copying it.
+   - Owner: T23 lane (projects), then the design lane.
+6. **Sharing a project:** later, after accounts (T31).
+7. **Slides:** only if people ask. A deck would be a task result like any other (a `.pptx` or a
+   PDF with a picture of its first slide on the result card), made by the agent in the sandbox.
+   There is no Hark pattern to follow.
+
 ## Later
 
 - **Sky by time of day.** Pick the background tokens from an hour band, our own palette in
@@ -171,6 +233,10 @@ template-only.
 | 2 | Narration and tool panels | coding runner phases (built) | Playbook, server, design |
 | 3 | Notification actions on the phone | phone app on main | T29, server |
 | 4 | Server-owned Home cards | none | T28, design |
+| 5.2 | Viewport check by the runner | a headless browser in the sandbox | Playbook, instabox |
+| 5.5 | Keep in project | none | T23, design |
+| 5.3 | Typed reply blocks | none | Conductor, design |
+| 5.4 | Link previews | egress allowlist | Server, design |
 
 Patterns 1 and 2 come before the first paid evaluation run. A level-2 grant is what the scorecard
 unlocks, and the panels are how a person sees a run go well or badly without reading logs.
