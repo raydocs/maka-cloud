@@ -360,6 +360,8 @@ export async function startStack(
       // The token is read from MAKA_GITHUB_TOKEN when a pull request is opened, never earlier.
       publisher: new GitHubPublisher({ env }),
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
+      ownsConversationTask: (runId, taskId) =>
+        conductor?.state.conversationOwnsTask(runId, taskId) ?? false,
     });
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the

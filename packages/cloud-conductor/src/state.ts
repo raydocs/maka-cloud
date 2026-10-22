@@ -1198,6 +1198,17 @@ export class ConductorState {
     ).map((row) => String(row.task_id));
   }
 
+  /** Whether a task was delegated by any run of the conversation the given run belongs to. */
+  conversationOwnsTask(runId: string, taskId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          'SELECT 1 FROM delegations d JOIN runs r ON r.conversation_id = d.conversation_id WHERE r.run_id = ? AND d.task_id = ?',
+        )
+        .get(runId, taskId) !== undefined
+    );
+  }
+
   private appendLedger(runId: string, kind: string, usd: number, ref: string | null): number {
     const result = this.db
       .prepare('INSERT INTO ledger (run_id, kind, usd, ref, at) VALUES (?, ?, ?, ?, ?)')
