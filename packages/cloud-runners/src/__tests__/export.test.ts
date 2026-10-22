@@ -113,6 +113,42 @@ test('a done entry that claims an export is dropped, whether or not anything was
   assert.deepEqual((await result(h2)).done, ['runner-exported: a.txt']);
 });
 
+test('an agent cannot mark its own result as a kept change', async (t) => {
+  const h = await withHarness(t);
+  await fakeManifest(h, { done: ['kept: change.patch is ready', ' kept: x', 'did the work'] });
+  const events = await collect(await h.runners.claude.start(await h.spec(TASK)));
+  assert.equal(terminal(events)?.type, 'finished');
+  assert.deepEqual((await result(h)).done, ['did the work']);
+});
+
+test('names the spec reserves are not replaced by an exported artifact', async (t) => {
+  const h = await withHarness(t);
+  await workspaceFile(h, TASK, 'change.patch', 'agent text');
+  await workspaceFile(h, TASK, 'notes.md', 'notes');
+  await fakeManifest(h, { artifacts: ['change.patch', 'notes.md'] });
+  const spec = { ...(await h.spec(TASK)), reserved: ['change.patch'] };
+  await fs.writeFile(handoff(h, 'change.patch'), 'host text');
+  const events = await collect(await h.runners.claude.start(spec));
+  assert.equal(terminal(events)?.type, 'finished');
+  assert.equal(await fs.readFile(handoff(h, 'change.patch'), 'utf8'), 'host text');
+  assert.ok(
+    notes(events).some((x) =>
+      /artifact change\.patch was not exported: that name is reserved/.test(x),
+    ),
+  );
+});
+
+test('a reserved name is not made a directory either', async (t) => {
+  const h = await withHarness(t);
+  await workspaceFile(h, TASK, 'review.md/inside.txt', 'agent text');
+  await fakeManifest(h, { artifacts: ['review.md/inside.txt'] });
+  const spec = { ...(await h.spec(TASK)), reserved: ['review.md'] };
+  const events = await collect(await h.runners.claude.start(spec));
+  assert.equal(terminal(events)?.type, 'finished');
+  await assert.rejects(fs.stat(handoff(h, 'review.md')));
+  assert.ok(notes(events).some((x) => /was not exported: that name is reserved/.test(x)));
+});
+
 test('a manifest that needs no change reaches the orchestrator byte for byte', async (t) => {
   const h = await withHarness(t);
   const text = '{"summary":"s","done":["d"],"notDone":[],"confidence":"high","knownIssues":[]}';

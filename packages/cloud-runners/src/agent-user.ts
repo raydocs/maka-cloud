@@ -36,6 +36,24 @@ export function assertAgentChannel(channel: AgentChannel): AgentChannel {
 }
 
 /**
+ * What runs as the agent before its command. The checkout belongs to the sandbox user, so git, run
+ * by the agent in it, refuses it as owned by someone else; the exact workspace is named as a safe
+ * directory through the environment (`GIT_CONFIG_COUNT`, which git reads as command-line
+ * configuration: the only place `safe.directory` is honoured besides the protected files, and not
+ * a file the agent can write). The workspace is `MAKA_WORKDIR` for a run, or the one beside
+ * `MAKA_DIR` for an exec; nothing else is trusted.
+ */
+const AGENT_ENTRY = [
+  'umask 002; PATH="$1"; shift',
+  'd="${MAKA_WORKDIR:-${MAKA_DIR:+$MAKA_DIR/workspace}}"',
+  'if [ -n "$d" ] && d=$(cd "$d" 2>/dev/null && pwd -P); then',
+  '  n=${GIT_CONFIG_COUNT:-0}',
+  '  export "GIT_CONFIG_KEY_$n=safe.directory" "GIT_CONFIG_VALUE_$n=$d" "GIT_CONFIG_COUNT=$((n + 1))"',
+  'fi',
+  'exec "$@"',
+].join('\n');
+
+/**
  * `commandLine` (already quoted) run as the agent's user. The environment is passed on, but PATH is
  * handed over explicitly since sudo replaces it; the shared umask lets the sandbox user read and
  * remove what the agent writes in the workspace.
@@ -47,7 +65,7 @@ export function asAgent(commandLine: string, channel: AgentChannel): string {
 /** `asAgent` for a caller that knows the account's name only. */
 export function asAgentUser(commandLine: string, user: string): string {
   assertAgentChannel({ user, group: 'x' });
-  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c 'umask 002; PATH="$1"; shift; exec "$@"' sh "$PATH" ${commandLine}`;
+  return `sudo -n -u ${shq(user)} --preserve-env -- sh -c ${shq(AGENT_ENTRY)} sh "$PATH" ${commandLine}`;
 }
 
 /** A whole script (any text, quoted here) run under bash as the agent's user, as `asAgent` does a command. */
@@ -81,7 +99,9 @@ root=$(dirname "$MAKA_DIR")
 mkdir -p handoff
 chgrp "$MAKA_AGENT_GROUP" "$root" . workspace handoff
 chmod 710 "$root" .
-chmod 2770 workspace handoff
+chmod 2770 workspace
+# Sticky: the agent writes its own files in handoff but cannot remove or replace the runner's.
+chmod 3770 handoff
 # The CLI's configuration directory (its transcripts): the agent writes it, the sandbox user puts a
 # kept conversation back into it.
 mkdir -p claude-config
@@ -157,7 +177,8 @@ mkdir "$scratch/workspace" "$scratch/handoff"
 : > "$scratch/handoff/brief.md"
 chgrp "$MAKA_AGENT_GROUP" "$MAKA_ROOT" "$scratch" "$scratch/workspace" "$scratch/handoff" "$scratch/handoff/brief.md" 2>/dev/null || echo "FACT group=no"
 chmod 710 "$MAKA_ROOT" "$scratch"
-chmod 2770 "$scratch/workspace" "$scratch/handoff"
+chmod 2770 "$scratch/workspace"
+chmod 3770 "$scratch/handoff"
 chmod 640 "$scratch/handoff/brief.md"
 as_agent() { sudo -n -u "$MAKA_AGENT_USER" --preserve-env -- "$@"; }
 yes_no() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }

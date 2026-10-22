@@ -251,7 +251,9 @@ export class Fleet {
     const version = this.options.versions?.[vendor.name] ?? sdkVersion ?? vendor.defaultVersion;
     const marker = `${machine.root}/.setup/${vendor.binary}-${version}.ok`;
     // The check runs the CLI itself (`--version`), so the box is guarded first like for any task code.
-    const check = await machine.exec(cliCheckScript(vendor.binary), {
+    const account = this.options.agentChannel;
+    if (account === undefined) throw new Error('no agent account is configured');
+    const check = await machine.exec(cliCheckScript(vendor.binary, account.user), {
       taskCode: true,
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
     });
@@ -286,8 +288,19 @@ mkdir -p "$(dirname ${shq(marker)})"
         consumed += update.data.length;
         const state = update.state;
         if (typeof state === 'object' && consumed >= update.size) {
-          if (state.exit === 0) return;
-          throw new Error(`exit ${state.exit}: ${output.tail()}`);
+          if (state.exit !== 0) throw new Error(`exit ${state.exit}: ${output.tail()}`);
+          // The marker is written, but the CLI may still not be one the check can run as the agent
+          // account (a sudo that refuses, a home it cannot enter): say so now, not at every launch.
+          const again = await machine.exec(cliCheckScript(vendor.binary, account.user), {
+            taskCode: true,
+            envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
+          });
+          if (again.exitCode !== 0) {
+            throw new Error(
+              `the installed ${vendor.binary} cannot be run as the agent account ${account.user} (its version could not be read, or the sandbox image does not let that account run it)`,
+            );
+          }
+          return;
         }
         if (state === 'dead' && consumed >= update.size)
           throw new Error(`the install was killed: ${output.tail()}`);

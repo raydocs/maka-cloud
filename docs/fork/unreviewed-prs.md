@@ -1,8 +1,10 @@
 # PRs merged without an outside review
 
-Codex, the outside reviewer, hit its usage limit at 17:25Z on 2026-10-21. Its first refused review was on #229 at 17:25:13Z, and every Codex review after that failed with "You have reached your Codex usage limits for code reviews." Each PR below merged after that without a completed Codex review. Recheck them once Codex is back by commenting `@codex review` on each PR, or hold any further change to the same code until then.
+Codex, the outside reviewer, hit its usage limit at 17:25Z on 2026-10-21. Its first refused review was on #229 at 17:25:13Z, and every GitHub Codex review after that failed with "You have reached your Codex usage limits for code reviews."
 
-Where a different outside reviewer ran instead, the line says so. Such a PR still needs the Codex recheck when Codex returns.
+Coverage: every PR below is reviewed. The owner's local Codex (gpt-6.1-sol, xhigh) reviewed each commit from 39f7d6948 through da8705f67 after it merged, with no gap, and sent its findings as batches 18 to 29. That covers all 79 PRs in the first list, plus #194 on its own commit. The latest recheck batch covers #301, #310 to #313, #315 to #317, #319 and #321. Those findings are open and belong to their lanes. The lines below record the GitHub state at merge time, not a missing review.
+
+Where a PR also had an outside Claude review, the line says so.
 
 ## How this was checked
 

@@ -267,6 +267,8 @@ class Run implements RunHandle {
   private renewTimer: NodeJS.Timeout | undefined;
   private renewing: Promise<void> | undefined;
   private cleanupPromise: Promise<void> | undefined;
+  /** Set when the process is closing and let go of this run (see `detach`). */
+  private detached = false;
 
   constructor(
     private readonly fleet: Fleet,
@@ -294,6 +296,31 @@ class Run implements RunHandle {
     await this.cleanup();
     // A cancel that returns says the run is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
+  }
+
+  /**
+   * Lets go of the run for a process that is closing: its timers, its watch of the sandbox and its
+   * calls end at once, and nothing is stopped, revoked or reported. The agent process keeps
+   * running on the sandbox and the task stays unfinished in the log; the next process takes the
+   * task over like one whose process died (it stops what is left, settles the spend and resumes
+   * the session). The stream ends without an end event.
+   */
+  detach(): void {
+    if (this.ended || this.detached) return;
+    this.detached = true;
+    // The process handle goes first: let go of, the abort below has nothing on the sandbox to stop.
+    this.stopWatch?.();
+    this.cancelled = true;
+    this.abort.abort();
+    if (this.renewTimer) {
+      clearInterval(this.renewTimer);
+      this.renewTimer = undefined;
+      this.fleet.leaseRenewals--;
+    }
+    this.stopMetering?.();
+    this.cleanupPromise = Promise.resolve();
+    this.fleet.openRuns--;
+    this.events.close();
   }
 
   private get signal(): AbortSignal {
@@ -1360,7 +1387,7 @@ class Run implements RunHandle {
       machine,
       taskId: spec.taskId,
       handoffDir,
-      reserved: [basename(spec.resultPath), basename(spec.briefPath)],
+      reserved: [basename(spec.resultPath), basename(spec.briefPath), ...(spec.reserved ?? [])],
       listed: manifest.artifacts ?? [],
       required: this.requiredArtifacts,
       limits: this.fleet.exportLimits,

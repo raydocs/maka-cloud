@@ -60,13 +60,14 @@ test('the values this process holds are removed however they are written, and or
   assert.equal(scrubSecretShapes(`still ${key}`), `still ${key}`);
 });
 
-test("a short registered value that is a plain word is left alone, so a host's AUTH_PROVIDER does not eat the text", () => {
-  setKnownSecrets(['google', 'invite', 'sqlite']);
+test('a short registered value is a key whatever it looks like; only a few characters are not', () => {
+  setKnownSecrets(['hunter', '123456', 'a1b2', 'abc']);
   assert.equal(
-    scrubSecretShapes('Sign in with google or invite to sandbox'),
-    'Sign in with google or invite to sandbox',
+    scrubSecretShapes('pw hunter and 123456 and a1b2'),
+    'pw [secret] and [secret] and [secret]',
   );
-  assert.equal(containsSecret({ question: 'Sign in with google?' }), false);
+  assert.equal(containsSecret({ question: 'Sign in with hunter?' }), true);
+  assert.equal(scrubSecretShapes('the abc of it'), 'the abc of it');
 });
 
 test('a short registered key is removed too, in every form, and a blank one is not a key', () => {
@@ -366,13 +367,4 @@ test('text of scripts that are written with combining marks is shown as written,
   // A secret with marks of its own script inside it is found too, at the price of those marks.
   setKnownSecrets(['पुस्तक-secret-9']);
   assert.equal(scrubSecretText('x पुस्‍तक-secret-9 y'), 'x [secret] y');
-});
-
-test('a short registered value that is a number or a version is left alone, a mixed one is a key', () => {
-  setKnownSecrets(['1.0.0', '604800', '123456', 'en-US']);
-  assert.equal(
-    scrubSecretShapes('Node 1.0.0, ttl 604800, 123456'),
-    'Node 1.0.0, ttl 604800, 123456',
-  );
-  assert.equal(scrubSecretShapes('locale en-US'), 'locale [secret]');
 });

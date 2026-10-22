@@ -39,7 +39,7 @@ async function setup(t: TestContext, options: Options = {}) {
     await h.server.orchestrator.wait(session, task.taskId, 2000);
     return { taskId: task.taskId, dir };
   };
-  return { h, conversationId, finished };
+  return { h, conversationId, finished, session };
 }
 
 const get = (h: Harness, taskId: string, rest: string, token?: string | null) =>
@@ -75,6 +75,40 @@ test('the manifest lists its references and each file comes back as an attachmen
     (await get(h, taskId, '/2')).headers.get('content-type'),
     'application/json; charset=utf-8',
   );
+});
+
+test('a task that failed after the runner kept a change for the owner still lists and serves what was kept', async (t) => {
+  const { h, session } = await setup(t);
+  const before = h.fake.runs.length;
+  const task = await h.server.orchestrator.delegate(session, { runner: 'fake', brief: 'work' });
+  await eventually(() => h.fake.runs.length > before, 'run');
+  const run = h.fake.runFor(task.taskId);
+  const dir = dirname(run.spec.resultPath);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'change.patch'), '--- a\n+++ b\n');
+  await writeFile(
+    run.spec.resultPath,
+    JSON.stringify({
+      summary: 'Kept for you to look at, not delivered: the task ended before its review finished.',
+      done: ['kept: the task ended before its review finished'],
+      notDone: [],
+      confidence: 'low',
+      knownIssues: [],
+      artifacts: ['change.patch'],
+    }),
+  );
+  run.fail('the review could not run');
+  await eventually(
+    () => h.server.orchestrator.status(session, task.taskId).state === 'failed',
+    'failed',
+  );
+  const listing = await get(h, task.taskId, '');
+  assert.equal(listing.status, 200);
+  assert.deepEqual(await listing.json(), {
+    artifacts: [{ index: 0, name: 'change.patch', kind: 'file' }],
+    total: 1,
+  });
+  assert.equal(await (await get(h, task.taskId, '/0')).text(), '--- a\n+++ b\n');
 });
 
 test("a research run's exported report is served as both files, never as a page", async (t) => {
