@@ -138,8 +138,11 @@ run_setup() {
       maka-cloud setup --settings /setup/settings.env --names /setup/names.env < /dev/tty
   fi
 
-  as_root install -m 600 -o root -g root "$work/setup/settings.env" "$SETTINGS"
-  as_root install -m 600 -o root -g root "$work/setup/names.env" "$NAMES"
+  # Beside the destination, then renamed: a full disk leaves the old file whole, never half of one.
+  for pair in "settings.env:$SETTINGS" "names.env:$NAMES"; do
+    as_root install -m 600 -o root -g root "$work/setup/${pair%%:*}" "${pair#*:}.new"
+    as_root mv -f "${pair#*:}.new" "${pair#*:}"
+  done
   as_root rm -rf "$work"
   trap - EXIT INT TERM
 }

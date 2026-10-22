@@ -306,6 +306,9 @@ test('values are read as Compose and systemd read them: escapes, comments, broke
       "SINGLE='a # b'",
       'export EXPORTED=yes',
       'BROKEN="never closed',
+      'OCTAL="maka\\055agent"',
+      'HEX="a\\x2db\\u00e9\\tc"',
+      'UNKNOWN="keep\\qthis"',
     ].join('\n'),
   );
   assert.equal(read.get('MAKA_CLOUD_SANDBOXES'), '{"inv_aaaaaaaaaaaa":"m_a"}');
@@ -313,6 +316,9 @@ test('values are read as Compose and systemd read them: escapes, comments, broke
   assert.equal(read.get('SINGLE'), 'a # b');
   assert.equal(read.get('EXPORTED'), 'yes');
   assert.equal(read.has('BROKEN'), false);
+  assert.equal(read.get('OCTAL'), 'maka-agent');
+  assert.equal(read.get('HEX'), 'a-b\u00e9\tc');
+  assert.equal(read.get('UNKNOWN'), 'keep\\qthis');
 });
 
 test('when the settings cannot be written, the new invite is revoked and the old file kept', async (t) => {

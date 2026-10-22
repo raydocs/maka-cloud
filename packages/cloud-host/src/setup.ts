@@ -119,15 +119,63 @@ function envValue(text: string): string | undefined {
     for (let index = 1; index < text.length; index += 1) {
       const char = text[index] as string;
       if (char === '"') return value;
-      if (char === '\\' && index + 1 < text.length) {
-        index += 1;
-        const next = text[index] as string;
-        value += next === 'n' ? '\n' : next;
-      } else value += char;
+      if (char !== '\\' || index + 1 >= text.length) {
+        value += char;
+        continue;
+      }
+      const escape = unescape(text, index + 1);
+      value += escape.text;
+      index = escape.end - 1;
     }
     return undefined;
   }
   return text.replace(/\s+#.*$/u, '');
+}
+
+const SIMPLE_ESCAPES: Record<string, string> = {
+  a: '\x07',
+  b: '\b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+  '\\': '\\',
+  "'": "'",
+  '"': '"',
+  $: '$',
+};
+
+/**
+ * The escape after a backslash at `at`, as Go's string unquoting reads it (Compose's parser uses
+ * it): the simple ones, octal `\NNN`, `\xHH`, `\uHHHH` and `\UHHHHHHHH`. Any other is kept as it
+ * was written, backslash and all, so nothing is silently lost.
+ */
+function unescape(text: string, at: number): { text: string; end: number } {
+  const char = text[at] as string;
+  const simple = SIMPLE_ESCAPES[char];
+  if (simple !== undefined) return { text: simple, end: at + 1 };
+  const code = (digits: string, base: number, length: number, start: number) => {
+    const part = text.slice(start, start + length);
+    if (part.length !== length || ![...part].every((d) => digits.includes(d.toLowerCase()))) {
+      return undefined;
+    }
+    const value = Number.parseInt(part, base);
+    return value <= 0x10ffff
+      ? { text: String.fromCodePoint(value), end: start + length }
+      : undefined;
+  };
+  const found =
+    char >= '0' && char <= '7'
+      ? code('01234567', 8, 3, at)
+      : char === 'x'
+        ? code('0123456789abcdef', 16, 2, at + 1)
+        : char === 'u'
+          ? code('0123456789abcdef', 16, 4, at + 1)
+          : char === 'U'
+            ? code('0123456789abcdef', 16, 8, at + 1)
+            : undefined;
+  return found ?? { text: `\\${char}`, end: at + 1 };
 }
 
 /** Why a value cannot go in the file as one line, if it cannot. */
