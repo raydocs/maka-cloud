@@ -103,6 +103,18 @@ Where a PR also had an outside Claude review, the line says so.
 - #316 22:53 fix(cloud-playbooks): scrub, then clip, text that enters the coding manifest (recheck A8) (outside Claude review, submitted 22:53:44Z; it raised one P2 outside its own lines, a check's output is cut before it is scrubbed, in `failure_brief.json` and `verification.json`, which its own review says belongs to the next push of this lane)
 - #317 22:54 Smoke cleanup: ask the live state of every task of the invite, however long ago it ended (outside Claude review, per the coordinator)
 
+## Launch-path reviewer's second read (from the T28 thread)
+
+These merged with a second read by the Launch-path reviewer, on top of any earlier review. The
+read is as the T28 thread reports it; the merge times are from GitHub.
+
+- #312 23:01Z The sandbox user reads the agent's work through a repository of its own, and the agent can read its whole checkout
+- #331 23:39Z The agent account can run git in its own checkout: the exact workspace is a safe directory in its environment (P1-3)
+- #325 00:29Z The kept conversation is the model's history exactly as written: never scrubbed, owner-only (P1-1, P1-2)
+- #337 00:05Z Closing the server lets go of its runs, so a restart with a task running is immediate (pre-launch gate 2)
+- #338 00:11Z A check that cannot get its own namespaces says why; launch notes list it as a live-run check
+- #345 00:19Z A recovered journal row without an attempt is booked once however often it is read (recheck B2)
+
 ## Not in the list
 
 - #309 (Egress guard: refuse a box where the lock cannot be taken) was closed unmerged at 22:28Z; #310 is its replacement.
