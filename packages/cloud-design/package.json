@@ -1,0 +1,15 @@
+{
+  "name": "@maka-cloud/design",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The look of the web and phone apps, defined once: colors for both schemes, type, radius, spacing and motion. Generates cloud-web's tokens.css and cloud-mobile's tokens.generated.ts.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "generate": "node src/generate.ts",
+    "check": "node src/generate.ts --check",
+    "test": "node --test src/generate.test.ts"
+  }
+}
