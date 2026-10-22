@@ -33,6 +33,7 @@ import {
   type TimelineLimits,
 } from './http.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
+import { AccountStore } from './accounts.js';
 import { InviteStore } from './invites.js';
 import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
@@ -271,6 +272,7 @@ export interface CloudServer {
   mcpUrl: string;
   orchestrator: Orchestrator;
   invites: InviteStore;
+  accounts: AccountStore;
   /** Where conductor output enters the conversation feed. */
   publisher: ConversationPublisher;
   /**
@@ -326,6 +328,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   const warn = options.onWarning ?? (() => undefined);
   const db: DatabaseSync = openDatabase(options.dbPath);
   let invites: InviteStore | undefined;
+  let accounts: AccountStore | undefined;
   let mcp: OrchestratorServer | undefined;
   let http: Server | undefined;
   let push: PushService | undefined;
@@ -364,6 +367,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const mcpUrl = await mcp.listen();
 
     invites = new InviteStore(options.invitesPath);
+    accounts = new AccountStore(options.invitesPath);
     const conversations = new ConversationStore(
       db,
       hub,
@@ -559,6 +563,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       db,
       memory,
       invites,
+      accounts,
       conversations,
       tasks: store,
       hub,
@@ -609,6 +614,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     });
     const { port } = server.address() as AddressInfo;
     const ownInvites = invites;
+    const ownAccounts = accounts;
     const ownPush = push;
     ownPush?.start();
     const ownInbox = inbox;
@@ -638,6 +644,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         // Owed stops are retried by the next process over this database.
         orchestrator.close();
         // The database goes last and always: its lock is what keeps a second server out.
+        ownAccounts.close();
         ownInvites.close();
         db.close();
       }
@@ -648,6 +655,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       mcpUrl,
       orchestrator,
       invites: ownInvites,
+      accounts: ownAccounts,
       publisher,
       openStreams: () => api.openStreams,
       deliveryStats: () => ownDeliveries?.stats(),
@@ -705,6 +713,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     await Promise.resolve(handler?.close?.()).catch(() => undefined);
     await mcp?.close().catch(() => undefined);
     try {
+      accounts?.close();
       invites?.close();
     } finally {
       db.close();
