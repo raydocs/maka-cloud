@@ -238,6 +238,50 @@ test('the mutes, the settings and the digest are each invite’s own, and one in
   );
 });
 
+test('settings replies expose only owner choices and mute and quiet-hour defaults', async (t) => {
+  const visible = {
+    mutedKinds: ['budget', 'finished'],
+    quietHours: { start: '22:00', end: '07:00' },
+    timeZone: 'Europe/Paris',
+  };
+  const settings = {
+    ...visible,
+    maxInterruptsPerHour: 6,
+    verifierDailyCapUsd: 5,
+    stallAfterMinutes: 30,
+    queuedStallAfterMinutes: 10,
+    digestAt: '08:00',
+    futureOperatorSetting: 'private',
+  };
+  const { h } = await setup(t, {
+    settings: () => settings,
+    updateSettings: () => ({ ok: true, settings }),
+    setMute: () => ({ ok: true, settings }),
+  });
+  const other = h.server.invites.create('other');
+  for (const token of [h.token, other.token]) {
+    for (const [method, path, body] of [
+      ['GET', '/v1/inbox/settings'],
+      ['PUT', '/v1/inbox/settings', { quietHours: visible.quietHours }],
+      ['PUT', '/v1/inbox/mutes/finished'],
+      ['DELETE', '/v1/inbox/mutes/finished'],
+    ] as const) {
+      await t.test(
+        `${method} ${path} for ${token === h.token ? 'first' : 'other'} invite`,
+        async () => {
+          const res = await h.api(path, {
+            method,
+            token,
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          });
+          assert.equal(res.status, 200);
+          assert.deepEqual(await res.json(), { settings: visible });
+        },
+      );
+    }
+  }
+});
+
 test('the owner routes refuse what they cannot take: an unknown kind, settings the service rejects, a wrong method', async (t) => {
   const { h } = await setup(t);
   assert.equal((await h.api('/v1/inbox/mutes/nonsense', { method: 'PUT' })).status, 404);
