@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  clip,
   countBySeverity,
   type Finding,
   MAX_FINDINGS,
@@ -94,6 +95,32 @@ test('plain text scrubs a secret before it clips, so no piece of a key is left a
   } as const;
   assert.doesNotMatch(reviewLine(review as never), /ghp_/);
   assert.doesNotMatch(reviewMarkdown(review as never), /ghp_/);
+});
+
+test('plain text scrubs a key split by a character that shows nothing before that character becomes a space', () => {
+  const shown = plain('token ghp_01234567\u200b89abcdef0123456789abcdef01234567 here', 200);
+  assert.doesNotMatch(shown, /89abcdef/u);
+  assert.match(shown, /\[secret\]/u);
+  // A cut that would fall inside the mark falls before it.
+  assert.doesNotMatch(
+    plain(`${'a'.repeat(10)} ghp_0123456789abcdef0123456789abcdef0123 tail`, 15),
+    /\[se/u,
+  );
+});
+
+test('a clip never cuts a [secret] mark, half a character or a letter from its marks', () => {
+  // The mark would be cut: the cut moves before it.
+  assert.equal(clip(`${'a'.repeat(10)}[secret] tail`, 15), `${'a'.repeat(10)}…`);
+  // Two UTF-16 units of one emoji are kept together or dropped together.
+  assert.equal(clip('ab\u{1F600}cdef', 4), 'ab…');
+  // e with its acute stays one letter.
+  assert.equal(clip('abe\u0301cdef', 4), 'ab…');
+  assert.equal(clip('short', 10), 'short');
+  for (const text of ['x[secret]', 'xxxxx[secret]yyyy', '[secret][secret]']) {
+    for (let max = 2; max < text.length; max++) {
+      assert.doesNotMatch(clip(text, max), /\[(?!secret\])[^…]*…$/u, `${text} at ${max}`);
+    }
+  }
 });
 
 test('plain text has no control, direction or look-alike characters and is one clipped line', () => {

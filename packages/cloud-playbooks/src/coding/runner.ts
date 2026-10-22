@@ -26,6 +26,7 @@ import type { ChangedFile, ChangeSet, CodingDeliveries } from './deliveries.js';
 import { DEFAULT_LOOP_LIMITS, type LoopLimits, LoopDetector, parseSample } from './loop.js';
 import {
   MAX_REVIEW_BYTES,
+  clip,
   parseReviewFile,
   plain,
   type FixRecord,
@@ -331,8 +332,7 @@ const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text)
 
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
-  const shown = scrubSecretText(text);
-  return shown.length <= max ? shown : `${shown.slice(0, max - 1)}…`;
+  return clip(scrubSecretText(text), max);
 }
 
 /** How many serious (P1) findings a finished review still carries. */

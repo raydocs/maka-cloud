@@ -25,10 +25,34 @@ const MAX_REASON = 300;
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}͏ᅟᅠ឴឵᠋-᠏⠀ㅤ︀-️ﾠ\u{E0100}-\u{E01EF}]/gu;
 
 export function plain(text: string, max: number): string {
-  // Flattened and scrubbed whole, and only then cut: a key cut in two is no longer a key the
-  // scrubber knows, and what is left of it would be shown.
-  const flat = scrubSecretText(text.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim());
-  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+  // Scrubbed as written, before anything is flattened: a key split by a zero-width character is
+  // found by the scrubber, which reads such characters away, but not once one became a space. Then
+  // scrubbed whole once more and only then cut: a key cut in two is no longer a key the scrubber
+  // knows, and what is left of it would be shown.
+  const flat = scrubSecretText(
+    scrubSecretText(text).replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim(),
+  );
+  return clip(flat, max);
+}
+
+const SECRET_MARK = '[secret]';
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * `text` cut to at most `max` UTF-16 units, the last one an ellipsis: at a character boundary (never
+ * half of a surrogate pair or a letter without its marks), and never inside a `[secret]` mark, which
+ * cut short would no longer say what was there.
+ */
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = 0;
+  for (const { index, segment } of graphemes.segment(text)) {
+    if (index + segment.length > max - 1) break;
+    end = index + segment.length;
+  }
+  const mark = text.lastIndexOf(SECRET_MARK, end - 1);
+  if (mark !== -1 && mark + SECRET_MARK.length > end) end = mark;
+  return `${text.slice(0, end)}…`;
 }
 
 const FindingSchema = z.object({
