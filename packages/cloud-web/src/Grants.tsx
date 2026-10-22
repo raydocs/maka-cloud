@@ -42,12 +42,12 @@ export function GrantsPanel({
 
   if (hidden) return null;
 
-  async function act(work: () => Promise<unknown>, drop: (grant: Grant) => boolean) {
+  async function act(work: () => Promise<unknown>, drop?: (grant: Grant) => boolean) {
     setBusy(true);
     setError('');
     try {
       await work();
-      setGrants((list) => list?.filter((grant) => !drop(grant)));
+      if (drop) setGrants((list) => list?.filter((grant) => !drop(grant)));
     } catch (failure) {
       setError(errorText(failure));
     } finally {
@@ -83,10 +83,12 @@ export function GrantsPanel({
                 className="quiet-action"
                 disabled={busy}
                 onClick={() =>
-                  void act(
-                    () => client.revokeGrants({ repository }),
-                    (grant) => grant.repository === repository,
-                  )
+                  void act(async () => {
+                    // The list shows scrubbed repository names, and the server matches the stored
+                    // one, so a bulk revoke can miss: show what the server still keeps.
+                    await client.revokeGrants({ repository });
+                    setGrants(await client.listGrants());
+                  })
                 }
               >
                 Revoke all
