@@ -344,6 +344,18 @@ test('a key split by a character that shows nothing is still found, whichever th
       `U+${mark.codePointAt(0)?.toString(16)} not found`,
     );
   }
+  // A mark that would compose with the letter before it (c and an acute make ć) is found too.
+  setKnownSecrets(['abcDEF12345key']);
+  for (const split of ['abc\u0301DEF12345key', 'abcDEF12345ke\u0308y', 'a\u0300bcDEF12345key']) {
+    assert.ok(!scrubSecretText(`here: ${split}`).includes('12345'), JSON.stringify(split));
+    assert.equal(containsSecret({ ask: split }), true, JSON.stringify(split));
+  }
+  // A key with accents of its own is still found with a mark put into it.
+  setKnownSecrets(['café12345']);
+  for (const split of ['café\u030112345', 'cafe\u0301\u030112345', 'café123\u030045']) {
+    assert.ok(!scrubSecretText(`here: ${split}`).includes('12345'), JSON.stringify(split));
+    assert.equal(containsSecret({ ask: split }), true, JSON.stringify(split));
+  }
   // The shape of a token the same way: nothing of its tail is left showing.
   assert.ok(!scrubSecretText('sk-abcdefgh\u034fijklmnop').includes('ijklmnop'));
   // Text with nothing in it is not rewritten.

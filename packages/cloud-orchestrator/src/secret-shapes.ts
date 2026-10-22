@@ -411,6 +411,16 @@ export function withoutInvisible(value: string): string {
   return value.normalize('NFKC').replace(INVISIBLE, '');
 }
 
+/**
+ * `withoutInvisible` with the letters taken apart first: folded with NFKC, `c` and a combining
+ * acute become one letter `ć` with no mark left to remove, and a key written that way is not found.
+ * Every accent goes here, the key's own included, so this is a reading beside the other, not
+ * instead of it. Composed again after, so Hangul reads as its syllables.
+ */
+function withoutMarks(value: string): string {
+  return value.normalize('NFKD').replace(INVISIBLE, '').normalize('NFC');
+}
+
 /** Like `withoutInvisible`, but the combining marks of other scripts stay, so it can be shown: the text of an outside page, or of a message with a secret cut out of it. */
 export function withoutHidden(value: string): string {
   return value.normalize('NFKC').replace(INVISIBLE_NOT_MARKS, '').replace(MARK_AFTER_ASCII, '$1');
@@ -431,6 +441,11 @@ export function scrubReading(value: string, scrub: (text: string) => string): st
   if (plain !== shown) {
     const scrubbedPlain = scrub(plain);
     if (scrubbedPlain !== plain) return scrubbedPlain;
+  }
+  const bare = withoutMarks(value);
+  if (bare !== shown && bare !== plain) {
+    const scrubbedBare = scrub(bare);
+    if (scrubbedBare !== bare) return scrubbedBare;
   }
   return scrub(value);
 }
