@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { CLAUDE_CLI, CODEX_CLI } from './fake-cli.js';
 import type { CloudRunnersOptions } from '../fleet.js';
+import { codexAdapter } from '../vendors.js';
 import { collect, type Harness, setup, terminal } from './harness.js';
 
 // The codex install says it started, waits until the test lets it go, and fails unless allowed.
@@ -210,3 +211,39 @@ test('the background install of a cancelled task is stopped, and a run that need
   assert.deepEqual(rejections, []);
 });
 
+test('an install goes on while any caller still wants it, and stops when the last one lets go', async (t) => {
+  const rejections = watchRejections(t);
+  const h = await claudeOnly(t);
+  const fleet = h.runners.fleet;
+  const machine = fleet.machine(h.fake.machineId);
+  const a = new AbortController();
+  const b = new AbortController();
+  const first = fleet.ensureCli(machine, codexAdapter, a.signal);
+  const second = fleet.ensureCli(machine, codexAdapter, b.signal);
+  await until(() => exists(join(h.home, 'codex-install-started')), 'the codex install to start');
+  const [pid] = await installPids(h);
+  assert.ok(pid !== undefined);
+
+  a.abort(new Error('the first caller let go'));
+  await assert.rejects(first, /the first caller let go/);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(await running(pid), true, 'the second caller still wants it');
+
+  b.abort(new Error('the second caller let go'));
+  await assert.rejects(second, /the second caller let go/);
+  await until(async () => !(await running(pid)), 'the install to be killed');
+  await until(async () => !(await exists(join(h.root, '.setup-codex'))), 'its lock to go');
+
+  // A caller without a signal always wants it: it shares the next install to its end.
+  const third = fleet.ensureCli(machine, codexAdapter);
+  const c = new AbortController();
+  const fourth = fleet.ensureCli(machine, codexAdapter, c.signal);
+  c.abort(new Error('the fourth caller let go'));
+  await assert.rejects(fourth, /the fourth caller let go/);
+  await fs.writeFile(join(h.home, 'codex-install-ok'), '');
+  await fs.writeFile(join(h.home, 'codex-install-go'), '');
+  await third;
+  assert.equal(await lines(join(h.home, 'codex-install-started')), 2);
+  assert.equal(await lines(join(h.home, 'codex-install-count')), 1);
+  assert.deepEqual(rejections, []);
+});

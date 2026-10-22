@@ -268,6 +268,11 @@ class Run implements RunHandle {
   private stopWatch: (() => void) | undefined;
   /** Set once the CLIs of `spec.prepareRunners` have been started. */
   private preparedLater = false;
+  /**
+   * Aborted when no later run of the task will need the CLIs this run installs: it was cancelled
+   * before its end, or stopped on its budget. Not by a detach: the task goes on in the next process.
+   */
+  private readonly unneeded = new AbortController();
   private renewTimer: NodeJS.Timeout | undefined;
   private renewing: Promise<void> | undefined;
   private cleanupPromise: Promise<void> | undefined;
@@ -297,6 +302,7 @@ class Run implements RunHandle {
       this.cancelled = true;
       this.abort.abort();
     }
+    if (!this.detached && (this.cancelled || this.budgetStop !== undefined)) this.unneeded.abort();
     await this.cleanup();
     // A cancel that returns says the run is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
@@ -500,7 +506,7 @@ class Run implements RunHandle {
       // version check, not its install, not the tools it is handed.
       const refused = await this.requireAgentAccount(fleet, machine, vendor);
       if (refused !== undefined) return this.fail(refused);
-      await this.guard(fleet.ensureCli(machine, vendor));
+      await this.guard(fleet.ensureCli(machine, vendor, this.unneeded.signal));
       await this.guard(fleet.ensureTools(machine));
       this.checkCancelled();
 
@@ -1632,7 +1638,7 @@ class Run implements RunHandle {
     if (this.preparedLater) return;
     this.preparedLater = true;
     for (const name of this.spec.prepareRunners ?? []) {
-      if (name !== this.vendor.name) this.fleet.prepareCli(machine, name);
+      if (name !== this.vendor.name) this.fleet.prepareCli(machine, name, this.unneeded.signal);
     }
   }
 

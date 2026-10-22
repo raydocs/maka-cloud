@@ -97,6 +97,7 @@ export {
   withoutHidden,
   withoutInvisible,
   scrubValues,
+  secretFieldValueStarts,
   secretForms,
   setKnownSecrets,
 } from './secret-shapes.js';
