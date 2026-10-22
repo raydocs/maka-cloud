@@ -239,7 +239,10 @@ interface CheckResult {
   /** The end of the output. */
   output: string;
   outputBytes: number;
-  /** Lines of the whole output, not only its end, with a permission error of the system on them. */
+  /**
+   * Lines of the whole output, not only its end, with a permission error of the system on them;
+   * missing when they could not be counted.
+   */
   permissionErrors?: number;
 }
 
@@ -248,12 +251,13 @@ interface CheckResult {
  * Python's and Rust's errno numbers, a perror-style line that ends in the message): the agent's
  * account is not the one the project's own tests run as, so it is not a failure of the code. Not
  * the words alone, which a test of the project's own authorization prints too. As an extended
- * regular expression for grep -iE in the sandbox, and the same for the end of the output here.
+ * regular expression for grep -iE in the C locale in the sandbox, and the same for the end of the
+ * output here: ASCII words and case, a line ends at a line feed only.
  */
 const PERMISSION_ERROR_ERE =
   '(^|[^[:alnum:]_])(EACCES|EPERM)([^[:alnum:]_]|$)|\\[Errno (1|13)\\]|\\(os error (1|13)\\)|: (permission denied|operation not permitted)[[:space:]]*$';
 const PERMISSION_ERROR =
-  /\b(?:EACCES|EPERM)\b|\[Errno (?:1|13)\]|\(os error (?:1|13)\)|: (?:permission denied|operation not permitted)\s*$/imu;
+  /\b(?:EACCES|EPERM)\b|\[Errno (?:1|13)\]|\(os error (?:1|13)\)|: (?:permission denied|operation not permitted)[ \t\v\f\r]*(?=\n|$)/i;
 
 /**
  * Why a check that did not pass is not a test failure (it timed out, died, was killed by a
@@ -265,7 +269,8 @@ function notATestFailure(check: CheckResult): string | undefined {
   if (check.exitCode < 0) return `did not finish (${check.output})`;
   if (check.exitCode >= 128) return `was killed by signal ${check.exitCode - 128}`;
   if (check.exitCode >= 125) return `could not run (exit ${check.exitCode})`;
-  if ((check.permissionErrors ?? 0) > 0 || PERMISSION_ERROR.test(check.output)) {
+  if (check.permissionErrors === undefined) return 'could not be checked for permission errors';
+  if (check.permissionErrors > 0 || PERMISSION_ERROR.test(check.output)) {
     return 'met a permission error';
   }
   return undefined;

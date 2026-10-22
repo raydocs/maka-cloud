@@ -115,12 +115,13 @@ timeout -s KILL "$((MAKA_TIMEOUT + 15))" \\
   unshare --user --map-current-user --pid --fork --kill-child -- \\
   bash -c ': > "$1/started" || exit 125; timeout -k 5 "$3" bash -c "$2" < /dev/null & wait $!' \\
   "$MAKA_CHECK_TAG" "$mark" "$MAKA_CMD" "$MAKA_TIMEOUT" < /dev/null 2>&1 |
-  { tee >(grep -ciE -e "$MAKA_PERMISSION_ERROR" > "$mark/perms.part"; mv -f -- "$mark/perms.part" "$mark/perms") \\
+  { tee >(fold -b -w 65536 | LC_ALL=C grep -ciE -e "$MAKA_PERMISSION_ERROR" > "$mark/perms.part"; [ "\${PIPESTATUS[1]}" -le 1 ] && mv -f -- "$mark/perms.part" "$mark/perms") \\
     >(wc -c | sed 's/^/BYTES /' >&2) | tail -c "$MAKA_TAIL"; wait $!; }
 rc=\${PIPESTATUS[0]}
 isolated=0
 [ -e "$mark/started" ] && isolated=1
-# The count of lines with a permission error, over the whole output and not only its tail.
+# The count of lines with a permission error, over the whole output and not only its tail, in lines
+# of at most 64 KiB so the count takes no more memory than that; none when grep failed.
 i=0
 while [ ! -e "$mark/perms" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 [ -e "$mark/perms" ] && echo "PERMS $(cat -- "$mark/perms")" >&2
