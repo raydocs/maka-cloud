@@ -3,7 +3,33 @@ import { z } from 'zod';
 import { HttpError, parseCount, readJson, respond, take } from './http.js';
 import type { InviteInfo } from './invites.js';
 import { toPublicDigest, toPublicItem } from './public-view.js';
+import { scrubSecretText } from './secret-shapes.js';
 import type { RateLimiter } from './rate-limit.js';
+
+/** A scoped approval the owner kept, as the owner sees it. Whose it is, and the call's arguments, never leave the server. */
+export interface PublicGrant {
+  grantId: string;
+  tool: string;
+  repository: string;
+  scope: 'task' | 'repository';
+  createdAt: number;
+  expiresAt: number;
+  uses: number;
+  lastUsedAt: number | null;
+}
+
+/**
+ * The approvals an owner chose to keep ("for this task", "for this repository"). Each owner's own:
+ * `owner` is the invite, and a grant of another owner is never listed, counted or revoked.
+ */
+export interface GrantsService {
+  /** The owner's grants that can still be used, newest first. */
+  list(owner: string): PublicGrant[];
+  /** False for a grant that is not the owner's, does not exist or was already revoked. */
+  revoke(owner: string, grantId: string): boolean;
+  /** Revokes the owner's usable grants that match the filter (all of them with none); returns how many. */
+  revokeAll(owner: string, filter: { tool?: string; repository?: string }): number;
+}
 
 /**
  * What the inbox routes need from the supervisor. Declared here, so the server
@@ -48,6 +74,8 @@ export interface InboxService {
   /** `ok: false` for a patch the settings reject, which includes everything that is the operator's to set. */
   updateSettings(owner: string, patch: unknown): { ok: true; settings: unknown } | { ok: false };
   digest(owner: string): Promise<unknown>;
+  /** Absent when nothing keeps scoped approvals; the grants routes then answer 404. */
+  grants?: GrantsService;
   stop(): Promise<void>;
 }
 
@@ -71,6 +99,12 @@ const ANSWER_FAILURE: Record<string, number> = {
 };
 
 const STATES = ['open', 'closed', 'all'] as const;
+const revokeBody = z
+  .object({
+    tool: z.string().min(1).max(100).optional(),
+    repository: z.string().min(1).max(300).optional(),
+  })
+  .strict();
 const answerBody = z
   .object({
     answerId: z.string().min(1).max(64),
@@ -155,6 +189,41 @@ export class InboxRoutes {
       respond(res, 200, { settings: result.settings });
       return true;
     }
+    if (path === '/v1/inbox/grants') {
+      allow(method, 'GET');
+      take(this.limiter, invite);
+      const grants = this.grants();
+      respond(res, 200, {
+        grants: grants.list(invite.inviteId).map((grant) => ({
+          ...grant,
+          repository: scrubSecretText(grant.repository),
+        })),
+      });
+      return true;
+    }
+    if (path === '/v1/inbox/grants/revoke') {
+      allow(method, 'POST');
+      take(this.limiter, invite);
+      const grants = this.grants();
+      const body = revokeBody.safeParse(await readJson(req, false));
+      if (!body.success) throw new HttpError(400, 'invalid_request');
+      this.checkActive(invite);
+      respond(res, 200, { revoked: grants.revokeAll(invite.inviteId, body.data) });
+      return true;
+    }
+    const grant = /^\/v1\/inbox\/grants\/([^/]+)$/u.exec(path);
+    if (grant) {
+      allow(method, 'DELETE');
+      take(this.limiter, invite);
+      const grants = this.grants();
+      this.checkActive(invite);
+      // Not yours, unknown and already revoked answer alike.
+      if (!grants.revoke(invite.inviteId, decodeURIComponent(grant[1] ?? ''))) {
+        throw new HttpError(404, 'not_found');
+      }
+      respond(res, 200, { revoked: true });
+      return true;
+    }
     if (path === '/v1/inbox/digest') {
       allow(method, 'POST');
       take(this.limiter, invite);
@@ -163,6 +232,11 @@ export class InboxRoutes {
       return true;
     }
     return false;
+  }
+
+  private grants(): GrantsService {
+    if (!this.service.grants) throw new HttpError(404, 'not_found');
+    return this.service.grants;
   }
 
   /** A revoke that landed while the request was read wins. */
