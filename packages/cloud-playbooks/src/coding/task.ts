@@ -54,6 +54,15 @@ export function parseCodingBrief(brief: string): ParsedBrief {
   return { ok: true, task: parsed.data };
 }
 
+/**
+ * Where the agent writes its reproduction test record and its review, and where the files it reads
+ * (the change, a failed attempt) are put for it: `handoff/` of the task directory. The task
+ * directory itself only lets the agent's account pass through, so nothing in it is writable by it.
+ */
+export const REPRO_FILE = 'handoff/repro.json';
+export const REVIEW_FILE = 'handoff/review.json';
+export const AGENT_READS_DIR = 'handoff';
+
 /** What the agent records about its reproduction test, in `repro.json` next to the workspace. */
 export const ReproSchema = z
   .object({
@@ -72,4 +81,28 @@ export function isRepoPath(path: string): boolean {
     return false;
   const parts = path.split('/');
   return parts.every((part) => part !== '' && part !== '.' && part !== '..') && parts[0] !== '.git';
+}
+
+/**
+ * A file of the task directory a script is told to read or write: relative, every part a plain
+ * name (letters, digits, `.`, `_`, `-`), none empty, none starting with a dot, so no `..`, no
+ * hidden file and nothing the scripts' own temporary names (`.publish.*`) could collide with.
+ * A slash is allowed because `READ_SMALL_SCRIPT` and `rm` take `handoff/<name>`; `publishForAgent`
+ * copies into `handoff/` itself and refuses a name with a slash.
+ */
+export function isTaskFile(name: string): boolean {
+  return /^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/u.test(name);
+}
+
+/**
+ * The values a script takes from its environment as paths: `MAKA_FILE` must be a task file and
+ * every line of `MAKA_KEEP` a repository path. Returns the first thing refused.
+ */
+export function refusedScriptEnv(envs: Record<string, string>): string | undefined {
+  const file = envs.MAKA_FILE;
+  if (file !== undefined && !isTaskFile(file)) return `MAKA_FILE is not a plain file name`;
+  const keep = envs.MAKA_KEEP;
+  if (keep !== undefined && keep !== '' && !keep.split('\n').every(isRepoPath))
+    return `MAKA_KEEP holds a path that is not inside the repository`;
+  return undefined;
 }

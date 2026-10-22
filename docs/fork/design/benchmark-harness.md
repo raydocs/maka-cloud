@@ -97,9 +97,13 @@ cloud-evals make-spec --suite swe-bench-verified --dataset verified.jsonl --ids-
 cloud-evals make-spec --suite swe-bench-verified --synthetic 50 ...     # no dataset needed
 cloud-evals run spec.json --out run-001 [--cell <id>]...
 cloud-evals report run-001
+cloud-evals scorecard run-002 --baseline run-001
 ```
 
 `run` writes `run-001/report/`: `per-task.json`, `per-task.csv`, `summary.json`, `pareto.svg`, `report.md`.
+`scorecard` adds `scorecard.md` and `scorecard.json`: per subject the resolve rate, the hands-off rate and false
+confidence read from the playbook's `verification.json` (artifact `proof`), and against a baseline the tasks fixed and
+broken with a sign test. `autonomy.md` explains how it is used.
 
 ## Reading the chart
 

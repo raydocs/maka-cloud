@@ -41,6 +41,8 @@ export interface TaskView {
   finishedAt?: number;
   progress: string[];
   manifest?: Manifest;
+  /** What the runner kept for the owner when the task ended without a result. */
+  kept?: Manifest;
   failureReason?: string;
   cancelRequested: boolean;
   /** On a top-level task: what its whole tree reported spending. Absent until a run reports. */
@@ -70,9 +72,9 @@ export type TaskEvent =
   /** A cut-off run goes again: show `text` in place of what you had of its turn. */
   | { type: 'task_restarted'; taskId: string; epoch: number; text: string }
   | { type: 'task_succeeded'; taskId: string; manifest: Manifest }
-  | { type: 'task_failed'; taskId: string; reason: string }
+  | { type: 'task_failed'; taskId: string; reason: string; kept?: Manifest }
   | { type: 'task_cancel_requested'; taskId: string; by: string }
-  | { type: 'task_cancelled'; taskId: string }
+  | { type: 'task_cancelled'; taskId: string; kept?: Manifest }
   | { type: 'task_pause_requested'; taskId: string; by: string }
   | { type: 'task_paused'; taskId: string }
   | { type: 'task_pause_failed'; taskId: string; reason: string }
@@ -181,6 +183,34 @@ export interface InboxAnswerRequest {
 export interface InboxAnswerResult {
   duplicate: boolean;
   item: InboxItem;
+}
+
+export type HomeCardKind = 'waiting' | 'suggestion' | 'finished' | 'note' | 'scheduled';
+
+/** What a Home card points at: the client already holds or fetches the thing itself. */
+export type HomeCardRef =
+  | { type: 'inbox'; id: string }
+  | { type: 'task'; id: string; conversationId: string }
+  | { type: 'duty'; id: string; projectId: string }
+  | { type: 'note'; id: string };
+
+/**
+ * One card of Home as the server keeps it: in the server's order (waiting, suggestions, finished
+ * since the owner last left, notes, what runs next), with when this owner last saw it.
+ */
+export interface HomeCard {
+  cardId: string;
+  kind: HomeCardKind;
+  ref: HomeCardRef;
+  /** Position in the whole list, from 0. */
+  rank: number;
+  seenAt: number | null;
+  /** The time the card is about: raised, finished, or next run. */
+  at: number;
+  /** On a finished card, how the task ended. */
+  state?: 'succeeded' | 'failed' | 'cancelled';
+  /** On a note, the server's words for it. */
+  text?: string;
 }
 
 /** A standing duty of a project as the public API shows it (T23). Only what a page shows is typed. */
@@ -341,6 +371,9 @@ export const routes = {
   computer: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/computer`,
   inboxItems: '/v1/inbox/items',
   projects: '/v1/projects',
+  home: '/v1/home',
+  homeSeen: '/v1/home/seen',
+  homeOrder: '/v1/home/order',
   inboxAnswer: (item: string) => `/v1/inbox/items/${encodeURIComponent(item)}/answer`,
   artifacts: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/artifacts`,
   artifact: (task: string, index: number) => `${routes.artifacts(task)}/${index}`,

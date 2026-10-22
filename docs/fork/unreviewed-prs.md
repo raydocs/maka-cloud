@@ -1,8 +1,10 @@
 # PRs merged without an outside review
 
-Codex, the outside reviewer, hit its usage limit at 17:25Z on 2026-10-21. Its first refused review was on #229 at 17:25:13Z, and every Codex review after that failed with "You have reached your Codex usage limits for code reviews." Each PR below merged after that without a completed Codex review. Recheck them once Codex is back by commenting `@codex review` on each PR, or hold any further change to the same code until then.
+Codex, the outside reviewer, hit its usage limit at 17:25Z on 2026-10-21. Its first refused review was on #229 at 17:25:13Z, and every GitHub Codex review after that failed with "You have reached your Codex usage limits for code reviews."
 
-Where a different outside reviewer ran instead, the line says so. Such a PR still needs the Codex recheck when Codex returns.
+Coverage: every PR below is reviewed. The owner's local Codex (gpt-6.1-sol, xhigh) reviewed each commit from 39f7d6948 through da8705f67 after it merged, with no gap, and sent its findings as batches 18 to 29. That covers all 79 PRs in the first list, plus #194 on its own commit. The latest recheck batch covers #301, #310 to #313, #315 to #317, #319 and #321. Those findings are open and belong to their lanes. The lines below record the GitHub state at merge time, not a missing review.
+
+Where a PR also had an outside Claude review, the line says so.
 
 ## How this was checked
 
@@ -100,6 +102,35 @@ Where a different outside reviewer ran instead, the line says so. Such a PR stil
 - #311 22:43 docs: list PRs merged since Codex hit its usage limit (docs only; no outside review)
 - #316 22:53 fix(cloud-playbooks): scrub, then clip, text that enters the coding manifest (recheck A8) (outside Claude review, submitted 22:53:44Z; it raised one P2 outside its own lines, a check's output is cut before it is scrubbed, in `failure_brief.json` and `verification.json`, which its own review says belongs to the next push of this lane)
 - #317 22:54 Smoke cleanup: ask the live state of every task of the invite, however long ago it ended (outside Claude review, per the coordinator)
+
+## Launch-path reviewer's second read (from the T28 thread)
+
+These merged with a second read by the Launch-path reviewer, on top of any earlier review. The
+read is as the T28 thread reports it; the merge times are from GitHub.
+
+- #312 23:01Z The sandbox user reads the agent's work through a repository of its own, and the agent can read its whole checkout
+- #331 23:39Z The agent account can run git in its own checkout: the exact workspace is a safe directory in its environment (P1-3)
+- #325 00:29Z The kept conversation is the model's history exactly as written: never scrubbed, owner-only (P1-1, P1-2)
+- #337 00:05Z Closing the server lets go of its runs, so a restart with a task running is immediate (pre-launch gate 2)
+- #338 00:11Z A check that cannot get its own namespaces says why; launch notes list it as a live-run check
+- #345 00:19Z A recovered journal row without an attempt is booked once however often it is read (recheck B2)
+
+## Owner's local Codex review, E-lane (recheck28)
+
+These merged after the owner's local Codex (gpt-6.1-sol, xhigh) approved each one, with CI green on
+the final commit. The owner reports the approval; the PR bodies do not repeat it.
+
+- #334 01:25Z Box check: the capability and setuid scan covers every program the agent can run, and no file name hides one (batch30 A1, A3)
+- #339 01:25Z Egress guard: the lock lives in a directory only the sandbox user can enter, not in /tmp (batch30 A4)
+- #344 01:25Z Egress: check the guard before every task-code exec (batch29 A2)
+- #347 Secrets: decompose before the marks go, so a mark that composes with its letter cannot hide a key (batch29 A5). Merged at 96be175 after the owner's approve, with CI green.
+- #359 Backup: a private key in a stored conversation leaves no line of its body in the backup. Merged at aed44bf after the owner's round 4 approve, with CI green on 4850776b.
+- #358 Coding: cut text with no line break is shown as an ellipsis only (recheck28 F2). Merged at 6f7285d after the owner's approve, with CI green on 6e10803d.
+
+Also merged in this window, with the Launch-path reviewer's second read (per the coordinator). It is
+not in the owner's list:
+
+- #353 01:15Z The agent starts with named variables only (isolation F8, I9)
 
 ## Not in the list
 

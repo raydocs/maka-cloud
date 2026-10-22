@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   implementerFor,
   type ModeId,
@@ -26,9 +26,12 @@ import type { ChangedFile, ChangeSet, CodingDeliveries } from './deliveries.js';
 import { DEFAULT_LOOP_LIMITS, type LoopLimits, LoopDetector, parseSample } from './loop.js';
 import {
   MAX_REVIEW_BYTES,
+  clip,
   parseReviewFile,
   plain,
+  countBySeverity,
   type FixRecord,
+  type FixRound,
   type ReviewRecord,
   fixBrief,
   MAX_FIX_FINDINGS,
@@ -52,15 +55,19 @@ import {
   PATCH_CHUNK_SCRIPT,
   READ_SMALL_SCRIPT,
   SAMPLE_SCRIPT,
+  PUBLISH_FILE_SCRIPT,
   WRITE_FILE_SCRIPT,
 } from './scripts.js';
 import {
   type CodingTask,
   isRepoPath,
+  refusedScriptEnv,
   otherVendor,
   parseCodingBrief,
+  REPRO_FILE,
   type Repro,
   ReproSchema,
+  REVIEW_FILE,
   type Vendor,
 } from './task.js';
 
@@ -88,6 +95,13 @@ export interface CodingLimits {
   maxPatchBytes: number;
   /** Failed runs or checks of one vendor before the task goes to the other. Default 2. */
   failuresPerVendor: number;
+  /**
+   * Fix rounds after the review, at most: each sends the P1 and P2 findings back to the implementer,
+   * runs the checks again and has the other vendor review the fixed change afresh. The rounds stop
+   * early when a review has no P1 or P2, and when the review's share of the budget runs out.
+   * Default 3, at most 10; 0 sends nothing back.
+   */
+  fixRounds: number;
 }
 
 export const DEFAULT_CODING_LIMITS: CodingLimits = {
@@ -98,7 +112,11 @@ export const DEFAULT_CODING_LIMITS: CodingLimits = {
   maxTotalBytes: 8 * 1024 * 1024,
   maxPatchBytes: 1024 * 1024,
   failuresPerVendor: 2,
+  fixRounds: 3,
 };
+
+/** The most fix rounds a runner may be configured with. */
+export const MAX_FIX_ROUNDS = 10;
 
 export interface CodingRunnerOptions {
   agents: Record<Vendor, AgentRunner>;
@@ -208,6 +226,10 @@ export class CodingRunner implements Runner {
         `checkTimeoutMs must be above 0 and at most ${MAX_CHECK_MS} (a check is one sandbox exec, which ends after 10 minutes)`,
       );
     }
+    const rounds = this.limits.fixRounds;
+    if (!(Number.isInteger(rounds) && rounds >= 0 && rounds <= MAX_FIX_ROUNDS)) {
+      throw new Error(`fixRounds must be a whole number from 0 to ${MAX_FIX_ROUNDS}`);
+    }
     this.loopLimits = { ...DEFAULT_LOOP_LIMITS, ...options.loop };
   }
 
@@ -303,10 +325,45 @@ interface Collected {
   patch: string;
 }
 
+/**
+ * The sandbox cuts output to its last bytes before the host sees it, which can split a key at the
+ * cut. The sandbox is asked for `TAIL_MARGIN` more bytes than are wanted and the host scrubs the
+ * whole of it. When the text was cut, what is left of the cut line is dropped before the last
+ * `max` characters are kept: a key never spans a line, so that partial first line is the only place
+ * a split key can be, and counting the margin in bytes against characters (a redaction shortens
+ * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
+ * line break (the git messages, folded onto one line) is that partial line whole, so none of it is
+ * shown, only \`…\`: no part of it can be told from the rest of a key, whatever its length, and a
+ * scheme cut to \`earer\` no longer marks the key after it.
+ */
+export const TAIL_MARGIN = 512;
+
+export function scrubbedTail(text: string, max: number, cut = false): string {
+  let shown = scrubSecretText(text);
+  if (cut) {
+    const line = shown.indexOf('\n');
+    if (line < 0) return '…';
+    shown = shown.slice(line + 1);
+  }
+  return shown.length <= max ? shown : shown.slice(shown.length - max);
+}
+
+/** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
+const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
+
+/**
+ * What CLONE_SCRIPT says of a failed fetch (\`CLONE_FAILED\`, then the last 2512 bytes of git's
+ * error), scrubbed and cut to 500 characters. Whether the sandbox cut it is judged on the bytes as
+ * they came, before any space is trimmed: trimmed first, a cut one could pass as whole.
+ */
+export function cloneFailure(out: string): string {
+  const tail = out.replace(/^CLONE_FAILED\n?/u, '');
+  return scrubbedTail(tail, 500, wasCut(tail, 2512)).trim();
+}
+
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
-  const shown = scrubSecretText(text);
-  return shown.length <= max ? shown : `${shown.slice(0, max - 1)}…`;
+  return clip(scrubSecretText(text), max);
 }
 
 /** How many serious (P1) findings a finished review still carries. */
@@ -317,35 +374,33 @@ function p1Of(review: ReviewRecord): number {
 }
 
 /**
- * Why a change that passed its checks is kept for the owner to look at instead of delivered: no
- * independent review could be made, or the review still has a serious (P1) problem after the one
- * fix. Undefined: nothing stands in the way of delivering it.
+ * Why a fixed change has no review of its own. The review before the fix found what the fix was
+ * for, so the record says how many serious problems it found and that their fix was never checked
+ * by a reviewer.
  */
-/**
- * Why a fixed change has no second review. The first review's P1 findings were the reason for the
- * fix, so the record says they were found and that their fix was never checked by a reviewer.
- */
-function notReviewedAgain(first: ReviewRecord, why: string): string {
-  const found = first.status === 'reviewed' ? p1Of(first) : 0;
+function notReviewedAgain(previous: ReviewRecord, why: string): string {
+  const found = p1Of(previous);
   const earlier =
     found > 0
-      ? `the first review found ${found} serious problem(s); the fix was not checked: `
+      ? `the review before the fix found ${found} serious problem(s); the fix was not checked: `
       : '';
   return `${earlier}the fixed change could not be reviewed again (${why})`;
 }
 
+/**
+ * Why a change that passed its checks is kept for the owner to look at instead of delivered: no
+ * independent review could be made, or the latest review still has a serious (P1) problem after the
+ * fix rounds. Undefined: nothing stands in the way of delivering it.
+ */
 function keptReason(review: ReviewRecord): string | undefined {
   if (review.status !== 'reviewed') {
     return `the change passed the repository's checks but could not be independently reviewed (${plain(review.reason, 200)})`;
   }
   const left = p1Of(review);
   if (left === 0) return undefined;
-  const fix = review.fix;
-  const unused =
-    fix?.result === 'not_applied'
-      ? ` (the fix was not used: ${fix.reason ?? 'no reason given'})`
-      : '';
-  return `the independent review still found ${left} serious problem(s) after the one fix it allows${unused}`;
+  const rounds = review.fix?.rounds ?? 0;
+  const why = review.fix?.reason ? ` (${review.fix.reason})` : '';
+  return `the independent review still found ${left} serious problem(s) after ${rounds} fix round(s)${why}`;
 }
 
 function roundUsd(value: number): number {
@@ -384,7 +439,7 @@ class CodingRun implements RunHandle {
   private lastReportedUsd: number | undefined;
   /** Set once the task has spent its budget: the reason it stops. */
   private budgetStop: string | undefined;
-  /** What the review, the fix and the second review may spend in all (the task's total, not theirs alone). */
+  /** What the review and every fix round and its review may spend in all (the task's total, not theirs alone). */
   private reviewCap: number | undefined;
   /** The mode the brief names; the work and the review follow its roles and its budget split. */
   private mode: ModeId = 'standard';
@@ -401,6 +456,8 @@ class CodingRun implements RunHandle {
   /** Reads of agent streams that outlived the wait for their last spend; each adds to the total when it ends. */
   private readonly lateSpends = new Set<Promise<void>>();
   private readonly hostDir: string;
+  /** Set when the process is closing and let go of this run (see `detach`). */
+  private detached = false;
 
   constructor(
     private readonly runner: CodingRunner,
@@ -425,6 +482,21 @@ class CodingRun implements RunHandle {
     await this.cleanup();
     // A cancel that returns says everything the task started is stopped: when it could not be, it says so.
     if (this.stopFailure) throw this.stopFailure;
+  }
+
+  /**
+   * Lets go of the task for a process that is closing: its agent run is let go of, its waits end,
+   * and nothing is stopped, restored or reported (the sandbox keeps what it has). The task stays
+   * unfinished in the log and the next process takes it over as it does after a crash.
+   */
+  detach(): void {
+    if (this.ended || this.detached) return;
+    this.detached = true;
+    this.agentHandle?.detach?.();
+    this.cancelled = true;
+    this.abort.abort();
+    this.cleanupPromise = Promise.resolve();
+    this.events.close();
   }
 
   private get signal(): AbortSignal {
@@ -609,8 +681,14 @@ class CodingRun implements RunHandle {
       }
       let problem: CheckProblem;
       if (!turn.ok) {
-        record.turns.push({ run, kind, outcome: 'agent_failed', detail: turn.reason, checks: [] });
-        runs.push({ run, outcome: `the agent's run failed: ${turn.reason}` });
+        record.turns.push({
+          run,
+          kind,
+          outcome: 'agent_failed',
+          detail: scrubSecretText(turn.reason),
+          checks: [],
+        });
+        runs.push({ run, outcome: scrubSecretText(`the agent's run failed: ${turn.reason}`) });
         problem = { problem: `your last run failed: ${turn.reason}` };
       } else {
         const checks: CheckResult[] = [];
@@ -627,7 +705,7 @@ class CodingRun implements RunHandle {
           outcome: checked.ok ? 'verified' : 'check_failed',
           checks: checks.map(({ output: _output, ...rest }) => rest),
         };
-        if (!checked.ok) turnRecord.detail = checked.problem;
+        if (!checked.ok) turnRecord.detail = scrubSecretText(checked.problem);
         record.turns.push(turnRecord);
         if (checked.ok && collected) {
           return { ok: true, repro: checked.repro, manifest: turn.manifest, collected };
@@ -635,7 +713,7 @@ class CodingRun implements RunHandle {
         if (checked.ok) throw new Error('unreachable: verified without a change set');
         runs.push({
           run,
-          outcome: `check failed: ${checked.problem}`,
+          outcome: scrubSecretText(`check failed: ${checked.problem}`),
           ...(checked.output ? { output: checked.output } : {}),
         });
         problem = checked;
@@ -670,6 +748,18 @@ class CodingRun implements RunHandle {
       runner: vendor,
       briefPath: join(this.hostDir, `agent-${n}-brief.md`),
       resultPath: join(this.hostDir, `agent-${n}-result.json`),
+      // The files this runner writes itself: the task's result and the delivery. An agent's
+      // exported artifact must not replace them, or it could forge what the owner is shown.
+      reserved: [
+        basename(this.spec.resultPath),
+        basename(this.spec.briefPath),
+        'changes.json',
+        'change.patch',
+        'review.md',
+        'verification.json',
+        'failure_brief.json',
+        RECORDS_DIR,
+      ],
       // Each agent run may spend what is left of its phase's limit.
       // The run's own limit is what is left of its phase (work, then review and fix). The whole
       // budget stays `budgetUsd`, so the gateway pool is the whole and not the first phase's share.
@@ -684,6 +774,7 @@ class CodingRun implements RunHandle {
       ...(this.spec.budgetRootId === undefined ? {} : { budgetRootId: this.spec.budgetRootId }),
       ...(this.spec.mcp ? { mcp: this.spec.mcp } : {}),
       ...(this.spec.epoch === undefined ? {} : { epoch: this.spec.epoch }),
+      ...(options.phase === 'work' ? this.reviewerAhead(vendor) : {}),
     };
     // Every run reads its brief, a resume included.
     await this.guard(writeHostFile(spec.briefPath, brief()));
@@ -758,7 +849,10 @@ class CodingRun implements RunHandle {
       );
       return { ok: true, manifest };
     } catch (error) {
-      return { ok: false, reason: `its result could not be read (${errorMessage(error)})` };
+      return {
+        ok: false,
+        reason: scrubSecretText(`its result could not be read (${errorMessage(error)})`),
+      };
     }
   }
 
@@ -921,6 +1015,21 @@ class CodingRun implements RunHandle {
   }
 
   /**
+   * The reviewer of `implementer`'s change, named in the work's runs so its CLI can install while
+   * the work goes on. Nothing when no review will run: no modes, or a review share of the budget
+   * too small to start one.
+   */
+  private reviewerAhead(implementer: Vendor): { prepareRunners?: string[] } {
+    const { modes } = this.options;
+    if (!modes) return {};
+    const budget = this.allowance();
+    if (budget !== undefined && splitBudget(modes, this.mode, budget).reviewUsd < MIN_REVIEW_USD) {
+      return {};
+    }
+    return { prepareRunners: [reviewerFor(modes, this.mode, implementer).vendor] };
+  }
+
+  /**
    * An agent of the other vendor reviews the change that passed the runner's checks. Whatever
    * happens to the review (it cannot start, runs out of its budget, fails, writes nothing usable),
    * the verified change is still delivered, and the record says the change was not reviewed and
@@ -952,7 +1061,7 @@ class CodingRun implements RunHandle {
     });
     const budget = this.allowance();
     if (budget !== undefined) {
-      // One limit for the review, the fix and the second review together: it is set when the first
+      // One limit for the review and every fix round and its review together: it is set when the first
       // review starts and never grows, and it is below the task's budget.
       const reviewLimit = (this.reviewCap ??= Math.min(
         budget,
@@ -967,7 +1076,8 @@ class CodingRun implements RunHandle {
     }
     try {
       this.progress('a second agent reviews the change');
-      await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- review.json\n`, {});
+      await this.removeAgentFile(REVIEW_FILE);
+      await this.publishForAgent('change.patch');
       const turn = await this.agentTurn(
         reviewer.vendor,
         new LoopDetector(this.runner.loopLimits),
@@ -992,7 +1102,18 @@ class CodingRun implements RunHandle {
             : `the reviewer's run failed: ${turn.reason}`,
         );
       }
-      const text = await this.readTaskFile('review.json', MAX_REVIEW_BYTES);
+      // The first agent's account shares handoff/ with the reviewer's: what the reviewer was given
+      // to read must still be the runner's copy of the change, or it reviewed something else.
+      const same = await this.exec(
+        'set -u\ncd "$MAKA_DIR"\ncmp -s -- change.patch handoff/change.patch\n',
+        {},
+      );
+      if (same.exitCode !== 0) {
+        return unavailable(
+          'the copy of the change given to the reviewer was replaced, so its review was not used',
+        );
+      }
+      const text = await this.readTaskFile(REVIEW_FILE, MAX_REVIEW_BYTES);
       if (!text.ok) return unavailable(text.reason);
       const parsed = parseReviewFile(text.text);
       if (!parsed.ok) return unavailable(parsed.reason);
@@ -1021,12 +1142,15 @@ class CodingRun implements RunHandle {
   }
 
   /**
-   * The review, and, when it found P1 problems, the one fix. The implementer's vendor gets the P1
-   * findings once, in a fresh run (the task's session record is the reviewer's by now); the runner
-   * checks the result as it checked the first change, and the other vendor reviews it again. If the
-   * fix does not run or fails the checks, the first verified change is the one delivered, with its P1
-   * findings; if only the second review fails, the fixed change is kept unreviewed. There
-   * is no loop: this method runs `fix` at most once, and nothing calls it again.
+   * The review, and the fix rounds after it. While the latest review has P1 or P2 findings, the
+   * implementer's vendor gets them (the worst first) in a fresh run (the task's session record is the
+   * reviewer's by now); the runner checks the result as it checked the first change, and the other
+   * vendor reviews the fixed change afresh. The rounds end when a review has no P1 or P2, after
+   * `fixRounds` rounds, when the review's share of the budget is too small for another round, or
+   * when a fix does not run or fails the checks. The change returned is then the last one that passed
+   * the checks and was reviewed, with that review; a fixed change that passed the checks but whose
+   * review did not finish is returned unreviewed. It is never one whose latest checks failed, and
+   * its review is always its own.
    */
   private async reviewAndFix(
     task: CodingTask,
@@ -1041,114 +1165,147 @@ class CodingRun implements RunHandle {
   }> {
     const first = await this.review(task, baseSha, conductorBrief, implementer, outcome);
     if (first.status !== 'reviewed') return { outcome, review: first };
-    const p1 = first.findings.filter((finding) => finding.severity === 'P1');
-    if (p1.length === 0) return { outcome, review: first };
-    const sent = Math.min(p1.length, MAX_FIX_FINDINGS);
-    const notApplied = (reason: string): ReviewRecord => ({
-      ...first,
-      fix: { sent, result: 'not_applied', reason: plain(reason, 300) },
+    const maxRounds = this.limits.fixRounds;
+    // `review` is the review of `current` throughout: a change is never shown with another's review.
+    let current = outcome;
+    let review = first;
+    const history: FixRound[] = [];
+    let sent = 0;
+    const fixOf = (reason?: string): FixRecord => ({
+      rounds: history.length,
+      sent,
+      result: current === outcome ? 'not_applied' : 'applied',
+      ...(reason === undefined ? {} : { reason: plain(reason, 300) }),
+      history: history.map((round) => ({ ...round })),
     });
-    const budget = this.spec.budgetUsd;
-    if (budget !== undefined && this.reviewCap !== undefined) {
-      // The review's limit, below the turn's allowance when that is the smaller.
-      const left = (this.limitUsd ?? this.reviewCap) - this.spentBefore;
-      if (left < 2 * MIN_REVIEW_USD) {
-        return {
-          outcome,
-          review: notApplied(
-            `the review's budget has $${Math.max(0, left).toFixed(2)} left, too little for a fix and a second review`,
-          ),
-        };
+    const ended = (reason?: string) => ({
+      outcome: current,
+      review:
+        history.length === 0 && reason === undefined ? review : { ...review, fix: fixOf(reason) },
+    });
+    for (let round = 1; ; round++) {
+      const open = review.findings.filter((finding) => finding.severity !== 'P3');
+      if (open.length === 0) return ended();
+      // With no rounds configured nothing is sent back, and the record says nothing of a fix.
+      if (round > maxRounds) {
+        return ended(
+          maxRounds === 0 ? undefined : `the cap of ${maxRounds} fix round(s) was reached`,
+        );
       }
-    }
-    // Set once the fixed change has passed the checks and is kept on the host: from then on a
-    // second review that fails ends with it, not with the first change (which the fix replaced).
-    let kept: { outcome: typeof outcome; applied: FixRecord } | undefined;
-    try {
-      this.progress(`${implementer} fixes the ${sent} problem(s) the review found`);
-      const turn = await this.agentTurn(
-        implementer,
-        new LoopDetector(this.runner.loopLimits),
-        undefined,
-        () =>
-          fixBrief({
-            repo: task.repo,
-            baseSha,
-            dir: this.ws.dir,
-            goal: task.goal,
-            testCommand: task.testCommand,
-            findings: p1,
-            conductorBrief,
-          }),
-        { phase: 'review', ...this.settingsOf(implementerFor, implementer) },
-      );
-      if ('loop' in turn) return { outcome, review: notApplied(`the fix stopped: ${turn.loop}`) };
-      if (!turn.ok) {
-        return {
-          outcome,
-          review: notApplied(
+      if (this.spec.budgetUsd !== undefined && this.reviewCap !== undefined) {
+        // The review's limit, below the turn's allowance when that is the smaller.
+        const left = (this.limitUsd ?? this.reviewCap) - this.spentBefore;
+        if (left < 2 * MIN_REVIEW_USD) {
+          return ended(
+            `the review's budget has $${Math.max(0, left).toFixed(2)} left, too little for a fix and a second review`,
+          );
+        }
+      }
+      const findings = open.slice(0, MAX_FIX_FINDINGS);
+      sent += findings.length;
+      const previous = review;
+      const before = current;
+      const notApplied = (reason: string) => {
+        history.push({ sent: findings.length, result: 'not_applied', reason: plain(reason, 300) });
+        return ended(`the fix of round ${round} was not used: ${reason}`);
+      };
+      // Set once the fixed change has passed the checks and is kept on the host: from then on a
+      // review that fails ends with it, not with the change before it (which the fix replaced).
+      let keptFixed = false;
+      try {
+        this.progress(
+          `${implementer} fixes the ${findings.length} problem(s) the review found (round ${round} of at most ${maxRounds})`,
+        );
+        const turn = await this.agentTurn(
+          implementer,
+          new LoopDetector(this.runner.loopLimits),
+          undefined,
+          () =>
+            fixBrief({
+              repo: task.repo,
+              baseSha,
+              dir: this.ws.dir,
+              goal: task.goal,
+              testCommand: task.testCommand,
+              findings,
+              conductorBrief,
+              round,
+              maxRounds,
+            }),
+          { phase: 'review', ...this.settingsOf(implementerFor, implementer) },
+        );
+        if ('loop' in turn) return notApplied(`the fix stopped: ${turn.loop}`);
+        if (!turn.ok) {
+          return notApplied(
             this.budgetStop
               ? `the fix ran out of the review's budget (${this.budgetStop})`
               : `the fix run failed: ${turn.reason}`,
-          ),
+          );
+        }
+        const checks: CheckResult[] = [];
+        const checked = await this.check(task, baseSha, checks);
+        if (!checked.ok)
+          return notApplied(`the fixed change failed the checks: ${checked.problem}`);
+        const collected = await this.collect(task, baseSha);
+        if ('reason' in collected) {
+          return notApplied(`the fixed change could not be read (${collected.reason})`);
+        }
+        const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
+        // The fix's own spend may have used the cap: the review then cannot start, and says so.
+        this.budgetStop = undefined;
+        // The fixed change has passed the checks: it, not the one before it, is what a stop during
+        // its review must leave kept, with the review so far.
+        history.push({ sent: findings.length, result: 'not_reviewed' });
+        current = fixed;
+        try {
+          await this.keepUntilReviewed(task, verification, fixed, { ...previous, fix: fixOf() });
+        } catch (error) {
+          current = before;
+          history.pop();
+          throw error;
+        }
+        keptFixed = true;
+        const next = await this.review(task, baseSha, conductorBrief, implementer, fixed);
+        if (next.status !== 'reviewed') {
+          const why = plain(notReviewedAgain(previous, next.reason), 300);
+          history[history.length - 1] = {
+            sent: findings.length,
+            result: 'not_reviewed',
+            reason: why,
+          };
+          return { outcome: fixed, review: { ...next, reason: why, fix: fixOf() } };
+        }
+        history[history.length - 1] = {
+          sent: findings.length,
+          result: 'applied',
+          counts: countBySeverity(next.findings),
         };
+        review = next;
+      } catch (error) {
+        if (this.cancelled || error instanceof CancelledError) throw error;
+        if (keptFixed) {
+          // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
+          const why = plain(notReviewedAgain(previous, errorMessage(error)), 300);
+          history[history.length - 1] = {
+            sent: findings.length,
+            result: 'not_reviewed',
+            reason: why,
+          };
+          return {
+            outcome: current,
+            review: {
+              ...previous,
+              status: 'unavailable',
+              reviewer: previous.reviewer,
+              reason: why,
+              fix: fixOf(),
+            },
+          };
+        }
+        return notApplied(errorMessage(error));
+      } finally {
+        this.budgetStop = undefined;
       }
-      const checks: CheckResult[] = [];
-      const checked = await this.check(task, baseSha, checks);
-      if (!checked.ok) {
-        return {
-          outcome,
-          review: notApplied(`the fixed change failed the checks: ${checked.problem}`),
-        };
-      }
-      const collected = await this.collect(task, baseSha);
-      if ('reason' in collected) {
-        return {
-          outcome,
-          review: notApplied(`the fixed change could not be read (${collected.reason})`),
-        };
-      }
-      const fixed = { repro: checked.repro, manifest: turn.manifest, collected };
-      // The fix's own spend may have used the cap: the second review then cannot start, and says so.
-      this.budgetStop = undefined;
-      // The fixed change has passed the checks: it, not the first one, is what a stop during the
-      // second review must leave kept.
-      const applied: FixRecord = { sent, result: 'applied' };
-      await this.keepUntilReviewed(task, verification, fixed, { ...first, fix: applied });
-      kept = { outcome: fixed, applied };
-      const second = await this.review(task, baseSha, conductorBrief, implementer, fixed);
-      if (second.status !== 'reviewed') {
-        return {
-          outcome: fixed,
-          review: {
-            ...second,
-            reason: plain(notReviewedAgain(first, second.reason), 300),
-            fix: applied,
-          },
-        };
-      }
-      return { outcome: fixed, review: { ...second, fix: applied } };
-    } catch (error) {
-      if (this.cancelled || error instanceof CancelledError) throw error;
-      if (kept) {
-        // The fixed change passed the checks and is the one on the host: it is kept unreviewed.
-        return {
-          outcome: kept.outcome,
-          review: {
-            ...first,
-            status: 'unavailable',
-            reviewer: first.reviewer,
-            reason: plain(
-              `the fixed change could not be reviewed again (${errorMessage(error)})`,
-              300,
-            ),
-            fix: kept.applied,
-          },
-        };
-      }
-      return { outcome, review: notApplied(errorMessage(error)) };
-    } finally {
-      this.budgetStop = undefined;
     }
   }
 
@@ -1237,7 +1394,7 @@ class CodingRun implements RunHandle {
   private async readRepro(): Promise<Repro | CheckProblem> {
     const out = (
       await this.exec(READ_SMALL_SCRIPT, {
-        MAKA_FILE: 'repro.json',
+        MAKA_FILE: REPRO_FILE,
         MAKA_MAX: String(MAX_REPRO_BYTES),
       })
     ).stdout.trim();
@@ -1333,7 +1490,7 @@ class CodingRun implements RunHandle {
             MAKA_CHECK_TAG: tag,
             MAKA_CMD: command,
             MAKA_TIMEOUT: String(timeoutSeconds),
-            MAKA_TAIL: String(this.limits.outputTailBytes),
+            MAKA_TAIL: String(this.limits.outputTailBytes + TAIL_MARGIN),
           },
           timeoutSeconds + CHECK_EXEC_SLACK_SECONDS,
         );
@@ -1345,7 +1502,16 @@ class CodingRun implements RunHandle {
       const notIsolated = /^maka-check: (.*)$/mu.exec(out.stderr);
       if (notIsolated) throw new Error(`the check ${name} could not run: ${notIsolated[1]}`);
       const bytes = /^BYTES (\d+)$/mu.exec(out.stderr);
-      const result = { name, command, outputBytes: Number(bytes?.[1] ?? 0), output: out.stdout };
+      const result = {
+        name,
+        command: scrubSecretText(command),
+        outputBytes: Number(bytes?.[1] ?? 0),
+        output: scrubbedTail(
+          out.stdout,
+          this.limits.outputTailBytes,
+          Number(bytes?.[1] ?? 0) > this.limits.outputTailBytes + TAIL_MARGIN,
+        ),
+      };
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
@@ -1378,7 +1544,10 @@ class CodingRun implements RunHandle {
     if (out.truncated) return { reason: 'the change is too large to read' };
     const lines = out.stdout.split('\n');
     const err = lines.find((line) => line.startsWith('ERR '));
-    if (err) return { reason: `git could not list the change (${err.slice(4)})` };
+    if (err)
+      return {
+        reason: `git could not list the change (${scrubbedTail(err.slice(4), 300, wasCut(err.slice(4), 812))})`,
+      };
     const raw = lines.find((line) => line.startsWith('RAW '));
     const patchLine = lines.find((line) => line.startsWith('PATCH '));
     if (raw === undefined || patchLine === undefined)
@@ -1518,25 +1687,42 @@ class CodingRun implements RunHandle {
   ): Promise<void> {
     const guard = <T>(promise: Promise<T>): Promise<T> =>
       cancellable ? this.guard(promise) : promise;
-    const changesPath = join(this.hostDir, 'changes.json');
-    const verificationPath = join(this.hostDir, 'verification.json');
+    // The delivery record points at files that are never written twice: their names carry their
+    // hashes. A restart between the writes below then finds the earlier delivery as it was left, not
+    // a record whose change was replaced under it (`change_modified`, for good). The record is
+    // swapped in one atomic write; the files under their plain names are what the task page lists.
     const changes = JSON.stringify(outcome.collected.changeSet);
-    await guard(writeHostFile(changesPath, changes));
-    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
-    // review.md first: verification.json holds its hash, and the supervisor holds the two together.
+    const changesSha256 = createHash('sha256').update(changes).digest('hex');
+    const changesPath = join(
+      this.hostDir,
+      RECORDS_DIR,
+      `changes.${changesSha256.slice(0, 16)}.json`,
+    );
     const reviewText = reviewMarkdown(review);
-    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
     else delete verification.kept;
     // What was checked and what is delivered are the same change: after a fix that is the fixed one,
     // not the first attempt the review looked at.
-    verification.repro = outcome.repro;
+    // What the agent wrote (the reproduction command, the names of the files) is scrubbed like any
+    // other text that reaches the owner.
+    verification.repro = {
+      ...outcome.repro,
+      command: scrubSecretText(outcome.repro.command),
+      files: outcome.repro.files.map((file) => scrubSecretText(file)),
+    };
     verification.changedFiles = outcome.collected.changeSet.files.map((file) => ({
-      path: file.path,
+      path: scrubSecretText(file.path),
       status: file.status,
     }));
-    await guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
+    const verificationText = JSON.stringify(verification, null, 2);
+    const verificationPath = join(
+      this.hostDir,
+      RECORDS_DIR,
+      `verification.${createHash('sha256').update(verificationText).digest('hex').slice(0, 16)}.json`,
+    );
+    await guard(writeHostFile(changesPath, changes));
+    await guard(writeHostFile(verificationPath, verificationText));
     await guard(
       this.options.deliveries.record({
         taskId: this.spec.taskId,
@@ -1544,10 +1730,15 @@ class CodingRun implements RunHandle {
         baseRef: task.baseRef,
         baseSha: verification.baseSha,
         changesPath,
-        changesSha256: createHash('sha256').update(changes).digest('hex'),
+        changesSha256,
         verificationPath,
       }),
     );
+    // review.md before verification.json: that holds its hash, and the supervisor holds the two together.
+    await guard(writeHostFile(join(this.hostDir, 'changes.json'), changes));
+    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
+    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
+    await guard(writeHostFile(join(this.hostDir, 'verification.json'), verificationText));
     const agent = outcome.manifest;
     const files = outcome.collected.changeSet.files;
     const vendors = verification.attempts.map((attempt) => attempt.vendor);
@@ -1623,7 +1814,9 @@ class CodingRun implements RunHandle {
     const json = JSON.stringify(failure, null, 2);
     await this.guard(writeHostFile(join(this.hostDir, 'failure_brief.json'), json));
     await this.writeSandboxFile('failure_brief.json', json);
-    await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- repro.json\n`, {});
+    await this.publishForAgent('failure_brief.json');
+    await this.publishForAgent('attempt-1.patch');
+    await this.removeAgentFile(REPRO_FILE);
     const sha = await this.clone(task, baseSha);
     if (sha !== baseSha) throw new Error(`the base commit changed from ${baseSha} to ${sha}`);
   }
@@ -1633,15 +1826,36 @@ class CodingRun implements RunHandle {
     const out = (await this.exec(CLONE_SCRIPT, { MAKA_REPO_URL: url, MAKA_REF: ref }, 600)).stdout;
     const base = /^BASE ([0-9a-f]{40})$/mu.exec(out);
     if (!base) {
-      const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
+      const detail = cloneFailure(out);
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${clipText(detail, 500)}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${detail}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
   }
 
+  /** Removes a file the agent wrote in handoff/; one that cannot be removed fails the step. */
+  private async removeAgentFile(name: string): Promise<void> {
+    this.refuseEnv({ MAKA_FILE: name });
+    const out = await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${name}\n`, {});
+    if (out.exitCode !== 0) throw new Error(`could not remove ${name} before the next agent run`);
+  }
+
+  /** A file of the task directory, copied where the agent's account can read it. */
+  private async publishForAgent(name: string): Promise<void> {
+    // The script copies into `handoff/` directly, which has no subdirectories: no slash here.
+    if (name.includes('/'))
+      throw new Error('a sandbox script was refused: MAKA_FILE is not a plain file name');
+    this.refuseEnv({ MAKA_FILE: name });
+    const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
+      envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
+      signal: this.signal,
+    });
+    if (out.exitCode !== 0) throw new Error(`could not make ${name} readable for the agent`);
+  }
+
   private async writeSandboxFile(name: string, content: string): Promise<void> {
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.ws.exec(WRITE_FILE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
       stdin: content,
@@ -1652,12 +1866,19 @@ class CodingRun implements RunHandle {
 
   // -- plumbing ------------------------------------------------------------------------------------
 
+  /** A script's path inputs are checked here, before any script runs (fail closed). */
+  private refuseEnv(envs: Record<string, string>): void {
+    const refused = refusedScriptEnv(envs);
+    if (refused) throw new Error(`a sandbox script was refused: ${refused}`);
+  }
+
   private get ws(): SandboxWorkspace {
     if (!this.workspace) throw new CancelledError();
     return this.workspace;
   }
 
   private exec(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    this.refuseEnv(envs);
     return this.guard(
       this.ws.exec(script, {
         envs: { MAKA_DIR: this.ws.dir, ...envs },
@@ -1813,8 +2034,17 @@ function verifiedLine(task: CodingTask, repro: Repro, baseSha: string): string {
   return `verified: \`${task.testCommand}\` passed; the reproduction test \`${repro.command}\` failed on base ${baseSha.slice(0, 12)} and passes with the change`;
 }
 
+/**
+ * Where a delivery's immutable records (the change and its verification, each named by its hash)
+ * are kept, inside the task's handoff directory. An agent's exported artifact is a plain relative
+ * path, which never starts with a dot, so nothing it exports can land here, and the name is
+ * reserved besides. The records used to sit beside the plain-named files, where an artifact named
+ * `changes.<hash>.json` replaced an earlier delivery's change or record (recheck28 F4).
+ */
+const RECORDS_DIR = '.records';
+
 async function writeHostFile(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     await writeFile(temp, content, { flag: 'wx', mode: 0o600 });

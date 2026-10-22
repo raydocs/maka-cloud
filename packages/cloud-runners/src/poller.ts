@@ -26,6 +26,9 @@ export interface PollBackoff {
   maxMs: number;
 }
 
+/** How a run's output is polled unless configured otherwise: a turn's end is seen within a second. */
+export const RUN_POLL_BACKOFF: PollBackoff = { minMs: 150, maxMs: 1_000 };
+
 interface WatchInternal {
   dir: string;
   run: string;
@@ -70,7 +73,14 @@ export class MachinePoller {
   pollCount = 0;
 
   constructor(private readonly options: PollerOptions) {
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    // The wait between polls does not keep the process alive: a server that is shutting down with a
+    // run in flight must be able to exit, and the next process recovers the run.
+    this.sleep =
+      options.sleep ??
+      ((ms) =>
+        new Promise((resolve) => {
+          setTimeout(resolve, ms).unref();
+        }));
     this.maxFailures = options.maxFailures ?? 5;
   }
 

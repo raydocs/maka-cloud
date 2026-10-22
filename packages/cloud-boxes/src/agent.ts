@@ -6,9 +6,13 @@ import { type AgentChannel, asAgent, assertAgentChannel } from '@maka-cloud/runn
  * the agent's unprivileged account, which cannot become root, change the firewall or touch what the
  * sandbox user owns (the control files, the pinned CLI installs, the checksum tools).
  */
-export function asRepoUser(script: string, channel: AgentChannel): string {
+export function asRepoUser(
+  script: string,
+  channel: AgentChannel,
+  names: readonly string[] = [],
+): string {
   assertAgentChannel(channel);
-  return asAgent(`sh -c ${shq(script)} sh`, channel);
+  return asAgent(`sh -c ${shq(script)} sh`, channel, names);
 }
 
 function shq(value: string): string {

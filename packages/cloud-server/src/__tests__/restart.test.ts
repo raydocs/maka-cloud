@@ -5,7 +5,8 @@ import { eventually, newConversation, openStream, startHarness } from './harness
 
 test('a restart keeps tasks, ends the running one with an orphan event and continues the stream from old ids', async (t) => {
   const { handler, seen } = recordingHandler();
-  const h = await startHarness(t, { handler });
+  // Two tasks of the invite run at once here, so both are running when the server restarts.
+  const h = await startHarness(t, { handler, tasksPerInvite: 2 });
   const conversationId = await newConversation(h);
   const { session, token } = await conductorSession(h, seen, conversationId);
   const orchestrator = h.server.orchestrator;
@@ -124,4 +125,26 @@ test('an executor token for a task that was running at the restart is revoked, a
     }
   }
   await h.restart();
+});
+
+test('closing the server lets go of a running task instead of cancelling it, so the process can exit', async (t) => {
+  const { handler, seen } = recordingHandler();
+  const h = await startHarness(t, { handler });
+  const conversationId = await newConversation(h);
+  const { session } = await conductorSession(h, seen, conversationId);
+  const running = await h.server.orchestrator.delegate(session, {
+    runner: 'fake',
+    brief: 'running',
+  });
+  await eventually(() => h.fake.runs.length === 1, 'run');
+  await eventually(
+    () => h.server.orchestrator.status(session, running.taskId).state === 'running',
+    'running',
+  );
+  const run = h.fake.runFor(running.taskId);
+
+  await h.restart();
+
+  assert.equal(run.detachCalls, 1, 'the closing server did not let go of the run');
+  assert.equal(run.cancelCalls, 0, 'it cancelled the run, which would end the task');
 });

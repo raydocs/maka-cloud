@@ -21,7 +21,12 @@
  *   slowexit like ok, but leave 600 ms after its input ended
  *   wait     like ok, but first run until `$HOME/fake-cli/go` exists (`waiting` says it is running)
  *   waitinit like wait, but only after it reported its session, so a restart can resume it
+ *   code     do what a coding brief asks of an agent, as whatever account runs it: read the brief the
+ *            prompt names, append a line to README.md in the workspace the prompt names, write the
+ *            repro.json the brief names, run `git status` in the checkout, and record what each of those did (`ok` or the error code)
+ *            in `$HOME/fake-cli/code-result.json`; then like ok
  *   leak     like ok, but its transcript also holds the run's API key and MCP token
+ *   thinking like ok, but its transcript also holds a thinking block with a signature
  *   shape    like ok, but its transcript also holds a key the run was never given
  *
  * With `--session-mirror` it keeps a transcript like the real CLI: lines in
@@ -128,11 +133,27 @@ async function run(prompt) {
   send({ type: 'system', subtype: 'init', session_id: sid });
   keep('user', { content: prompt });
   if (mode === 'leak') keep('assistant', { content: 'key ' + process.env.ANTHROPIC_API_KEY + ' token ' + process.env.MAKA_MCP_TOKEN });
+  if (mode === 'thinking') keep('assistant', { content: [{ type: 'thinking', thinking: 'plan', signature: 'EqQBCkYIBxgCKkA0Vh7Pq9m1ZtQ2w8d3Jx5sL0bN4cR6yU/aKfGhTeWnMoPzXvB1iDjE2lSq+u7CyHrAgFkIwVtQpZnYb' }, { type: 'redacted_thinking', data: 'EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxfnXrssn6jjZVM1UJ1' }] });
   if (mode === 'shape') keep('assistant', { content: 'the user pasted sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh and ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' });
   if (mode === 'noise') { console.log('some warning text'); console.error('stderr text'); console.log('{"level":"warn"}'); }
   send({ type: 'assistant', message: { id: 'm0', content: [{ type: 'text', text: 'working on it' }] } });
   keep('assistant', { content: 'working on it' });
   if (mode === 'waitinit') await hold();
+  // A later prompt (a repair or a resume) names no brief: only the first, which does, is recorded.
+  if (mode === 'code' && /handoff\\/brief\\.md/.test(prompt)) {
+    const seen = {};
+    const attempt = (name, fn) => { try { fn(); seen[name] = 'ok'; } catch (error) { seen[name] = String(error.code || error.message); } };
+    const briefPath = (prompt.match(/(\\S+\\/handoff\\/brief\\.md)/) || [])[1];
+    const workspace = ((prompt.match(/Work in (\\S+)/) || [])[1] || '').replace(/\\.$/, '');
+    let brief = '';
+    attempt('brief', () => { brief = fs.readFileSync(briefPath, 'utf8'); });
+    const reproPath = (brief.match(/\`([^\`\\n]*repro\\.json)\`/) || [])[1];
+    attempt('edit', () => fs.appendFileSync(path.join(workspace, 'README.md'), 'rehearsal-fixed\\n'));
+    // A real agent runs git in the checkout it was given.
+    attempt('git', () => require('node:child_process').execFileSync('git', ['status', '--porcelain'], { cwd: workspace, stdio: 'pipe' }));
+    attempt('repro', () => fs.writeFileSync(reproPath, JSON.stringify({ command: 'sh check.sh', files: ['check.sh'] })));
+    fs.writeFileSync(path.join(ctl, 'code-result.json'), JSON.stringify(seen));
+  }
   if (mode === 'hang') { setInterval(() => {}, 1000); return; }
   if (mode === 'exit3') process.exit(3);
   if (mode === 'fail') {

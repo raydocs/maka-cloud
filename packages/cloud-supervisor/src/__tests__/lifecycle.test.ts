@@ -228,7 +228,7 @@ test('the item log and the answer log are append-only', async () => {
   }
 });
 
-test('a schema 2 database gains the answer caller and digest owner columns and keeps its rows', () => {
+test('a schema 2 database gains the answer caller, digest owner and owner settings and keeps its rows', () => {
   const dbPath = tmpDb();
   openDatabase(dbPath).close();
   const raw = new DatabaseSync(dbPath);
@@ -243,8 +243,9 @@ test('a schema 2 database gains the answer caller and digest owner columns and k
   try {
     assert.equal(
       (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
-      4,
+      5,
     );
+    assert.deepEqual(db.prepare('SELECT * FROM owner_settings').all(), []);
     assert.ok(
       (db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>).some(
         (column) => column.name === 'owner',

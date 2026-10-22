@@ -554,12 +554,19 @@ test('pull request triggers stay on an explicit allowlist', () => {
   ]);
 });
 
-test('every pull request lane holds a scarce runner for the same bounded time', () => {
-  // One tier, not per-lane values. The worst observed successful runs are 19
-  // minutes (ci.yml) and 20 (release-windows-check), so 45 is about 2.3x the
-  // slowest lane: enough headroom for a cold cache and a flake retry, and far
-  // short of the 120 and 90 a hung job used to hold. A lane with no limit at
-  // all inherits GitHub's 360 and fails here.
+test('every pull request lane holds a scarce runner for a bounded time', () => {
+  // One tier, 45, with the exceptions named below. 45 was about 2.3x the
+  // slowest lane when it was set (19 minutes for ci.yml, 20 for
+  // release-windows-check): enough headroom for a cold cache and a flake retry,
+  // and far short of the 120 and 90 a hung job used to hold. A lane with no
+  // limit at all inherits GitHub's 360 and fails here.
+  // Fork lanes that outgrew it, one limit per job in file order: ci.yml `test`
+  // (a full run takes 34-35 minutes and was cut off at 45 under load) and the
+  // Android job of fork-cloud-mobile.yml (a cold Gradle build plus the emulator).
+  const longer = new Map([
+    ['ci.yml', ['75']],
+    ['fork-cloud-mobile.yml', ['45', '60', '45']],
+  ]);
   // `pull_request` only: a `pull_request_target` lane reads the pull request
   // rather than gating it, so it is not competing for a runner the author is
   // waiting on and keeps its own tighter limit.
@@ -583,11 +590,7 @@ test('every pull request lane holds a scarce runner for the same bounded time', 
     // `run: |` block satisfies one.
     const runners = [...jobs.matchAll(/^ {4}runs-on:/gmu)].length;
     assert.ok(runners > 0, `${name}: no job consumes a runner`);
-    assert.deepEqual(
-      limits,
-      Array.from({ length: runners }, () => '45'),
-      name,
-    );
+    assert.deepEqual(limits, longer.get(name) ?? Array.from({ length: runners }, () => '45'), name);
   }
 });
 

@@ -68,6 +68,49 @@ export interface QuestionOption {
   label: string;
 }
 
+/** The answers that approve the held call; the two after `approve` also leave a grant (see `GrantRow`). */
+export const APPROVE_OPTION = 'approve';
+export const APPROVE_TASK_OPTION = 'approve_task';
+export const APPROVE_REPOSITORY_OPTION = 'approve_repository';
+export const isApprovingOption = (optionId: string): boolean =>
+  optionId === APPROVE_OPTION ||
+  optionId === APPROVE_TASK_OPTION ||
+  optionId === APPROVE_REPOSITORY_OPTION;
+
+export type GrantScope = 'task' | 'repository';
+
+/** What a grant covers besides its tool: the repository, and the arguments it pins to one value. */
+export interface GrantKey {
+  tool: string;
+  repository: string;
+  fixed: Record<string, string | number | boolean | null>;
+}
+
+/**
+ * An approval the owner chose to keep (a scope other than "this once"). It lets the same tool run
+ * again, in the same repository with the same pinned arguments, without a card: for one run
+ * (`task`) or for any of the owner's conversations (`repository`). It never lets a call past a
+ * standing duty's authority, the taint hold or the tool's own checks, and the owner can revoke it.
+ */
+export interface GrantRow extends GrantKey {
+  grantId: string;
+  /** The invite that gave it; it is usable only while that invite is active and owns the conversation. */
+  owner: string;
+  scope: GrantScope;
+  conversationId: string;
+  runId: string | null;
+  questionId: string;
+  createdAt: number;
+  expiresAt: number;
+  revokedAt: number | null;
+}
+
+/** How long a grant lasts unless revoked first. */
+export const GRANT_TTL_MS: Readonly<Record<GrantScope, number>> = {
+  task: 24 * 60 * 60 * 1000,
+  repository: 30 * 24 * 60 * 60 * 1000,
+};
+
 export interface QuestionRow {
   questionId: string;
   runId: string;
@@ -83,6 +126,8 @@ export interface QuestionRow {
   action: HeldCall | null;
   /** The model's own words, shown under the code-built question. */
   note: string | null;
+  /** irreversible: what an `approve_task` or `approve_repository` answer would grant; set only when those options are offered. */
+  grantCandidate: GrantKey | null;
   state: 'open' | 'answered' | 'dismissed' | 'closed';
   answer: string | null;
 }
@@ -401,6 +446,41 @@ const SCHEMA_V10 = `
 UPDATE runs SET tool_called = 1 WHERE tool_called = 0 AND state IN ('active', 'waiting');
 `;
 
+/**
+ * Scoped approvals: grants the owner chose to keep, each use of one, and the key a question would
+ * grant. A grant is never updated except to revoke it; uses are only added.
+ */
+const SCHEMA_V11 = `
+ALTER TABLE questions ADD COLUMN grant_candidate TEXT;
+CREATE TABLE grants (
+  grant_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  repository TEXT NOT NULL,
+  fixed TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('task', 'repository')),
+  conversation_id TEXT NOT NULL,
+  run_id TEXT,
+  question_id TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+CREATE INDEX grants_owner ON grants (owner, created_at);
+CREATE TABLE grant_uses (
+  use_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  grant_id TEXT NOT NULL REFERENCES grants (grant_id),
+  run_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  args TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TRIGGER grant_uses_no_update BEFORE UPDATE ON grant_uses
+  BEGIN SELECT RAISE(ABORT, 'grant uses are never changed'); END;
+CREATE TRIGGER grant_uses_no_delete BEFORE DELETE ON grant_uses
+  BEGIN SELECT RAISE(ABORT, 'grant uses are never changed'); END;
+`;
+
 type Migration = string | ((db: DatabaseSync) => void);
 
 /** Step `i` takes the database from `user_version` i to i + 1. */
@@ -415,6 +495,7 @@ export const CONDUCTOR_MIGRATIONS: readonly Migration[] = [
   SCHEMA_V8,
   SCHEMA_V9,
   SCHEMA_V10,
+  SCHEMA_V11,
 ];
 
 function hasTable(db: DatabaseSync, table: string): boolean {
@@ -1198,6 +1279,17 @@ export class ConductorState {
     ).map((row) => String(row.task_id));
   }
 
+  /** Whether a task was delegated by any run of the conversation the given run belongs to. */
+  conversationOwnsTask(runId: string, taskId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          'SELECT 1 FROM delegations d JOIN runs r ON r.conversation_id = d.conversation_id WHERE r.run_id = ? AND d.task_id = ?',
+        )
+        .get(runId, taskId) !== undefined
+    );
+  }
+
   private appendLedger(runId: string, kind: string, usd: number, ref: string | null): number {
     const result = this.db
       .prepare('INSERT INTO ledger (run_id, kind, usd, ref, at) VALUES (?, ?, ?, ?, ?)')
@@ -1229,9 +1321,16 @@ export class ConductorState {
     runId: string,
     draft: Omit<
       QuestionRow,
-      'questionId' | 'runId' | 'conversationId' | 'state' | 'answer' | 'action' | 'note'
+      | 'questionId'
+      | 'runId'
+      | 'conversationId'
+      | 'state'
+      | 'answer'
+      | 'action'
+      | 'note'
+      | 'grantCandidate'
     > &
-      Partial<Pick<QuestionRow, 'action' | 'note'>>,
+      Partial<Pick<QuestionRow, 'action' | 'note' | 'grantCandidate'>>,
     check: () => { code: string; message: string } | undefined,
   ): OpenQuestionResult {
     return this.transaction((): OpenQuestionResult => {
@@ -1254,8 +1353,8 @@ export class ConductorState {
       this.db
         .prepare(
           `INSERT INTO questions (question_id, n, run_id, conversation_id, reason, question, options,
-             recommended, raise_to_usd, action_ref, action, note, state, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+             recommended, raise_to_usd, action_ref, action, note, grant_candidate, state, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
         )
         .run(
           questionId,
@@ -1270,12 +1369,14 @@ export class ConductorState {
           draft.actionRef,
           draft.action ? JSON.stringify(draft.action) : null,
           draft.note ?? null,
+          draft.grantCandidate ? JSON.stringify(draft.grantCandidate) : null,
           this.now(),
         );
       const question: QuestionRow = {
         ...draft,
         action: draft.action ?? null,
         note: draft.note ?? null,
+        grantCandidate: draft.grantCandidate ?? null,
         questionId,
         runId,
         conversationId: run.conversationId,
@@ -1347,17 +1448,23 @@ export class ConductorState {
           .run(question.runId);
       }
       if (question.reason === 'irreversible' && question.actionRef) {
-        this.db
+        const updated = this.db
           .prepare(
             "UPDATE held_actions SET state = ?, approved_by = ?, shown = ? WHERE action_id = ? AND state = 'held'",
           )
           .run(
-            optionId === 'approve' ? 'approved' : 'rejected',
+            isApprovingOption(optionId) ? 'approved' : 'rejected',
             caller ?? null,
             // The card the owner answered, exactly: the approval covers a call that shows the same.
             question.question,
             question.actionRef,
           );
+        // The grant is made with the approval it comes with, once: an answer that approved
+        // nothing (the held call had expired) or came from nobody leaves none.
+        const scope = grantScopeOf(optionId);
+        if (scope && question.grantCandidate && caller && Number(updated.changes) === 1) {
+          this.createGrant(question, scope, caller);
+        }
       }
       this.db
         .prepare(
@@ -1381,6 +1488,131 @@ export class ConductorState {
         run: { ...run, state: run.state === 'waiting' ? 'active' : run.state },
       };
     });
+  }
+
+  // Grants (scoped approvals)
+
+  private createGrant(question: QuestionRow, scope: GrantScope, owner: string): void {
+    const key = question.grantCandidate as GrantKey;
+    const now = this.now();
+    this.db
+      .prepare(
+        `INSERT INTO grants (grant_id, owner, tool, repository, fixed, scope, conversation_id, run_id,
+           question_id, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `grant_${randomUUID().replaceAll('-', '').slice(0, 16)}`,
+        owner,
+        key.tool,
+        key.repository,
+        canonicalJson(key.fixed),
+        scope,
+        question.conversationId,
+        scope === 'task' ? question.runId : null,
+        question.questionId,
+        now,
+        now + GRANT_TTL_MS[scope],
+      );
+  }
+
+  /**
+   * Uses a grant for a call of `key`, if one covers it, and records the use: the grant's tool,
+   * repository and pinned arguments must be the call's, it must be neither revoked nor expired,
+   * and `ownerOk` must still accept who gave it (an invite that was revoked, or that does not own
+   * the conversation, gives nothing). A task grant covers only the run it was given in. A standing
+   * duty's run never uses one. Synchronous, in one transaction with the check.
+   */
+  useGrant(
+    runId: string,
+    key: GrantKey,
+    args: unknown,
+    ownerOk: (owner: string) => boolean,
+  ): GrantRow | undefined {
+    return this.transaction(() => {
+      const run = this.run(runId);
+      if (!run || !OPEN_RUN_STATES.includes(run.state) || run.authority !== null) return undefined;
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM grants WHERE tool = ? AND repository = ? AND fixed = ? AND revoked_at IS NULL
+             AND expires_at > ? AND (scope = 'repository' OR run_id = ?) ORDER BY created_at DESC, rowid DESC`,
+        )
+        .all(key.tool, key.repository, canonicalJson(key.fixed), this.now(), runId) as Row[];
+      for (const row of rows) {
+        const grant = toGrant(row);
+        if (!ownerOk(grant.owner)) continue;
+        this.db
+          .prepare(
+            'INSERT INTO grant_uses (grant_id, run_id, conversation_id, args, at) VALUES (?, ?, ?, ?, ?)',
+          )
+          .run(grant.grantId, runId, run.conversationId, canonicalJson(args), this.now());
+        return grant;
+      }
+      return undefined;
+    });
+  }
+
+  /** An owner's grants, newest first; only the ones that can still be used unless `all`. */
+  grantsOf(owner: string, options: { all?: boolean } = {}): GrantRow[] {
+    const rows = options.all
+      ? (this.db
+          .prepare('SELECT * FROM grants WHERE owner = ? ORDER BY created_at DESC, rowid DESC')
+          .all(owner) as Row[])
+      : (this.db
+          .prepare(
+            `SELECT * FROM grants WHERE owner = ? AND revoked_at IS NULL AND expires_at > ?
+               ORDER BY created_at DESC, rowid DESC`,
+          )
+          .all(owner, this.now()) as Row[]);
+    return rows.map(toGrant);
+  }
+
+  /** Every use of a grant, oldest first. */
+  grantUses(grantId: string): Array<{ runId: string; conversationId: string; at: number }> {
+    return (
+      this.db
+        .prepare(
+          'SELECT run_id, conversation_id, at FROM grant_uses WHERE grant_id = ? ORDER BY use_id',
+        )
+        .all(grantId) as Row[]
+    ).map((row) => ({
+      runId: String(row.run_id),
+      conversationId: String(row.conversation_id),
+      at: Number(row.at),
+    }));
+  }
+
+  /** Revokes one of the owner's usable grants. False if it is not theirs, does not exist, expired or was already revoked. */
+  revokeGrant(owner: string, grantId: string): boolean {
+    return (
+      Number(
+        this.db
+          .prepare(
+            'UPDATE grants SET revoked_at = ? WHERE grant_id = ? AND owner = ? AND revoked_at IS NULL AND expires_at > ?',
+          )
+          .run(this.now(), grantId, owner, this.now()).changes,
+      ) === 1
+    );
+  }
+
+  /** Revokes every usable grant of the owner that matches the filter (all of them, with none); returns how many. */
+  revokeGrants(owner: string, filter: { tool?: string; repository?: string } = {}): number {
+    return Number(
+      this.db
+        .prepare(
+          `UPDATE grants SET revoked_at = ? WHERE owner = ? AND revoked_at IS NULL
+             AND expires_at > ? AND (? IS NULL OR tool = ?) AND (? IS NULL OR repository = ?)`,
+        )
+        .run(
+          this.now(),
+          owner,
+          this.now(),
+          filter.tool ?? null,
+          filter.tool ?? null,
+          filter.repository ?? null,
+          filter.repository ?? null,
+        ).changes,
+    );
   }
 
   /**
@@ -1605,9 +1837,39 @@ function toQuestion(row: Row): QuestionRow {
     actionRef: row.action_ref === null ? null : String(row.action_ref),
     action: row.action === null ? null : (JSON.parse(String(row.action)) as HeldCall),
     note: row.note === null ? null : String(row.note),
+    grantCandidate:
+      row.grant_candidate === null || row.grant_candidate === undefined
+        ? null
+        : (JSON.parse(String(row.grant_candidate)) as GrantKey),
     state: row.state as QuestionRow['state'],
     answer: row.answer === null ? null : String(row.answer),
   };
+}
+
+function toGrant(row: Row): GrantRow {
+  return {
+    grantId: String(row.grant_id),
+    owner: String(row.owner),
+    tool: String(row.tool),
+    repository: String(row.repository),
+    fixed: JSON.parse(String(row.fixed)) as GrantKey['fixed'],
+    scope: row.scope as GrantScope,
+    conversationId: String(row.conversation_id),
+    runId: row.run_id === null ? null : String(row.run_id),
+    questionId: String(row.question_id),
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    revokedAt: row.revoked_at === null ? null : Number(row.revoked_at),
+  };
+}
+
+/** The scope an answer grants; none for "this once" and for any other answer. */
+function grantScopeOf(optionId: string): GrantScope | undefined {
+  return optionId === APPROVE_TASK_OPTION
+    ? 'task'
+    : optionId === APPROVE_REPOSITORY_OPTION
+      ? 'repository'
+      : undefined;
 }
 
 function toDelegation(row: Row): DelegationRow {

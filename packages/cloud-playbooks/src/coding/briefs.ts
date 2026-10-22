@@ -1,4 +1,4 @@
-import type { CodingTask, Vendor } from './task.js';
+import { AGENT_READS_DIR, type CodingTask, REPRO_FILE, type Vendor } from './task.js';
 
 /** What the second vendor is told about the first one's attempt (`failure_brief.json`). */
 export interface FailureBrief {
@@ -47,7 +47,7 @@ export function agentBrief(input: {
     '## How your work is checked',
     [
       `1. First write a reproduction test: a test that fails on commit \`${baseSha.slice(0, 12)}\` and passes once the change is made.`,
-      `   Record it in \`${dir}/repro.json\` as \`{"command": "...", "files": ["..."]}\`: \`command\` runs only that test from the repository root, \`files\` are its test files relative to the repository root.`,
+      `   Record it in \`${dir}/${REPRO_FILE}\` as \`{"command": "...", "files": ["..."]}\`: \`command\` runs only that test from the repository root, \`files\` are its test files relative to the repository root.`,
       '2. Make the change.',
       `3. Run the reproduction test and the repository's tests: \`${task.testCommand}\`.`,
       '',
@@ -61,7 +61,7 @@ export function agentBrief(input: {
       '## An earlier attempt failed',
       [
         `Another agent (${input.failure.vendor}) tried this task and it was taken from it: ${input.failure.reason}.`,
-        `\`${dir}/failure_brief.json\` says what it tried and how the checks failed; its diff is \`${dir}/attempt-1.patch\`.`,
+        `\`${dir}/${AGENT_READS_DIR}/failure_brief.json\` says what it tried and how the checks failed; its diff is \`${dir}/${AGENT_READS_DIR}/attempt-1.patch\`.`,
         'The workspace is back at the base commit. Use what it learned, but do not assume its approach was right.',
       ].join(' '),
     );
@@ -76,7 +76,7 @@ export function repairPrompt(failure: CheckProblem, testCommand: string): string
   if (failure.output) lines.push('', 'End of the output:', '```', failure.output, '```');
   lines.push(
     '',
-    `Fix it. Keep repro.json up to date, run the reproduction test and \`${testCommand}\` again, then stop. ${NO_TAMPERING}`,
+    `Fix it. Keep ${REPRO_FILE} up to date, run the reproduction test and \`${testCommand}\` again, then stop. ${NO_TAMPERING}`,
   );
   return lines.join('\n');
 }

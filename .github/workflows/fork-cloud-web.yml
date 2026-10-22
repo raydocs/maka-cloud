@@ -8,6 +8,14 @@ name: Fork cloud-web
 on:
   pull_request:
     branches: [main]
+    # The web app, the server stack it builds and the root manifests. The push to main below has no
+    # filter, so a change the list misses still runs this lane once it lands.
+    paths:
+      - 'packages/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - '.github/workflows/fork-cloud-web.yml'
   push:
     branches: [main]
   workflow_dispatch:
@@ -21,7 +29,10 @@ permissions:
 
 jobs:
   cloud-web:
-    runs-on: ubuntu-24.04
+    # The repository variable CI_RUNNER (a JSON label list such as ["self-hosted","boat"]) moves
+    # this job to a self-hosted runner; unset, it runs on GitHub's pinned image. Deleting the
+    # variable is the way back, with no commit.
+    runs-on: ${{ vars.CI_RUNNER && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,7 +42,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-          cache: npm
+          # A self-hosted runner keeps ~/.npm itself; GitHub's cache would only download it again.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
       # The tests start the built server, so build it and what it imports.
       # Scripts are skipped: nothing here needs the desktop app's postinstall.
@@ -64,6 +76,14 @@ jobs:
           npm --prefix packages/cloud-client ci --workspaces=false --ignore-scripts --no-audit --no-fund
           npm --prefix packages/cloud-client run typecheck
           npm --prefix packages/cloud-client test
+
+      # cloud-web's tokens.css and cloud-mobile's tokens.generated.ts come from
+      # packages/cloud-design; a hand edit to either, or a token change without
+      # regenerating, fails here.
+      - name: Design tokens are generated and up to date
+        run: |
+          node packages/cloud-design/src/generate.ts --check
+          node --test packages/cloud-design/src/generate.test.ts
 
       - name: Install cloud-web dependencies
         run: npm --prefix packages/cloud-web ci --workspaces=false --ignore-scripts --no-audit --no-fund

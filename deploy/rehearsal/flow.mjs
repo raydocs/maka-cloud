@@ -405,6 +405,51 @@ const steps = [
     },
   ],
   [
+    'checkout',
+    async () => {
+      // The gate for the first live run: a coding task clones a repository (the real clone script),
+      // and the agent account edits a file of the checkout and writes the repro.json its brief names.
+      // The scripted claude does that as the account it runs as and records what each write did.
+      await control('POST', '/mode?mode=code');
+      const id = await startConversation('rehearsal: code a change');
+      let ended = '';
+      let notes = [];
+      try {
+        const events = await settle(
+          id,
+          (seen) =>
+            ['task_succeeded', 'task_failed', 'task_cancelled'].some(
+              (kind) => taskEvents(seen, kind).length > 0,
+            ),
+          240_000,
+        );
+        ended = summary(events);
+        // What the runner said on the way and what it found wrong, for whoever reads a failure.
+        notes = taskEvents(events, 'task_progress').map((e) => e.data.event.note);
+        const problems = itemsOf(events, 'verification_failed').map((e) => e.data.ask);
+        console.log(`  the coding task's progress: ${notes.join(' | ').slice(0, 1500)}`);
+        console.log(`  not verified: ${problems.join(' | ').slice(0, 1500) || 'nothing'}`);
+      } catch (error) {
+        ended = String(error.message);
+      }
+      const { code } = await control('GET', '/state');
+      assert(code, `the scripted claude never ran as a coding agent: ${ended}`);
+      const wrong = ['brief', 'edit', 'git', 'repro'].filter((what) => code[what] !== 'ok');
+      assert(
+        wrong.length === 0,
+        `the agent account could not ${wrong.map((what) => `${what} (${code[what]})`).join(', ')}: ${ended}`,
+      );
+      // The runner read the repro.json the agent wrote, and the reproduction test ran in its own user
+      // and PID namespace and exited 0 (only then does it say it runs the task's own test command),
+      // so a box that refuses those namespaces, or a repro.json that was not written, fails here.
+      assert(
+        notes.some((note) => note === 'running sh check.sh'),
+        `the runner never got past the reproduction test to the task's own tests: ${notes.join(' | ').slice(0, 600)}; the task ended: ${ended.slice(-900)}`,
+      );
+      console.log(`  the coding task: ${ended.slice(0, 300)}`);
+    },
+  ],
+  [
     'approval',
     async () => {
       await control('POST', '/mode?mode=ok');

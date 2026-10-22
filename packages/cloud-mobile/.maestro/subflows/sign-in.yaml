@@ -9,15 +9,31 @@ appId: cloud.maka.app
       visible: "Pixel Launcher isn't responding"
     commands:
       - tapOn: "Wait"
-- assertVisible: "Enter your workspace"
+# A cold start on a hosted emulator can take a while to draw the first screen.
+- extendedWaitUntil:
+    visible: "Enter your workspace"
+    timeout: 60000
+- takeScreenshot: sign-in-empty
 - tapOn:
     id: "field-Server address"
 - inputText: ${SERVER}
 - tapOn:
     id: "field-Invite token"
 - inputText: ${TOKEN}
-- hideKeyboard
-- takeScreenshot: sign-in
+# With the keyboard up, as a person sees it while typing.
+- takeScreenshot: sign-in-typing
+# Maestro's hideKeyboard cannot dismiss this app's keyboard on newer iOS simulators (iOS 27), so
+# iOS presses Return, which closes a one-line field's keyboard (and may submit the form).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - pressKey: Enter
 # On iOS the keyboard's own dismissal can already have submitted the form.
 - runFlow:
     when:

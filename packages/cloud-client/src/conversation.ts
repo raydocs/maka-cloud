@@ -77,11 +77,12 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     );
   }
 
-  /** Opens the stream; the stream replays the conversation from the start. Safe to call again after `stop`. */
+  /** Opens the stream; it replays the conversation from the start, and the folding is idempotent, so it is safe to call again after `stop`. It does not resume from a remembered event id: after a restored backup the server's ids restart lower, and a stale id would leave the stream silent. */
   start(): void {
     if (this.controller) return;
     const controller = new AbortController();
     this.controller = controller;
+    this.patch({ status: 'Connecting…' });
     this.client
       .subscribe(
         this.conversationId,
@@ -130,8 +131,8 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   private listResults(): void {
     for (const task of Object.values(this.getSnapshot().state.tasks)) {
       if (
-        task.state !== 'succeeded' ||
-        !task.manifest?.artifacts?.length ||
+        (task.state !== 'succeeded' && !task.kept) ||
+        !(task.manifest ?? task.kept)?.artifacts?.length ||
         this.listed.has(task.taskId)
       )
         continue;

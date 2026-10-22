@@ -49,14 +49,25 @@ so it cannot start next to a running deployment on the same ports either (set `M
 2. `sign-in`: the invite's token opens the API; no token and a wrong one do not.
 3. `task`: a message starts a task; the result card (an inbox item of kind `finished`) and the
    closing message arrive.
-4. `approval`: two tasks in one conversation; the second is held for the user. Each approval card is
+4. `checkout` (the gate for the first live run): a coding task. The server's own clone script fetches a
+   small repository (`rehearsal/sample`; the sandbox's git is told that this GitHub name is a local
+   repository, so nothing leaves the container), then the scripted `claude` does what the task's
+   brief asks of an agent, as the agent account: it reads the brief, appends a line to `README.md` in
+   the checkout, runs `git status` there and writes the `repro.json` the brief names. It records what
+   each did, and the step fails if any was refused, or if the runner never gets past the reproduction
+   test to the task's own test command (it reads `repro.json` and runs that test in a new user and PID
+   namespace first; the stand-in container runs without Docker's default seccomp and AppArmor profiles
+   for that). The task itself
+   ends at the review, which needs a second vendor the stand-in does not have, so it is never
+   delivered and the step does not look at how it ends.
+5. `approval`: two tasks in one conversation; the second is held for the user. Each approval card is
    answered, the first one twice (the second answer must be a duplicate), and exactly that many
    answers are recorded and tasks run.
-5. `restart`: the server restarts while a task is running in the sandbox; the task resumes and
+6. `restart`: the server restarts while a task is running in the sandbox; the task resumes and
    finishes once, with one result card.
-6. `restart-reply`: the conductor, whose turn the restart cut, follows the resumed task and, when it
+7. `restart-reply`: the conductor, whose turn the restart cut, follows the resumed task and, when it
    ends, says so in the conversation, once.
-7. `backup-restore`: the server is stopped and backed up, something new happens, the backup is
+8. `backup-restore`: the server is stopped and backed up, something new happens, the backup is
    restored, and the conversations and the inbox are as they were; a new task still runs.
 
 A conversation after the first holds each delegation for approval (the invite's memory has read

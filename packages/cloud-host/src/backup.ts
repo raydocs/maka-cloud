@@ -39,24 +39,61 @@ const MANIFEST = 'manifest.json';
 const SQLITE_HEADER = 'SQLite format 3\0';
 const SQLITE_COMPANION = /-(?:wal|shm|journal)$/u;
 const SCAN_CHUNK = 1 << 20;
-/** Shapes that are secrets wherever they appear: private keys and this system's own tokens. */
+/** Shapes that are secrets wherever they appear: private keys (either end of one) and this system's own tokens. */
 const SECRET_SHAPES: readonly RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+  /-----END [A-Z ]*PRIVATE KEY-----/u,
   /\bmk[iog]_[\w.-]{16,}/u,
 ];
 
+/** A private key as written: the body is the key, so all of it, up to its end line or the end of the text. */
+const PRIVATE_KEY_BLOCK =
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gu;
+
 /**
- * `text` with every secret shape taken out. For copies of conversations a task may have seen such
- * a thing in (a key file in a repository): the backup scan refuses a copy that holds one, and one
- * file in a repository must not stop the daily backup. The replacement adds no quote or backslash,
- * so a JSON string stays one.
+ * `text` with every secret shape taken out, a private key whole. For copies of conversations a task
+ * may have seen such a thing in (a key file in a repository): the backup scan refuses a copy that
+ * holds one, and one file in a repository must not stop the daily backup. `text` is text as it
+ * reads, not as some encoding writes it: see `withoutSecretShapesInJson`.
  */
 export function withoutSecretShapes(text: string): string {
-  let out = text;
+  let out = text.replace(PRIVATE_KEY_BLOCK, '[secret removed]');
   for (const shape of SECRET_SHAPES) {
     out = out.replace(new RegExp(shape.source, 'gu'), '[secret removed]');
   }
   return out;
+}
+
+const QUOTE = 0x22;
+const BACKSLASH = 0x5c;
+
+/**
+ * A JSON text with the secret shapes taken out of every string in it (keys included), each read as
+ * its value: however the text escapes a key's line breaks or slashes (\`\\n\`, \`\\u000a\`, \`\\/\`), the
+ * whole key goes. Only those strings are written again; the rest of the text (numbers, nesting,
+ * spacing) stays byte for byte. Text that is not JSON is taken as it reads.
+ */
+export function withoutSecretShapesInJson(json: string): string {
+  try {
+    JSON.parse(json);
+  } catch {
+    return withoutSecretShapes(json);
+  }
+  // In a JSON text every quote outside a string opens one. The strings are found by a scan, not a
+  // regular expression: a pattern walking a string of many megabytes runs out of stack.
+  const parts: string[] = [];
+  let from = 0;
+  for (let open = json.indexOf('"'); open !== -1; open = json.indexOf('"', from)) {
+    let close = open + 1;
+    while (json.charCodeAt(close) !== QUOTE) close += json.charCodeAt(close) === BACKSLASH ? 2 : 1;
+    const token = json.slice(open, close + 1);
+    const value = JSON.parse(token) as string;
+    const clean = withoutSecretShapes(value);
+    parts.push(json.slice(from, open), clean === value ? token : JSON.stringify(clean));
+    from = close + 1;
+  }
+  parts.push(json.slice(from));
+  return parts.join('');
 }
 
 export interface ManifestFile {

@@ -47,6 +47,22 @@ and Compose were not run.
 | `OPENAI_API_KEY`, `MAKA_CLOUD_GATEWAY_MODELS`, `MAKA_CLOUD_VERIFIER_MODELS` | recommended | a model of another vendor that checks finished work; without a verifier model only the checks that need none run |
 | `CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` | optional | Web Push; make the pair with `node_modules/.bin/web-push generate-vapid-keys` in the checkout (it works offline) |
 
+**2b. Sign-in (owner items, none of them set by us)**
+
+The apps and the web open on "Continue with Apple / Google / email". Each way is off until
+you set what it needs, and the invite token box stays for the beta. A new person is asked for
+their invite code once, after the first sign-in. Nothing here is called until someone signs in.
+
+| Variable | What you provide |
+| --- | --- |
+| `MAKA_CLOUD_APPLE_CLIENT_IDS` | the iOS app's bundle id, and the Services id if the web uses Sign in with Apple |
+| `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | the Google OAuth client ids of the iOS, Android and web apps |
+| `MAKA_CLOUD_MAIL_API_URL`, `MAKA_CLOUD_MAIL_API_KEY`, `MAKA_CLOUD_MAIL_FROM` | a mail service that takes a POST of `{from, to, subject, text}` with a bearer key, and a sender it allows. All three or none |
+| `MAKA_CLOUD_TRUST_PROXY` | the address of the proxy in front of the server. The default `127.0.0.1,::1` is right for nginx or Caddy on the same host (systemd); `deploy/compose.yaml` sets Caddy's fixed address. Only that peer's `X-Forwarded-For` is believed, so a caller that reaches the server directly cannot choose its own rate limit. With no proxy at all, `0` |
+
+With none of them set the server answers invite tokens only. `check` prints a `sign-in:` line
+saying which ways are on.
+
 **3. A sandbox machine for each invite**
 
 - Create the machine in the sandbox provider's console, from an image with
@@ -231,6 +247,12 @@ Under Compose, run the commands below as
 deploy/compose.yaml stop maka-cloud` first. Copy the `maka-backups` volume off
 the host as the backup section says.
 
+The file pins its network (`172.29.80.0/24`, Caddy at `172.29.80.250`) so the server can trust
+Caddy's forwarded client address and no other peer's. Choose another range in the file if your host
+already uses that one. A host that ran an earlier version of the file keeps its old network, and
+Compose will not change it in place: run `docker compose -f deploy/compose.yaml down` once (the
+volumes stay) and then the `up` command again.
+
 ## Rehearse it first
 
 `deploy/rehearsal/` brings the same images, Compose file and Caddyfile up with stand-ins for the model
@@ -377,6 +399,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_BACKUP_DIR` | directory for the daily backup (kept 7 days, no keys inside); outside the data directory. Unset: no backups |
 | `MAKA_CLOUD_TASK_TURN_USD` | the most one run of a task (a start, or a resume after a restart) may spend in model calls, on top of the task’s own budget; above 0. Unset: no turn limit |
 | `MAKA_CLOUD_TASK_RUN_HOURS` | how long a task may run in all, over every attempt and restart, before it is stopped with a note (default 4, at most 168) |
+| `MAKA_CLOUD_TASKS_PER_INVITE` | how many tasks one invite may run at once; a further one waits its turn and says so (default 1, at most 32). Keep 1 until each task runs as an account of its own: the tasks of an invite share one machine and agent account |
 | `MAKA_CLOUD_TIMELINE_CONTENT` | set to 1 to let a task’s timeline show what each step did (its command or file); by default it shows only the kind of step, its state and its timing |
 | `MAKA_CLOUD_AGENT_USER` | the account every CLI (Claude, Codex) runs as inside a sandbox (not the sandbox user, no sudo); with MAKA_CLOUD_AGENT_GROUP it also turns on Agent SDK runs, the step log and the stored conversation. Unset: no CLI is started |
 | `MAKA_CLOUD_AGENT_GROUP` | the group the sandbox user and that account share; goes with MAKA_CLOUD_AGENT_USER |
@@ -403,7 +426,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_GATEWAY_HOST` | model gateway host (default 127.0.0.1) |
 | `MAKA_CLOUD_GATEWAY_PORT` | model gateway port (default 8082) |
 | `MAKA_CLOUD_GATEWAY_PUBLIC_URL` | the model gateway as the sandbox reaches it (https, or http on a loopback host) |
-| `MAKA_CLOUD_GATEWAY_MODELS` | JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one |
+| `MAKA_CLOUD_GATEWAY_MODELS` | JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; adds prices and replaces a built-in one by vendor and model (built in: the Claude models and gpt-6.1-sol, the built-in modes’ Codex model); any other Codex model needs one |
 | `MAKA_CLOUD_MODES` | JSON: the modes (quick, standard, deep) as "maka-cloud modes" prints them: per mode the conductor, implementer, reviewer and helper models and effort, and the budgets; every model named needs a gateway price. Unset: the built-in modes |
 | `MAKA_CLOUD_VERIFIER_MODELS` | JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run |
 | `MAKA_CLOUD_VERIFIER_DAILY_CAP_USD` | daily cap on model checks, default 5; changeable in the inbox settings |
@@ -419,6 +442,12 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
 | `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
+| `MAKA_CLOUD_APPLE_CLIENT_IDS` | comma separated Sign in with Apple client ids (the app’s bundle id, the web Services id) a token may be made for. Unset: no Sign in with Apple |
+| `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | comma separated Google OAuth client ids (iOS, Android, web) a token may be made for. Unset: no Sign in with Google |
+| `MAKA_CLOUD_MAIL_API_URL` | https URL of the mail service that sends sign-in codes: it takes a POST of {from, to, subject, text} with a bearer key. With the next two, turns on sign-in by emailed code. All three or none |
+| `MAKA_CLOUD_MAIL_API_KEY` | the mail service’s bearer key, kept in memory only |
+| `MAKA_CLOUD_MAIL_FROM` | the sender of sign-in mail, an address or Name <address> your mail service allows |
+| `MAKA_CLOUD_TRUST_PROXY` | comma separated IP addresses or ranges of the reverse proxy in front of the server. Only a request from one of them has its X-Forwarded-For client counted in the sign-in limits; from any other peer the header is ignored. Default 127.0.0.1,::1 (a proxy on the same host); under Compose the proxy’s fixed address. 0: trust none |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 
@@ -436,10 +465,18 @@ change, the other vendor reviews it; no setting can change that.
 `maka-cloud modes` prints the modes in force as JSON. To change them, save that
 output, edit it and set `MAKA_CLOUD_MODES` to it (the whole config, version 1; a
 config of another version is refused). Every model it names needs a price in the
-gateway: the Claude models are priced already, a Codex model needs an entry in
-`MAKA_CLOUD_GATEWAY_MODELS`. Until you name one, the Codex roles run on the Codex
-CLI's own default model, which the gateway cannot price, so a Codex run (and with
-it the review of a Claude change) is refused: `maka-cloud check` says how many
+gateway. Built in are the Claude models and `gpt-6.1-sol`, which the built-in modes
+give every Codex role, so a Codex run and the Codex review of a Claude change work
+with no setting beyond `OPENAI_API_KEY`. Its built-in price is OpenAI's standard API list price, read
+on 2026-10-22 from <https://developers.openai.com/api/docs/pricing>: $2 input,
+$0.10 cached input, $2.50 cache write and $10 output per million tokens, and twice
+the input and cache rates and 1.5 times the output once a request's input passes
+272K tokens. The gateway caps its output at 32K tokens per request (the model
+allows 128K), because each request reserves its cap in full. To price it
+differently, add an `openai` entry for `gpt-6.1-sol` to `MAKA_CLOUD_GATEWAY_MODELS`
+(it replaces the built-in one). Any other Codex model needs its own entry there. A
+role whose model you remove runs on the Codex CLI's own default model, which the
+gateway cannot price, so its runs are refused: `maka-cloud check` says how many
 roles are in that state.
 
 How a mode is chosen: a mode the user picks for a message that starts a run is that
@@ -501,13 +538,28 @@ The check also looks at what the account could do to the egress rules, so code t
 cannot take them away. The sandbox user (it needs `sudo -n`, which the egress guard needs too) reads
 the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
 account is not allowed to run anything; a query that fails is a failed check. The account must hold no
-Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), no program under `/usr/sbin`, `/usr/bin`,
-`/sbin`, `/bin` or `/usr/local` may carry a capability such as `cap_net_admin` or `cap_setuid`
-(the box needs `getcap`, from `libcap2-bin`; without it the check fails), it must not be in a group that
+Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), and no program it can run anywhere on the
+box (the whole tree from `/` and every mount below it, the work root included, except `/proc`, `/sys`
+and `/dev`) may carry any file capability, be setuid to another account, or be setgid to a group the
+agent is not in, apart from the stock ping and id-mapping helpers and the stock setuid tools (`sudo`,
+`su`, `passwd`, `mount`, ...) under their own paths. The scan runs as root, needs GNU `find` and
+`getcap` (from `libcap2-bin`), and a scan that fails, or a `getcap` that reports an error, is a failed
+check. It must not be in a group that
 is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
 socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
 not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
 out of the check.
+
+The box must also allow unprivileged user and PID namespaces (`unshare --user --map-current-user
+--pid` as the sandbox user): every check of a coding task (the repository's tests, the reproduction
+test) runs in one, and a box that refuses them, as Docker's default seccomp profile does, makes every
+check fail at once with exit 125 ("could not start the check in its own user and PID namespace"). On
+Ubuntu 24.04 that includes the host's AppArmor rule: set `kernel.apparmor_restrict_unprivileged_userns=0`
+(the rehearsal job does) or give the sandbox user a profile that allows user namespaces.
+
+The agent runs `git` in a checkout that the sandbox user owns. The server names that one workspace
+as git's `safe.directory` in the agent's environment (`asAgentUser`), so nothing is set on the box;
+the rehearsal's `checkout` step has the agent run `git status` there to show it.
 
 The server starts nothing as the sandbox user either. A run is a program and its arguments; the
 server quotes them and hands the whole command to the agent account itself, so no argument can add a
@@ -517,7 +569,8 @@ command that runs as the sandbox user. The pinned CLI install, which writes the 
 Nothing of the CLI is checked, installed or run before the account and the box check pass, a repository's
 test commands run as the agent account (the stop that ends them runs as root, since the processes are
 the agent's), the CLI's version check refuses a CLI that is not wholly the sandbox user's own and
-closed to everyone else, and the brief is written in the task directory and renamed into `handoff/`,
+closed to everyone else and then asks it for its version as the agent account, by absolute path, so
+the sandbox user never runs what the agent's tooling may have shaped, and the brief is written in the task directory and renamed into `handoff/`,
 so a link the agent leaves there is never followed.
 
 Limits that are not settings: a schedule runs at most every 15 minutes; an invite
@@ -666,9 +719,11 @@ Preparation:
    its tree is still being stopped. It sends the cancel again every 5 seconds,
    for up to 3 minutes a task (the server itself retries a stop that failed with
    a growing delay), until the answer says the task ended with nothing pending.
-   A task not seen stopped, or a task list it cannot read, means it starts
-   nothing and exits 2, naming the last error: stop those tasks by hand and run
-   again. A task that started after the list was read is not seen. The
+   A task not seen stopped, or a conversation or task list it cannot read to
+   its end (a next page after the last one it reads, a cursor that does not move
+   forward, an entry of an unexpected shape), means it starts nothing and exits
+   2, naming the last error: stop those tasks by hand and run again. A task that
+   started after the list was read is not seen. The
    cleanup is repeated by the next run even though the run that failed it has
    cleared its budget. A run that ends clears its budget and fences its own
    keys the same way. A budget left by an older version, without a row

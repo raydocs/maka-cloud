@@ -57,7 +57,7 @@ CMD ["start"]
 FROM server AS rehearsal-sandbox
 USER root
 RUN apt-get update \
- && apt-get install -y --no-install-recommends sudo libcap2-bin \
+ && apt-get install -y --no-install-recommends sudo libcap2-bin git \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd maka-box \
  && useradd --no-create-home --gid maka-box --shell /bin/bash maka-agent \

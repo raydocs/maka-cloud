@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { TestContext } from 'node:test';
@@ -91,7 +91,7 @@ export const reviewsNothing: AgentScript = async (turn) => {
   const brief = await fs.readFile(turn.spec.briefPath, 'utf8');
   if (/# Review of a change/u.test(brief)) {
     await fs.writeFile(
-      join(turn.dir, 'review.json'),
+      join(turn.dir, 'handoff', 'review.json'),
       JSON.stringify({ summary: 'Nothing to report.', findings: [] }),
     );
   }
@@ -167,6 +167,9 @@ export class FakeAgent implements AgentRunner {
     };
     const finished = (async () => {
       try {
+        // The agent account's setup makes handoff/ before it runs, and it is where the agent writes.
+        // Synchronous: an abort that arrives meanwhile must still reach the script's listener.
+        mkdirSync(join(turn.dir, 'handoff'), { recursive: true });
         const outcome = await this.script(turn);
         if (abort.signal.aborted) return;
         if (outcome === 'ok') {
@@ -261,6 +264,11 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+# The agent starts under \`env -i\`; the pid directory is the test's own channel to its processes.
+if [ "$1" = env ] && [ "$2" = -i ] && [ -n "\${MAKA_TEST_PIDS:-}" ]; then
+  shift 2
+  exec env -i MAKA_TEST_PIDS="$MAKA_TEST_PIDS" "$@"
+fi
 exec "$@"
 `;
 
@@ -505,7 +513,7 @@ export async function readJson<T = any>(path: string): Promise<T> {
 export async function writeRepro(turn: AgentTurn, test = REPRO_TEST): Promise<void> {
   await fs.writeFile(join(turn.workspace, 'tests', 'test_add.sh'), test);
   await fs.writeFile(
-    join(turn.dir, 'repro.json'),
+    join(turn.dir, 'handoff', 'repro.json'),
     JSON.stringify({ command: 'bash tests/test_add.sh', files: ['tests/test_add.sh'] }),
   );
 }

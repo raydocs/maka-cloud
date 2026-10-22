@@ -38,8 +38,11 @@ import {
   TenantMachineProvider,
 } from '@maka-cloud/runners';
 import type { Supervisor } from '@maka-cloud/supervisor';
+import { createHttpMailer } from './mail.js';
 import {
+  type CloudServerOptions,
   InviteStore,
+  type JwksSource,
   type PushTransport,
   pushConfigFromEnv,
   scrubErrorText,
@@ -96,6 +99,9 @@ export interface StackDependencies {
   spendAlertTiming?: { pollMs?: number; now?: () => number };
   /** Replaces the Web Push transport, for tests; the product sends over HTTPS. */
   pushTransport?: PushTransport;
+  /** Replaces the mail service's HTTP call and the providers' key fetch, for tests; the product calls them over HTTPS. */
+  mailFetch?: typeof fetch;
+  jwks?: JwksSource;
   backupTiming?: {
     tickMs?: number;
     firstTickMs?: number;
@@ -360,6 +366,8 @@ export async function startStack(
       // The token is read from MAKA_GITHUB_TOKEN when a pull request is opened, never earlier.
       publisher: new GitHubPublisher({ env }),
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
+      ownsConversationTask: (runId, taskId) =>
+        conductor?.state.conversationOwnsTask(runId, taskId) ?? false,
     });
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the
@@ -372,8 +380,31 @@ export async function startStack(
             ...pushSettings,
             ...(dependencies.pushTransport ? { transport: dependencies.pushTransport } : {}),
           };
+    // The mail key is read here and goes to the mailer only; it is not part of the config.
+    const mailKey = env.MAKA_CLOUD_MAIL_API_KEY?.trim();
+    const { signIn } = config;
+    const auth: CloudServerOptions['auth'] = {
+      ...(signIn.appleClientIds.length > 0 ? { apple: { audiences: signIn.appleClientIds } } : {}),
+      ...(signIn.googleClientIds.length > 0
+        ? { google: { audiences: signIn.googleClientIds } }
+        : {}),
+      ...(signIn.mail && mailKey
+        ? {
+            mailer: createHttpMailer({
+              apiUrl: signIn.mail.apiUrl,
+              apiKey: mailKey,
+              from: signIn.mail.from,
+              ...(dependencies.mailFetch ? { fetch: dependencies.mailFetch } : {}),
+            }),
+          }
+        : {}),
+      ...(dependencies.jwks ? { jwks: dependencies.jwks } : {}),
+      ...(signIn.trustedProxies.length > 0 ? { trustedProxies: signIn.trustedProxies } : {}),
+    };
+    const signInOn = auth.apple || auth.google || auth.mailer;
     cloud = await startCloud({
       ...(push === undefined ? {} : { push }),
+      ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
@@ -387,6 +418,7 @@ export async function startStack(
       mcp: { host: config.mcp.host, port: config.mcp.port },
       sweepOrphans: (known) => runners.sweepOrphans(known),
       orchestrator: { recoveredSpend: journal, limits: config.taskLimits },
+      tasksPerInvite: config.tasksPerInvite,
       timelineContent: config.timelineContent,
       conductorRoot: config.conductorRoot,
       conductor: {
