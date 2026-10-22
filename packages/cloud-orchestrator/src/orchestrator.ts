@@ -1098,6 +1098,9 @@ export class Orchestrator {
       // A row without an attempt is booked under an attempt that depends on this process (the one
       // before the one just begun). A crash after the record and before `recorded()` hands the same
       // row to the next process, whose attempt is another: the row's id says where it went.
+      // The id is a hash of the row's sum, so it holds only while no new row without an attempt is
+      // written for the task (every run spec carries its epoch, so only a journal from before
+      // attempts has them); two such rows with the same figures would share an id.
       const recovery =
         spentIn === undefined
           ? createHash('sha256')
