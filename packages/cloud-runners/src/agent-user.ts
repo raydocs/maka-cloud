@@ -192,11 +192,17 @@ login_safe() {
   as_agent test -w "$target" >/dev/null 2>&1 && return 1
   chain_safe "$(dirname -- "$target")"
 }
-for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" /etc/profile /etc/bash.bashrc /etc/profile.d/*; do
+login_files=("$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" /etc/profile /etc/bash.bashrc /etc/profile.d/*)
+login_dirs=("$HOME" /etc /etc/profile.d)
+# A test names its own files and directories (one per line); nothing else sets these.
+if [ -n "\${MAKA_LOGIN_FILES+x}" ]; then mapfile -t login_files <<< "$MAKA_LOGIN_FILES"; mapfile -t login_dirs <<< "\${MAKA_LOGIN_DIRS:-}"; fi
+unset MAKA_LOGIN_FILES MAKA_LOGIN_DIRS
+for f in "\${login_files[@]}"; do
+  [ -n "$f" ] || continue
   { [ -e "$f" ] || [ -L "$f" ]; } || continue
   login_safe "$f" || login_bad="$login_bad $f"
 done
-for d in "$HOME" /etc /etc/profile.d; do
+for d in "\${login_dirs[@]}"; do
   [ -d "$d" ] || continue
   chain_safe "$(readlink -f -- "$d")" || login_bad="$login_bad $d"
 done

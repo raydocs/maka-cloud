@@ -18,7 +18,15 @@ function probe(prepare: (home: string) => void): string {
     const agent =
       'as_agent() { [ "$1" = test ] && [ "$2" = -w ] && [ -n "$(find "$3" -maxdepth 0 \\( -perm -g+w -o -perm -o+w \\) )" ]; }';
     const run = spawnSync('bash', ['-c', `${agent}\n${LOGIN_FILES_PROBE}`], {
-      env: { PATH: process.env.PATH ?? '', HOME: home },
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: home,
+        // Only the scratch home: the files of the machine the test runs on are not its business.
+        MAKA_LOGIN_FILES: ['.bash_profile', '.bash_login', '.profile', '.bashrc']
+          .map((name) => join(home, name))
+          .join('\n'),
+        MAKA_LOGIN_DIRS: home,
+      },
       encoding: 'utf8',
     });
     return run.stdout.trim();
