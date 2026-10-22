@@ -54,12 +54,13 @@ test('one sentence in, a watched piece of work and a reviewable result out', asy
     },
   });
   await expect(page.getByText('Needs your decision')).toBeVisible();
-  await expect(page.getByRole('listbox').getByRole('option').first()).toContainText(
+  const decision = page.getByRole('region', { name: 'Your decision' });
+  await expect(decision.locator('.inbox-options button').first()).toHaveText(
     'Peer-reviewed papers only',
   );
-  await expect(page.getByRole('listbox').getByRole('option').first()).toContainText('Recommended');
-  await page.getByLabel('Additional context (optional)').fill('Keep it short.');
-  await page.getByRole('button', { name: 'Send answer' }).click();
+  await decision.getByRole('button', { name: 'Add a note' }).click();
+  await page.getByLabel('Note').fill('Keep it short.');
+  await decision.getByRole('button', { name: 'Peer-reviewed papers only' }).click();
   await expect(page.getByText('Answer recorded: Peer-reviewed papers only')).toBeVisible();
   await expect(page.getByText('Needs your decision')).toHaveCount(0);
   expect(await control<unknown[]>(request, 'answers')).toEqual(
@@ -93,22 +94,20 @@ test('one sentence in, a watched piece of work and a reviewable result out', asy
     manifest: { artifacts: ['out/report.md', 'https://github.com/example/repo/pull/7'] },
   });
   await expect(rootCard.getByText('Finished', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Review report.md' }).click();
-  await expect(page.locator('.report-content')).toContainText(
-    'Solid-state cells <script>alert(1)</script> are close.',
+  // The pull request is one tap on the result card, and the result is not listed a second time.
+  const result = page.getByRole('article', { name: 'Result: Write the report' });
+  await expect(result.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
+    'href',
+    'https://github.com/example/repo/pull/7',
   );
-  // The pull request is one tap on the result card and listed with the other results.
-  for (const where of [
-    page.getByRole('article', { name: 'Result: Write the report' }),
-    page.getByRole('region', { name: 'Artifacts' }),
-  ]) {
-    await expect(where.getByRole('link', { name: 'Open pull request' })).toHaveAttribute(
-      'href',
-      'https://github.com/example/repo/pull/7',
-    );
-  }
+  await expect(page.getByRole('region', { name: 'Artifacts' })).toHaveCount(0);
   expect(await page.locator('body').innerText()).not.toMatch(NAMES);
   await noHorizontalScroll(page);
+  // The report is read on the task's own page, as inert text.
+  await result.getByRole('button', { name: 'Details' }).click();
+  await expect(
+    page.getByRole('article', { name: 'Task: Write the report' }).locator('pre'),
+  ).toContainText('Solid-state cells <script>alert(1)</script> are close.');
 });
 
 test('cancel stops the whole tree and is shown only when the server says so', async ({

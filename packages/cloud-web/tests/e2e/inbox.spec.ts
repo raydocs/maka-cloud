@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { API, control, conversationsOf, noHorizontalScroll, signIn } from './support';
+import { API, control, conversationsOf, noHorizontalScroll, openSection, signIn } from './support';
 
 type Item = { itemId: string; taskId: string; kind: string; ask: string; state: string };
 
@@ -30,19 +30,28 @@ test('a finished task asks for one answer with the supervisor’s own words, the
 
   await finishedTask(request, conversationId, 'Weekly report');
 
-  const needsYou = page.getByRole('region', { name: 'Needs you' });
-  await expect(needsYou.getByRole('heading', { name: /Needs you \(1\)/u })).toBeVisible({
+  // In the conversation the result card is the one place the task's outcome shows; the
+  // supervisor's card for it waits on Home.
+  await expect(page.getByRole('article', { name: 'Result: Weekly report' })).toBeVisible({
     timeout: 20_000,
   });
+  await expect(page.getByRole('region', { name: 'Needs you' })).toHaveCount(0);
+
+  await openSection(page, 'Home');
+  const waiting = page.getByRole('region', { name: 'Decisions waiting' });
+  await expect(waiting.getByRole('button', { name: 'Got it' })).toBeVisible({ timeout: 20_000 });
 
   // The card shows the supervisor's sentence as sent: no vendor or model names.
-  const heading = await needsYou.getByRole('heading', { level: 3 }).innerText();
+  const heading = await waiting.getByRole('heading', { level: 3 }).innerText();
   expect(heading).toContain('Weekly report');
   expect(heading).not.toMatch(/claude|openai|gpt|anthropic|gemini|codex/iu);
 
-  await page.getByRole('button', { name: 'Got it' }).click();
-  await expect(page.getByRole('button', { name: 'Got it' })).toHaveCount(0, { timeout: 20_000 });
-  await expect(needsYou.getByText('Done (1)')).toBeVisible();
+  await waiting.getByRole('button', { name: 'Got it' }).click();
+  await expect(waiting).toHaveCount(0, { timeout: 20_000 });
+  const items = await request.get(`${API}/v1/inbox/items?state=closed`, {
+    headers: { authorization: `Bearer ${invite.token}` },
+  });
+  expect(((await items.json()) as { items: unknown[] }).items).toHaveLength(1);
   await noHorizontalScroll(page);
 });
 
@@ -67,12 +76,16 @@ test('another invite’s finished task never shows up in this workspace', async 
   // the other invite has is not reachable by id from this token.
   const [{ conversationId }] = await conversationsOf(request, invite.token);
   await finishedTask(request, conversationId, 'Mine');
-  // Wait until the supervisor's item has arrived too, so the check below sees both headings.
-  await expect(
-    page.getByRole('heading', { level: 3, name: /finished/u }).filter({ hasText: 'Mine' }),
-  ).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole('heading', { level: 3, name: 'Mine', exact: true })).toBeVisible({
     timeout: 20_000,
   });
+  // Wait until the supervisor's item has arrived on Home too, so the check below sees both.
+  await openSection(page, 'Home');
+  await expect(
+    page
+      .getByRole('region', { name: 'Decisions waiting' })
+      .getByRole('heading', { level: 3 })
+      .filter({ hasText: 'Mine' }),
+  ).toBeVisible({ timeout: 20_000 });
   await expect(page.getByText('Not yours')).toHaveCount(0);
 });

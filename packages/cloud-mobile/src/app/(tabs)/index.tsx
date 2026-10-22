@@ -1,4 +1,5 @@
 import {
+  BRAND,
   type Conversation,
   ConversationStarter,
   displayText,
@@ -25,6 +26,7 @@ import { DecisionCard } from '@/components/Decision';
 import { InboxStatus } from '@/components/InboxStatus';
 import { Card, Chip, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
 import { useWorkspace } from '@/lib/session';
+import { mono } from '@/lib/theme';
 
 /** What a first visit can start with; one tap puts it in the box, the person sends it. */
 const EXAMPLES = [
@@ -154,7 +156,7 @@ export default function Home() {
           <Card label="Start something">
             <T kind={waiting.length > 0 ? 'heading' : 'title'}>Make room for your next idea.</T>
             <T kind="muted">
-              Tell us what you’d like done, in a sentence. We’ll take it from there.
+              Tell {BRAND.name} what you’d like done, in a sentence. It takes it from there.
             </T>
             <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
               <View style={{ flex: 1 }}>
@@ -172,7 +174,7 @@ export default function Home() {
               </View>
               <RoundButton
                 label={starting ? 'Starting…' : 'Start'}
-                glyph="↑"
+                icon="send"
                 disabled={starting || !draft.trim()}
                 onPress={begin}
               />
@@ -196,43 +198,44 @@ export default function Home() {
             </Card>
           )}
 
-          {since !== undefined &&
-            done !== undefined &&
-            (finished.length > 0 || waiting.length > 0) && (
-              <Card label="Since you were last here">
-                <T kind="heading">Since you were last here</T>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <Stat label="Done" value={String(finished.length)} />
-                  <Stat label="Needs you" value={String(waiting.length)} />
-                  <Stat label="Spent" value={anySpend ? dollars(spent) : '—'} />
-                </View>
-                {!anySpend && finished.length > 0 && <T kind="small">Spend not reported.</T>}
-                {finished.map((entry) => (
-                  <Pressable
-                    key={entry.taskId}
-                    accessibilityRole="button"
-                    onPress={() => openConversation(entry.conversationId)}
-                    style={{
-                      flexDirection: 'row',
-                      gap: 10,
-                      alignItems: 'flex-start',
-                      minHeight: 44,
-                    }}
-                  >
-                    <View style={{ paddingTop: 6 }}>
-                      <StatusMark tone={entry.state === 'succeeded' ? 'ok' : 'bad'} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <T kind="body" style={{ fontWeight: '600' }}>
-                        {displayText(entry.title)}
-                      </T>
-                      <T kind="muted">{displayText(entry.outcome)}</T>
-                    </View>
-                    {entry.costUsd !== undefined && <T kind="muted">{dollars(entry.costUsd)}</T>}
-                  </Pressable>
-                ))}
-              </Card>
-            )}
+          {since !== undefined && done !== undefined && finished.length > 0 && (
+            <Card label="Since you were last here">
+              <T kind="heading">Since you were last here</T>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <Stat label="Done" value={String(finished.length)} />
+                <Stat label="Spent" value={anySpend ? dollars(spent) : '—'} />
+              </View>
+              {!anySpend && finished.length > 0 && <T kind="small">Spend not reported.</T>}
+              {finished.map((entry) => (
+                <Pressable
+                  key={entry.taskId}
+                  accessibilityRole="button"
+                  onPress={() => openConversation(entry.conversationId)}
+                  style={{
+                    flexDirection: 'row',
+                    gap: 10,
+                    alignItems: 'flex-start',
+                    minHeight: 44,
+                  }}
+                >
+                  <View style={{ paddingTop: 6 }}>
+                    <StatusMark tone={entry.state === 'succeeded' ? 'ok' : 'bad'} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <T kind="body" style={{ fontWeight: '600' }}>
+                      {displayText(entry.title)}
+                    </T>
+                    <T kind="muted">{displayText(entry.outcome)}</T>
+                  </View>
+                  {entry.costUsd !== undefined && (
+                    <T kind="muted" style={mono}>
+                      {dollars(entry.costUsd)}
+                    </T>
+                  )}
+                </Pressable>
+              ))}
+            </Card>
+          )}
 
           {schedule && (schedule.scheduled.length > 0 || schedule.watching > 0) && (
             <Card label="What runs next">
@@ -283,7 +286,9 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <View style={{ flex: 1, gap: 2 }} accessible accessibilityLabel={`${label}: ${value}`}>
       <T kind="small">{label}</T>
-      <T kind="heading">{value}</T>
+      <T kind="heading" style={/\d/u.test(value) ? mono : undefined}>
+        {value}
+      </T>
     </View>
   );
 }

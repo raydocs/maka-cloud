@@ -26,7 +26,7 @@ const question: Question = {
   recommended: 'quiet',
 };
 
-test('recommendation is first; keyboard can pick another answer and add context', () => {
+test('the answers are the buttons, the recommended one first and filled; a note only when asked for', () => {
   const answers: unknown[] = [];
   render(
     <QuestionCard
@@ -35,14 +35,17 @@ test('recommendation is first; keyboard can pick another answer and add context'
       onAnswer={(optionId, text) => answers.push({ optionId, text })}
     />,
   );
-  const options = screen.getAllByRole('option');
-  expect(options[0].textContent).toContain('A quieter launch');
-  expect(options[0].textContent).toContain('Recommended');
-  fireEvent.keyDown(screen.getByRole('listbox'), { key: 'ArrowDown' });
-  fireEvent.change(screen.getByLabelText('Additional context (optional)'), {
+  const card = screen.getByRole('region', { name: 'Your decision' });
+  const options = within(card.querySelector('.inbox-options') as HTMLElement).getAllByRole(
+    'button',
+  );
+  expect(options.map((o) => o.textContent)).toEqual(['A quieter launch', expect.any(String)]);
+  expect(screen.queryByLabelText('Note')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Add a note' }));
+  fireEvent.change(screen.getByLabelText('Note'), {
     target: { value: 'Keep it short' },
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+  fireEvent.click(options[1] as HTMLElement);
   expect(answers).toEqual([{ optionId: 'bold', text: 'Keep it short' }]);
 });
 
@@ -91,7 +94,7 @@ test('an approval card is shown exactly as the approval binds it: no name filter
   );
   expect(screen.getByRole('heading', { level: 3 }).textContent).toBe(card);
   expect(screen.getByText('{"taskId":"tsk_1","title":"Fix \uFF43odex login"}')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Go ahead' }));
   expect(answers).toEqual(['approve']);
 });
 
@@ -112,9 +115,11 @@ test('an approval card holding a hidden character cannot be approved', () => {
       onAnswer={() => {}}
     />,
   );
-  const options = screen.getAllByRole('option');
-  expect(options).toHaveLength(1);
-  expect(options[0]?.textContent).toContain("Don't do it");
+  const card = screen.getByRole('region', { name: 'Your decision' });
+  const options = within(card.querySelector('.inbox-options') as HTMLElement).getAllByRole(
+    'button',
+  );
+  expect(options.map((o) => o.textContent)).toEqual(["Don't do it"]);
   expect(screen.getByText(/cannot be approved here/)).toBeTruthy();
 });
 
@@ -286,7 +291,7 @@ test('cost is only what the server reported: absent stays "Not reported", a part
     <ConversationView client={new CloudClient('fake', api.fetcher)} conversation={conversation} />,
   );
   const reported = await screen.findByRole('article', { name: 'Reported job' });
-  await waitFor(() => expect(within(reported).getByText(/Cost so far: \$0\.40/)).toBeTruthy());
+  await waitFor(() => expect(reported.textContent).toMatch(/Cost so far: \$0\.40/u));
   expect(
     within(screen.getByRole('article', { name: 'Silent job' })).getByText(/Not reported/),
   ).toBeTruthy();
@@ -294,7 +299,9 @@ test('cost is only what the server reported: absent stays "Not reported", a part
   expect(
     within(screen.getByRole('article', { name: 'Subtask' })).queryByText(/Cost so far/),
   ).toBeNull();
-  expect(screen.getByText('$0.40 (not all reported)')).toBeTruthy();
+  const running = screen.getByRole('region', { name: 'Running' });
+  expect(within(running).getByText('$0.40')).toBeTruthy();
+  expect(within(running).getByText('Not all reported')).toBeTruthy();
   expect(screen.queryByText('$0.00')).toBeNull();
 });
 
@@ -327,6 +334,24 @@ test('all server text is presentation-filtered', async () => {
   expect(
     screen.getAllByText('assistant, assistant, assistant, assistant, assistant').length,
   ).toBeGreaterThan(2);
+});
+
+test('a failed task says what happened and what to do; the raw reason waits behind Details', async () => {
+  const api = fakeApi([
+    created(1, 't1', 'Tag the release'),
+    taskEvent(2, { type: 'task_progress', taskId: 't1', note: 'step: Checking tags' }),
+    taskEvent(3, { type: 'task_failed', taskId: 't1', reason: 'runner error: exit code 137' }),
+  ]);
+  render(
+    <ConversationView client={new CloudClient('fake', api.fetcher)} conversation={conversation} />,
+  );
+  const task = await screen.findByRole('article', { name: 'Tag the release' });
+  await within(task).findByText(/The computer Maka was working on stopped unexpectedly\./u);
+  expect(within(task).getByText('Ask Maka to try again.')).toBeTruthy();
+  const raw = within(task).getByText('runner error: exit code 137');
+  expect(raw.closest('details')?.open).toBe(false);
+  // A finished task has no current step.
+  expect(within(task).queryByText('Current step')).toBeNull();
 });
 
 const item: InboxItem = {
@@ -413,11 +438,11 @@ test('an inbox card puts the recommended answer first, takes context only when a
     />,
   );
   // The note is one tap away instead of an empty box on every card.
-  expect(screen.queryByLabelText('Additional context (optional)')).toBeNull();
+  expect(screen.queryByLabelText('Note')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Add a note' }));
   const buttons = screen.getAllByRole('button').map((button) => button.textContent);
   expect(buttons).toEqual(['Ask the agent to redo it', 'Accept it as is']);
-  fireEvent.change(screen.getByLabelText('Additional context (optional)'), {
+  fireEvent.change(screen.getByLabelText('Note'), {
     target: { value: '  Use the Q3 numbers ' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to redo it' }));
@@ -426,7 +451,7 @@ test('an inbox card puts the recommended answer first, takes context only when a
 
 test('an item with no text field offers none, and an answer being delivered offers no buttons', () => {
   const { rerender } = render(<InboxCard item={item} disabled={false} onAnswer={() => {}} />);
-  expect(screen.queryByLabelText('Additional context (optional)')).toBeNull();
+  expect(screen.queryByLabelText('Note')).toBeNull();
   rerender(
     <InboxCard
       item={{ ...item, state: 'answering', delivery: 'retrying' }}

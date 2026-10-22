@@ -46,7 +46,7 @@ test('the card says the outcome, offers the changes and opens each action as a l
     wrap(<DeliveryCard client={client} task={task} model={model()} onOpenTask={() => {}} />),
   );
   expect(screen.getByText('The login page no longer loops.')).toBeTruthy();
-  await fireEvent.press(screen.getByRole('button', { name: 'Open pull request · github.com ↗' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Open pull request · github.com' }));
   expect(open).toHaveBeenCalledWith('https://github.com/example/repo/pull/12');
   await fireEvent.press(screen.getByRole('button', { name: 'View the changes' }));
   expect(await screen.findByText('+redirect once')).toBeTruthy();
@@ -58,7 +58,7 @@ test('the card says the outcome, offers the changes and opens each action as a l
 test('a result with no links offers none, and Details is only there when it can be opened', async () => {
   const client = {} as unknown as CloudClient;
   await render(wrap(<DeliveryCard client={client} task={task} model={model({ actions: [] })} />));
-  expect(screen.queryByRole('button', { name: /↗/u })).toBeNull();
+  expect(screen.queryByRole('button', { name: / · /u })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
 });
 
