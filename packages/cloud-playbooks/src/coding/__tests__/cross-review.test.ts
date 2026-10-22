@@ -94,7 +94,7 @@ test('the other vendor reviews a change, and the review is part of what is deliv
   );
   assert.deepEqual(
     [h.codex.turns[0]?.spec.model, h.codex.turns[0]?.spec.effort],
-    [undefined, 'medium'],
+    ['gpt-6.1-sol', 'medium'],
   );
 
   // The files the runner writes in the task directory are not for an agent's artifact to replace.
