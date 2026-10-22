@@ -130,10 +130,11 @@ Still missing before it can merge:
 
 ## Restarts, the kept conversation and CI timing (from #325, #337, #345, #352)
 
-1. P3: a restart runs every running coding task again from a fresh clone, spend so far included. The
-   result card or the inbox should say "restarted after a server restart" when it happens, so a
-   second `fetching` is not read as a loop. Test: a task resumed by a second process shows the note.
-   Source: #337.
+1. P3: a restart ends every running coding task as failed ("orphaned"), because `CodingRunner` has
+   no `recover`. A first user who restarts mid-task has to send the goal again. A coding `recover`
+   would restart from the kept change or a fresh clone, spend so far included, and the result
+   card should say "restarted after a server restart" so a second `fetching` is not read as a
+   loop. Source: #337, recheck28 F3.
 2. P3: the backup copy of `transcripts.db` walks `transcript_lines` with `LIMIT ? OFFSET ?`, which
    is quadratic in the table size. Use keyset pagination on the ordering columns, or one iterated
    `SELECT` with the updates batched in a transaction. Source: #325.

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { test } from 'node:test';
+import { MemoryTaskStore } from '../store.js';
 import type { FakeRun } from '../fake-runner.js';
 import type { ResultManifest } from '../types.js';
 import { eventually, type Harness, makeHarness } from './harness.js';
@@ -56,4 +57,28 @@ test('a manifest that does not say it kept a change is not shown as one', async 
   run.fail('the run failed');
   await eventually(() => h.orchestrator.status(session, taskId).state === 'failed', 'failed');
   assert.equal(h.orchestrator.status(session, taskId).kept, undefined);
+});
+
+test('a restart that ends a task whose runner kept a change for the owner shows what was kept', async (t) => {
+  const store = new MemoryTaskStore();
+  const first = await makeHarness(t, { store });
+  const { session, taskId, run } = await start(first);
+  await leave(run, KEPT);
+  // The process goes away with the task running; the handoff directory stays.
+  const second = await makeHarness(t, { store, dir: first.dir });
+  const view = second.orchestrator.status(session, taskId);
+  assert.equal(view.state, 'failed');
+  assert.match(view.failureReason ?? '', /orphaned/);
+  assert.deepEqual(view.kept?.artifacts, ['change.patch', 'verification.json']);
+});
+
+test('a restart that ends a task whose manifest does not say it kept a change shows no kept change', async (t) => {
+  const store = new MemoryTaskStore();
+  const first = await makeHarness(t, { store });
+  const { session, taskId, run } = await start(first);
+  await leave(run, { ...KEPT, done: ['everything the brief asked'] });
+  const second = await makeHarness(t, { store, dir: first.dir });
+  const view = second.orchestrator.status(session, taskId);
+  assert.equal(view.state, 'failed');
+  assert.equal(view.kept, undefined);
 });
