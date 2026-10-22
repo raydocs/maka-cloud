@@ -5,7 +5,7 @@ import {
   type Fleet,
   type RemoteMachine,
 } from '@maka-cloud/runners';
-import { CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
+import { BASE_RESTORE_SCRIPT, CHECK_STOP_SCRIPT, checkTagPrefix } from './scripts.js';
 
 /** What CHECK_STOP_SCRIPT reads from its environment. */
 const CHECK_STOP_ENV = ['MAKA_CHECK_TAG', 'MAKA_CHECK_UP_TO'];
@@ -97,7 +97,9 @@ export class FleetCodingSandbox implements CodingSandbox {
     };
     return {
       dir: machine.taskDir(taskId),
-      exec: (script, options = {}) => run(script, options),
+      // Putting the change back after a base check is the host's own fixed script: like the check
+      // stop, it must reach a box whose guard now fails, or the change stays in the backup.
+      exec: (script, options = {}) => run(script, options, script !== BASE_RESTORE_SCRIPT),
       execCheck: async (script, options = {}) => {
         if (channel === undefined) {
           throw new Error('checks run as the agent account, and none is configured');

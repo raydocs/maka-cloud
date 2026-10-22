@@ -7,8 +7,9 @@ import { InstaboxClient } from '@maka-cloud/instabox';
 import { FakeInstabox } from '@maka-cloud/instabox/testing';
 import { Fleet, FixedMachineProvider } from '@maka-cloud/runners';
 import { FleetCodingSandbox } from '../sandbox.js';
+import { BASE_RESTORE_SCRIPT } from '../scripts.js';
 
-test('the stop of a check still reaches a box whose guard now fails; repo code does not', async (t) => {
+test('the stop of a check and the restore after a base check still reach a box whose guard now fails; repo code does not', async (t) => {
   const tmp = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'sandbox-guard-')));
   const fake = await new FakeInstabox().start();
   t.after(async () => {
@@ -38,4 +39,7 @@ test('the stop of a check still reaches a box whose guard now fails; repo code d
   const stopped = await ws.execCheckStop('echo stop-sent');
   assert.equal(stopped.stdout.trim(), 'stop-sent');
   await assert.rejects(ws.exec('echo repo-code'), /refused/u);
+  // The change a base check took away is put back all the same.
+  const restored = await ws.exec(BASE_RESTORE_SCRIPT, { envs: { MAKA_DIR: ws.dir } });
+  assert.match(restored.stdout, /RESTORED/u);
 });
