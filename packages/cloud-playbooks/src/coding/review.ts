@@ -347,7 +347,7 @@ export function fixBrief(input: {
       `The runner checks again, outside your session: \`${input.testCommand}\` must pass, and the reproduction test in \`${dir}/${REPRO_FILE}\` must still pass with your change and fail when your changes outside its files are reverted. Keep \`${REPRO_FILE}\` correct, run both, then stop.`,
       input.round < input.maxRounds
         ? `Then a second agent reviews the change again. This is fix round ${input.round} of at most ${input.maxRounds}.`
-        : `Then a second agent reviews the change again. This is fix round ${input.round}, the last one: there is no further round.`,
+        : `Then a second agent reviews the change again. This is fix round ${input.round}, the last one. There is no further round.`,
     ].join(' '),
     '## Rules',
     'Do not commit, push, change git remotes or open pull requests: leave the change in the working tree. Never look for, fetch or use hidden or held-out tests.',

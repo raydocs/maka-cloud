@@ -284,6 +284,6 @@ test('the fix brief says which round it is, and that the last one is the last', 
   assert.match(first, /2\. no test/);
   assert.match(
     fixBrief({ ...input, round: 3, maxRounds: 3 }),
-    /the last one: there is no further round/,
+    /the last one\. There is no further round/,
   );
 });

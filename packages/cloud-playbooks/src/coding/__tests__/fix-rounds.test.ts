@@ -188,7 +188,7 @@ test('a reviewer that always answers P1 gets three fix rounds and four reviews, 
     /after 3 fix round\(s\) \(the cap of 3 fix round\(s\) was reached\)/,
   );
   const last = await fs.readFile(h.claude.turns[3]?.spec.briefPath ?? '', 'utf8');
-  assert.match(last, /fix round 3, the last one: there is no further round/);
+  assert.match(last, /fix round 3, the last one\. There is no further round/);
   const record = await readJson(join(dir, 'verification.json'));
   assert.equal(record.review.fix.rounds, 3);
   assert.deepEqual(
