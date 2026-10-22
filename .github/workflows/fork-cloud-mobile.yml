@@ -71,17 +71,9 @@ jobs:
     # ANDROID_HOME and whose emulator runs arm64; unset, it runs on GitHub's image, which carries the
     # SDK and runs the emulator under KVM.
     runs-on: ${{ vars.CI_RUNNER_MAC && fromJSON(vars.CI_RUNNER_MAC) || 'ubuntu-24.04' }}
-    timeout-minutes: 45
+    # The build is the long step: a cold Gradle cache and one ABI, then the emulator flows.
+    timeout-minutes: 60
     steps:
-      # GitHub's runner leaves little disk for a Gradle and NDK build; some runs ran out of space
-      # ("No space left on device"). These preinstalled toolchains are not used here.
-      - name: Free disk space
-        if: runner.environment == 'github-hosted'
-        run: |
-          df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -94,6 +86,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      # The release build leaves the disk too full for the emulator's system image (the runner then fails
+      # with "No space left on device" while installing it). These toolchains are not used by this job.
+      - name: Free disk space
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY/CodeQL"
+          df -h /
 
       - name: Install the stack and the app
         run: |
@@ -119,20 +119,35 @@ jobs:
           npm --workspace @maka-cloud/playbooks run build
           npm --workspace @maka-cloud/supervisor run build
 
+      # Gradle's downloaded dependencies and wrapper, kept between runs. Keyed on the app's lockfile, so a
+      # new Expo or React Native version starts cold. A self-hosted runner keeps ~/.gradle itself.
+      - name: Cache Gradle
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('packages/cloud-mobile/package-lock.json') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       # A release build carries its own JavaScript, so no dev server is needed on the emulator. It is signed
-      # with the debug key Expo generates; it is never uploaded anywhere.
+      # with the debug key Expo generates; it is never uploaded anywhere. Only the one ABI the emulator below
+      # runs is compiled (x86_64, or arm64-v8a on Apple silicon); all four took about 43 minutes.
       - name: Build the app
         working-directory: packages/cloud-mobile
         run: |
           npx expo prebuild --platform android --no-install
           # Gradle fetches its plugins from the public repositories; a reset connection is retried.
           for attempt in 1 2 3; do
-            (cd android && ./gradlew --no-daemon assembleRelease) && exit 0
+            (cd android && ./gradlew --no-daemon assembleRelease -PreactNativeArchitectures="$ABI") && exit 0
             echo "Gradle attempt $attempt failed" >&2
             sleep 15
           done
           exit 1
         env:
+          ABI: ${{ runner.arch == 'ARM64' && 'arm64-v8a' || 'x86_64' }}
           CI: '1'
           MAKA_E2E: '1'
 
@@ -159,6 +174,9 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      - name: Disk before the emulator
+        run: df -h /
 
       # adb's mDNS discovery aborts on a malformed service name from the local network (seen on
       # the owner's Mac); the emulator is reached over TCP, so discovery is not needed.
