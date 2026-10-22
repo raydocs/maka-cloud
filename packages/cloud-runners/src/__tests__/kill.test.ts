@@ -27,11 +27,46 @@ async function runScript(
   });
 }
 
-async function childPid(h: Harness, dirName: string): Promise<number> {
+/**
+ * The stubborn child's pid. `echo $$ > file` creates the file before it writes the pid, so a file
+ * that exists may still be empty: that is waited out (`onEmpty` runs when it is seen so), because
+ * an empty file read as a pid is 0, which is not running, and fails the assertion that the child
+ * outlived its leader.
+ */
+async function childPid(
+  h: Harness,
+  dirName: string,
+  onEmpty?: () => Promise<void>,
+): Promise<number> {
   const file = join(h.root, dirName, 'child.pid');
-  await until(() => exists(file));
-  return Number((await fs.readFile(file, 'utf8')).trim());
+  let pid = 0;
+  let seenEmpty = false;
+  await until(async () => {
+    const text = await fs.readFile(file, 'utf8').catch(() => undefined);
+    if (text === undefined) return false;
+    if (/^\d+\n$/u.test(text)) {
+      pid = Number(text);
+      return true;
+    }
+    if (!seenEmpty) {
+      seenEmpty = true;
+      await onEmpty?.();
+    }
+    return false;
+  });
+  return pid;
 }
+
+test('a pid file seen while it is still empty is waited for, never read as pid 0', async (t) => {
+  const h = await setup();
+  t.after(() => h.cleanup());
+  const file = join(h.root, 'tsk_empty', 'child.pid');
+  await fs.mkdir(join(h.root, 'tsk_empty'), { recursive: true });
+  await fs.writeFile(file, '');
+  // The pid is written only after the helper has looked at the empty file.
+  const pid = await childPid(h, 'tsk_empty', () => fs.writeFile(file, '4242\n'));
+  assert.equal(pid, 4242);
+});
 
 test('children that ignore TERM are killed even after the leader exited normally', async (t) => {
   const h = await setup();

@@ -92,6 +92,13 @@ async function processesOf(token: string): Promise<number[]> {
   return found;
 }
 
+const isStopped = (result: unknown): boolean => {
+  const exit = result as { code: number | null; signal: string | null };
+  return (
+    (exit.code === 143 && exit.signal === null) || (exit.code === null && exit.signal === 'SIGKILL')
+  );
+};
+
 const exitOf = (proc: ExecProcess) =>
   new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
     proc.once('exit', (code, signal) => resolve({ code, signal })),
@@ -309,8 +316,14 @@ test('kill stops the process on the machine, once, and the exit is reported once
   assert.equal(proc.kill('SIGKILL'), true);
   assert.equal(proc.killed, true);
   await proc.stopped();
-  assert.deepEqual(await settles(proc.exited), { code: null, signal: 'SIGKILL' });
-  assert.deepEqual(exits, [{ code: null, signal: 'SIGKILL' }]);
+  // A stop ends the run in one of two ways, and which depends on whether the run script outlived
+  // its TERM long enough to write the exit file: exit 143, or gone before it could (SIGKILL).
+  const result = await settles(proc.exited);
+  assert.ok(
+    isStopped(result),
+    `a stopped run ends with 143 or SIGKILL, not ${JSON.stringify(result)}`,
+  );
+  assert.deepEqual(exits, [result], 'the exit is reported once');
   assert.deepEqual(await processesOf(r.token), []);
   assert.equal(proc.kill('SIGKILL'), false, 'nothing to kill any more');
   assert.equal(r.h.runners.fleet.poller.watchCount(), 0);
