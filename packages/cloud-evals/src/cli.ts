@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -13,7 +13,8 @@ import { FAKE_PROFILES, FakeDriver, FakeGrader, FakeHiddenTests } from './fake.j
 import { BudgetLedger } from './ledger.js';
 import { type EvalDeps, assertLiveApproved, createLiveDeps } from './live.js';
 import { carrySpend, priorSpentUsd } from './recovery.js';
-import { writeReport } from './report.js';
+import { loadRows, writeReport } from './report.js';
+import { buildScorecard, renderScorecard } from './scorecard.js';
 import { SweBenchDataset, selectStratified, terminalBenchTasks } from './suites.js';
 import { makeSpec } from './spec-gen.js';
 import {
@@ -33,6 +34,7 @@ const USAGE = [
   '      --task-budget-usd <usd> --total-budget-usd <usd> [--timeout-seconds <s>] [--mode dry-run|live] --out <spec.json>',
   '  cloud-evals run <spec.json> --out <dir> [--cell <id>]... [--live --approve-budget <usd>]',
   '  cloud-evals report <dir>',
+  '  cloud-evals scorecard <dir> [--baseline <dir>]',
 ].join('\n');
 
 export interface CloudEvalsCliDependencies {
@@ -284,6 +286,38 @@ async function reportCommand(
   return 0;
 }
 
+async function readRun(dir: string) {
+  const spec = parseExperimentSpec(
+    JSON.parse(await readFile(join(dir, 'experiment.json'), 'utf8')) as unknown,
+  );
+  return { spec, rows: await loadRows(spec, new FileAttemptStore(join(dir, 'attempts'))) };
+}
+
+async function scorecardCommand(
+  argv: readonly string[],
+  io: CloudEvalsCliDependencies,
+): Promise<number> {
+  const { positional, flags } = parseFlags(argv);
+  if (positional.length !== 1) throw new Error('scorecard takes one experiment directory');
+  const dir = resolve(positional[0] as string);
+  const current = await readRun(dir);
+  const baselineDir = flags.get('baseline')?.[0];
+  const baseline = baselineDir ? await readRun(resolve(baselineDir)) : undefined;
+  const card = buildScorecard({
+    experimentId: current.spec.id,
+    mode: String(current.spec.executor.config.mode ?? ''),
+    subjectIds: current.spec.subjects.map((subject) => subject.id),
+    rows: current.rows,
+    ...(baseline ? { baseline: { experimentId: baseline.spec.id, rows: baseline.rows } } : {}),
+  });
+  const markdown = renderScorecard(card);
+  await mkdir(join(dir, 'report'), { recursive: true });
+  await writeFile(join(dir, 'report', 'scorecard.json'), `${JSON.stringify(card, null, 2)}\n`);
+  await writeFile(join(dir, 'report', 'scorecard.md'), markdown);
+  io.stdout(markdown);
+  return 0;
+}
+
 export async function runCloudEvalsCli(
   argv: readonly string[],
   overrides: Partial<CloudEvalsCliDependencies> = {},
@@ -305,6 +339,8 @@ export async function runCloudEvalsCli(
         return await runCommand(rest, io);
       case 'report':
         return await reportCommand(rest, io);
+      case 'scorecard':
+        return await scorecardCommand(rest, io);
       default:
         throw new Error('unknown command');
     }
