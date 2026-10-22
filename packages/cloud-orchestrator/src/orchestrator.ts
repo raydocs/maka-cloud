@@ -776,8 +776,15 @@ export class Orchestrator {
         );
         // Cancelled while its turn came: the cancel ends it, with no run to stop.
         if (noted === undefined) return;
-      } catch {
-        // The store failed; the start below records its own outcome, or fails the same way.
+      } catch (error) {
+        // Without the note a restart would take the task for one that never ran and start it
+        // again beside a run this start left: it does not start.
+        await this.record({
+          type: 'task_failed',
+          taskId: task.taskId,
+          reason: `could not start: its turn could not be recorded: ${errorMessage(error)}`,
+        }).catch(() => undefined);
+        return;
       }
     }
     await start();

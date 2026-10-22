@@ -4,7 +4,8 @@ import type { SessionInfo } from '../auth.js';
 import type { FakeRunnerOptions } from '../fake-runner.js';
 import { holdNote, isHoldNote, type OrchestratorOptions, TURN_NOTE } from '../orchestrator.js';
 import { MAX_RESUMES_IN_A_ROW } from '../recovery.js';
-import { MemoryTaskStore } from '../store.js';
+import { type Fence, MemoryTaskStore } from '../store.js';
+import type { StoredEvent, TaskEvent } from '../types.js';
 import { eventually, type Harness, makeHarness } from './harness.js';
 
 /** A harness whose conductor sessions each belong to the group they were made for. */
@@ -435,6 +436,27 @@ test('a held task says its turn came before its run starts, so a later restart t
   // Its run is a run like any other now: a runner that cannot recover ends it at a restart.
   const after = await grouped(t, { store, groups, dir: before.h.dir });
   assert.deepEqual(after.h.orchestrator.orphanedTaskIds, [second.taskId]);
+});
+
+test('a held task whose turn cannot be written down does not start', async (t) => {
+  class NoTurnStore extends MemoryTaskStore {
+    override async append(event: TaskEvent, at: number, fence?: Fence): Promise<StoredEvent> {
+      if (event.type === 'task_progress' && event.note === TURN_NOTE) throw new Error('disk full');
+      return super.append(event, at, fence);
+    }
+  }
+  const { h, conductor } = await grouped(t, { store: new NoTurnStore() });
+  const c = conductor('invite-1');
+  const first = await h.orchestrator.delegate(c, { runner: 'fake', brief: '1' });
+  const second = await h.orchestrator.delegate(c, { runner: 'fake', brief: '2' });
+  await eventually(() => started(h, first.taskId), 'the first run');
+  await h.fake.runFor(first.taskId).complete();
+  await eventually(() => h.orchestrator.taskStateOf(second.taskId) === 'failed', 'failed');
+  assert.equal(started(h, second.taskId), false);
+  assert.match(
+    h.orchestrator.status(c, second.taskId).failureReason ?? '',
+    /its turn could not be recorded: disk full/u,
+  );
 });
 
 test('without admission nothing is held', async (t) => {
