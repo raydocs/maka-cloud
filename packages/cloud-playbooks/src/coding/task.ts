@@ -87,6 +87,8 @@ export function isRepoPath(path: string): boolean {
  * A file of the task directory a script is told to read or write: relative, every part a plain
  * name (letters, digits, `.`, `_`, `-`), none empty, none starting with a dot, so no `..`, no
  * hidden file and nothing the scripts' own temporary names (`.publish.*`) could collide with.
+ * A slash is allowed because `READ_SMALL_SCRIPT` and `rm` take `handoff/<name>`; `publishForAgent`
+ * copies into `handoff/` itself and refuses a name with a slash.
  */
 export function isTaskFile(name: string): boolean {
   return /^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/u.test(name);

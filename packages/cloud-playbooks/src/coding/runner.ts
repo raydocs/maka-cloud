@@ -1757,6 +1757,9 @@ class CodingRun implements RunHandle {
 
   /** A file of the task directory, copied where the agent's account can read it. */
   private async publishForAgent(name: string): Promise<void> {
+    // The script copies into `handoff/` directly, which has no subdirectories: no slash here.
+    if (name.includes('/'))
+      throw new Error('a sandbox script was refused: MAKA_FILE is not a plain file name');
     this.refuseEnv({ MAKA_FILE: name });
     const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
