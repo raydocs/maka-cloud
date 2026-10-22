@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,7 @@ import {
   listBackups,
   restoreBackup,
   verifyBackup,
+  withoutSecretShapesInJson,
 } from '../backup.js';
 import { backupLayoutOf, dataPathsOf } from '../config.js';
 
@@ -484,6 +485,97 @@ test('from outside, a database a running server holds exclusively is refused wit
     /held by a running server, which backs itself up/u,
   );
   assert.deepEqual(await readdir(backupDir), [], 'no scratch directory is left');
+});
+
+test('a conversation line keeps its numbers and its nesting when a key is taken out of it', () => {
+  const line = '{"n":9007199254740993,"big":1e400,"z":-0,"text":"mki_0123456789abcdef"}';
+  assert.equal(
+    withoutSecretShapesInJson(line),
+    '{"n":9007199254740993,"big":1e400,"z":-0,"text":"[secret removed]"}',
+  );
+  // Nested deeper than a call stack could walk, with nothing in it: as it was.
+  const deep = `${'['.repeat(20_000)}"x"${']'.repeat(20_000)}`;
+  assert.equal(withoutSecretShapesInJson(deep), deep);
+  const deepKey = `${'['.repeat(20_000)}"mki_0123456789abcdef"${']'.repeat(20_000)}`;
+  assert.equal(
+    withoutSecretShapesInJson(deepKey),
+    `${'['.repeat(20_000)}"[secret removed]"${']'.repeat(20_000)}`,
+  );
+  // A string as long as a stored line may be, with and without a key in it.
+  const long = 'x'.repeat(16_000_000);
+  assert.equal(
+    withoutSecretShapesInJson(JSON.stringify({ text: long })),
+    JSON.stringify({ text: long }),
+  );
+  assert.equal(
+    withoutSecretShapesInJson(JSON.stringify({ text: `${long} mki_0123456789abcdef` })),
+    JSON.stringify({ text: `${long} [secret removed]` }),
+  );
+});
+
+test('a private key in a stored conversation leaves no line of its body in the backup, however it is escaped', async (t) => {
+  const { dataDir, backupDir } = await dirs(t);
+  await populate(dataDir);
+  const paths = dataPathsOf(dataDir);
+  const store = SqliteTranscriptStore.open(paths.transcriptsDbPath);
+  const session = '11111111-2222-4333-8444-555555555555';
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 1024,
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  });
+  const body = privateKey.split('\n').filter((line) => line !== '' && !line.startsWith('-----'));
+  const line = (uuid: string, text: string) => JSON.stringify({ type: 'user', uuid, text });
+  const rows: [string, string, string][] = [
+    ['a', line('a', `key.pem:\n${privateKey}after it`), 'key.pem:\n[secret removed]\nafter it'],
+    // Line breaks written as \u000a, slashes as \/: the same JSON value.
+    [
+      'b',
+      line('b', `key.pem:\n${privateKey}after it`).replaceAll('\\n', '\\u000a'),
+      'key.pem:\n[secret removed]\nafter it',
+    ],
+    [
+      'c',
+      line('c', `key.pem:\n${privateKey}after it`).replaceAll('/', '\\/'),
+      'key.pem:\n[secret removed]\nafter it',
+    ],
+    // URL-encoded inside the text itself.
+    [
+      'd',
+      line('d', `key.pem:\n${privateKey.replaceAll('\n', '%0A')}after it`),
+      'key.pem:\n[secret removed]%0Aafter it',
+    ],
+    // Cut off before its end line: the rest of the text goes with it.
+    ['e', line('e', `key.pem:\n${privateKey.slice(0, 400)}`), 'key.pem:\n[secret removed]'],
+  ];
+  await store.append(
+    'tsk_1',
+    { projectKey: '-work-x', sessionId: session },
+    rows.map(([uuid, json]) => ({ json, uuid })),
+  );
+  const done = await backupAll({
+    dataDir,
+    backupDir,
+    layout: backupLayoutOf(dataDir),
+    env,
+    now: () => T0,
+    inProcess: { 'transcripts.db': (to) => store.backupTo(to) },
+  });
+  const copy = SqliteTranscriptStore.open(join(done.path, 'transcripts.db'));
+  const lines = (await copy.read('tsk_1', session)).lines;
+  copy.close();
+  assert.equal(lines.length, rows.length);
+  for (const [i, [uuid, , text]] of rows.entries()) {
+    const raw = lines[i] as string;
+    // Still one JSON line, and still the text around the key.
+    const read = JSON.parse(raw).text as string;
+    assert.equal(read, text, uuid);
+    for (const part of body) {
+      assert.ok(!raw.includes(part) && !read.includes(part), `${uuid}: a line of the body`);
+    }
+    assert.doesNotMatch(raw, /PRIVATE KEY/u, uuid);
+  }
+  store.close();
 });
 
 test('the stored conversations are backed up with key-shaped text taken out of the copy, and left in the live file', async (t) => {

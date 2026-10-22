@@ -12,7 +12,7 @@ import { scrubKeyShapes } from '@maka-cloud/orchestrator';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { assertAgentChannel } from '@maka-cloud/runners';
 import { pushConfigFromEnv } from '@maka-cloud/server';
-import { type BackupLayout, withoutSecretShapes } from './backup.js';
+import { type BackupLayout, withoutSecretShapesInJson } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
 /**
@@ -233,7 +233,7 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
             json: string;
           }>;
           for (const row of rows) {
-            const clean = scrubKeyShapes(withoutSecretShapes(row.json));
+            const clean = scrubKeyShapes(withoutSecretShapesInJson(row.json));
             if (clean !== row.json) {
               update.run(clean, row.task_id, row.session_id, row.subpath, row.n);
             }
