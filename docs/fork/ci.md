@@ -26,7 +26,7 @@ repository also requires approval before any workflow runs for an outside contri
 
 | Runner | Host | Labels |
 |---|---|---|
-| `mac-mini` | Mac mini (Apple silicon) | `self-hosted`, `mac` |
+| `mac-mini`, `mac-mini-2` | Mac mini (Apple silicon, 12 cores, 16 GB), two instances: two mobile jobs at once | `self-hosted`, `mac` |
 | `vps-1` | Ubuntu 24.04 server (12 vCPU, 15 GB, no KVM) | `self-hosted`, `vps`, `vps-test` |
 | `vps-2` | the same server, second instance | `vps-test`, `vps-docker` |
 
@@ -40,6 +40,10 @@ To use it again, set `CI_RUNNER` to `["self-hosted","vps"]`, after that test pas
 
 The VPS has no `/dev/kvm`, so the Android emulator runs on the Mac: an arm64 emulator and an
 `arm64-v8a` build. On GitHub's image it is x86_64 under KVM.
+
+Every push to `main` runs the mobile lane without a filter, and a merge every few minutes used to
+queue one 13-minute run per commit on the Mac. Pushes to `main` now share one concurrency group: the
+run in progress finishes, and the newest push replaces any run still waiting.
 
 ## What the hosts need (set up by hand, not in the repository)
 

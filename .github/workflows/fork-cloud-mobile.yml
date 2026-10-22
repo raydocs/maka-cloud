@@ -19,8 +19,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A pull request keeps one run, its newest. Pushes to main share one group too: the run in
+# progress finishes, and a newer push replaces any that is still waiting, so the Mac does not work
+# through main commits that later ones already include.
 concurrency:
-  group: fork-cloud-mobile-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  group: fork-cloud-mobile-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
