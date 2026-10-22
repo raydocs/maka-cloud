@@ -4,6 +4,8 @@
 # checked, and the files that need the second account are named so that moving one fails here.
 set -eu
 
+# The patterns are quoted on purpose: they are matched by `node --test` inside the package, not by
+# this shell in /app/packages.
 for file in \
   cloud-runners/dist/__tests__/agent-user.test.js \
   cloud-playbooks/dist/coding/__tests__/check-real-account.test.js \
@@ -25,5 +27,5 @@ run() {
   fi
 }
 
-run cloud-runners dist/__tests__/*.test.js
-run cloud-playbooks dist/coding/__tests__/*.test.js
+run cloud-runners 'dist/__tests__/*.test.js'
+run cloud-playbooks 'dist/coding/__tests__/*.test.js'
