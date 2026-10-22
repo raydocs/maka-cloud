@@ -117,10 +117,38 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `GET /v1/push/key` | `{publicKey}`, the VAPID public key. 404 when push is not configured (so are the next two). |
 | `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
 | `DELETE /v1/push/subscriptions` | `{endpoint}` -> 204. Only the invite that registered it can remove it; otherwise 404. |
+| `GET /v1/home` | The caller's Home as the server keeps it: `{cards: [{cardId, kind, ref, rank, seenAt, at, state?, text?}]}` (see "Home cards"). |
+| `POST /v1/home/seen` | `{cardIds}` (at most 100): the person saw these cards and left Home. Records the ones that are on this Home and moves the caller's visit to now. 200 `{seen, visitedAt}`. |
+| `POST /v1/home/order` | `{cardId, after}`: moves a card to just after `after` (first when null) inside its kind. 200 `{cards}`; 404 a card that is not on this Home; 400 `after` in another kind, itself, or not there. |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
 Unknown or malformed ids are 404. Bodies over 64 KiB are 413; message text is
 capped at 32,000 bytes.
+
+### Home cards
+
+`home.ts`. Home is a list of cards the server builds for one invite from that invite's own conversations, projects and
+rows, and keeps the order and what was seen (schema v12: `home_visits`, `home_seen`, `home_order`, `home_notes`).
+A card is `kind:what it points at` (`waiting:<inbox item>`, `finished:<task>`, `scheduled:<duty>`), so the same thing is
+always the same card. `ref` says where to read it (an inbox item, a task of a conversation, a duty of a project, a note);
+clients resolve it as they already do, and `HomeFeed` keeps building Home from its own parts on a server without
+`/v1/home`.
+
+- **Order.** Waiting (open inbox items that are not suggestions; one that interrupts first, then the longest-waiting),
+  suggestions (newest first), finished (top-level tasks that ended after the caller last left Home, or in the last day on a
+  first visit; newest first, at most 8), notes (newest first, at most 5, for a week), scheduled (duties on a schedule
+  that are on, soonest first, at most 5). Ties break on the card id, so the list is a function of its input.
+- **Seen.** `POST /v1/home/seen` records the cards shown and moves the caller's visit; what finished before the visit is not
+  new any more, on every device. A tab that goes to the background sends it too, so what it showed is gone from Home
+  for good: clients should send it when the person leaves, not on every hide they cannot tell from leaving. Per invite: another invite's cards, seen times and order are never read or written. Only a card on
+  the caller's Home is recorded, and the rows are capped (1,000 seen for 30 days, 500 ordered).
+- **Moving.** A card moves inside its kind, never across (waiting always leads). The moved cards keep the owner's order;
+  a card that arrives later comes before them in the kind's own order.
+- **Notes.** The one card the employee writes. `CloudServer.addHomeNote(owner, note)` takes a template (`pull_request_merged`,
+  `checks_failed`) with typed parameters (a repository name from a fixed alphabet, a number, one of a few words) and
+  stores exactly that; the words are the server's and are made when the card is read. Free text, extra keys and anything
+  that does not fit the alphabet are refused, so nothing a model or another person wrote can reach a note. Nothing
+  calls it yet: the duties engine can once it reports a merge.
 
 ### Public view
 
