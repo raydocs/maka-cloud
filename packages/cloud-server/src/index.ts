@@ -5,6 +5,7 @@ export {
   type ConversationHandler,
   type CreateConversationInput,
   type CreateConversationResult,
+  DEFAULT_TASKS_PER_INVITE,
   type StartConversationInput,
   type StartConversationResult,
   startCloudServer,

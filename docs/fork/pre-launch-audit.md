@@ -88,6 +88,14 @@ Findings:
   so no money or tenant line is crossed. Per-task accounts (r19-4) are parked. For launch, either
   say "one task at a time per invite" in the runbook or cap active tasks per invite at 1; the
   rehearsal's `approval` step starts two tasks in one conversation, so a first user will do the same.
+  **Capped**: one task tree runs at a time per invite (`MAKA_CLOUD_TASKS_PER_INVITE`, default 1;
+  `Admission` in `cloud-orchestrator/src/orchestrator.ts`, wired in `cloud-server.ts`). A further
+  top-level task of the invite, in any of its conversations, waits as `queued` with the note "One
+  task runs at a time on this workspace for now. This one starts when <title> finishes." and starts
+  once nothing of the running tree can still run (ended, no stop owed, no stream still read). Tasks
+  the running task delegates are its own tree and are not held. A task that waits through a restart
+  waits again. Covered by `admission.test.ts` and `tasks-per-invite.test.ts`. Lift it when per-task
+  accounts land (`post-launch-backlog.md`).
 - **P2 (follow-up to #312, told to T28)**: the base-check revert and restore and the `add -A` of the
   change are check-then-act and hold only while no agent process is alive, but the runner stops the
   agent's runs only in the final cleanup (`cloud-playbooks/src/coding/runner.ts:1797`); a background

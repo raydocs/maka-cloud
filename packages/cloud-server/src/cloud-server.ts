@@ -160,6 +160,13 @@ export interface SupervisorParts {
   onWarning(message: string, detail?: unknown): void;
 }
 
+/**
+ * Task trees one invite may run at once. Every task of an invite runs on the invite's machine as
+ * one agent account, so two at once could change each other's files; a further top-level task
+ * waits its turn as `queued`. Lift it when each task gets an account of its own.
+ */
+export const DEFAULT_TASKS_PER_INVITE = 1;
+
 export interface CloudServerOptions {
   /** The SQLite file. Exactly one server may have it open. */
   dbPath: string;
@@ -176,6 +183,8 @@ export interface CloudServerOptions {
     OrchestratorOptions,
     'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend' | 'limits'
   >;
+  /** Task trees one invite may run at once (default `DEFAULT_TASKS_PER_INVITE`); the rest wait. */
+  tasksPerInvite?: number;
   handler?: ConversationHandler;
   /**
    * Builds the handler once the database is open, with the publisher it posts
@@ -376,8 +385,15 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   try {
     const hub = new FeedHub();
     const store = new SqliteTaskStore(db, hub);
+    // Set once the conversations are open; nothing delegates or resumes before that.
+    let inviteOfRoot: ((sessionId: string) => string | undefined) | undefined;
     const orchestrator = await Orchestrator.create({
       ...options.orchestrator,
+      // The tasks of one invite wait for each other: they share its machine and agent account.
+      admission: {
+        groupOf: (sessionId) => inviteOfRoot?.(sessionId),
+        perGroup: options.tasksPerInvite ?? DEFAULT_TASKS_PER_INVITE,
+      },
       store,
       sessions: new SqliteSessionStore(db, options.orchestrator?.now),
       runners: options.runners,
@@ -412,6 +428,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       () => orchestrator.issueSession(),
       options.orchestrator?.now,
     );
+    inviteOfRoot = (sessionId) => {
+      const conversationId = conversations.conversationOf(sessionId);
+      return conversationId === undefined ? undefined : conversations.ownerOf(conversationId);
+    };
     if (options.push) {
       const { transport, retryDelayMs, maxAttempts, timeoutMs, ...config } = options.push;
       push = new PushService(db, hub, invites, {
