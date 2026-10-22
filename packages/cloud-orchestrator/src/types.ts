@@ -1,6 +1,23 @@
 import { z } from 'zod';
 
 export type TaskId = string;
+
+export const PANEL_KINDS = ['shell', 'tests', 'diff', 'review', 'search'] as const;
+export type PanelKind = (typeof PANEL_KINDS)[number];
+export const PANEL_STATES = ['running', 'passed', 'failed', 'stopped'] as const;
+export type PanelState = (typeof PANEL_STATES)[number];
+
+/** A panel as the log and clients hold it. */
+export interface TaskPanel {
+  panelId: string;
+  kind: PanelKind;
+  state: PanelState;
+  title: string;
+  /** One of the fixed shapes of its kind (`cleanPanel`), never free text. */
+  summary: string;
+  /** The last lines of what the panel shows, scrubbed and cut to `MAX_PANEL_TAIL_LINES` / `MAX_PANEL_TAIL_BYTES`. */
+  tail?: string;
+}
 export type SessionId = string;
 
 export const TASK_STATES = [
@@ -79,6 +96,18 @@ export type TaskEvent =
       recovery?: string;
     }
   | { type: 'task_progress'; taskId: TaskId; note: string }
+  /**
+   * What the run is doing, in one short present-tense line. A viewer shows it in place of the
+   * last one; the notes stay for history. A reader copy: nothing in the orchestrator reads it back,
+   * and it is never part of what a model is given.
+   */
+  | { type: 'task_narration'; taskId: TaskId; line: string }
+  /**
+   * One panel of the task's work (a test run, a diff, a review), updated in place by `panelId`.
+   * A reader copy like `task_narration`, and never evidence: the proof of a coding task stays its
+   * verification record. See `cleanPanel` for what each field may hold.
+   */
+  | ({ type: 'task_panel'; taskId: TaskId } & TaskPanel)
   /**
    * The run of a task that was cut off by a restart is going again, in `epoch`. `text` is what a
    * viewer shows in place of whatever it had of the cut-off turn, so the same answer is not shown
@@ -236,6 +265,9 @@ export interface TaskRecord {
   runMs: number;
   runSince?: number;
   progress: string[];
+  /** How many narration lines and panel updates the log holds for the task (the caps in panels.ts). */
+  narrations?: number;
+  panelUpdates?: number;
   manifest?: ResultManifest;
   /** What the runner kept for the owner when the task ended without a result; see `task_failed`. */
   kept?: ResultManifest;
