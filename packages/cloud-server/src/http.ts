@@ -32,6 +32,7 @@ import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
 import type { InboxRoutes } from './inbox.js';
 import type { AccountStore } from './accounts.js';
+import type { AuthRoutes } from './auth-routes.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import type { PushApi } from './push.js';
 import { toPublicView } from './public-view.js';
@@ -181,6 +182,8 @@ export interface PublicApiDeps {
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
   /** Absent when no supervisor runs; the `/v1/inbox` routes then answer 404. */
   inbox?: InboxRoutes;
+  /** Absent when no sign-in is configured; `/v1/auth` then answers like any unknown path. */
+  auth?: AuthRoutes;
   /** Absent when no duties engine runs; `/github/webhook` and `/v1/projects` then answer like any unknown path. */
   duties?: DutyRoutes;
 }
@@ -386,6 +389,11 @@ export class PublicApi {
         await this.deps.duties.webhook(req, res);
         return;
       }
+      // Signing in comes before there is anything to authenticate with.
+      if (this.deps.auth?.isPublic(url.pathname)) {
+        await this.deps.auth.handlePublic(req, res, url);
+        return;
+      }
       const invite = this.authenticate(req);
       await this.route(req, res, url, invite);
     } catch (error) {
@@ -474,6 +482,9 @@ export class PublicApi {
   ): Promise<void> {
     const path = url.pathname;
     const method = req.method ?? 'GET';
+    if (this.deps.auth && path.startsWith('/v1/auth/')) {
+      if (await this.deps.auth.handleSigned(req, res, url, invite)) return;
+    }
     if (path === '/v1/memory' && method === 'GET') {
       return respond(res, 200, this.deps.memory.profile(invite.inviteId));
     }

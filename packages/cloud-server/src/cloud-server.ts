@@ -34,6 +34,16 @@ import {
 } from './http.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { AccountStore } from './accounts.js';
+import { type AuthLimits, AuthRoutes } from './auth-routes.js';
+import { EmailCodes, type Mailer, NonceStore } from './challenges.js';
+import {
+  APPLE,
+  createOidcVerifier,
+  GOOGLE,
+  type IdentityVerifier,
+  type JwksSource,
+  jwksFromSafeFetch,
+} from './identity.js';
 import { InviteStore } from './invites.js';
 import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
@@ -236,6 +246,25 @@ export interface CloudServerOptions {
    * like any unknown path. The caller owns it and closes it after the server.
    */
   duties?: DutyService;
+  /**
+   * Signing in with Apple, Google or an emailed code (T31). `apple` and `google` list the client
+   * ids the owner registered; a provider with none is off, and with no `mailer` there is no email
+   * sign-in. Without any of them `/v1/auth` answers like any unknown path and invite tokens remain
+   * the only way in. `jwks` replaces the fetch of the providers' public keys (tests only).
+   */
+  auth?: {
+    apple?: { audiences: string[] };
+    google?: { audiences: string[] };
+    mailer?: Mailer;
+    jwks?: JwksSource;
+    limits?: Partial<AuthLimits>;
+    /** Mail the server may send in an hour, over all addresses (default 300). */
+    maxMailsPerHour?: number;
+    /** The server is behind one reverse proxy: count sign-in limits per forwarded client address. */
+    trustProxy?: boolean;
+    /** Tests only: the clock of nonces, codes and rate limits. */
+    now?: () => number;
+  };
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
 }
@@ -564,11 +593,46 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         onWarning: warn,
       });
     }
+    const authOptions = options.auth;
+    const verifiers: Partial<Record<'apple' | 'google', IdentityVerifier>> = {};
+    if (authOptions) {
+      const jwks = authOptions.jwks ?? jwksFromSafeFetch(createSafeFetch());
+      const apple =
+        authOptions.apple && createOidcVerifier({ ...APPLE, ...authOptions.apple }, jwks);
+      const google =
+        authOptions.google && createOidcVerifier({ ...GOOGLE, ...authOptions.google }, jwks);
+      if (apple) verifiers.apple = apple;
+      if (google) verifiers.google = google;
+    }
+    const auth =
+      authOptions && (verifiers.apple || verifiers.google || authOptions.mailer)
+        ? new AuthRoutes({
+            accounts,
+            invites,
+            nonces: new NonceStore(authOptions.now),
+            verifiers,
+            ...(authOptions.mailer
+              ? {
+                  emailCodes: new EmailCodes(
+                    authOptions.mailer,
+                    authOptions.now,
+                    authOptions.maxMailsPerHour,
+                  ),
+                }
+              : {}),
+            ...(authOptions.now ? { now: authOptions.now } : {}),
+            ...(authOptions.trustProxy ? { trustProxy: true } : {}),
+            ...(authOptions.limits ? { limits: authOptions.limits } : {}),
+            reauthenticate: (invite) => api.reauthenticate(invite),
+            removePush: (inviteId, endpoint) => push?.remove(inviteId, endpoint) ?? false,
+          })
+        : undefined;
     const api = new PublicApi({
       db,
       memory,
       invites,
       accounts,
+      ...(auth ? { auth } : {}),
       conversations,
       tasks: store,
       hub,
