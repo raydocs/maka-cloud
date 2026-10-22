@@ -162,23 +162,14 @@ const MAX_REPRO_BYTES = 16 * 1024;
 const MAX_CHECK_MS = 570_000;
 /** Seconds an exec of CHECK_SCRIPT may take beyond the check's own limit. */
 const CHECK_EXEC_SLACK_SECONDS = 30;
-/** The `timeout -k 5` in `CHECK_SCRIPT`: KILL follows TERM this many seconds after the limit. */
-const CHECK_KILL_GRACE_SECONDS = 5;
-
 /**
- * Whether `timeout` ended a check, from its exit and how long the whole check took. `timeout`
- * exits 124 when TERM ended the command at the limit, and 137 only when it had to send KILL, the
- * grace after that. The time includes the sandbox's own setup, so a command that killed itself
- * with signal 9 on a slow machine is not taken for one that ran out of time.
+ * Whether `timeout` ended a check: it exits 124 after TERM, or 137 when the command died of KILL,
+ * whether timeout sent it or the command answered TERM by killing itself. Either way the command
+ * ran for the whole limit, so `ranMs` is how long the command itself ran (`RAN_MS` from
+ * `CHECK_SCRIPT`, without the sandbox's setup). A command that killed itself early ran for less.
  */
-export function checkTimedOut(
-  exitCode: number,
-  elapsedMs: number,
-  timeoutSeconds: number,
-): boolean {
-  if (exitCode === 124) return elapsedMs >= timeoutSeconds * 1000;
-  if (exitCode === 137) return elapsedMs >= (timeoutSeconds + CHECK_KILL_GRACE_SECONDS) * 1000;
-  return false;
+export function checkTimedOut(exitCode: number, ranMs: number, timeoutSeconds: number): boolean {
+  return (exitCode === 124 || exitCode === 137) && ranMs >= timeoutSeconds * 1000;
 }
 
 class CancelledError extends Error {}
@@ -1533,7 +1524,13 @@ class CodingRun implements RunHandle {
       if (out.timedOut) {
         return { ...result, exitCode: -1, timedOut: true };
       }
-      const timedOut = checkTimedOut(out.exitCode, elapsedMs, timeoutSeconds);
+      // The command's own time when the script reported it; the whole check's otherwise.
+      const ran = /^RAN_MS (\d+)$/mu.exec(out.stderr);
+      const timedOut = checkTimedOut(
+        out.exitCode,
+        ran ? Number(ran[1]) : elapsedMs,
+        timeoutSeconds,
+      );
       return { ...result, exitCode: out.exitCode, ...(timedOut ? { timedOut: true } : {}) };
     } finally {
       stats.checks--;

@@ -135,13 +135,13 @@ test('the coding runner wires onto the T6 runners', async () => {
   assert.equal(runner.options.agents.codex, cloud.codex);
 });
 
-test('a check killed by signal 9 is a timeout only when timeout itself had to send KILL', () => {
-  // TERM at the limit: timeout exits 124.
+test('a check is a timeout when the command itself ran for the whole limit', () => {
+  // TERM at the limit (124), or KILL after it (137), also when the command answered TERM by
+  // killing itself.
   assert.equal(checkTimedOut(124, 1_000, 1), true);
+  assert.equal(checkTimedOut(137, 1_000, 1), true);
+  // A command that killed itself before the limit, however long the sandbox took to start.
+  assert.equal(checkTimedOut(137, 20, 1), false);
   assert.equal(checkTimedOut(124, 400, 1), false);
-  // KILL comes 5 s after the limit. A command that killed itself, on a machine whose sandbox took
-  // over a second to start, is not a timeout.
-  assert.equal(checkTimedOut(137, 1_500, 1), false);
-  assert.equal(checkTimedOut(137, 6_000, 1), true);
   assert.equal(checkTimedOut(1, 60_000, 1), false);
 });
