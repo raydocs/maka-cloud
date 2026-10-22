@@ -213,6 +213,21 @@ export interface HomeCard {
   text?: string;
 }
 
+/**
+ * An approval the owner chose to keep ("for this task", "for this repository"): what it lets the
+ * agent do without asking again. Whose it is, and the call's exact arguments, stay on the server.
+ */
+export interface Grant {
+  grantId: string;
+  tool: string;
+  repository: string;
+  scope: 'task' | 'repository';
+  createdAt: number;
+  expiresAt: number;
+  uses: number;
+  lastUsedAt: number | null;
+}
+
 /** A standing duty of a project as the public API shows it (T23). Only what a page shows is typed. */
 export interface DutyView {
   dutyId: string;
@@ -370,6 +385,9 @@ export const routes = {
   control: (task: string, action: TaskControl) => `/v1/tasks/${encodeURIComponent(task)}/${action}`,
   computer: (task: string) => `/v1/tasks/${encodeURIComponent(task)}/computer`,
   inboxItems: '/v1/inbox/items',
+  grants: '/v1/inbox/grants',
+  grant: (id: string) => `/v1/inbox/grants/${encodeURIComponent(id)}`,
+  grantsRevoke: '/v1/inbox/grants/revoke',
   projects: '/v1/projects',
   home: '/v1/home',
   homeSeen: '/v1/home/seen',

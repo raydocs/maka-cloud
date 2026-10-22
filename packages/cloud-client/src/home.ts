@@ -103,3 +103,31 @@ const VERB: Record<string, string> = {
   suggestion: 'Suggested',
 };
 export const verbOf = (kind: string) => VERB[kind] ?? 'Decide';
+
+/** How long ago, in the same words as `relativeTime`: "just now", "5 min ago", "3 h ago", "2 days ago". */
+export function timeAgo(at: number, now: number): string {
+  const minutes = Math.max(0, Math.round((now - at) / 60_000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+/** A kept approval in a person's words: how far it reaches, how it was used, when it ends. */
+export function grantFacts(
+  grant: { scope: 'task' | 'repository'; uses: number; lastUsedAt: number | null; expiresAt: number },
+  now: number,
+): { scope: string; uses: string; ends: string } {
+  const uses =
+    grant.uses === 0
+      ? 'Not used yet'
+      : `${grant.uses === 1 ? 'Used once' : `Used ${grant.uses} times`}${
+          grant.lastUsedAt === null ? '' : `, last ${timeAgo(grant.lastUsedAt, now)}`
+        }`;
+  return {
+    scope: grant.scope === 'task' ? 'For one task' : 'For this repository',
+    uses,
+    ends: `Ends ${relativeTime(grant.expiresAt, now)}`,
+  };
+}
