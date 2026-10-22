@@ -10,7 +10,7 @@ because without it every later step is tuned by feel.
 |---|---|---|
 | Judge whether a change to the system helped | **Scorecard** (`cloud-evals scorecard`): resolve rate, hands-off rate, false confidence, cost, against a baseline run | this change |
 | Check that a result is right | Proof block: reproduction test, the repository's tests, a second vendor's review (`verification.json`, C5) | built; the PR body is #332 |
-| Run an outside review and turn findings into fix PRs | Review loop: P1 findings go back to the implementer until the review is clean or a round or dollar cap is reached | one round today (`FixRecord`) |
+| Run an outside review and turn findings into fix PRs | Review loop: P1 and P2 findings go back to the implementer until the review is clean or a round or dollar cap is reached | built: up to `fixRounds` (default 3) rounds, each re-checked and reviewed afresh, recorded in `review.fix` |
 | Choose what to work on | Intake: failing CI (C2), GitHub issues (C3) and the employee's own suggestions (T30) start tasks | T30 built; C2, C3 open |
 | Give the same correction again | Repository conventions (C4) and memory: a correction given twice becomes a rule every brief carries | open |
 | Decide how far to trust a change | Autonomy levels per repository, earned on the scorecard (below) | open |
@@ -63,7 +63,9 @@ level. Level 2 is off by default and is turned on per repository by the owner.
    must fail on the parent and pass on the merge. Packages that test on their own (`cloud-design`, `cloud-client`)
    come first, because a full monorepo build does not fit in a check's time limit.
 3. **Close the review loop.** Findings go back for fixing until the review is clean, within a round and dollar cap.
-   Kept only if a scorecard run shows the hands-off rate up and false confidence not up.
+   Built: up to three fix rounds by default (`limits.fixRounds`), each re-running the checks and a fresh review by
+   the other vendor, within the review's share of the budget; a P1 left at the end keeps the change for the owner
+   (see the coding playbook). Kept only if a scorecard run shows the hands-off rate up and false confidence not up.
 4. **Intake.** Failing CI and labelled issues start tasks on their own (C2, C3). Nothing merges at level 1.
 5. **Remember corrections** (C4), measured on the suite from step 2.
 6. **Autonomy level 2**, per repository, once its scorecard earns it.
