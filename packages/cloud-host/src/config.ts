@@ -428,7 +428,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_GATEWAY_MODELS',
-    'JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one',
+    'JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; adds prices and replaces a built-in one by vendor and model (built in: the Claude models and gpt-6.1-sol, the built-in modes’ Codex model); any other Codex model needs one',
   ],
   [
     'MAKA_CLOUD_MODES',
@@ -976,8 +976,9 @@ function describeModes(modes: ModesConfig): string {
 }
 
 function describeModels(models: readonly ModelPrice[]): string {
-  if (models.length === 0) return 'built-in Claude prices only (Codex tasks will be refused)';
-  return `built-in Claude prices and ${models.length} configured`;
+  const builtIn = 'built-in Claude and gpt-6.1-sol prices';
+  if (models.length === 0) return `${builtIn} only`;
+  return `${builtIn} and ${models.length} configured`;
 }
 
 function describeVerifiers(inbox: InboxConfig): string {

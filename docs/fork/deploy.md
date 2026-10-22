@@ -404,7 +404,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_GATEWAY_HOST` | model gateway host (default 127.0.0.1) |
 | `MAKA_CLOUD_GATEWAY_PORT` | model gateway port (default 8082) |
 | `MAKA_CLOUD_GATEWAY_PUBLIC_URL` | the model gateway as the sandbox reaches it (https, or http on a loopback host) |
-| `MAKA_CLOUD_GATEWAY_MODELS` | JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; Codex models need one |
+| `MAKA_CLOUD_GATEWAY_MODELS` | JSON array of model prices for the gateway: {vendor, model, inputPerMTokUsd, outputPerMTokUsd, cacheReadPerMTokUsd?, maxOutputTokens, longContext?}; adds prices and replaces a built-in one by vendor and model (built in: the Claude models and gpt-6.1-sol, the built-in modes’ Codex model); any other Codex model needs one |
 | `MAKA_CLOUD_MODES` | JSON: the modes (quick, standard, deep) as "maka-cloud modes" prints them: per mode the conductor, implementer, reviewer and helper models and effort, and the budgets; every model named needs a gateway price. Unset: the built-in modes |
 | `MAKA_CLOUD_VERIFIER_MODELS` | JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run |
 | `MAKA_CLOUD_VERIFIER_DAILY_CAP_USD` | daily cap on model checks, default 5; changeable in the inbox settings |
@@ -437,10 +437,18 @@ change, the other vendor reviews it; no setting can change that.
 `maka-cloud modes` prints the modes in force as JSON. To change them, save that
 output, edit it and set `MAKA_CLOUD_MODES` to it (the whole config, version 1; a
 config of another version is refused). Every model it names needs a price in the
-gateway: the Claude models are priced already, a Codex model needs an entry in
-`MAKA_CLOUD_GATEWAY_MODELS`. Until you name one, the Codex roles run on the Codex
-CLI's own default model, which the gateway cannot price, so a Codex run (and with
-it the review of a Claude change) is refused: `maka-cloud check` says how many
+gateway. Built in are the Claude models and `gpt-6.1-sol`, which the built-in modes
+give every Codex role, so a Codex run and the Codex review of a Claude change work
+with no setting beyond `OPENAI_API_KEY`. Its built-in price is OpenAI's standard API list price, read
+on 2026-10-22 from <https://developers.openai.com/api/docs/pricing>: $2 input,
+$0.10 cached input, $2.50 cache write and $10 output per million tokens, and twice
+the input and cache rates and 1.5 times the output once a request's input passes
+272K tokens. The gateway caps its output at 32K tokens per request (the model
+allows 128K), because each request reserves its cap in full. To price it
+differently, add an `openai` entry for `gpt-6.1-sol` to `MAKA_CLOUD_GATEWAY_MODELS`
+(it replaces the built-in one). Any other Codex model needs its own entry there. A
+role whose model you remove runs on the Codex CLI's own default model, which the
+gateway cannot price, so its runs are refused: `maka-cloud check` says how many
 roles are in that state.
 
 How a mode is chosen: a mode the user picks for a message that starts a run is that
