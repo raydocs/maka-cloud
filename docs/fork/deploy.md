@@ -47,6 +47,22 @@ and Compose were not run.
 | `OPENAI_API_KEY`, `MAKA_CLOUD_GATEWAY_MODELS`, `MAKA_CLOUD_VERIFIER_MODELS` | recommended | a model of another vendor that checks finished work; without a verifier model only the checks that need none run |
 | `CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` | optional | Web Push; make the pair with `node_modules/.bin/web-push generate-vapid-keys` in the checkout (it works offline) |
 
+**2b. Sign-in (owner items, none of them set by us)**
+
+The apps and the web open on "Continue with Apple / Google / email". Each way is off until
+you set what it needs, and the invite token box stays for the beta. A new person is asked for
+their invite code once, after the first sign-in. Nothing here is called until someone signs in.
+
+| Variable | What you provide |
+| --- | --- |
+| `MAKA_CLOUD_APPLE_CLIENT_IDS` | the iOS app's bundle id, and the Services id if the web uses Sign in with Apple |
+| `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | the Google OAuth client ids of the iOS, Android and web apps |
+| `MAKA_CLOUD_MAIL_API_URL`, `MAKA_CLOUD_MAIL_API_KEY`, `MAKA_CLOUD_MAIL_FROM` | a mail service that takes a POST of `{from, to, subject, text}` with a bearer key, and a sender it allows. All three or none |
+| `MAKA_CLOUD_TRUST_PROXY` | the address of the proxy in front of the server. The default `127.0.0.1,::1` is right for nginx or Caddy on the same host (systemd); `deploy/compose.yaml` sets Caddy's fixed address. Only that peer's `X-Forwarded-For` is believed, so a caller that reaches the server directly cannot choose its own rate limit. With no proxy at all, `0` |
+
+With none of them set the server answers invite tokens only. `check` prints a `sign-in:` line
+saying which ways are on.
+
 **3. A sandbox machine for each invite**
 
 - Create the machine in the sandbox provider's console, from an image with
@@ -230,6 +246,12 @@ Under Compose, run the commands below as
 `backup` and `restore` need the server stopped: `docker compose -f
 deploy/compose.yaml stop maka-cloud` first. Copy the `maka-backups` volume off
 the host as the backup section says.
+
+The file pins its network (`172.29.80.0/24`, Caddy at `172.29.80.250`) so the server can trust
+Caddy's forwarded client address and no other peer's. Choose another range in the file if your host
+already uses that one. A host that ran an earlier version of the file keeps its old network, and
+Compose will not change it in place: run `docker compose -f deploy/compose.yaml down` once (the
+volumes stay) and then the `up` command again.
 
 ## Rehearse it first
 
@@ -420,6 +442,12 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
 | `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
+| `MAKA_CLOUD_APPLE_CLIENT_IDS` | comma separated Sign in with Apple client ids (the app’s bundle id, the web Services id) a token may be made for. Unset: no Sign in with Apple |
+| `MAKA_CLOUD_GOOGLE_CLIENT_IDS` | comma separated Google OAuth client ids (iOS, Android, web) a token may be made for. Unset: no Sign in with Google |
+| `MAKA_CLOUD_MAIL_API_URL` | https URL of the mail service that sends sign-in codes: it takes a POST of {from, to, subject, text} with a bearer key. With the next two, turns on sign-in by emailed code. All three or none |
+| `MAKA_CLOUD_MAIL_API_KEY` | the mail service’s bearer key, kept in memory only |
+| `MAKA_CLOUD_MAIL_FROM` | the sender of sign-in mail, an address or Name <address> your mail service allows |
+| `MAKA_CLOUD_TRUST_PROXY` | comma separated IP addresses or ranges of the reverse proxy in front of the server. Only a request from one of them has its X-Forwarded-For client counted in the sign-in limits; from any other peer the header is ignored. Default 127.0.0.1,::1 (a proxy on the same host); under Compose the proxy’s fixed address. 0: trust none |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
 <!-- env:end -->
 

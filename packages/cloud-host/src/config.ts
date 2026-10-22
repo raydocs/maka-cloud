@@ -11,7 +11,7 @@ import {
 import { scrubKeyShapes } from '@maka-cloud/orchestrator';
 import { githubTokenProblem } from '@maka-cloud/playbooks/coding';
 import { assertAgentChannel } from '@maka-cloud/runners';
-import { DEFAULT_TASKS_PER_INVITE, pushConfigFromEnv } from '@maka-cloud/server';
+import { DEFAULT_TASKS_PER_INVITE, proxyList, pushConfigFromEnv } from '@maka-cloud/server';
 import { type BackupLayout, withoutSecretShapesInJson } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
 
@@ -19,6 +19,9 @@ import { type InboxConfig, readInboxConfig } from './inbox/config.js';
  * Everything the stack needs, read from the environment. Secret values are kept
  * only where they are used; `describeConfig` never prints them.
  */
+/** A reverse proxy on the same host: where the runbook's systemd setup puts it. */
+const DEFAULT_PROXIES = ['127.0.0.1', '::1'] as const;
+
 export interface StackConfig {
   dataDir: string;
   dbPath: string;
@@ -144,6 +147,20 @@ export interface StackConfig {
   dutyLinks: DutyLink[];
   /** Why no pull request can be opened with `MAKA_GITHUB_TOKEN`, if it cannot. */
   githubTokenProblem?: string;
+  /**
+   * Signing in with Apple, Google or an emailed code (T31). A way with no settings is off; with none
+   * on, invite tokens are the only way in. The mail key is read from the environment by the stack.
+   */
+  signIn: {
+    appleClientIds: string[];
+    googleClientIds: string[];
+    mail?: { apiUrl: string; from: string };
+    /**
+     * The addresses (IPs or CIDR ranges) of the reverse proxy in front: only a request from one of
+     * them is counted by the client it forwards in the sign-in limits. Empty: none is trusted.
+     */
+    trustedProxies: string[];
+  };
 }
 
 /** Why a backup directory cannot be used with a data directory, if it cannot. */
@@ -314,6 +331,81 @@ export const DEFAULT_SPEND_CAPS: SpendCaps = {
   serverDailyUsd: 25,
 };
 
+const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
+const MAIL_ADDRESS = '[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+';
+/** `a@b.c`, `<a@b.c>` or `Name <a@b.c>`: the brackets come as a pair. */
+const MAIL_FROM = new RegExp(
+  `^(?:${MAIL_ADDRESS}|(?:[A-Za-z0-9 ._'-]{1,60} )?<${MAIL_ADDRESS}>)$`,
+  'u',
+);
+
+function clientIds(raw: string | undefined, name: string, problems: string[]): string[] {
+  if (raw === undefined) return [];
+  const ids = raw.split(',').map((id) => id.trim());
+  if (ids.some((id) => !CLIENT_ID.test(id))) {
+    problems.push(`${name} must be client ids separated by commas`);
+    return [];
+  }
+  return ids;
+}
+
+function readSignIn(
+  value: (name: string) => string | undefined,
+  problems: string[],
+): StackConfig['signIn'] {
+  const signIn: StackConfig['signIn'] = {
+    appleClientIds: clientIds(
+      value('MAKA_CLOUD_APPLE_CLIENT_IDS'),
+      'MAKA_CLOUD_APPLE_CLIENT_IDS',
+      problems,
+    ),
+    googleClientIds: clientIds(
+      value('MAKA_CLOUD_GOOGLE_CLIENT_IDS'),
+      'MAKA_CLOUD_GOOGLE_CLIENT_IDS',
+      problems,
+    ),
+    trustedProxies: [...DEFAULT_PROXIES],
+  };
+  const proxy = value('MAKA_CLOUD_TRUST_PROXY');
+  if (proxy === '0') signIn.trustedProxies = [];
+  else if (proxy !== undefined) {
+    const entries = proxy.split(',').map((entry) => entry.trim());
+    try {
+      proxyList(entries);
+      signIn.trustedProxies = entries;
+    } catch {
+      problems.push(
+        'MAKA_CLOUD_TRUST_PROXY must be 0 or IP addresses or ranges separated by commas (for example 127.0.0.1,::1)',
+      );
+    }
+  }
+  const apiUrl = value('MAKA_CLOUD_MAIL_API_URL');
+  const key = value('MAKA_CLOUD_MAIL_API_KEY');
+  const from = value('MAKA_CLOUD_MAIL_FROM');
+  if (apiUrl === undefined && key === undefined && from === undefined) return signIn;
+  if (apiUrl === undefined || key === undefined || from === undefined) {
+    problems.push(
+      'MAKA_CLOUD_MAIL_API_URL, MAKA_CLOUD_MAIL_API_KEY and MAKA_CLOUD_MAIL_FROM go together',
+    );
+    return signIn;
+  }
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(apiUrl);
+  } catch {
+    problems.push('MAKA_CLOUD_MAIL_API_URL is not a URL');
+  }
+  if (parsed !== undefined) {
+    if (parsed.protocol !== 'https:') problems.push('MAKA_CLOUD_MAIL_API_URL must be an https URL');
+    else if (parsed.username !== '' || parsed.password !== '') {
+      problems.push('MAKA_CLOUD_MAIL_API_URL must not carry credentials');
+    } else if (!MAIL_FROM.test(from)) {
+      problems.push('MAKA_CLOUD_MAIL_FROM must be an address or Name <address>');
+    } else signIn.mail = { apiUrl, from };
+  }
+  return signIn;
+}
+
 /** The shortest webhook secret accepted: the duties engine refuses a shorter one. */
 const MIN_WEBHOOK_SECRET_LENGTH = 16;
 
@@ -331,6 +423,7 @@ const KEY_VARIABLES = [
   'INSTABOX_API_KEY',
   'CLOUD_PUSH_VAPID_PRIVATE',
   'MAKA_GITHUB_TOKEN',
+  'MAKA_CLOUD_MAIL_API_KEY',
 ] as const;
 
 export class ConfigError extends Error {
@@ -476,6 +569,27 @@ export const ENV_VARIABLES = [
     '1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off',
   ],
   [
+    'MAKA_CLOUD_APPLE_CLIENT_IDS',
+    'comma separated Sign in with Apple client ids (the app’s bundle id, the web Services id) a token may be made for. Unset: no Sign in with Apple',
+  ],
+  [
+    'MAKA_CLOUD_GOOGLE_CLIENT_IDS',
+    'comma separated Google OAuth client ids (iOS, Android, web) a token may be made for. Unset: no Sign in with Google',
+  ],
+  [
+    'MAKA_CLOUD_MAIL_API_URL',
+    'https URL of the mail service that sends sign-in codes: it takes a POST of {from, to, subject, text} with a bearer key. With the next two, turns on sign-in by emailed code. All three or none',
+  ],
+  ['MAKA_CLOUD_MAIL_API_KEY', 'the mail service’s bearer key, kept in memory only'],
+  [
+    'MAKA_CLOUD_MAIL_FROM',
+    'the sender of sign-in mail, an address or Name <address> your mail service allows',
+  ],
+  [
+    'MAKA_CLOUD_TRUST_PROXY',
+    'comma separated IP addresses or ranges of the reverse proxy in front of the server. Only a request from one of them has its X-Forwarded-For client counted in the sign-in limits; from any other peer the header is ignored. Default 127.0.0.1,::1 (a proxy on the same host); under Compose the proxy’s fixed address. 0: trust none',
+  ],
+  [
     'MAKA_CLOUD_DUTY_REPOS',
     'comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
   ],
@@ -608,6 +722,7 @@ export function readStackConfig(
     dutiesSet: false,
     cardsSet: false,
     dutyLinks: [],
+    signIn: { appleClientIds: [], googleClientIds: [], trustedProxies: [...DEFAULT_PROXIES] },
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
   if (modes !== undefined) config.modes = modes;
@@ -649,6 +764,7 @@ export function readStackConfig(
       config.dutyLinks = links;
     }
   }
+  config.signIn = readSignIn(value, problems);
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
   if (flag('MAKA_CLOUD_CARDS')) {
@@ -955,6 +1071,7 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `sign-in:             ${describeSignIn(config.signIn)}`,
     `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
     `CLIs run as:         ${config.agentChannel ? `${config.agentChannel.user} (group ${config.agentChannel.group}); Claude through the Agent SDK, conversation kept in ${config.transcriptsDbPath}` : 'nothing: no CLI starts until MAKA_CLOUD_AGENT_USER and MAKA_CLOUD_AGENT_GROUP are set'}`,
@@ -967,6 +1084,21 @@ export function describeConfig(config: StackConfig): string[] {
     `digest summary:      ${config.inbox.summaryModel}`,
     `spend limits:        invite $${config.spend.inviteDailyUsd}/day and $${config.spend.inviteMonthlyUsd}/month unless set per invite, server $${config.spend.serverDailyUsd}/day`,
   ];
+}
+
+function describeSignIn(signIn: StackConfig['signIn']): string {
+  const ways = [
+    ...(signIn.appleClientIds.length > 0 ? ['Apple'] : []),
+    ...(signIn.googleClientIds.length > 0 ? ['Google'] : []),
+    ...(signIn.mail ? ['emailed code'] : []),
+  ];
+  if (ways.length === 0)
+    return 'invite token only (set the Apple, Google or mail variables to add more)';
+  const proxies =
+    signIn.trustedProxies.length > 0
+      ? `; client address trusted from ${signIn.trustedProxies.join(', ')}`
+      : '; limits count the socket address (no proxy trusted)';
+  return `${ways.join(', ')} and invite token${proxies}`;
 }
 
 function describeModes(modes: ModesConfig): string {
