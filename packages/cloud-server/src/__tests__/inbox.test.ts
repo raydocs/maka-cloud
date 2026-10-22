@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { request } from 'node:http';
 import { test } from 'node:test';
 import type { InboxAnswerResult, InboxService } from '../inbox.js';
 import { newConversation, startHarness } from './harness.js';
@@ -292,4 +293,41 @@ test('an unknown path under /v1/inbox is 404 for an invited client', async (t) =
   const { h } = await setup(t);
   assert.equal((await h.api('/v1/inbox/nope')).status, 404);
   assert.equal((await h.api('/v1/inbox/items/itm_1')).status, 404);
+});
+
+test('a device signed out while its answer was arriving does not get the answer through', async (t) => {
+  const { h, calls } = await setup(t);
+  const accounts = h.server.accounts;
+  const accountId = accounts.createAccount(h.inviteId) ?? assert.fail('no account');
+  const session = accounts.issueSession(accountId, 'phone') ?? assert.fail('no session');
+  const body = JSON.stringify(ANSWER);
+  const { port } = new URL(h.server.url);
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = request(
+      {
+        port: Number(port),
+        host: '127.0.0.1',
+        method: 'POST',
+        path: '/v1/inbox/items/itm_1/answer',
+        headers: {
+          authorization: `Bearer ${session.token}`,
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(body)),
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on('error', reject);
+    // The head and half the body are in; the device is signed out; the rest arrives.
+    req.write(body.slice(0, 10));
+    setTimeout(() => {
+      accounts.revokeSession(accountId, session.sessionId);
+      req.end(body.slice(10));
+    }, 50);
+  });
+  assert.equal(status, 401);
+  assert.deepEqual(calls.answer, []);
 });

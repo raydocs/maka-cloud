@@ -82,8 +82,11 @@ const answerBody = z
 
 /** Who owns what, for the inbox routes. */
 export interface InboxOwners {
-  /** Whether the invite is still active: checked again after the body is read. */
-  active(inviteId: string): boolean;
+  /**
+   * Whether the invite is still active and, for a device, its session too: checked again after the
+   * body is read.
+   */
+  active(inviteId: string, sessionId?: string): boolean;
   /** The ids of the conversations the invite owns. */
   conversationsOf(inviteId: string): string[];
 }
@@ -164,7 +167,7 @@ export class InboxRoutes {
 
   /** A revoke that landed while the request was read wins. */
   private checkActive(invite: InviteInfo): void {
-    if (!this.owners.active(invite.inviteId)) {
+    if (!this.owners.active(invite.inviteId, invite.sessionId)) {
       throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     }
   }
@@ -197,7 +200,7 @@ export class InboxRoutes {
     const body = answerBody.safeParse(await readJson(req, false));
     if (!body.success) throw new HttpError(400, 'invalid_request');
     // Checked again now the body is in: a revoke that landed while it arrived wins.
-    if (!this.owners.active(invite.inviteId)) {
+    if (!this.owners.active(invite.inviteId, invite.sessionId)) {
       throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     }
     const result = await this.service.answer({

@@ -29,6 +29,7 @@ export {
 } from './http.js';
 export { type DutyOwners, type DutyService, type SuggestionsOverview } from './duties.js';
 export { type InboxAnswerResult, type InboxService } from './inbox.js';
+export { AccountStore, type IssuedSession, type Session, SESSION_IDLE_MS } from './accounts.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
 export { scrubErrorText } from './public-view.js';
 export {
