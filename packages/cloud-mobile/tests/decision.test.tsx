@@ -120,3 +120,34 @@ test('a question with a note is answered with the note, and shows the recorded a
   );
   expect(screen.getByText('Answer recorded: Right')).toBeTruthy();
 });
+
+test('a finished task reads as title, how far it was checked, and the outcome; other wording stays whole', async () => {
+  const finished = item({
+    kind: 'finished',
+    ask: '“Weekly report” finished (not independently checked): “The weekly report is ready.”',
+    options: [{ id: 'ok', label: 'Got it', recommended: true }],
+    evidence: [],
+  });
+  const answers: string[] = [];
+  await render(
+    wrap(<DecisionCard item={finished} disabled={false} onAnswer={(o) => answers.push(o)} />),
+  );
+  expect(screen.getByText('Weekly report finished')).toBeTruthy();
+  expect(screen.getByText('Not independently checked')).toBeTruthy();
+  expect(screen.getByText('The weekly report is ready.')).toBeTruthy();
+  await fireEvent.press(screen.getByRole('button', { name: 'Got it' }));
+  expect(answers).toEqual(['ok']);
+});
+
+test('a finished card in another shape is shown exactly as sent', async () => {
+  const odd = item({
+    kind: 'finished',
+    ask: 'Finished (independently checked): the login loop is fixed.',
+    options: [],
+    evidence: [],
+  });
+  await render(wrap(<DecisionCard item={odd} disabled={false} onAnswer={() => {}} />));
+  expect(
+    screen.getByText('Finished (independently checked): the login loop is fixed.'),
+  ).toBeTruthy();
+});
