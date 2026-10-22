@@ -113,6 +113,24 @@ test('plain text scrubs a key split by a character that shows nothing before tha
   );
 });
 
+test('a key split after enough of it to be found is not shown in part, and no word is read into it', () => {
+  const key = 'ghp_0123456789abcdef0123456789abcdef0123';
+  for (const split of ['\u0000', '\ue000', '\u0378', '\u2028', '\u2029', '\u0007']) {
+    // Enough before the split to be a key on its own: the part after it was shown.
+    const late = plain(`${key.slice(0, 20)}${split}${key.slice(20)}`, 200);
+    assert.equal(late, '[secret]', `U+${split.codePointAt(0)?.toString(16)}`);
+  }
+  // Read without the split, the key runs into the word after the line break: the text is not shown
+  // rather than shown without its "not".
+  const warning = plain(`${key.slice(0, 12)}\u0000${key.slice(12)}\nnot safe to deploy`, 200);
+  assert.doesNotMatch(warning, /^\[secret\] safe/u);
+  assert.doesNotMatch(warning, /89abcdef/u);
+  // A whole key with a line break after it keeps the word after it.
+  assert.equal(plain(`${key}\nnot safe to deploy`, 200), '[secret] not safe to deploy');
+  // A key whole as written, and a hidden character elsewhere, keep the text.
+  assert.equal(plain(`${key} is bad\u0000ly placed`, 200), '[secret] is bad ly placed');
+});
+
 test('a clip never cuts a [secret] mark, half a character or a letter from its marks', () => {
   // The mark would be cut: the cut moves before it.
   assert.equal(clip(`${'a'.repeat(10)}[secret] tail`, 15), `${'a'.repeat(10)}…`);

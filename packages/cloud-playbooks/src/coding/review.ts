@@ -24,20 +24,29 @@ const MAX_REASON = 300;
  */
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}͏ᅟᅠ឴឵᠋-᠏⠀ㅤ︀-️ﾠ\u{E0100}-\u{E01EF}]/gu;
 
+const SECRET_MARK = '[secret]';
+
+/** Breaks that read as the space between two words; a key split by one is shown split, as written. */
+const BREAKS = /[\t\n\v\f\r]/gu;
+
 export function plain(text: string, max: number): string {
   // Scrubbed before anything is flattened: a key split by a character that becomes a space here is
   // no longer one the scrubber knows. The scrubber reads zero-width characters away itself; the
-  // rest of these (private-use, unassigned, control, line separators) are read away here, and when
-  // that reading has a key, it is the one shown. Then scrubbed whole once more and only then cut: a
-  // key cut in two is no longer a key the scrubber knows, and what is left of it would be shown.
-  const scrubbed = scrubSecretText(text);
-  const joined = scrubbed.replace(UNPRINTABLE, '');
+  // rest of these (private-use, unassigned, control, line separators) are read away here, from the
+  // text as written. When that reading has a key the text as shown does not hide the same way, where
+  // the key ends is not known (a tail after the split, or a word after it read into it), so none of
+  // the text is shown. Then scrubbed whole once more and only then cut: a key cut in two is no
+  // longer a key the scrubber knows, and what is left of it would be shown.
+  const spaced = text.replace(BREAKS, ' ');
+  const shown = scrubSecretText(spaced);
+  const joined = spaced.replace(UNPRINTABLE, '');
   const scrubbedJoined = scrubSecretText(joined);
-  const read = scrubbedJoined !== joined ? scrubbedJoined : scrubbed;
-  return clip(scrubSecretText(read.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim()), max);
+  if (scrubbedJoined !== joined && shown.replace(UNPRINTABLE, '') !== scrubbedJoined) {
+    return clip(SECRET_MARK, max);
+  }
+  return clip(scrubSecretText(shown.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim()), max);
 }
 
-const SECRET_MARK = '[secret]';
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 /**
