@@ -563,3 +563,43 @@ test('display text is scrubbed whole before it is cut, so a key at the cut leave
     setKnownSecrets([]);
   }
 });
+
+test('a later run of the conversation opens a change kept by an earlier run, but no other task it did not delegate', async (t) => {
+  const kept = {
+    ...VERIFICATION,
+    review: { ...VERIFICATION.review, status: 'unavailable' as const, reason: 'x' },
+    kept: { reason: 'no independent review (the reviewer could not start)' },
+  };
+  const ownership = {
+    // run_1 delegated tsk_1; run_2 is a later run of the same conversation; run_3 is another one.
+    ownsTask: (runId: string, taskId: string) => runId === 'run_1' && taskId === 'tsk_1',
+    ownsConversationTask: (runId: string, taskId: string) =>
+      (runId === 'run_1' || runId === 'run_2') && taskId === 'tsk_1',
+  };
+  const { deliveries } = await deliveryFiles(t, kept);
+  const fake = await github(t);
+  const tool = openPullRequestTool({ deliveries, publisher: publisher(fake), ...ownership });
+  const args = { taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true };
+
+  await assert.rejects(call(tool, args, 'run_3'), /not_your_task/);
+  assert.equal(fake.pulls.length, 0);
+  // The owner's approval is still required: without it nothing is opened.
+  await assert.rejects(tool.impl(args, context('run_2')), /change_modified/);
+  assert.equal(fake.pulls.length, 0);
+  await call(tool, args, 'run_2');
+  assert.equal(fake.pulls[0]?.draft, true);
+
+  // A change that was not kept belongs to the run that delegated it, whatever the conversation.
+  const reviewed = await deliveryFiles(t);
+  const second = await github(t);
+  const other = openPullRequestTool({
+    deliveries: reviewed.deliveries,
+    publisher: publisher(second),
+    ...ownership,
+  });
+  await assert.rejects(
+    call(other, { taskId: 'tsk_1', title: 'Fix add' }, 'run_2'),
+    /not_your_task/,
+  );
+  assert.equal(second.pulls.length, 0);
+});

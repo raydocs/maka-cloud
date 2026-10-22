@@ -1,8 +1,10 @@
 # PRs merged without an outside review
 
-Codex, the outside reviewer, hit its usage limit at 17:25Z on 2026-10-21. Its first refused review was on #229 at 17:25:13Z, and every Codex review after that failed with "You have reached your Codex usage limits for code reviews." Each PR below merged after that without a completed Codex review. Recheck them once Codex is back by commenting `@codex review` on each PR, or hold any further change to the same code until then.
+Codex, the outside reviewer, hit its usage limit at 17:25Z on 2026-10-21. Its first refused review was on #229 at 17:25:13Z, and every GitHub Codex review after that failed with "You have reached your Codex usage limits for code reviews."
 
-Where a different outside reviewer ran instead, the line says so. Such a PR still needs the Codex recheck when Codex returns.
+Coverage: every PR below is reviewed. The owner's local Codex (gpt-6.1-sol, xhigh) reviewed each commit from 39f7d6948 through da8705f67 after it merged, with no gap, and sent its findings as batches 18 to 29. That covers all 79 PRs in the first list, plus #194 on its own commit. The latest recheck batch covers #301, #310 to #313, #315 to #317, #319 and #321. Those findings are open and belong to their lanes. The lines below record the GitHub state at merge time, not a missing review.
+
+Where a PR also had an outside Claude review, the line says so.
 
 ## How this was checked
 
@@ -93,7 +95,15 @@ Where a different outside reviewer ran instead, the line says so. Such a PR stil
 - #307 22:21 A stop from an earlier attempt no longer reaches the run or the model access of a later one
 - #302 22:27 Secrets: one detection path for approvals, questions, text and install output
 
+## Merged after the list above was built (22:28Z onward)
+
+- #310 22:37 Egress guard: refuse a box where the lock cannot be taken (outside Claude review, per the Egress lane)
+- #301 22:38 Rehearsal: the stand-in sandbox has a real agent account, so the task steps run for real (outside Claude review, per the coordinator)
+- #311 22:43 docs: list PRs merged since Codex hit its usage limit (docs only; no outside review)
+- #316 22:53 fix(cloud-playbooks): scrub, then clip, text that enters the coding manifest (recheck A8) (outside Claude review, submitted 22:53:44Z; it raised one P2 outside its own lines, a check's output is cut before it is scrubbed, in `failure_brief.json` and `verification.json`, which its own review says belongs to the next push of this lane)
+- #317 22:54 Smoke cleanup: ask the live state of every task of the invite, however long ago it ended (outside Claude review, per the coordinator)
+
 ## Not in the list
 
-- #309 (Egress guard: refuse a box where the lock cannot be taken) was closed unmerged at 22:28Z.
-- #301, #304, #298 and #299 are open at the time of this check.
+- #309 (Egress guard: refuse a box where the lock cannot be taken) was closed unmerged at 22:28Z; #310 is its replacement.
+- #304, #298 and #299 were open at the time of the check.

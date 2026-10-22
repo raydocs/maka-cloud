@@ -24,6 +24,7 @@ import {
   type AttemptCause,
   isTerminal,
   OrchestratorError,
+  type ResultManifest,
   type SessionId,
   type SteerId,
   type SteerState,
@@ -1688,7 +1689,7 @@ export class Orchestrator {
       // the task ends once that is recorded, so what it reads as costing is what the run spent.
       if (cancelled) await this.readerEnded(taskId);
     }
-    await this.record({ type: 'task_cancelled', taskId });
+    await this.record(await this.withKept({ type: 'task_cancelled', taskId }));
   }
 
   /**
@@ -1718,13 +1719,26 @@ export class Orchestrator {
     event: TaskEvent & { taskId: TaskId },
     fence: Fence,
   ): Promise<StoredEvent | undefined> {
-    return this.record(
-      event,
-      () => {
-        if (this.isStopping(event.taskId)) throw new Superseded();
-      },
-      fence,
+    return this.withKept(event).then((withKept) =>
+      this.record(
+        withKept,
+        () => {
+          if (this.isStopping(event.taskId)) throw new Superseded();
+        },
+        fence,
+      ),
     );
+  }
+
+  /**
+   * A failed or cancelled task's event, with the change the runner kept for the owner when it left
+   * one. Read before the write chain, never in it.
+   */
+  private async withKept<E extends TaskEvent>(event: E): Promise<E> {
+    if (event.type !== 'task_failed' && event.type !== 'task_cancelled') return event;
+    if (event.kept !== undefined) return event;
+    const kept = await this.keptManifestOf(event.taskId);
+    return kept === undefined ? event : { ...event, kept };
   }
 
   /**
@@ -1791,6 +1805,22 @@ export class Orchestrator {
     });
     this.writeChain = written.catch(() => undefined);
     return written;
+  }
+
+  /**
+   * The manifest a runner left for a change it kept for the owner (a `kept:` line in `done`), read
+   * from the handoff when the task ends without a result. Anything else, or a manifest that cannot
+   * be read, is nothing: a failed task shows what the runner reported.
+   */
+  private async keptManifestOf(taskId: TaskId): Promise<ResultManifest | undefined> {
+    try {
+      const result = await this.handoff.readManifest(taskId);
+      if (!result.ok) return undefined;
+      const kept = result.manifest.done.some((line) => line.trim().startsWith('kept:'));
+      return kept ? result.manifest : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
