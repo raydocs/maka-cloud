@@ -7,6 +7,9 @@ const MAX_WRONG_CODES = 5;
 /** A new code for the same address is not sent sooner than this, and not more than `MAX_SENDS` an hour. */
 const RESEND_AFTER_MS = 30_000;
 const MAX_SENDS_PER_HOUR = 5;
+/** Mail sent through the owner's key, over all addresses, in any hour. Fails closed when reached. */
+const DEFAULT_MAX_MAILS_PER_HOUR = 300;
+const HOUR_MS = 60 * 60 * 1000;
 
 function sha256(value: string): Buffer {
   return createHash('sha256').update(value).digest();
@@ -37,6 +40,11 @@ export class NonceStore {
   constructor(private readonly now: () => number = Date.now) {}
 
   issue(): string {
+    if (this.live.size >= MAX_LIVE) {
+      // Spent time first: a flood of requests must not push out nonces that are still good.
+      const at = this.now();
+      for (const [nonce, expires] of this.live) if (expires <= at) this.live.delete(nonce);
+    }
     makeRoom(this.live, MAX_LIVE);
     const nonce = randomBytes(24).toString('base64url');
     this.live.set(nonce, this.now() + NONCE_TTL_MS);
@@ -84,15 +92,17 @@ interface Pending {
  * Sign-in by a code mailed to an address. The device that asks gets a challenge id and a secret;
  * the code arrives only in the mail; redeeming needs all three, so a code that someone else sees
  * is no use from another device. A code works once, for ten minutes, and dies after five wrong
- * tries. Mail goes out through the owner's mailer, and with none there is no email sign-in.
+ * tries; an address gets at most five mails an hour and the server at most `maxMailsPerHour`. Mail goes out through the owner's mailer, and with none there is no email sign-in.
  */
 export class EmailCodes {
   private readonly pending = new Map<string, Pending>();
   private readonly sends = new Map<string, number[]>();
+  private mailed: number[] = [];
 
   constructor(
     private readonly mailer: Mailer,
     private readonly now: () => number = Date.now,
+    private readonly maxMailsPerHour: number = DEFAULT_MAX_MAILS_PER_HOUR,
   ) {}
 
   /**
@@ -109,7 +119,8 @@ export class EmailCodes {
     const address = normalizeEmail(rawAddress);
     if (address === undefined) return { ok: false, reason: 'invalid' };
     const at = this.now();
-    const recent = (this.sends.get(address) ?? []).filter((time) => at - time < 60 * 60 * 1000);
+    for (const [id, entry] of this.pending) if (entry.expiresAt <= at) this.pending.delete(id);
+    const recent = (this.sends.get(address) ?? []).filter((time) => at - time < HOUR_MS);
     const last = recent[recent.length - 1];
     if (
       recent.length >= MAX_SENDS_PER_HOUR ||
@@ -117,11 +128,21 @@ export class EmailCodes {
     ) {
       return { ok: false, reason: 'slow_down' };
     }
+    // The whole server's mail is capped too, so no crowd of addresses can run up the owner's mail bill.
+    this.mailed = this.mailed.filter((time) => at - time < HOUR_MS);
+    if (this.mailed.length >= this.maxMailsPerHour) return { ok: false, reason: 'slow_down' };
+    if (!this.sends.has(address) && this.sends.size >= MAX_LIVE) {
+      // Only addresses with no mail in the last hour are forgotten; when every one is live, refuse.
+      for (const [other, times] of this.sends) {
+        if (at - (times[times.length - 1] ?? 0) >= HOUR_MS) this.sends.delete(other);
+      }
+      if (this.sends.size >= MAX_LIVE) return { ok: false, reason: 'slow_down' };
+    }
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
     const challengeId = `chl_${randomBytes(9).toString('base64url')}`;
     const deviceSecret = randomBytes(24).toString('base64url');
-    // A new code replaces the older one for the same address: only the last mail can be redeemed.
-    for (const [id, other] of this.pending) if (other.address === address) this.pending.delete(id);
+    // Challenges for one address live side by side (the hourly cap bounds them): each needs its own
+    // device secret, so asking for a code for someone else's address cannot cancel theirs.
     makeRoom(this.pending, MAX_LIVE);
     const expiresAt = at + CODE_TTL_MS;
     this.pending.set(challengeId, {
@@ -131,8 +152,8 @@ export class EmailCodes {
       expiresAt,
       wrong: 0,
     });
-    makeRoom(this.sends, MAX_LIVE);
     this.sends.set(address, [...recent, at]);
+    this.mailed.push(at);
     try {
       await this.mailer.send({
         to: address,
@@ -158,9 +179,10 @@ export class EmailCodes {
       this.pending.delete(challengeId);
       return undefined;
     }
-    const right =
-      sameHash(entry.deviceHash, sha256(deviceSecret)) &&
-      sameHash(entry.codeHash, sha256(code.trim()));
+    // Both are always compared, so the time taken does not say which one was wrong.
+    const deviceRight = sameHash(entry.deviceHash, sha256(deviceSecret));
+    const codeRight = sameHash(entry.codeHash, sha256(code.trim()));
+    const right = deviceRight && codeRight;
     if (!right) {
       entry.wrong += 1;
       if (entry.wrong >= MAX_WRONG_CODES) this.pending.delete(challengeId);

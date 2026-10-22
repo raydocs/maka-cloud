@@ -105,7 +105,7 @@ test('a code is good for ten minutes', async () => {
   assert.equal(codes.redeem(c.challengeId, c.deviceSecret, codeOf()), undefined);
 });
 
-test('a new code replaces the old one, and mail is not sent faster or more often than allowed', async () => {
+test('asking again does not cancel an earlier code, and mail is not sent faster or more often than allowed', async () => {
   let now = 1_000;
   const { sent, mailer, codeOf } = mail();
   const codes = new EmailCodes(mailer, () => now);
@@ -114,13 +114,14 @@ test('a new code replaces the old one, and mail is not sent faster or more often
   assert.deepEqual(await codes.request('ada@example.com'), { ok: false, reason: 'slow_down' });
   assert.equal(sent.length, 1);
   now += 31_000;
-  const second = await ask(codes);
+  // someone else asks for a code for this address: the owner's challenge still works
+  const other = await ask(codes);
   assert.equal(
-    codes.redeem(first.challengeId, first.deviceSecret, firstCode),
+    codes.redeem(other.challengeId, other.deviceSecret, firstCode),
     undefined,
-    'the older challenge',
+    'their secret, my code',
   );
-  assert.equal(codes.redeem(second.challengeId, second.deviceSecret, codeOf()), 'ada@example.com');
+  assert.equal(codes.redeem(first.challengeId, first.deviceSecret, firstCode), 'ada@example.com');
   for (let i = 0; i < 3; i += 1) {
     now += 31_000;
     await ask(codes);
@@ -136,6 +137,36 @@ test('a new code replaces the old one, and mail is not sent faster or more often
   await ask(codes);
   // another address is not held up by the first
   await ask(codes, 'bob@example.com');
+});
+
+test('the server as a whole sends a bounded amount of mail an hour, and recovers after it', async () => {
+  let now = 1_000;
+  const { sent, mailer } = mail();
+  const codes = new EmailCodes(mailer, () => now, 3);
+  for (const who of ['a', 'b', 'c']) await ask(codes, `${who}@example.com`);
+  assert.deepEqual(await codes.request('d@example.com'), { ok: false, reason: 'slow_down' });
+  assert.equal(sent.length, 3);
+  now += 60 * 60 * 1000 + 1;
+  await ask(codes, 'd@example.com');
+});
+
+test('expired challenges are forgotten, and a full nonce table clears what has expired before anything else', async () => {
+  let now = 1_000;
+  const { mailer } = mail();
+  const codes = new EmailCodes(mailer, () => now);
+  await ask(codes);
+  now += 11 * 60 * 1000;
+  await ask(codes, 'bob@example.com');
+  const nonces = new NonceStore(() => now);
+  const stale: string[] = [];
+  for (let i = 0; i < 10_000; i += 1) stale.push(nonces.issue());
+  now += 11 * 60 * 1000;
+  const fresh = nonces.issue();
+  const live = [fresh];
+  for (let i = 0; i < 9_999; i += 1) live.push(nonces.issue());
+  assert.equal(nonces.consume(stale[0] ?? ''), false, 'expired');
+  assert.equal(nonces.consume(fresh), true, 'every nonce issued after the sweep is still good');
+  assert.equal(nonces.consume(live[9_999] ?? ''), true);
 });
 
 test('a bad address is refused and a failing mailer leaves nothing to redeem', async () => {
