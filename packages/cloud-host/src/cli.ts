@@ -13,11 +13,18 @@ import {
 import { DEFAULT_MODES } from '@maka-cloud/modes';
 import { createLogger, createScrubber } from './log.js';
 import { PauseSwitch } from './pause.js';
+import { runSetup, SETUP_VARIABLES } from './setup.js';
+import { terminalIO } from './setup-terminal.js';
 import { smokeCommand } from './smoke-live.js';
 import { SMOKE_VARIABLES } from './smoke.js';
 import { startStack } from './stack.js';
 
 const USAGE = `Usage:
+  maka-cloud setup [--from-env] [--no-verify] [--settings <path>] [--names <path>]
+                     the first-run wizard: asks for the domain, the keys and your sandbox machine,
+                     fills the rest with safe defaults, makes your invite and writes the settings
+                     (default /etc/maka-cloud.env and /etc/maka-cloud.compose.env, mode 600); run
+                     again to change them. Needs MAKA_CLOUD_DATA_DIR
   maka-cloud check   read the configuration from the environment and print it, without secrets
   maka-cloud modes   print the modes (quick, standard, deep) in force as JSON, to copy into MAKA_CLOUD_MODES
   maka-cloud start   start the stack and serve until SIGINT or SIGTERM
@@ -38,6 +45,9 @@ Invites are made with: cloud-server invite create --invites <data dir>/invites.d
 
 Environment:
 ${ENV_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}
+
+Only for maka-cloud setup --from-env:
+${SETUP_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}
 
 Only for maka-cloud smoke:
 ${SMOKE_VARIABLES.map(([name, what]) => `  ${name.padEnd(30)}${what}`).join('\n')}`;
@@ -117,11 +127,51 @@ function modesCommand(env: NodeJS.ProcessEnv): number {
   return 0;
 }
 
+const SETUP_FLAGS = new Set(['--from-env', '--no-verify']);
+const SETUP_PATHS = new Set(['--settings', '--names']);
+
+async function setupCommand(rest: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  const flags = new Set<string>();
+  const paths = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index] as string;
+    if (SETUP_FLAGS.has(arg)) flags.add(arg);
+    else if (SETUP_PATHS.has(arg) && rest[index + 1] !== undefined) {
+      paths.set(arg, rest[index + 1] as string);
+      index += 1;
+    } else {
+      console.error(USAGE);
+      return 2;
+    }
+  }
+  const dataDir = env.MAKA_CLOUD_DATA_DIR?.trim();
+  if (!dataDir) {
+    console.error('MAKA_CLOUD_DATA_DIR is not set');
+    return 2;
+  }
+  const fromEnv = flags.has('--from-env');
+  const io = terminalIO();
+  try {
+    return await runSetup({
+      envFile: paths.get('--settings') ?? '/etc/maka-cloud.env',
+      composeEnvFile: paths.get('--names') ?? '/etc/maka-cloud.compose.env',
+      dataDir,
+      env,
+      fromEnv,
+      verify: !flags.has('--no-verify'),
+      io,
+    });
+  } finally {
+    io.close();
+  }
+}
+
 /** How long the process may take to exit after the stack has closed. */
 const FORCED_EXIT_MS = 10_000;
 
 async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const [command, ...rest] = argv;
+  if (command === 'setup') return setupCommand(rest, env);
   if (command === 'modes' && rest.length === 0) return modesCommand(env);
   if ((command === 'pause' || command === 'resume') && rest.length === 0) {
     return pauseCommand(command, env);

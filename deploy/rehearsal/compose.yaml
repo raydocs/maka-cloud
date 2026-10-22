@@ -4,7 +4,7 @@
 #   deploy/rehearsal/up.sh          build, bring the stack up, wait until it is healthy
 #   deploy/rehearsal/down.sh        take it down and delete its volumes
 #
-# The server's settings are deploy/rehearsal/server.env (with the sandbox map up.sh adds), the names
+# The server's settings are deploy/rehearsal/server.env (as up.sh's "maka-cloud setup" completes it), the names
 # are deploy/rehearsal/compose.env. See deploy/rehearsal/README.md.
 # Relative paths here resolve against the first file (deploy/), not against this one.
 #
