@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { transaction } from './db.js';
 import type { SignalManifest } from './events.js';
-import { DEFAULT_SETTINGS, type Settings, SettingsSchema } from './settings.js';
+import {
+  DEFAULT_SETTINGS,
+  type OwnerSettingsPatch,
+  OwnerSettingsPatchSchema,
+  type Settings,
+  SettingsSchema,
+} from './settings.js';
 import {
   type CloseReason,
   type EvidenceLink,
@@ -190,6 +196,30 @@ export class Store {
   putSettings(settings: Settings): void {
     this.run(
       "INSERT INTO settings (key, value) VALUES ('settings', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      JSON.stringify(settings),
+    );
+  }
+
+  /**
+   * What this owner chose for themselves; nothing for an owner who chose nothing. A row that no
+   * longer parses (a kind or a time zone the host stopped knowing) counts as nothing and is
+   * reported, so one owner's stale row never fails the pass for everyone else.
+   */
+  ownerSettings(owner: string, onProblem?: (error: unknown) => void): OwnerSettingsPatch {
+    const row = this.get('SELECT value FROM owner_settings WHERE owner = ?', owner);
+    if (!row) return {};
+    try {
+      return OwnerSettingsPatchSchema.parse(JSON.parse(str(row.value)));
+    } catch (error) {
+      onProblem?.(error);
+      return {};
+    }
+  }
+
+  putOwnerSettings(owner: string, settings: OwnerSettingsPatch): void {
+    this.run(
+      'INSERT INTO owner_settings (owner, value) VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET value = excluded.value',
+      owner,
       JSON.stringify(settings),
     );
   }

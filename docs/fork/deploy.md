@@ -501,13 +501,28 @@ The check also looks at what the account could do to the egress rules, so code t
 cannot take them away. The sandbox user (it needs `sudo -n`, which the egress guard needs too) reads
 the account's sudo rules with `sudo -l -U <account>` and the box passes only when sudo says the
 account is not allowed to run anything; a query that fails is a failed check. The account must hold no
-Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), no program under `/usr/sbin`, `/usr/bin`,
-`/sbin`, `/bin` or `/usr/local` may carry a capability such as `cap_net_admin` or `cap_setuid`
-(the box needs `getcap`, from `libcap2-bin`; without it the check fails), it must not be in a group that
+Linux capabilities (`CapPrm`, `CapEff`, `CapAmb` all zero), and no program it can run anywhere on the
+box (the whole tree from `/` and every mount below it, the work root included, except `/proc`, `/sys`
+and `/dev`) may carry any file capability, be setuid to another account, or be setgid to a group the
+agent is not in, apart from the stock ping and id-mapping helpers and the stock setuid tools (`sudo`,
+`su`, `passwd`, `mount`, ...) under their own paths. The scan runs as root, needs GNU `find` and
+`getcap` (from `libcap2-bin`), and a scan that fails, or a `getcap` that reports an error, is a failed
+check. It must not be in a group that
 is as good as root (`docker`, `lxd`, `sudo`, `disk`, ...), must not be able to write a container or VM
 socket, must not be able to write the sandbox user's home, its `~/.maka-cli` or the work root, and must
 not be able to create an iptables or ip6tables chain. What it left behind is removed on every way
 out of the check.
+
+The box must also allow unprivileged user and PID namespaces (`unshare --user --map-current-user
+--pid` as the sandbox user): every check of a coding task (the repository's tests, the reproduction
+test) runs in one, and a box that refuses them, as Docker's default seccomp profile does, makes every
+check fail at once with exit 125 ("could not start the check in its own user and PID namespace"). On
+Ubuntu 24.04 that includes the host's AppArmor rule: set `kernel.apparmor_restrict_unprivileged_userns=0`
+(the rehearsal job does) or give the sandbox user a profile that allows user namespaces.
+
+The agent runs `git` in a checkout that the sandbox user owns. The server names that one workspace
+as git's `safe.directory` in the agent's environment (`asAgentUser`), so nothing is set on the box;
+the rehearsal's `checkout` step has the agent run `git status` there to show it.
 
 The server starts nothing as the sandbox user either. A run is a program and its arguments; the
 server quotes them and hands the whole command to the agent account itself, so no argument can add a

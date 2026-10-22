@@ -47,16 +47,17 @@ passed all seven steps:
 | `backup-restore` (backup, restore, a task still runs) | passes |
 
 **Gate for the first live run: a coding task's checkout.** The `task` step runs the `free` playbook, which
-never clones a repository, so nothing in the rehearsal makes the agent account read or edit a checkout or
-write `handoff/repro.json`. A review of the launch-path PRs found that on the launch path it cannot
-(the checkout is cloned under `umask 077` and the agent account is not in its group; `repro.json` is
-written to a directory the agent cannot write). Until a rehearsal step shows the agent account editing a
-file in a real checkout and writing `handoff/repro.json`, and that step passes, no coding task has been
-shown to work and **the first live run does not start**. This is a gate, not an expected failure: it is
-not in `MAKA_REHEARSAL_XFAIL`, and the line below is struck out only when the step is in the flow and green.
+never clones a repository, so it cannot show the agent account working in a checkout. The launch-path
+review found that it could not: the checkout was cloned under `umask 077` with the agent outside its group
+(fixed on main by #312), `repro.json` is written to a directory the agent cannot write, and git as the agent
+refuses the checkout ("dubious ownership"; the sandbox user owns it). The rehearsal's `checkout` step runs
+a coding task through the server's own clone script and has the scripted agent, as the agent account, read
+its brief, edit a file of the checkout, run `git status` there and write the `repro.json` the brief names;
+it then needs the runner to read that file, run the reproduction test in its check namespace, and go on to the task's own tests. It is a gate, not an expected
+failure (it is not in `MAKA_REHEARSAL_XFAIL`): the `rehearsal` job is the launch check and stays red
+until the step passes, and **the first live run does not start until it does.**
 
-- [ ] Rehearsal step `checkout`: the agent account edits a file in the checkout of a coding task and writes
-  `handoff/repro.json`, and the host reads it.
+- [ ] `checkout` passes in CI (needs the `repro.json` move and the `safe.directory` fix to have landed).
 
 Still not verified by the rehearsal, so the first run on a real host is the first time they run:
 
@@ -68,6 +69,10 @@ Still not verified by the rehearsal, so the first run on a real host is the firs
 - The firewall is a stand-in that keeps its rules in files: the egress guard's rules are checked as
   text, no packet is filtered.
 - The CLI is scripted: the real `claude`'s flags, its own files and its network use are not exercised.
+- The agent starts under `env -i` with named variables only (`asAgentUser`, isolation F8). `USER`, `LOGNAME`
+  and `SHELL` are set by the entry from the agent account; whether the real `claude -p` starts without any
+  other variable the box's exec carried is not shown. Before the first task, run the real `claude -p` once
+  under the exact `asAgentUser` line on the real box.
 - The sandbox user may run any command as root in the stand-in; a real box need not allow that.
 - Any model, GitHub, certificate or domain, and the owner's keys and budget.
 
@@ -80,7 +85,18 @@ That path is built, unit-tested and run end to end by the rehearsal on stand-ins
 
 A close lets go of the runs without stopping them, and lease renewals stop with it, so a task's
 sandbox lease runs out five minutes (the default `leaseTtlSeconds`) after the last renewal. A
-restart that takes longer than that lets the sandbox go to sleep under its running agent; the next
-process stops what is left and runs the task again from a fresh clone, as it does after a crash.
+restart that takes longer than that lets the sandbox go to sleep under its running agent. What the
+next process does depends on the runner. A runner that can resume (`recover`, the Claude runner) is
+stopped where it was left and runs the task again from a fresh clone, as after a crash. **The
+coding runner cannot**: its task is stopped and ended as failed ("orphaned: the orchestrator
+restarted while this task was running"), and the owner sends the goal again. If the change had
+already passed its checks, it is on the host (`keepUntilReviewed`) and the failed task shows it as
+kept for the owner to look at, as a task that fails or is stopped in the same state does.
 A forced exit (the process was still closing after ten seconds) exits with code 1 and logs
 `server.exit_forced`.
+
+Run one server per data directory. A second one over the same directory refuses to start
+(`DatabaseInUseError`) before it touches the spend journal or the task log, and the first keeps
+running. With a fixed gateway port on the same machine the second one is refused earlier, by the
+port (`EADDRINUSE`): same outcome, nothing of the first touched. See
+`design/durable-tasks.md`, "One process owns a task store".

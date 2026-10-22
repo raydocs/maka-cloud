@@ -8,7 +8,7 @@ import { setKnownSecrets } from '@maka-cloud/orchestrator';
 import { type ChangeSet, JsonFileCodingDeliveries, MemoryCodingDeliveries } from '../deliveries.js';
 import { GitHubPublisher, githubTokenProblem, type PullRequestPublisher } from '../github.js';
 import { openPullRequestTool, pullRequestBody } from '../pull-request.js';
-import { clipText } from '../runner.js';
+import { clipText, cloneFailure, scrubbedTail } from '../runner.js';
 import { FakeGitHub } from './fake-github.js';
 
 const TOKEN = 'github_pat_11ABCDEFG_secretsecretsecret';
@@ -564,6 +564,35 @@ test('display text is scrubbed whole before it is cut, so a key at the cut leave
   }
 });
 
+test('a cut output with no line break shows none of it, however long the key the cut left', () => {
+  // A 2,048-character bearer token cut by the sandbox's tail: its scheme and first half are gone.
+  const token = 'A'.repeat(1_024) + 'Z'.repeat(1_024);
+  assert.equal(
+    scrubbedTail(`${token.slice(900)} request failed: 401 unauthorized`, 8_192, true),
+    '…',
+  );
+  // A scheme cut to "earer" no longer marks the credential after it.
+  assert.equal(scrubbedTail('earer opaqueCredential0123456789 后面的文字', 8_192, true), '…');
+  // The git error as the host passes it, its own word first.
+  assert.equal(scrubbedTail('add earer opaqueCredential0123456789', 300, true), '…');
+  // Not cut: the text is kept as it is.
+  assert.equal(scrubbedTail('one line, not cut', 100), 'one line, not cut');
+  // Cut at a line break: what follows it stays.
+  assert.equal(scrubbedTail('ken-tail\nnext line', 100, true), 'next line');
+});
+
+test('a fetch error the sandbox cut is judged cut before its trailing spaces are trimmed', () => {
+  // 2512 bytes of git's error, the scheme's B cut off, eight spaces and a line break at the end.
+  const tail = `earer ${'c'.repeat(2497)}        \n`;
+  assert.equal(Buffer.byteLength(tail), 2512);
+  assert.equal(cloneFailure(`CLONE_FAILED\n${tail}`), '');
+  // A short error is shown as it is.
+  assert.equal(
+    cloneFailure('CLONE_FAILED\nfatal: repository not found\n'),
+    'fatal: repository not found',
+  );
+});
+
 test('a later run of the conversation opens a change kept by an earlier run, but no other task it did not delegate', async (t) => {
   const kept = {
     ...VERIFICATION,
@@ -602,4 +631,41 @@ test('a later run of the conversation opens a change kept by an earlier run, but
     /not_your_task/,
   );
   assert.equal(second.pulls.length, 0);
+});
+
+test('a scoped approval may cover this tool only for the repository its card names, and never for a kept, unreviewed, unknown or modified change', async (t) => {
+  const { deliveries, changesPath } = await deliveryFiles(t);
+  const tool = openPullRequestTool({
+    deliveries,
+    publisher: new CountingPublisher(),
+    ownsTask: () => true,
+  });
+  const scope = await tool.grantScope?.({ taskId: 'tsk_1', title: 'Fix add' });
+  assert.deepEqual(scope, { repository: REPO, fixed: { baseRef: 'main' } });
+  // The owner approving a scope sees this repository on the card.
+  const card = (await tool.approvalDetails?.({ taskId: 'tsk_1', title: 'Fix add' })) ?? '';
+  assert.ok(card.split('\n').includes(`Repository: ${scope?.repository}`));
+
+  // Opening a change unreviewed is its own ask each time; an unknown task has no repository.
+  assert.equal(
+    await tool.grantScope?.({ taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true }),
+    undefined,
+  );
+  assert.equal(await tool.grantScope?.({ taskId: 'tsk_none', title: 'Fix add' }), undefined);
+
+  // A change kept for the owner to look at is never covered.
+  const kept = await deliveryFiles(t, {
+    ...VERIFICATION,
+    kept: { reason: 'no independent review' },
+  });
+  const keptTool = openPullRequestTool({
+    deliveries: kept.deliveries,
+    publisher: new CountingPublisher(),
+    ownsTask: () => true,
+  });
+  assert.equal(await keptTool.grantScope?.({ taskId: 'tsk_1', title: 'Fix add' }), undefined);
+
+  // So is a change that was modified after it was verified.
+  await fs.writeFile(changesPath, JSON.stringify({ ...CHANGES, files: [] }));
+  assert.equal(await tool.grantScope?.({ taskId: 'tsk_1', title: 'Fix add' }), undefined);
 });

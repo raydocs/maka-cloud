@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { request } from 'node:http';
 import { test } from 'node:test';
-import type { InboxAnswerResult, InboxService } from '../inbox.js';
+import type { GrantsService, InboxAnswerResult, InboxService, PublicGrant } from '../inbox.js';
 import { newConversation, startHarness } from './harness.js';
 
 interface Calls {
@@ -8,11 +9,12 @@ interface Calls {
   answer: unknown[];
   mute: unknown[];
   settings: unknown[];
-  digest: number;
+  digest: string[];
 }
 
 function fakeService(overrides: Partial<InboxService> = {}) {
-  const calls: Calls = { list: [], answer: [], mute: [], settings: [], digest: 0 };
+  const calls: Calls = { list: [], answer: [], mute: [], settings: [], digest: [] };
+  const byOwner = new Map<string, { mutedKinds: string[] }>();
   const service: InboxService = {
     list: async (query) => {
       calls.list.push(query);
@@ -22,21 +24,23 @@ function fakeService(overrides: Partial<InboxService> = {}) {
       calls.answer.push(request);
       return { ok: true, duplicate: false, item: { state: 'closed' } };
     },
-    setMute: (kind, muted) => {
-      calls.mute.push([kind, muted]);
-      return kind === 'finished' || kind === 'decision'
-        ? { ok: true, settings: { mutedKinds: muted ? [kind] : [] } }
-        : { ok: false };
+    setMute: (owner, kind, muted) => {
+      calls.mute.push([owner, kind, muted]);
+      if (kind !== 'finished' && kind !== 'decision') return { ok: false };
+      const settings = { mutedKinds: muted ? [kind] : [] };
+      byOwner.set(owner, settings);
+      return { ok: true, settings };
     },
-    settings: () => ({ stallAfterMinutes: 30 }),
-    updateSettings: (patch) => {
-      calls.settings.push(patch);
-      const ok = (patch as { stallAfterMinutes?: unknown }).stallAfterMinutes === 45;
+    settings: (owner) => byOwner.get(owner) ?? { mutedKinds: [] },
+    updateSettings: (owner, patch) => {
+      calls.settings.push([owner, patch]);
+      const ok = (patch as { quietHours?: unknown }).quietHours !== undefined;
+      if (ok) byOwner.set(owner, patch as { mutedKinds: string[] });
       return ok ? { ok: true, settings: patch } : { ok: false };
     },
-    digest: async () => {
-      calls.digest += 1;
-      return { digestId: 'dig_1' };
+    digest: async (owner) => {
+      calls.digest.push(owner);
+      return { digestId: `dig_${owner}` };
     },
     stop: async () => undefined,
     ...overrides,
@@ -68,6 +72,9 @@ test('every inbox route needs a valid invite, including with a revoked or malfor
     ['GET', '/v1/inbox/settings'],
     ['PUT', '/v1/inbox/settings', { stallAfterMinutes: 45 }],
     ['POST', '/v1/inbox/digest'],
+    ['GET', '/v1/inbox/grants'],
+    ['DELETE', '/v1/inbox/grants/grant_1'],
+    ['POST', '/v1/inbox/grants/revoke', {}],
   ];
   const revoked = h.server.invites.create('gone');
   h.server.invites.revoke(revoked.inviteId);
@@ -82,7 +89,7 @@ test('every inbox route needs a valid invite, including with a revoked or malfor
       assert.equal(res.headers.get('www-authenticate'), 'Bearer');
     }
   }
-  assert.deepEqual(calls, { list: [], answer: [], mute: [], settings: [], digest: 0 });
+  assert.deepEqual(calls, { list: [], answer: [], mute: [], settings: [], digest: [] });
 });
 
 test('the list passes its filters on, with bounds, and shows where the next page starts', async (t) => {
@@ -197,24 +204,63 @@ test('an answer body with missing, extra or oversized fields never reaches the s
   assert.deepEqual(calls.answer, []);
 });
 
-test('the mutes, the settings and the digest are shared by every owner, so no invite reaches them', async (t) => {
+test('the mutes, the settings and the digest are each invite’s own, and one invite never sees or changes another’s', async (t) => {
   const { h, calls } = await setup(t);
-  const routes: Array<[string, string, unknown?]> = [
-    ['PUT', '/v1/inbox/mutes/finished'],
-    ['DELETE', '/v1/inbox/mutes/finished'],
-    ['GET', '/v1/inbox/settings'],
-    ['PUT', '/v1/inbox/settings', { stallAfterMinutes: 45 }],
-    ['POST', '/v1/inbox/digest'],
-  ];
-  for (const [method, path, body] of routes) {
-    const res = await h.api(path, {
-      method,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    assert.equal(res.status, 404, `${method} ${path}`);
-    assert.deepEqual(await res.json(), { error: 'not_found' });
-  }
-  assert.deepEqual(calls, { list: [], answer: [], mute: [], settings: [], digest: 0 });
+  const other = h.server.invites.create('other');
+  const mine = await (await h.api('/v1/inbox/mutes/finished', { method: 'PUT' })).json();
+  assert.deepEqual(mine, { settings: { mutedKinds: ['finished'] } });
+  // The other invite sees nothing of it, and its own digest is its own.
+  const theirs = await h.api('/v1/inbox/settings', { token: other.token });
+  assert.deepEqual(await theirs.json(), { settings: { mutedKinds: [] } });
+  const back = await h.api('/v1/inbox/settings');
+  assert.deepEqual(await back.json(), { settings: { mutedKinds: ['finished'] } });
+  const put = await h.api('/v1/inbox/settings', {
+    method: 'PUT',
+    token: other.token,
+    body: JSON.stringify({ quietHours: { start: '22:00', end: '07:00' } }),
+  });
+  assert.equal(put.status, 200);
+  assert.deepEqual(await (await h.api('/v1/inbox/settings')).json(), {
+    settings: { mutedKinds: ['finished'] },
+  });
+  const unmute = await h.api('/v1/inbox/mutes/finished', { method: 'DELETE' });
+  assert.deepEqual(await unmute.json(), { settings: { mutedKinds: [] } });
+  await h.api('/v1/inbox/digest', { method: 'POST' });
+  await h.api('/v1/inbox/digest', { method: 'POST', token: other.token });
+  const owners = calls.mute.map((call) => (call as unknown[])[0]);
+  assert.equal(new Set(owners).size, 1, 'every mute named the caller as its owner');
+  assert.equal(calls.digest.length, 2);
+  assert.notEqual(calls.digest[0], calls.digest[1], 'each digest is for the caller');
+  assert.deepEqual(
+    (calls.settings[0] as unknown[])[0],
+    calls.digest[1],
+    'the settings write was the other invite’s',
+  );
+});
+
+test('the owner routes refuse what they cannot take: an unknown kind, settings the service rejects, a wrong method', async (t) => {
+  const { h } = await setup(t);
+  assert.equal((await h.api('/v1/inbox/mutes/nonsense', { method: 'PUT' })).status, 404);
+  assert.equal((await h.api('/v1/inbox/mutes/finished', { method: 'GET' })).status, 405);
+  const bad = await h.api('/v1/inbox/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ stallAfterMinutes: 45 }),
+  });
+  assert.equal(bad.status, 400);
+  assert.equal((await h.api('/v1/inbox/settings', { method: 'POST' })).status, 405);
+  assert.equal((await h.api('/v1/inbox/digest', { method: 'GET' })).status, 405);
+});
+
+test('a digest is shown scrubbed like an item', async (t) => {
+  const { h } = await setup(t, {
+    digest: async () => ({
+      digestId: 'dig_1',
+      summary: 'Fixed it with ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789',
+      items: [{ itemId: 'itm_1', ask: 'Use token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789?' }],
+    }),
+  });
+  const body = JSON.stringify(await (await h.api('/v1/inbox/digest', { method: 'POST' })).json());
+  assert.ok(!body.includes('ghp_AbCdEfGhIjKlMnOpQrStUvWxYz'), body);
 });
 
 test('answers are rate limited per invite before the body is read, and a refused call reaches nothing', async (t) => {
@@ -250,4 +296,123 @@ test('an unknown path under /v1/inbox is 404 for an invited client', async (t) =
   const { h } = await setup(t);
   assert.equal((await h.api('/v1/inbox/nope')).status, 404);
   assert.equal((await h.api('/v1/inbox/items/itm_1')).status, 404);
+});
+
+test('a device signed out while its answer was arriving does not get the answer through', async (t) => {
+  const { h, calls } = await setup(t);
+  const accounts = h.server.accounts;
+  const accountId = accounts.createAccount(h.inviteId) ?? assert.fail('no account');
+  const session = accounts.issueSession(accountId, 'phone') ?? assert.fail('no session');
+  const body = JSON.stringify(ANSWER);
+  const { port } = new URL(h.server.url);
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = request(
+      {
+        port: Number(port),
+        host: '127.0.0.1',
+        method: 'POST',
+        path: '/v1/inbox/items/itm_1/answer',
+        headers: {
+          authorization: `Bearer ${session.token}`,
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(body)),
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on('error', reject);
+    // The head and half the body are in; the device is signed out; the rest arrives.
+    req.write(body.slice(0, 10));
+    setTimeout(() => {
+      accounts.revokeSession(accountId, session.sessionId);
+      req.end(body.slice(10));
+    }, 50);
+  });
+  assert.equal(status, 401);
+  assert.deepEqual(calls.answer, []);
+});
+
+function fakeGrants() {
+  const calls: unknown[][] = [];
+  const grant = (grantId: string, repository: string): PublicGrant => ({
+    grantId,
+    tool: 'open_pull_request',
+    repository,
+    scope: 'repository',
+    createdAt: 1,
+    expiresAt: 2,
+    uses: 0,
+    lastUsedAt: null,
+  });
+  const mine = new Map([['inv_x', [grant('grant_1', 'acme/widgets')]]]);
+  const service: GrantsService = {
+    list: (owner) => (calls.push(['list', owner]), mine.get(owner) ?? []),
+    revoke: (owner, grantId) => (
+      calls.push(['revoke', owner, grantId]),
+      (mine.get(owner) ?? []).some((entry) => entry.grantId === grantId)
+    ),
+    revokeAll: (owner, filter) => (calls.push(['revokeAll', owner, filter]), 2),
+  };
+  return { service, calls, mine };
+}
+
+test('the grants routes show and revoke the caller’s own approvals only, and answer 404 where nothing keeps them', async (t) => {
+  const none = await setup(t);
+  assert.equal((await none.h.api('/v1/inbox/grants')).status, 404);
+  assert.equal((await none.h.api('/v1/inbox/grants/grant_1', { method: 'DELETE' })).status, 404);
+
+  const { service, calls, mine } = fakeGrants();
+  const { h } = await setup(t, { grants: service });
+  const me = h.server.invites.create('me');
+  mine.set(me.inviteId, [
+    { ...mine.get('inv_x')?.[0], grantId: 'grant_me', repository: 'acme/widgets' } as PublicGrant,
+  ]);
+  const other = h.server.invites.create('other');
+  const asMe = { token: me.token };
+  const asOther = { token: other.token };
+
+  const listed = await h.api('/v1/inbox/grants', asMe);
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    ((await listed.json()) as { grants: Array<{ grantId: string }> }).grants.map((g) => g.grantId),
+    ['grant_me'],
+  );
+  assert.deepEqual(
+    ((await (await h.api('/v1/inbox/grants', asOther)).json()) as { grants: unknown[] }).grants,
+    [],
+  );
+
+  // Another owner's grant, an unknown one and a second revoke all answer 404.
+  for (const [opts, id] of [
+    [asOther, 'grant_me'],
+    [asMe, 'grant_nope'],
+  ] as const) {
+    assert.equal(
+      (await h.api(`/v1/inbox/grants/${id}`, { ...opts, method: 'DELETE' })).status,
+      404,
+    );
+  }
+  const revoked = await h.api('/v1/inbox/grants/grant_me', { ...asMe, method: 'DELETE' });
+  assert.equal(revoked.status, 200);
+  assert.deepEqual(await revoked.json(), { revoked: true });
+
+  const bulk = await h.api('/v1/inbox/grants/revoke', {
+    ...asMe,
+    ...json({ repository: 'acme/widgets' }),
+  });
+  assert.deepEqual(await bulk.json(), { revoked: 2 });
+  assert.deepEqual(calls.at(-1), ['revokeAll', me.inviteId, { repository: 'acme/widgets' }]);
+
+  // A body with anything else in it is refused, and the wrong method too.
+  assert.equal(
+    (await h.api('/v1/inbox/grants/revoke', { ...asMe, ...json({ owner: 'inv_x' }) })).status,
+    400,
+  );
+  // An id that is not valid percent-encoding is no grant, not a server error.
+  assert.equal((await h.api('/v1/inbox/grants/%E0', { ...asMe, method: 'DELETE' })).status, 404);
+  assert.equal((await h.api('/v1/inbox/grants', { ...asMe, method: 'POST' })).status, 405);
+  assert.equal((await h.api('/v1/inbox/grants/grant_me', asMe)).status, 405);
 });

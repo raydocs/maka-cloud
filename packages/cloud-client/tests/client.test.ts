@@ -89,6 +89,12 @@ test('links cannot execute code, expose blocked names or smuggle credentials', (
     'https://example.com/%43laude',
     'https://user:secret@example.com',
     'file:///tmp/report',
+    // Written so a parser that finds no user name would still let it through.
+    'https:paypal.com@evil.example/x/pull/1',
+    'https://paypal.com\\@evil.example/',
+    'https://paypal.com@evil.example/',
+    ' https://github.com/example/project/pull/17',
+    'https://github.com\t/example',
   ])
     expect(publicLink(url)).toBeUndefined();
   expect(publicLink('https://github.com/example/project/pull/17')).toBe(

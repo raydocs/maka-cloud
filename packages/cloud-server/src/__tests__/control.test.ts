@@ -12,6 +12,7 @@ import { ConversationStore } from '../conversations.js';
 import { openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
 import { DEFAULT_HTTP_LIMITS, PublicApi } from '../http.js';
+import { AccountStore } from '../accounts.js';
 import { InviteStore } from '../invites.js';
 import { RateLimiter } from '../rate-limit.js';
 import { SqliteTaskStore } from '../sqlite-task-store.js';
@@ -329,6 +330,7 @@ for (const change of [
     const db = openDatabase(join(dir, 'server.sqlite'));
     const hub = new FeedHub();
     const invites = new InviteStore(join(dir, 'invites.sqlite'));
+    const accounts = new AccountStore(join(dir, 'invites.sqlite'));
     const invite = invites.create('test');
     let n = 0;
     const conversations = new ConversationStore(db, hub, () => ({
@@ -349,6 +351,7 @@ for (const change of [
       db,
       memory: new MemoryStore(db),
       invites,
+      accounts,
       conversations,
       tasks: new SqliteTaskStore(db, hub),
       hub,
@@ -385,6 +388,7 @@ for (const change of [
       release();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      accounts.close();
       invites.close();
       db.close();
       await rm(dir, { recursive: true, force: true });

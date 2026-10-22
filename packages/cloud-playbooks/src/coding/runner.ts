@@ -59,6 +59,7 @@ import {
 import {
   type CodingTask,
   isRepoPath,
+  refusedScriptEnv,
   otherVendor,
   parseCodingBrief,
   REPRO_FILE,
@@ -314,7 +315,9 @@ interface Collected {
  * `max` characters are kept: a key never spans a line, so that partial first line is the only place
  * a split key can be, and counting the margin in bytes against characters (a redaction shortens
  * the text, non-ASCII text lengthens it in bytes) cannot be relied on to drop it. Text with no
- * line break (the git messages, folded onto one line) loses its first `TAIL_MARGIN` characters.
+ * line break (the git messages, folded onto one line) is that partial line whole, so none of it is
+ * shown, only \`…\`: no part of it can be told from the rest of a key, whatever its length, and a
+ * scheme cut to \`earer\` no longer marks the key after it.
  */
 export const TAIL_MARGIN = 512;
 
@@ -322,13 +325,24 @@ export function scrubbedTail(text: string, max: number, cut = false): string {
   let shown = scrubSecretText(text);
   if (cut) {
     const line = shown.indexOf('\n');
-    shown = line >= 0 ? shown.slice(line + 1) : shown.slice(Math.min(TAIL_MARGIN, shown.length));
+    if (line < 0) return '…';
+    shown = shown.slice(line + 1);
   }
   return shown.length <= max ? shown : shown.slice(shown.length - max);
 }
 
 /** Whether a string this long (in bytes) came out of a `tail -c` of `asked` bytes that cut it. */
 const wasCut = (text: string, asked: number): boolean => Buffer.byteLength(text) >= asked - 8;
+
+/**
+ * What CLONE_SCRIPT says of a failed fetch (\`CLONE_FAILED\`, then the last 2512 bytes of git's
+ * error), scrubbed and cut to 500 characters. Whether the sandbox cut it is judged on the bytes as
+ * they came, before any space is trimmed: trimmed first, a cut one could pass as whole.
+ */
+export function cloneFailure(out: string): string {
+  const tail = out.replace(/^CLONE_FAILED\n?/u, '');
+  return scrubbedTail(tail, 500, wasCut(tail, 2512)).trim();
+}
 
 export function clipText(text: string, max: number): string {
   // Scrubbed whole and only then cut: a key cut in two is no longer a key the scrubber knows.
@@ -729,6 +743,7 @@ class CodingRun implements RunHandle {
         'review.md',
         'verification.json',
         'failure_brief.json',
+        RECORDS_DIR,
       ],
       // Each agent run may spend what is left of its phase's limit.
       // The run's own limit is what is left of its phase (work, then review and fix). The whole
@@ -1611,7 +1626,11 @@ class CodingRun implements RunHandle {
     // swapped in one atomic write; the files under their plain names are what the task page lists.
     const changes = JSON.stringify(outcome.collected.changeSet);
     const changesSha256 = createHash('sha256').update(changes).digest('hex');
-    const changesPath = join(this.hostDir, `changes.${changesSha256.slice(0, 16)}.json`);
+    const changesPath = join(
+      this.hostDir,
+      RECORDS_DIR,
+      `changes.${changesSha256.slice(0, 16)}.json`,
+    );
     const reviewText = reviewMarkdown(review);
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
@@ -1632,6 +1651,7 @@ class CodingRun implements RunHandle {
     const verificationText = JSON.stringify(verification, null, 2);
     const verificationPath = join(
       this.hostDir,
+      RECORDS_DIR,
       `verification.${createHash('sha256').update(verificationText).digest('hex').slice(0, 16)}.json`,
     );
     await guard(writeHostFile(changesPath, changes));
@@ -1739,9 +1759,9 @@ class CodingRun implements RunHandle {
     const out = (await this.exec(CLONE_SCRIPT, { MAKA_REPO_URL: url, MAKA_REF: ref }, 600)).stdout;
     const base = /^BASE ([0-9a-f]{40})$/mu.exec(out);
     if (!base) {
-      const detail = out.replace(/^CLONE_FAILED\s*/u, '').trim();
+      const detail = cloneFailure(out);
       throw new Error(
-        `could not fetch ${task.repo} at ${ref}${detail ? `: ${scrubbedTail(detail, 500, wasCut(detail, 2512))}` : ''} (only public repositories are supported)`,
+        `could not fetch ${task.repo} at ${ref}${detail ? `: ${detail}` : ''} (only public repositories are supported)`,
       );
     }
     return base[1] as string;
@@ -1749,12 +1769,17 @@ class CodingRun implements RunHandle {
 
   /** Removes a file the agent wrote in handoff/; one that cannot be removed fails the step. */
   private async removeAgentFile(name: string): Promise<void> {
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.exec(`set -eu\ncd "$MAKA_DIR"\nrm -f -- ${name}\n`, {});
     if (out.exitCode !== 0) throw new Error(`could not remove ${name} before the next agent run`);
   }
 
   /** A file of the task directory, copied where the agent's account can read it. */
   private async publishForAgent(name: string): Promise<void> {
+    // The script copies into `handoff/` directly, which has no subdirectories: no slash here.
+    if (name.includes('/'))
+      throw new Error('a sandbox script was refused: MAKA_FILE is not a plain file name');
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.ws.exec(PUBLISH_FILE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
       signal: this.signal,
@@ -1763,6 +1788,7 @@ class CodingRun implements RunHandle {
   }
 
   private async writeSandboxFile(name: string, content: string): Promise<void> {
+    this.refuseEnv({ MAKA_FILE: name });
     const out = await this.ws.exec(WRITE_FILE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir, MAKA_FILE: name },
       stdin: content,
@@ -1773,12 +1799,19 @@ class CodingRun implements RunHandle {
 
   // -- plumbing ------------------------------------------------------------------------------------
 
+  /** A script's path inputs are checked here, before any script runs (fail closed). */
+  private refuseEnv(envs: Record<string, string>): void {
+    const refused = refusedScriptEnv(envs);
+    if (refused) throw new Error(`a sandbox script was refused: ${refused}`);
+  }
+
   private get ws(): SandboxWorkspace {
     if (!this.workspace) throw new CancelledError();
     return this.workspace;
   }
 
   private exec(script: string, envs: Record<string, string>, timeoutSeconds = 60) {
+    this.refuseEnv(envs);
     return this.guard(
       this.ws.exec(script, {
         envs: { MAKA_DIR: this.ws.dir, ...envs },
@@ -1934,8 +1967,17 @@ function verifiedLine(task: CodingTask, repro: Repro, baseSha: string): string {
   return `verified: \`${task.testCommand}\` passed; the reproduction test \`${repro.command}\` failed on base ${baseSha.slice(0, 12)} and passes with the change`;
 }
 
+/**
+ * Where a delivery's immutable records (the change and its verification, each named by its hash)
+ * are kept, inside the task's handoff directory. An agent's exported artifact is a plain relative
+ * path, which never starts with a dot, so nothing it exports can land here, and the name is
+ * reserved besides. The records used to sit beside the plain-named files, where an artifact named
+ * `changes.<hash>.json` replaced an earlier delivery's change or record (recheck28 F4).
+ */
+const RECORDS_DIR = '.records';
+
 async function writeHostFile(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     await writeFile(temp, content, { flag: 'wx', mode: 0o600 });

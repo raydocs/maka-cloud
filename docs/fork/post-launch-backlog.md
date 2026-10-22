@@ -128,6 +128,30 @@ Still missing before it can merge:
 3. P3: the hash-named files are not listed in the handoff listing, so an owner cannot see them.
    Test: a listing of a handoff directory with a hash-named file includes it. Source: #341.
 
+## Restarts, the kept conversation and CI timing (from #325, #337, #345, #352)
+
+1. P3: a restart ends every running coding task as failed ("orphaned"), because `CodingRunner` has
+   no `recover`. A first user who restarts mid-task has to send the goal again. A coding `recover`
+   would restart from the kept change or a fresh clone, spend so far included, and the result
+   card should say "restarted after a server restart" so a second `fetching` is not read as a
+   loop. Source: #337, recheck28 F3.
+2. P3: the backup copy of `transcripts.db` walks `transcript_lines` with `LIMIT ? OFFSET ?`, which
+   is quadratic in the table size. Use keyset pagination on the ordering columns, or one iterated
+   `SELECT` with the updates batched in a transaction. Source: #325.
+3. P3: the recovery id of a journal row without an attempt is a hash of the row's sum, so it holds
+   only while no new row without an attempt is written for the task. If the journal ever writes
+   them again, key the rows by their own id. Source: #345.
+4. P3: two timing tests failed on a loaded CI runner (the suite took 306 s against 128 s on a
+   dev machine) with nothing in the PR touching them: `cancelling the task stops the CLI in the
+   sandbox` (the pid file is awaited 5 s) and `children that ignore TERM are killed even after the
+   leader exited normally`. Make each wait on an explicit handshake instead of a time. (The
+   stop-obligations tests that raced the fast retry are fixed: the retry that would confirm the
+   stop now waits for the test to open a gate.)
+5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
+   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
+   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
+   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
+
 ## Reviews merged without an outside review
 
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull

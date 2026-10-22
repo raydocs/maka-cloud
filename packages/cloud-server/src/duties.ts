@@ -79,7 +79,8 @@ export interface DutyService {
 
 /** Who is still allowed to act: checked again once a body has been read. */
 export interface DutyOwners {
-  active(inviteId: string): boolean;
+  /** The invite is active and, for a device, its session too. */
+  active(inviteId: string, sessionId?: string): boolean;
 }
 
 /** The webhook body cap: GitHub's own limit is larger, but nothing we handle comes near this. */
@@ -282,7 +283,7 @@ export class DutyRoutes {
   }
 
   private reauthenticate(invite: InviteInfo): void {
-    if (!this.owners.active(invite.inviteId)) {
+    if (!this.owners.active(invite.inviteId, invite.sessionId)) {
       throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     }
   }

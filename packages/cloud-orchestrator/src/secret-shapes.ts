@@ -17,6 +17,56 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\b((?:x-api-key|authorization|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/giu,
 ];
 
+/**
+ * The body of a private key whose first marker is not in the text: output cut to its last bytes
+ * can begin in the middle of the block, leaving the lines of base64 and, at the end, the closing
+ * marker. A run of three or more full-width base64 lines is taken whole (a key body is 64 to 76
+ * characters wide; a list of hashes is hex, which is left alone), and so are the lines in front of
+ * a closing marker (`scrubOrphanKeyEnds`). Three lines of anything that is base64 by its characters
+ * count, a `base64 -w` blob or a diff of one included: a key body looks exactly like them, and the loss
+ * is some data in a text the owner reads, never a refusal. Not among `SECRET_SHAPES`: a copy that must stay exact (`scrubKeyShapes`) can
+ * hold base64 data of its own.
+ */
+const KEY_BODY_LINE = String.raw`[ \t]*(?![0-9a-fA-F]{60,100}[ \t]*\r?$)[A-Za-z0-9+/]{60,100}={0,2}[ \t]*(?:\r?\n|(?![\s\S]))`;
+const KEY_END = String.raw`-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`;
+const KEY_BODY_SHAPES: readonly RegExp[] = [
+  new RegExp(
+    String.raw`^(?:${KEY_BODY_LINE}){3,2000}(?:[ \t]*[A-Za-z0-9+/]{1,100}={1,2}[ \t]*(?:\r?\n|$))?`,
+    'gmu',
+  ),
+];
+
+const KEY_END_MARKER = new RegExp(KEY_END, 'gu');
+const KEY_BODY_ROW = /^[ \t]*[A-Za-z0-9+/]{16,100}={0,2}[ \t]*\r?$/u;
+const MAX_KEY_BODY_ROWS = 2000;
+
+/**
+ * A closing marker with no opening one, and the lines of base64 in front of it. Anchored on the
+ * marker and walked backwards a line at a time, so the cost is the lines taken, never a search
+ * from every line start (a pattern `^(lines){1,n}END` is quadratic on a long list of hashes).
+ */
+function scrubOrphanKeyEnds(text: string): string {
+  let out = '';
+  let kept = 0;
+  for (const marker of text.matchAll(KEY_END_MARKER)) {
+    const end = marker.index + marker[0].length;
+    const lineBegin = text.lastIndexOf('\n', marker.index - 1) + 1;
+    // Only indentation before the marker: it starts its line, and the lines before it can be its body.
+    const alone = /^[ \t]*$/u.test(text.slice(lineBegin, marker.index));
+    let start = alone ? lineBegin : marker.index;
+    if (alone) {
+      for (let rows = 0; rows < MAX_KEY_BODY_ROWS && start > kept; rows++) {
+        const lineStart = text.lastIndexOf('\n', start - 2) + 1;
+        if (lineStart < kept || !KEY_BODY_ROW.test(text.slice(lineStart, start - 1))) break;
+        start = lineStart;
+      }
+    }
+    out += `${text.slice(kept, start)}[secret]`;
+    kept = end;
+  }
+  return kept === 0 ? text : out + text.slice(kept);
+}
+
 /** Names whose value is a secret whatever it looks like: in a header, a query string or a JSON field. */
 const SECRET_FIELD =
   'authorization|proxy-authorization|x-api-key|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|bearer|token|secret|client[_-]?secret|password|passwd|credentials?|cookie|set-cookie|private[_-]?key|signature|x-amz-security-token';
@@ -390,6 +440,10 @@ function scrubShapes(text: string): string {
       typeof name === 'string' ? `${name}[secret]` : '[secret]',
     );
   }
+  for (const shape of KEY_BODY_SHAPES) {
+    out = out.replace(shape, (match) => (match.endsWith('\n') ? '[secret]\n' : '[secret]'));
+  }
+  out = scrubOrphanKeyEnds(out);
   return out;
 }
 
@@ -409,6 +463,16 @@ const MARK_AFTER_ASCII = /([\x21-\x7e])[\p{Mn}\p{Me}]+/gu;
 /** `value` as it reads: compatibility forms folded, invisible characters gone. For finding secrets, not for showing. */
 export function withoutInvisible(value: string): string {
   return value.normalize('NFKC').replace(INVISIBLE, '');
+}
+
+/**
+ * `withoutInvisible` with the letters taken apart first: folded with NFKC, `c` and a combining
+ * acute become one letter `ć` with no mark left to remove, and a key written that way is not found.
+ * Every accent goes here, the key's own included, so this is a reading beside the other, not
+ * instead of it. Composed again after, so Hangul reads as its syllables.
+ */
+function withoutMarks(value: string): string {
+  return value.normalize('NFKD').replace(INVISIBLE, '').normalize('NFC');
 }
 
 /** Like `withoutInvisible`, but the combining marks of other scripts stay, so it can be shown: the text of an outside page, or of a message with a secret cut out of it. */
@@ -431,6 +495,11 @@ export function scrubReading(value: string, scrub: (text: string) => string): st
   if (plain !== shown) {
     const scrubbedPlain = scrub(plain);
     if (scrubbedPlain !== plain) return scrubbedPlain;
+  }
+  const bare = withoutMarks(value);
+  if (bare !== shown && bare !== plain) {
+    const scrubbedBare = scrub(bare);
+    if (scrubbedBare !== bare) return scrubbedBare;
   }
   return scrub(value);
 }

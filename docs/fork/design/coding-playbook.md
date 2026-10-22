@@ -38,7 +38,11 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
    failures. There is never a third agent, and never two at once.
 7. A verified change is read out as git would commit it (diff against the base commit including untracked files,
    ignored files excluded, every blob's sha1 checked on the host; symlinks, submodules and oversized files refused)
-   into `changes.json`, `change.patch` and `verification.json`, and recorded in `CodingDeliveries`.
+   into `changes.json`, `change.patch` and `verification.json`, and recorded in `CodingDeliveries`. The delivery
+   points at hash-named copies of the change and its record (`changes.<hash>.json`, `verification.<hash>.json`) that
+   are never written twice. They live in `.records/` of the task's handoff directory, which no exported artifact can
+   name (an artifact is a plain relative path, never starting with a dot) and which the export reserves besides.
+   Beside the plain-named files, an artifact called `changes.<hash>.json` replaced an earlier delivery's change or record.
 8. The runner writes the result manifest itself. Its `done` holds one `verified:` line; `verify` requires it and the
    three artifacts. When both vendors fail, the task still finishes, with `notDone`, low confidence and the failure
    brief, so the conductor can say what went wrong.

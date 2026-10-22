@@ -172,7 +172,10 @@ export function PillButton({
   );
 }
 
-/** A small round send button next to a field. */
+/**
+ * A small round send button next to a field. It is filled with the accent when there is something to
+ * send; when there is not, it is an outlined ring in the muted ink (readable, but plainly at rest).
+ */
 export function RoundButton({
   label,
   glyph,
@@ -196,9 +199,19 @@ export function RoundButton({
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
         onPress();
       }}
-      style={[styles.round, { backgroundColor: t.pillOn, opacity: disabled ? 0.4 : 1 }]}
+      style={[
+        styles.round,
+        disabled
+          ? { backgroundColor: t.chip, borderColor: t.inkMuted, borderWidth: 1.5 }
+          : { backgroundColor: t.accent, borderColor: t.accent, borderWidth: 1.5 },
+      ]}
     >
-      <Text style={{ color: t.onPillOn, fontSize: 20, fontWeight: '700' }}>{glyph}</Text>
+      <Text
+        style={{ color: disabled ? t.inkMuted : t.onAccent, fontSize: 20, fontWeight: '700' }}
+        allowFontScaling={false}
+      >
+        {glyph}
+      </Text>
     </Pressable>
   );
 }
@@ -227,10 +240,11 @@ export function StatusMark({ tone }: { tone: 'ok' | 'attention' | 'bad' | 'idle'
   );
 }
 
-export function Field(props: TextInputProps & { label: string }) {
+/** A text field. `showLabel` puts its name above it (a placeholder alone disappears once typing starts). */
+export function Field(props: TextInputProps & { label: string; showLabel?: boolean }) {
   const t = useTheme();
-  const { label, style, ...rest } = props;
-  return (
+  const { label, showLabel = false, style, ...rest } = props;
+  const input = (
     <TextInput
       testID={`field-${label}`}
       accessibilityLabel={label}
@@ -242,6 +256,27 @@ export function Field(props: TextInputProps & { label: string }) {
         style,
       ]}
       {...rest}
+    />
+  );
+  if (!showLabel) return input;
+  return (
+    <View style={{ gap: 6 }}>
+      <T kind="small" style={{ fontWeight: '600' }}>
+        {label}
+      </T>
+      {input}
+    </View>
+  );
+}
+
+/** A grey bar standing in for a line of text that has not arrived yet. */
+export function SkeletonLine({ width = '100%' }: { width?: ViewStyle['width'] }) {
+  const t = useTheme();
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no"
+      style={{ height: 14, width, borderRadius: 7, backgroundColor: t.chip }}
     />
   );
 }

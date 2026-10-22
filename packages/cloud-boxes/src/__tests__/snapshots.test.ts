@@ -155,7 +155,7 @@ describe('SetupSnapshots', () => {
     const setupStep = steps.find(
       (step) => step.cmd.includes('.agents/setup') && step.cmd.includes('exec'),
     );
-    assert.match(setupStep?.cmd ?? '', /^sudo -n -u 'maka-agent' --preserve-env -- /);
+    assert.match(setupStep?.cmd ?? '', /^sudo -n -u 'maka-agent' -- env -i PATH=/);
     // Our own preparation (the pinned CLI installs) is not repository code and stays as it is.
     assert.equal(
       steps.find((step) => step.cmd.startsWith('echo install'))?.cmd,

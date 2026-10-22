@@ -449,6 +449,7 @@ export class FuzzWorld {
       store: this.storeFor(epoch),
       runners: new RunnerRegistry([this.runnerFor(epoch)]),
       handoffRoot: '/fuzz',
+      handoff: this.handoffFor(epoch),
       now: () => this.clock.now,
       maxDepth: MAX_DEPTH,
       controlTimeoutMs: 1_500,
@@ -461,8 +462,6 @@ export class FuzzWorld {
     }).then(
       (orchestrator) => {
         if (epoch !== this.epoch) return;
-        // Brief writes and manifest reads become gates too.
-        (orchestrator as unknown as { handoff: unknown }).handoff = this.handoffFor(epoch);
         orchestrator.setEndpoint('http://fuzz.invalid/mcp');
         this.orchestrator = orchestrator;
         this.note(
