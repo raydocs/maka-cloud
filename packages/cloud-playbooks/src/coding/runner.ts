@@ -1529,14 +1529,14 @@ class CodingRun implements RunHandle {
   ): Promise<void> {
     const guard = <T>(promise: Promise<T>): Promise<T> =>
       cancellable ? this.guard(promise) : promise;
-    const changesPath = join(this.hostDir, 'changes.json');
-    const verificationPath = join(this.hostDir, 'verification.json');
+    // The delivery record points at files that are never written twice: their names carry their
+    // hashes. A restart between the writes below then finds the earlier delivery as it was left, not
+    // a record whose change was replaced under it (`change_modified`, for good). The record is
+    // swapped in one atomic write; the files under their plain names are what the task page lists.
     const changes = JSON.stringify(outcome.collected.changeSet);
-    await guard(writeHostFile(changesPath, changes));
-    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
-    // review.md first: verification.json holds its hash, and the supervisor holds the two together.
+    const changesSha256 = createHash('sha256').update(changes).digest('hex');
+    const changesPath = join(this.hostDir, `changes.${changesSha256.slice(0, 16)}.json`);
     const reviewText = reviewMarkdown(review);
-    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     verification.review = summarizeReview(review, reviewText);
     if (kept !== undefined) verification.kept = { reason: plain(kept, 300) };
     else delete verification.kept;
@@ -1547,7 +1547,13 @@ class CodingRun implements RunHandle {
       path: file.path,
       status: file.status,
     }));
-    await guard(writeHostFile(verificationPath, JSON.stringify(verification, null, 2)));
+    const verificationText = JSON.stringify(verification, null, 2);
+    const verificationPath = join(
+      this.hostDir,
+      `verification.${createHash('sha256').update(verificationText).digest('hex').slice(0, 16)}.json`,
+    );
+    await guard(writeHostFile(changesPath, changes));
+    await guard(writeHostFile(verificationPath, verificationText));
     await guard(
       this.options.deliveries.record({
         taskId: this.spec.taskId,
@@ -1555,10 +1561,15 @@ class CodingRun implements RunHandle {
         baseRef: task.baseRef,
         baseSha: verification.baseSha,
         changesPath,
-        changesSha256: createHash('sha256').update(changes).digest('hex'),
+        changesSha256,
         verificationPath,
       }),
     );
+    // review.md before verification.json: that holds its hash, and the supervisor holds the two together.
+    await guard(writeHostFile(join(this.hostDir, 'changes.json'), changes));
+    await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
+    await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
+    await guard(writeHostFile(join(this.hostDir, 'verification.json'), verificationText));
     const agent = outcome.manifest;
     const files = outcome.collected.changeSet.files;
     const vendors = verification.attempts.map((attempt) => attempt.vendor);
