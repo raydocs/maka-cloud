@@ -70,6 +70,12 @@ export interface OrchestratorOptions {
   runners: RunnerRegistry;
   /** Directory that holds one `<taskId>/` folder of handoff files per task. */
   handoffRoot: string;
+  /**
+   * Replaces the reads and writes of the handoff directory. For tests that schedule every await
+   * themselves (the schedule fuzzer): restore reads the handoff, so it must be in place before
+   * restore runs.
+   */
+  handoff?: Pick<Handoff, 'paths' | 'writeBrief' | 'discard' | 'readManifest'>;
   now?: () => number;
   /**
    * How many levels of tasks may sit below a task the caller delegated
@@ -104,6 +110,25 @@ export interface OrchestratorOptions {
   resume?: 'automatic' | 'manual';
   /** Limits on one task on top of the budget of its tree; see `TaskLimits`. */
   limits?: Partial<TaskLimits>;
+  /** Holds back top-level tasks so few trees of one group run at once; see `Admission`. */
+  admission?: Admission;
+}
+
+/**
+ * At most `perGroup` task trees of one group run at once. A top-level task that would make one
+ * more waits as `queued`, in the order it came, with a note that says what it waits for, and
+ * starts once a tree of its group has ended and nothing of it can still be running. A task that a
+ * running task delegates is never held: it is that tree's own work. A task whose group is unknown
+ * is not held either.
+ *
+ * The server's group is the invite that owns the conversation: until each task gets an account
+ * of its own, every task of an invite runs on one machine as one agent account, so two trees at
+ * once could read and change each other's files.
+ */
+export interface Admission {
+  /** The group of the tree a root session starts, or undefined when it has none. */
+  groupOf(rootSessionId: SessionId): string | undefined;
+  perGroup: number;
 }
 
 /**
@@ -175,6 +200,8 @@ export interface OrchestratorStats {
   stopRetries: number;
   /** Running tasks with a run-time timer set. */
   runClocks: number;
+  /** Top-level tasks waiting for their group to have room (see `Admission`). */
+  heldTasks: number;
 }
 
 export interface DelegateInput {
@@ -199,7 +226,7 @@ export interface DelegateInput {
 export class Orchestrator {
   private readonly store: TaskStore;
   private readonly runners: RunnerRegistry;
-  private readonly handoff: Handoff;
+  private readonly handoff: Pick<Handoff, 'paths' | 'writeBrief' | 'discard' | 'readManifest'>;
   private readonly now: () => number;
   private readonly maxDepth: number;
   private readonly orphanStopTimeoutMs: number;
@@ -259,11 +286,16 @@ export class Orchestrator {
   private readonly runClocks = new Map<TaskId, NodeJS.Timeout>();
   /** The messages each run was handed, so a run is offered one once and a new run gets them all. */
   private readonly offered = new WeakMap<RunHandle, Set<SteerId>>();
+  private readonly admission: Admission | undefined;
+  /** Top-level tasks waiting for room in their group, oldest first. */
+  private held: HeldTask[] = [];
+  private readonly heldIds = new Set<TaskId>();
+  private admitScheduled = false;
 
   private constructor(options: OrchestratorOptions) {
     this.store = options.store;
     this.runners = options.runners;
-    this.handoff = new Handoff(options.handoffRoot);
+    this.handoff = options.handoff ?? new Handoff(options.handoffRoot);
     this.now = options.now ?? Date.now;
     this.quotas = { ...DEFAULT_QUOTAS, ...options.quotas };
     this.auth = new SessionAuth(
@@ -286,6 +318,13 @@ export class Orchestrator {
     ) {
       throw new RangeError('Task limits are positive numbers');
     }
+    if (
+      options.admission !== undefined &&
+      !(Number.isInteger(options.admission.perGroup) && options.admission.perGroup > 0)
+    ) {
+      throw new RangeError('admission.perGroup is a whole number above 0');
+    }
+    this.admission = options.admission;
     this.controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.stopRetry = { ...DEFAULT_STOP_RETRY, ...options.stopRetry };
     this.newTaskId =
@@ -332,7 +371,30 @@ export class Orchestrator {
     const pending = this.pendingResumes;
     this.pendingResumes = [];
     if (this.closed) return;
-    for (const resume of pending) this.track(this.resumeRun(resume));
+    // The resumes of one tree go together: a tree beyond its group's room (a limit lowered, or
+    // trees from before there was one) waits whole, like a new task. Trees that were running come
+    // first, then the ones that were waiting, each in the order they were made.
+    const trees = new Map<TaskId, PendingResume[]>();
+    for (const resume of pending) {
+      const rootId = this.treeRoot(resume.task.taskId)?.taskId ?? resume.task.taskId;
+      const tree = trees.get(rootId) ?? [];
+      tree.push(resume);
+      trees.set(rootId, tree);
+    }
+    const order = [...trees.entries()].sort(
+      ([a], [b]) =>
+        Number(this.tasks.get(a)?.state === 'queued') -
+        Number(this.tasks.get(b)?.state === 'queued'),
+    );
+    for (const [rootId, resumes] of order) {
+      const root = this.tasks.get(rootId);
+      const start = async () => {
+        await Promise.all(resumes.map((resume) => this.resumeRun(resume)));
+      };
+      if (root !== undefined && this.queueHeld(rootId, root.rootSessionId, start)) continue;
+      this.track(start());
+    }
+    this.admit();
   }
 
   /**
@@ -387,6 +449,9 @@ export class Orchestrator {
   close(): void {
     this.closed = true;
     this.pendingResumes = [];
+    // A held task stays queued in the log; the next process holds it again.
+    this.held = [];
+    this.heldIds.clear();
     for (const retry of this.stopRetries.values()) retry.abort();
     this.stopRetries.clear();
     for (const retry of this.cancelRetries.values()) retry.abort();
@@ -407,6 +472,7 @@ export class Orchestrator {
       connectionSessions: this.connectionsBySession.keys,
       stopRetries: this.stopRetries.size + this.cancelRetries.size,
       runClocks: this.runClocks.size,
+      heldTasks: this.held.length,
     };
   }
 
@@ -575,8 +641,167 @@ export class Orchestrator {
       if (error instanceof OrchestratorError) await this.handoff.discard(taskId);
       throw error;
     }
-    this.track(this.launch(taskId, input.runner, paths));
+    const start = () => this.launch(taskId, input.runner, paths);
+    if (parent === undefined && this.queueHeld(taskId, rootSessionId, start)) {
+      this.admit();
+      // The caller gets the task with the note that says what it waits for.
+      await this.heldTask(taskId)?.noting;
+    } else {
+      this.track(start());
+    }
     return taskId;
+  }
+
+  // Admission (see `Admission`). Which trees run is read from what may still run (as `view` reads
+  // it for `treeStopPending`), not counted, so nothing can leak a slot or free one too early.
+
+  /**
+   * A top-level task whose latest note says it waits its turn. It never had a run: a held task
+   * that gets its turn writes `TURN_NOTE` before its run starts.
+   */
+  private waitingTurn(task: TaskRecord): boolean {
+    return (
+      this.admission !== undefined &&
+      task.parentTaskId === undefined &&
+      task.state === 'queued' &&
+      isHoldNote(task.progress.at(-1))
+    );
+  }
+
+  /** Puts a top-level task at the back of its group's line. False when it has no group to wait in. */
+  private queueHeld(taskId: TaskId, rootSessionId: SessionId, start: () => Promise<void>): boolean {
+    if (this.admission === undefined) return false;
+    const group = this.admission.groupOf(rootSessionId);
+    if (group === undefined) return false;
+    this.held.push({ taskId, group, start });
+    this.heldIds.add(taskId);
+    return true;
+  }
+
+  private heldTask(taskId: TaskId): HeldTask | undefined {
+    return this.held.find((entry) => entry.taskId === taskId);
+  }
+
+  /** Runs `admit` once after whatever changed what may still run. */
+  private wakeAdmission(): void {
+    if (this.admitScheduled || this.held.length === 0) return;
+    this.admitScheduled = true;
+    queueMicrotask(() => {
+      this.admitScheduled = false;
+      this.admit();
+    });
+  }
+
+  /**
+   * Starts every held task whose group has room, oldest first, and tells the others what they
+   * wait for. Synchronous: what runs is read and the start is decided in one step.
+   */
+  private admit(): void {
+    const admission = this.admission;
+    if (admission === undefined || this.closed || this.held.length === 0) return;
+    const running = this.runningTrees(admission);
+    const waiting = new Map<string, number>();
+    const kept: HeldTask[] = [];
+    for (const entry of this.held) {
+      // Cancelled or ended while it waited (a cancel ends a task with no run at once).
+      if (this.isStopping(entry.taskId) || this.fenced.has(entry.taskId)) {
+        this.heldIds.delete(entry.taskId);
+        continue;
+      }
+      const trees = running.get(entry.group) ?? [];
+      const ahead = waiting.get(entry.group) ?? 0;
+      if (ahead === 0 && trees.length < admission.perGroup) {
+        this.heldIds.delete(entry.taskId);
+        const task = this.tasks.get(entry.taskId) as TaskRecord;
+        trees.push(task);
+        running.set(entry.group, trees);
+        this.track(this.takeTurn(task, entry.start));
+        continue;
+      }
+      kept.push(entry);
+      waiting.set(entry.group, ahead + 1);
+      const note = holdNote(admission.perGroup, trees[0]?.title, ahead);
+      if (note !== entry.note) {
+        entry.note = note;
+        entry.noting = this.recordHoldNote(entry.taskId, note);
+        this.track(entry.noting);
+      }
+    }
+    this.held = kept;
+  }
+
+  /**
+   * The top-level task of every tree that is not held and may still run something, by group,
+   * oldest first: a tree with a task not ended, or one still starting, owing a stop, having its
+   * cancel retried or its stream read.
+   */
+  private runningTrees(admission: Admission): Map<string, TaskRecord[]> {
+    const roots = new Map<TaskId, TaskRecord>();
+    // An unfinished task of a held tree has no run yet. A run that may still be going counts
+    // whatever its tree waits for: it is on the machine now.
+    const consider = (taskId: TaskId, live: boolean) => {
+      if (this.fenced.has(taskId)) return;
+      const root = this.treeRoot(taskId);
+      if (root && (live || !this.heldIds.has(root.taskId))) roots.set(root.taskId, root);
+    };
+    for (const taskId of this.tasks.keys()) consider(taskId, false);
+    for (const taskId of this.starting) consider(taskId, true);
+    for (const taskId of this.handles.keys()) consider(taskId, true);
+    for (const taskId of this.readers.keys()) consider(taskId, true);
+    for (const taskId of this.cancelRetries.keys()) consider(taskId, true);
+    for (const taskId of this.store.stopPendingTaskIds()) consider(taskId, true);
+    const byGroup = new Map<string, TaskRecord[]>();
+    for (const root of [...roots.values()].sort((a, b) => a.createdAt - b.createdAt)) {
+      const group = admission.groupOf(root.rootSessionId);
+      if (group === undefined) continue;
+      const trees = byGroup.get(group) ?? [];
+      trees.push(root);
+      byGroup.set(group, trees);
+    }
+    return byGroup;
+  }
+
+  /**
+   * Starts a held task. One that was told it waits is told its turn came first, durably, so a
+   * restart from here on knows it may have a run (`waitingTurn`).
+   */
+  private async takeTurn(task: TaskRecord, start: () => Promise<void>): Promise<void> {
+    if (isHoldNote(task.progress.at(-1))) {
+      try {
+        const noted = await this.record(
+          { type: 'task_progress', taskId: task.taskId, note: TURN_NOTE },
+          () => {
+            if (this.isStopping(task.taskId)) throw new Superseded();
+          },
+        );
+        // Cancelled while its turn came: the cancel ends it, with no run to stop.
+        if (noted === undefined) return;
+      } catch (error) {
+        // Without the note a restart would take the task for one that never ran and start it
+        // again beside a run this start left: it does not start.
+        await this.record({
+          type: 'task_failed',
+          taskId: task.taskId,
+          reason: `could not start: its turn could not be recorded: ${errorMessage(error)}`,
+        }).catch(() => undefined);
+        return;
+      }
+    }
+    await start();
+  }
+
+  /** Writes what a held task waits for, unless it started meanwhile or already says so. */
+  private async recordHoldNote(taskId: TaskId, note: string): Promise<void> {
+    try {
+      await this.record({ type: 'task_progress', taskId, note }, () => {
+        const task = this.tasks.get(taskId);
+        if (!this.heldIds.has(taskId) || task === undefined || task.progress.at(-1) === note) {
+          throw new Superseded();
+        }
+      });
+    } catch {
+      // A note that could not be written changes nothing about when the task starts.
+    }
   }
 
   status(session: SessionInfo, taskId: TaskId): TaskView {
@@ -960,8 +1185,13 @@ export class Orchestrator {
     const orphans = [...this.tasks.values()];
     // A runner may have left work behind (a remote sandbox keeps running when we restart).
     // Stop it for every orphan at once, each bounded, so an unreachable sandbox cannot stall startup.
+    // A task still waiting its turn never had a run, so there is nothing of it to stop.
     const stops = await Promise.all(
-      orphans.map((task) => this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch)),
+      orphans.map((task) =>
+        this.waitingTurn(task)
+          ? Promise.resolve<LeftoverStop>('none')
+          : this.stopLeftover(task, begun.get(task.taskId) ?? task.epoch),
+      ),
     );
     const toResume: PendingResume[] = [];
     for (const [index, task] of orphans.entries()) {
@@ -1015,18 +1245,22 @@ export class Orchestrator {
         continue;
       }
       // Nothing is running after a restart. History is never edited, so the
-      // outcome is appended.
+      // outcome is appended. A change the runner already kept for the owner is on the handoff
+      // directory, not in a process: it goes on the outcome like on any other end (read here,
+      // before the write chain, as `withKept` requires).
       const ended = await this.record(
-        task.cancelRequestedBy !== undefined
-          ? { type: 'task_cancelled', taskId: task.taskId }
-          : {
-              type: 'task_failed',
-              taskId: task.taskId,
-              reason:
-                plan?.kind === 'give_up'
-                  ? plan.reason
-                  : 'orphaned: the orchestrator restarted while this task was running',
-            },
+        await this.withKept(
+          task.cancelRequestedBy !== undefined
+            ? { type: 'task_cancelled', taskId: task.taskId }
+            : {
+                type: 'task_failed',
+                taskId: task.taskId,
+                reason:
+                  plan?.kind === 'give_up'
+                    ? plan.reason
+                    : 'orphaned: the orchestrator restarted while this task was running',
+              },
+        ),
         undefined,
         fence,
       );
@@ -1047,8 +1281,12 @@ export class Orchestrator {
     task: TaskRecord,
   ): { kind: 'resume'; resumes: number } | { kind: 'give_up'; reason: string } | undefined {
     const runner = this.runners.get(task.runner);
+    // A top-level task still waiting its turn never ran: it waits again and starts like a new one,
+    // whatever its runner can recover, and waiting through restarts is not a resume that got nowhere.
+    const waitingTurn = this.waitingTurn(task);
     if (
-      !runner?.recover ||
+      runner === undefined ||
+      (!runner.recover && !waitingTurn) ||
       task.cancelRequestedBy !== undefined ||
       task.state === 'paused' ||
       task.pauseRequested === true ||
@@ -1064,11 +1302,23 @@ export class Orchestrator {
       };
     }
     const root = this.treeRoot(task.taskId);
-    const costSeqs = (root ? this.store.readTask(root.taskId) : [])
+    const rootLog = root ? this.store.readTask(root.taskId) : [];
+    const costSeqs = rootLog
       .filter(({ event }) => event.type === 'task_cost' && event.fromTaskId === task.taskId)
       .map(({ seq }) => seq);
-    const resumes = resumesInARow(this.store.readTask(task.taskId), costSeqs);
-    if (resumes > MAX_RESUMES_IN_A_ROW) {
+    // Restarts its tree spent waiting its turn are not resumes that got nowhere: they are counted
+    // from the tree's latest hold or turn note, and not at all while the tree still waits.
+    const waitSeqs = rootLog
+      .filter(
+        ({ event }) =>
+          event.type === 'task_progress' && (event.note === TURN_NOTE || isHoldNote(event.note)),
+      )
+      .map(({ seq }) => seq);
+    const treeWaits =
+      waitingTurn ||
+      (this.admission !== undefined && root !== undefined && isHoldNote(root.progress.at(-1)));
+    const resumes = resumesInARow(this.store.readTask(task.taskId), [...costSeqs, ...waitSeqs]);
+    if (resumes > MAX_RESUMES_IN_A_ROW && !treeWaits) {
       return {
         kind: 'give_up',
         reason: `needs you: this task was resumed ${MAX_RESUMES_IN_A_ROW} times in a row without finishing a step or spending anything, so it stopped; open it and decide whether to start it again`,
@@ -1255,6 +1505,7 @@ export class Orchestrator {
       })
       .finally(() => {
         if (this.cancelRetries.get(taskId) === retry) this.cancelRetries.delete(taskId);
+        this.wakeAdmission();
       });
     await first;
   }
@@ -1313,6 +1564,18 @@ export class Orchestrator {
   ): Promise<void> {
     const task = this.tasks.get(taskId);
     const runner = this.runners.get(runnerName);
+    // A run that used its time before it could start again (a restored tree held for its turn) is
+    // stopped with the usual note, not left reading as running with nothing behind it.
+    if (
+      task !== undefined &&
+      runner !== undefined &&
+      !this.isStopping(taskId) &&
+      !this.ancestorStopped(taskId) &&
+      this.overRunTime(task)
+    ) {
+      await this.stopForRunTime(taskId);
+      return;
+    }
     if (
       !task ||
       !runner ||
@@ -1383,6 +1646,7 @@ export class Orchestrator {
     this.readers.set(taskId, reading);
     void reading.finally(() => {
       if (this.readers.get(taskId) === reading) this.readers.delete(taskId);
+      this.wakeAdmission();
     });
     let recorded = false;
     try {
@@ -1595,6 +1859,7 @@ export class Orchestrator {
       if (!cancelled) await this.cancelFailed(taskId, handle);
     } finally {
       this.starting.delete(taskId);
+      this.wakeAdmission();
     }
     if (cancelled) await Promise.all([reading, this.recordStopped(taskId)]);
   }
@@ -1686,6 +1951,7 @@ export class Orchestrator {
   private runnerOver(taskId: TaskId, handle: RunHandle): void {
     if (this.handles.get(taskId) === handle) this.handles.delete(taskId);
     this.readers.delete(taskId);
+    this.wakeAdmission();
   }
 
   /** Concurrent callers for one task share a single cancel. */
@@ -1927,9 +2193,12 @@ export class Orchestrator {
       this.tasks.delete(taskId);
     }
     this.readers.delete(taskId);
+    this.wakeAdmission();
   }
 
   private afterApply(event: TaskEvent): void {
+    // An end or a confirmed stop may be the last of what a running tree had left.
+    if (isTerminalEvent(event) || event.type === 'task_stopped') this.wakeAdmission();
     if (event.type === 'task_cost' && !this.tasks.has(event.taskId)) {
       // Spend that settled after the end changed the ended record.
       this.archive.delete(event.taskId);
@@ -2343,6 +2612,49 @@ class ControlTimeout extends Error {}
 
 /** Thrown by a write guard to drop an event that no longer applies. */
 class Superseded extends Error {}
+
+/** A top-level task waiting for room in its group (see `Admission`). */
+interface HeldTask {
+  taskId: TaskId;
+  group: string;
+  /** Starts its run: a first start, or the resume `restore` planned. */
+  start: () => Promise<void>;
+  /** The last note it was given, and the write of it. */
+  note?: string;
+  noting?: Promise<void>;
+}
+
+/**
+ * What a held task tells its user. `title` is the oldest running tree's; `ahead` counts the tasks
+ * of the group that wait before it.
+ */
+export function holdNote(perGroup: number, title: string | undefined, ahead: number): string {
+  const rule =
+    perGroup === 1
+      ? 'One task runs at a time on this workspace for now.'
+      : `${perGroup} tasks run at a time on this workspace for now.`;
+  const others = ahead === 1 ? 'the task' : `the ${ahead} tasks`;
+  if (perGroup > 1) {
+    return ahead === 0
+      ? `${rule} This one starts when one of them finishes.`
+      : `${rule} This one starts after ${others} waiting before it.`;
+  }
+  const running = title === undefined || title.trim() === '' ? 'the running task' : `"${title}"`;
+  return ahead === 0
+    ? `${rule} This one starts when ${running} finishes.`
+    : `${rule} This one starts after ${running} and ${others} waiting before it.`;
+}
+
+/** What a held task says when its turn comes, before its run starts. */
+export const TURN_NOTE = 'Its turn came: starting now.';
+
+/** Whether a progress note is one `holdNote` wrote: the task was waiting its turn. */
+export function isHoldNote(note: string | undefined): boolean {
+  return (
+    note !== undefined &&
+    /^(?:One task runs|\d+ tasks run) at a time on this workspace for now\. /u.test(note)
+  );
+}
 
 /** A run `restore` decided to start again, held until `startRestored`. */
 interface PendingResume {

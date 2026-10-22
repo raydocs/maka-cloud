@@ -38,7 +38,11 @@ edit loops, one handoff) need to see the sandbox, and the conductor only sees ma
    failures. There is never a third agent, and never two at once.
 7. A verified change is read out as git would commit it (diff against the base commit including untracked files,
    ignored files excluded, every blob's sha1 checked on the host; symlinks, submodules and oversized files refused)
-   into `changes.json`, `change.patch` and `verification.json`, and recorded in `CodingDeliveries`.
+   into `changes.json`, `change.patch` and `verification.json`, and recorded in `CodingDeliveries`. The delivery
+   points at hash-named copies of the change and its record (`changes.<hash>.json`, `verification.<hash>.json`) that
+   are never written twice. They live in `.records/` of the task's handoff directory, which no exported artifact can
+   name (an artifact is a plain relative path, never starting with a dot) and which the export reserves besides.
+   Beside the plain-named files, an artifact called `changes.<hash>.json` replaced an earlier delivery's change or record.
 8. The runner writes the result manifest itself. Its `done` holds one `verified:` line; `verify` requires it and the
    three artifacts. When both vendors fail, the task still finishes, with `notDone`, low confidence and the failure
    brief, so the conductor can say what went wrong.
@@ -54,6 +58,22 @@ samples of one vendor's attempt, is a loop: the run is cancelled and the task ha
 **Budget.** The runner reports one running total of its agent runs' spend as `usage` events, and gives each agent
 run what is left of the task's `budgetUsd`. When the total reaches the budget, it stops the agent run and fails the
 task with the reason. A spent budget is not a vendor failure, so the task is not handed over.
+
+**Review and fix rounds.** A verified change is reviewed by an agent of the other vendor (`review.md`, counts and
+its hash in `verification.json`). While the latest review has P1 or P2 findings, the runner starts a fix round: the
+implementer's vendor gets those findings (the worst five, as data) in a fresh run, the runner runs the reproduction
+test, the repository's tests and the base check again exactly as for the first change, and the other vendor reviews
+the fixed change afresh. P3 findings are never sent back. The rounds end at the first review with no P1 or P2, after
+`limits.fixRounds` rounds (default 3, at most 10, 0 for none), when the review's share of the budget leaves less than
+a fix and a review, or when a fix does not run or fails the checks. The change delivered is then the last one that
+passed the checks and was reviewed, with that review: never a fix whose checks failed, and never one shown with
+another change's review. Each fixed change that passes the checks is kept on the host before its review starts, so a
+stop or a failed review leaves it kept unreviewed. `verification.json` records the rounds under `review.fix`
+(`rounds`, findings sent, whether the change is a fixed one, why the rounds stopped, and each round's result and
+counts). A change whose latest review still has a P1, or that could not be reviewed, is kept for the owner instead of
+delivered, with the reason (for example "the independent review still found 1 serious problem(s) after 3 fix
+round(s) (the cap of 3 fix round(s) was reached)"); it is pushed only if the owner asks to open it unreviewed. A P2
+left after the rounds is delivered and shown.
 
 **Checks.** A check is one sandbox `exec`, run as the agent's account (`SandboxWorkspace.execCheck`: the same account check and
 `sudo -u` as the CLI), that runs the command to its end, and its exit status is the exec's own,

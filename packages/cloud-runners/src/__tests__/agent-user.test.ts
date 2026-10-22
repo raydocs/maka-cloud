@@ -28,6 +28,7 @@ const GOOD = [
   'FACT agent_groups=maka-agent maka',
   'FACT agent_sockets=none',
   'FACT agent_control_write=none',
+  'FACT agent_login_files=none',
   'FACT agent_iptables=no',
   'FACT agent_ip6tables=absent',
   'FACT chan_enter=no',

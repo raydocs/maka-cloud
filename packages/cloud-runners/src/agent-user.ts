@@ -154,6 +154,62 @@ chmod 2770 claude-config
 `;
 
 /**
+ * Part of the probe: the files the control user's login shell reads on every exec. Needs
+ * `as_agent`.
+ */
+export const LOGIN_FILES_PROBE = `# Every exec of the control user runs under a login shell, which reads these files first: whoever
+# can write one (or the directory it is in) runs code as the control user. Each must be a regular
+# file (a link is followed to its target) the control user or root owns, which the agent cannot write,
+# in directories (all the way up) that it cannot write either, apart from sticky ones.
+mine=$(id -u)
+login_bad=""
+dir_safe() {
+  local owner
+  owner=$(stat -c %u -- "$1" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  if as_agent test -w "$1" >/dev/null 2>&1; then
+    # A sticky directory (/tmp) lets the agent add entries but not rename or remove ours.
+    case "$(stat -c %a -- "$1" 2>/dev/null)" in 1???|3???|5???|7???) return 0 ;; esac
+    return 1
+  fi
+  return 0
+}
+# A directory and every one above it: a writable one lets the agent swap what is below.
+chain_safe() {
+  local d="$1"
+  while :; do
+    dir_safe "$d" || return 1
+    [ "$d" = / ] && return 0
+    d=$(dirname -- "$d")
+  done
+}
+login_safe() {
+  local target owner
+  target=$(readlink -f -- "$1" 2>/dev/null) || return 1
+  [ -f "$target" ] || return 1
+  owner=$(stat -c %u -- "$target" 2>/dev/null) || return 1
+  [ "$owner" = "$mine" ] || [ "$owner" = 0 ] || return 1
+  as_agent test -w "$target" >/dev/null 2>&1 && return 1
+  chain_safe "$(dirname -- "$target")"
+}
+login_files=("$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" /etc/profile /etc/bash.bashrc /etc/profile.d/*)
+login_dirs=("$HOME" /etc /etc/profile.d)
+# A test names its own files and directories (one per line); nothing else sets these.
+if [ -n "\${MAKA_LOGIN_FILES+x}" ]; then mapfile -t login_files <<< "$MAKA_LOGIN_FILES"; mapfile -t login_dirs <<< "\${MAKA_LOGIN_DIRS:-}"; fi
+unset MAKA_LOGIN_FILES MAKA_LOGIN_DIRS
+for f in "\${login_files[@]}"; do
+  [ -n "$f" ] || continue
+  { [ -e "$f" ] || [ -L "$f" ]; } || continue
+  login_safe "$f" || login_bad="$login_bad $f"
+done
+for d in "\${login_dirs[@]}"; do
+  [ -d "$d" ] || continue
+  chain_safe "$(readlink -f -- "$d")" || login_bad="$login_bad $d"
+done
+if [ -z "$login_bad" ]; then echo "FACT agent_login_files=none"; else echo "FACT agent_login_files=$login_bad"; fi
+`;
+
+/**
  * Whether any program the agent can run carries a file capability, or is setuid to anyone but the
  * agent or setgid to a group the agent is not in. The whole tree from `/` is walked (hidden
  * directories, files at the top and every mount below included, the task root too: a privileged
@@ -325,6 +381,7 @@ for path in "$HOME" "$HOME/.maka-cli" "$HOME/.maka-cli/bin" "$MAKA_ROOT" "$(dirn
   if [ -e "$path" ] && as_agent test -w "$path" >/dev/null 2>&1; then writable="$writable $path"; fi
 done
 if [ -z "$writable" ]; then echo "FACT agent_control_write=none"; else echo "FACT agent_control_write=$writable"; fi
+${LOGIN_FILES_PROBE}
 # The firewall itself: can this account change network policy (a capability, a setuid tool)? A
 # scratch chain is made and taken away again (also on the way out, if this stops half way).
 chain="MAKA_PROBE_$$"
@@ -408,6 +465,11 @@ export function agentIsolationProblems(output: string): string[] {
     'agent_filecaps',
     'none',
     'a program carries a capability the agent could use (or file capabilities could not be listed)',
+  );
+  mustBe(
+    'agent_login_files',
+    'none',
+    'the agent account can change a file or directory that the login shell of the control user reads (or one of them is a link to nowhere, or could not be checked)',
   );
   mustBe(
     'agent_setid',

@@ -7,7 +7,13 @@ appId: cloud.maka.app
 - tapOn:
     id: "field-What would you like to get done\\?"
 - inputText: "Summarise what changed this week"
-- hideKeyboard
+# On iOS the keyboard's dismiss action taps the screen, which can press an example start instead; the
+# Start button is above the keyboard there.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn:
     id: "button-Start"
 - assertVisible: "Summarise what changed this week"

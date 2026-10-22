@@ -5,6 +5,7 @@ export {
   type ConversationHandler,
   type CreateConversationInput,
   type CreateConversationResult,
+  DEFAULT_TASKS_PER_INVITE,
   type StartConversationInput,
   type StartConversationResult,
   startCloudServer,
@@ -28,7 +29,23 @@ export {
   MAX_ANSWER_TEXT_LENGTH,
 } from './http.js';
 export { type DutyOwners, type DutyService, type SuggestionsOverview } from './duties.js';
-export { type InboxAnswerResult, type InboxService } from './inbox.js';
+export {
+  type GrantsService,
+  type InboxAnswerResult,
+  type InboxService,
+  type PublicGrant,
+} from './inbox.js';
+export { type Mailer, EmailCodes, NonceStore, normalizeEmail } from './challenges.js';
+export {
+  APPLE,
+  createOidcVerifier,
+  GOOGLE,
+  type IdentityVerifier,
+  type JwksSource,
+  jwksFromSafeFetch,
+  type VerifiedIdentity,
+} from './identity.js';
+export { AccountStore, type IssuedSession, type Session, SESSION_IDLE_MS } from './accounts.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
 export { scrubErrorText } from './public-view.js';
 export {

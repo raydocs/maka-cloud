@@ -232,6 +232,37 @@ test('the playbook subject: its verified delivery is the outcome, after its left
   assert.match(brief, /"repo":"pallets\/flask"/u);
   assert.match(brief, /Calling the thing twice raises\./u, 'the full issue is in the brief');
   assert.match(brief, /import flask/u, 'the visible test command is the repository smoke test');
+  assert.equal(result.proof, null, 'no verification record is no proof, not a failure');
+});
+
+test('the playbook subject: its verification record is read as the proof', async (t) => {
+  const log: string[] = [];
+  const runner = new FakeRunner('coding', log);
+  const deliveries = new MemoryCodingDeliveries();
+  const { driver } = playbook(log, runner, deliveries);
+  const input = await driverInput(t);
+  runner.onStart = async (run) => {
+    await deliver(deliveries, input, 'diff --git a/s b/s\n+1\n');
+    await writeFile(
+      join(input.hostDir, 'verification.json'),
+      JSON.stringify({
+        baseSha: BASE_SHA,
+        repro: { command: 'pytest t.py', files: ['t.py'] },
+        attempts: [{ vendor: 'claude' }, { vendor: 'claude' }],
+        review: { status: 'reviewed', reviewer: 'codex', counts: { P1: 0, P2: 2, P3: 1 } },
+      }),
+    );
+    finishWith(1)(run);
+  };
+  const result = await driver.run(input);
+  assert.deepEqual(result.proof, {
+    reproduced: true,
+    reviewed: true,
+    crossVendor: true,
+    open: { P1: 0, P2: 2, P3: 1 },
+    attempts: 2,
+    kept: false,
+  });
 });
 
 test('the playbook subject: giving up delivers nothing', async (t) => {

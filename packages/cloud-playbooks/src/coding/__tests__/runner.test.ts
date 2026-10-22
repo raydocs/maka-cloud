@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { verifyCodingManifest } from '../playbook.js';
 import { BASE_RESTORE_SCRIPT, BASE_REVERT_SCRIPT, BASE_STAGE_SCRIPT } from '../scripts.js';
@@ -423,4 +423,29 @@ test('a repro.json at the task directory is not read: the agent can only write h
   assert.ok(terminal(events), 'the task ends');
   assert.equal(await h.deliveries.get('tsk_oldrepro'), undefined);
   zeroStats(h.runner);
+});
+
+test('the records of a delivery sit where no exported artifact can name them (recheck28 F4)', async (t) => {
+  const h = await setup(t);
+  h.claude.script = fixes;
+  const spec = await h.spec('tsk_records');
+  await collect(await h.runner.start(spec));
+  const delivery = await h.deliveries.get('tsk_records');
+  assert.ok(delivery);
+  const dir = dirname(spec.resultPath);
+  for (const path of [delivery.changesPath, delivery.verificationPath]) {
+    const name = relative(dir, path);
+    // An exported artifact is a plain relative path: letters, digits, `_`, `.`, `-`, never a first
+    // dot. A name in the task directory itself (`changes.<hash>.json`) is one an agent can export.
+    assert.match(name, /^\.records\/(changes|verification)\.[0-9a-f]{16}\.json$/u, name);
+  }
+  // The agent's runs may not export into that directory either.
+  const turn = h.claude.turns[0];
+  assert.ok(turn?.spec.reserved?.includes('.records'));
+  // And the records are still what the delivery names: the hashes hold.
+  const changes = await fs.readFile(delivery.changesPath);
+  assert.equal(
+    (await import('node:crypto')).createHash('sha256').update(changes).digest('hex'),
+    delivery.changesSha256,
+  );
 });

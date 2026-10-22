@@ -6,14 +6,14 @@ type Mode = 'dark' | 'light';
 const KEY = 'maka.appearance';
 
 const Appearance = createContext<{ mode: Mode; setMode(mode: Mode): void }>({
-  mode: 'dark',
+  mode: 'light',
   setMode: () => {},
 });
 export const useAppearance = () => useContext(Appearance);
 
-/** Dark is the default; light is one tap in Settings. The choice stays on this device. */
+/** Light is the default; dark is one tap in Settings. The choice stays on this device. */
 export function AppearanceProvider({ children }: { children: ReactNode }) {
-  const [mode, setMode] = useState<Mode>('dark');
+  const [mode, setMode] = useState<Mode>('light');
   useEffect(() => {
     void readSecure(KEY).then((stored) => {
       if (stored === 'light' || stored === 'dark') setMode(stored);

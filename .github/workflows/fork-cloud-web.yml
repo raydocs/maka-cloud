@@ -65,6 +65,14 @@ jobs:
           npm --prefix packages/cloud-client run typecheck
           npm --prefix packages/cloud-client test
 
+      # cloud-web's tokens.css and cloud-mobile's tokens.generated.ts come from
+      # packages/cloud-design; a hand edit to either, or a token change without
+      # regenerating, fails here.
+      - name: Design tokens are generated and up to date
+        run: |
+          node packages/cloud-design/src/generate.ts --check
+          node --test packages/cloud-design/src/generate.test.ts
+
       - name: Install cloud-web dependencies
         run: npm --prefix packages/cloud-web ci --workspaces=false --ignore-scripts --no-audit --no-fund
 

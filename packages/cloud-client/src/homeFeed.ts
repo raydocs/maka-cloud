@@ -1,6 +1,6 @@
 import type { CloudClient } from './client';
 import { Unsupported } from './client';
-import type { Conversation, InboxItem, ProjectView, TaskView } from './contract';
+import type { Conversation, HomeCard, InboxItem, ProjectView, TaskView } from './contract';
 import { errorText } from './errors';
 import { DAY_MS } from './home';
 import { inboxAnswerer } from './inboxAnswer';
@@ -27,6 +27,10 @@ export interface HomeSnapshot {
   /** Every inbox item seen, by id; the highest version wins. */
   items: Record<string, InboxItem>;
   busy: boolean;
+  /** False until the first read of the open decisions has finished, so "nothing waits" is never a guess. */
+  inboxLoaded: boolean;
+  /** The last read of the open decisions failed. */
+  inboxFailed: boolean;
   answerError: string;
   /** When the person last looked, or a day ago on a first visit; unknown until read. */
   since: number | undefined;
@@ -34,6 +38,11 @@ export interface HomeSnapshot {
   done: ReadonlyMap<string, readonly TaskView[]> | undefined;
   /** The projects and their duties; empty when the server has none; unknown until read. */
   projects: ProjectView[] | undefined;
+  /**
+   * The server's own Home: its cards in its order, with what this owner has seen. Undefined until
+   * read, and for good on a server without `/v1/home`, where Home is built from the parts above.
+   */
+  cards: HomeCard[] | undefined;
 }
 
 /**
@@ -58,10 +67,13 @@ export class HomeFeed extends Store<HomeSnapshot> {
     super({
       items: {},
       busy: false,
+      inboxLoaded: false,
+      inboxFailed: false,
       answerError: '',
       since: undefined,
       done: undefined,
       projects: undefined,
+      cards: undefined,
     });
     this.answerItem = inboxAnswerer(client, (item) =>
       this.update((s) => {
@@ -101,9 +113,24 @@ export class HomeFeed extends Store<HomeSnapshot> {
     this.load(this.generation);
   }
 
-  /** Remembers this visit. Called when the person leaves (a page hide, a screen going away). */
+  /**
+   * Remembers this visit. Called when the person leaves (a page hide, a screen going away). The
+   * server is told too, with the cards that were shown, so the next device agrees on what is new.
+   */
   leave(): void {
     if (this.fingerprint !== undefined) void this.visits.write(this.fingerprint, this.now());
+    const cards = this.getSnapshot().cards;
+    if (cards !== undefined)
+      void this.client.homeSeen(cards.map((card) => card.cardId)).catch(() => undefined);
+  }
+
+  /** Moves a card to just after `after` (first when null) inside its kind. Home keeps the server's answer. */
+  async moveCard(cardId: string, after: string | null): Promise<void> {
+    try {
+      this.patch({ cards: await this.client.moveHomeCard(cardId, after) });
+    } catch (e) {
+      this.patch({ answerError: errorText(e) });
+    }
   }
 
   stop(): void {
@@ -119,10 +146,18 @@ export class HomeFeed extends Store<HomeSnapshot> {
         if (!current()) return;
         this.update((s) => {
           const items = list.reduce((all, item) => mergeInboxItem(all, item), s.items);
-          return items === s.items ? s : { ...s, items };
+          return items === s.items && s.inboxLoaded && !s.inboxFailed
+            ? s
+            : { ...s, items, inboxLoaded: true, inboxFailed: false };
         });
       })
-      .catch(() => {});
+      // A failed read is not "nothing waits": it is told apart, so a screen never says all is clear.
+      .catch(() => current() && this.patch({ inboxFailed: true }));
+    // The server's Home, where it has one. A server without it stays on the parts below.
+    this.client
+      .home()
+      .then((cards) => current() && this.patch({ cards }))
+      .catch(() => undefined);
     const seq = ++this.projectsSeq;
     const latest = () => current() && seq === this.projectsSeq;
     this.client

@@ -12,6 +12,26 @@ each is off unless its setting is present, so the launch environment file simply
 | Deep mode | `MAKA_CLOUD_DEEP_MODE` unset or `0` | the conductor is not told about `deep`, a suggestion of it runs as `standard`, and a user's pick of it runs as `standard` with the notice "Deep mode is not available yet"; `deep` holds `standard`'s values everywhere the modes are read | the provenance gap in `docs/fork/post-launch-backlog.md` (Deep research) is closed |
 | Plan vault | not wired: `packages/cloud-plans` is imported by no server package, so no setting turns it on | the user's own Claude or ChatGPT plan used on the boxes (T27) | T27 is finished and reviewed; it needs the box pool first |
 
+## One task at a time per invite
+
+Every task of an invite runs on the invite's machine as the one agent account, so two tasks at once
+could read and change each other's workspace (`pre-launch-audit.md` §2). Until each task gets an
+account of its own, the server runs one task tree per invite at a time (`MAKA_CLOUD_TASKS_PER_INVITE`,
+default 1). A second task, from the same conversation or another one of the invite, is not refused:
+it waits as `queued`, says "One task runs at a time on this workspace for now. This one starts when
+<title> finishes.", and starts when the running tree has ended and nothing of it can still be running.
+Tasks the running task delegates belong to its tree and start at once. A restart keeps the line: a
+task that was waiting waits again (nothing of it is stopped or resumed), and trees that were running
+beyond the limit (a lowered setting, or the first start of this version) resume one at a time; such a
+tree still reads as running while it waits (with the same note) and cannot be paused until it resumes. The
+start-up summary says
+`tasks at once:       1 per invite; the next one waits its turn`.
+
+A task that waits counts as queued for the inbox's stall check, so one that waits longer than
+`queuedStallAfterMinutes` (10 by default) raises a "no progress" item although it is only waiting its
+turn. A run stuck owing a stop (an unreachable machine) keeps the next task waiting until the stop is
+confirmed or the task is cancelled.
+
 ## What to check at launch
 
 - `MAKA_CLOUD_SANDBOXES` is set (one machine per invite) and `MAKA_CLOUD_BOXES` is not. The server refuses
@@ -85,8 +105,13 @@ That path is built, unit-tested and run end to end by the rehearsal on stand-ins
 
 A close lets go of the runs without stopping them, and lease renewals stop with it, so a task's
 sandbox lease runs out five minutes (the default `leaseTtlSeconds`) after the last renewal. A
-restart that takes longer than that lets the sandbox go to sleep under its running agent; the next
-process stops what is left and runs the task again from a fresh clone, as it does after a crash.
+restart that takes longer than that lets the sandbox go to sleep under its running agent. What the
+next process does depends on the runner. A runner that can resume (`recover`, the Claude runner) is
+stopped where it was left and runs the task again from a fresh clone, as after a crash. **The
+coding runner cannot**: its task is stopped and ended as failed ("orphaned: the orchestrator
+restarted while this task was running"), and the owner sends the goal again. If the change had
+already passed its checks, it is on the host (`keepUntilReviewed`) and the failed task shows it as
+kept for the owner to look at, as a task that fails or is stopped in the same state does.
 A forced exit (the process was still closing after ten seconds) exits with code 1 and logs
 `server.exit_forced`.
 

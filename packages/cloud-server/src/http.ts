@@ -30,7 +30,10 @@ import {
 import { type OpenedPages, type PreviewService, PreviewBusy, siteOf } from './previews.js';
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
+import type { HomeRoutes } from './home.js';
 import type { InboxRoutes } from './inbox.js';
+import type { AccountStore } from './accounts.js';
+import type { AuthRoutes } from './auth-routes.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import type { PushApi } from './push.js';
 import { toPublicView } from './public-view.js';
@@ -136,10 +139,17 @@ const ANSWER_STATUS: Record<Extract<AnswerOutcome, { accepted: false }>['reason'
   text_too_long: 400,
 };
 
+/** Ends one open stream; `sessionId` is the device session it was opened with, when it was one. */
+interface StreamEnd {
+  (): void;
+  sessionId?: string;
+}
+
 export interface PublicApiDeps {
   db: DatabaseSync;
   memory: MemoryStore;
   invites: InviteStore;
+  accounts: AccountStore;
   conversations: ConversationStore;
   tasks: SqliteTaskStore;
   hub: FeedHub;
@@ -173,6 +183,10 @@ export interface PublicApiDeps {
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
   /** Absent when no supervisor runs; the `/v1/inbox` routes then answer 404. */
   inbox?: InboxRoutes;
+  /** Home's cards, in the order the server keeps for each owner. */
+  home?: HomeRoutes;
+  /** Absent when no sign-in is configured; `/v1/auth` then answers like any unknown path. */
+  auth?: AuthRoutes;
   /** Absent when no duties engine runs; `/github/webhook` and `/v1/projects` then answer like any unknown path. */
   duties?: DutyRoutes;
 }
@@ -252,7 +266,7 @@ export class PublicApi {
   private closing = false;
   private readonly open = new Set<ServerResponse>();
   /** How to end each open stream, by the invite it was opened with. */
-  private readonly streamEnds = new Map<string, Set<() => void>>();
+  private readonly streamEnds = new Map<string, Set<StreamEnd>>();
   private stopWatching: (() => void) | undefined;
   private artifactReads = 0;
   private readonly humanComputers = new Map<string, { inviteId: string; abort: AbortController }>();
@@ -276,12 +290,26 @@ export class PublicApi {
     for (const taskId of [...this.humanComputers.keys()]) this.releaseComputer(taskId);
   }
 
-  /** Ends the streams of invites that are no longer active. */
+  /**
+   * A human's control of a computer is leased to the invite, not to the device that took it: every
+   * input is authorised again with its own bearer, so a signed-out device cannot drive it, and the
+   * account's other devices keep it.
+   *
+   * Ends the streams of invites that are no longer active, and those of a device whose session
+   * is revoked or has gone idle. `only` limits it to one invite.
+   */
   private endRevokedStreams(only?: string): void {
     for (const [inviteId, ends] of [...this.streamEnds]) {
       if (only !== undefined && inviteId !== only) continue;
-      if (this.deps.invites.active(inviteId)) continue;
-      for (const end of [...ends]) end();
+      const inviteActive = this.deps.invites.active(inviteId);
+      for (const end of [...ends]) {
+        if (
+          !inviteActive ||
+          (end.sessionId !== undefined && !this.deps.accounts.active(end.sessionId))
+        ) {
+          end();
+        }
+      }
     }
     for (const [taskId, lease] of this.humanComputers) {
       if (only !== undefined && lease.inviteId !== only) continue;
@@ -293,7 +321,12 @@ export class PublicApi {
   private watch(): void {
     if (this.stopWatching) return;
     const { invites, limits } = this.deps;
-    const unsubscribe = invites.onRevoke((inviteId) => this.endRevokedStreams(inviteId));
+    const offInvite = invites.onRevoke((inviteId) => this.endRevokedStreams(inviteId));
+    const offSession = this.deps.accounts.onRevoke(() => this.endRevokedStreams());
+    const unsubscribe = () => {
+      offInvite();
+      offSession();
+    };
     invites.changedElsewhere();
     const timer = setInterval(() => {
       try {
@@ -359,6 +392,11 @@ export class PublicApi {
         await this.deps.duties.webhook(req, res);
         return;
       }
+      // Signing in comes before there is anything to authenticate with.
+      if (this.deps.auth?.isPublic(url.pathname)) {
+        await this.deps.auth.handlePublic(req, res, url);
+        return;
+      }
       const invite = this.authenticate(req);
       await this.route(req, res, url, invite);
     } catch (error) {
@@ -380,9 +418,28 @@ export class PublicApi {
 
   private authenticate(req: IncomingMessage): InviteInfo {
     const token = bearerToken(req);
-    const invite = token === undefined ? undefined : this.deps.invites.resolve(token);
+    const invite = token === undefined ? undefined : this.resolveToken(token);
     if (!invite) throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     return invite;
+  }
+
+  /**
+   * The invite a bearer token acts as: an invite token itself, or a device session of an account
+   * bound to an active invite. A session's `InviteInfo` is its invite's plus the session id, so
+   * every owner check downstream sees the same owner either way.
+   */
+  private resolveToken(token: string): InviteInfo | undefined {
+    const direct = this.deps.invites.resolve(token);
+    if (direct) return direct;
+    const owner = this.deps.accounts.resolve(token);
+    const invite = owner && this.deps.invites.get(owner.inviteId);
+    return owner && invite ? { ...invite, sessionId: owner.sessionId } : undefined;
+  }
+
+  /** Whether the caller's invite is active and, for a device session, the session is still good. */
+  private callerActive(invite: InviteInfo): boolean {
+    if (!this.deps.invites.active(invite.inviteId)) return false;
+    return invite.sessionId === undefined || this.deps.accounts.active(invite.sessionId);
   }
 
   /**
@@ -390,7 +447,7 @@ export class PublicApi {
    * one revoked while its request was still arriving does nothing.
    */
   reauthenticate(invite: InviteInfo): void {
-    if (!this.deps.invites.active(invite.inviteId)) {
+    if (!this.callerActive(invite)) {
       throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
     }
   }
@@ -428,6 +485,9 @@ export class PublicApi {
   ): Promise<void> {
     const path = url.pathname;
     const method = req.method ?? 'GET';
+    if (this.deps.auth && path.startsWith('/v1/auth/')) {
+      if (await this.deps.auth.handleSigned(req, res, url, invite)) return;
+    }
     if (path === '/v1/memory' && method === 'GET') {
       return respond(res, 200, this.deps.memory.profile(invite.inviteId));
     }
@@ -549,6 +609,9 @@ export class PublicApi {
     }
     if (this.deps.duties && path.startsWith('/v1/projects')) {
       if (await this.deps.duties.handle(req, res, url, invite)) return;
+    }
+    if (this.deps.home && (path === '/v1/home' || path.startsWith('/v1/home/'))) {
+      if (await this.deps.home.handle(req, res, url, invite)) return;
     }
     if (this.deps.inbox && path.startsWith('/v1/inbox/')) {
       if (await this.deps.inbox.handle(req, res, url, invite)) return;
@@ -854,7 +917,7 @@ export class PublicApi {
     const access: OperatorAccess = {
       sessionId,
       authorize: () => {
-        const current = token === undefined ? undefined : this.deps.invites.resolve(token);
+        const current = token === undefined ? undefined : this.resolveToken(token);
         if (!current || current.inviteId !== invite.inviteId) {
           throw new OrchestratorError('unauthorized', 'The invite is no longer valid');
         }
@@ -937,7 +1000,7 @@ export class PublicApi {
     return {
       sessionId,
       authorize: () => {
-        const current = token === undefined ? undefined : this.deps.invites.resolve(token);
+        const current = token === undefined ? undefined : this.resolveToken(token);
         if (!current || current.inviteId !== invite.inviteId) {
           throw new OrchestratorError('unauthorized', 'The invite is no longer valid');
         }
@@ -1160,6 +1223,7 @@ export class PublicApi {
         return false;
       }
     };
+    end.sessionId = invite.sessionId;
     ownEnds.add(end);
     res.once('close', end);
     this.watch();
@@ -1261,11 +1325,12 @@ export class PublicApi {
     function end() {
       finish();
     }
+    end.sessionId = invite.sessionId;
     ownEnds.add(end);
     this.watch();
     /** False once the invite is revoked; the stream is then ended. */
     const stillValid = (): boolean => {
-      if (invites.active(invite.inviteId)) return true;
+      if (this.callerActive(invite)) return true;
       finish();
       return false;
     };

@@ -123,6 +123,9 @@ the final commit. The owner reports the approval; the PR bodies do not repeat it
 - #334 01:25Z Box check: the capability and setuid scan covers every program the agent can run, and no file name hides one (batch30 A1, A3)
 - #339 01:25Z Egress guard: the lock lives in a directory only the sandbox user can enter, not in /tmp (batch30 A4)
 - #344 01:25Z Egress: check the guard before every task-code exec (batch29 A2)
+- #347 Secrets: decompose before the marks go, so a mark that composes with its letter cannot hide a key (batch29 A5). Merged at 96be175 after the owner's approve, with CI green.
+- #359 Backup: a private key in a stored conversation leaves no line of its body in the backup. Merged at aed44bf after the owner's round 4 approve, with CI green on 4850776b.
+- #358 Coding: cut text with no line break is shown as an ellipsis only (recheck28 F2). Merged at 6f7285d after the owner's approve, with CI green on 6e10803d.
 
 Also merged in this window, with the Launch-path reviewer's second read (per the coordinator). It is
 not in the owner's list:
