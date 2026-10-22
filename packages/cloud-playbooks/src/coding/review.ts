@@ -25,14 +25,16 @@ const MAX_REASON = 300;
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}͏ᅟᅠ឴឵᠋-᠏⠀ㅤ︀-️ﾠ\u{E0100}-\u{E01EF}]/gu;
 
 export function plain(text: string, max: number): string {
-  // Scrubbed as written, before anything is flattened: a key split by a zero-width character is
-  // found by the scrubber, which reads such characters away, but not once one became a space. Then
-  // scrubbed whole once more and only then cut: a key cut in two is no longer a key the scrubber
-  // knows, and what is left of it would be shown.
-  const flat = scrubSecretText(
-    scrubSecretText(text).replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim(),
-  );
-  return clip(flat, max);
+  // Scrubbed before anything is flattened: a key split by a character that becomes a space here is
+  // no longer one the scrubber knows. The scrubber reads zero-width characters away itself; the
+  // rest of these (private-use, unassigned, control, line separators) are read away here, and when
+  // that reading has a key, it is the one shown. Then scrubbed whole once more and only then cut: a
+  // key cut in two is no longer a key the scrubber knows, and what is left of it would be shown.
+  const scrubbed = scrubSecretText(text);
+  const joined = scrubbed.replace(UNPRINTABLE, '');
+  const scrubbedJoined = scrubSecretText(joined);
+  const read = scrubbedJoined !== joined ? scrubbedJoined : scrubbed;
+  return clip(scrubSecretText(read.replace(UNPRINTABLE, ' ').replace(/\s+/gu, ' ').trim()), max);
 }
 
 const SECRET_MARK = '[secret]';
@@ -45,13 +47,18 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
  */
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
-  let end = 0;
+  const ends = [0];
   for (const { index, segment } of graphemes.segment(text)) {
     if (index + segment.length > max - 1) break;
-    end = index + segment.length;
+    ends.push(index + segment.length);
   }
+  let end = ends.at(-1) ?? 0;
   const mark = text.lastIndexOf(SECRET_MARK, end - 1);
-  if (mark !== -1 && mark + SECRET_MARK.length > end) end = mark;
+  // Before the mark, and still where a character ends: the mark's [ can be part of one before it.
+  if (mark !== -1 && mark + SECRET_MARK.length > end) {
+    end = 0;
+    for (const at of ends) if (at <= mark) end = at;
+  }
   return `${text.slice(0, end)}…`;
 }
 

@@ -101,6 +101,11 @@ test('plain text scrubs a key split by a character that shows nothing before tha
   const shown = plain('token ghp_01234567\u200b89abcdef0123456789abcdef01234567 here', 200);
   assert.doesNotMatch(shown, /89abcdef/u);
   assert.match(shown, /\[secret\]/u);
+  // Characters that become a space here, and that the scrubber does not read away itself.
+  for (const split of ['\ue000', '\u0000', '\u0378', '\u2028', '\u2029', '\u0007']) {
+    const out = plain(`token ghp_01234567${split}89abcdef0123456789abcdef0123 here`, 200);
+    assert.doesNotMatch(out, /89abcdef/u, `U+${split.codePointAt(0)?.toString(16)}`);
+  }
   // A cut that would fall inside the mark falls before it.
   assert.doesNotMatch(
     plain(`${'a'.repeat(10)} ghp_0123456789abcdef0123456789abcdef0123 tail`, 15),
@@ -116,6 +121,8 @@ test('a clip never cuts a [secret] mark, half a character or a letter from its m
   // e with its acute stays one letter.
   assert.equal(clip('abe\u0301cdef', 4), 'ab…');
   assert.equal(clip('short', 10), 'short');
+  // The dot reph joins the [ of the mark into one character: the cut goes before both.
+  assert.equal(clip('a\u0d4e[secret] tail', 6), 'a…');
   for (const text of ['x[secret]', 'xxxxx[secret]yyyy', '[secret][secret]']) {
     for (let max = 2; max < text.length; max++) {
       assert.doesNotMatch(clip(text, max), /\[(?!secret\])[^…]*…$/u, `${text} at ${max}`);
