@@ -59,6 +59,16 @@ export const INVITE_MIGRATIONS: readonly string[] = [
     revoked_at INTEGER
   );
   CREATE INDEX IF NOT EXISTS sessions_by_account ON sessions (account_id)`,
+  // Who an account is at a provider. The provider's own subject is the key, never an email address.
+  `CREATE TABLE IF NOT EXISTS identities (
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts (account_id),
+    email TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (provider, subject)
+  );
+  CREATE INDEX IF NOT EXISTS identities_by_account ON identities (account_id)`,
 ];
 
 function digest(token: string): Buffer {

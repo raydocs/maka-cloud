@@ -27,6 +27,13 @@ export interface SessionOwner {
   sessionId: string;
 }
 
+/** Who someone is at a provider. `email` is shown to them and never used to find an account. */
+export interface Identity {
+  provider: 'apple' | 'google' | 'email';
+  subject: string;
+  email?: string;
+}
+
 function digest(token: string): Buffer {
   return createHash('sha256').update(token).digest();
 }
@@ -81,6 +88,64 @@ export class AccountStore {
       )
       .run(accountId, this.now(), inviteId);
     return Number(result.changes) > 0 ? accountId : undefined;
+  }
+
+  /**
+   * The account of an active invite, made now together with its first identity, or nothing when the
+   * invite is gone or already has an account or the identity already belongs to one. All or nothing.
+   */
+  createAccountWithIdentity(inviteId: string, identity: Identity): string | undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const accountId = this.createAccount(inviteId);
+      if (accountId === undefined || !this.insertIdentity(accountId, identity)) {
+        this.db.exec('ROLLBACK');
+        return undefined;
+      }
+      this.db.exec('COMMIT');
+      return accountId;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** The account an identity signs in to, whether or not its invite is still active. */
+  accountOfIdentity(identity: Pick<Identity, 'provider' | 'subject'>): string | undefined {
+    const row = this.db
+      .prepare('SELECT account_id FROM identities WHERE provider = ? AND subject = ?')
+      .get(identity.provider, identity.subject) as { account_id: string } | undefined;
+    return row?.account_id;
+  }
+
+  /**
+   * Adds a way to sign in to an account: `linked`, `already_here` when the account has it, or
+   * `taken` when another account does. The caller proves the identity first.
+   */
+  linkIdentity(accountId: string, identity: Identity): 'linked' | 'already_here' | 'taken' {
+    if (this.insertIdentity(accountId, identity)) return 'linked';
+    return this.accountOfIdentity(identity) === accountId ? 'already_here' : 'taken';
+  }
+
+  /** The ways to sign in to an account, for its owner to see. */
+  identities(accountId: string): Array<{ provider: Identity['provider']; email?: string }> {
+    const rows = this.db
+      .prepare('SELECT provider, email FROM identities WHERE account_id = ? ORDER BY created_at')
+      .all(accountId) as unknown as Array<{ provider: Identity['provider']; email: string | null }>;
+    return rows.map((row) => ({
+      provider: row.provider,
+      ...(row.email === null ? {} : { email: row.email }),
+    }));
+  }
+
+  private insertIdentity(accountId: string, identity: Identity): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT INTO identities (provider, subject, account_id, email, created_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT (provider, subject) DO NOTHING`,
+      )
+      .run(identity.provider, identity.subject, accountId, identity.email ?? null, this.now());
+    return Number(result.changes) > 0;
   }
 
   /** The account that belongs to an invite, active or not. */
