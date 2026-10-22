@@ -14,7 +14,7 @@ import {
 } from '@maka-cloud/client';
 import { useEffect, useState } from 'react';
 import { Image, Linking, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useBlobUri, usePicture } from '@/lib/picture';
 import { mono, radius, useTheme } from '@/lib/theme';
 import { Card, PillButton, Solid, StatusMark, T } from './ui';
@@ -82,18 +82,21 @@ export function Viewer({
   const t = useTheme();
   return (
     <Modal visible animationType="fade" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: t.solid }}>
-        <View
-          style={{ flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 }}
-          accessibilityLabel={`Viewer: ${title}`}
-        >
-          <T kind="heading" style={{ flex: 1 }} numberOfLines={1}>
-            {title}
-          </T>
-          <PillButton label="Close" onPress={onClose} />
-        </View>
-        <ScrollView contentContainerStyle={{ padding: 12 }}>{children}</ScrollView>
-      </SafeAreaView>
+      {/* A modal is its own native window: it needs its own insets, or the header sits under the status bar. */}
+      <SafeAreaProvider>
+        <SafeAreaView style={{ flex: 1, backgroundColor: t.solid }}>
+          <View
+            style={{ flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 }}
+            accessibilityLabel={`Viewer: ${title}`}
+          >
+            <T kind="heading" style={{ flex: 1 }} numberOfLines={1}>
+              {title}
+            </T>
+            <PillButton label="Close" onPress={onClose} />
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 12 }}>{children}</ScrollView>
+        </SafeAreaView>
+      </SafeAreaProvider>
     </Modal>
   );
 }
