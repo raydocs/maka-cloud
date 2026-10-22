@@ -268,13 +268,12 @@ const UNDER_LINK_FN = `
 # Whether a directory above the workspace path \$2 is a link: a removal or a write under it would
 # follow the link out of the workspace (a kept path, or one the test put there).
 under_link() {
-  local d
-  d=$(dirname -- "$2")
-  while [ "$d" != . ] && [ "$d" != / ]; do
+  # Cut with the shell, not \$(dirname): a command substitution drops the newlines a name ends with.
+  local d="$2"
+  while :; do
+    case "$d" in */*) d="\${d%/*}" ;; *) return 1 ;; esac
     [ -L "$1/$d" ] && return 0
-    d=$(dirname -- "$d")
   done
-  return 1
 }
 `;
 

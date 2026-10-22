@@ -334,6 +334,47 @@ test('a path under a linked directory is neither reverted nor restored through t
   assert.deepEqual(await snapshot(outside), before, 'the restore');
 });
 
+test('a directory named by a newline under a linked directory is no way past the check', async (t) => {
+  const { tmp } = await setup(t);
+  const outside = join(tmp, 'outside');
+  await fs.mkdir(join(outside, '\n', 'deep'), { recursive: true });
+  await fs.writeFile(join(outside, '\n', 'deep', 'a.txt'), 'not the workspace\n');
+  const before = await snapshot(outside);
+  const origin = join(tmp, 'origin');
+  await fs.mkdir(join(origin, 'lib', '\n', 'deep'), { recursive: true });
+  await fs.writeFile(join(origin, 'lib', '\n', 'deep', 'a.txt'), 'base\n');
+  git(origin, 'add', '-A');
+  git(origin, 'commit', '-q', '-m', 'a newline directory');
+  const dir = join(tmp, 'newline');
+  const cloned = run(CLONE_SCRIPT, {
+    MAKA_DIR: dir,
+    MAKA_REPO_URL: `file://${origin}`,
+    MAKA_REF: 'HEAD',
+  });
+  const base = /^BASE ([0-9a-f]{40})$/mu.exec(cloned)?.[1] as string;
+  const ws = join(dir, 'workspace');
+  const linkLib = async () => {
+    await fs.rm(join(ws, 'lib'), { recursive: true });
+    await fs.symlink(outside, join(ws, 'lib'));
+  };
+  // The change made lib a link out and keeps it.
+  await linkLib();
+  const out = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: 'lib' });
+  assert.match(out, /^UNSAFE_PATH lib\/$/mu, out);
+  assert.deepEqual(await snapshot(outside), before, 'the revert');
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORED$/mu);
+  // The link put in place while the check ran: the restore stops before it.
+  await fs.rm(join(ws, 'lib'));
+  await fs.mkdir(join(ws, 'lib', '\n', 'deep'), { recursive: true });
+  await fs.writeFile(join(ws, 'lib', '\n', 'deep', 'a.txt'), 'changed\n');
+  await fs.writeFile(join(ws, 'lib', 'b.txt'), 'changed\n');
+  const reverted = revertForBase({ MAKA_DIR: dir, MAKA_BASE: base, MAKA_KEEP: '' });
+  assert.match(reverted, /^REVERTED \d+$/mu, reverted);
+  await linkLib();
+  assert.match(run(BASE_RESTORE_SCRIPT, { MAKA_DIR: dir }), /^RESTORE_FAILED$/mu);
+  assert.deepEqual(await snapshot(outside), before, 'the restore');
+});
+
 test('the agent group reads the stage and writes the backup, and cannot write the stage', async (t) => {
   const { dir, base, ws } = await setup(t);
   await fs.writeFile(join(ws, 'lib', 'a.txt'), 'changed\n');
