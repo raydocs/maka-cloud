@@ -8,7 +8,12 @@ import { InstaboxClient } from '@maka-cloud/instabox';
 import { FakeInstabox } from '@maka-cloud/instabox/testing';
 import { Fleet, FixedMachineProvider } from '@maka-cloud/runners';
 import { FleetCodingSandbox } from '../sandbox.js';
-import { BASE_RESTORE_SCRIPT, BASE_REVERT_SCRIPT, CLONE_SCRIPT } from '../scripts.js';
+import {
+  BASE_RESTORE_SCRIPT,
+  BASE_REVERT_SCRIPT,
+  BASE_STAGE_SCRIPT,
+  CLONE_SCRIPT,
+} from '../scripts.js';
 
 // The real thing, where this machine has a second account to run as the agent.
 const CHANNEL = { user: 'nobody', group: 'nogroup' };
@@ -116,29 +121,38 @@ test('the agent account reads and writes the nested files of a checkout, and of 
   assert.equal(await asAgent('git log -1 --format=%H'), base);
   assert.match(await asAgent('git status --short'), /M lib\/deep\/a\.txt/u);
 
-  // The base check puts the base's files back: the agent reads and writes them, and the change returns.
-  const reverted = await ws.exec(BASE_REVERT_SCRIPT, {
-    envs: { MAKA_DIR: ws.dir, MAKA_BASE: base, MAKA_KEEP: '' },
-    timeoutSeconds: 60,
-  });
+  // The base check puts the base's files back: the sandbox user stages them, the agent's account
+  // writes them into its workspace, so the agent reads and writes them, and the change returns.
+  const env = { MAKA_DIR: ws.dir, MAKA_BASE: base, MAKA_KEEP: '' };
+  const stage = () => ws.exec(BASE_STAGE_SCRIPT, { envs: env, timeoutSeconds: 60 });
+  const restore = () =>
+    ws.execCheck(BASE_RESTORE_SCRIPT, { envs: { MAKA_DIR: ws.dir }, timeoutSeconds: 60 });
+  const staged = await stage();
+  assert.match(staged.stdout, /^STAGED \d+$/mu, staged.stdout + staged.stderr);
+  const reverted = await ws.execCheck(BASE_REVERT_SCRIPT, { envs: env, timeoutSeconds: 60 });
   assert.match(reverted.stdout, /^REVERTED \d+$/mu, reverted.stdout + reverted.stderr);
   assert.equal(await asAgent('cat lib/deep/a.txt'), 'one');
   assert.equal(await asAgent('cat lib/deep/gone.txt'), 'will be deleted');
   assert.equal(await asAgent('lib/run.sh'), 'ran');
   assert.equal(await asAgent('echo more >> lib/deep/gone.txt && echo written'), 'written');
+  // The stage is the agent's to read, not to change.
+  assert.equal(await asAgent(`cat ${ws.dir}/base-stage/paths >/dev/null && echo read`), 'read');
+  assert.equal(
+    await asAgent(`touch ${ws.dir}/base-stage/x 2>/dev/null || echo cannot write`),
+    'cannot write',
+  );
   // A file the agent's account could not read would fail a base check for the wrong reason: refused.
+  const putBack = await restore();
+  assert.match(putBack.stdout, /RESTORED/u, putBack.stdout + putBack.stderr);
   await fs.writeFile(join(ws.dir, 'workspace', 'lib', 'private.txt'), 'x', { mode: 0o600 });
   await fs.chown(join(ws.dir, 'workspace', 'lib', 'private.txt'), 0, 0);
-  const refused = await ws.exec(BASE_REVERT_SCRIPT, {
-    envs: { MAKA_DIR: ws.dir, MAKA_BASE: base, MAKA_KEEP: 'lib/private.txt' },
+  const refused = await ws.exec(BASE_STAGE_SCRIPT, {
+    envs: { ...env, MAKA_KEEP: 'lib/private.txt' },
     timeoutSeconds: 60,
   });
   assert.match(refused.stdout, /^UNREADABLE_FOR_AGENT .*private\.txt$/mu, refused.stdout);
   await fs.rm(join(ws.dir, 'workspace', 'lib', 'private.txt'));
-  const restored = await ws.exec(BASE_RESTORE_SCRIPT, {
-    envs: { MAKA_DIR: ws.dir },
-    timeoutSeconds: 60,
-  });
+  const restored = await restore();
   assert.match(restored.stdout, /RESTORED/u, restored.stdout + restored.stderr);
   assert.equal(await asAgent('cat lib/deep/a.txt'), 'two');
   assert.equal(await asAgent('cat lib/new/f'), 'n');

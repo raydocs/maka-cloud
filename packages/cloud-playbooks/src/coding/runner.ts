@@ -42,6 +42,7 @@ import type { CodingSandbox, SandboxWorkspace } from './sandbox.js';
 import {
   BASE_RESTORE_SCRIPT,
   BASE_REVERT_SCRIPT,
+  BASE_STAGE_SCRIPT,
   BLOB_CHUNK_SCRIPT,
   CHANGES_SCRIPT,
   CHECK_SCRIPT,
@@ -1347,20 +1348,38 @@ class CodingRun implements RunHandle {
     return parsed.data;
   }
 
-  /** Runs `work` with every change outside the reproduction test reverted, then puts it back. */
+  /**
+   * Runs `work` with every change outside the reproduction test reverted, then puts it back.
+   * The workspace is edited only as the agent's account (`execCheck`): the sandbox user's own
+   * part, the stage, reads the base version of each changed file from the control repository and
+   * writes outside the workspace, so a symlink the agent plants there is not followed by it.
+   */
   private async onBase<T>(
     baseSha: string,
     repro: Repro,
     work: () => Promise<T>,
   ): Promise<T | CheckProblem> {
+    // A leftover of an interrupted check goes back first: the stage lists what differs from the base.
+    const left = (await this.execCheck(BASE_RESTORE_SCRIPT, {})).stdout;
+    if (!left.includes('RESTORED')) {
+      return {
+        problem: `the change could not be reverted for the base check (${clipText(left.trim(), 200)})`,
+      };
+    }
+    const staged = (
+      await this.exec(BASE_STAGE_SCRIPT, {
+        MAKA_BASE: baseSha,
+        MAKA_KEEP: repro.files.join('\n'),
+      })
+    ).stdout;
+    if (!/^STAGED \d+$/mu.test(staged)) {
+      return {
+        problem: `the change could not be reverted for the base check (${clipText(staged.trim(), 200)})`,
+      };
+    }
     this.baseCheckActive = true;
     try {
-      const out = (
-        await this.exec(BASE_REVERT_SCRIPT, {
-          MAKA_BASE: baseSha,
-          MAKA_KEEP: repro.files.join('\n'),
-        })
-      ).stdout;
+      const out = (await this.execCheck(BASE_REVERT_SCRIPT, {})).stdout;
       if (!/^REVERTED \d+$/mu.test(out)) {
         return {
           problem: `the change could not be reverted for the base check (${clipText(out.trim(), 200)})`,
@@ -1375,8 +1394,9 @@ class CodingRun implements RunHandle {
     }
   }
 
+  /** Puts the change back as the agent's account: it moves the agent's own backup into its workspace. */
   private async restoreBase(signal: AbortSignal | undefined): Promise<void> {
-    const out = await this.ws.exec(BASE_RESTORE_SCRIPT, {
+    const out = await this.ws.execCheck(BASE_RESTORE_SCRIPT, {
       envs: { MAKA_DIR: this.ws.dir },
       ...(signal ? { signal } : {}),
     });

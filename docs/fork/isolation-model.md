@@ -71,7 +71,9 @@ make it:
     claude-config/               control user, 2770 group=agent  (CLI transcripts; both write)
     chan/                        control user, 700               (the SDK channel; agent cannot enter)
     <run>.lock .sh .token .pid .exit .cancel   control user, 600 (run state; agent cannot create here)
-    result.read, *.read, change.patch, base-check/, changes.index   control user, task directory
+    result.read, *.read, change.patch, changes.index   control user, task directory
+    base-stage/                  control user, 2750, agent group reads (the base versions of the changed files, by number)
+    base-check/                  control user, 2770, agent group writes (the agent's own change, backed up for a base check)
   .setup/, .setup-<cli>/         control user (install markers and install runs)
 /dev/shm/maka-logs/<taskId>/     control user, 700, tmpfs        (raw CLI output; deleted on stop)
 ~dev/.maka-cli/bin/              control user, 755, agent reads  (the pinned CLI, installed once)
@@ -194,11 +196,13 @@ a directory the agent can write (`/tmp` included). Why this is P1 and not a nuis
 control user on the next exec.
 *Enforced*: `PREPARE_SCRIPT` (brief by rename, #289), `RESULT_STAGE_SCRIPT`, `FILE_STAGE_SCRIPT`,
 `STAGE_INPUTS_SCRIPT`, `READ_SMALL_SCRIPT`, `TRANSCRIPT_CHUNK_SCRIPT` (`set -C` create),
-`export.ts` `writeHandoffFile` (host side).
+`export.ts` `writeHandoffFile` (host side); the base check (kind (c)): `BASE_STAGE_SCRIPT` runs as the
+control user and touches no workspace path (git against `control.git` and a stage directory in the
+task directory), `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT` run as the agent account through
+`execCheck`.
 *Tested*: `handoff-links.test.ts`, `agent-user.test.ts` ("links the agent plants in handoff/ are not
 followed"), `result.test.ts`, `stage.test.ts`, `export.test.ts`.
-*Still violated*: F1 (`BASE_REVERT_SCRIPT` and the restore write through workspace paths without
-the per-component check of (d)), F6 (the egress lock is opened in `/tmp`), F10 (transcript chunks
+*Still violated*: F6 (the egress lock is opened in `/tmp`), F10 (transcript chunks
 appended by name in a group-writable directory).
 
 **I5. Nothing the agent account can reach lets it change the firewall, the accounts or the control
@@ -320,7 +324,7 @@ a finding that fits none means this section is incomplete.
 | Verified state that outlives the box | I6 | `exec` with `taskCode` guards only while `unguarded`; a box restarted or restored by the provider without a `machine_not_running` answer keeps its stale "verified" state (batch29 A2, open, F14) |
 | Shell-text identity | I2 | `startsWith(agentPrefix)` (#290 fixed) |
 | Shared agent account across tasks | I12 | handoff 2770, claude-config 2770, `/proc` (open, F11) |
-| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); `BASE_REVERT_SCRIPT` and the restore, raced by a sibling's agent (#312 checks then re-resolves by path; recheck A2, open, F1); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
+| Link-following writes by the control user | I4 | brief write into `handoff/` (#289 fixed); the base revert and the restore, which a sibling's agent could race when the control user wrote by path (recheck A2; now `BASE_REVERT_SCRIPT` and `BASE_RESTORE_SCRIPT` run as the agent account and the control user's `BASE_STAGE_SCRIPT` touches no workspace path); egress lock truncating through a link (#310 fixed) and still in `/tmp` (open, F6); transcript append (open, F10); the box pool's scrub writes `/tmp/maka-scrub-env.$$` by name (pool, off; section 9) |
 | Control user's login files | I3 | `bash -lc` on every exec; not probed (open, F13) |
 | Whole environment handed to the agent | I9 | `env -i` plus named variables (F8, closed) |
 | Verification against a stale or tampered change | I11 | approval not bound to content (#308 fixed); failed second review overwrote the fix (#306 fixed) |
@@ -355,6 +359,10 @@ swaps a directory for a link after the check, and the copy re-resolves the path 
 user): run the revert's writes and the restore as the agent account (`SandboxWorkspace.execAgent`,
 the tree is the agent's), or copy through directory file descriptors. #312 at `be7bdb7` has neither
 the assertion nor the agent-side copy.
+*Status*: the agent-side copy is done. The control user's `BASE_STAGE_SCRIPT` writes the base
+versions of the changed files, by number, into `base-stage/` in the task directory; the revert and
+the restore run as the agent account (`execCheck`) and do all the edits in the workspace and the
+backup in `base-check/`. The nested-repository refusal stays in the stage.
 *Test that fails on main (and on #312)*: `control-git.test.ts`: a workspace with `sub/.git` whose
 config sets `filter.p.clean` to `touch "$MAKA_DIR/pwned"` and `sub/.gitattributes` `* filter=p`;
 `SAMPLE_SCRIPT` and `CHANGES_SCRIPT` must refuse with `ERR nested repository` and the marker must not
