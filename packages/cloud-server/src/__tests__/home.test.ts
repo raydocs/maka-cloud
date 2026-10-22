@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import type { DutyService } from '../duties.js';
-import { noteText, rankCards } from '../home.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openDatabase } from '../db.js';
+import { HomeStore, noteText, rankCards } from '../home.js';
 import type { InboxService } from '../inbox.js';
 import { conductorSession, recordingHandler } from './conductor.js';
 import { eventually, type Harness, postJson, sleep, startHarness } from './harness.js';
@@ -405,4 +409,22 @@ test('ranking is a function of its input: the same cards in any order give the s
       want,
     );
   }
+});
+
+test('a note row that is not JSON, or no longer fits the schema, is left out and the rest of Home still reads', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'home-notes-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const db = openDatabase(join(dir, 'db.sqlite'));
+  t.after(() => db.close());
+  const store = new HomeStore(db, () => 1_000);
+  const insert = db.prepare(
+    "INSERT INTO home_notes (note_id, owner, dedupe, template, params, created_at) VALUES (?, 'o', ?, ?, ?, 1000)",
+  );
+  insert.run('n1', 'a', 'checks_failed', '{not json');
+  insert.run('n2', 'b', 'checks_failed', '{"repo":"a b","number":1}');
+  insert.run('n3', 'c', 'checks_failed', '{"repo":"a/b","number":1}');
+  assert.deepEqual(
+    store.notes('o').map((note) => note.noteId),
+    ['n3'],
+  );
 });

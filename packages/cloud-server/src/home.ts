@@ -188,6 +188,8 @@ export class HomeStore {
          JOIN task_log t ON t.task_id = i.task_id
            AND json_extract(t.event, '$.type') IN ('task_succeeded', 'task_failed', 'task_cancelled')
          WHERE c.owner = ? AND t.at > ?
+           AND t.seq = (SELECT MAX(e.seq) FROM task_log e WHERE e.task_id = t.task_id
+             AND json_extract(e.event, '$.type') IN ('task_succeeded', 'task_failed', 'task_cancelled'))
          ORDER BY t.at DESC, t.seq DESC
          LIMIT ?`,
       )
@@ -206,8 +208,14 @@ export class HomeStore {
       params: string;
     }>;
     return rows.flatMap((row) => {
-      // Read back through the same schema: a row that no longer fits it is not shown.
-      const parsed = NoteSchema.safeParse({ template: row.template, ...JSON.parse(row.params) });
+      // Read back through the same schema: a row that no longer fits it (or is not JSON) is not shown.
+      let params: unknown;
+      try {
+        params = JSON.parse(row.params);
+      } catch {
+        return [];
+      }
+      const parsed = NoteSchema.safeParse({ template: row.template, ...(params as object) });
       return parsed.success ? [{ noteId: row.id, at: row.at, note: parsed.data }] : [];
     });
   }

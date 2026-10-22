@@ -139,7 +139,8 @@ clients resolve it as they already do, and `HomeFeed` keeps building Home from i
   first visit; newest first, at most 8), notes (newest first, at most 5, for a week), scheduled (duties on a schedule
   that are on, soonest first, at most 5). Ties break on the card id, so the list is a function of its input.
 - **Seen.** `POST /v1/home/seen` records the cards shown and moves the caller's visit; what finished before the visit is not
-  new any more, on every device. Per invite: another invite's cards, seen times and order are never read or written. Only a card on
+  new any more, on every device. A tab that goes to the background sends it too, so what it showed is gone from Home
+  for good: clients should send it when the person leaves, not on every hide they cannot tell from leaving. Per invite: another invite's cards, seen times and order are never read or written. Only a card on
   the caller's Home is recorded, and the rows are capped (1,000 seen for 30 days, 500 ordered).
 - **Moving.** A card moves inside its kind, never across (waiting always leads). The moved cards keep the owner's order;
   a card that arrives later comes before them in the kind's own order.
