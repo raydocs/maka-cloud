@@ -162,7 +162,11 @@ test('cancel during the base check stops it and puts the change back', async (t)
     FIXED_ADD,
     'the change is back',
   );
-  await assert.rejects(fs.stat(join(h.root, 'tsk_cbase', 'base-check')), { code: 'ENOENT' });
+  assert.deepEqual(
+    await fs.readdir(join(h.root, 'tsk_cbase', 'base-check')),
+    [],
+    'the backup is emptied',
+  );
   assert.deepEqual(cleanupErrors, []);
   zeroStats(h.runner);
 });
