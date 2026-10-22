@@ -30,6 +30,8 @@ export interface Outcome {
   sha256: string;
 }
 
+import type { ProofSignals } from './proof.js';
+
 export type DriverEnd = 'finished' | 'failed' | 'timeout' | 'cancelled';
 
 export interface DriverInput {
@@ -51,6 +53,8 @@ export interface DriverResult {
   costUsd: number | null;
   end: DriverEnd;
   failureReason: string | null;
+  /** What the subject's own record says about its change; only the playbook keeps one. */
+  proof?: ProofSignals | null;
 }
 
 /**

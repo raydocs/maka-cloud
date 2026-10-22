@@ -134,6 +134,20 @@ export function openPullRequestTool(
       if (problem) lines.push(`This cannot be opened yet: ${problem}`);
       return lines.join('\n');
     },
+    /**
+     * The owner may keep an approval of this tool for a repository (the card names it above). A
+     * change kept for the owner to look at, or a call that publishes one unreviewed, is never
+     * covered: that is an explicit ask each time.
+     */
+    async grantScope(args: Args) {
+      if (args.publishUnreviewed === true) return undefined;
+      const delivery = await options.deliveries.get(args.taskId);
+      if (!delivery || delivery.repo === '') return undefined;
+      const loaded = await loadChange(delivery).catch(() => undefined);
+      if (!loaded || loaded.verification.kept !== undefined) return undefined;
+      // The card names the base branch too: a grant covers pull requests against that one.
+      return { repository: delivery.repo, fixed: { baseRef: delivery.baseRef } };
+    },
     async impl(args, context) {
       const delegatedHere = options.ownsTask(context.runId, args.taskId);
       const notYours = new ToolRefusal(

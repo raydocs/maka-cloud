@@ -94,8 +94,8 @@ export function pullRequestBody(verification: VerificationView, extras: ProofExt
     rows.push([
       'Fix after review',
       fix.result === 'applied'
-        ? `✅ ${fix.sent} P1 finding(s) sent back once; this is the fixed change`
-        : `⚠️ ${fix.sent} P1 finding(s) sent back; the fix was not applied`,
+        ? `✅ ${fix.sent} finding(s) sent back over ${fix.rounds} fix round(s); this is the latest fixed change, checked and reviewed again`
+        : `⚠️ ${fix.sent} finding(s) sent back over ${fix.rounds} fix round(s); no fix was used`,
     ]);
   }
   if (verification.attempts.length > 1) {

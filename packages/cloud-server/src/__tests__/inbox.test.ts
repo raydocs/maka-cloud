@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { test } from 'node:test';
-import type { InboxAnswerResult, InboxService } from '../inbox.js';
+import type { GrantsService, InboxAnswerResult, InboxService, PublicGrant } from '../inbox.js';
 import { newConversation, startHarness } from './harness.js';
 
 interface Calls {
@@ -72,6 +72,9 @@ test('every inbox route needs a valid invite, including with a revoked or malfor
     ['GET', '/v1/inbox/settings'],
     ['PUT', '/v1/inbox/settings', { stallAfterMinutes: 45 }],
     ['POST', '/v1/inbox/digest'],
+    ['GET', '/v1/inbox/grants'],
+    ['DELETE', '/v1/inbox/grants/grant_1'],
+    ['POST', '/v1/inbox/grants/revoke', {}],
   ];
   const revoked = h.server.invites.create('gone');
   h.server.invites.revoke(revoked.inviteId);
@@ -330,4 +333,86 @@ test('a device signed out while its answer was arriving does not get the answer 
   });
   assert.equal(status, 401);
   assert.deepEqual(calls.answer, []);
+});
+
+function fakeGrants() {
+  const calls: unknown[][] = [];
+  const grant = (grantId: string, repository: string): PublicGrant => ({
+    grantId,
+    tool: 'open_pull_request',
+    repository,
+    scope: 'repository',
+    createdAt: 1,
+    expiresAt: 2,
+    uses: 0,
+    lastUsedAt: null,
+  });
+  const mine = new Map([['inv_x', [grant('grant_1', 'acme/widgets')]]]);
+  const service: GrantsService = {
+    list: (owner) => (calls.push(['list', owner]), mine.get(owner) ?? []),
+    revoke: (owner, grantId) => (
+      calls.push(['revoke', owner, grantId]),
+      (mine.get(owner) ?? []).some((entry) => entry.grantId === grantId)
+    ),
+    revokeAll: (owner, filter) => (calls.push(['revokeAll', owner, filter]), 2),
+  };
+  return { service, calls, mine };
+}
+
+test('the grants routes show and revoke the caller’s own approvals only, and answer 404 where nothing keeps them', async (t) => {
+  const none = await setup(t);
+  assert.equal((await none.h.api('/v1/inbox/grants')).status, 404);
+  assert.equal((await none.h.api('/v1/inbox/grants/grant_1', { method: 'DELETE' })).status, 404);
+
+  const { service, calls, mine } = fakeGrants();
+  const { h } = await setup(t, { grants: service });
+  const me = h.server.invites.create('me');
+  mine.set(me.inviteId, [
+    { ...mine.get('inv_x')?.[0], grantId: 'grant_me', repository: 'acme/widgets' } as PublicGrant,
+  ]);
+  const other = h.server.invites.create('other');
+  const asMe = { token: me.token };
+  const asOther = { token: other.token };
+
+  const listed = await h.api('/v1/inbox/grants', asMe);
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    ((await listed.json()) as { grants: Array<{ grantId: string }> }).grants.map((g) => g.grantId),
+    ['grant_me'],
+  );
+  assert.deepEqual(
+    ((await (await h.api('/v1/inbox/grants', asOther)).json()) as { grants: unknown[] }).grants,
+    [],
+  );
+
+  // Another owner's grant, an unknown one and a second revoke all answer 404.
+  for (const [opts, id] of [
+    [asOther, 'grant_me'],
+    [asMe, 'grant_nope'],
+  ] as const) {
+    assert.equal(
+      (await h.api(`/v1/inbox/grants/${id}`, { ...opts, method: 'DELETE' })).status,
+      404,
+    );
+  }
+  const revoked = await h.api('/v1/inbox/grants/grant_me', { ...asMe, method: 'DELETE' });
+  assert.equal(revoked.status, 200);
+  assert.deepEqual(await revoked.json(), { revoked: true });
+
+  const bulk = await h.api('/v1/inbox/grants/revoke', {
+    ...asMe,
+    ...json({ repository: 'acme/widgets' }),
+  });
+  assert.deepEqual(await bulk.json(), { revoked: 2 });
+  assert.deepEqual(calls.at(-1), ['revokeAll', me.inviteId, { repository: 'acme/widgets' }]);
+
+  // A body with anything else in it is refused, and the wrong method too.
+  assert.equal(
+    (await h.api('/v1/inbox/grants/revoke', { ...asMe, ...json({ owner: 'inv_x' }) })).status,
+    400,
+  );
+  // An id that is not valid percent-encoding is no grant, not a server error.
+  assert.equal((await h.api('/v1/inbox/grants/%E0', { ...asMe, method: 'DELETE' })).status, 404);
+  assert.equal((await h.api('/v1/inbox/grants', { ...asMe, method: 'POST' })).status, 405);
+  assert.equal((await h.api('/v1/inbox/grants/grant_me', asMe)).status, 405);
 });

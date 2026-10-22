@@ -32,6 +32,7 @@ import {
   PublicApi,
   type TimelineLimits,
 } from './http.js';
+import { HomeRoutes, HomeStore } from './home.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { AccountStore } from './accounts.js';
 import { type AuthLimits, AuthRoutes } from './auth-routes.js';
@@ -159,6 +160,13 @@ export interface SupervisorParts {
   onWarning(message: string, detail?: unknown): void;
 }
 
+/**
+ * Task trees one invite may run at once. Every task of an invite runs on the invite's machine as
+ * one agent account, so two at once could change each other's files; a further top-level task
+ * waits its turn as `queued`. Lift it when each task gets an account of its own.
+ */
+export const DEFAULT_TASKS_PER_INVITE = 1;
+
 export interface CloudServerOptions {
   /** The SQLite file. Exactly one server may have it open. */
   dbPath: string;
@@ -175,6 +183,8 @@ export interface CloudServerOptions {
     OrchestratorOptions,
     'quotas' | 'caches' | 'maxDepth' | 'now' | 'stopRetry' | 'recoveredSpend' | 'limits'
   >;
+  /** Task trees one invite may run at once (default `DEFAULT_TASKS_PER_INVITE`); the rest wait. */
+  tasksPerInvite?: number;
   handler?: ConversationHandler;
   /**
    * Builds the handler once the database is open, with the publisher it posts
@@ -328,6 +338,11 @@ export interface CloudServer {
   /** The ids of the conversations `inviteId` owns, oldest first. */
   conversationsOf(inviteId: string): string[];
   /**
+   * Puts one fact on `owner`'s Home: a known template with typed parameters (`HomeNote`), never
+   * text. The same fact twice is one card; anything else is `invalid`.
+   */
+  addHomeNote(owner: string, note: unknown): 'added' | 'duplicate' | 'invalid';
+  /**
    * Starts a conversation owned by `owner` with a first message that carries `meta`, for a
    * standing duty. Idempotent on `key`. The message is delivered at least once with its meta.
    */
@@ -367,8 +382,15 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   try {
     const hub = new FeedHub();
     const store = new SqliteTaskStore(db, hub);
+    // Set once the conversations are open; nothing delegates or resumes before that.
+    let inviteOfRoot: ((sessionId: string) => string | undefined) | undefined;
     const orchestrator = await Orchestrator.create({
       ...options.orchestrator,
+      // The tasks of one invite wait for each other: they share its machine and agent account.
+      admission: {
+        groupOf: (sessionId) => inviteOfRoot?.(sessionId),
+        perGroup: options.tasksPerInvite ?? DEFAULT_TASKS_PER_INVITE,
+      },
       store,
       sessions: new SqliteSessionStore(db, options.orchestrator?.now),
       runners: options.runners,
@@ -403,6 +425,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       () => orchestrator.issueSession(),
       options.orchestrator?.now,
     );
+    inviteOfRoot = (sessionId) => {
+      const conversationId = conversations.conversationOf(sessionId);
+      return conversationId === undefined ? undefined : conversations.ownerOf(conversationId);
+    };
     if (options.push) {
       const { transport, retryDelayMs, maxAttempts, timeoutMs, ...config } = options.push;
       push = new PushService(db, hub, invites, {
@@ -627,6 +653,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             removePush: (inviteId, endpoint) => push?.remove(inviteId, endpoint) ?? false,
           })
         : undefined;
+    const homeStore = new HomeStore(db);
     const api = new PublicApi({
       db,
       memory,
@@ -662,6 +689,12 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             ),
           }
         : {}),
+      home: new HomeRoutes(
+        homeStore,
+        { ...(inbox ? { inbox } : {}), ...(options.duties ? { duties: options.duties } : {}) },
+        new RateLimiter(limits.controlPerMinute),
+        { active: callerActive, conversationsOf: (inviteId) => conversations.idsOf(inviteId) },
+      ),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
@@ -768,6 +801,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         };
       },
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
+      addHomeNote: (owner, note) => homeStore.addNote(owner, note),
       close: () => {
         closing ??= shutdown();
         return closing;

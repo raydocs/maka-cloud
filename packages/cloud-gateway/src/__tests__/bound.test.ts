@@ -326,6 +326,65 @@ test('the long-context tier prices the whole request once the input passes its t
   );
 });
 
+test("the built-in modes' Codex model is priced with no configuration, and configuration replaces it", () => {
+  const builtIn = modelTable();
+  const sol = builtIn.get('openai:gpt-6.1-sol');
+  assert.ok(sol);
+  const usage = {
+    input: 100_000,
+    cacheRead: 100_000,
+    cacheWrite5m: 0,
+    cacheWrite1h: 0,
+    output: 10_000,
+  };
+  assert.ok(
+    Math.abs(costUsd(sol, usage) - (100_000 * 2 + 100_000 * 0.1 + 10_000 * 10) / 1e6) < 1e-12,
+  );
+  const long = { ...usage, input: 172_001 };
+  assert.ok(
+    Math.abs(costUsd(sol, long) - (172_001 * 4 + 100_000 * 0.2 + 10_000 * 15) / 1e6) < 1e-12,
+  );
+  const request = { model: 'gpt-6.1-sol', input: 'go', stream: true };
+  const bounded = boundOpenAI(encode(request), request, builtIn, DEFAULT_BOUND_LIMITS);
+  assert.ok(bounded.ok);
+  assert.equal(bounded.outputTokens, 32_000);
+  assert.equal(bounded.inputMultiplier, 1.25);
+  const repriced = modelTable([
+    {
+      vendor: 'openai',
+      model: 'gpt-6.1-sol',
+      inputPerMTokUsd: 3,
+      outputPerMTokUsd: 12,
+      maxOutputTokens: 64_000,
+    },
+  ]).get('openai:gpt-6.1-sol');
+  assert.equal(repriced?.inputPerMTokUsd, 3);
+  assert.equal(repriced?.longContext, undefined);
+  assert.equal(builtIn.get('anthropic:gpt-6.1-sol'), undefined);
+});
+
+test('a cache breakpoint may not choose a lifetime dearer than the bound reserves', () => {
+  const at = (breakpoint: unknown) => ({
+    model: 'codex-test',
+    input: [
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'go', prompt_cache_breakpoint: breakpoint }],
+      },
+    ],
+  });
+  assert.equal(openai(at({ mode: 'explicit' })).ok, true);
+  assert.equal(openai(at({ mode: 'explicit', ttl: '30m' })).ok, true);
+  for (const refused of [{ mode: 'explicit', ttl: '12h' }, 'explicit', null]) {
+    const bounded = openai(at(refused));
+    assert.equal(bounded.ok, false, JSON.stringify(refused));
+    assert.match(bounded.ok ? '' : bounded.reason, /30-minute cache lifetime/);
+  }
+  const options = { model: 'codex-test', input: 'go', prompt_cache_options: { ttl: '12h' } };
+  assert.equal(openai(options).ok, false);
+});
+
 test('configured prices are checked', () => {
   assert.equal(
     priceProblem({
