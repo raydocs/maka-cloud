@@ -809,6 +809,45 @@ test('usage that breaks the schema settles at the reservation, streamed or not',
     },
     { input_tokens: 10, output_tokens: 3, total_tokens: 12 },
     { input_tokens: 10, output_tokens: 3, image_tokens: 9_000 },
+    // Reads and writes together are more than the input.
+    {
+      input_tokens: 10,
+      input_tokens_details: { cached_tokens: 6, cache_write_tokens: 5 },
+      output_tokens: 3,
+    },
+    // A lifetime split that does not add up, a 12-hour write (its field is refused), a bad split.
+    {
+      input_tokens: 10,
+      input_tokens_details: {
+        cached_tokens: 0,
+        cache_write_tokens: 4,
+        cache_write_tokens_details: { ttl_30m_tokens: 3, ttl_12h_tokens: 0 },
+      },
+      output_tokens: 3,
+    },
+    {
+      input_tokens: 10,
+      input_tokens_details: {
+        cached_tokens: 0,
+        cache_write_tokens: 4,
+        cache_write_tokens_details: { ttl_30m_tokens: 0, ttl_12h_tokens: 4 },
+      },
+      output_tokens: 3,
+    },
+    {
+      input_tokens: 10,
+      input_tokens_details: {
+        cached_tokens: 0,
+        cache_write_tokens: 4,
+        cache_write_tokens_details: { ttl_30m_tokens: 4 },
+      },
+      output_tokens: 3,
+    },
+    {
+      input_tokens: 10,
+      input_tokens_details: { cached_tokens: 0, cache_write_tokens: -1 },
+      output_tokens: 3,
+    },
   ];
   const completed = (usage: unknown) => ({
     type: 'response.completed',
@@ -916,9 +955,31 @@ test('usage within the schema settles at what it reports, streamed or not', asyn
       { path: '/responses' },
     ),
   );
+  // GPT-5.6 and later report cache writes apart from reads, with a lifetime split.
+  const writes = {
+    input_tokens: 100,
+    input_tokens_details: {
+      cached_tokens: 40,
+      cache_write_tokens: 50,
+      cache_write_tokens_details: { ttl_30m_tokens: 50, ttl_12h_tokens: 0 },
+    },
+    output_tokens: 3,
+    total_tokens: 103,
+  };
+  upstream.next(() => json({ id: 'r', usage: writes }));
+  await text(
+    await post(
+      codexClient,
+      { model: 'codex-test', input: 'go', max_output_tokens: 100 },
+      { path: '/responses' },
+    ),
+  );
   assert.deepEqual(
     codex.settled.map(([, usd]) => usd),
-    [costUsd(CODEX, { input: 6, cacheRead: 4, cacheWrite5m: 0, cacheWrite1h: 0, output: 3 })],
+    [
+      costUsd(CODEX, { input: 6, cacheRead: 4, cacheWrite5m: 0, cacheWrite1h: 0, output: 3 }),
+      costUsd(CODEX, { input: 10, cacheRead: 40, cacheWrite5m: 50, cacheWrite1h: 0, output: 3 }),
+    ],
   );
 });
 
