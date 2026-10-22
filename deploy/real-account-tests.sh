@@ -19,7 +19,7 @@ run() {
   (cd "$dir" && node --test "$@") >"$out" 2>&1 || status=$?
   cat "$out"
   [ "$status" -eq 0 ] || exit "$status"
-  if ! grep -Eq '^# tests [1-9][0-9]*$' "$out"; then
+  if ! grep -Eq '^(#|ℹ) tests [1-9][0-9]*$' "$out"; then
     echo "real-account-tests: $dir ran no tests" >&2
     exit 1
   fi
