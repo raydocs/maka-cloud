@@ -33,7 +33,10 @@ env:
 
 jobs:
   checks:
-    runs-on: ubuntu-24.04
+    # The repository variable CI_RUNNER (a JSON label list such as ["self-hosted","boat"]) moves
+    # this job to a self-hosted runner; unset, it runs on GitHub's pinned image. Deleting the
+    # variable is the way back, with no commit.
+    runs-on: ${{ vars.CI_RUNNER && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,8 +67,12 @@ jobs:
           CI: '1'
 
   android:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # CI_RUNNER_MAC moves this job to the owner's Mac (Apple silicon), whose SDK sits at the runner's
+    # ANDROID_HOME and whose emulator runs arm64; unset, it runs on GitHub's image, which carries the
+    # SDK and runs the emulator under KVM.
+    runs-on: ${{ vars.CI_RUNNER_MAC && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_MAC) || 'ubuntu-24.04' }}
+    # The build is the long step: a cold Gradle cache and one ABI, then the emulator flows.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,6 +86,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      # The release build leaves the disk too full for the emulator's system image (the runner then fails
+      # with "No space left on device" while installing it). These toolchains are not used by this job.
+      - name: Free disk space
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY/CodeQL"
+          df -h /
 
       - name: Install the stack and the app
         run: |
@@ -104,27 +119,42 @@ jobs:
           npm --workspace @maka-cloud/playbooks run build
           npm --workspace @maka-cloud/supervisor run build
 
+      # Gradle's downloaded dependencies and wrapper, kept between runs. Keyed on the app's lockfile, so a
+      # new Expo or React Native version starts cold. A self-hosted runner keeps ~/.gradle itself.
+      - name: Cache Gradle
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('packages/cloud-mobile/package-lock.json') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       # A release build carries its own JavaScript, so no dev server is needed on the emulator. It is signed
-      # with the debug key Expo generates; it is never uploaded anywhere.
+      # with the debug key Expo generates; it is never uploaded anywhere. Only the one ABI the emulator below
+      # runs is compiled (x86_64, or arm64-v8a on Apple silicon); all four took about 43 minutes.
       - name: Build the app
         working-directory: packages/cloud-mobile
         run: |
           npx expo prebuild --platform android --no-install
           # Gradle fetches its plugins from the public repositories; a reset connection is retried.
           for attempt in 1 2 3; do
-            (cd android && ./gradlew --no-daemon assembleRelease) && exit 0
+            (cd android && ./gradlew --no-daemon assembleRelease -PreactNativeArchitectures="$ABI") && exit 0
             echo "Gradle attempt $attempt failed" >&2
             sleep 15
           done
           exit 1
         env:
+          ABI: ${{ runner.arch == 'ARM64' && 'arm64-v8a' || 'x86_64' }}
           CI: '1'
           MAKA_E2E: '1'
 
       - name: Install Maestro
         run: |
           curl -fsSL -o "$RUNNER_TEMP/maestro.zip" "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
-          echo "${MAESTRO_SHA256}  $RUNNER_TEMP/maestro.zip" | sha256sum --check -
+          echo "${MAESTRO_SHA256}  $RUNNER_TEMP/maestro.zip" | shasum -a 256 --check -
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
           echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
 
@@ -139,16 +169,24 @@ jobs:
           exit 1
 
       - name: Enable KVM for the emulator
+        if: runner.os == 'Linux'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Disk before the emulator
+        run: df -h /
+
+      # adb's mDNS discovery aborts on a malformed service name from the local network (seen on
+      # the owner's Mac); the emulator is reached over TCP, so discovery is not needed.
       - name: Run the flows on an Android emulator
+        env:
+          ADB_MDNS: '0'
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           api-level: 34
-          arch: x86_64
+          arch: ${{ runner.arch == 'ARM64' && 'arm64-v8a' || 'x86_64' }}
           target: google_apis
           profile: pixel_7
           ram-size: 4096M
@@ -166,7 +204,9 @@ jobs:
           retention-days: 7
 
   ios:
-    runs-on: macos-15
+    # CI_RUNNER_MAC (a JSON label list such as ["self-hosted","mac"]) moves this job to a Mac of the
+    # owner's; unset, it runs on GitHub's macos-15. Deleting the variable is the way back.
+    runs-on: ${{ vars.CI_RUNNER_MAC && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_MAC) || 'macos-15' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -209,9 +249,13 @@ jobs:
       # Expo SDK 58 needs Swift tools 6.2 (Xcode 26); the runner's default Xcode is older.
       - name: Select the newest Xcode
         run: |
-          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)
-          echo "Using $xcode"
-          sudo xcode-select -s "$xcode"
+          # GitHub's image keeps several Xcodes as Xcode_N.app; a self-hosted Mac has its one Xcode
+          # selected already, so nothing is switched there (and no sudo is needed).
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -n "$xcode" ]; then
+            echo "Using $xcode"
+            sudo xcode-select -s "$xcode"
+          fi
           xcodebuild -version
 
       # A release build for the simulator carries its own JavaScript. Nothing is signed or uploaded.
@@ -257,7 +301,8 @@ jobs:
             if (!phone) process.exit(1);
             console.log(phone.udid);
           ')
-          xcrun simctl boot "$udid"
+          # A self-hosted Mac keeps the simulator from the last run; booting a booted one is an error.
+          xcrun simctl boot "$udid" 2>/dev/null || true
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl install "$udid" "$RUNNER_TEMP/ios-build/Build/Products/Release-iphonesimulator/Maka.app"
           bash packages/cloud-mobile/scripts/run-flows.sh ios

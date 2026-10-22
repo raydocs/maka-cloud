@@ -4,6 +4,7 @@ import {
   AGENT_VENDORS,
   budgetProblem,
   chooseMode,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_MODES,
   EFFORTS,
   implementerFor,
@@ -221,6 +222,7 @@ test('the models a config names are listed once each, with the vendor that serve
     'anthropic:claude-haiku-5-5',
     'anthropic:claude-opus-5-5',
     'anthropic:claude-sonnet-5-5',
+    'openai:gpt-6.1-sol',
   ]);
   const config = clone();
   config.modes.deep.reviewer.codex = { model: 'gpt-review-x', effort: 'high' };
@@ -228,16 +230,23 @@ test('the models a config names are listed once each, with the vendor that serve
 });
 
 test('roles left on the CLI default are reported, so the host can say they need a price', () => {
-  const open = unnamedModels(DEFAULT_MODES);
-  assert.ok(open.length > 0);
-  assert.ok(open.every((entry) => entry.vendor === 'codex'));
+  assert.deepEqual(unnamedModels(DEFAULT_MODES), []);
   const config = clone();
+  config.modes.standard.reviewer.codex = { effort: 'medium' };
+  config.modes.quick.implementer.codex = { effort: 'low' };
+  assert.deepEqual(unnamedModels(config), [
+    { mode: 'quick', role: 'implementer', vendor: 'codex' },
+    { mode: 'standard', role: 'reviewer', vendor: 'codex' },
+  ]);
+});
+
+test('the built-in modes name the default Codex model for every Codex role', () => {
   for (const id of MODE_IDS) {
     for (const role of ['implementer', 'reviewer'] as const) {
-      config.modes[id][role].codex = { model: 'gpt-x', effort: 'low' };
+      assert.equal(DEFAULT_MODES.modes[id][role].codex.model, DEFAULT_CODEX_MODEL, `${id} ${role}`);
     }
+    assert.equal(reviewerFor(DEFAULT_MODES, id, 'claude-agent-sdk').model, DEFAULT_CODEX_MODEL);
   }
-  assert.deepEqual(unnamedModels(config), []);
 });
 
 test('the mode line goes right after the leading directives and is read back from there', () => {

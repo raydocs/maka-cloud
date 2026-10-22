@@ -22,7 +22,18 @@ appId: cloud.maka.app
 - inputText: ${TOKEN}
 # With the keyboard up, as a person sees it while typing.
 - takeScreenshot: sign-in-typing
-- hideKeyboard
+# Maestro's hideKeyboard cannot dismiss this app's keyboard on newer iOS simulators (iOS 27), so
+# iOS presses Return, which closes a one-line field's keyboard (and may submit the form).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - pressKey: Enter
 # On iOS the keyboard's own dismissal can already have submitted the form.
 - runFlow:
     when:

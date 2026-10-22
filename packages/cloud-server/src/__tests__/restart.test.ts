@@ -5,7 +5,8 @@ import { eventually, newConversation, openStream, startHarness } from './harness
 
 test('a restart keeps tasks, ends the running one with an orphan event and continues the stream from old ids', async (t) => {
   const { handler, seen } = recordingHandler();
-  const h = await startHarness(t, { handler });
+  // Two tasks of the invite run at once here, so both are running when the server restarts.
+  const h = await startHarness(t, { handler, tasksPerInvite: 2 });
   const conversationId = await newConversation(h);
   const { session, token } = await conductorSession(h, seen, conversationId);
   const orchestrator = h.server.orchestrator;

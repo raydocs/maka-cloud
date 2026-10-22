@@ -95,9 +95,14 @@ const ConfigSchema = z
 export type ModesConfig = z.infer<typeof ConfigSchema>;
 
 /**
- * Anthropic models are named. Codex models are left to the CLI's default until the owner sets one:
- * the gateway prices only models it is told about, so naming an OpenAI model here would be a guess.
+ * The OpenAI model the built-in modes run Codex on. The gateway's built-in table prices it (see
+ * `BUILT_IN_MODELS` in cloud-gateway), so a Codex run, and with it the review of a Claude change,
+ * works without configuration. `MAKA_CLOUD_MODES` names another, `MAKA_CLOUD_GATEWAY_MODELS`
+ * reprices it.
  */
+export const DEFAULT_CODEX_MODEL = 'gpt-6.1-sol';
+
+/** Every agent role names its model, so the gateway can price each run. */
 export const DEFAULT_MODES: ModesConfig = {
   version: MODES_CONFIG_VERSION,
   modes: {
@@ -105,11 +110,11 @@ export const DEFAULT_MODES: ModesConfig = {
       conductor: { effort: 'low', plannerEffort: 'medium' },
       implementer: {
         'claude-agent-sdk': { model: 'claude-sonnet-5-5', effort: 'low' },
-        codex: { effort: 'low' },
+        codex: { model: DEFAULT_CODEX_MODEL, effort: 'low' },
       },
       reviewer: {
         'claude-agent-sdk': { model: 'claude-sonnet-5-5', effort: 'low' },
-        codex: { effort: 'low' },
+        codex: { model: DEFAULT_CODEX_MODEL, effort: 'low' },
       },
       helper: { vendor: 'anthropic', model: 'claude-haiku-5-5', effort: 'low' },
       budget: { minRunUsd: 0.5, defaultRunUsd: 2, maxDelegationUsd: 10, reviewShare: 0.2 },
@@ -118,11 +123,11 @@ export const DEFAULT_MODES: ModesConfig = {
       conductor: { effort: 'medium', plannerEffort: 'high' },
       implementer: {
         'claude-agent-sdk': { model: 'claude-sonnet-5-5', effort: 'high' },
-        codex: { effort: 'medium' },
+        codex: { model: DEFAULT_CODEX_MODEL, effort: 'medium' },
       },
       reviewer: {
         'claude-agent-sdk': { model: 'claude-opus-5-5', effort: 'medium' },
-        codex: { effort: 'medium' },
+        codex: { model: DEFAULT_CODEX_MODEL, effort: 'medium' },
       },
       helper: { vendor: 'anthropic', model: 'claude-haiku-5-5', effort: 'low' },
       budget: { minRunUsd: 2, defaultRunUsd: 5, maxDelegationUsd: 50, reviewShare: 0.2 },
@@ -131,11 +136,11 @@ export const DEFAULT_MODES: ModesConfig = {
       conductor: { effort: 'high', plannerEffort: 'xhigh' },
       implementer: {
         'claude-agent-sdk': { model: 'claude-opus-5-5', effort: 'high' },
-        codex: { effort: 'high' },
+        codex: { model: DEFAULT_CODEX_MODEL, effort: 'high' },
       },
       reviewer: {
         'claude-agent-sdk': { model: 'claude-opus-5-5', effort: 'high' },
-        codex: { effort: 'high' },
+        codex: { model: DEFAULT_CODEX_MODEL, effort: 'high' },
       },
       helper: { vendor: 'anthropic', model: 'claude-haiku-5-5', effort: 'medium' },
       budget: { minRunUsd: 10, defaultRunUsd: 20, maxDelegationUsd: 100, reviewShare: 0.25 },
