@@ -17,6 +17,8 @@ async function run(body: Body): Promise<unknown> {
   switch (body.op) {
     case 'invite':
       return stack.newInvite();
+    case 'mail-code':
+      return { code: stack.mailCode(text('address')) };
     case 'revoke':
       return { revoked: stack.server.invites.revoke(text('inviteId')) };
     case 'say':

@@ -1,4 +1,4 @@
-# Signs in with the server address and invite token passed as -e SERVER=... -e TOKEN=...
+# Signs in with an invite token: the server address and token passed as -e SERVER=... -e TOKEN=...
 appId: cloud.maka.app
 ---
 - launchApp:
@@ -11,12 +11,23 @@ appId: cloud.maka.app
       - tapOn: "Wait"
 # A cold start on a hosted emulator can take a while to draw the first screen.
 - extendedWaitUntil:
-    visible: "Enter your workspace"
+    visible:
+      id: "field-Server address"
     timeout: 60000
 - takeScreenshot: sign-in-empty
 - tapOn:
     id: "field-Server address"
 - inputText: ${SERVER}
+- tapOn:
+    id: "button-Continue"
+# The first screen offers the ways in; a hand-made invite token is the small link at the bottom.
+- extendedWaitUntil:
+    visible:
+      id: "button-I have an invite token"
+    timeout: 30000
+- takeScreenshot: sign-in-choose
+- tapOn:
+    id: "button-I have an invite token"
 - tapOn:
     id: "field-Invite token"
 - inputText: ${TOKEN}
