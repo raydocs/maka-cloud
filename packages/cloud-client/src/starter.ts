@@ -59,7 +59,7 @@ export class ConversationStarter {
       clientMessageId: randomId(),
       title,
     };
-    const { conversationId, clientMessageId } = this.attempt;
+    const { conversationId, clientMessageId, title: name } = this.attempt;
     this.sends?.write(START_KEY, {
       id: clientMessageId,
       text: body,
@@ -76,7 +76,7 @@ export class ConversationStarter {
     }
     this.attempt = null;
     this.sends?.clear(START_KEY);
-    return { conversationId, title, createdAt: this.now() };
+    return { conversationId, title: name, createdAt: this.now() };
   }
 
   /** Call when the sentence changes. */
