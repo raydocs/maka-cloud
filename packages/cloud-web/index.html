@@ -19,6 +19,22 @@
             window.matchMedia('(prefers-color-scheme: dark)').matches);
         document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
       })();
+      // The language before the first paint, as i18n.tsx picks it, so the right Chinese glyphs load.
+      (function () {
+        var lang;
+        try {
+          lang = localStorage.getItem('maka.language');
+        } catch (e) {}
+        if (lang !== 'en' && lang !== 'zh-Hans' && lang !== 'zh-Hant') {
+          var first = ((navigator.languages && navigator.languages[0]) || '').toLowerCase();
+          lang = /^zh-(?:hant|tw|hk|mo)(?:-|$)/.test(first)
+            ? 'zh-Hant'
+            : first === 'en' || first.indexOf('en-') === 0
+              ? 'en'
+              : 'zh-Hans';
+        }
+        document.documentElement.setAttribute('lang', lang);
+      })();
     </script>
   </head>
   <body>
