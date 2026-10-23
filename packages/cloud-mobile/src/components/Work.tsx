@@ -1,14 +1,16 @@
 import { BRAND, displayText, taskLabel, type TaskView } from '@maka-cloud/client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, LayoutAnimation, Pressable, View } from 'react-native';
 import { useReduceMotion } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
 import { useTheme } from '@/lib/theme';
 import {
+  clockOf,
   doneSummary,
   liveLine,
   panelSummary,
   runnerWords,
+  runningSince,
   type WorkStep,
   workSteps,
 } from '@/lib/work';
@@ -106,9 +108,24 @@ function StepRow({ step }: { step: WorkStep }) {
 }
 
 /**
+ * How long the running work has gone on, read again each second while it runs: "Working for 2:05".
+ * The digits only change; nothing moves or fades, with or without Reduce Motion.
+ */
+export function useWorkingFor(since: number | undefined, now: () => number = Date.now) {
+  const [at, setAt] = useState(now);
+  useEffect(() => {
+    if (since === undefined) return;
+    setAt(now());
+    const timer = setInterval(() => setAt(now()), 1000);
+    return () => clearInterval(timer);
+  }, [since, now]);
+  return since === undefined ? undefined : clockOf(at - since);
+}
+
+/**
  * The work one message of the person's set going, as one block. While it works: the thinking mark
- * and one live line (the running task's narration or current step, else "working"), with a row per
- * step under it. Once done it folds to one line ("Worked for 4 min · 6 steps") that opens again.
+ * and one live line (the running task's narration or current step, else "working") with how long
+ * the running work has gone on, and a row per step under it. Once done it folds to one line ("Worked for 4 min · 6 steps") that opens again.
  * A block with nothing known to show (no steps, no time) is not drawn.
  */
 export function WorkBlock({ tasks, working }: { tasks: readonly TaskView[]; working: boolean }) {
@@ -118,6 +135,7 @@ export function WorkBlock({ tasks, working }: { tasks: readonly TaskView[]; work
   // Unset, it follows the work: open while it runs, folded once it is done.
   const [chosen, setChosen] = useState<boolean | undefined>();
   const steps = workSteps(tasks);
+  const clock = useWorkingFor(working ? runningSince(tasks) : undefined);
   const summary = working ? '' : doneSummary(tasks, say);
   if (!working && summary === '') return null;
   const open = chosen ?? working;
@@ -127,6 +145,7 @@ export function WorkBlock({ tasks, working }: { tasks: readonly TaskView[]; work
   };
   const found = liveLine(tasks);
   const line = found === undefined ? undefined : runnerWords(displayText(found), say);
+  const forTime = clock === undefined ? undefined : say('work.for', { time: clock });
   return (
     <View
       testID="work-block"
@@ -136,7 +155,9 @@ export function WorkBlock({ tasks, working }: { tasks: readonly TaskView[]; work
       {working ? (
         <Pressable
           accessibilityRole={steps.length > 0 ? 'button' : 'text'}
-          accessibilityLabel={line ?? say('chat.workingLabel', { name: BRAND.name })}
+          accessibilityLabel={[line ?? say('chat.workingLabel', { name: BRAND.name }), forTime]
+            .filter(Boolean)
+            .join(say('work.join'))}
           {...(steps.length > 0 ? { accessibilityState: { expanded: open } } : {})}
           disabled={steps.length === 0}
           onPress={toggle}
@@ -148,6 +169,11 @@ export function WorkBlock({ tasks, working }: { tasks: readonly TaskView[]; work
               <T kind="muted">{line ?? say('chat.working', { name: BRAND.name })}</T>
             </Shimmer>
           </View>
+          {forTime !== undefined && (
+            <T kind="small" testID="work-clock" style={{ fontVariant: ['tabular-nums'] }}>
+              {forTime}
+            </T>
+          )}
           {steps.length > 0 && (
             <Icon name={open ? 'chevronUp' : 'chevronDown'} color={t.inkMuted} />
           )}
