@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react-native';
-import { Text } from 'react-native';
+import { AccessibilityInfo, Text } from 'react-native';
 import { boldRuns, Card, Glass, Rich, withoutMarks } from '@/components/ui';
-import { ReduceTransparency } from '@/lib/appearance';
+import { AppearanceProvider, ReduceTransparency } from '@/lib/appearance';
 import { LIGHT, PANEL, ThemeContext } from '@/lib/theme';
 
 const flat = (style: unknown) => Object.assign({}, ...[style].flat(3).filter(Boolean));
@@ -52,4 +52,29 @@ test('without it, glass stays translucent', async () => {
     </ThemeContext.Provider>,
   );
   expect(screen.queryByTestId('glass-solid')).toBeNull();
+});
+
+// The web preview has no Reduce Transparency setting: the app must still start there.
+test('a platform without the setting starts with it off', async () => {
+  const original = AccessibilityInfo.isReduceTransparencyEnabled;
+  Object.defineProperty(AccessibilityInfo, 'isReduceTransparencyEnabled', {
+    value: undefined,
+    configurable: true,
+  });
+  try {
+    await render(
+      <AppearanceProvider>
+        <Glass>
+          <Text>Started</Text>
+        </Glass>
+      </AppearanceProvider>,
+    );
+    expect(screen.getByText('Started')).toBeTruthy();
+    expect(screen.queryByTestId('glass-solid')).toBeNull();
+  } finally {
+    Object.defineProperty(AccessibilityInfo, 'isReduceTransparencyEnabled', {
+      value: original,
+      configurable: true,
+    });
+  }
 });

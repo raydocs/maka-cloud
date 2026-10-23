@@ -279,10 +279,10 @@ export const ZH: Record<Key, string> = {
   'settings.signOutFailed': '无法移除这台设备的访问权限，请重试。',
 
   'devices.title': '已登录的设备',
-  'devices.ways': '你通过{ways}登录。',
+  'devices.ways': '你通过 {ways} 登录。',
   'devices.email': '邮箱',
   'devices.emailAt': '邮箱 {address}',
-  'devices.list': '{items}和{last}',
+  'devices.list': '{items} 和 {last}',
   'devices.listSeparator': '、',
   'devices.this': ' · 本机',
   'devices.signOut': '让 {device} 退出登录',
@@ -295,7 +295,7 @@ export const ZH: Record<Key, string> = {
 
   'decision.cannotShow': '这张卡片无法完整显示，所以不能在这里批准。',
   'decision.held': '等你回复后才会执行：{tool}',
-  'decision.finished': '{title}已完成',
+  'decision.finished': '{title} 已完成',
   'decision.recorded': '已记录回答：{label}',
 
   'delivery.result': '结果：{title}',

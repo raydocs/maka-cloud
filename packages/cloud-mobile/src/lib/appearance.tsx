@@ -26,6 +26,8 @@ export const useReduceTransparency = () => useContext(ReduceTransparency);
 function useSystemReduceTransparency(): boolean {
   const [on, setOn] = useState(false);
   useEffect(() => {
+    // The web preview's AccessibilityInfo has no such setting; there it is simply off.
+    if (typeof AccessibilityInfo.isReduceTransparencyEnabled !== 'function') return;
     let current = true;
     void AccessibilityInfo.isReduceTransparencyEnabled()
       .then((value) => current && setOn(value))
@@ -33,7 +35,7 @@ function useSystemReduceTransparency(): boolean {
     const subscription = AccessibilityInfo.addEventListener('reduceTransparencyChanged', setOn);
     return () => {
       current = false;
-      subscription.remove();
+      subscription?.remove();
     };
   }, []);
   return on;
