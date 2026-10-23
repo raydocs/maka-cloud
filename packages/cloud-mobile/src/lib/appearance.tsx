@@ -23,21 +23,31 @@ export const useAppearance = () => useContext(Appearance);
 export const ReduceTransparency = createContext(false);
 export const useReduceTransparency = () => useContext(ReduceTransparency);
 
-function useSystemReduceTransparency(): boolean {
+/** The system's Reduce Motion: the shimmer and the springs stop while it is on. */
+export const ReduceMotion = createContext(false);
+export const useReduceMotion = () => useContext(ReduceMotion);
+
+const SETTINGS = {
+  transparency: ['isReduceTransparencyEnabled', 'reduceTransparencyChanged'],
+  motion: ['isReduceMotionEnabled', 'reduceMotionChanged'],
+} as const;
+
+function useSystemSetting(which: keyof typeof SETTINGS): boolean {
   const [on, setOn] = useState(false);
   useEffect(() => {
-    // The web preview's AccessibilityInfo has no such setting; there it is simply off.
-    if (typeof AccessibilityInfo.isReduceTransparencyEnabled !== 'function') return;
+    const [read, event] = SETTINGS[which];
+    // Where AccessibilityInfo has no such setting (the web preview), it is simply off.
+    if (typeof AccessibilityInfo[read] !== 'function') return;
     let current = true;
-    void AccessibilityInfo.isReduceTransparencyEnabled()
+    void AccessibilityInfo[read]()
       .then((value) => current && setOn(value))
       .catch(() => {});
-    const subscription = AccessibilityInfo.addEventListener('reduceTransparencyChanged', setOn);
+    const subscription = AccessibilityInfo.addEventListener(event, setOn);
     return () => {
       current = false;
       subscription?.remove();
     };
-  }, []);
+  }, [which]);
   return on;
 }
 
@@ -45,7 +55,8 @@ function useSystemReduceTransparency(): boolean {
 export function AppearanceProvider({ children }: { children: ReactNode }) {
   const [choice, setChoice] = useState<ModeChoice>('system');
   const scheme = useColorScheme();
-  const reduceTransparency = useSystemReduceTransparency();
+  const reduceTransparency = useSystemSetting('transparency');
+  const reduceMotion = useSystemSetting('motion');
   useEffect(() => {
     void readSecure(KEY).then((stored) => {
       if (stored === 'light' || stored === 'dark' || stored === 'system') setChoice(stored);
@@ -66,9 +77,11 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   return (
     <Appearance.Provider value={value}>
       <ReduceTransparency.Provider value={reduceTransparency}>
-        <ThemeContext.Provider value={mode === 'dark' ? DARK : LIGHT}>
-          {children}
-        </ThemeContext.Provider>
+        <ReduceMotion.Provider value={reduceMotion}>
+          <ThemeContext.Provider value={mode === 'dark' ? DARK : LIGHT}>
+            {children}
+          </ThemeContext.Provider>
+        </ReduceMotion.Provider>
       </ReduceTransparency.Provider>
     </Appearance.Provider>
   );

@@ -63,10 +63,44 @@ test('Home in Chinese: the start sentence, its field and its ideas', async () =>
   expect(screen.getByTestId('field-What would you like to get done?')).toBeTruthy();
 });
 
-test('Chat in Chinese, with no conversation open', async () => {
+test('an empty Chat can be talked to: an opening line, three ideas and the composer start one', async () => {
   await signedIn(<Chat />);
-  expect(await screen.findByText('还没有打开的对话')).toBeTruthy();
-  expect(screen.getByText('去首页开始一个吧。')).toBeTruthy();
+  const posted: Array<{ method: string; path: string; body: unknown }> = [];
+  fetchMock().mockImplementation(async (url: string, init: RequestInit = {}) => {
+    const path = new URL(url).pathname;
+    const method = init.method ?? 'GET';
+    posted.push({ method, path, body: init.body ? JSON.parse(String(init.body)) : undefined });
+    if (method === 'POST' && path === '/v1/conversations')
+      return Response.json({ conversationId: 'c-new' });
+    if (method === 'POST' && path === '/v1/conversations/c-new/messages')
+      return Response.json({ messageId: 'm1' });
+    if (path === '/v1/conversations') return Response.json({ conversations: [] });
+    return new Response('{}', { status: 404 });
+  });
+  expect(await screen.findByText('想完成什么？')).toBeTruthy();
+  // No card sending the person away to Home.
+  expect(screen.queryByText(/去首页/u)).toBeNull();
+  const ideas = ['home.idea.1', 'home.idea.2', 'home.idea.3'].map((id) =>
+    screen.getByTestId(`button-${id}`),
+  );
+  expect(ideas).toHaveLength(3);
+  const field = screen.getByTestId('field-Keep the conversation going');
+  expect(field.props.value).toBe('');
+  expect(screen.getByTestId('button-Send message').props.accessibilityState).toMatchObject({
+    disabled: true,
+  });
+  await fireEvent.press(ideas[0] as never);
+  const idea = String(screen.getByTestId('field-Keep the conversation going').props.value);
+  expect(idea.length).toBeGreaterThan(0);
+  await act(async () => {
+    fireEvent.press(screen.getByTestId('button-Send message'));
+  });
+  const message = posted.find(
+    (call) => call.method === 'POST' && call.path === '/v1/conversations/c-new/messages',
+  );
+  expect(message?.body).toMatchObject({ text: idea });
+  // The new conversation is open: the ideas give way to it.
+  expect(api.session.status === 'in' && api.session.chosen).toBe('c-new');
 });
 
 test('Settings in Chinese', async () => {

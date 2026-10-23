@@ -188,20 +188,32 @@ function Ways({
   }, [deep, onDeep]);
   const host = server.replace(/^https?:\/\//u, '');
   const { t: say } = useT();
+  // The server's address is plumbing: it waits behind "Advanced" with the way to change it.
+  const [advanced, setAdvanced] = useState(false);
   return (
     <>
       <Card label={say('signin.label')}>
         <Step state={state} flow={flow} notice={notice} onToken={onToken} />
       </Card>
       <View style={{ alignItems: 'center' }}>
-        <T kind="small">{host}</T>
-        {onChangeServer ? (
-          <TextLink
-            label={say('signin.anotherServer')}
-            id="Use another server"
-            onPress={onChangeServer}
-          />
-        ) : null}
+        <TextLink
+          label={say('signin.advanced')}
+          id="Advanced"
+          expanded={advanced}
+          onPress={() => setAdvanced(!advanced)}
+        />
+        {advanced && (
+          <>
+            <T kind="small">{host}</T>
+            {onChangeServer ? (
+              <TextLink
+                label={say('signin.anotherServer')}
+                id="Use another server"
+                onPress={onChangeServer}
+              />
+            ) : null}
+          </>
+        )}
       </View>
     </>
   );
@@ -370,19 +382,37 @@ function Step({
   );
 }
 
-/** A quiet text button, at least 44 pt tall. `id` names it for the device tests in any language. */
-function TextLink({ label, id, onPress }: { label: string; id: string; onPress: () => void }) {
+/**
+ * A quiet text link in the small size, well below the main button's weight; at least 44 pt tall.
+ * `id` names it for the device tests in any language; `expanded` makes it a disclosure.
+ */
+function TextLink({
+  label,
+  id,
+  onPress,
+  expanded,
+}: {
+  label: string;
+  id: string;
+  onPress: () => void;
+  expanded?: boolean;
+}) {
   return (
     <Pressable
       testID={`button-${id}`}
-      accessibilityRole="link"
+      accessibilityRole={expanded === undefined ? 'link' : 'button'}
       accessibilityLabel={label}
+      {...(expanded === undefined ? {} : { accessibilityState: { expanded } })}
       onPress={onPress}
-      style={{ minHeight: 44, alignItems: 'center', justifyContent: 'center' }}
+      hitSlop={4}
+      style={({ pressed }) => ({
+        minHeight: 44,
+        alignItems: 'center',
+        justifyContent: 'center',
+        opacity: pressed ? 0.6 : 1,
+      })}
     >
-      <T kind="muted" style={{ textDecorationLine: 'underline' }}>
-        {label}
-      </T>
+      <T kind="small">{label}</T>
     </Pressable>
   );
 }

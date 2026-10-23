@@ -11,7 +11,7 @@ import { useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useT } from '@/lib/i18n';
 import { mono } from '@/lib/theme';
-import { FailureNote, QuietButton, StatusMark, T } from './ui';
+import { FailureNote, QuietButton, Shimmer, StatusMark, T } from './ui';
 
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;
 
@@ -31,7 +31,9 @@ function StepLine({ notes }: { notes: readonly string[] }) {
         style={{ minHeight: 44, justifyContent: 'center' }}
       >
         <T kind="small">{say('task.currentStep')}</T>
-        <T kind="body">{displayText(current)}</T>
+        <Shimmer>
+          <T kind="body">{displayText(current)}</T>
+        </Shimmer>
       </Pressable>
       {open &&
         steps.map((step, i) => <T key={i} kind="muted">{`${i + 1}. ${displayText(step)}`}</T>)}
@@ -39,13 +41,18 @@ function StepLine({ notes }: { notes: readonly string[] }) {
   );
 }
 
-/** A task, its live step and its controls, with its subtasks under it. */
+/**
+ * A task, its live step and its controls, with its subtasks under it. Only what is known is shown:
+ * no cost line until the server reports one. `resultCard` says a finished task's result card is on
+ * the screen too, so its summary is read there and not twice.
+ */
 export function TaskRow({
   task,
   tasks,
   noPause,
   busy,
   onControl,
+  resultCard = false,
   ancestors = [],
 }: {
   task: TaskView;
@@ -53,6 +60,7 @@ export function TaskRow({
   noPause: ReadonlySet<string>;
   busy: boolean;
   onControl: (taskId: string, action: TaskControl) => void;
+  resultCard?: boolean;
   ancestors?: string[];
 }) {
   const { t: say, tx } = useT();
@@ -62,21 +70,23 @@ export function TaskRow({
   const live = !TERMINAL.has(task.state) && !task.cancelRequested;
   const stopping = task.stopPending || task.treeStopPending;
   const title = task.title ? displayText(task.title) : say('task.title');
+  const showCost = task.parentTaskId === undefined && task.costUsd !== undefined;
   const spent = tx(dollars(task.costUsd));
+  // The result card says the outcome of a finished task; the row does not repeat it.
+  const summaryElsewhere = resultCard && task.state === 'succeeded';
   return (
     <View style={{ gap: 6 }}>
       <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
         <StatusMark tone={TONE[task.state as keyof typeof TONE] ?? 'attention'} />
-        {/* A bold lead-in at reading size, as the panel's text has; still a heading to a screen reader. */}
-        <T kind="heading" style={{ flex: 1, fontSize: 16, lineHeight: 22, fontWeight: '700' }}>
+        {/* The row's one semibold line; a heading to a screen reader. */}
+        <T kind="heading" style={{ flex: 1 }}>
           {title}
         </T>
       </View>
       <T kind="muted">
         {tx(taskLabel(task))}
-        {task.parentTaskId === undefined &&
-          ` · ${say(live ? 'task.costSoFar' : 'task.cost')}${say('common.colon')}`}
-        {task.parentTaskId === undefined && (
+        {showCost && ` · ${say(live ? 'task.costSoFar' : 'task.cost')}${say('common.colon')}`}
+        {showCost && (
           <T kind="muted" style={mono}>
             {task.budgetUsd !== undefined
               ? say('task.ofBudget', { spent, budget: tx(dollars(task.budgetUsd)) })
@@ -89,7 +99,9 @@ export function TaskRow({
       {/* A finished task has no "current step". */}
       {live && task.progress.length > 0 && <StepLine notes={task.progress} />}
       {task.failureReason ? <FailureNote reason={task.failureReason} /> : null}
-      {task.manifest ? <T kind="body">{displayText(task.manifest.summary)}</T> : null}
+      {task.manifest && !summaryElsewhere ? (
+        <T kind="body">{displayText(task.manifest.summary)}</T>
+      ) : null}
       {live && (
         // Quiet words, as on the web: the task is the thing to read, the controls are a glance.
         <View style={{ flexDirection: 'row', gap: 20 }}>

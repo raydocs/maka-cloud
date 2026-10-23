@@ -9,10 +9,14 @@ import {
 } from '@maka-cloud/client';
 import { useState } from 'react';
 import { Linking, Pressable, View } from 'react-native';
-import { Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
+import { ButtonRow, Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
 import { useT } from '@/lib/i18n';
 import { mono, useTheme } from '@/lib/theme';
 import { Icon } from './Icon';
+
+/** Answers that stop or refuse something: they buzz a warning, every other answer taps lightly. */
+const STOPPING = new Set(['reject', 'deny', 'cancel', 'stop', 'turn-off']);
+const hapticFor = (optionId: string) => (STOPPING.has(optionId) ? 'warning' : 'light');
 
 function Evidence({ line }: { line: EvidenceLine }) {
   const t = useTheme();
@@ -134,18 +138,20 @@ export function DecisionCard({
       ) : (
         <>
           {item.allowText && <Note value={note} onChange={setNote} disabled={disabled} />}
-          <View style={{ gap: 8 }}>
+          <ButtonRow>
             {card.options.map((option) => (
               <PillButton
                 key={option.id}
                 label={choice(option.id, displayText(option.label))}
                 id={displayText(option.label)}
                 primary={option.recommended}
+                compact
+                haptic={hapticFor(option.id)}
                 disabled={disabled}
                 onPress={() => onAnswer(option.id, note.trim() || undefined)}
               />
             ))}
-          </View>
+          </ButtonRow>
         </>
       )}
     </View>
@@ -196,18 +202,20 @@ export function QuestionBlock({
       ) : (
         <>
           <Note value={note} onChange={setNote} disabled={disabled} />
-          <View style={{ gap: 8 }}>
+          <ButtonRow>
             {card.options.map((option) => (
               <PillButton
                 key={option.id}
                 label={choice(option.id, option.label)}
                 id={option.label}
                 primary={option.recommended}
+                compact
+                haptic={hapticFor(option.id)}
                 disabled={disabled}
                 onPress={() => onAnswer(option.id, note.trim() || undefined)}
               />
             ))}
-          </View>
+          </ButtonRow>
         </>
       )}
     </View>

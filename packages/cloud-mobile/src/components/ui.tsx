@@ -8,8 +8,9 @@ import {
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { displayText, failureWords } from '@maka-cloud/client';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import {
+  Animated,
   Platform,
   Pressable,
   type StyleProp,
@@ -22,7 +23,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { type Edge, SafeAreaView } from 'react-native-safe-area-context';
-import { useReduceTransparency } from '@/lib/appearance';
+import { useReduceMotion, useReduceTransparency } from '@/lib/appearance';
 import { type Language, useT } from '@/lib/i18n';
 import { mono, PANEL, radius, ThemeContext, TOUCH, useTheme } from '@/lib/theme';
 import { Icon, type IconName } from './Icon';
@@ -263,6 +264,9 @@ export function T({
     <Text
       style={[TEXT[lang][kind], { color }, style]}
       allowFontScaling
+      // Break lines so a paragraph does not end on one lone character or word.
+      lineBreakStrategyIOS="push-out"
+      textBreakStrategy="balanced"
       {...(kind === 'title' || kind === 'heading' ? { accessibilityRole: 'header' as const } : {})}
       {...(kind === 'error' ? { accessibilityRole: 'alert' as const } : {})}
       {...rest}
@@ -273,34 +277,50 @@ export function T({
 }
 
 /**
- * The system face in every language (PingFang SC or TC for Chinese on iOS). Chinese reads best with
- * more room between lines, about 1.5 to 1.6 times the size; no language adds letter spacing.
+ * Five sizes and two weights, in every language: a title (22), a heading (17), body text (16),
+ * secondary text (14; muted and error lines) and captions (12). Titles and headings are semibold, so a
+ * card has one semibold line and the rest is regular. The system face throughout (PingFang SC or TC
+ * for Chinese on iOS); Chinese gets more room between lines, about 1.6 times the size, and no
+ * language adds letter spacing.
  */
 const CJK: Record<TextKind, TextStyle> = {
-  title: { fontSize: 28, lineHeight: 42, fontWeight: '700' },
-  heading: { fontSize: 18, lineHeight: 28, fontWeight: '600' },
-  body: { fontSize: 16, lineHeight: 25 },
-  muted: { fontSize: 15, lineHeight: 23 },
-  small: { fontSize: 13, lineHeight: 20 },
-  error: { fontSize: 15, lineHeight: 23 },
+  title: { fontSize: 22, lineHeight: 32, fontWeight: '600' },
+  heading: { fontSize: 17, lineHeight: 26, fontWeight: '600' },
+  body: { fontSize: 16, lineHeight: 26 },
+  muted: { fontSize: 14, lineHeight: 22 },
+  small: { fontSize: 12, lineHeight: 18 },
+  error: { fontSize: 14, lineHeight: 22 },
 };
 
 const TEXT: Record<Language, Record<TextKind, TextStyle>> = {
   en: {
-    title: { fontSize: 28, lineHeight: 34, fontWeight: '700' },
-    heading: { fontSize: 18, lineHeight: 24, fontWeight: '600' },
+    title: { fontSize: 22, lineHeight: 28, fontWeight: '600' },
+    heading: { fontSize: 17, lineHeight: 22, fontWeight: '600' },
     body: { fontSize: 16, lineHeight: 24 },
-    muted: { fontSize: 15, lineHeight: 22 },
-    small: { fontSize: 13, lineHeight: 18 },
-    error: { fontSize: 15, lineHeight: 21 },
+    muted: { fontSize: 14, lineHeight: 20 },
+    small: { fontSize: 12, lineHeight: 16 },
+    error: { fontSize: 14, lineHeight: 20 },
   },
   'zh-Hans': CJK,
   'zh-Hant': CJK,
 };
 
+/** What a press feels like: a light tap, or the warning buzz of an answer that stops something. */
+export type HapticKind = 'light' | 'warning';
+
+function buzz(kind: HapticKind) {
+  const done =
+    kind === 'warning'
+      ? Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning)
+      : Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  void done.catch(() => {});
+}
+
 /**
  * A button: filled with ink when it is the recommended answer, outlined otherwise. At least 44 pt
- * tall. `external` adds the arrow of a link that leaves the app.
+ * tall. `compact` sizes it to its label instead of the full width (the answers on a card); its touch
+ * area still reaches 44 pt. A disabled button is a faint outline, not a grey slab. `external` adds the
+ * arrow of a link that leaves the app.
  */
 export function PillButton({
   label,
@@ -308,6 +328,8 @@ export function PillButton({
   primary = false,
   disabled = false,
   external = false,
+  compact = false,
+  haptic = 'light',
   accessibilityLabel,
   id,
 }: {
@@ -316,11 +338,15 @@ export function PillButton({
   primary?: boolean;
   disabled?: boolean;
   external?: boolean;
+  compact?: boolean;
+  haptic?: HapticKind;
   accessibilityLabel?: string;
   /** A fixed name for the device tests (`button-<id>`), the same in every language. */
   id?: string;
 }) {
   const t = useTheme();
+  const filled = primary && !disabled;
+  const ink = filled ? t.onPillOn : disabled ? t.inkMuted : t.ink;
   return (
     <Pressable
       testID={`button-${id ?? label}`}
@@ -328,27 +354,99 @@ export function PillButton({
       accessibilityLabel={accessibilityLabel ?? label}
       accessibilityState={{ disabled }}
       disabled={disabled}
+      hitSlop={compact ? 4 : undefined}
       onPress={() => {
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+        buzz(haptic);
         onPress();
       }}
       style={({ pressed }) => [
         styles.pill,
-        primary
+        compact && styles.pillCompact,
+        filled
           ? { backgroundColor: t.pillOn, borderColor: t.pillOn }
-          : { backgroundColor: t.chip, borderColor: t.cardEdge },
-        { opacity: disabled ? 0.5 : pressed ? 0.8 : 1 },
+          : disabled
+            ? { backgroundColor: 'transparent', borderColor: t.cardEdge }
+            : { backgroundColor: t.chip, borderColor: t.cardEdge },
+        { opacity: pressed ? 0.8 : 1 },
       ]}
     >
       <View style={styles.pillRow}>
-        <Text style={[styles.pillText, { color: primary ? t.onPillOn : t.ink }]} allowFontScaling>
+        <Text
+          style={[styles.pillText, compact && styles.pillTextCompact, { color: ink }]}
+          allowFontScaling
+        >
           {label}
         </Text>
-        {external && <Icon name="external" size={15} color={primary ? t.onPillOn : t.ink} />}
+        {external && <Icon name="external" size={compact ? 13 : 15} color={ink} />}
       </View>
     </Pressable>
   );
 }
+
+/** Buttons side by side, each as wide as its label, wrapping to a new row when they run out of room. */
+export function ButtonRow({ children }: { children: ReactNode }) {
+  return <View style={styles.buttonRow}>{children}</View>;
+}
+
+/**
+ * A line that is still going (the agent working, the current step): its opacity breathes slowly.
+ * Still under Reduce Motion.
+ */
+export function Shimmer({ children }: { children: ReactNode }) {
+  const reduce = useReduceMotion();
+  const opacity = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (reduce) {
+      opacity.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.45, duration: 900, useNativeDriver: NATIVE }),
+        Animated.timing(opacity, { toValue: 1, duration: 900, useNativeDriver: NATIVE }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reduce, opacity]);
+  return <Animated.View style={{ opacity }}>{children}</Animated.View>;
+}
+
+/**
+ * Something new arriving (a message, a card): it rises a few points into place on a soft spring.
+ * Only when `enter` is set (things already there when the screen opens just show), and never under
+ * Reduce Motion.
+ */
+export function Appear({ enter, children }: { enter: boolean; children: ReactNode }) {
+  const reduce = useReduceMotion();
+  const still = reduce || !enter;
+  const progress = useRef(new Animated.Value(still ? 1 : 0)).current;
+  useEffect(() => {
+    if (still) {
+      progress.setValue(1);
+      return;
+    }
+    const spring = Animated.spring(progress, {
+      toValue: 1,
+      damping: 18,
+      stiffness: 160,
+      mass: 1,
+      useNativeDriver: NATIVE,
+    });
+    spring.start();
+    return () => spring.stop();
+  }, [still, progress]);
+  if (still) return <>{children}</>;
+  const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [10, 0] });
+  return (
+    <Animated.View style={{ opacity: progress, transform: [{ translateY }] }}>
+      {children}
+    </Animated.View>
+  );
+}
+
+/** Native-driven animation where there is a native side; the web preview animates in JavaScript. */
+const NATIVE = Platform.OS !== 'web';
 
 /** A quiet word that does something ("Add a note"): muted, 44 pt tall. */
 export function QuietButton({
@@ -377,7 +475,7 @@ export function QuietButton({
       hitSlop={4}
       style={({ pressed }) => [styles.quiet, { opacity: disabled ? 0.5 : pressed ? 0.6 : 1 }]}
     >
-      <Text style={{ color: t.inkMuted, fontSize: 15 }} allowFontScaling>
+      <Text style={{ color: t.inkMuted, fontSize: 14 }} allowFontScaling>
         {label}
       </Text>
     </Pressable>
@@ -500,7 +598,7 @@ export function Tiles({ children }: { children: ReactNode }) {
   return <View style={styles.tiles}>{children}</View>;
 }
 
-/** One tile: a small line above it (a date, a name) and a bold title of up to three lines. */
+/** One tile: a small line above it (a date, a name) and a title of up to three lines. */
 export function Tile({
   over,
   title,
@@ -522,7 +620,7 @@ export function Tile({
           {over}
         </T>
       ) : null}
-      <T kind="body" style={[styles.bold, titleStyle]} numberOfLines={3}>
+      <T kind="body" style={titleStyle} numberOfLines={3}>
         {title}
       </T>
     </>
@@ -554,7 +652,7 @@ export function Chip({ children }: { children: string }) {
   const t = useTheme();
   return (
     <View style={[styles.chip, { backgroundColor: t.chip, borderColor: t.cardEdge }]}>
-      <Text style={{ color: t.ink, fontSize: 13, fontWeight: '600' }} allowFontScaling>
+      <Text style={{ color: t.ink, fontSize: 12 }} allowFontScaling>
         {children}
       </Text>
     </View>
@@ -680,7 +778,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  pillCompact: {
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    minHeight: 40,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
   pillText: { fontSize: 16, fontWeight: '600', textAlign: 'center', flexShrink: 1 },
+  pillTextCompact: { fontSize: 15 },
+  buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   pillRow: {
     flexDirection: 'row',
     alignItems: 'center',

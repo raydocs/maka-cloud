@@ -10,6 +10,8 @@ const SYMBOLS = {
   external: { ios: 'arrow.up.right', android: 'north_east', web: 'north_east' },
   file: { ios: 'doc', android: 'description', web: 'description' },
   conversations: { ios: 'bubble.left.and.bubble.right', android: 'forum', web: 'forum' },
+  chevronDown: { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' },
+  chevronUp: { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' },
 } as const;
 
 export type IconName = keyof typeof SYMBOLS;

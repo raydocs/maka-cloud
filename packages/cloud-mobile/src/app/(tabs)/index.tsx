@@ -217,13 +217,11 @@ export default function Home() {
           {since !== undefined && done !== undefined && finished.length > 0 && (
             <Card label={say('home.since')}>
               <T kind="heading">{say('home.since')}</T>
+              {/* Spend shows only when the server reported some; there is no "not reported" tile. */}
               <Tiles>
                 <Stat label={say('home.done')} value={String(finished.length)} />
-                <Stat label={say('home.spent')} value={anySpend ? dollars(spent) : '—'} />
+                {anySpend && <Stat label={say('home.spent')} value={dollars(spent)} />}
               </Tiles>
-              {!anySpend && finished.length > 0 && (
-                <T kind="small">{say('home.spendNotReported')}</T>
-              )}
               {finished.map((entry) => (
                 <Pressable
                   key={entry.taskId}
@@ -240,7 +238,7 @@ export default function Home() {
                     <StatusMark tone={entry.state === 'succeeded' ? 'ok' : 'bad'} />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <T kind="body" style={{ fontWeight: '600' }}>
+                    <T kind="body">
                       {entry.task.title ? displayText(entry.task.title) : say('task.title')}
                     </T>
                     {/* A finished task's summary is its own words; any other outcome is the app's. */}
@@ -266,9 +264,7 @@ export default function Home() {
               {schedule.scheduled.map((run) => (
                 <View key={run.dutyId} style={{ flexDirection: 'row', gap: 10 }}>
                   <View style={{ flex: 1 }}>
-                    <T kind="body" style={{ fontWeight: '600' }}>
-                      {displayText(run.name)}
-                    </T>
+                    <T kind="body">{displayText(run.name)}</T>
                     <T kind="muted">{displayText(run.repo)}</T>
                   </View>
                   <T kind="muted">{tx(relativeTime(run.at, now))}</T>
@@ -316,7 +312,7 @@ function Stat({ label, value }: { label: string; value: string }) {
     <Tile
       over={label}
       title={value}
-      titleStyle={/\d/u.test(value) ? [{ fontSize: 24, lineHeight: 30 }, mono] : undefined}
+      titleStyle={{ fontSize: 22, lineHeight: 30, fontVariant: ['tabular-nums'] }}
       accessibilityLabel={say('common.labelValue', { label, value })}
     />
   );

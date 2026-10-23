@@ -1,6 +1,9 @@
 import {
   BRAND,
+  type Conversation,
   ConversationFeed,
+  ConversationStarter,
+  errorText,
   type TaskView,
   conversationSummary,
   displayText,
@@ -28,6 +31,8 @@ import { TaskDelivery } from '@/components/Delivery';
 import { TaskDetails } from '@/components/TaskDetails';
 import { TaskRow } from '@/components/TaskRow';
 import {
+  Appear,
+  ButtonRow,
   Card,
   Fade,
   Field,
@@ -39,6 +44,7 @@ import {
   Rich,
   RoundButton,
   Screen,
+  Shimmer,
   StatusMark,
   T,
   withoutMarks,
@@ -51,10 +57,12 @@ import { DARK, LIGHT, mono, radius, ThemeContext, useTheme } from '@/lib/theme';
 
 type Message = ConversationState['messages'][number];
 
+/** What an empty chat offers to start with; a tap puts it in the box, the person sends it. */
+const IDEAS = ['home.idea.1', 'home.idea.2', 'home.idea.3'] as const;
+
 export default function Chat() {
   const { conversations, chosen } = useWorkspace();
   const selected = conversations.find((c) => c.conversationId === chosen);
-  const { t: say } = useT();
   return (
     <Screen>
       <Panel>
@@ -64,20 +72,218 @@ export default function Chat() {
             conversationId={selected.conversationId}
           />
         ) : (
-          <View style={{ padding: 16, paddingTop: 20 }}>
-            <Card label={say('chat.none.label')}>
-              <T kind="heading">{say('chat.none.title')}</T>
-              <T kind="muted">{say('chat.none.body')}</T>
-            </Card>
-          </View>
+          <NewConversation />
         )}
       </Panel>
     </Screen>
   );
 }
 
+/** An opening line and three ideas: what an empty chat says before anything has been said. */
+function Opening({ onIdea }: { onIdea: (words: string) => void }) {
+  const { t: say } = useT();
+  return (
+    <View style={{ gap: 12 }} accessibilityLabel={say('home.ideas.label')}>
+      <T kind="heading">{say('chat.empty.title')}</T>
+      <T kind="muted">{say('chat.empty.body', { name: BRAND.name })}</T>
+      <ButtonRow>
+        {IDEAS.map((idea) => (
+          <PillButton
+            key={idea}
+            label={say(idea)}
+            id={idea}
+            compact
+            onPress={() => onIdea(say(idea))}
+          />
+        ))}
+      </ButtonRow>
+    </View>
+  );
+}
+
+/**
+ * The floating composer: the field and the send button blend as one glass control, with the
+ * conversation picker beside them when there is more than one conversation.
+ */
+function Composer({
+  draft,
+  onDraft,
+  sending,
+  disabled,
+  onSend,
+  onPick,
+}: {
+  draft: string;
+  onDraft: (text: string) => void;
+  sending: boolean;
+  disabled: boolean;
+  onSend: () => void;
+  onPick?: () => void;
+}) {
+  const { t: say } = useT();
+  return (
+    <GlassGroup style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
+      {onPick && (
+        <GlassButton
+          label={say('chat.select')}
+          id="Select conversation"
+          icon="conversations"
+          onPress={onPick}
+        />
+      )}
+      <Glass
+        interactive
+        style={{
+          flex: 1,
+          flexDirection: 'row',
+          alignItems: 'flex-end',
+          borderRadius: radius.card,
+        }}
+      >
+        <View style={{ flex: 1 }}>
+          <Field
+            label={say('chat.field')}
+            id="Keep the conversation going"
+            placeholder={say('chat.placeholder')}
+            multiline
+            maxLength={16000}
+            value={draft}
+            onChangeText={(text) => onDraft(displayText(text))}
+            style={{ backgroundColor: 'transparent', borderWidth: 0, maxHeight: 140 }}
+          />
+        </View>
+        <RoundButton
+          label={say(sending ? 'chat.sending' : 'chat.send')}
+          id={sending ? 'Sending…' : 'Send message'}
+          icon="send"
+          disabled={disabled || !draft.trim()}
+          onPress={onSend}
+        />
+      </Glass>
+    </GlassGroup>
+  );
+}
+
+/** The Chat tab with no conversation open: it can still be talked to; the first message starts one. */
+function NewConversation() {
+  const { client, conversations, started } = useWorkspace();
+  const theme = useTheme();
+  const { tx } = useT();
+  const starter = useMemo(() => new ConversationStarter(client), [client]);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [failure, setFailure] = useState('');
+  const [picking, setPicking] = useState(false);
+  const [composer, setComposer] = useState(76);
+  const send = () => {
+    if (!draft.trim() || sending) return;
+    setSending(true);
+    setFailure('');
+    starter.start(draft).then(
+      (conversation: Conversation) => {
+        setSending(false);
+        setDraft('');
+        started(conversation);
+      },
+      (error: unknown) => {
+        setFailure(errorText(error));
+        setSending(false);
+      },
+    );
+  };
+  return (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1 }}
+    >
+      <View style={{ flex: 1, padding: 20, paddingBottom: composer + 16, gap: 12 }}>
+        <Opening
+          onIdea={(words) => {
+            setDraft(words);
+            starter.draftEdited();
+          }}
+        />
+        {failure ? <T kind="error">{tx(failure)}</T> : null}
+      </View>
+      <Fade edge="bottom" height={composer + 36} color={theme.panel} clear={theme.panelClear} />
+      <View
+        onLayout={(event) => setComposer(Math.ceil(event.nativeEvent.layout.height))}
+        style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 12 }}
+      >
+        <Composer
+          draft={draft}
+          onDraft={(text) => {
+            setDraft(text);
+            starter.draftEdited();
+          }}
+          sending={sending}
+          disabled={sending}
+          onSend={send}
+          {...(conversations.length > 0 ? { onPick: () => setPicking(true) } : {})}
+        />
+      </View>
+      <ConversationPicker visible={picking} onClose={() => setPicking(false)} />
+    </KeyboardAvoidingView>
+  );
+}
+
+/** The conversations, newest first, on an opaque sheet; the open one is filled. */
+function ConversationPicker({
+  visible,
+  current,
+  onClose,
+}: {
+  visible: boolean;
+  current?: string;
+  onClose: () => void;
+}) {
+  const { conversations, open } = useWorkspace();
+  const theme = useTheme();
+  const { t: say } = useT();
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
+        {/* An opaque slab of its own: the panel's translucent cards would vanish on the dimmed screen. */}
+        <Card
+          label={say('chat.conversations')}
+          style={{
+            backgroundColor: theme.panel,
+            margin: 8,
+            marginBottom: 24,
+            borderRadius: radius.panel,
+          }}
+        >
+          <T kind="heading">{say('chat.conversations')}</T>
+          {[...conversations].reverse().map((c) => (
+            <PillButton
+              key={c.conversationId}
+              label={c.title ? displayText(c.title) : say('common.untitled')}
+              primary={c.conversationId === current}
+              onPress={() => {
+                open(c.conversationId);
+                onClose();
+              }}
+            />
+          ))}
+          <PillButton label={say('common.close')} id="Close" onPress={onClose} />
+        </Card>
+      </View>
+    </Modal>
+  );
+}
+
+/**
+ * Which items arrived after the screen first showed what it had: only those spring into place.
+ * The first batch (the history) is just there.
+ */
+function useArrivals(ids: readonly string[], ready: boolean): (id: string) => boolean {
+  const first = useRef<Set<string> | null>(null);
+  if (first.current === null && ready) first.current = new Set(ids);
+  return (id) => first.current !== null && !first.current.has(id);
+}
+
 function ConversationScreen({ conversationId }: { conversationId: string }) {
-  const { client, conversations, open } = useWorkspace();
+  const { client, conversations } = useWorkspace();
   const theme = useTheme();
   const { t: say, tx } = useT();
   // The task page opens over the whole screen, in the person's own appearance, not the panel's.
@@ -131,6 +337,21 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     waiting.length === 0 &&
     (tasks.some((task) => !TERMINAL.has(task.state) && task.state !== 'paused') ||
       state.messages.at(-1)?.role === 'user');
+  // Messages and cards that arrive while the chat is open rise into place; the history does not.
+  const arrived = useArrivals(
+    [
+      ...state.messages.map((message) => message.id),
+      ...roots.map((task) => `task-${task.taskId}-${task.state}`),
+      ...questions.map((question) => question.questionId),
+      ...waiting.map((item) => item.itemId),
+    ],
+    status === 'Live' || state.messages.length > 0,
+  );
+  const send = () => {
+    const sending = draft;
+    // Words typed while it was sending stay in the box.
+    void feed.send(sending).then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
+  };
 
   return (
     <KeyboardAvoidingView
@@ -164,40 +385,44 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             </T>
           }
           ListEmptyComponent={
-            <Card label={say('chat.empty.label')}>
-              <T kind="heading">{say('chat.empty.title')}</T>
-              <T kind="muted">{say('chat.empty.body', { name: BRAND.name })}</T>
-            </Card>
+            <Opening
+              onIdea={(words) => {
+                setDraft(words);
+                feed.draftEdited();
+              }}
+            />
           }
           renderItem={({ item: message }) => (
-            // Who said it is plain from the side it sits on; a screen reader still hears the name.
-            <View
-              accessible
-              accessibilityLabel={say('chat.said', {
-                who:
+            <Appear enter={arrived(message.id)}>
+              {/* Who said it is plain from the side it sits on; a screen reader still hears the name. */}
+              <View
+                accessible
+                accessibilityLabel={say('chat.said', {
+                  who:
+                    message.role === 'user'
+                      ? say('chat.you')
+                      : message.role === 'notice'
+                        ? say('chat.update')
+                        : BRAND.name,
+                  text: withoutMarks(displayText(message.text)),
+                })}
+                style={[
+                  { gap: 2, marginBottom: 18 },
                   message.role === 'user'
-                    ? say('chat.you')
-                    : message.role === 'notice'
-                      ? say('chat.update')
-                      : BRAND.name,
-                text: withoutMarks(displayText(message.text)),
-              })}
-              style={[
-                { gap: 2, marginBottom: 18 },
-                message.role === 'user'
-                  ? {
-                      alignSelf: 'flex-end',
-                      maxWidth: '85%',
-                      backgroundColor: theme.chip,
-                      borderRadius: radius.card,
-                      paddingHorizontal: 16,
-                      paddingVertical: 10,
-                    }
-                  : { alignSelf: 'stretch' },
-              ]}
-            >
-              <Rich text={displayText(message.text)} />
-            </View>
+                    ? {
+                        alignSelf: 'flex-end',
+                        maxWidth: '85%',
+                        backgroundColor: theme.chip,
+                        borderRadius: radius.card,
+                        paddingHorizontal: 16,
+                        paddingVertical: 10,
+                      }
+                    : { alignSelf: 'stretch' },
+                ]}
+              >
+                <Rich text={displayText(message.text)} />
+              </View>
+            </Appear>
           )}
           ListFooterComponent={
             <View style={{ gap: 14 }}>
@@ -209,18 +434,27 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                   style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
                 >
                   <ActivityIndicator size="small" color={theme.inkMuted} />
-                  <T kind="muted">{say('chat.working', { name: BRAND.name })}</T>
+                  <Shimmer>
+                    <T kind="muted">{say('chat.working', { name: BRAND.name })}</T>
+                  </Shimmer>
                 </View>
               )}
               {roots.length > 0 && (
                 <Card label={say('chat.running.label')}>
-                  <T kind="small">
-                    {say('chat.running', { count: running })}
-                    <T kind="small" style={mono}>
-                      {tx(dollars(total.usd))}
+                  {/* Only what is known: no "0 running" once all is done, no cost the server never sent. */}
+                  {(running > 0 || total.usd !== undefined) && (
+                    <T kind="small">
+                      {running > 0 && say('chat.running', { count: running })}
+                      {running > 0 && total.usd !== undefined && ' · '}
+                      {total.usd !== undefined && say('chat.totalCost')}
+                      {total.usd !== undefined && (
+                        <T kind="small" style={mono}>
+                          {dollars(total.usd)}
+                        </T>
+                      )}
+                      {total.usd !== undefined && !total.complete && say('chat.notAllReported')}
                     </T>
-                    {total.usd !== undefined && !total.complete && say('chat.notAllReported')}
-                  </T>
+                  )}
                   {roots.map((task) => (
                     <TaskRow
                       key={task.taskId}
@@ -228,6 +462,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                       tasks={tasks}
                       noPause={noPause}
                       busy={Boolean(busy)}
+                      resultCard
                       onControl={(taskId: string, action: TaskControl) =>
                         void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
                       }
@@ -236,36 +471,41 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 </Card>
               )}
               {roots.map((task) => (
-                <TaskDelivery
-                  key={task.taskId}
-                  client={client}
-                  task={task}
-                  listings={snapshot.artifacts[task.taskId]?.listings ?? []}
-                  onOpenTask={setDetail}
-                />
+                <Appear key={task.taskId} enter={arrived(`task-${task.taskId}-${task.state}`)}>
+                  <TaskDelivery
+                    client={client}
+                    task={task}
+                    listings={snapshot.artifacts[task.taskId]?.listings ?? []}
+                    onOpenTask={setDetail}
+                  />
+                </Appear>
               ))}
               {questions.map((question) => (
-                <Card key={question.questionId} label={say('chat.decision.label')}>
-                  <QuestionBlock
-                    question={question}
-                    answered={state.answers[question.questionId]}
-                    disabled={Boolean(busy)}
-                    onAnswer={(optionId, text) =>
-                      void feed.answerQuestion(question, optionId, text)
-                    }
-                  />
-                </Card>
+                <Appear key={question.questionId} enter={arrived(question.questionId)}>
+                  <Card label={say('chat.decision.label')}>
+                    <QuestionBlock
+                      question={question}
+                      answered={state.answers[question.questionId]}
+                      disabled={Boolean(busy)}
+                      onAnswer={(optionId, text) =>
+                        void feed.answerQuestion(question, optionId, text)
+                      }
+                    />
+                  </Card>
+                </Appear>
               ))}
               {waiting
                 .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
                 .map((item) => (
-                  <Card key={item.itemId} label={say('chat.needsYou.label')}>
-                    <DecisionCard
-                      item={item}
-                      disabled={Boolean(busy)}
-                      onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
-                    />
-                  </Card>
+                  <Appear key={item.itemId} enter={arrived(item.itemId)}>
+                    <Card label={say('chat.needsYou.label')}>
+                      <DecisionCard
+                        item={item}
+                        disabled={Boolean(busy)}
+                        onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
+                      />
+                    </Card>
+                  </Appear>
                 ))}
               {error ? <T kind="error">{tx(error)}</T> : null}
             </View>
@@ -289,55 +529,17 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               <T kind="small">{tx(status)}</T>
             </View>
           )}
-          {/* One glass group: the button and the field blend as one floating control. */}
-          <GlassGroup style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
-            {conversations.length > 1 && (
-              <GlassButton
-                label={say('chat.select')}
-                id="Select conversation"
-                icon="conversations"
-                onPress={() => setPicking(true)}
-              />
-            )}
-            <Glass
-              interactive
-              style={{
-                flex: 1,
-                flexDirection: 'row',
-                alignItems: 'flex-end',
-                borderRadius: radius.card,
-              }}
-            >
-              <View style={{ flex: 1 }}>
-                <Field
-                  label={say('chat.field')}
-                  id="Keep the conversation going"
-                  placeholder={say('chat.placeholder')}
-                  multiline
-                  maxLength={16000}
-                  value={draft}
-                  onChangeText={(text) => {
-                    setDraft(displayText(text));
-                    feed.draftEdited();
-                  }}
-                  style={{ backgroundColor: 'transparent', borderWidth: 0, maxHeight: 140 }}
-                />
-              </View>
-              <RoundButton
-                label={say(busy === 'message' ? 'chat.sending' : 'chat.send')}
-                id={busy === 'message' ? 'Sending…' : 'Send message'}
-                icon="send"
-                disabled={Boolean(busy) || !draft.trim()}
-                onPress={() => {
-                  const sending = draft;
-                  // Words typed while it was sending stay in the box.
-                  void feed
-                    .send(sending)
-                    .then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
-                }}
-              />
-            </Glass>
-          </GlassGroup>
+          <Composer
+            draft={draft}
+            onDraft={(text) => {
+              setDraft(text);
+              feed.draftEdited();
+            }}
+            sending={busy === 'message'}
+            disabled={Boolean(busy)}
+            onSend={send}
+            {...(conversations.length > 1 ? { onPick: () => setPicking(true) } : {})}
+          />
         </View>
       </View>
       {detail && (
@@ -349,39 +551,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           />
         </ThemeContext.Provider>
       )}
-      <Modal
+      <ConversationPicker
         visible={picking}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setPicking(false)}
-      >
-        <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
-          {/* An opaque slab of its own: the panel's translucent cards would vanish on the dimmed screen. */}
-          <Card
-            label={say('chat.conversations')}
-            style={{
-              backgroundColor: theme.panel,
-              margin: 8,
-              marginBottom: 24,
-              borderRadius: radius.panel,
-            }}
-          >
-            <T kind="heading">{say('chat.conversations')}</T>
-            {[...conversations].reverse().map((c) => (
-              <PillButton
-                key={c.conversationId}
-                label={c.title ? displayText(c.title) : say('common.untitled')}
-                primary={c.conversationId === conversationId}
-                onPress={() => {
-                  open(c.conversationId);
-                  setPicking(false);
-                }}
-              />
-            ))}
-            <PillButton label={say('common.close')} id="Close" onPress={() => setPicking(false)} />
-          </Card>
-        </View>
-      </Modal>
+        current={conversationId}
+        onClose={() => setPicking(false)}
+      />
     </KeyboardAvoidingView>
   );
 }

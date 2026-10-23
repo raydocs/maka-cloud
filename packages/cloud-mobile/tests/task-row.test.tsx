@@ -67,6 +67,48 @@ test('a failed task says what happened in plain words, the raw reason behind Det
   expect(screen.getByText('invalid manifest: result.json was not written')).toBeTruthy();
 });
 
+test('only what is known: no cost line until one is reported, and no summary twice', async () => {
+  const done = task({
+    state: 'succeeded',
+    progress: [],
+    manifest: { summary: 'Tagged v1.2.0.' } as TaskView['manifest'],
+  });
+  const view = await render(
+    wrap(<TaskRow task={done} tasks={[]} noPause={new Set()} busy={false} onControl={() => {}} />),
+  );
+  expect(screen.queryByText(/Cost/u)).toBeNull();
+  expect(screen.queryByText(/Not reported/u)).toBeNull();
+  // Without a result card on screen, the row says the outcome itself.
+  expect(screen.getByText('Tagged v1.2.0.')).toBeTruthy();
+  await view.rerender(
+    wrap(
+      <TaskRow
+        task={done}
+        tasks={[]}
+        noPause={new Set()}
+        busy={false}
+        resultCard
+        onControl={() => {}}
+      />,
+    ),
+  );
+  expect(screen.queryByText('Tagged v1.2.0.')).toBeNull();
+  await view.rerender(
+    wrap(
+      <TaskRow
+        task={{ ...done, costUsd: 0.42 }}
+        tasks={[]}
+        noPause={new Set()}
+        busy={false}
+        resultCard
+        onControl={() => {}}
+      />,
+    ),
+  );
+  expect(screen.getByText(/Cost/u)).toBeTruthy();
+  expect(screen.getByText('$0.42')).toBeTruthy();
+});
+
 function Probe() {
   const { choice, setMode } = useAppearance();
   const t = useTheme();

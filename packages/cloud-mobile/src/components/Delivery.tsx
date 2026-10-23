@@ -21,7 +21,7 @@ import { useT } from '@/lib/i18n';
 import { useBlobUri, usePicture } from '@/lib/picture';
 import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
 import { Icon } from './Icon';
-import { Card, PillButton, Solid, StatusMark, T } from './ui';
+import { ButtonRow, Card, PillButton, Solid, StatusMark, T } from './ui';
 
 const MONO = Platform.OS === 'ios' ? mono.fontFamily : 'monospace';
 
@@ -155,14 +155,28 @@ interface Opened {
   text?: string;
 }
 
-/** A file the task made, quietly: one line, a small file icon and its name. A tap opens it. */
-function FileRow({ name, onOpen }: { name: string; onOpen: () => void }) {
+/**
+ * A file the task made, quietly: one line, a small file icon and its name. A tap opens it. The
+ * changes are one of these lines too, named "View the changes".
+ */
+function FileRow({
+  name,
+  onOpen,
+  label,
+  id,
+}: {
+  name: string;
+  onOpen: () => void;
+  label?: string;
+  id?: string;
+}) {
   const t = useTheme();
   const { t: say } = useT();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={say('delivery.openFile', { name })}
+      accessibilityLabel={label ?? say('delivery.openFile', { name })}
+      {...(id ? { testID: `button-${id}` } : {})}
       onPress={onOpen}
       style={({ pressed }) => ({
         flexDirection: 'row',
@@ -181,8 +195,9 @@ function FileRow({ name, onOpen }: { name: string; onOpen: () => void }) {
 }
 
 /**
- * A finished task as one result card: the outcome in one sentence, one visual proof from the box, a
- * caption and at most two one-tap actions. The visual opens large over the screen.
+ * A finished task as one result card: the outcome in one sentence, a small proof from the box beside
+ * its caption, the files as quiet lines and at most two one-tap actions, each as wide as its words.
+ * The visual opens large over the screen.
  */
 const VIEW_SHAPE = {
   Desktop: { flex: 5, aspectRatio: 16 / 10, borderRadius: radius.small },
@@ -358,7 +373,7 @@ export function DeliveryCard({
       {views ? (
         <View
           accessibilityLabel={caption}
-          style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 10 }}
+          style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 10, maxWidth: 300 }}
         >
           {views.map((view) => (
             <ViewShot
@@ -372,42 +387,52 @@ export function DeliveryCard({
           ))}
         </View>
       ) : shot && proofUri ? (
-        <Pressable
-          testID="delivery-picture"
-          accessibilityRole="imagebutton"
-          accessibilityLabel={say('delivery.openLarge', {
-            name: caption || say('delivery.picture'),
-          })}
-          onPress={() =>
-            setOpened({ kind: 'image', title: caption || say('delivery.picture'), blob: proof })
-          }
-        >
-          <Image
-            source={{ uri: proofUri }}
-            accessibilityLabel={displayText(shot.name)}
-            resizeMode="cover"
-            resizeMethod="resize"
-            style={{
-              width: '100%',
-              aspectRatio: 16 / 10,
-              borderRadius: radius.small,
-              backgroundColor: t.chip,
-            }}
-          />
-        </Pressable>
-      ) : (
-        diff && (
-          <PillButton
-            label={say('delivery.viewChanges')}
-            id="View the changes"
-            onPress={() => void openDiff()}
-          />
-        )
-      )}
-      {caption && !views ? <T kind="muted">{caption}</T> : null}
+        // A thumbnail beside its caption; a tap shows it large.
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+          <Pressable
+            testID="delivery-picture"
+            accessibilityRole="imagebutton"
+            accessibilityLabel={say('delivery.openLarge', {
+              name: caption || say('delivery.picture'),
+            })}
+            onPress={() =>
+              setOpened({ kind: 'image', title: caption || say('delivery.picture'), blob: proof })
+            }
+          >
+            <Image
+              source={{ uri: proofUri }}
+              accessibilityLabel={displayText(shot.name)}
+              resizeMode="cover"
+              resizeMethod="resize"
+              style={{
+                width: 112,
+                aspectRatio: 16 / 10,
+                borderRadius: radius.small,
+                borderWidth: 1,
+                borderColor: t.cardEdge,
+                backgroundColor: t.chip,
+              }}
+            />
+          </Pressable>
+          {caption ? (
+            <T kind="muted" style={{ flex: 1 }}>
+              {caption}
+            </T>
+          ) : null}
+        </View>
+      ) : null}
+      {caption && !views && !(shot && proofUri) ? <T kind="muted">{caption}</T> : null}
       {(failed || proofFailed) && <T kind="muted">{say('delivery.pictureFailed')}</T>}
-      {files.length > 0 && (
+      {(files.length > 0 || (diff && !views && !shot)) && (
         <View>
+          {diff && !views && !shot && (
+            <FileRow
+              name={say('delivery.viewChanges')}
+              label={say('delivery.viewChanges')}
+              id="View the changes"
+              onOpen={() => void openDiff()}
+            />
+          )}
           {files.map((file) => (
             <FileRow
               key={file.index}
@@ -418,16 +443,26 @@ export function DeliveryCard({
         </View>
       )}
       {fileFailed && <T kind="muted">{say('delivery.fileFailed')}</T>}
-      {actions.map((action, i) => (
-        <PillButton
-          key={action.label}
-          label={say('delivery.action', { label: tx(action.label), host: action.host })}
-          id={`${action.label} · ${action.host}`}
-          primary={i === 0}
-          external
-          onPress={() => openLink(action.url)}
-        />
-      ))}
+      {actions.length > 0 && (
+        // The button says what it does; where it goes is for the screen reader and the arrow.
+        <ButtonRow>
+          {actions.slice(0, 2).map((action, i) => (
+            <PillButton
+              key={action.label}
+              label={tx(action.label)}
+              accessibilityLabel={say('delivery.action', {
+                label: tx(action.label),
+                host: action.host,
+              })}
+              id={`${action.label} · ${action.host}`}
+              primary={i === 0}
+              compact
+              external
+              onPress={() => openLink(action.url)}
+            />
+          ))}
+        </ButtonRow>
+      )}
       {opened && (
         <Viewer title={opened.title} onClose={() => setOpened(undefined)}>
           {opened.kind === 'image' && opened.blob && (
@@ -520,7 +555,7 @@ function SourceCard({
   );
 }
 
-/** Up to three of the pages the task opened. */
+/** Up to three of the pages the task opened, folded into one line until it is opened. */
 export function SourcesStack({
   client,
   taskId,
@@ -530,15 +565,36 @@ export function SourcesStack({
   taskId: string;
   sources: readonly SourceListing[];
 }) {
+  const t = useTheme();
   const { t: say } = useT();
+  const [open, setOpen] = useState(false);
   const shown = stackOf(sources);
   if (shown.length === 0) return null;
   return (
     <Card label={say('delivery.sources')}>
-      <T kind="small">{say('delivery.sources')}</T>
-      {shown.map((source) => (
-        <SourceCard key={source.index} client={client} taskId={taskId} source={source} />
-      ))}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        accessibilityLabel={say('delivery.sourcesCount', { count: shown.length })}
+        testID="delivery-sources"
+        onPress={() => setOpen(!open)}
+        style={({ pressed }) => ({
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 6,
+          minHeight: TOUCH,
+          opacity: pressed ? 0.6 : 1,
+        })}
+      >
+        <T kind="muted" style={{ flex: 1 }}>
+          {say('delivery.sourcesCount', { count: shown.length })}
+        </T>
+        <Icon name={open ? 'chevronUp' : 'chevronDown'} size={16} color={t.inkMuted} />
+      </Pressable>
+      {open &&
+        shown.map((source) => (
+          <SourceCard key={source.index} client={client} taskId={taskId} source={source} />
+        ))}
     </Card>
   );
 }

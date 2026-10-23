@@ -70,6 +70,34 @@ test('the first screen offers email, not an invite-token box, and the old box is
   expect(screen.getByTestId('field-Email')).toBeTruthy();
 });
 
+test('the server address and the way to change it wait behind "Advanced"', async () => {
+  serve({ 'GET /v1/auth/options': () => Response.json(WAYS) });
+  await mount();
+  await chooseServer();
+  await screen.findByTestId('field-Email');
+  expect(screen.queryByText('maka.example.com')).toBeNull();
+  expect(screen.queryByTestId('button-Use another server')).toBeNull();
+  const advanced = screen.getByRole('button', { name: 'Advanced' });
+  expect(advanced.props.accessibilityState).toEqual({ expanded: false });
+  await fireEvent.press(advanced);
+  expect(screen.getByText('maka.example.com')).toBeTruthy();
+  expect(screen.getByTestId('button-Use another server')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Advanced' }).props.accessibilityState).toEqual({
+    expanded: true,
+  });
+});
+
+test('a disabled main button is a faint outline, not a filled slab', async () => {
+  serve({ 'GET /v1/auth/options': () => Response.json(WAYS) });
+  await mount();
+  await chooseServer();
+  const button = await screen.findByTestId('button-Email me a code');
+  expect(button.props.accessibilityState).toMatchObject({ disabled: true });
+  const style = Object.assign({}, ...[button.props.style].flat(Number.POSITIVE_INFINITY));
+  expect(style.backgroundColor).toBe('transparent');
+  expect(style.opacity).toBe(1);
+});
+
 test('email: a known address signs in with the code, and only the session token is kept, in the secure store', async () => {
   const calls = serve({
     'GET /v1/auth/options': () => Response.json(WAYS),
@@ -252,6 +280,7 @@ test('a sign-in left behind by choosing another server cannot replace the one th
   await fireEvent.changeText(screen.getByTestId('field-Code'), '123456');
   await fireEvent.press(screen.getByTestId('button-Sign in')); // the answer is still out
   await waitFor(() => expect(calls.some((c) => c.path === '/v1/auth/email/verify')).toBe(true));
+  await fireEvent.press(screen.getByTestId('button-Advanced'));
   await fireEvent.press(screen.getByTestId('button-Use another server'));
   await fireEvent.changeText(screen.getByTestId('field-Server address'), 'other.example.com');
   await fireEvent.press(screen.getByTestId('button-Continue'));
