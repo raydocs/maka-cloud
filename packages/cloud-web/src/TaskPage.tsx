@@ -1,6 +1,6 @@
 import { useT } from './i18n';
 import { ArrowLeft, ArrowUpRight } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   type CloudClient,
   confidenceWords,
@@ -20,6 +20,7 @@ import {
   type TaskView,
   type TimelineStep,
   Unsupported,
+  TERMINAL,
 } from '@maka-cloud/client';
 import { DiffLines, SourcesStack, useSources } from './Delivery';
 import { FailureNote } from './Failure';
@@ -63,7 +64,7 @@ export function TaskPage({
   task: TaskView;
   onBack: () => void;
 }) {
-  const { t, shared } = useT();
+  const { t, shared, duration } = useT();
   const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
   const [error, setError] = useState('');
@@ -71,27 +72,68 @@ export function TaskPage({
   const [next, setNext] = useState<number>();
   const [timelineError, setTimelineError] = useState(false);
   const [loadingSteps, setLoadingSteps] = useState(false);
+  const loadedCount = useRef(0);
+  const generation = useRef(0);
+  const terminal = TERMINAL.has(task.state);
   useEffect(() => {
-    let current = true;
+    loadedCount.current = 0;
     setTimeline([]);
     setNext(undefined);
     setTimelineError(false);
-    client.timeline(task.taskId).then(({ timeline }) => {
-      if (!current) return;
-      setTimeline(timeline.steps);
-      setNext(timeline.stepsNext);
-    }).catch(() => { if (current) setTimelineError(true); });
-    return () => { current = false; };
-  }, [client, task.taskId, task.state, task.progress]);
+    setLoadingSteps(false);
+  }, [client, task.taskId]);
+  useEffect(() => {
+    const version = ++generation.current;
+    setLoadingSteps(false);
+    let request = 0;
+    const refresh = async () => {
+      const ticket = ++request;
+      try {
+        const steps = new Map<string, TimelineStep>();
+        let after: number | undefined;
+        do {
+          const { timeline } = await client.timeline(task.taskId, { after });
+          for (const step of timeline.steps) steps.set(step.stepId, step);
+          after = timeline.stepsNext;
+        } while (after !== undefined && steps.size < loadedCount.current);
+        if (generation.current !== version || ticket !== request) return;
+        setTimeline([...steps.values()]);
+        loadedCount.current = steps.size;
+        setNext(after);
+        setTimelineError(false);
+      } catch {
+        if (generation.current === version) setTimelineError(true);
+      }
+    };
+    void refresh();
+    const visible = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      generation.current++;
+      document.removeEventListener('visibilitychange', visible);
+    };
+  }, [client, task.taskId, terminal]);
   const moreSteps = async () => {
+    const version = generation.current;
     setLoadingSteps(true);
     try {
       const page = await client.timeline(task.taskId, { after: next });
-      setTimeline((steps) => [...steps, ...page.timeline.steps]);
+      if (generation.current !== version) return;
+      setTimeline((steps) => {
+        const merged = new Map(steps.map((step) => [step.stepId, step]));
+        for (const step of page.timeline.steps) merged.set(step.stepId, step);
+        loadedCount.current = merged.size;
+        return [...merged.values()];
+      });
       setNext(page.timeline.stepsNext);
       setTimelineError(false);
-    } catch { setTimelineError(true); }
-    finally { setLoadingSteps(false); }
+    } catch {
+      if (generation.current === version) setTimelineError(true);
+    } finally {
+      if (generation.current === version) setLoadingSteps(false);
+    }
   };
   const sources = useSources(client, task.taskId, task.state);
 
@@ -182,23 +224,46 @@ export function TaskPage({
           ))}
         </section>
       )}
-      {(timeline.length > 0 || steps.length > 0 || timelineError) && <section aria-label={t('Steps')}>
-        <h2>{t('Steps')}</h2>
-        {timelineError && <p role="alert">{t('Timeline could not be loaded.')}</p>}
-        <ol className="plain-list">
-          {timeline.map((step) => (
-            <li key={step.stepId} data-state={step.state}>
-              <strong>{displayText(step.kind)}</strong>{' · '}
-              {t(({ running: 'Running', done: 'Done', failed: 'Failed', interrupted: 'Interrupted' } as const)[step.state])}
-              {step.label && <p>{displayText(step.label)}</p>}
-              {step.durationMs !== undefined && <span> · {t('Duration: {ms} ms', { ms: step.durationMs })}</span>}
-              {step.state === 'interrupted' && <p>{t('May or may not have happened — check before redoing it')}</p>}
-            </li>
-          ))}
-          {timeline.length === 0 && steps.map((step, i) => <li key={i}>{displayText(step)}</li>)}
-        </ol>
-        {next !== undefined && <button type="button" disabled={loadingSteps} onClick={() => void moreSteps()}>{t('Load more steps')}</button>}
-      </section>}
+      {(timeline.length > 0 || steps.length > 0 || timelineError) && (
+        <section aria-label={t('Steps')}>
+          <h2>{t('Steps')}</h2>
+          {timelineError && <p role="alert">{t('Timeline could not be loaded.')}</p>}
+          <ol className="plain-list">
+            {timeline.map((step) => (
+              <li key={step.stepId} data-state={step.state}>
+                <strong>{displayText(step.kind)}</strong>
+                {' · '}
+                {t(
+                  (
+                    {
+                      running: 'Running',
+                      done: 'Done',
+                      failed: 'Failed',
+                      interrupted: 'Interrupted',
+                    } as const
+                  )[step.state],
+                )}
+                {step.label && <p>{displayText(step.label)}</p>}
+                {step.durationMs !== undefined && (
+                  <span>
+                    {' '}
+                    · {t('Duration: {duration}', { duration: duration(step.durationMs) })}
+                  </span>
+                )}
+                {step.state === 'interrupted' && (
+                  <p>{t('May or may not have happened — check before redoing it')}</p>
+                )}
+              </li>
+            ))}
+            {timeline.length === 0 && steps.map((step, i) => <li key={i}>{displayText(step)}</li>)}
+          </ol>
+          {next !== undefined && (
+            <button type="button" disabled={loadingSteps} onClick={() => void moreSteps()}>
+              {t('Load more steps')}
+            </button>
+          )}
+        </section>
+      )}
       <section aria-label={t('Results')}>
         <h2>{t('Results')}</h2>
         {error && (

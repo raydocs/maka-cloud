@@ -9,9 +9,10 @@ export const en = {
   'Task running': 'Task running',
   'Your decision is needed': 'Your decision is needed',
   'Open Maka to review the request.': 'Open Maka to review the request.',
-  'Interrupted': 'Interrupted',
-  'May or may not have happened — check before redoing it': 'May or may not have happened — check before redoing it',
-  'Duration: {ms} ms': 'Duration: {ms} ms',
+  Interrupted: 'Interrupted',
+  'May or may not have happened — check before redoing it':
+    'May or may not have happened — check before redoing it',
+  'Duration: {duration}': 'Duration: {duration}',
   'Timeline could not be loaded.': 'Timeline could not be loaded.',
   'Load more steps': 'Load more steps',
 
@@ -529,9 +530,10 @@ export const zhHans: Record<Key, string> = {
   'Task running': '任务进行中',
   'Your decision is needed': '需要你的决定',
   'Open Maka to review the request.': '打开 Maka 查看请求。',
-  'Interrupted': '已中断',
-  'May or may not have happened — check before redoing it': '可能已执行，也可能未执行——重试前请先检查',
-  'Duration: {ms} ms': '耗时：{ms} 毫秒',
+  Interrupted: '已中断',
+  'May or may not have happened — check before redoing it':
+    '可能已执行，也可能未执行——重试前请先检查',
+  'Duration: {duration}': '耗时：{duration}',
   'Timeline could not be loaded.': '无法加载步骤记录。',
   'Load more steps': '加载更多步骤',
 
@@ -1015,9 +1017,10 @@ export const zhHant: Record<Key, string> = {
   'Task running': '任務執行中',
   'Your decision is needed': '需要你的決定',
   'Open Maka to review the request.': '開啟 Maka 查看請求。',
-  'Interrupted': '已中斷',
-  'May or may not have happened — check before redoing it': '可能已執行，也可能未執行——重試前請先檢查',
-  'Duration: {ms} ms': '耗時：{ms} 毫秒',
+  Interrupted: '已中斷',
+  'May or may not have happened — check before redoing it':
+    '可能已執行，也可能未執行——重試前請先檢查',
+  'Duration: {duration}': '耗時：{duration}',
   'Timeline could not be loaded.': '無法載入步驟紀錄。',
   'Load more steps': '載入更多步驟',
 

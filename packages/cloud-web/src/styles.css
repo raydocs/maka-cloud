@@ -2327,8 +2327,3 @@ strong {
     white-space: nowrap;
   }
 }
-
-/* Unsupported browsers retain their normal spacing. */
-.chat-dock, .task-page {
-  text-autospace: normal;
-}

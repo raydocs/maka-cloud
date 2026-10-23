@@ -1,12 +1,20 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 
 type Listener = (event: unknown) => void;
 
 /** Runs the real service worker script against a stand-in for its global scope. */
-function load(language = 'en-US', saved = new Map<string, string>()) {
+function load(
+  language = 'en-US',
+  saved = new Map<string, string>(),
+  windows: Array<{
+    url: string;
+    focus: () => Promise<unknown>;
+    postMessage: (data: unknown) => void;
+  }> = [],
+) {
   const caches = {
     open: async () => ({
       put: async (key: string, value: Response) => {
@@ -21,13 +29,22 @@ function load(language = 'en-US', saved = new Map<string, string>()) {
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
+      getNotifications: async ({ tag }: { tag: string }) =>
+        shown
+          .filter((notice) => notice.options.tag === tag)
+          .map((notice) => ({ data: notice.options.data })),
       showNotification: async (title: string, options: Record<string, unknown>) => {
         shown.push({ title, options });
       },
     },
     location: { origin: 'https://maka.example.test' },
     navigator: { languages: [language] },
-    clients: { matchAll: async () => [], openWindow: async (path: string) => { opened.push(path); } },
+    clients: {
+      matchAll: async () => windows,
+      openWindow: async (path: string) => {
+        opened.push(path);
+      },
+    },
   };
   vm.runInNewContext(readFileSync(join(__dirname, '../dist/sw.js'), 'utf8'), {
     caches,
@@ -91,10 +108,13 @@ test('a task message and a spend alert each show their own fixed text', async ()
   });
   await worker.push({ type: 'spend.alert' });
   expect(worker.shown.map((n) => [n.title, n.options.body, n.options.tag])).toEqual([
-    [TASK.title, TASK.body, "maka-task:tsk_1"],
+    [TASK.title, TASK.body, 'maka-task:tsk_1'],
     [SPEND.title, SPEND.body, SPEND.tag],
   ]);
-  expect(worker.shown[0]?.options.data).toEqual({ path: '/?conversation=cnv_1&task=tsk_1' });
+  expect(worker.shown[0]?.options.data).toEqual({
+    path: '/?conversation=cnv_1&task=tsk_1',
+    rank: 2,
+  });
 });
 
 test('nothing a payload carries reaches the notification', async () => {
@@ -193,13 +213,29 @@ test.each(['zh-Hant', 'zh-TW', 'zh-HK', 'zh-MO'])(
 
 test('task states replace one tag; approval only offers opening the in-app decision', async () => {
   const worker = load();
-  for (const type of ['task.running', 'approval.required', 'task.finished', 'task.failed', 'task.stopped'])
+  for (const type of [
+    'task.running',
+    'approval.required',
+    'task.finished',
+    'task.failed',
+    'task.stopped',
+  ])
     await worker.push({ type, taskId: 'one', conversationId: 'chat' });
-  expect(new Set(worker.shown.map((n) => n.options.tag))).toEqual(new Set(['maka-task:one']));
+  expect(new Set(worker.shown.map((n) => n.options.tag))).toEqual(
+    new Set(['maka-task:one', 'maka-approval:one']),
+  );
   expect(worker.shown[1]?.options.actions).toEqual([{ action: 'open', title: 'Open' }]);
   expect(worker.shown[2]?.options.actions).toBeUndefined();
 });
-test.each([['zh-TW', '有件事需要查看'], ['zh-HK', '有件事需要查看'], ['zh-MO', '有件事需要查看'], ['zh-CN', '有件事需要查看'], ['zh-SG', '有件事需要查看'], ['en-GB', 'Something needs a look'], ['fr', '有件事需要查看']])('neutral notification in %s opens inbox', async (locale, title) => {
+test.each([
+  ['zh-TW', '有件事需要查看'],
+  ['zh-HK', '有件事需要查看'],
+  ['zh-MO', '有件事需要查看'],
+  ['zh-CN', '有件事需要查看'],
+  ['zh-SG', '有件事需要查看'],
+  ['en-GB', 'Something needs a look'],
+  ['fr', '有件事需要查看'],
+])('neutral notification in %s opens inbox', async (locale, title) => {
   const worker = load(locale);
   await worker.push({ type: 'future.type', taskId: 'one' });
   expect(worker.shown[0]?.title).toBe(title);
@@ -220,5 +256,50 @@ test('the server terminal envelope preserves failed and stopped outcomes', async
   expect(worker.shown.map((n) => n.title)).toEqual(['Task failed', 'Task stopped', TASK.title]);
   expect(new Set(worker.shown.map((n) => n.options.tag)).size).toBe(1);
   await worker.push({ type: 'approval.required', taskId: 'same', conversationId: 'chat' });
-  expect(worker.shown.at(-1)?.options.data).toEqual({ path: '/?conversation=chat&task=same&decision=1' });
+  expect(worker.shown.at(-1)?.options.data).toEqual({
+    path: '/?conversation=chat&task=same&decision=1',
+  });
+});
+
+test('existing uncontrolled clients receive in-app links without navigation or reload', async () => {
+  const focus = vi.fn(async () => {});
+  const postMessage = vi.fn();
+  const worker = load('en', new Map(), [{ url: 'https://maka.example.test/', focus, postMessage }]);
+  await worker.click('/?task=one');
+  expect(focus).toHaveBeenCalledOnce();
+  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/?task=one' });
+  expect(worker.opened).toEqual([]);
+});
+
+test('a client that cannot be messaged falls back to a new window', async () => {
+  const worker = load('en', new Map(), [
+    {
+      url: 'https://maka.example.test/',
+      focus: async () => {},
+      postMessage: () => {
+        throw new Error('gone');
+      },
+    },
+  ]);
+  await worker.click('/?task=one');
+  expect(worker.opened).toEqual(['/?task=one']);
+});
+
+test('approval and unknown tags stay separate; terminal replaces ongoing and resists late running pushes', async () => {
+  const worker = load();
+  await worker.push({ type: 'approval.required', taskId: 'one', actionRef: 'action-1' });
+  await worker.push({ type: 'approval.required', taskId: 'one', actionRef: 'action-2' });
+  await worker.push({ type: 'future.type', taskId: 'one' });
+  await worker.push({ type: 'task.running', taskId: 'one' });
+  await worker.push({ type: 'task.finished', taskId: 'one' });
+  expect(worker.shown.map((notice) => notice.options.tag)).toEqual([
+    'maka-approval:action-1',
+    'maka-approval:action-2',
+    'maka-inbox',
+    'maka-task:one',
+    'maka-task:one',
+  ]);
+  expect(worker.shown.at(-1)?.options.renotify).toBe(true);
+  await worker.push({ type: 'task.running', taskId: 'one' });
+  expect(worker.shown).toHaveLength(5);
 });
