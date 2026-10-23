@@ -195,7 +195,7 @@ export function Projects({ client }: { client: CloudClient }) {
       setUnavailable(false);
     } catch (e) {
       if (e instanceof Unsupported) setUnavailable(true);
-      else setError(errorText(e));
+      else setError((previous) => previous || errorText(e));
     }
   }, [client]);
   useEffect(() => {
@@ -207,9 +207,22 @@ export function Projects({ client }: { client: CloudClient }) {
     pending.current = true;
     setBusy(duty.dutyId);
     setError('');
+    const showDuty = (value: DutyView) =>
+      setProjects((current) =>
+        current?.map((row) =>
+          row.projectId === project.projectId
+            ? {
+                ...row,
+                duties: row.duties.map((item) => (item.dutyId === duty.dutyId ? value : item)),
+              }
+            : row,
+        ),
+      );
+    showDuty({ ...duty, state });
     try {
       await client.setDutyState(project.projectId, duty.dutyId, state);
     } catch (e) {
+      showDuty(duty);
       setError(errorText(e));
     } finally {
       // Whatever the answer was, the page shows what the server holds now.

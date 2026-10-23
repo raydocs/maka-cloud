@@ -1,4 +1,11 @@
-import type { HomeCard, HomeSnapshot, InboxItem, TaskView } from '@maka-cloud/client';
+import {
+  dutyTime,
+  type ProjectView,
+  type HomeCard,
+  type HomeSnapshot,
+  type InboxItem,
+  type TaskView,
+} from '@maka-cloud/client';
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native';
 import { AppState, type AppStateStatus, Text } from 'react-native';
 import Home from '@/app/(tabs)/index';
@@ -472,4 +479,43 @@ test('a first visit is calm: a greeting, one line and three ideas that fill the 
   expect(screen.getByTestId('field-What would you like to get done?').props.value).toBe(
     'Review my latest open pull request',
   );
+});
+
+test('Home shows the next duty run in the viewer language and timezone', async () => {
+  const projects: ProjectView[] = [
+    {
+      projectId: 'p1',
+      repo: 'example/site',
+      defaultBranch: 'main',
+      duties: [
+        {
+          dutyId: 'd1',
+          name: 'Check dependencies',
+          trigger: { kind: 'schedule', everyMinutes: 60 },
+          authority: 'open-pr',
+          runBudgetUsd: 2,
+          dailyCapUsd: 6,
+          state: 'active',
+          activatedAt: NOW,
+          offReason: null,
+          consecutiveFailures: 0,
+        },
+      ],
+    },
+  ];
+  await home({
+    '/v1/projects': () => Response.json({ projects }),
+    '/v1/home': () =>
+      Response.json({
+        cards: [
+          card('scheduled:d1', {
+            kind: 'scheduled',
+            ref: { type: 'duty', id: 'd1', projectId: 'p1' },
+            at: NOW + 3_600_000,
+          }),
+        ],
+      }),
+  });
+  await screen.findByText('Check dependencies');
+  expect(screen.getByText(dutyTime(NOW + 3_600_000, 'en', NOW))).toBeTruthy();
 });
