@@ -72,7 +72,8 @@ export function TaskPage({
   const [next, setNext] = useState<number>();
   const [timelineError, setTimelineError] = useState(false);
   const [loadingSteps, setLoadingSteps] = useState(false);
-  const loadedCount = useRef(0);
+  const newestPage = useRef<number | undefined>(undefined);
+  const ended = useRef(false);
   const generation = useRef(0);
   const sequence = useRef(0);
   const loadingMore = useRef(false);
@@ -80,7 +81,8 @@ export function TaskPage({
   const lastRefresh = useRef(0);
   const terminal = TERMINAL.has(task.state);
   useEffect(() => {
-    loadedCount.current = 0;
+    newestPage.current = undefined;
+    ended.current = false;
     setTimeline([]);
     setNext(undefined);
     setTimelineError(false);
@@ -97,18 +99,15 @@ export function TaskPage({
       const ticket = ++sequence.current;
       lastRefresh.current = Date.now();
       try {
-        const steps = new Map<string, TimelineStep>();
-        let after: number | undefined;
-        do {
-          const { timeline } = await client.timeline(task.taskId, { after });
-          if (generation.current !== version || ticket !== sequence.current) return;
-          for (const step of timeline.steps) steps.set(step.stepId, step);
-          after = timeline.stepsNext;
-        } while (after !== undefined && steps.size < loadedCount.current);
+        const { timeline } = await client.timeline(task.taskId, { after: newestPage.current });
         if (generation.current !== version || ticket !== sequence.current) return;
-        setTimeline([...steps.values()]);
-        loadedCount.current = steps.size;
-        setNext(after);
+        ended.current = TERMINAL.has(timeline.state);
+        setTimeline((previous) => {
+          const steps = new Map(previous.map((step) => [step.stepId, step]));
+          for (const step of timeline.steps) steps.set(step.stepId, step);
+          return [...steps.values()];
+        });
+        setNext(timeline.stepsNext);
         setTimelineError(false);
       } catch {
         if (generation.current === version && ticket === sequence.current) setTimelineError(true);
@@ -119,7 +118,7 @@ export function TaskPage({
     refreshSteps.current = () => void refresh();
     void refresh();
     const visible = () => {
-      if (document.visibilityState === 'visible') void refresh();
+      if (!document.hidden && !ended.current) void refresh();
     };
     document.addEventListener('visibilitychange', visible);
     return () => {
@@ -130,7 +129,8 @@ export function TaskPage({
   useEffect(() => {
     if (terminal) return;
     const timer = setInterval(() => {
-      if (Date.now() - lastRefresh.current >= 5000) refreshSteps.current();
+      if (!document.hidden && !ended.current && Date.now() - lastRefresh.current >= 5000)
+        refreshSteps.current();
     }, 5000);
     return () => clearInterval(timer);
   }, [client, task.taskId, terminal]);
@@ -142,10 +142,11 @@ export function TaskPage({
     try {
       const page = await client.timeline(task.taskId, { after: next });
       if (generation.current !== version || ticket !== sequence.current) return;
+      newestPage.current = next;
+      ended.current = TERMINAL.has(page.timeline.state);
       setTimeline((steps) => {
         const merged = new Map(steps.map((step) => [step.stepId, step]));
         for (const step of page.timeline.steps) merged.set(step.stepId, step);
-        loadedCount.current = merged.size;
         return [...merged.values()];
       });
       setNext(page.timeline.stepsNext);

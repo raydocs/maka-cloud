@@ -947,9 +947,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       if (typeof event.data.path !== 'string') return;
       const target = new URL(event.data.path, window.location.origin);
       if (target.origin !== window.location.origin) return;
+      event.ports?.[0]?.postMessage({ type: 'maka.open.ack' });
       window.history.replaceState(window.history.state, '', target.pathname + target.search);
       window.dispatchEvent(new PopStateEvent('popstate'));
-      event.ports?.[0]?.postMessage({ type: 'maka.open.ack' });
     };
     navigator.serviceWorker?.addEventListener('message', message);
     return () => navigator.serviceWorker?.removeEventListener('message', message);
@@ -980,12 +980,8 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       }
       if (!taskId || (conversation && query.has('decision'))) return;
       try {
-        const conversationId =
-          conversation ?? (await session.client.taskConversation(taskId)).conversationId;
+        const { conversationId, task } = await session.client.taskConversation(taskId);
         if (!current || ticket !== request) return;
-        const tasks = await session.client.listTasks(conversationId);
-        if (!current || ticket !== request) return;
-        const task = tasks.find((task) => task.taskId === taskId);
         if (task) {
           setChosen(conversationId);
           setView('chat');
@@ -993,8 +989,11 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           return;
         }
         if (current && ticket === request) setError("Couldn't find that task.");
-      } catch {
-        if (current && ticket === request) setError("Couldn't find that task.");
+      } catch (e) {
+        if (current && ticket === request)
+          setError(
+            e instanceof ApiError && e.status === 404 ? "Couldn't find that task." : errorText(e),
+          );
       }
     };
     void openLink();

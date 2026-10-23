@@ -29,6 +29,7 @@ function load(
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
+      scope: 'https://maka.example.test/',
       getNotifications: async ({ tag }: { tag: string }) =>
         shown
           .filter((notice) => notice.options.tag === tag)
@@ -330,7 +331,7 @@ test('dismissed terminal tasks survive a restart, expire after seven days, and k
   expect(records[0][0]).toBe('1');
 });
 
-test('callback clients are skipped and an app without an ack falls back after 1.5 seconds', async () => {
+test('callback clients are skipped and an app without an ack falls back after ten seconds when focused', async () => {
   vi.useFakeTimers();
   try {
     const callback = vi.fn();
@@ -340,13 +341,34 @@ test('callback clients are skipped and an app without an ack falls back after 1.
       { url: 'https://maka.example.test/', focus: async () => {}, postMessage: app },
     ]);
     const click = worker.click('/?task=one');
-    await vi.advanceTimersByTimeAsync(1499);
+    await vi.advanceTimersByTimeAsync(9999);
     expect(callback).not.toHaveBeenCalled();
     expect(app).toHaveBeenCalledOnce();
     expect(worker.opened).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     await click;
     expect(worker.opened).toEqual(['/?task=one']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('a focused app on a nested route acknowledges after the old timeout without a duplicate window', async () => {
+  vi.useFakeTimers();
+  try {
+    const worker = load('en', new Map(), [
+      {
+        url: 'https://maka.example.test/tasks/one',
+        focus: async () => {},
+        postMessage: (_data, ports) => {
+          setTimeout(() => ports?.[0]?.postMessage({ type: 'maka.open.ack' }), 2500);
+        },
+      },
+    ]);
+    const click = worker.click('/?task=one');
+    await vi.advanceTimersByTimeAsync(2500);
+    await click;
+    expect(worker.opened).toEqual([]);
   } finally {
     vi.useRealTimers();
   }

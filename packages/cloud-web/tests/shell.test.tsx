@@ -277,7 +277,7 @@ test('task-only links resolve conversation 21 and report an unavailable task in 
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith('/v1/conversations')) return json({ conversations });
-    if (url.endsWith('/v1/tasks/deep/conversation')) return json({ conversationId: 'cnv_0' });
+    if (url.endsWith('/v1/tasks/deep/conversation')) return json({ conversationId: 'cnv_0', task });
     if (url.includes('/v1/conversations/cnv_0/tasks')) return json({ tasks: [task] });
     return json({}, 404);
   });
@@ -313,7 +313,9 @@ test('app acknowledges worker links after accepting their same-origin destinatio
     },
   });
   render(<App />);
-  const postMessage = vi.fn();
+  const postMessage = vi.fn(() => {
+    expect(window.location.search).not.toBe('?task=one');
+  });
   act(() =>
     listeners.get('message')?.({
       origin: window.location.origin,
@@ -332,5 +334,31 @@ test('app acknowledges worker links after accepting their same-origin destinatio
     } as unknown as Event),
   );
   expect(postMessage).not.toHaveBeenCalled();
+  window.history.replaceState(null, '', '/');
+});
+
+test.each([
+  [401, 'Your invite is no longer valid. Please reconnect.'],
+  [429, 'Too many requests. Try again in a moment.'],
+  [500, 'Could not complete the request (500). Try again.'],
+  [0, 'Could not complete the request. Check your connection and try again.'],
+])('task link preserves the error for status %s', async (status, note) => {
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+    if (url.endsWith('/v1/tasks/broken/conversation')) {
+      if (!status) throw new TypeError('offline');
+      return json({}, status);
+    }
+    return json({}, 404);
+  });
+  window.history.replaceState(null, '', '/?task=broken');
+  render(
+    <LanguageProvider language="en">
+      <App initialToken="token" />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText(note)).toBeTruthy();
+  expect(screen.queryByText("Couldn't find that task.")).toBeNull();
   window.history.replaceState(null, '', '/');
 });

@@ -230,9 +230,9 @@ test('task conversation lookup resolves the root and hides tasks from other owne
   const conversations = (await (await h.api('/v1/conversations')).json()) as {
     conversations: Array<{ conversationId: string }>;
   };
-  assert.deepEqual(await res.json(), {
-    conversationId: conversations.conversations[0]?.conversationId,
-  });
+  const body = (await res.json()) as { conversationId: string; task: { taskId: string } };
+  assert.equal(body.conversationId, conversations.conversations[0]?.conversationId);
+  assert.equal(body.task.taskId, taskId);
   const other = h.server.invites.create('other');
   assert.equal((await h.api(path, { token: other.token })).status, 404);
   assert.equal((await h.api(path, { token: null })).status, 401);

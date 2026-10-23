@@ -243,15 +243,16 @@ test('the person’s language is read and set on the settings route; an older se
 });
 
 test('task conversation lookup uses the authenticated owner-scoped route and encodes the task id', async () => {
+  const task = { taskId: 'task/a', state: 'running', title: 'Task' };
   const calls: Array<{ path: string; authorization: string | null }> = [];
   const client = new CloudClient('owner-token', async (input, init) => {
     calls.push({
       path: String(input),
       authorization: new Headers(init?.headers).get('authorization'),
     });
-    return Response.json({ conversationId: 'cnv_target' });
+    return Response.json({ conversationId: 'cnv_target', task });
   });
-  expect(await client.taskConversation('task/a')).toEqual({ conversationId: 'cnv_target' });
+  expect(await client.taskConversation('task/a')).toEqual({ conversationId: 'cnv_target', task });
   expect(calls).toEqual([
     { path: '/v1/tasks/task%2Fa/conversation', authorization: 'Bearer owner-token' },
   ]);

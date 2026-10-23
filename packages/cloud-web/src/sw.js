@@ -174,14 +174,21 @@ self.addEventListener('notificationclick', (event) => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       const own = windows.find((client) => {
         const url = new URL(client.url);
-        return url.origin === self.location.origin && url.pathname === '/';
+        return (
+          url.origin === self.location.origin &&
+          url.href.startsWith(self.registration.scope) &&
+          !url.pathname.startsWith('/callback')
+        );
       });
       const raw = event.notification.data?.path;
       const target = new URL(typeof raw === 'string' ? raw : '/', self.location.origin);
       const path = target.origin === self.location.origin ? target.pathname + target.search : '/';
       if (own) {
         try {
-          await own.focus().catch(() => {});
+          const focused = await own.focus().then(
+            () => true,
+            () => false,
+          );
           const acknowledged = await new Promise((resolve) => {
             const channel = new MessageChannel();
             const finish = (ok) => {
@@ -189,7 +196,7 @@ self.addEventListener('notificationclick', (event) => {
               channel.port1.close();
               resolve(ok);
             };
-            const timer = setTimeout(() => finish(false), 1500);
+            const timer = setTimeout(() => finish(false), focused ? 10000 : 1500);
             channel.port1.onmessage = (message) => {
               if (message.data?.type === 'maka.open.ack') finish(true);
             };

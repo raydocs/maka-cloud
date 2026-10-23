@@ -573,10 +573,16 @@ export class PublicApi {
     if (taskConversation) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
       const session = this.ownTaskSession(invite, decodeURIComponent(taskConversation[1] ?? ''));
+      const taskId = decodeURIComponent(taskConversation[1] ?? '');
+      const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
+      if (!record) throw new HttpError(404, 'not_found');
       return respond(
         res,
         200,
-        { conversationId: this.deps.conversations.conversationOf(session) },
+        {
+          conversationId: this.deps.conversations.conversationOf(session),
+          task: toPublicView(toView(record)),
+        },
         { 'cache-control': 'private, no-store' },
       );
     }

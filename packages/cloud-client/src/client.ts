@@ -232,7 +232,7 @@ export class CloudClient {
     });
   }
   taskConversation(task: string) {
-    return this.request<{ conversationId: string }>(
+    return this.request<{ conversationId: string; task: TaskView }>(
       `/v1/tasks/${encodeURIComponent(task)}/conversation`,
     );
   }
