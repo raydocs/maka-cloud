@@ -1,3 +1,5 @@
+import { CloudClient } from '@maka-cloud/client';
+import { restorePush } from '../src/push';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -10,14 +12,20 @@ function load(
   language = 'en-US',
   saved = new Map<string, string>(),
   windows: Array<{
+    id?: string;
+    visibilityState?: string;
+    focused?: boolean;
     url: string;
     focus: () => Promise<unknown>;
     postMessage: (data: unknown, ports?: MessagePort[]) => void;
   }> = [],
   registrationScope = 'https://maka.example.test/',
 ) {
+  if (!saved.has('/.maka-account')) saved.set('/.maka-account', 'account-a');
   const caches = {
     open: async () => ({
+      keys: async () => [...saved.keys()],
+      delete: async (key: string) => saved.delete(key),
       put: async (key: string, value: Response) => {
         saved.set(key, await value.text());
       },
@@ -27,6 +35,7 @@ function load(
   const listeners = new Map<string, Listener>();
   const shown: Array<{ title: string; options: Record<string, unknown> }> = [];
   const opened: string[] = [];
+  const closed: unknown[] = [];
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
@@ -34,7 +43,10 @@ function load(
       getNotifications: async ({ tag }: { tag: string }) =>
         shown
           .filter((notice) => notice.options.tag === tag)
-          .map((notice) => ({ data: notice.options.data })),
+          .map((notice) => ({
+            data: notice.options.data,
+            close: () => closed.push(notice.options.tag),
+          })),
       showNotification: async (title: string, options: Record<string, unknown>) => {
         shown.push({ title, options });
       },
@@ -42,7 +54,7 @@ function load(
     location: { origin: 'https://maka.example.test' },
     navigator: { languages: [language] },
     clients: {
-      matchAll: async () => windows,
+      matchAll: async () => windows.map((client) => ({ id: 'tab', ...client })),
       openWindow: async (path: string) => {
         opened.push(path);
       },
@@ -69,33 +81,48 @@ function load(
       };
     },
   });
-  const push = async (data: unknown) => {
+  const push = async (data: unknown, tagged = true) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('push')?.({
       data:
-        data === undefined ? null : { json: () => (data instanceof Error ? raise(data) : data) },
+        data === undefined && !tagged
+          ? undefined
+          : {
+              json: () =>
+                tagged
+                  ? {
+                      ...(data instanceof Error ? raise(data) : (data as object)),
+                      accountTag:
+                        (data as { accountTag?: string } | null)?.accountTag ?? 'account-a',
+                    }
+                  : data,
+            },
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
   };
-  const message = async (language: string, origin = 'https://maka.example.test') => {
+  const message = async (
+    language: string | Record<string, unknown>,
+    origin = 'https://maka.example.test',
+    clientId = 'tab',
+  ) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('message')?.({
-      source: { url: `${origin}/` },
-      data: { type: 'maka.language', language },
+      source: { id: clientId, url: `${origin}/` },
+      data: typeof language === 'string' ? { type: 'maka.language', language } : language,
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
   };
-  const click = async (path: string) => {
+  const click = async (path: string, accountTag = 'account-a') => {
     const waits: Promise<unknown>[] = [];
     listeners.get('notificationclick')?.({
-      notification: { close() {}, data: { path } },
+      notification: { close() {}, data: { path, accountTag } },
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
   };
-  return { push, shown, message, click, opened };
+  return { push, shown, message, click, opened, closed };
 }
 
 function raise(error: Error): never {
@@ -127,6 +154,7 @@ test('a task message and a spend alert each show their own fixed text', async ()
     [SPEND.title, SPEND.body, SPEND.tag],
   ]);
   expect(worker.shown[0]?.options.data).toEqual({
+    accountTag: 'account-a',
     path: '/?conversation=cnv_1&task=tsk_1',
     rank: 2,
   });
@@ -145,10 +173,10 @@ test('nothing a payload carries reaches the notification', async () => {
   const [only] = worker.shown;
   expect(only?.title).toBe(SPEND.title);
   expect(JSON.stringify(only)).not.toMatch(/attacker|500|123|click/u);
-  expect(only?.options.data).toEqual({ path: '/' });
+  expect(only?.options.data).toEqual({ accountTag: 'account-a', path: '/' });
 });
 
-test('an unknown, malformed, missing or inherited type shows the default text, never the payload', async () => {
+test('unknown and malformed payloads always show neutral text', async () => {
   const worker = load();
   for (const payload of [
     { type: 'something.new', body: 'x' },
@@ -160,11 +188,10 @@ test('an unknown, malformed, missing or inherited type shows the default text, n
     null,
     42,
     undefined,
-    new Error('not json'),
   ]) {
     await worker.push(payload);
   }
-  expect(worker.shown).toHaveLength(10);
+  expect(worker.shown).toHaveLength(9);
   for (const shown of worker.shown) {
     expect([shown.title, shown.options.body, shown.options.tag]).toEqual([
       'Something needs a look',
@@ -254,7 +281,7 @@ test.each([
   const worker = load(locale);
   await worker.push({ type: 'future.type', taskId: 'one' });
   expect(worker.shown[0]?.title).toBe(title);
-  expect(worker.shown[0]?.options.data).toEqual({ path: '/?inbox=1' });
+  expect(worker.shown[0]?.options.data).toEqual({ accountTag: 'account-a', path: '/?inbox=1' });
 });
 
 test('click opens the payload target and refuses external destinations', async () => {
@@ -271,7 +298,8 @@ test('the server terminal envelope preserves failed and stopped outcomes', async
   expect(worker.shown.map((n) => n.title)).toEqual(['Task failed', 'Task stopped', TASK.title]);
   expect(new Set(worker.shown.map((n) => n.options.tag)).size).toBe(1);
   await worker.push({ type: 'approval.required', taskId: 'same', conversationId: 'chat' });
-  expect(worker.shown).toHaveLength(3);
+  expect(worker.shown).toHaveLength(4);
+  expect(worker.shown.at(-1)?.options.silent).toBe(true);
 });
 
 test('existing uncontrolled clients receive in-app links without navigation or reload', async () => {
@@ -280,6 +308,7 @@ test('existing uncontrolled clients receive in-app links without navigation or r
     ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
   );
   const worker = load('en', new Map(), [{ url: 'https://maka.example.test/', focus, postMessage }]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a' });
   await worker.click('/?task=one');
   expect(focus).toHaveBeenCalledOnce();
   expect(postMessage).toHaveBeenCalledWith(
@@ -299,6 +328,7 @@ test('a client that cannot be messaged falls back to a new window', async () => 
       },
     },
   ]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a' });
   await worker.click('/?task=one');
   expect(worker.opened).toEqual(['/?task=one']);
 });
@@ -319,7 +349,190 @@ test('approval and unknown tags stay separate; terminal replaces ongoing and res
   ]);
   expect(worker.shown.at(-1)?.options.renotify).toBe(true);
   await worker.push({ type: 'task.running', taskId: 'one' });
-  expect(worker.shown).toHaveLength(5);
+  expect(worker.shown).toHaveLength(6);
+  expect(worker.shown.at(-1)?.options.silent).toBe(true);
+  expect(worker.closed).toContain('maka-quiet');
+});
+
+test('mismatched, missing, and pre-upgrade tags stay neutral until app-load recovery', async () => {
+  const saved = new Map<string, string>();
+  const worker = load('en', saved);
+  await worker.push({ type: 'task.finished', accountTag: 'account-b', conversationId: 'private' });
+  await worker.push({ type: 'task.finished' }, false);
+  saved.delete('/.maka-account');
+  await worker.push({ type: 'task.finished' });
+  expect(worker.shown).toHaveLength(3);
+  for (const notice of worker.shown) {
+    expect(notice.title).toBe('Something needs a look');
+    expect(notice.options.data).toEqual({ path: '/' });
+  }
+  await worker.click('/?conversation=private');
+  expect(worker.opened).toEqual(['/']);
+  vi.stubGlobal('navigator', {
+    serviceWorker: {
+      getRegistration: async () => ({
+        active: { postMessage: (message: Record<string, unknown>) => worker.message(message) },
+        pushManager: {
+          getSubscription: async () => ({
+            toJSON: () => ({
+              endpoint: 'https://push.example/one',
+              keys: { p256dh: 'key', auth: 'auth' },
+            }),
+          }),
+        },
+      }),
+    },
+  });
+  vi.stubGlobal('PushManager', class {});
+  vi.stubGlobal('Notification', {});
+  try {
+    await restorePush(
+      new CloudClient('token', async () => Response.json({ accountTag: 'new-tag' })),
+    );
+    await worker.push({ type: 'task.finished', accountTag: 'new-tag', conversationId: 'chat' });
+    expect(worker.shown.at(-1)?.options.data).toMatchObject({
+      accountTag: 'new-tag',
+      path: '/?conversation=chat',
+    });
+    await worker.push({ type: 'future.type', accountTag: 'new-tag' });
+    expect(worker.shown.at(-1)?.options.tag).toBe('maka-inbox');
+    expect(worker.shown[0]?.options.tag).toBe('maka-account-mismatch');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('tab contexts cannot overwrite the subscription owner, including sign-out', async () => {
+  const saved = new Map<string, string>();
+  const worker = load('en', saved);
+  await worker.message({ type: 'maka.subscription', accountTag: 'account-b' });
+  await worker.message(
+    { type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' },
+    undefined,
+    'tab-a',
+  );
+  await worker.message(
+    { type: 'maka.context', accountTag: 'account-b', conversationId: 'other' },
+    undefined,
+    'tab-b',
+  );
+  await worker.message({ type: 'maka.context', accountTag: null }, undefined, 'tab-a');
+  expect(JSON.parse(saved.get('/.maka-context/tab-b') ?? '{}').tag).toBe('account-b');
+  expect(saved.get('/.maka-account')).toBe('account-b');
+  await worker.push({ type: 'task.finished', accountTag: 'account-b', taskId: 'one' });
+  expect(worker.shown[0]?.title).toBe(TASK.title);
+  await worker.push({ type: 'task.finished', accountTag: 'account-a', taskId: 'two' });
+  expect(worker.shown[1]?.options.data).toEqual({ path: '/' });
+  await worker.message({ type: 'maka.subscription', accountTag: 'account-a' });
+  await worker.push({ type: 'spend.alert' });
+  expect(worker.shown[2]?.title).toBe(SPEND.title);
+});
+
+test('visible conversations suppress banners but retain terminal ordering across restart', async () => {
+  const saved = new Map<string, string>();
+  const tab = {
+    id: 'tab',
+    visibilityState: 'visible',
+    focused: true,
+    url: 'https://maka.example.test/',
+    focus: async () => {},
+    postMessage: vi.fn(),
+  };
+  const worker = load('en', saved, [tab]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' });
+  await worker.push({ type: 'task.finished', taskId: 'one', conversationId: 'chat' });
+  expect(worker.shown).toHaveLength(1);
+  expect(worker.shown[0]?.options.silent).toBe(true);
+  expect(worker.closed).toContain('maka-quiet');
+  expect(tab.postMessage).not.toHaveBeenCalled();
+  const restarted = load('en', saved, [tab]);
+  await restarted.push({ type: 'task.finished', taskId: 'other', conversationId: 'chat' });
+  expect(restarted.shown.at(-1)?.options.silent).toBe(true);
+  expect(restarted.closed).toContain('maka-quiet');
+  await restarted.push({ type: 'task.running', taskId: 'one', conversationId: 'chat' });
+  expect(restarted.shown.at(-1)?.options.silent).toBe(true);
+  expect(restarted.closed).toContain('maka-quiet');
+  tab.visibilityState = 'hidden';
+  await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: null });
+  await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
+  expect(worker.shown).toHaveLength(2);
+  expect(worker.shown[1]?.title).toBe(TASK.title);
+});
+
+test.each([undefined, 'account-b'])(
+  'a shown notification routes to its own tab with subscription owner %s',
+  async (owner) => {
+    const saved = new Map<string, string>();
+    const postMessage = vi.fn((data, ports) =>
+      ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+    );
+    const worker = load('en', saved, [
+      { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
+    ]);
+    await worker.message({ type: 'maka.context', accountTag: 'account-a' });
+    await worker.push({ type: 'task.finished', conversationId: 'chat', taskId: 'one' });
+    const notice = worker.shown[0]?.options.data as { path: string; accountTag: string };
+    if (owner) await worker.message({ type: 'maka.subscription', accountTag: owner });
+    else saved.delete('/.maka-account');
+    await worker.click(notice.path, notice.accountTag);
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: 'maka.open', path: '/?conversation=chat&task=one', id: expect.any(Number) },
+      expect.anything(),
+    );
+    expect(worker.opened).toEqual([]);
+  },
+);
+
+test.each([undefined, '', 'account-b'])(
+  'a notification cannot deep-link a tab with missing or foreign account context %s',
+  async (tag) => {
+    const postMessage = vi.fn();
+    const saved = new Map([
+      ['/.maka-account', 'account-a'],
+      ['/.maka-context/tab', JSON.stringify({ tag })],
+    ]);
+    const worker = load('en', saved, [
+      { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
+    ]);
+    await worker.click('/?conversation=private', 'account-a');
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: 'maka.open', path: '/', id: expect.any(Number) },
+      expect.anything(),
+    );
+  },
+);
+
+test('a push with no data still displays a neutral root-only notification', async () => {
+  const worker = load();
+  await worker.push(undefined, false);
+  await worker.push(new Error('not json'));
+  expect(worker.shown).toHaveLength(2);
+  expect(worker.shown[1]?.options.tag).toBe('maka-account-mismatch');
+  expect(worker.shown[0]?.title).toBe('Something needs a look');
+  expect(worker.shown[0]?.options.data).toEqual({ path: '/' });
+});
+
+test('only a focused visible conversation suppresses its task notification', async () => {
+  const tab = {
+    id: 'tab',
+    visibilityState: 'visible',
+    focused: false,
+    url: 'https://maka.example.test/',
+    focus: async () => {},
+    postMessage: () => {
+      throw new Error('gone');
+    },
+  };
+  const worker = load('en', new Map(), [tab]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' });
+  await worker.push({ type: 'task.finished', taskId: 'one', conversationId: 'chat' });
+  tab.focused = true;
+  await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
+  expect(worker.shown.map((notice) => notice.title)).toEqual([
+    TASK.title,
+    'Something needs a look',
+  ]);
+  expect(worker.shown[1]?.options.silent).toBe(true);
 });
 
 test('dismissed terminal tasks survive a restart, expire after seven days, and keep only 200 records', async () => {
@@ -327,11 +540,12 @@ test('dismissed terminal tasks survive a restart, expire after seven days, and k
   await load('en', saved).push({ type: 'task.finished', taskId: 'ended' });
   const restarted = load('en', saved);
   await restarted.push({ type: 'task.running', taskId: 'ended' });
-  expect(restarted.shown).toHaveLength(0);
-  const key = '/.maka-terminal-tasks';
+  expect(restarted.shown).toHaveLength(1);
+  expect(restarted.shown[0]?.options.silent).toBe(true);
+  const key = '/.maka-terminal-tasks/account-a';
   saved.set(key, JSON.stringify([['expired', Date.now() - 8 * 86400000]]));
   await restarted.push({ type: 'task.running', taskId: 'expired' });
-  expect(restarted.shown).toHaveLength(1);
+  expect(restarted.shown).toHaveLength(2);
   for (let i = 0; i < 201; i++) await restarted.push({ type: 'task.finished', taskId: String(i) });
   const records = JSON.parse(saved.get(key)!);
   expect(records).toHaveLength(200);
@@ -347,6 +561,7 @@ test('callback clients are skipped and an app without an ack falls back after ha
       { url: 'https://maka.example.test/callback', focus: async () => {}, postMessage: callback },
       { url: 'https://maka.example.test/', focus: async () => {}, postMessage: app },
     ]);
+    await worker.message({ type: 'maka.context', accountTag: 'account-a' });
     const click = worker.click('/?task=one');
     await vi.advanceTimersByTimeAsync(499);
     expect(callback).not.toHaveBeenCalled();
@@ -380,6 +595,7 @@ test.each([100, 600])(
           },
         },
       ]);
+      await worker.message({ type: 'maka.context', accountTag: 'account-a' });
       const click = worker.click('/?task=one');
       await vi.advanceTimersByTimeAsync(1000);
       await click;
@@ -402,6 +618,7 @@ test('a refused focus still lets the open app route; no answer opens a window', 
   const routed = load('en', new Map(), [
     { url: 'https://maka.example.test/', focus: refused, postMessage: answering },
   ]);
+  await routed.message({ type: 'maka.context', accountTag: 'account-a' });
   await routed.click('/?task=one');
   expect(answering).toHaveBeenCalledOnce();
   expect(routed.opened).toEqual([]);
@@ -410,6 +627,7 @@ test('a refused focus still lets the open app route; no answer opens a window', 
   const opened = load('en', new Map(), [
     { url: 'https://maka.example.test/', focus: refused, postMessage: silent },
   ]);
+  await opened.message({ type: 'maka.context', accountTag: 'account-a' });
   await opened.click('/?task=one');
   expect(silent).toHaveBeenCalledOnce();
   expect(opened.opened).toEqual(['/?task=one']);

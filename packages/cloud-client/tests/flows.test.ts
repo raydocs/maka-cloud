@@ -502,3 +502,38 @@ test('Home without a server Home stays on its own parts and tells the server not
   await new Promise((r) => setTimeout(r, 20));
   expect(calls.some((c) => c.url.startsWith('/v1/home/seen'))).toBe(false);
 });
+
+test('leaving Home sends the versions that were displayed', async () => {
+  const seen: unknown[] = [];
+  const { client } = served({
+    '/v1/home/seen': (_url, init) => {
+      seen.push(JSON.parse(String(init.body)));
+      return Response.json({ seen: ['waiting:a'], visitedAt: 1 });
+    },
+    '/v1/home': () =>
+      Response.json({
+        cards: [
+          {
+            cardId: 'waiting:a',
+            kind: 'waiting',
+            rank: 0,
+            seenAt: null,
+            at: 1,
+            ref: { type: 'inbox', id: 'a' },
+            contentVersion: 'displayed-v1',
+          },
+        ],
+      }),
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store);
+  feed.start([]);
+  await until(() => feed.getSnapshot().cards !== undefined, 'the cards');
+  feed.leave();
+  await until(() => seen.length === 1, 'seen request');
+  expect(seen).toEqual([
+    { cardIds: ['waiting:a'], contentVersions: { 'waiting:a': 'displayed-v1' } },
+  ]);
+  feed.stop();
+});

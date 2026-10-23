@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { control, conversationsOf, finishedTask, signIn } from './support';
+import { API, control, conversationsOf, finishedTask, signIn } from './support';
 
 test('notification task link opens timeline and CJK text keeps autospace', async ({
   page,
@@ -27,17 +27,35 @@ test('notification task link opens timeline and CJK text keeps autospace', async
     await navigator.serviceWorker.ready;
   });
   const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
+  const me = await request.get(`${API}/v1/me`, {
+    headers: { authorization: `Bearer ${invite.token}` },
+  });
+  const { accountTag } = (await me.json()) as { accountTag: string };
+  // Real notices retain their account tag. No push subscription is needed to open one.
+  await expect
+    .poll(() =>
+      worker.evaluate(async () => {
+        const cache = await caches.open('maka-context');
+        return Promise.all(
+          (await cache.keys()).map(async (key) => (await (await cache.match(key))?.json())?.tag),
+        );
+      }),
+    )
+    .toContain(accountTag);
   const clickNotification = (path: string) =>
-    worker.evaluate(async (path) => {
-      const event = new Event('notificationclick');
-      const waits: Promise<unknown>[] = [];
-      Object.assign(event, {
-        notification: { close() {}, data: { path } },
-        waitUntil: (work: Promise<unknown>) => waits.push(work),
-      });
-      self.dispatchEvent(event);
-      await Promise.all(waits);
-    }, path);
+    worker.evaluate(
+      async ({ path, accountTag }) => {
+        const event = new Event('notificationclick');
+        const waits: Promise<unknown>[] = [];
+        Object.assign(event, {
+          notification: { close() {}, data: { path, accountTag } },
+          waitUntil: (work: Promise<unknown>) => waits.push(work),
+        });
+        self.dispatchEvent(event);
+        await Promise.all(waits);
+      },
+      { path, accountTag },
+    );
   await clickNotification('/?conversation=' + conversationId + '&task=' + taskId);
   await expect(page.getByLabel('Invite token')).toHaveCount(0);
   await expect(page).toHaveURL('/');

@@ -165,7 +165,7 @@ test('a push service the server does not accept is said plainly and leaves no su
   ).toBe(false);
 });
 
-test('the service worker shows one generic notification and ignores whatever the push carries', async ({
+test('an untagged push shows a neutral root-only notification and ignores hostile content', async ({
   page,
   context,
 }) => {
@@ -200,8 +200,13 @@ test('the service worker shows one generic notification and ignores whatever the
     await Promise.all(promises);
     return shown;
   });
-  expect(notification).toMatchObject({
+  expect(notification).toEqual({
     title: 'Something needs a look',
-    options: { body: 'Open Maka to check your inbox.', data: { path: '/?inbox=1' } },
+    options: {
+      body: 'Open Maka to check your inbox.',
+      tag: 'maka-account-mismatch',
+      silent: false,
+      data: { path: '/' },
+    },
   });
 });

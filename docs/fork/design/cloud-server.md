@@ -115,7 +115,7 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `GET /v1/tasks/:taskId/sources/:index/preview` | `{site, title?, image}` for one page of that list, fetched by the server. `image` says whether the next route has bytes. 404 for an index not in the list; 429 over the preview limit (60 a minute per invite) or when the server is already fetching as much as it allows (`retry-after: 2`). |
 | `GET /v1/tasks/:taskId/sources/:index/image` | The page's own preview image (png, jpeg, webp or gif by its first bytes, at most 1 MiB), with `nosniff`, a sandboxing CSP and `private, no-store`. 404 when the page has none. |
 | `GET /v1/push/key` | `{publicKey}`, the VAPID public key. 404 when push is not configured (so are the next two). |
-| `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
+| `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> `{accountTag}` with 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
 | `DELETE /v1/push/subscriptions` | `{endpoint}` -> 204. Only the invite that registered it can remove it; otherwise 404. |
 | `GET /v1/home` | The caller's Home as the server keeps it: `{cards: [{cardId, kind, ref, rank, seenAt, at, state?, text?}]}` (see "Home cards"). |
 | `POST /v1/home/seen` | `{cardIds}` (at most 100): the person saw these cards and left Home. Records the ones that are on this Home and moves the caller's visit to now. 200 `{seen, visitedAt}`. |
@@ -240,6 +240,35 @@ The server fetches a URL a client chose, so: the endpoint must be `https`, on po
 Apple, Windows by default); no redirect is followed; the address is checked when
 the socket connects (non-public addresses are refused, and so are IP literals); a
 send ends after 10 s or when the server closes; and the response is read to 4 KiB.
+
+#### Browser notification choices
+
+Pushes carry an opaque account tag. The worker uses fixed neutral text in English,
+Simplified Chinese or Traditional Chinese for missing or mismatched tags, including
+pre-upgrade subscriptions, and opens only the app root. These notices use
+`maka-account-mismatch`, separate from an unknown event's `maka-inbox` notice.
+Notifications retain their account tag when shown. Click routing compares that tag
+with the target tab's own `/v1/me` context before using a deep link, independently
+of the current subscription owner. A missing or different tab account opens only
+the app root; with no open tab, the stored subscription owner must still match.
+
+On each signed-in app load, an existing browser subscription is POSTed again.
+Registration is idempotent and confirms or moves the endpoint to that account;
+only the returned server tag is posted to the worker as `maka.subscription`.
+This repairs old workers with no stored tag and tags changed by a new or restored
+database. It asks for no permission and creates no browser subscription. Failed
+registration keeps the existing worker tag and can recover on the next load.
+
+For obsolete running/approval updates after a terminal task, or a visible,
+focused tab already viewing the same account and conversation, the worker shows
+a neutral `silent: true` notice under `maka-quiet` and immediately closes it.
+[WebKit requires every push to display a notification](https://webkit.org/blog/12945/meet-web-push/)
+and can revoke subscriptions when pushes show nothing. The quiet notice is intended to satisfy
+that requirement while avoiding a persistent duplicate banner; OS timing may still
+make it briefly visible. No unused push message is sent to the tab. Terminal task
+records are account-scoped, survive worker restarts, expire after seven days, and
+retain at most 200 entries per account. Clicks retain the ack/go handshake so an
+unresponsive tab falls back to a new window without routing twice.
 
 ### Language
 

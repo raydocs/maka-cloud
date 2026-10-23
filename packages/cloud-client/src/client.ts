@@ -354,10 +354,13 @@ export class CloudClient {
     return Array.isArray(result.cards) ? result.cards : [];
   }
   /** Tells the server the person saw these cards and left Home. */
-  homeSeen(cardIds: readonly string[]) {
+  homeSeen(cardIds: readonly string[], contentVersions?: Record<string, string>) {
     return this.request<{ seen: string[]; visitedAt: number }>(routes.homeSeen, {
       method: 'POST',
-      body: JSON.stringify({ cardIds }),
+      body: JSON.stringify({
+        cardIds,
+        ...(contentVersions && Object.keys(contentVersions).length ? { contentVersions } : {}),
+      }),
     });
   }
   /** Moves a card to just after `after` (first when null) inside its kind; answers the new list. */

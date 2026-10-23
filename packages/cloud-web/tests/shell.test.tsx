@@ -423,3 +423,52 @@ test('the first-message setup action focuses the visible chat composer', async (
   await waitFor(() => expect(document.activeElement?.closest('.chat-dock')).toBeTruthy());
   expect(document.activeElement?.tagName).toBe('TEXTAREA');
 });
+
+test.each(['en', 'zh-Hans', 'zh-Hant'])(
+  'signed-in app load restores an existing push subscription in %s',
+  async (language) => {
+    localStorage.setItem('maka.language', language);
+    const subscription = {
+      endpoint: 'https://push.example/one',
+      keys: { p256dh: 'key', auth: 'auth' },
+    };
+    const postMessage = vi.fn();
+    vi.stubGlobal('PushManager', class {});
+    const requestPermission = vi.fn();
+    vi.stubGlobal('Notification', { permission: 'granted', requestPermission });
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        getRegistration: async () => ({
+          active: { postMessage },
+          pushManager: { getSubscription: async () => ({ toJSON: () => subscription }) },
+        }),
+      },
+    });
+    const register = vi.fn();
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+      if (url.endsWith('/v1/me')) return json({ accountTag: 'restored-tag' });
+      if (url.endsWith('/v1/push/subscriptions') && init?.method === 'POST') {
+        register(JSON.parse(init.body as string));
+        return json({ accountTag: 'restored-tag' });
+      }
+      return json({}, 404);
+    });
+    render(
+      <ThemeProvider>
+        <App initialToken="token" />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith({
+        type: 'maka.subscription',
+        accountTag: 'restored-tag',
+      }),
+    );
+    expect(register).toHaveBeenCalledExactlyOnceWith(subscription);
+    expect(requestPermission).not.toHaveBeenCalled();
+  },
+);

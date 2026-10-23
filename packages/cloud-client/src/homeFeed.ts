@@ -130,7 +130,13 @@ export class HomeFeed extends Store<HomeSnapshot> {
     const cards = this.getSnapshot().cards;
     if (cards !== undefined) {
       const ids = shown ?? cards.map((card) => card.cardId);
-      void this.client.homeSeen(ids.slice(0, HOME_SEEN_MAX)).catch(() => undefined);
+      const marked = ids.slice(0, HOME_SEEN_MAX);
+      const versions = Object.fromEntries(
+        cards
+          .filter((card) => marked.includes(card.cardId) && card.contentVersion)
+          .map((card) => [card.cardId, card.contentVersion as string]),
+      );
+      void this.client.homeSeen(marked, versions).catch(() => undefined);
     }
   }
 

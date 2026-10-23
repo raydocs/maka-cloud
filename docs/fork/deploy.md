@@ -238,8 +238,8 @@ way: `MAKA_CLOUD_SANDBOXES='{"inv_0123456789ab":"machine-dana"}'`.
 - The data directory holds the databases, which hold invite digests and your
   users' conversations. Mode 700, owned by the service user. The server creates
   its own files with that in mind, but the directory is what keeps others out.
-- A backup holds no keys, no environment and no push subscriptions (devices turn
-  notifications on again after a restore). It does hold conversations, so give it
+- A backup holds no keys, no environment and no push subscriptions (existing browser
+  subscriptions re-register on the next signed-in app load after a restore). It does hold conversations, so give it
   the same protection as the data directory.
 - Logs are JSON lines on standard output. Keys, tokens, key-shaped strings and
   model vendor names are removed before a line is written, but treat the log as

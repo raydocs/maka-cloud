@@ -36,6 +36,7 @@ export interface HomeCard {
   rank: number;
   /** When this owner last saw the card, or null. */
   seenAt: number | null;
+  contentVersion: string;
   /** The time the card is about: when it was raised, when the task finished, when a duty runs next. */
   at: number;
   /** On a `finished` card: how the task ended. */
@@ -44,9 +45,10 @@ export interface HomeCard {
   text?: string;
 }
 
-interface Draft extends Omit<HomeCard, 'rank' | 'seenAt'> {
+interface Draft extends Omit<HomeCard, 'rank' | 'seenAt' | 'contentVersion'> {
   /** The default order inside the kind, lowest first. */
   sort: number[];
+  contentVersion?: string;
 }
 
 /** Cards the page lists per kind beyond the waiting ones, so Home stays a glance. */
@@ -131,6 +133,8 @@ export function rankCards(
   }
   return ordered.map(({ sort: _sort, ...card }, rank) => ({
     ...card,
+    contentVersion:
+      card.contentVersion ?? createHash('sha256').update(JSON.stringify(card)).digest('hex'),
     rank,
     seenAt: seen.get(card.cardId) ?? null,
   }));
@@ -206,11 +210,26 @@ export class HomeStore {
     return row?.at;
   }
 
-  seenAt(owner: string): Map<string, number> {
+  seenAt(owner: string, versions?: ReadonlyMap<string, string>): Map<string, number> {
     const rows = this.db
-      .prepare('SELECT card_id AS id, seen_at AS at FROM home_seen WHERE owner = ?')
-      .all(owner) as unknown as Array<{ id: string; at: number }>;
-    return new Map(rows.map((row) => [row.id, row.at]));
+      .prepare(
+        'SELECT card_id AS id, seen_at AS at, content_version AS version FROM home_seen WHERE owner = ?',
+      )
+      .all(owner) as unknown as Array<{ id: string; at: number; version: string | null }>;
+    if (versions) {
+      const put = this.db.prepare(
+        'UPDATE home_seen SET content_version = ? WHERE owner = ? AND card_id = ? AND content_version IS NULL',
+      );
+      for (const row of rows) {
+        const version = versions.get(row.id);
+        if (row.version === null && version) put.run(version, owner, row.id);
+      }
+    }
+    return new Map(
+      rows
+        .filter((row) => !versions || row.version === null || versions.get(row.id) === row.version)
+        .map((row) => [row.id, row.at]),
+    );
   }
 
   pinned(owner: string): Map<string, number> {
@@ -291,14 +310,18 @@ export class HomeStore {
   }
 
   /** Records that the owner saw these cards and left Home now. */
-  markSeen(owner: string, cardIds: readonly string[]): number {
+  markSeen(
+    owner: string,
+    cardIds: readonly string[],
+    versions: ReadonlyMap<string, string> = new Map(),
+  ): number {
     const at = this.now();
     transaction(this.db, () => {
       const put = this.db.prepare(
-        `INSERT INTO home_seen (owner, card_id, seen_at) VALUES (?, ?, ?)
-         ON CONFLICT (owner, card_id) DO UPDATE SET seen_at = excluded.seen_at`,
+        `INSERT INTO home_seen (owner, card_id, seen_at, content_version) VALUES (?, ?, ?, ?)
+         ON CONFLICT (owner, card_id) DO UPDATE SET seen_at = excluded.seen_at, content_version = excluded.content_version`,
       );
-      for (const id of cardIds) put.run(owner, id, at);
+      for (const id of cardIds) put.run(owner, id, at, versions.get(id) ?? null);
       this.db
         .prepare(
           `INSERT INTO home_visits (owner, visited_at) VALUES (?, ?)
@@ -378,7 +401,12 @@ const ProjectShape = z
   .passthrough();
 
 const cardIdSchema = z.string().min(3).max(200);
-const seenBody = z.object({ cardIds: z.array(cardIdSchema).max(100) }).strict();
+const seenBody = z
+  .object({
+    cardIds: z.array(cardIdSchema).max(100),
+    contentVersions: z.record(cardIdSchema, z.string().min(1).max(128)).optional(),
+  })
+  .strict();
 const orderBody = z.object({ cardId: cardIdSchema, after: cardIdSchema.nullable() }).strict();
 
 /** The `/v1/home` routes. */
@@ -442,7 +470,16 @@ export class HomeRoutes {
         const { cards } = await this.build(owner);
         const live = new Set(cards.map((card) => card.cardId));
         const seen = [...new Set(body.data.cardIds)].filter((id) => live.has(id));
-        const visitedAt = this.store.markSeen(owner, seen);
+        const visitedAt = this.store.markSeen(
+          owner,
+          seen,
+          new Map(
+            cards.map((card) => [
+              card.cardId,
+              body.data.contentVersions?.[card.cardId] ?? card.contentVersion,
+            ]),
+          ),
+        );
         respond(res, 200, { seen, visitedAt });
         return true;
       }
@@ -512,6 +549,7 @@ export class HomeRoutes {
         const kind = item.data.kind === 'suggestion' ? 'suggestion' : 'waiting';
         drafts.push({
           cardId: `${kind}:${item.data.itemId}`,
+          contentVersion: createHash('sha256').update(JSON.stringify(item.data)).digest('hex'),
           kind,
           ref: { type: 'inbox', id: item.data.itemId },
           at: item.data.createdAt,
@@ -546,6 +584,7 @@ export class HomeRoutes {
         ref: { type: 'note', id: noteId },
         at,
         text: noteText(note, this.owners.languageOf?.(owner)),
+        contentVersion: createHash('sha256').update(JSON.stringify(note)).digest('hex'),
         sort: [-at],
       });
     }
@@ -553,7 +592,10 @@ export class HomeRoutes {
     drafts.push(...this.scheduled(owner, now));
 
     const pinned = this.store.pinned(owner);
-    const seen = this.store.seenAt(owner);
+    const versions = new Map(
+      rankCards(drafts, pinned, new Map()).map((card) => [card.cardId, card.contentVersion]),
+    );
+    const seen = this.store.seenAt(owner, versions);
     return { drafts, pinned, seen, cards: rankCards(drafts, pinned, seen) };
   }
 
@@ -581,6 +623,17 @@ export class HomeRoutes {
         const at = duty.activatedAt + slots * period;
         runs.push({
           cardId: `scheduled:${duty.dutyId}`,
+          contentVersion: createHash('sha256')
+            .update(
+              JSON.stringify({
+                dutyId: duty.dutyId,
+                projectId: project.data.projectId,
+                name: duty.name,
+                repo: project.data.repo,
+                trigger: duty.trigger,
+              }),
+            )
+            .digest('hex'),
           kind: 'scheduled',
           ref: { type: 'duty', id: duty.dutyId, projectId: project.data.projectId },
           at,
