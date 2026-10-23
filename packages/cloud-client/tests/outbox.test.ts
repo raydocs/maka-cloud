@@ -2,7 +2,14 @@ import { expect, test } from 'vitest';
 import { CloudClient } from '../src/client';
 import { connectionAction, connectionNeedsBanner, connectionText } from '../src/connection';
 import { ConversationFeed, type SendFailure, sendFailureText } from '../src/conversation';
-import { OUTBOX_KEEP_MS, outboxScope, storageOutbox, webStorageOutbox } from '../src/outbox';
+import {
+  adoptPendingSend,
+  OUTBOX_KEEP_MS,
+  outboxScope,
+  storageOutbox,
+  webStorageOutbox,
+} from '../src/outbox';
+import { storagePendingSends } from '../src/pending';
 
 /** A Web Storage stand-in that outlives the feeds made over it, like localStorage over a reload. */
 function memoryStorage() {
@@ -238,9 +245,8 @@ test('a failed post says why, and whether trying again can help', async () => {
   }
 });
 
-test('the outbox: a late remove of an older message never clears a newer one; old and junk records go', async () => {
+test('the outbox: a late remove of an older message never clears a newer one; junk records go, old ones stay for the conversation to show', async () => {
   const storage = memoryStorage();
-  let now = 1_000_000;
   const outbox = storageOutbox(
     {
       get: (k) => storage.getItem(k),
@@ -249,16 +255,15 @@ test('the outbox: a late remove of an older message never clears a newer one; ol
       remove: (k) => storage.removeItem(k),
     },
     'me',
-    'maka.outbox.',
-    () => now,
   );
-  const entry = (id: string, at = now) => ({ id, conversationId: 'c1', text: id, at });
+  const entry = (id: string, at = 1_000_000) => ({ id, conversationId: 'c1', text: id, at });
   await Promise.all([outbox.put(entry('a')), outbox.put(entry('b')), outbox.remove('c1', 'a')]);
   expect((await outbox.list('c1')).map((e) => e.id)).toEqual(['b']);
   await outbox.remove('c1', 'a');
   expect((await outbox.list('c1')).map((e) => e.id)).toEqual(['b']);
-  now += OUTBOX_KEEP_MS;
-  expect(await outbox.list('c1')).toEqual([]);
+  // However old, a message is not the store's to drop: the conversation shows it first.
+  await outbox.put(entry('old', 0));
+  expect((await outbox.list('c1')).map((e) => e.id)).toEqual(['old', 'b']);
   // A store without a key listing keeps an index: junk in it, or in a record, is dropped.
   storage.setItem('maka.outbox.me.c2', '["x"]');
   storage.setItem('maka.outbox.me.c2.x', '{"id":"has spaces","conversationId":"c2","text":"t"}');
@@ -291,20 +296,168 @@ test('two tabs over the same storage never lose each other’s messages', async 
   expect((await tabA.list('c1')).map((e) => e.id).sort()).toEqual(['b', 'c']);
 });
 
-test('each account on each server has its own outbox', async () => {
+/** A server that names the account each token signs in as (`GET /v1/me`), or has no such route. */
+function accounts(owners: Record<string, string> | undefined) {
+  return (async (url: string | URL, init?: RequestInit) => {
+    if (!String(url).endsWith('/v1/me')) return Response.json({}, { status: 404 });
+    if (!owners) return Response.json({ error: 'not_found' }, { status: 404 });
+    const token = new Headers(init?.headers).get('Authorization')?.replace('Bearer ', '') ?? '';
+    return Response.json({ ownerId: owners[token] });
+  }) as typeof fetch;
+}
+
+test('each account on each server has its own outbox, and signing in again (a new token) finds it', async () => {
   const shared = memoryStorage();
-  const mine = webStorageOutbox(shared, outboxScope('https://a.example', 'mks_one'));
-  const theirs = webStorageOutbox(shared, outboxScope('https://a.example', 'mks_two'));
-  const elsewhere = webStorageOutbox(shared, outboxScope('https://b.example', 'mks_one'));
-  await mine.put({ id: 'm1', conversationId: 'c1', text: 'private words', at: Date.now() });
-  expect(await theirs.list('c1')).toEqual([]);
-  expect(await elsewhere.list('c1')).toEqual([]);
-  expect((await mine.list('c1')).map((e) => e.text)).toEqual(['private words']);
-  // The scope never carries the token.
-  expect([...shared.map.keys()].join()).not.toContain('mks_one');
-  expect(new CloudClient('mks_one', { baseUrl: 'https://a.example' }).outboxScope()).toBe(
-    outboxScope('https://a.example', 'mks_one'),
+  const owners = { mks_first: 'inv_ada', mks_again: 'inv_ada', mks_bob: 'inv_bob' };
+  const box = (token: string, baseUrl = 'https://a.example', known = owners) =>
+    webStorageOutbox(
+      shared,
+      new CloudClient(token, { baseUrl, fetcher: accounts(known) }).outboxScope(),
+    );
+  await box('mks_first').put({ id: 'm1', conversationId: 'c1', text: 'private words', at: 1 });
+  // Signed out and in again: a new session token, the same account.
+  expect((await box('mks_again').list('c1')).map((e) => e.text)).toEqual(['private words']);
+  expect(await box('mks_bob').list('c1')).toEqual([]);
+  expect(await box('mks_first', 'https://b.example').list('c1')).toEqual([]);
+  // Keys carry neither the token nor the account id.
+  const keys = [...shared.map.keys()].join();
+  for (const secret of ['mks_first', 'mks_again', 'inv_ada']) expect(keys).not.toContain(secret);
+  expect(outboxScope('https://a.example', 'owner:inv_ada')).not.toBe(
+    outboxScope('https://b.example', 'owner:inv_ada'),
   );
+});
+
+test('a store that cannot list its keys (the phone’s secure store) finds the account’s messages after signing in again', async () => {
+  const secure = new Map<string, string>();
+  const store = {
+    get: async (k: string) => secure.get(k) ?? null,
+    set: async (k: string, v: string) => void secure.set(k, v),
+    remove: async (k: string) => void secure.delete(k),
+  };
+  const owners = { mks_first: 'inv_ada', mks_again: 'inv_ada' };
+  const box = (token: string) =>
+    storageOutbox(
+      store,
+      new CloudClient(token, {
+        baseUrl: 'https://a.example',
+        fetcher: accounts(owners),
+      }).outboxScope(),
+    );
+  await box('mks_first').put({ id: 'm1', conversationId: 'c1', text: 'kept', at: 1 });
+  await box('mks_first').put({ id: 'm2', conversationId: 'c1', text: 'also kept', at: 2 });
+  const again = box('mks_again');
+  expect((await again.list('c1')).map((e) => e.id)).toEqual(['m1', 'm2']);
+  await again.remove('c1', 'm1');
+  expect((await box('mks_first').list('c1')).map((e) => e.id)).toEqual(['m2']);
+  expect([...secure.keys()].every((key) => /^[A-Za-z0-9._-]+$/u.test(key))).toBe(true);
+});
+
+test('before the server names the account, messages are kept under the token and move to the account once it does', async () => {
+  const shared = memoryStorage();
+  // An older server: no /v1/me, so the token's own scope.
+  const old = webStorageOutbox(
+    shared,
+    new CloudClient('mks_first', {
+      baseUrl: 'https://a.example',
+      fetcher: accounts(undefined),
+    }).outboxScope(),
+  );
+  await old.put({ id: 'm1', conversationId: 'c1', text: 'kept under the token', at: 1 });
+  expect((await old.list('c1')).map((e) => e.id)).toEqual(['m1']);
+  // The server now names the account: what the token kept moves to it, so another session finds it.
+  const named = { mks_first: 'inv_ada', mks_again: 'inv_ada' };
+  const upgraded = webStorageOutbox(
+    shared,
+    new CloudClient('mks_first', {
+      baseUrl: 'https://a.example',
+      fetcher: accounts(named),
+    }).outboxScope(),
+  );
+  expect((await upgraded.list('c1')).map((e) => e.id)).toEqual(['m1']);
+  const again = webStorageOutbox(
+    shared,
+    new CloudClient('mks_again', {
+      baseUrl: 'https://a.example',
+      fetcher: accounts(named),
+    }).outboxScope(),
+  );
+  expect((await again.list('c1')).map((e) => e.id)).toEqual(['m1']);
+  // Offline later: the link the outbox kept still finds the account without asking.
+  const offline = webStorageOutbox(
+    shared,
+    new CloudClient('mks_first', {
+      baseUrl: 'https://a.example',
+      fetcher: (async () => {
+        throw new TypeError('offline');
+      }) as typeof fetch,
+    }).outboxScope(),
+  );
+  expect((await offline.list('c1')).map((e) => e.id)).toEqual(['m1']);
+});
+
+test('an unsent message is kept 30 days from its last try, then shown once as expired before it goes', async () => {
+  const storage = memoryStorage();
+  let now = 1_000_000;
+  const api = server(() => {
+    throw new TypeError('offline');
+  });
+  const client = new CloudClient('t', api.fetcher);
+  const open = () =>
+    new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'), () => now);
+  const day = 24 * 60 * 60_000;
+  expect(await open().send('Book the flight')).toBe(false);
+  // Away for a long weekend, and longer: still there, saying why it failed.
+  now += 29 * day;
+  let feed = open();
+  await until(() => feed.getSnapshot().outgoing.length === 1, 'the kept message');
+  expect(feed.getSnapshot().outgoing[0]?.status).toMatchObject({ reason: 'offline' });
+  // Tried again (and failed again): kept for another 30 days from now.
+  expect(await feed.retry(feed.getSnapshot().outgoing[0]?.id ?? '')).toBe(false);
+  now += 29 * day;
+  feed = open();
+  await until(() => feed.getSnapshot().outgoing.length === 1, 'the kept message');
+  expect(feed.getSnapshot().outgoing[0]?.status).toMatchObject({ reason: 'offline' });
+  // Past 30 days since its last try: shown this once, words and all, as expired.
+  now += OUTBOX_KEEP_MS;
+  feed = open();
+  await until(() => feed.getSnapshot().outgoing.length === 1, 'the expired message');
+  expect(feed.getSnapshot().outgoing[0]).toMatchObject({
+    text: 'Book the flight',
+    status: { state: 'failed', reason: 'expired', retryable: true },
+  });
+  await until(() => storage.map.size === 0, 'the device to let it go');
+  feed = open();
+  await new Promise((r) => setTimeout(r, 20));
+  expect(feed.getSnapshot().outgoing).toEqual([]);
+  expect(api.posts).toHaveLength(2);
+});
+
+test('a send kept the earlier way (sessionStorage) is taken over under its own id, never resent on its own', async () => {
+  const session = memoryStorage();
+  const local = memoryStorage();
+  // What an earlier version left: this conversation's unacknowledged send, and a first message's.
+  session.setItem(
+    'maka.pending.c1',
+    JSON.stringify({ id: 'legacy-1', text: 'Ship it', at: Date.now() }),
+  );
+  const start = JSON.stringify({ id: 'start-1', text: 'Hi', at: Date.now(), conversationId: 'c9' });
+  session.setItem('maka.pending.start', start);
+  const api = server();
+  const outbox = webStorageOutbox(local, 'me');
+  void adoptPendingSend(storagePendingSends(session), outbox, 'c1');
+  const feed = new ConversationFeed(new CloudClient('t', api.fetcher), 'c1', 0, outbox);
+  await until(() => feed.getSnapshot().outgoing.length === 1, 'the earlier send');
+  expect(feed.getSnapshot().outgoing[0]).toMatchObject({
+    id: 'legacy-1',
+    text: 'Ship it',
+    status: { state: 'failed', reason: 'interrupted', retryable: true },
+  });
+  await until(() => !session.map.has('maka.pending.c1'), 'the old record to go');
+  expect(session.map.get('maka.pending.start')).toBe(start);
+  expect(api.posts).toHaveLength(0);
+  // Sent again by the person: the id the server may already have.
+  expect(await feed.retry('legacy-1')).toBe(true);
+  expect(api.posts.map((p) => p.clientMessageId)).toEqual(['legacy-1']);
 });
 
 test('an older message with the same words, replayed late, never takes the place of an unsent or unconfirmed one', async () => {

@@ -4,7 +4,7 @@ import type { ArtifactListing, InboxItem, Mode, Question, TaskControl } from './
 import { errorText } from './errors';
 import { randomId } from './ids';
 import { inboxAnswerer } from './inboxAnswer';
-import { memoryOutbox, type Outbox, type OutboxEntry } from './outbox';
+import { memoryOutbox, OUTBOX_KEEP_MS, type Outbox, type OutboxEntry } from './outbox';
 import { displayText } from './presentation';
 import {
   applyEvent,
@@ -34,7 +34,12 @@ export type SendFailure =
   /** This device's sign-in is no longer valid. */
   | 'signed_out'
   /** The app was closed or reloaded before the server confirmed it. It may have arrived. */
-  | 'interrupted';
+  | 'interrupted'
+  /**
+   * Kept unsent for longer than `OUTBOX_KEEP_MS` since its last try: shown this once (it can still be
+   * sent again, or its words copied) and no longer kept on the device.
+   */
+  | 'expired';
 
 /**
  * Where a message the person sent stands, until the conversation shows it: `queued` (kept on the
@@ -142,7 +147,8 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
    * Messages kept from an earlier visit, a reload or a crash come back as failed ("interrupted"):
    * the person decides whether to send them again. They are never resent on their own, which could
    * post something hours after the person moved on. A message the conversation shows by then is
-   * dropped instead.
+   * dropped instead. One kept past `OUTBOX_KEEP_MS` since its last try is shown this once, as
+   * expired, and deleted from the device: its words are never dropped without being shown.
    */
   private async restore(): Promise<void> {
     let entries: OutboxEntry[];
@@ -152,19 +158,31 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
       return;
     }
     if (entries.length === 0) return;
+    const now = this.now();
+    const expired = (entry: OutboxEntry) => now - (entry.keptAt ?? entry.at) >= OUTBOX_KEEP_MS;
+    const shown: string[] = [];
     this.update((s) => {
       const known = new Set(s.outgoing.map((message) => message.id));
       const back = entries
         .filter((entry) => !known.has(entry.id))
-        .map(
-          (entry): OutgoingMessage => ({
+        .map((entry): OutgoingMessage => {
+          shown.push(entry.id);
+          return {
             ...outgoingOf(entry),
             // A message whose last try ended without an answer may still have been in flight.
-            status: { state: 'failed', reason: entry.failure ?? 'interrupted', retryable: true },
-          }),
-        );
+            status: {
+              state: 'failed',
+              reason: expired(entry) ? 'expired' : (entry.failure ?? 'interrupted'),
+              retryable: true,
+            },
+          };
+        });
       return back.length === 0 ? s : { ...s, outgoing: [...back, ...s.outgoing] };
     });
+    // Shown now, so no longer kept; sending it again keeps it anew.
+    for (const entry of entries)
+      if (expired(entry) && shown.includes(entry.id))
+        void this.outbox.remove(this.conversationId, entry.id).catch(() => {});
     this.settle();
   }
 
@@ -382,7 +400,7 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     let sent = false;
     const ran = await this.act('message', async () => {
       // Kept before the post: a reload while it is in flight finds it.
-      await this.outbox.put(entryOf(this.conversationId, message)).catch(() => {});
+      await this.outbox.put(entryOf(this.conversationId, message, this.now())).catch(() => {});
       this.setOutgoing(message.id, { state: 'sending' });
       try {
         const answer: unknown = await this.client.postMessage(
@@ -406,7 +424,10 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
         if (failure.reason === 'offline' || failure.reason === 'server') {
           if (still)
             await this.outbox
-              .put({ ...entryOf(this.conversationId, message), failure: failure.reason })
+              .put({
+                ...entryOf(this.conversationId, message, this.now()),
+                failure: failure.reason,
+              })
               .catch(() => {});
           return;
         }
@@ -427,12 +448,14 @@ function outgoingOf(entry: OutboxEntry): Omit<OutgoingMessage, 'status'> {
   };
 }
 
-function entryOf(conversationId: string, message: OutgoingMessage): OutboxEntry {
+/** The outbox record of a message, kept from `keptAt` (its latest try). */
+function entryOf(conversationId: string, message: OutgoingMessage, keptAt: number): OutboxEntry {
   return {
     id: message.id,
     conversationId,
     text: message.text,
     at: message.at,
+    keptAt,
     ...(message.mode === undefined ? {} : { mode: message.mode }),
   };
 }
@@ -494,6 +517,8 @@ export function sendFailureText(reason: SendFailure): string {
       return 'A different message was already sent under this id.';
     case 'signed_out':
       return 'Sign in again to send it.';
+    case 'expired':
+      return 'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.';
     case 'interrupted':
       return 'The app closed before the server confirmed it. It may have arrived.';
   }

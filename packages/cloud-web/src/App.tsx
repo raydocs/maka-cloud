@@ -383,7 +383,13 @@ export function ConversationView({
 }) {
   const { t, shared } = useT();
   const feed = useMemo(
-    () => new ConversationFeed(client, conversation.conversationId, undefined, outboxFor(client)),
+    () =>
+      new ConversationFeed(
+        client,
+        conversation.conversationId,
+        undefined,
+        outboxFor(client, conversation.conversationId),
+      ),
     [client, conversation.conversationId],
   );
   useEffect(() => {

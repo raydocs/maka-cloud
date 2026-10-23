@@ -220,6 +220,8 @@ export const en = {
   'A different message was already sent under this id.':
     'A different message was already sent under this id.',
   'Sign in again to send it.': 'Sign in again to send it.',
+  'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.':
+    'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.',
   'The app closed before the server confirmed it. It may have arrived.':
     'The app closed before the server confirmed it. It may have arrived.',
   'Send message': 'Send message',
@@ -723,6 +725,8 @@ export const zhHans: Record<Key, string> = {
   'The server refused this message.': '服务器拒绝了这条消息。',
   'A different message was already sent under this id.': '这个编号下已经发送过另一条消息。',
   'Sign in again to send it.': '请重新登录后再发送。',
+  'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.':
+    '这条消息已有 30 天未发送，不再保存在这台设备上。请重新发送，或复制其中的文字。',
   'The app closed before the server confirmed it. It may have arrived.':
     '服务器确认之前应用已关闭，消息可能已经送达。',
   'Send message': '发送',
@@ -1209,6 +1213,8 @@ export const zhHant: Record<Key, string> = {
   'The server refused this message.': '伺服器拒絕了這則訊息。',
   'A different message was already sent under this id.': '這個編號下已經傳送過另一則訊息。',
   'Sign in again to send it.': '請重新登入後再傳送。',
+  'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.':
+    '這則訊息已有 30 天未傳送，不再儲存在這台裝置上。請重新傳送，或複製其中的文字。',
   'The app closed before the server confirmed it. It may have arrived.':
     '伺服器確認之前應用程式已關閉，訊息可能已經送達。',
   'Send message': '傳送',

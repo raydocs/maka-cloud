@@ -1,4 +1,5 @@
 import type { Mode } from './contract';
+import type { PendingSends } from './pending';
 
 /**
  * A message the person sent that the server has not acknowledged yet. It is kept from before the
@@ -12,6 +13,8 @@ export interface OutboxEntry {
   text: string;
   /** When the person sent it, on this device's clock. */
   at: number;
+  /** When it was last tried (or kept), on this device's clock: how long it is kept counts from here. */
+  keptAt?: number;
   mode?: Mode;
   /** Why the last try failed, when it ended in a failure that sending again can help. */
   failure?: 'offline' | 'server';
@@ -20,7 +23,7 @@ export interface OutboxEntry {
 /**
  * Where unacknowledged messages are kept, for one account on one server. `put` and `remove` touch
  * only their own message, so a late call of an earlier view, or another tab, can only clear the
- * message it names.
+ * message it names. Nothing is dropped for its age here: the conversation decides (`OUTBOX_KEEP_MS`).
  */
 export interface Outbox {
   list(conversationId: string): Promise<OutboxEntry[]>;
@@ -40,11 +43,28 @@ export interface OutboxStorage {
   keys?(): string[] | Promise<string[]>;
 }
 
-/** After this long an unacknowledged message is dropped, text and all, instead of offered again. */
-export const OUTBOX_KEEP_MS = 24 * 60 * 60_000;
+/**
+ * Whose outbox it is. `account` is the account's scope on its server, the same across its sessions
+ * (`CloudClient.outboxScope`); it is undefined when the server cannot say (an older server, or no
+ * answer yet). `token` is this token's own scope, used until the account's is known; what was kept
+ * under it moves to the account's scope once that is known.
+ */
+export interface OutboxScope {
+  account(): Promise<string | undefined>;
+  token: string;
+}
+
+/**
+ * How long an unsent message is kept on the device after its last try. Past that it is shown one
+ * last time, as not sent and no longer kept, and then deleted: never dropped without being shown.
+ */
+export const OUTBOX_KEEP_MS = 30 * 24 * 60 * 60_000;
 
 /** At most this many messages are kept per conversation; the oldest go first. */
 const MAX_PER_CONVERSATION = 20;
+
+/** How long working out the account's scope may hold the outbox up before the token's is used. */
+const ACCOUNT_WAIT_MS = 3000;
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/u;
 
@@ -52,12 +72,13 @@ const ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const part = (value: string) => value.replace(/[^A-Za-z0-9_-]/gu, '_');
 
 /**
- * A short name for an account on a server, to keep its unsent messages apart from another
- * account's on the same device. It only separates; it is not a secret and does not reveal the token
- * (two independent 32-bit hashes, so it works where Web Crypto does not, as on React Native).
+ * A short name for one account (or one token) on a server, to keep its unsent messages apart from
+ * another's on the same device. It only separates; it is not a secret and does not reveal what it
+ * was made from (two independent 32-bit hashes, so it works where Web Crypto does not, as on React
+ * Native). Never pass a raw token where a key would show it: this is what keys carry instead.
  */
-export function outboxScope(server: string, token: string): string {
-  const input = `${server}\n${token}`;
+export function outboxScope(server: string, who: string): string {
+  const input = `${server}\n${who}`;
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
   for (let i = 0; i < input.length; i += 1) {
@@ -79,6 +100,7 @@ function isEntry(value: unknown, conversationId: string): value is OutboxEntry {
     v['conversationId'] === conversationId &&
     typeof v['text'] === 'string' &&
     typeof v['at'] === 'number' &&
+    (v['keptAt'] === undefined || typeof v['keptAt'] === 'number') &&
     (v['mode'] === undefined || typeof v['mode'] === 'string') &&
     (v['failure'] === undefined || v['failure'] === 'offline' || v['failure'] === 'server')
   );
@@ -88,39 +110,64 @@ function isEntry(value: unknown, conversationId: string): value is OutboxEntry {
 const queues = new WeakMap<object, Promise<unknown>>();
 const memoryQueue = { current: Promise.resolve() as Promise<unknown> };
 
+const quietly = async <T>(work: () => T | Promise<T>, fallback: T): Promise<T> => {
+  try {
+    return await work();
+  } catch {
+    return fallback;
+  }
+};
+
 /**
- * An outbox over a store of strings, for one `scope` (see `outboxScope`): each message under a key
- * of its own, `<prefix><scope>.<conversation>.<id>`, so writers in other tabs never overwrite each
- * other's messages. Junk and entries past `OUTBOX_KEEP_MS` are dropped when read. A store that is
- * missing, full or blocked keeps nothing: the message is still sent, it just is not offered again
- * after a reload.
+ * An outbox over a store of strings: each message under a key of its own,
+ * `<prefix><scope>.<conversation>.<id>`, so writers in other tabs never overwrite each other's
+ * messages. Junk records are dropped when read. A store that is missing, full or blocked keeps
+ * nothing: the message is still sent, it just is not offered again after a reload.
  */
 export function storageOutbox(
   storage: OutboxStorage | undefined,
-  scope: string,
+  scope: string | OutboxScope,
   prefix = 'maka.outbox.',
-  now: () => number = Date.now,
 ): Outbox {
-  const base = (conversationId: string) => `${prefix}${part(scope)}.${part(conversationId)}`;
-  const keyOf = (conversationId: string, id: string) => `${base(conversationId)}.${part(id)}`;
-  const fresh = (entry: OutboxEntry) => now() - entry.at >= 0 && now() - entry.at < OUTBOX_KEEP_MS;
-  const quietly = async <T>(work: () => T | Promise<T>, fallback: T): Promise<T> => {
-    try {
-      return await work();
-    } catch {
-      return fallback;
+  const whose: OutboxScope =
+    typeof scope === 'string' ? { account: async () => scope, token: scope } : scope;
+  const base = (s: string, conversationId: string) => `${prefix}${part(s)}.${part(conversationId)}`;
+  const keyOf = (s: string, conversationId: string, id: string) =>
+    `${base(s, conversationId)}.${part(id)}`;
+
+  // The token's scope is linked to the account's once known, so an offline start still finds it.
+  const linkKey = `${prefix}account.${part(whose.token)}`;
+  let resolved: string | undefined;
+  const current = async (): Promise<string> => {
+    if (resolved !== undefined) return resolved;
+    const linked = await quietly(() => storage?.get(linkKey), null);
+    if (linked && ID.test(linked)) {
+      resolved = linked;
+      return linked;
     }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const account = await Promise.race([
+      quietly(() => whose.account(), undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ACCOUNT_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (account === undefined || !ID.test(account)) return whose.token;
+    resolved = account;
+    if (account !== whose.token) await quietly(() => storage?.set(linkKey, account), undefined);
+    return account;
   };
 
   /** The ids kept for a conversation: from the store's own keys, or from the index. */
-  const ids = async (conversationId: string): Promise<string[]> => {
+  const ids = async (s: string, conversationId: string): Promise<string[]> => {
     if (!storage) return [];
-    const head = `${base(conversationId)}.`;
+    const head = `${base(s, conversationId)}.`;
     if (storage.keys) {
       const keys = await quietly(() => storage.keys?.() ?? [], [] as string[]);
       return keys.filter((key) => key.startsWith(head)).map((key) => key.slice(head.length));
     }
-    const raw = await quietly(() => storage.get(base(conversationId)), null);
+    const raw = await quietly(() => storage.get(base(s, conversationId)), null);
     let parsed: unknown;
     try {
       parsed = raw ? JSON.parse(raw) : [];
@@ -129,22 +176,22 @@ export function storageOutbox(
     }
     return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
   };
-  const writeIndex = async (conversationId: string, list: string[]) => {
+  const writeIndex = async (s: string, conversationId: string, list: string[]) => {
     if (!storage || storage.keys) return;
     await quietly(
       () =>
         list.length === 0
-          ? storage.remove(base(conversationId))
-          : storage.set(base(conversationId), JSON.stringify(list)),
+          ? storage.remove(base(s, conversationId))
+          : storage.set(base(s, conversationId), JSON.stringify(list)),
       undefined,
     );
   };
-  const read = async (conversationId: string): Promise<OutboxEntry[]> => {
+  const read = async (s: string, conversationId: string): Promise<OutboxEntry[]> => {
     const entries: OutboxEntry[] = [];
     const gone: string[] = [];
-    const listed = await ids(conversationId);
+    const listed = await ids(s, conversationId);
     for (const id of listed) {
-      const raw = await quietly(() => storage?.get(keyOf(conversationId, id)), null);
+      const raw = await quietly(() => storage?.get(keyOf(s, conversationId, id)), null);
       let parsed: unknown;
       try {
         parsed = raw ? JSON.parse(raw) : undefined;
@@ -154,19 +201,51 @@ export function storageOutbox(
       const other = (parsed as { conversationId?: unknown } | undefined)?.conversationId;
       // Another conversation whose id reads the same once made safe for a key: not this one's.
       if (typeof other === 'string' && other !== conversationId) continue;
-      if (isEntry(parsed, conversationId) && parsed.id === id && fresh(parsed))
-        entries.push(parsed);
+      if (isEntry(parsed, conversationId) && parsed.id === id) entries.push(parsed);
       else gone.push(id);
     }
-    // Junk and expired records are deleted, text and all, not just ignored.
+    // Junk records are deleted, not just ignored.
     for (const id of gone)
-      await quietly(() => storage?.remove(keyOf(conversationId, id)), undefined);
+      await quietly(() => storage?.remove(keyOf(s, conversationId, id)), undefined);
     if (gone.length > 0)
       await writeIndex(
+        s,
         conversationId,
         listed.filter((id) => !gone.includes(id)),
       );
     return entries.sort((a, b) => a.at - b.at);
+  };
+  const write = async (s: string, entry: OutboxEntry): Promise<boolean> => {
+    if (!storage || !ID.test(entry.id)) return false;
+    const set = await quietly(async () => {
+      await storage.set(keyOf(s, entry.conversationId, entry.id), JSON.stringify(entry));
+      return true;
+    }, false);
+    if (!set) return false;
+    // The oldest beyond the cap go.
+    const others = (await read(s, entry.conversationId)).filter((e) => e.id !== entry.id);
+    const dropped = new Set(
+      others.slice(0, Math.max(0, others.length - (MAX_PER_CONVERSATION - 1))).map((e) => e.id),
+    );
+    for (const id of dropped)
+      await quietly(() => storage.remove(keyOf(s, entry.conversationId, id)), undefined);
+    if (!storage.keys) {
+      const listed = (await ids(s, entry.conversationId)).filter(
+        (id) => id !== entry.id && !dropped.has(id),
+      );
+      await writeIndex(s, entry.conversationId, [...listed, entry.id]);
+    }
+    return true;
+  };
+  const erase = async (s: string, conversationId: string, id: string) => {
+    if (!storage) return;
+    await quietly(() => storage.remove(keyOf(s, conversationId, id)), undefined);
+    if (!storage.keys)
+      await writeIndex(
+        s,
+        conversationId,
+        (await ids(s, conversationId)).filter((kept) => kept !== id),
+      );
   };
 
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -179,44 +258,30 @@ export function storageOutbox(
   };
 
   return {
-    list: (conversationId) => serial(() => read(conversationId)),
+    list: (conversationId) =>
+      serial(async () => {
+        const s = await current();
+        // What was kept under the token before the account was known moves to the account.
+        if (s !== whose.token)
+          for (const entry of await read(whose.token, conversationId))
+            if (await write(s, entry)) await erase(whose.token, conversationId, entry.id);
+        return read(s, conversationId);
+      }),
     put: (entry) =>
       serial(async () => {
-        if (!storage || !ID.test(entry.id)) return;
-        const set = await quietly(async () => {
-          await storage.set(keyOf(entry.conversationId, entry.id), JSON.stringify(entry));
-          return true;
-        }, false);
-        if (!set) return;
-        // The oldest beyond the cap go.
-        const others = (await read(entry.conversationId)).filter((e) => e.id !== entry.id);
-        const dropped = new Set(
-          others.slice(0, Math.max(0, others.length - (MAX_PER_CONVERSATION - 1))).map((e) => e.id),
-        );
-        for (const id of dropped)
-          await quietly(() => storage.remove(keyOf(entry.conversationId, id)), undefined);
-        if (!storage.keys) {
-          const listed = (await ids(entry.conversationId)).filter(
-            (id) => id !== entry.id && !dropped.has(id),
-          );
-          await writeIndex(entry.conversationId, [...listed, entry.id]);
-        }
+        await write(await current(), entry);
       }),
     remove: (conversationId, id) =>
       serial(async () => {
-        if (!storage) return;
-        await quietly(() => storage.remove(keyOf(conversationId, id)), undefined);
-        if (!storage.keys)
-          await writeIndex(
-            conversationId,
-            (await ids(conversationId)).filter((kept) => kept !== id),
-          );
+        const s = await current();
+        await erase(s, conversationId, id);
+        if (s !== whose.token) await erase(whose.token, conversationId, id);
       }),
   };
 }
 
 /** An outbox in memory only: kept while the app runs, gone on a reload. */
-export function memoryOutbox(now: () => number = Date.now): Outbox {
+export function memoryOutbox(): Outbox {
   const map = new Map<string, string>();
   return storageOutbox(
     {
@@ -230,8 +295,6 @@ export function memoryOutbox(now: () => number = Date.now): Outbox {
       keys: () => [...map.keys()],
     },
     'memory',
-    'maka.outbox.',
-    now,
   );
 }
 
@@ -241,8 +304,7 @@ export function memoryOutbox(now: () => number = Date.now): Outbox {
  */
 export function webStorageOutbox(
   storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'> | undefined,
-  scope: string,
-  now: () => number = Date.now,
+  scope: string | OutboxScope,
 ): Outbox {
   return storageOutbox(
     storage && {
@@ -259,7 +321,25 @@ export function webStorageOutbox(
       },
     },
     scope,
-    'maka.outbox.',
-    now,
   );
+}
+
+/**
+ * Moves an unacknowledged send of the conversation kept the earlier way (`PendingSends`: the web's
+ * `sessionStorage` record `maka.pending.<conversationId>`) into the outbox, under the id it was
+ * posted with, so sending it again stays the same message to the server. Call it before the
+ * conversation's feed opens: the outbox runs its calls in order, so the feed then finds it. The old
+ * record is cleared only once the outbox holds it. A first message's record (the starter's, with a
+ * conversation id of its own) is left to the starter.
+ */
+export async function adoptPendingSend(
+  sends: PendingSends,
+  outbox: Outbox,
+  conversationId: string,
+): Promise<void> {
+  const kept = sends.read(conversationId);
+  if (!kept || kept.conversationId !== undefined) return;
+  await outbox.put({ id: kept.id, conversationId, text: kept.text, at: kept.at, keptAt: kept.at });
+  if ((await outbox.list(conversationId)).some((entry) => entry.id === kept.id))
+    sends.clear(conversationId);
 }

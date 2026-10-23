@@ -436,6 +436,8 @@ export const routes = {
   pushSubscriptions: '/v1/push/subscriptions',
   // The person's own settings: `GET`, and `PATCH` with `{language}`.
   settings: '/v1/settings',
+  // Who the token signs in as: `{ ownerId }`, the same for every session of an account.
+  me: '/v1/me',
 } as const;
 
 /** The languages the server speaks to a person. A person who never chose reads `zh-Hans`. */

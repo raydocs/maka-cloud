@@ -342,6 +342,8 @@ export const PHRASES_HANT: Record<string, string> = {
   'The server refused this message.': '伺服器拒絕了這則訊息。',
   'A different message was already sent under this id.': '這個編號下已經傳送過另一則訊息。',
   'Sign in again to send it.': '請重新登入後再傳送。',
+  'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.':
+    '這則訊息已有 30 天未傳送，不再儲存在這台裝置上。請重新傳送，或複製其中的文字。',
   'The app closed before the server confirmed it. It may have arrived.':
     '伺服器確認之前應用程式已關閉，訊息可能已經送達。',
   'The event stream went silent.': '連線中斷了。',

@@ -30,7 +30,7 @@ import {
 } from './contract';
 import type { ConnectionState } from './connection';
 import { randomId } from './ids';
-import { outboxScope } from './outbox';
+import { type OutboxScope, outboxScope } from './outbox';
 
 /** A device session's token starts so; any other bearer token is an invite. */
 const SESSION_TOKEN_PREFIX = 'mks_';
@@ -392,9 +392,39 @@ export class CloudClient {
   endSession() {
     return this.request<void>('/v1/auth/sign-out', { method: 'POST' });
   }
-  /** The outbox scope of this server and token (`outboxScope`): one account's unsent messages. */
-  outboxScope(): string {
-    return outboxScope(this.baseUrl, this.token);
+  private owner: Promise<string | undefined> | undefined;
+  /**
+   * The account this token signs in as (`GET /v1/me`), the same for every session of it. Undefined
+   * on a server without the route (kept, so it is asked once) or when there is no answer (asked
+   * again next time).
+   */
+  ownerId(): Promise<string | undefined> {
+    if (!this.owner) {
+      const asking = this.request<{ ownerId?: unknown }>(routes.me, {}, 'me').then(
+        (answer) =>
+          typeof answer?.ownerId === 'string' && answer.ownerId ? answer.ownerId : undefined,
+        (error: unknown) => {
+          if (!(error instanceof Unsupported) && this.owner === asking) this.owner = undefined;
+          return undefined;
+        },
+      );
+      this.owner = asking;
+    }
+    return this.owner;
+  }
+  /**
+   * Whose unsent messages these are (`OutboxScope`): the account on this server once the server
+   * names it, so signing in again (a new token) finds them; this token until then. Neither carries
+   * the token or the account id itself, only a hash of it with the server.
+   */
+  outboxScope(): OutboxScope {
+    return {
+      account: async () => {
+        const owner = await this.ownerId();
+        return owner === undefined ? undefined : outboxScope(this.baseUrl, `owner:${owner}`);
+      },
+      token: outboxScope(this.baseUrl, `token:${this.token}`),
+    };
   }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {
