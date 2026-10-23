@@ -44,9 +44,16 @@ export class ApiError extends Error {
     readonly code?: string,
     /** The error body, as the server sent it (a refused inbox answer carries the refreshed item). */
     readonly body?: unknown,
+    readonly retryAfterMs?: number,
   ) {
     super(`Request failed (${status}).`);
   }
+}
+function retryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
 }
 /** The server has no such feature: its route answered 404 or 405. */
 export class Unsupported extends Error {}
@@ -193,6 +200,7 @@ export class CloudClient {
       response.status,
       typeof body?.error === 'string' ? body.error : undefined,
       body,
+      retryAfterMs(response.headers.get('Retry-After')),
     );
   }
 

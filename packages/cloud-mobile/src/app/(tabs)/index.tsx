@@ -27,6 +27,7 @@ import {
   TOP_BAR,
 } from '@/components/ui';
 import { type Language, useT } from '@/lib/i18n';
+import { startersFor } from '@/lib/ideas';
 import { useWorkspace } from '@/lib/session';
 import {
   partOfDay,
@@ -36,14 +37,12 @@ import {
   type WorkingRow,
 } from '@/lib/today';
 
-/** What a quiet day can start with; one tap puts it in the box, the person sends it. */
-const IDEAS = ['home.idea.1', 'home.idea.2', 'home.idea.3'] as const;
-
 /**
  * Home is the day's page, built from the cards the server keeps for this person (`/v1/home`), in a
  * fixed order: the date and a greeting, what needs the person (the only place for the attention
  * colour), what is working now, what happened since the last visit, what runs next, and on a quiet
- * day three ideas. A part with nothing in it is left out. Starting work is the composer's job.
+ * day ideas from the person's own projects and conversations (the fixed three when there are
+ * none). A part with nothing in it is left out. Starting work is the composer's job.
  * Leaving Home (another section, or the app going to the background) tells the server which cards
  * were shown, once per visit.
  */
@@ -191,7 +190,8 @@ export default function Home() {
                   <DecisionCard
                     item={item}
                     disabled={busy}
-                    onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+                    onAnswer={(optionId, text) => feed.answer(item, optionId, text)}
+                    onOpenGrants={() => router.push('/me')}
                   />
                   <Pressable
                     accessibilityRole="button"
@@ -272,16 +272,17 @@ export default function Home() {
             >
               <T kind="heading">{say('home.ideas.title')}</T>
               <ButtonRow>
-                {IDEAS.map((idea) => (
+                {startersFor(snapshot.projects, conversations, undefined, say).map((idea) => (
                   <PillButton
-                    key={idea}
-                    label={say(idea)}
-                    id={idea}
+                    key={idea.id}
+                    label={idea.label}
+                    id={idea.id}
                     compact
                     // While a conversation starts, the draft is what is being sent.
                     disabled={starting}
                     onPress={() => {
-                      setDraft(say(idea));
+                      if (idea.open !== undefined) return openConversation(idea.open);
+                      setDraft(idea.fill);
                       starter.draftEdited();
                     }}
                   />

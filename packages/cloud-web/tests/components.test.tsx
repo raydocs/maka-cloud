@@ -626,3 +626,22 @@ test('decision fallback waits five seconds and until the stream has finished con
     vi.useRealTimers();
   }
 });
+
+test('conversation drafts survive switching away and back', () => {
+  const api = fakeApi([]);
+  const client = new CloudClient('fake', api.fetcher);
+  const first = { ...conversation, conversationId: 'draft-first' };
+  const second = { ...conversation, conversationId: 'draft-second' };
+  const view = render(<ConversationView key="first" client={client} conversation={first} />);
+  fireEvent.change(screen.getByLabelText('Keep the conversation going'), {
+    target: { value: 'Unsent words' },
+  });
+  view.rerender(<ConversationView key="second" client={client} conversation={second} />);
+  expect((screen.getByLabelText('Keep the conversation going') as HTMLTextAreaElement).value).toBe(
+    '',
+  );
+  view.rerender(<ConversationView key="first" client={client} conversation={first} />);
+  expect((screen.getByLabelText('Keep the conversation going') as HTMLTextAreaElement).value).toBe(
+    'Unsent words',
+  );
+});

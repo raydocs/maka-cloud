@@ -199,15 +199,20 @@ export class HomeFeed extends Store<HomeSnapshot> {
     );
   }
 
-  /** Answers a card once; a second tap while one is in flight does nothing. */
-  async answer(item: InboxItem, optionId: string, text?: string): Promise<void> {
-    if (this.pending) return;
+  /**
+   * Answers a card once; a second tap while one is in flight does nothing. Resolves `true` only when
+   * the server took this answer.
+   */
+  async answer(item: InboxItem, optionId: string, text?: string): Promise<boolean> {
+    if (this.pending) return false;
     this.pending = true;
     this.patch({ busy: true, answerError: '' });
     try {
       await this.answerItem(item, optionId, text);
+      return true;
     } catch (e) {
       this.patch({ answerError: errorText(e) });
+      return false;
     } finally {
       this.pending = false;
       this.patch({ busy: false });
