@@ -26,6 +26,8 @@ export function SetupCards({
   version: number;
 }) {
   const { t, shared } = useT();
+  const pushAvailable =
+    'Notification' in globalThis && 'PushManager' in globalThis && 'serviceWorker' in navigator;
   const [readiness, setReadiness] = useState<Readiness>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -48,44 +50,44 @@ export function SetupCards({
       );
     };
     // Permission comes from this client, never inferred from a push subscription.
-    if ('Notification' in globalThis)
-      void client
-        .setup({ notificationsAllowed: Notification.permission === 'granted' })
-        .then(refresh, refresh);
+    if (pushAvailable && Notification.permission === 'granted')
+      void client.setup({ notificationsAllowed: true }).then(refresh, refresh);
     else refresh();
     window.addEventListener('focus', refresh);
     return () => {
       live = false;
       window.removeEventListener('focus', refresh);
     };
-  }, [client, version, retry]);
+  }, [client, version, retry, pushAvailable]);
   return (
     <>
-      {readiness?.cards.map((card) => (
-        <section key={card.id} className="card section-card">
-          <h2>{t(titles[card.id])}</h2>
-          <button className="quiet-action" type="button" onClick={() => onAction(card.action)}>
-            {t(titles[card.id])}
-          </button>
-          <button
-            className="quiet-action"
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void client
-                .setup({ dismiss: card.id })
-                .then(
-                  (value) => setReadiness(value.readiness),
-                  (failure) => setError(errorText(failure)),
-                )
-                .finally(() => setBusy(false));
-            }}
-          >
-            {t('Later')}
-          </button>
-        </section>
-      ))}
+      {readiness?.cards
+        .filter((card) => card.id !== 'notifications' || pushAvailable)
+        .map((card) => (
+          <section key={card.id} className="card section-card">
+            <h2>{t(titles[card.id])}</h2>
+            <button className="quiet-action" type="button" onClick={() => onAction(card.action)}>
+              {t(titles[card.id])}
+            </button>
+            <button
+              className="quiet-action"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void client
+                  .setup({ dismiss: card.id })
+                  .then(
+                    (value) => setReadiness(value.readiness),
+                    (failure) => setError(errorText(failure)),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t('Later')}
+            </button>
+          </section>
+        ))}
       {error && (
         <section className="card section-card">
           <p role="alert">{shared(error)}</p>

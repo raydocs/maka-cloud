@@ -889,10 +889,6 @@ export class SqliteSpendJournal implements SpendJournal {
     };
   }
 
-  /**
-   * Everything the accounts spent on the UTC day of `at`, in USD: what settled plus what is still
-   * held at its reserved amount. This is the number the server's daily cap counts.
-   */
   recordCap(taskId: string, owner: string, cap: CapHit, at = Date.now()): void {
     const usage = this.accountUsage(cap.inviteId ?? '', at);
     const run = this.db
@@ -942,6 +938,10 @@ export class SqliteSpendJournal implements SpendJournal {
     return { dayUsd: sum('day', iso.slice(0, 10)), monthUsd: sum('month', iso.slice(0, 7)) };
   }
 
+  /**
+   * Everything the accounts spent on the UTC day of `at`, in USD: what settled plus what is still
+   * held at its reserved amount. This is the number the server's daily cap counts.
+   */
   serverDaySpendUsd(at: number = Date.now()): number {
     const day = new Date(at).toISOString().slice(0, 10);
     return (

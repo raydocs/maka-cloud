@@ -82,10 +82,34 @@ test('run refusal snapshots run spend rather than the whole day and survives reo
     () => now,
   );
   assert.deepEqual(source.refusal?.('task'), {
-    scope: 'task',
+    scope: 'run',
     usedUsd: 2,
     limitUsd: 3,
     resetsAt: null,
     nextStep: 'ask_owner',
   });
+});
+
+test('service refusals never expose operator spend or limits, including stored hits', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cloud-service-quota-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const journal = new SqliteSpendJournal(join(dir, 'spend.sqlite'));
+  t.after(() => journal.close());
+  const now = Date.UTC(2026, 9, 23);
+  const ledger = journal.accountLedger({
+    limitsOf: () => ({ dailyUsd: 100, monthlyUsd: 500 }),
+    serverDailyUsd: () => 1000,
+    now: () => now,
+  });
+  ledger.reserve({ inviteId: 'other' }, 'other-spend', 10);
+  const source = quotaSource(
+    journal,
+    { limits: () => undefined },
+    { inviteDailyUsd: 100, inviteMonthlyUsd: 500, serverDailyUsd: 10 },
+    () => now,
+  );
+  const expected = { scope: 'service', resetsAt: Date.UTC(2026, 9, 24), nextStep: 'wait' };
+  assert.deepEqual(source.usage('a').refusal, expected);
+  journal.recordCap('task', 'a', { scope: 'server_daily', limitUsd: 10 }, now);
+  assert.deepEqual(source.refusal?.('task'), expected);
 });

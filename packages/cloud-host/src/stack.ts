@@ -232,9 +232,9 @@ export async function startStack(
       accountLedgerOf(journal, inviteStore, config.spend, pause),
       // A cap that ends spending is told to the conversation and raised as a budget item.
       (event) => {
+        reportCap(event);
         if (event.taskId)
           journal.recordCap(event.taskId, event.cap.inviteId ?? 'server', event.cap);
-        reportCap(event);
       },
     );
   } catch (error) {

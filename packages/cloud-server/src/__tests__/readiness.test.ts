@@ -46,6 +46,8 @@ test('Home readiness uses stored facts, persists later, isolates owners and neve
   assert.deepEqual((await readiness()).completed, ['model']);
   assert.equal((await postJson(h, '/v1/home/setup', { dismiss: 'language' })).status, 200);
   assert.equal((await postJson(h, '/v1/home/setup', { notificationsAllowed: true })).status, 200);
+  // A second browser's default/denied permission cannot undo an enabled device.
+  await postJson(h, '/v1/home/setup', { notificationsAllowed: false });
   h.server.invites.setLanguage(h.inviteId, 'zh-Hant');
   const conversationId = await newConversation(h);
   assert.equal(
@@ -92,7 +94,7 @@ test('usage and a refused message expose the same typed reason, while duplicates
   blocked = true;
   assert.equal((await postJson(h, path, message)).status, 202);
   const refusal = await postJson(h, path, { text: 'new message' });
-  assert.equal(refusal.status, 429);
+  assert.equal(refusal.status, 402);
   assert.deepEqual(await refusal.json(), { error: 'budget_exceeded', quota: reason });
   assert.deepEqual(await (await h.api('/v1/usage')).json(), { limits: [reason], refusal: reason });
   assert.equal((await h.api('/v1/usage', { token: null })).status, 401);

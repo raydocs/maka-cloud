@@ -193,7 +193,7 @@ export class HomeStore {
     if (report.notificationsAllowed !== undefined)
       this.db
         .prepare(
-          `INSERT INTO home_permissions VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET notifications_allowed = excluded.notifications_allowed`,
+          `INSERT INTO home_permissions VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET notifications_allowed = MAX(home_permissions.notifications_allowed, excluded.notifications_allowed)`,
         )
         .run(owner, Number(report.notificationsAllowed));
   }

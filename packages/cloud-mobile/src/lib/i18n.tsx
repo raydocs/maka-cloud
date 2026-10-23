@@ -1,3 +1,4 @@
+import { localizedQuotaText } from '@maka-cloud/client';
 import Constants from 'expo-constants';
 import { getLocales } from 'expo-localization';
 import {
@@ -94,7 +95,8 @@ export function translator(lang: Language): Translator {
   return {
     lang,
     t: (key, params) => fill(strings[key], params),
-    tx: (text) => (phrases ? phrase(text, phrases, patterns) : text),
+    tx: (text) =>
+      localizedQuotaText(text, lang) ?? (phrases ? phrase(text, phrases, patterns) : text),
     choice: (id, label) => {
       const key = lang === 'en' ? undefined : CHOICE_KEYS.get(`${id}\n${label}`);
       return key ? fill(strings[key]) : label;

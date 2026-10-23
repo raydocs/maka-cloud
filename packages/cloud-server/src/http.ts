@@ -682,7 +682,7 @@ export class PublicApi {
         .get(conversationId, body.data.clientMessageId);
     if (!duplicate) {
       const refusal = this.deps.quota?.usage(invite.inviteId).refusal;
-      if (refusal) throw new HttpError(429, 'budget_exceeded', {}, { quota: refusal });
+      if (refusal) throw new HttpError(402, 'budget_exceeded', {}, { quota: refusal });
     }
     const result = this.deps.conversations.post(
       conversationId,

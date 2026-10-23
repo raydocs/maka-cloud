@@ -1,11 +1,15 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { CloudClient, quotaText, type Language, type QuotaReason } from '@maka-cloud/client';
 import { SetupCards } from '../src/SetupCards';
 import { QuotaNotice, Usage } from '../src/Quota';
 import { LanguageProvider, translator } from '../src/i18n';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 const quota: QuotaReason = {
   scope: 'day',
   usedUsd: 5,
@@ -93,7 +97,7 @@ test.each(['zh-Hans', 'zh-Hant', 'en'] as Language[])(
         );
       if (path.includes('/tasks?')) return Response.json({ tasks: [] });
       if (path.endsWith('/messages') && init?.method === 'POST')
-        return Response.json({ error: 'budget_exceeded', quota }, { status: 429 });
+        return Response.json({ error: 'budget_exceeded', quota }, { status: 402 });
       return Response.json({});
     }) as typeof fetch);
     const { ConversationView } = await import('../src/App');
@@ -115,3 +119,27 @@ test.each(['zh-Hans', 'zh-Hant', 'en'] as Language[])(
     );
   },
 );
+
+test('only granted devices upgrade notification readiness; unsupported browsers hide the card', async () => {
+  const reports: unknown[] = [];
+  const client = new CloudClient('test', (async (_url, init) => {
+    if (init?.body) reports.push(JSON.parse(String(init.body)));
+    return Response.json({
+      readiness: { completed: [], cards: [{ id: 'notifications', action: 'me' }] },
+    });
+  }) as typeof fetch);
+  vi.stubGlobal('Notification', { permission: 'default' });
+  vi.stubGlobal('PushManager', class {});
+  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: {} });
+  const { rerender } = render(<SetupCards client={client} version={1} onAction={() => {}} />);
+  await screen.findByRole('button', { name: 'Enable notifications' });
+  expect(reports).toEqual([]);
+  vi.stubGlobal('Notification', { permission: 'granted' });
+  rerender(<SetupCards client={client} version={2} onAction={() => {}} />);
+  await waitFor(() => expect(reports).toEqual([{ notificationsAllowed: true }]));
+  delete (navigator as unknown as { serviceWorker?: unknown }).serviceWorker;
+  rerender(<SetupCards client={client} version={3} onAction={() => {}} />);
+  await waitFor(() =>
+    expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull(),
+  );
+});

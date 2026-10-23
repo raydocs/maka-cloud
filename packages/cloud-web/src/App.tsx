@@ -625,11 +625,9 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
             void act(async () => {
               try {
                 await enablePush(client, languageChoice);
-                await client.setup({ notificationsAllowed: true }).catch((error) => {
-                  if (!(error instanceof Unsupported)) throw error;
-                });
                 setOn(true);
                 setHint('');
+                void client.setup({ notificationsAllowed: true }).catch(() => {});
               } catch (e) {
                 if (!(e instanceof ApiError) && !(e instanceof Unsupported)) {
                   setHint(
@@ -653,9 +651,6 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
             onClick={() =>
               void act(async () => {
                 await disablePush(client);
-                await client.setup({ notificationsAllowed: false }).catch((error) => {
-                  if (!(error instanceof Unsupported)) throw error;
-                });
                 setOn(false);
                 setHint('');
               })
@@ -1036,7 +1031,11 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
             onSetup={(action) => {
               if (action === 'chat') {
                 setView('chat');
-                document.getElementById('first-message')?.focus();
+                requestAnimationFrame(() => {
+                  const composer =
+                    document.querySelector<HTMLTextAreaElement>('.chat-dock textarea');
+                  composer?.focus();
+                });
               } else setView(action);
             }}
             active={view === 'home'}
