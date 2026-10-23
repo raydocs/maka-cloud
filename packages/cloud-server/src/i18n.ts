@@ -214,12 +214,12 @@ const zhHant: Messages = {
   },
   note: {
     pullRequestMerged: (repo, number, checks) =>
-      `${repo} 的 PR #${number} 已合併${
+      `${repo} 的拉取要求 #${number} 已合併${
         checks === 'none'
           ? ''
           : `，${{ green: 'CI 已通過', red: 'CI 未通過', pending: 'CI 仍在執行' }[checks]}`
       }。`,
-    checksFailed: (repo, number) => `${repo} 的 PR #${number} 檢查未通過。`,
+    checksFailed: (repo, number) => `${repo} 的拉取要求 #${number} 檢查未通過。`,
   },
   ask: {
     stall: (title, minutes) => `任務${quote(title, UNTITLED_ZH)}已經 ${minutes} 分鐘沒有進展。`,
@@ -243,7 +243,7 @@ const zhHant: Messages = {
         UNCHECKED_ZH_HANT[code ?? ''] ?? '原因不明'
       }。`,
     suggestionOffer: (count, _label, repo) =>
-      `${repo} 上連續 ${count} 則這類建議都沒有得到回應。要停止這類建議嗎？`,
+      `存放庫 ${repo} 上連續 ${count} 則這類建議都沒有得到回應。要停止這類建議嗎？`,
   },
   needsYou: {
     one: (ask) => `需要你處理：${ask}`,
@@ -276,7 +276,7 @@ export function languageInstruction(language: Language): string | undefined {
     language === 'zh-Hant'
       ? [
           'Traditional Chinese as used in Taiwan',
-          'Traditional Chinese, Taiwan usage (Taiwan vocabulary such as 軟體, 訊息, 帳號, 設定, 檔案, 網路, 登入, 連結 and 資料, not Simplified characters or mainland terms)',
+          'Traditional Chinese, Taiwan usage (Taiwan vocabulary such as 軟體, 訊息, 帳號, 設定, 檔案, 網路, 登入, 連結 and 資料, not Simplified characters or mainland terms; and the app’s own words: 代理程式 for agent, 常駐任務 for standing duties, 拉取要求 for pull request, 存放庫 for repository, 邀請權杖 for invite token, 幫它繼續 for Unblock)',
         ]
       : ['Simplified Chinese', 'Simplified Chinese'];
   return `Language: the person you work for reads ${reads}. Reply to them in ${reply} unless they write to you in another language; then reply in theirs. Questions and notes you show them follow the same rule. Messages the app writes on their behalf (such as those starting with "From my inbox:") are not the person writing, so they do not change the reply language. Keep code, commands, file names, URLs and quoted text exactly as they are. Write the briefs you delegate in English, and keep commit messages, pull request titles and code in English unless the repository's own conventions say otherwise.`;

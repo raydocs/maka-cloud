@@ -46,6 +46,7 @@ test('every key of the catalogue exists in every language, and the Chinese is Ch
     assert.match(text, CJK, `zh-Hant${key} is not Chinese`);
     assert.notEqual(text, en.get(key), key);
     assert.doesNotMatch(text, SIMPLIFIED_ONLY, `zh-Hant${key} has Simplified characters`);
+    assert.doesNotMatch(text, /\bPR #/u, `zh-Hant${key} says PR, not 拉取要求`);
   }
   for (const [key, text] of hans) {
     assert.match(text, CJK, `zh-Hans${key} is not Chinese`);
@@ -111,6 +112,10 @@ test('the conversational agent is told to reply in Chinese, and to keep code and
   assert.match(hant, /reads Traditional Chinese as used in Taiwan/u);
   assert.match(hant, /Reply to them in Traditional Chinese, Taiwan usage \(Taiwan vocabulary/u);
   assert.match(hant, /軟體, 訊息, 帳號, 設定/u);
+  // The app's own words, so replies name things as the apps do.
+  for (const term of ['代理程式', '常駐任務', '拉取要求', '存放庫', '邀請權杖', '幫它繼續']) {
+    assert.ok(hant.includes(term), term);
+  }
   assert.match(hant, /unless they write to you in another language/u);
   assert.match(hant, /Keep code, commands, file names/u);
   assert.match(hant, /"From my inbox:"\) are not the person writing/u);
@@ -243,7 +248,7 @@ const TEMPLATES = [
     template: { id: 'suggestion_offer', count: 3, label: 'fix failing checks', repo: 'acme/api' },
     en: '3 suggestions in a row to fix failing checks on acme/api went unanswered. Stop suggesting them?',
     zh: 'acme/api 上连续 3 条这类建议没有得到回应。要停止这类建议吗？',
-    hant: 'acme/api 上連續 3 則這類建議都沒有得到回應。要停止這類建議嗎？',
+    hant: '存放庫 acme/api 上連續 3 則這類建議都沒有得到回應。要停止這類建議嗎？',
   },
 ];
 
