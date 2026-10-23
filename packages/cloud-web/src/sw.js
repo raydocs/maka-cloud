@@ -1,16 +1,32 @@
 import { en, zhHans, zhHant } from './strings';
 
-/* No server-derived content or URLs enter notification surfaces. */
-
-/*
- * The only thing read from a push is its `type`, and only to pick one of these fixed texts. Anything
- * else in a payload, and a payload that is missing, is not shown; an unknown type shows the default.
- */
+// Notification copy is fixed; payload identifiers are used only in same-origin links and tags.
 const NOTIFICATIONS = {
   'task.finished': {
     title: 'Your background task has finished',
     body: 'Open Maka to review the result.',
     tag: 'maka-task-complete',
+  },
+  'task.failed': {
+    title: 'Task failed',
+    body: 'Open Maka to review the result.',
+    tag: 'maka-task',
+  },
+  'task.stopped': {
+    title: 'Task stopped',
+    body: 'Open Maka to review the result.',
+    tag: 'maka-task',
+  },
+  'task.running': {
+    title: 'Task running',
+    body: 'Open Maka to review the result.',
+    tag: 'maka-task',
+  },
+  'approval.required': {
+    title: 'Your decision is needed',
+    body: 'Open Maka to review the request.',
+    tag: 'maka-approval',
+    approval: true,
   },
   'spend.alert': {
     title: 'Spending is high today',
@@ -18,15 +34,31 @@ const NOTIFICATIONS = {
     tag: 'maka-spend-alert',
   },
 };
+const NEUTRAL = {
+  title: 'Something needs a look',
+  body: 'Open Maka to check your inbox.',
+  tag: 'maka-inbox',
+};
 
-function typeOf(event) {
+function payloadOf(event) {
   try {
-    const payload = event.data ? event.data.json() : undefined;
-    const type = payload && typeof payload === 'object' ? payload.type : undefined;
-    return typeof type === 'string' && Object.hasOwn(NOTIFICATIONS, type) ? type : 'task.finished';
+    const value = event.data?.json();
+    return value && typeof value === 'object' ? value : {};
   } catch {
-    return 'task.finished';
+    return {};
   }
+}
+const identifier = (value) =>
+  typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : undefined;
+function pathOf(payload, known) {
+  if (!known) return '/?inbox=1';
+  const query = new URLSearchParams();
+  const conversation = identifier(payload.conversationId);
+  const task = identifier(payload.taskId);
+  if (conversation) query.set('conversation', conversation);
+  if (task) query.set('task', task);
+  if (payload.type === 'approval.required') query.set('decision', '1');
+  return query.size ? '/?' + query.toString() : '/';
 }
 
 const LANGUAGE_CACHE = 'maka-language';
@@ -61,24 +93,56 @@ async function language() {
   } catch {
     // Storage can be unavailable. The browser's first language is still a useful default.
   }
-  if (/^zh-(?:hant|tw|hk|mo)(?:-|$)/iu.test(self.navigator?.languages?.[0] ?? '')) {
+  if (
+    /^zh-(?:hant|tw|hk|mo)(?:-|$)/iu.test(
+      self.navigator?.language ?? self.navigator?.languages?.[0] ?? '',
+    )
+  ) {
     return 'zh-Hant';
   }
-  return /^en(?:-|$)/iu.test(self.navigator?.languages?.[0] ?? '') ? 'en' : 'zh-Hans';
+  return /^en(?:-|$)/iu.test(self.navigator?.language ?? self.navigator?.languages?.[0] ?? '')
+    ? 'en'
+    : 'zh-Hans';
 }
 
+let pushQueue = Promise.resolve();
 self.addEventListener('push', (event) => {
-  const shown = NOTIFICATIONS[typeOf(event)];
-  event.waitUntil(
-    (async () => {
-      const table = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[await language()];
-      await self.registration.showNotification(table[shown.title], {
-        body: table[shown.body],
-        tag: shown.tag,
-        data: { path: '/' },
-      });
-    })(),
-  );
+  const payload = payloadOf(event);
+  const known = typeof payload.type === 'string' && Object.hasOwn(NOTIFICATIONS, payload.type);
+  const terminal =
+    payload.type === 'task.finished' &&
+    (payload.state === 'failed'
+      ? 'task.failed'
+      : ['stopped', 'cancelled'].includes(payload.state)
+        ? 'task.stopped'
+        : undefined);
+  const shown = known ? NOTIFICATIONS[terminal || payload.type] : NEUTRAL;
+  const work = pushQueue.then(async () => {
+    const table = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[await language()];
+    const task = identifier(payload.taskId);
+    const taskState = known && payload.type.startsWith('task.');
+    const rank = taskState ? (payload.type === 'task.running' ? 1 : 2) : 0;
+    const approval = identifier(payload.actionRef) || identifier(payload.approvalId) || task;
+    const tag =
+      shown.approval && approval
+        ? 'maka-approval:' + encodeURIComponent(approval)
+        : taskState && task
+          ? 'maka-task:' + encodeURIComponent(task)
+          : shown.tag;
+    const previous = taskState ? await self.registration.getNotifications({ tag }) : [];
+    if (previous.some((notice) => notice.data?.rank > rank)) return;
+    await self.registration.showNotification(table[shown.title], {
+      body: table[shown.body],
+      tag,
+      ...(rank === 2 && previous.some((notice) => notice.data?.rank === 1)
+        ? { renotify: true }
+        : {}),
+      data: { path: pathOf(payload, known), ...(rank ? { rank } : {}) },
+      ...(shown.approval ? { actions: [{ action: 'open', title: table.Open }] } : {}),
+    });
+  });
+  pushQueue = work.catch(() => {});
+  event.waitUntil(work);
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -87,8 +151,19 @@ self.addEventListener('notificationclick', (event) => {
     (async () => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       const own = windows.find((client) => new URL(client.url).origin === self.location.origin);
-      if (own) return own.focus();
-      return self.clients.openWindow('/');
+      const raw = event.notification.data?.path;
+      const target = new URL(typeof raw === 'string' ? raw : '/', self.location.origin);
+      const path = target.origin === self.location.origin ? target.pathname + target.search : '/';
+      if (own) {
+        try {
+          await own.focus().catch(() => {});
+          own.postMessage({ type: 'maka.open', path });
+          return;
+        } catch {
+          // An unavailable client must not swallow the click.
+        }
+      }
+      return self.clients.openWindow(path);
     })(),
   );
 });

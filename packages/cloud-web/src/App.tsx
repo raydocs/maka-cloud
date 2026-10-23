@@ -65,7 +65,7 @@ export function QuestionCard({
   // The same shape as the card on Home: the answers are the buttons, the recommended one first and
   // filled, and a note only when asked for. One tap answers.
   return (
-    <section className="question" aria-label={t('Your decision')}>
+    <section className="question" data-decision={!answered} aria-label={t('Your decision')}>
       <div className="section-heading">
         <span className={`status-mark ${answered ? 'succeeded' : 'attention'}`} />
         {shared(card.heading)}
@@ -374,8 +374,10 @@ export function ConversationView({
   conversation,
   picker,
   onOpenTask,
+  decision,
 }: {
   client: CloudClient;
+  decision?: { task: string };
   conversation: Conversation;
   onOpenTask?: (task: TaskView) => void;
   /** The conversation chooser, shown in the heading (the app owns which conversation is open). */
@@ -399,6 +401,24 @@ export function ConversationView({
   const answerItem = (item: InboxItem, optionId: string, text?: string) =>
     void feed.answerItem(item, optionId, text);
 
+  const conversationNode = useRef<HTMLElement>(null);
+  const focusedDecision = useRef<typeof decision>(undefined);
+  useEffect(() => {
+    if (decision === undefined || focusedDecision.current === decision) return;
+    const cards = Array.from(
+      conversationNode.current?.querySelectorAll<HTMLElement>('.question[data-decision="true"]') ??
+        [],
+    );
+    const card =
+      cards.find((node) => !decision.task || node.dataset.task === decision.task) ??
+      cards.find((node) => !node.dataset.task);
+    if (card) {
+      focusedDecision.current = decision;
+      card.scrollIntoView?.({ block: 'center' });
+      card.tabIndex = -1;
+      card.focus({ preventScroll: true });
+    }
+  }, [decision, state]);
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
   const topLevel = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
@@ -417,7 +437,7 @@ export function ConversationView({
 
   return (
     <div className="chat">
-      <section className="conversation card" aria-label={t('Conversation')}>
+      <section ref={conversationNode} className="conversation card" aria-label={t('Conversation')}>
         <div className="conversation-heading">
           <h1>{displayText(conversation.title ?? t('A fresh start'))}</h1>
           {picker}
@@ -879,6 +899,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('home');
   // The task page opens over whichever section the person came from and goes back to it.
+  const [decision, setDecision] = useState<{ task: string }>();
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -908,6 +929,77 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   useEffect(() => {
     if (initialToken) void connect(initialToken);
   }, [initialToken]);
+  useEffect(() => {
+    const message = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.data?.type !== 'maka.open') return;
+      if (typeof event.data.path !== 'string') return;
+      const target = new URL(event.data.path, window.location.origin);
+      if (target.origin !== window.location.origin) return;
+      window.history.replaceState(window.history.state, '', target.pathname + target.search);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    };
+    navigator.serviceWorker?.addEventListener('message', message);
+    return () => navigator.serviceWorker?.removeEventListener('message', message);
+  }, []);
+  useEffect(() => {
+    if (!session) return;
+    let current = true;
+    let request = 0;
+    const openLink = async () => {
+      const ticket = ++request;
+      const query = new URLSearchParams(window.location.search);
+      if (!['inbox', 'conversation', 'task', 'decision'].some((key) => query.has(key))) return;
+      const clean = new URL(window.location.href);
+      for (const key of ['inbox', 'conversation', 'task', 'decision'])
+        clean.searchParams.delete(key);
+      window.history.replaceState(window.history.state, '', clean);
+      setTaskPage(undefined);
+      setDecision(query.has('decision') ? { task: query.get('task') ?? '' } : undefined);
+      if (query.has('inbox')) {
+        setView('home');
+        return;
+      }
+      const conversation = query.get('conversation');
+      const taskId = query.get('task');
+      const candidates = conversation
+        ? session.conversations.filter((c) => c.conversationId === conversation)
+        : session.conversations.slice(0, 20);
+      if (conversation && candidates.length) {
+        setChosen(conversation);
+        setView('chat');
+      }
+      if (!taskId || (conversation && query.has('decision'))) return;
+      try {
+        // No owner-scoped task lookup exists. Bound the search and run at most four requests at once.
+        for (let offset = 0; offset < candidates.length; offset += 4) {
+          const batch = await Promise.all(
+            candidates.slice(offset, offset + 4).map(async (candidate) => ({
+              candidate,
+              tasks: await session.client.listTasks(candidate.conversationId),
+            })),
+          );
+          if (!current || ticket !== request) return;
+          for (const { candidate, tasks } of batch) {
+            const task = tasks.find((task) => task.taskId === taskId);
+            if (task) {
+              setChosen(candidate.conversationId);
+              setView('chat');
+              if (!query.has('decision')) setTaskPage({ task, from: 'chat' });
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        if (current) setError(errorText(e));
+      }
+    };
+    void openLink();
+    window.addEventListener('popstate', openLink);
+    return () => {
+      current = false;
+      window.removeEventListener('popstate', openLink);
+    };
+  }, [session]);
   const disconnect = () => {
     setSession(null);
     setInvite('');
@@ -1065,6 +1157,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               key={chosen}
               client={session.client}
               conversation={selected}
+              decision={decision}
               onOpenTask={(task) => setTaskPage({ task, from: 'chat' })}
               picker={
                 session.conversations.length > 1 && (

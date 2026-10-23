@@ -30,6 +30,28 @@ const choiceKeys = new Map(serverChoices.map(([id, label, key]) => [`${id}\n${la
 const hasKey = (key: string): key is Key => Object.prototype.hasOwnProperty.call(zhHans, key);
 
 export function translator(language: Language) {
+  function duration(ms: number): string {
+    const locale = { en: 'en', 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW' }[language];
+    const format = (value: number, unit: 'hour' | 'minute' | 'second' | 'millisecond') =>
+      new Intl.NumberFormat(locale, {
+        style: 'unit',
+        unit,
+        unitDisplay: 'short',
+        maximumFractionDigits: 1,
+      }).format(value);
+    if (ms < 1000) return format(ms, 'millisecond');
+    if (ms < 60000) return format(ms / 1000, 'second');
+    const minutes = Math.floor(ms / 60000);
+    return minutes < 60
+      ? format(minutes, 'minute')
+      : [
+          format(Math.floor(minutes / 60), 'hour'),
+          minutes % 60 ? format(minutes % 60, 'minute') : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+  }
+
   function t(key: Key, params?: Params): string {
     const template = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[language][key] ?? zhHans[key];
     return template.replace(/\{(\w+)\}/gu, (all, name: string) =>
@@ -106,6 +128,7 @@ export function translator(language: Language) {
   }
 
   return {
+    duration,
     language,
     t,
     shared,
