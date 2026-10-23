@@ -105,6 +105,36 @@ From `docs/fork/design/hark-patterns.md`, principles only (no Hark fonts, icons,
   cards that arrive while the chat is open (not for the history). Both are off under Reduce Motion,
   and so is the slide of the conversation sheet.
 
+### The chat shows the work (`src/components/Work.tsx`, `src/lib/work.ts`)
+
+- **One work block per message the person sends.** The chat is in time order (messages carry the
+  server's `at`): under each message, the steps of the tasks it started. While they run: the
+  thinking mark and one live line (the running task's narration, else its current step), and a row
+  per panel (tests, the change, the review) with its fixed summary in tabular figures and a spinner
+  that becomes a check or a cross. A task without panels lists the steps it noted, with no outcome
+  mark, because a noted step says nothing about how it went. Done, the block folds to one line,
+  "Worked for 4 min · 6 steps", that opens again. The runner's fixed lines, titles and summary
+  shapes are in all three languages; anything else is shown as sent.
+- **Task pills.** Each task is a pill with its live mark (spinner, check, cross, or the attention
+  dot while a card waits on the person) and its state; a tap opens its row with the controls. A
+  result card carries "From task", which goes back to the pill.
+- **Instant acknowledgement.** A sent message is in the list at once with "Sending…" (dimmed only
+  after two seconds), then the working line. A failed send says "Not sent" with "Send again" (the
+  same message id, so it runs once) and "Delete". It is kept (the client's `PendingSends`, in
+  memory) when the person leaves the conversation, and is taken off once the stream shows a new
+  message of theirs with the same words: the server names a message by its own id, not the send's.
+- **The approval card in fixed slots:** what will happen, what it touches (the `Repository:`,
+  `Branch:` and `Base branch:` lines the card itself carries), the exact text and held call as
+  sent, evidence badges (the task's panels, its files and links), and the scope (once, this task,
+  this repository) when the server offers it (#381). One "Go ahead" pill answers with the chosen
+  scope; only the recommended answer is filled. Changing scope ticks a selection haptic; approving
+  taps lightly; refusing buzzes a warning. An answered card is a one-line receipt; on an approval,
+  "Details" opens the exact text and held call again.
+- **Not sent by the server, so not shown:** a turn of the conversation's own (its model calls) has
+  no events, so a message that started no task shows only "working" until the reply; the time an
+  answer was given is not kept, so the receipt has none. Not built yet: a row does not open its
+  panel's tail, though the server sends it.
+
 ## Language
 
 Three languages: 简体中文, 繁體中文 and English. Simplified Chinese is the main language and the

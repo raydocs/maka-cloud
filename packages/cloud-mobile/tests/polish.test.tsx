@@ -20,6 +20,7 @@ jest.mock('expo-router', () => ({
 jest.mock('expo-haptics', () => ({
   impactAsync: jest.fn(async () => {}),
   notificationAsync: jest.fn(async () => {}),
+  selectionAsync: jest.fn(async () => {}),
   ImpactFeedbackStyle: { Light: 'light' },
   NotificationFeedbackType: { Warning: 'warning' },
 }));
@@ -154,6 +155,42 @@ test('the answers sit side by side, each as wide as its words; refusing buzzes a
   expect(warn).not.toHaveBeenCalled();
   await fireEvent.press(screen.getByRole('button', { name: 'Deny' }));
   expect(warn).toHaveBeenCalledWith('warning');
+});
+
+test('choosing how far an approval reaches ticks like a selection; the one "Go ahead" still taps lightly', async () => {
+  const impact = jest.mocked(Haptics.impactAsync);
+  const tick = jest.mocked(Haptics.selectionAsync);
+  impact.mockClear();
+  tick.mockClear();
+  const scoped: InboxItem = {
+    ...approval,
+    ask: 'Allow open_pull_request(taskId: t1, title: "Fix it")? It cannot be undone.',
+    options: [
+      { id: 'approve', label: 'Go ahead, just this once', recommended: true },
+      {
+        id: 'approve_task',
+        label: "Go ahead, and don't ask again for this repository in this task",
+        recommended: false,
+      },
+      { id: 'reject', label: "Don't do it", recommended: false },
+    ],
+  };
+  const answers: string[] = [];
+  await render(
+    wrap(<DecisionCard item={scoped} disabled={false} onAnswer={(id) => answers.push(id)} />),
+  );
+  await fireEvent.press(screen.getByRole('radio', { name: 'This task' }));
+  expect(tick).toHaveBeenCalledTimes(1);
+  // Choosing the scope already chosen does nothing.
+  await fireEvent.press(screen.getByRole('radio', { name: 'This task' }));
+  expect(tick).toHaveBeenCalledTimes(1);
+  const go = screen.getByRole('button', {
+    name: "Go ahead, and don't ask again for this repository in this task",
+  });
+  expect(flat(go.props.style).alignSelf).toBe('flex-start');
+  await fireEvent.press(go);
+  expect(impact).toHaveBeenCalledWith('light');
+  expect(answers).toEqual(['approve_task']);
 });
 
 // Every opacity below 1 on a node or anything around it.

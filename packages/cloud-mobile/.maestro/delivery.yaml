@@ -32,6 +32,12 @@ appId: cloud.maka.app
 - assertVisible:
     id: "button-Open pull request · github.com"
 - takeScreenshot: delivery-card
+# The result links back to the task it came from, whose pill sits higher up in the chat.
+- scrollUntilVisible:
+    element:
+      id: "button-From task"
+- assertVisible:
+    id: "button-From task"
 - tapOn:
     id: "delivery-picture"
 - assertVisible:
