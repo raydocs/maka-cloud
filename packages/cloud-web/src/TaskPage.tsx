@@ -111,11 +111,14 @@ export function TaskPage({
       </button>
       <h1>{displayText(task.title ?? t('Task'))}</h1>
       <p className="task-page-meta muted">
-        <span className={`status-mark ${task.state}`} /> {shared(taskLabel(task))} {t('· Cost')}{' '}
-        <span className={task.costUsd === undefined ? undefined : 'mono'}>
-          {shared(dollars(task.costUsd))}
-          {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
-        </span>
+        <span className={`status-mark ${task.state}`} /> {shared(taskLabel(task))}{' '}
+        {task.costUsd !== undefined && t('· Cost')}{' '}
+        {task.costUsd !== undefined && (
+          <span className="mono">
+            {shared(dollars(task.costUsd))}
+            {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
+          </span>
+        )}
         {pull && (
           <>
             {' · '}

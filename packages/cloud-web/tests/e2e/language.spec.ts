@@ -48,21 +48,21 @@ test('Traditional Home and Chat preserve server text; Settings remembers an Engl
   await page.getByRole('navigation').getByRole('button', { name: '專案' }).click();
   await expect(page.getByRole('heading', { name: '專案', exact: true })).toBeVisible();
   await noHorizontalScroll(page);
-  await page.getByRole('navigation').getByRole('button', { name: '設定' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: '我的' }).click();
   await page.getByText('記憶', { exact: true }).click();
   await expect(page.getByRole('heading', { name: '已儲存的資訊' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '已記住的授權' })).toBeVisible();
   await noHorizontalScroll(page);
   await page.screenshot({ path: info.outputPath('settings-zh-Hant.png'), fullPage: true });
-  await expect(page.getByRole('heading', { name: '設定' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '我的' })).toBeVisible();
   await page.getByRole('button', { name: '繁體中文' }).click();
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-Hant');
   await page.getByLabel('邀請權杖').fill(invite.token);
   await page.getByRole('button', { name: '進入工作區' }).click();
-  await page.getByRole('navigation').getByRole('button', { name: '設定' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: '我的' }).click();
   await page.getByRole('group', { name: '語言' }).getByRole('button', { name: 'English' }).click();
-  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Me', exact: true })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   await page.reload();
   await expect(page.getByRole('button', { name: 'Enter your workspace' })).toBeVisible();
@@ -142,9 +142,11 @@ for (const locale of ['zh-CN', 'zh-TW']) {
       const regions = await page
         .getByRole('region')
         .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
-      expect(regions.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeLessThan(
-        regions.indexOf(copy('开始新任务', '開始新任務')),
-      );
+      if (info.project.name === 'phone')
+        expect(regions.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeLessThan(
+          regions.indexOf(copy('开始新任务', '開始新任務')),
+        );
+      else await expect(page.locator('.chat-dock')).toBeVisible();
       expect(
         await waiting.locator('h2').evaluate((el) => getComputedStyle(el, '::before').content),
       ).not.toBe('none');

@@ -77,6 +77,7 @@ test('a finished task arrives as one card, its picture opens large, and its page
   expect(await card.getByRole('link').count()).toBeLessThanOrEqual(2);
 
   // The sources: three cards, from the server, never from the site.
+  await page.getByText(/^Sources \(\d+\)$/u).click();
   const stack = page.getByRole('region', { name: 'Sources' });
   await expect(stack.getByText('How redirects work')).toBeVisible();
   await expect(stack.getByText('Notes from a small site')).toBeVisible();

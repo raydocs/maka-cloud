@@ -1,6 +1,12 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  Me: 'Me',
+  Search: 'Search',
+  'Search conversations': 'Search conversations',
+  'New conversation': 'New conversation',
+  'Sources ({count})': 'Sources ({count})',
+
   'starter.update': 'Update',
   Live: 'Live',
   'Connecting…': 'Connecting…',
@@ -499,6 +505,12 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  Me: '我的',
+  Search: '搜索',
+  'Search conversations': '搜索对话',
+  'New conversation': '新对话',
+  'Sources ({count})': '来源（{count}）',
+
   'starter.update': '更新',
   Live: '已连接',
   'Connecting…': '正在连接…',
@@ -963,6 +975,12 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  Me: '我的',
+  Search: '搜尋',
+  'Search conversations': '搜尋對話',
+  'New conversation': '新對話',
+  'Sources ({count})': '來源（{count}）',
+
   'starter.update': '更新',
   Live: '已連線',
   'Connecting…': '正在連線…',

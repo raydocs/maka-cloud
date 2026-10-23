@@ -35,7 +35,7 @@ test('a finished task asks for one answer with the supervisor’s own words, the
   await expect(page.getByRole('article', { name: 'Result: Weekly report' })).toBeVisible({
     timeout: 20_000,
   });
-  await expect(page.getByRole('region', { name: 'Needs you' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Needs you', exact: true })).toHaveCount(0);
 
   await openSection(page, 'Home');
   const waiting = page.getByRole('region', { name: 'Decisions waiting' });

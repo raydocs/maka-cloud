@@ -35,7 +35,10 @@ test('Home leads with what waits on you, answers it once, and says what was done
   const order = await page
     .getByRole('region')
     .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
-  expect(order.indexOf('Decisions waiting')).toBeLessThan(order.indexOf('Start something'));
+  expect(order.indexOf('Decisions waiting')).toBeGreaterThanOrEqual(0);
+  if (info.project.name === 'phone')
+    expect(order.indexOf('Decisions waiting')).toBeLessThan(order.indexOf('Start something'));
+  else await expect(page.locator('.chat-dock')).toBeVisible();
   await noHorizontalScroll(page);
 
   // What was done since the last visit: the first visit shows the last day.

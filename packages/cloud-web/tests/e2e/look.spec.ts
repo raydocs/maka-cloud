@@ -17,7 +17,7 @@ test('Home, Chat and Settings fit the screen, cards are frosted and code is not'
   // Home: a first visit, the start sentence and nothing else to scroll sideways.
   await expect(page.getByRole('heading', { name: 'Make room for your next idea.' })).toBeVisible();
   await noHorizontalScroll(page);
-  const frosted = await page.getByRole('region', { name: 'Start something' }).evaluate((el) => {
+  const frosted = await page.locator('.start .pill-field').evaluate((el) => {
     const style = getComputedStyle(el);
     return { blur: style.backdropFilter, bg: style.backgroundColor };
   });
@@ -76,7 +76,7 @@ test('on a phone every navigation target is large enough to tap', async ({
 }, info) => {
   test.skip(info.project.name !== 'phone', 'phone only');
   await signIn(page, request);
-  for (const name of ['Home', 'Chat', 'Projects', 'Settings'] as const) {
+  for (const name of ['Search', 'Home', 'Chat', 'Projects', 'Me'] as const) {
     const box = await page
       .getByRole('navigation', { name: 'Sections' })
       .getByRole('button', { name, exact: true })

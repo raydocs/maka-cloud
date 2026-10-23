@@ -276,7 +276,7 @@ test('a refused pause says why and hides the pause button for that task only', a
   ).toBeTruthy();
 });
 
-test('cost is only what the server reported: absent stays "Not reported", a partial total says so', async () => {
+test('cost is only what the server reported: absent stays hidden, a partial total says so', async () => {
   const api = fakeApi([
     created(1, 't1', 'Reported job'),
     created(2, 't2', 'Silent job'),
@@ -293,8 +293,8 @@ test('cost is only what the server reported: absent stays "Not reported", a part
   const reported = await screen.findByRole('article', { name: 'Reported job' });
   await waitFor(() => expect(reported.textContent).toMatch(/Cost so far: \$0\.40/u));
   expect(
-    within(screen.getByRole('article', { name: 'Silent job' })).getByText(/Not reported/),
-  ).toBeTruthy();
+    within(screen.getByRole('article', { name: 'Silent job' })).queryByText(/Not reported/),
+  ).toBeNull();
   // A subtask has no cost of its own: the root's figure covers it.
   expect(
     within(screen.getByRole('article', { name: 'Subtask' })).queryByText(/Cost so far/),

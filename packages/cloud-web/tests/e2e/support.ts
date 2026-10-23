@@ -25,9 +25,10 @@ export async function signIn(page: Page, request: APIRequestContext) {
 
 /** The segmented navigation at the top of every signed-in screen. */
 export async function openSection(page: Page, name: 'Home' | 'Chat' | 'Projects' | 'Settings') {
+  if (name === 'Chat' && (await page.locator('.chat-dock').isVisible())) return;
   await page
     .getByRole('navigation', { name: 'Sections' })
-    .getByRole('button', { name, exact: true })
+    .getByRole('button', { name: name === 'Settings' ? 'Me' : name, exact: true })
     .click();
 }
 

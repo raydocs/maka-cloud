@@ -59,7 +59,10 @@ test('a proposed card shows on Home with its cost, and one tap delivers one acce
   const order = await page
     .getByRole('region')
     .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
-  expect(order.indexOf('Suggestions')).toBeLessThan(order.indexOf('Start something'));
+  expect(order.indexOf('Suggestions')).toBeGreaterThanOrEqual(0);
+  if (info.project.name === 'phone')
+    expect(order.indexOf('Suggestions')).toBeLessThan(order.indexOf('Start something'));
+  else await expect(page.locator('.chat-dock')).toBeVisible();
   await noHorizontalScroll(page);
   const doIt = region.getByRole('button', { name: 'Do it' });
   expect(await contrastOf(doIt)).toBeGreaterThanOrEqual(4.5);

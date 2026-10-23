@@ -1,6 +1,6 @@
 import { useT } from './i18n';
 import type { Key } from './strings';
-import { ArrowUp, ArrowUpRight, FileText, Settings as SettingsIcon } from 'lucide-react';
+import { ArrowUp, ArrowUpRight, FileText, Search, UserRound, Plus } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
 import { type ModeChoice, useMode } from './theme';
@@ -186,7 +186,7 @@ function TaskBranch({
         </div>
         <div className="task-meta">
           <span>{shared(taskLabel(task))}</span>
-          {task.parentTaskId === undefined && (
+          {task.parentTaskId === undefined && task.costUsd !== undefined && (
             <span>
               {live ? t('Cost so far:') : t('Cost:')}{' '}
               <span className={task.costUsd === undefined ? undefined : 'mono'}>
@@ -403,23 +403,17 @@ export function ConversationView({
       .filter((task) => task.state === 'succeeded' && task.manifest?.summary !== undefined)
       .map((task) => task.taskId),
   );
-  const unshown = withResults.filter((task) => !shown.has(task.taskId));
+  const unshown = withResults.filter(
+    (task) =>
+      !shown.has(task.taskId) &&
+      (artifacts[task.taskId]?.listings.length || artifacts[task.taskId]?.failed),
+  );
 
   return (
     <div className="chat">
       <section className="conversation card" aria-label={t('Conversation')}>
         <div className="conversation-heading">
           <h1>{displayText(conversation.title ?? t('A fresh start'))}</h1>
-          {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
-          <span className="connection" role="status">
-            {status === 'Connecting…' && <span className="muted">{shared(status)}</span>}
-            {status !== 'Live' && status !== 'Connecting…' && (
-              <>
-                <span className="status-mark attention" />
-                {shared(status)}
-              </>
-            )}
-          </span>
           {picker}
         </div>
         <div className="messages" role="log" aria-label={t('Messages')}>
@@ -482,6 +476,68 @@ export function ConversationView({
             {shared(error)}
           </p>
         )}
+        <aside className="work-panel" aria-label={t('Work and results')}>
+          {(running > 0 || total.usd !== undefined) && (
+            <section className="card section-card work-summary" aria-label={t('Running')}>
+              <div className="section-heading">
+                <h2>{t('Running')}</h2>
+                {running > 0 && (
+                  <span className="count">{t('{count} running', { count: running })}</span>
+                )}
+              </div>
+              {total.usd !== undefined && (
+                <div className="spend">
+                  <span>{t('Total cost so far')}</span>
+                  <strong className="mono">{shared(dollars(total.usd))}</strong>
+                  {total.usd !== undefined && !total.complete && (
+                    <span className="muted">{t('Not all reported')}</span>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+          {tasks.length > 0 && (
+            <section className="card section-card" aria-label={t('Task tree')}>
+              <h2 className="panel-heading">{t('Tasks')}</h2>
+              <ul className="task-tree">
+                {topLevel.map((task) => (
+                  <TaskBranch
+                    key={task.taskId}
+                    {...{ task, client, tasks, noPause, act, control }}
+                    busy={Boolean(busy)}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+          {/* A result with its own card in the conversation is not listed again here. */}
+          {unshown.length > 0 && (
+            <section className="artifacts" aria-label={t('Artifacts')}>
+              <h2 className="panel-heading">{t('Review')}</h2>
+              {unshown.map((task) => (
+                <ArtifactList
+                  key={task.taskId}
+                  client={client}
+                  taskId={task.taskId}
+                  title={task.title ?? t('Task')}
+                  entry={artifacts[task.taskId] as TaskArtifacts}
+                  busy={Boolean(busy)}
+                  act={act}
+                />
+              ))}
+            </section>
+          )}
+        </aside>
+        {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
+        <span className="connection" role="status">
+          {status === 'Connecting…' && <span className="muted">{shared(status)}</span>}
+          {status !== 'Live' && status !== 'Connecting…' && (
+            <>
+              <span className="status-mark attention" />
+              {shared(status)}
+            </>
+          )}
+        </span>
         <form
           className="composer"
           onSubmit={(e) => {
@@ -522,57 +578,6 @@ export function ConversationView({
           />
         </form>
       </section>
-      <aside className="work-panel" aria-label={t('Work and results')}>
-        <section className="card section-card work-summary" aria-label={t('Running')}>
-          <div className="section-heading">
-            <h2>{t('Running')}</h2>
-            <span className="count">{t('{count} running', { count: running })}</span>
-          </div>
-          <div className="spend">
-            <span>{t('Total cost so far')}</span>
-            <strong className="mono">{shared(dollars(total.usd))}</strong>
-            {total.usd !== undefined && !total.complete && (
-              <span className="muted">{t('Not all reported')}</span>
-            )}
-          </div>
-        </section>
-        <section className="card section-card" aria-label={t('Task tree')}>
-          <h2 className="panel-heading">{t('Tasks')}</h2>
-          {tasks.length ? (
-            <ul className="task-tree">
-              {topLevel.map((task) => (
-                <TaskBranch
-                  key={task.taskId}
-                  {...{ task, client, tasks, noPause, act, control }}
-                  busy={Boolean(busy)}
-                />
-              ))}
-            </ul>
-          ) : (
-            <p className="muted">{t('Tasks will appear as the plan takes shape.')}</p>
-          )}
-        </section>
-        {/* A result with its own card in the conversation is not listed again here. */}
-        {(withResults.length === 0 || unshown.length > 0) && (
-          <section className="artifacts" aria-label={t('Artifacts')}>
-            <h2 className="panel-heading">{t('Review')}</h2>
-            {!unshown.some((task) => artifacts[task.taskId]?.listings.length) && (
-              <p className="muted">{t('Reports, changes, and pull requests will collect here.')}</p>
-            )}
-            {unshown.map((task) => (
-              <ArtifactList
-                key={task.taskId}
-                client={client}
-                taskId={task.taskId}
-                title={task.title ?? t('Task')}
-                entry={artifacts[task.taskId] as TaskArtifacts}
-                busy={Boolean(busy)}
-                act={act}
-              />
-            ))}
-          </section>
-        )}
-      </aside>
     </div>
   );
 }
@@ -725,7 +730,7 @@ export function Settings({
   const { t } = useT();
   return (
     <div className="page">
-      <h1>{t('Settings')}</h1>
+      <h1>{t('Me')}</h1>
       <AppearanceChoice />
       <LanguageChoice />
       <section className="card section-card">
@@ -757,26 +762,35 @@ export function Shell({
   view,
   onView,
   children,
+  onSearch,
 }: {
+  onSearch?: () => void;
   view: View;
   onView: (view: View) => void;
   children: ReactNode;
 }) {
   const { t } = useT();
   return (
-    <div className="shell">
+    <div className="shell" data-view={view}>
       <header className="shell-top">
-        <a className="brand" href="/">
-          {BRAND.wordmark}
-        </a>
-        {/* One row on a phone, as Hark's: the sections in a pill, Settings a round icon beside it. */}
         <nav className="seg-nav" aria-label={t('Sections')}>
+          <button
+            type="button"
+            className="seg-settings"
+            data-testid="button-search"
+            aria-label={t('Search')}
+            onClick={onSearch}
+          >
+            <Search size={18} strokeWidth={1.5} />
+            <span className="sr-only">{t('Search')}</span>
+          </button>
           <div className="seg">
             {VIEWS.filter((item) => item.view !== 'settings').map((item) => (
               <button
                 key={item.view}
                 type="button"
                 className="seg-item"
+                data-testid={`tab-${item.view}`}
                 aria-current={view === item.view ? 'page' : undefined}
                 onClick={() => onView(item.view)}
               >
@@ -787,11 +801,12 @@ export function Shell({
           <button
             type="button"
             className="seg-settings"
+            data-testid="button-me"
             aria-current={view === 'settings' ? 'page' : undefined}
             onClick={() => onView('settings')}
           >
-            <SettingsIcon aria-hidden="true" size={19} strokeWidth={1.8} />
-            <span className="sr-only">{t('Settings')}</span>
+            <UserRound aria-hidden="true" size={18} strokeWidth={1.5} />
+            <span className="sr-only">{t('Me')}</span>
           </button>
         </nav>
       </header>
@@ -807,7 +822,18 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     client: CloudClient;
     conversations: Conversation[];
   } | null>(null);
+  const [wide, setWide] = useState(
+    () => globalThis.matchMedia?.('(min-width: 900px)').matches ?? false,
+  );
+  useEffect(() => {
+    const media = globalThis.matchMedia?.('(min-width: 900px)');
+    const update = () => setWide(media?.matches ?? false);
+    media?.addEventListener('change', update);
+    return () => media?.removeEventListener('change', update);
+  }, []);
   const [chosen, setChosen] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('home');
   // The task page opens over whichever section the person came from and goes back to it.
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
@@ -848,12 +874,75 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   const selected = session?.conversations.find((c) => c.conversationId === chosen);
   return session ? (
     <Shell
-      view={taskPage ? taskPage.from : view}
+      onSearch={() => setSearching(!searching)}
+      view={wide && (taskPage?.from ?? view) === 'chat' ? 'home' : (taskPage?.from ?? view)}
       onView={(next) => {
         setTaskPage(undefined);
         setView(next);
       }}
     >
+      {!taskPage && (wide || view !== 'settings') && (
+        <details className="composer-menu">
+          <summary aria-label={t('Switch conversation')}>
+            <Plus size={18} strokeWidth={1.5} />
+          </summary>
+          <div className="composer-choices">
+            <button
+              type="button"
+              onClick={(e) => {
+                setChosen('');
+                setView('chat');
+                e.currentTarget.closest('details')?.removeAttribute('open');
+              }}
+            >
+              {t('New conversation')}
+            </button>
+            {session.conversations.map((conversation) => (
+              <button
+                type="button"
+                key={conversation.conversationId}
+                onClick={(e) => {
+                  setChosen(conversation.conversationId);
+                  setView('chat');
+                  e.currentTarget.closest('details')?.removeAttribute('open');
+                }}
+              >
+                {displayText(conversation.title ?? t('Untitled conversation'))}
+              </button>
+            ))}
+          </div>
+        </details>
+      )}
+      {searching && (
+        <section className="search-sheet card section-card" aria-label={t('Search')}>
+          <label htmlFor="search-conversations">{t('Search conversations')}</label>
+          <input
+            id="search-conversations"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {session.conversations
+            .filter((c) => (c.title ?? '').toLocaleLowerCase().includes(query.toLocaleLowerCase()))
+            .map((c) => (
+              <button
+                className="quiet-action"
+                type="button"
+                key={c.conversationId}
+                onClick={() => {
+                  setChosen(c.conversationId);
+                  setView('chat');
+                  setSearching(false);
+                }}
+              >
+                {displayText(c.title ?? t('Untitled conversation'))}
+              </button>
+            ))}
+          <button type="button" className="quiet-action" onClick={() => setSearching(false)}>
+            {t('Close')}
+          </button>
+        </section>
+      )}
       {error && (
         <p className="error" role="alert">
           {shared(error)}
@@ -866,10 +955,12 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           onBack={() => setTaskPage(undefined)}
         />
       )}
-      {view === 'home' && (
+      {(view === 'home' || (wide && view === 'chat')) && (
         // Kept while a task page is open, so coming back is not a new visit.
-        <div hidden={taskPage !== undefined}>
+        <div className="content-pane" hidden={taskPage !== undefined}>
           <Home
+            active={view === 'home'}
+            hideStart={wide}
             client={session.client}
             conversations={session.conversations}
             onStarted={(conversation) => {
@@ -888,8 +979,8 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           />
         </div>
       )}
-      {view === 'chat' && (
-        <div hidden={taskPage !== undefined}>
+      {(wide || view === 'chat') && (
+        <div className="chat-dock" hidden={taskPage !== undefined}>
           {selected ? (
             <ConversationView
               key={chosen}
@@ -916,17 +1007,44 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               }
             />
           ) : (
-            <section className="card section-card" aria-label={t('No conversation')}>
-              <h2>{t('No conversation open')}</h2>
-              <p className="muted">{t('Start one from Home.')}</p>
-              <Button label={t('Go to Home')} variant="secondary" onClick={() => setView('home')} />
-            </section>
+            <Home
+              startOnly
+              client={session.client}
+              conversations={[]}
+              onStarted={(conversation) => {
+                setSession({ ...session, conversations: [...session.conversations, conversation] });
+                setChosen(conversation.conversationId);
+                setView('chat');
+              }}
+              onOpen={setChosen}
+            />
           )}
         </div>
       )}
-      {!taskPage && view === 'projects' && <Projects client={session.client} />}
+      {!taskPage && !wide && view === 'projects' && (
+        <div className="project-starter">
+          <Home
+            startOnly
+            client={session.client}
+            conversations={session.conversations}
+            onStarted={(conversation) => {
+              setSession({ ...session, conversations: [...session.conversations, conversation] });
+              setChosen(conversation.conversationId);
+              setView('chat');
+            }}
+            onOpen={setChosen}
+          />
+        </div>
+      )}
+      {!taskPage && view === 'projects' && (
+        <div className="content-pane">
+          <Projects client={session.client} />
+        </div>
+      )}
       {!taskPage && view === 'settings' && (
-        <Settings client={session.client} onDisconnect={disconnect} />
+        <div className="content-pane">
+          <Settings client={session.client} onDisconnect={disconnect} />
+        </div>
       )}
     </Shell>
   ) : (
