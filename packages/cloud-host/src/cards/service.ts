@@ -33,7 +33,7 @@ export interface CardsOptions {
 
 /** What the cards need once the server and the supervisor exist. */
 export interface CardsParts {
-  server: Pick<CloudServer, 'startConversation' | 'createConversation'>;
+  server: Pick<CloudServer, 'startConversation' | 'startedConversation' | 'createConversation'>;
   /** The supervisor's way to show a card. False when it cannot be shown. */
   raiseSuggestion(choice: SuggestionChoice): boolean;
   /** The supervisor's way to offer turning a kind off. False when it cannot be shown. */
@@ -168,11 +168,20 @@ export class CardsService {
   private startTask(card: Card): 'started' | 'forbidden' {
     const parts = this.parts;
     if (!parts) throw new Error('The cards are not started.');
+    const key = `card:${card.cardId}`;
+    // A card tapped before its project was removed (or before the operator stopped naming it)
+    // starts nothing new. A run that had already begun is attached, so it is settled.
+    if (this.options.engine.cards.get(card.owner, card.cardId) === undefined) {
+      const begun = parts.server.startedConversation({ owner: card.owner, key });
+      if (begun === undefined) return 'forbidden';
+      this.options.engine.cards.attachConversation(card.owner, card.cardId, begun.conversationId);
+      return 'started';
+    }
     const budgetUsd = this.budgetFor(card);
     const project = this.options.engine.project(card.owner, card.projectId);
     const started = parts.server.startConversation({
       owner: card.owner,
-      key: `card:${card.cardId}`,
+      key,
       title: `${card.title} · ${project?.repo ?? 'project'}`.slice(0, MAX_TITLE),
       text: `${card.brief}\n\nBudget: this task may spend at most $${budgetUsd.toFixed(2)} and cannot raise it. Stop and report if the work does not fit.`,
       meta: {

@@ -92,6 +92,22 @@ test('exit: the duty is turned off while the request waits', async () => {
   r.cleanup();
 });
 
+test('exit: the duty is turned off while a launch is in flight, and its retry never starts', async () => {
+  const { r, duty, open, usage } = await setup();
+  const id = open();
+  assert.ok(r.engine.beginLaunch(id));
+  // Turning the duty off cancels pending requests only; this one is launching.
+  r.engine.setDutyState('inv_owner', duty, 'off');
+  assert.equal(r.engine.request(id)?.state, 'launching');
+  // The attempt fails for a passing reason and the request goes back to pending.
+  assert.equal(r.engine.launchFailed(id, { permanent: false, retryAfterMs: 0 }), 'retry');
+  assert.equal(r.engine.beginLaunch(id), undefined, 'a duty that is off starts nothing');
+  assert.equal(r.engine.request(id)?.state, 'cancelled');
+  assert.equal(r.engine.request(id)?.reason, 'duty_off');
+  assert.deepEqual(usage(), { reservedUsd: 0, spentUsd: 0 });
+  r.cleanup();
+});
+
 test('exit: the project is removed while requests wait, and a started run is left to finish', async () => {
   const { r, duty, open, start, usage } = await setup();
   const running = open();

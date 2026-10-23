@@ -79,6 +79,10 @@ function rig(
         starts.push(input as unknown as Started);
         return { ok: true, conversationId: id, messageId: 'm', duplicate: false };
       },
+      startedConversation: (input) => {
+        const known = conversations.get(`${input.owner}/${input.key}`);
+        return known === undefined ? undefined : { conversationId: known };
+      },
       createConversation: (input) => ({ ok: true, conversationId: `place_${input.key}` }),
     },
     raiseSuggestion: (choice) => {
@@ -449,6 +453,40 @@ test('maintenance finishes a tap that died before its task began, once, and take
   assert.deepEqual(r.closed, [`${r.projectId}:rebase_pr:pr:12`]);
   assert.deepEqual(r.service.maintain(), { resumed: 0, expired: 0 }, 'expiry counts once');
   r.engine.close();
+});
+
+test('a card tapped before its project was removed starts no task, and one already begun is still attached', async () => {
+  const r = rig();
+  const tapped = await oneCard(r, FAILING_MAIN);
+  // The tap spent the card and the process died before the task started.
+  assert.ok(r.engine.cards.accept(OWNER, tapped.cardId).ok);
+  assert.equal(r.engine.removeProject(OWNER, r.projectId), true);
+  assert.deepEqual(r.service.maintain(), { resumed: 0, expired: 0 });
+  assert.equal(r.starts.length, 0, 'a removed project starts nothing');
+  assert.deepEqual(r.service.maintain(), { resumed: 0, expired: 0 });
+  assert.equal(r.starts.length, 0);
+  r.engine.close();
+
+  // A tap whose task began before the removal (the process died before recording it) is attached.
+  const s = rig();
+  const begun = await oneCard(s, FAILING_MAIN);
+  assert.ok(s.engine.cards.accept(OWNER, begun.cardId).ok);
+  const made = s.parts.server.startConversation({
+    owner: OWNER,
+    key: `card:${begun.cardId}`,
+    title: 't',
+    text: 'x',
+    meta: { external: true },
+  });
+  assert.ok(made.ok);
+  assert.equal(s.engine.removeProject(OWNER, s.projectId), true);
+  assert.deepEqual(s.service.maintain(), { resumed: 1, expired: 0 });
+  assert.equal(s.starts.length, 1, 'no second task');
+  assert.deepEqual(
+    s.engine.cards.unsettled().map((card) => card.conversationId),
+    [made.conversationId],
+  );
+  s.engine.close();
 });
 
 test('a failed start in maintenance is warned about and tried again on the next pass', async () => {
