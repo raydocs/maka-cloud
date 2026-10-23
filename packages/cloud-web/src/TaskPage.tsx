@@ -73,11 +73,21 @@ export function TaskPage({
   const [next, setNext] = useState<number>();
   const [timelineError, setTimelineError] = useState(false);
   const [loadingSteps, setLoadingSteps] = useState(false);
-  const loadedCount = useRef(0);
+  const newestPage = useRef<number | undefined>(undefined);
+  const pages = useRef(new Map<number | undefined, TimelineStep[]>());
+  const olderPage = useRef(0);
+  const ended = useRef(false);
   const generation = useRef(0);
+  const sequence = useRef(0);
+  const loadingMore = useRef(false);
+  const refreshSteps = useRef<(final?: boolean) => void>(() => {});
+  const lastRefresh = useRef(0);
   const terminal = TERMINAL.has(task.state);
   useEffect(() => {
-    loadedCount.current = 0;
+    newestPage.current = undefined;
+    pages.current.clear();
+    olderPage.current = 0;
+    ended.current = false;
     setTimeline([]);
     setNext(undefined);
     setTimelineError(false);
@@ -86,29 +96,68 @@ export function TaskPage({
   useEffect(() => {
     const version = ++generation.current;
     setLoadingSteps(false);
-    let request = 0;
-    const refresh = async () => {
-      const ticket = ++request;
+    loadingMore.current = false;
+    let refreshing = false;
+    let refreshAgain = false;
+    const refresh = async (final = false) => {
+      if (refreshing) {
+        refreshAgain ||= final;
+        return;
+      }
+      if (loadingMore.current) return;
+      refreshing = true;
+      const ticket = ++sequence.current;
+      lastRefresh.current = Date.now();
       try {
-        const steps = new Map<string, TimelineStep>();
-        let after: number | undefined;
-        do {
+        const read = async (after: number | undefined) => {
           const { timeline } = await client.timeline(task.taskId, { after });
-          for (const step of timeline.steps) steps.set(step.stepId, step);
-          after = timeline.stepsNext;
-        } while (after !== undefined && steps.size < loadedCount.current);
-        if (generation.current !== version || ticket !== request) return;
-        setTimeline([...steps.values()]);
-        loadedCount.current = steps.size;
-        setNext(after);
+          if (generation.current !== version || ticket !== sequence.current) return;
+          pages.current.set(after, timeline.steps);
+          ended.current ||= terminal || TERMINAL.has(timeline.state);
+          setTimeline((previous) => {
+            const steps = new Map(previous.map((step) => [step.stepId, step]));
+            for (const step of timeline.steps) steps.set(step.stepId, step);
+            return [...steps.values()];
+          });
+          if (after === newestPage.current) setNext(timeline.stepsNext);
+          return timeline;
+        };
+        if (!(await read(newestPage.current))) return;
+        const earlier = [...pages.current.keys()].filter((after) => after !== newestPage.current);
+        // Ten-second ticks cost at most 12 requests/minute while running, leaving room
+        // in the shared control limiter. Terminal snapshots refresh every loaded page once.
+        const open = earlier.filter((after) =>
+          pages.current.get(after)?.some((step) => step.state === 'running'),
+        );
+        const revisit = ended.current
+          ? earlier
+          : open.length
+            ? [open[olderPage.current++ % open.length]]
+            : [];
+        for (const after of revisit) {
+          if (!(await read(after))) return;
+        }
+        // An older page can be the first response to report that the task ended.
+        if (ended.current) {
+          for (const after of earlier.filter((after) => !revisit.includes(after))) {
+            if (!(await read(after))) return;
+          }
+        }
         setTimelineError(false);
       } catch {
-        if (generation.current === version) setTimelineError(true);
+        if (generation.current === version && ticket === sequence.current) setTimelineError(true);
+      } finally {
+        refreshing = false;
+        if (refreshAgain && generation.current === version) {
+          refreshAgain = false;
+          void refresh(true);
+        }
       }
     };
+    refreshSteps.current = (final = false) => void refresh(final);
     void refresh();
     const visible = () => {
-      if (document.visibilityState === 'visible') void refresh();
+      if (!document.hidden && !ended.current) void refresh();
     };
     document.addEventListener('visibilitychange', visible);
     return () => {
@@ -116,24 +165,41 @@ export function TaskPage({
       document.removeEventListener('visibilitychange', visible);
     };
   }, [client, task.taskId, terminal]);
+  useEffect(() => {
+    if (terminal) return;
+    const timer = setInterval(() => {
+      if (!document.hidden && !ended.current && Date.now() - lastRefresh.current >= 10000)
+        refreshSteps.current();
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [client, task.taskId, terminal]);
   const moreSteps = async () => {
     const version = generation.current;
+    const ticket = ++sequence.current;
+    loadingMore.current = true;
     setLoadingSteps(true);
+    let stopped = false;
     try {
       const page = await client.timeline(task.taskId, { after: next });
-      if (generation.current !== version) return;
+      if (generation.current !== version || ticket !== sequence.current) return;
+      pages.current.set(next, page.timeline.steps);
+      newestPage.current = next;
+      stopped = TERMINAL.has(page.timeline.state);
       setTimeline((steps) => {
         const merged = new Map(steps.map((step) => [step.stepId, step]));
         for (const step of page.timeline.steps) merged.set(step.stepId, step);
-        loadedCount.current = merged.size;
         return [...merged.values()];
       });
       setNext(page.timeline.stepsNext);
       setTimelineError(false);
     } catch {
-      if (generation.current === version) setTimelineError(true);
+      if (generation.current === version && ticket === sequence.current) setTimelineError(true);
     } finally {
-      if (generation.current === version) setLoadingSteps(false);
+      if (generation.current === version && ticket === sequence.current) {
+        loadingMore.current = false;
+        setLoadingSteps(false);
+        if (stopped) refreshSteps.current(true);
+      }
     }
   };
   const sources = useSources(client, task.taskId, task.state);

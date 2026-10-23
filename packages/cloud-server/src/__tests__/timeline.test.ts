@@ -220,3 +220,22 @@ test('an answer that cannot fit the byte limit even with one step is refused', a
   assert.equal(res.status, 413);
   assert.equal(((await res.json()) as { error: string }).error, 'timeline_too_large');
 });
+
+test('task conversation lookup resolves the root and hides tasks from other owners', async (t) => {
+  const { h, taskId } = await setup(t);
+  const path = `/v1/tasks/${taskId}/conversation`;
+  const res = await h.api(path);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'private, no-store');
+  const conversations = (await (await h.api('/v1/conversations')).json()) as {
+    conversations: Array<{ conversationId: string }>;
+  };
+  const body = (await res.json()) as { conversationId: string; task: { taskId: string } };
+  assert.equal(body.conversationId, conversations.conversations[0]?.conversationId);
+  assert.equal(body.task.taskId, taskId);
+  const other = h.server.invites.create('other');
+  assert.equal((await h.api(path, { token: other.token })).status, 404);
+  assert.equal((await h.api(path, { token: null })).status, 401);
+  assert.equal((await h.api('/v1/tasks/tsk_missing/conversation')).status, 404);
+  assert.equal((await h.api(path, { method: 'POST' })).status, 405);
+});

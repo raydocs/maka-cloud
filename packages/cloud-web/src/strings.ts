@@ -1,6 +1,7 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  "Couldn't find that task.": "Couldn't find that task.",
   Usage: 'Usage',
   'Choose your language': 'Choose your language',
   'Connect a project': 'Connect a project',
@@ -598,6 +599,7 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  "Couldn't find that task.": '找不到该任务。',
   Usage: '用量',
   'Choose your language': '选择语言',
   'Connect a project': '连接项目',
@@ -1151,6 +1153,7 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  "Couldn't find that task.": '找不到該任務。',
   Usage: '用量',
   'Choose your language': '選擇語言',
   'Connect a project': '連結專案',
