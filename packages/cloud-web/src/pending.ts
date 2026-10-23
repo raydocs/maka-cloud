@@ -14,8 +14,17 @@ function sessionStore() {
   }
 }
 
-/** This tab's unacknowledged sends, so a reload after a lost acknowledgment does not send twice. */
-export const pendingSends = storagePendingSends(sessionStore());
+/**
+ * This tab's unacknowledged first message (the starter's), so a reload after a lost acknowledgment
+ * does not send twice. A conversation's send kept here by an earlier version is not swept: the
+ * outbox takes it over (`adoptPendingSend`), however old.
+ */
+export const pendingSends = storagePendingSends(
+  sessionStore(),
+  'maka.pending.',
+  Date.now,
+  (key) => key === 'start',
+);
 
 function localStore() {
   try {
@@ -36,6 +45,6 @@ function localStore() {
  */
 export function outboxFor(client: CloudClient, conversationId: string) {
   const outbox = webStorageOutbox(localStore(), client.outboxScope());
-  void adoptPendingSend(pendingSends, outbox, conversationId);
+  void adoptPendingSend(sessionStore(), outbox, conversationId);
   return outbox;
 }

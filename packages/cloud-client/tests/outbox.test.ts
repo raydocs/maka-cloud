@@ -432,19 +432,26 @@ test('an unsent message is kept 30 days from its last try, then shown once as ex
   expect(api.posts).toHaveLength(2);
 });
 
-test('a send kept the earlier way (sessionStorage) is taken over under its own id, never resent on its own', async () => {
+test('a send kept the earlier way (sessionStorage) is taken over under its own id, even overnight, never resent on its own', async () => {
   const session = memoryStorage();
   const local = memoryStorage();
-  // What an earlier version left: this conversation's unacknowledged send, and a first message's.
+  const hour = 60 * 60_000;
+  // What an earlier version left in a tab open overnight: this conversation's unacknowledged send,
+  // ten hours old, and a first message's record just as old.
   session.setItem(
     'maka.pending.c1',
-    JSON.stringify({ id: 'legacy-1', text: 'Ship it', at: Date.now() }),
+    JSON.stringify({ id: 'legacy-1', text: 'Ship it', at: Date.now() - 10 * hour }),
   );
-  const start = JSON.stringify({ id: 'start-1', text: 'Hi', at: Date.now(), conversationId: 'c9' });
-  session.setItem('maka.pending.start', start);
+  const start = { id: 'start-1', text: 'Hi', at: Date.now() - 10 * hour, conversationId: 'c9' };
+  session.setItem('maka.pending.start', JSON.stringify(start));
+  // The web opens its first-message store as it does on load: its sweep runs first.
+  storagePendingSends(session, 'maka.pending.', Date.now, (key) => key === 'start');
+  // The first message's record is its own and past its hour: swept. The conversation's is left.
+  expect(session.map.has('maka.pending.start')).toBe(false);
+  expect(session.map.has('maka.pending.c1')).toBe(true);
   const api = server();
   const outbox = webStorageOutbox(local, 'me');
-  void adoptPendingSend(storagePendingSends(session), outbox, 'c1');
+  void adoptPendingSend(session, outbox, 'c1');
   const feed = new ConversationFeed(new CloudClient('t', api.fetcher), 'c1', 0, outbox);
   await until(() => feed.getSnapshot().outgoing.length === 1, 'the earlier send');
   expect(feed.getSnapshot().outgoing[0]).toMatchObject({
@@ -453,11 +460,68 @@ test('a send kept the earlier way (sessionStorage) is taken over under its own i
     status: { state: 'failed', reason: 'interrupted', retryable: true },
   });
   await until(() => !session.map.has('maka.pending.c1'), 'the old record to go');
-  expect(session.map.get('maka.pending.start')).toBe(start);
   expect(api.posts).toHaveLength(0);
   // Sent again by the person: the id the server may already have.
   expect(await feed.retry('legacy-1')).toBe(true);
   expect(api.posts.map((p) => p.clientMessageId)).toEqual(['legacy-1']);
+});
+
+test('a send kept the earlier way longer ago than the outbox keeps anything is shown once, as expired', async () => {
+  const session = memoryStorage();
+  const local = memoryStorage();
+  const at = Date.now() - OUTBOX_KEEP_MS - 1;
+  session.setItem('maka.pending.c1', JSON.stringify({ id: 'legacy-2', text: 'Old words', at }));
+  // Junk, and a first message's record, are never taken as a conversation's send.
+  session.setItem('maka.pending.c2', '{"id":"has spaces","text":"t","at":1}');
+  session.setItem(
+    'maka.pending.c3',
+    JSON.stringify({ id: 's', text: 't', at, conversationId: 'c3' }),
+  );
+  const outbox = webStorageOutbox(local, 'me');
+  void adoptPendingSend(session, outbox, 'c1');
+  void adoptPendingSend(session, outbox, 'c2');
+  void adoptPendingSend(session, outbox, 'c3');
+  const feed = new ConversationFeed(new CloudClient('t', server().fetcher), 'c1', 0, outbox);
+  await until(() => feed.getSnapshot().outgoing.length === 1, 'the earlier send');
+  expect(feed.getSnapshot().outgoing[0]).toMatchObject({
+    id: 'legacy-2',
+    text: 'Old words',
+    status: { state: 'failed', reason: 'expired' },
+  });
+  expect(await outbox.list('c2')).toEqual([]);
+  expect(await outbox.list('c3')).toEqual([]);
+});
+
+test('every unsent message is kept, however many: 25 sent offline all come back after a reload', async () => {
+  const storage = memoryStorage();
+  const api = server(() => {
+    throw new TypeError('offline');
+  });
+  const client = new CloudClient('t', api.fetcher);
+  const first = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
+  const words = Array.from({ length: 25 }, (_, i) => `message ${i + 1}`);
+  for (const text of words) expect(await first.send(text)).toBe(false);
+  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
+  await until(() => reloaded.getSnapshot().outgoing.length === 25, 'all 25');
+  expect(
+    reloaded
+      .getSnapshot()
+      .outgoing.map((m) => m.text)
+      .sort(),
+  ).toEqual([...words].sort());
+  // The same through a store that keeps an index (the phone's secure store).
+  const secure = new Map<string, string>();
+  const indexed = storageOutbox(
+    {
+      get: async (k) => secure.get(k) ?? null,
+      set: async (k, v) => void secure.set(k, v),
+      remove: async (k) => void secure.delete(k),
+    },
+    'me',
+  );
+  for (let i = 0; i < 25; i += 1)
+    await indexed.put({ id: `p${i}`, conversationId: 'c1', text: `phone ${i}`, at: i });
+  expect(await indexed.list('c1')).toHaveLength(25);
 });
 
 test('an older message with the same words, replayed late, never takes the place of an unsent or unconfirmed one', async () => {

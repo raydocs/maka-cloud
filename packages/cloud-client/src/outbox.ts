@@ -1,5 +1,5 @@
 import type { Mode } from './contract';
-import type { PendingSends } from './pending';
+import type { PendingSend } from './pending';
 
 /**
  * A message the person sent that the server has not acknowledged yet. It is kept from before the
@@ -59,9 +59,6 @@ export interface OutboxScope {
  * last time, as not sent and no longer kept, and then deleted: never dropped without being shown.
  */
 export const OUTBOX_KEEP_MS = 30 * 24 * 60 * 60_000;
-
-/** At most this many messages are kept per conversation; the oldest go first. */
-const MAX_PER_CONVERSATION = 20;
 
 /** How long working out the account's scope may hold the outbox up before the token's is used. */
 const ACCOUNT_WAIT_MS = 3000;
@@ -222,17 +219,9 @@ export function storageOutbox(
       return true;
     }, false);
     if (!set) return false;
-    // The oldest beyond the cap go.
-    const others = (await read(s, entry.conversationId)).filter((e) => e.id !== entry.id);
-    const dropped = new Set(
-      others.slice(0, Math.max(0, others.length - (MAX_PER_CONVERSATION - 1))).map((e) => e.id),
-    );
-    for (const id of dropped)
-      await quietly(() => storage.remove(keyOf(s, entry.conversationId, id)), undefined);
+    // No count limit: every unsent message is kept until it is sent, deleted, or shown as expired.
     if (!storage.keys) {
-      const listed = (await ids(s, entry.conversationId)).filter(
-        (id) => id !== entry.id && !dropped.has(id),
-      );
+      const listed = (await ids(s, entry.conversationId)).filter((id) => id !== entry.id);
       await writeIndex(s, entry.conversationId, [...listed, entry.id]);
     }
     return true;
@@ -331,15 +320,48 @@ export function webStorageOutbox(
  * conversation's feed opens: the outbox runs its calls in order, so the feed then finds it. The old
  * record is cleared only once the outbox holds it. A first message's record (the starter's, with a
  * conversation id of its own) is left to the starter.
+ *
+ * The record is read as stored, whatever its age: the earlier way forgot a send after an hour, but
+ * its words were never shown as dropped, so an old one is taken over too and the conversation shows
+ * it (as expired if it is past `OUTBOX_KEEP_MS`). The earlier store must not sweep these records
+ * first (`storagePendingSends` with `owns`).
  */
 export async function adoptPendingSend(
-  sends: PendingSends,
+  storage: Pick<Storage, 'getItem' | 'removeItem'> | undefined,
   outbox: Outbox,
   conversationId: string,
+  prefix = 'maka.pending.',
 ): Promise<void> {
-  const kept = sends.read(conversationId);
-  if (!kept || kept.conversationId !== undefined) return;
-  await outbox.put({ id: kept.id, conversationId, text: kept.text, at: kept.at, keptAt: kept.at });
-  if ((await outbox.list(conversationId)).some((entry) => entry.id === kept.id))
-    sends.clear(conversationId);
+  const key = prefix + conversationId;
+  let kept: unknown;
+  try {
+    const raw = storage?.getItem(key);
+    kept = raw ? JSON.parse(raw) : undefined;
+  } catch {
+    kept = undefined;
+  }
+  if (!isLegacySend(kept)) return;
+  const { id, text, at } = kept;
+  await outbox.put({ id, conversationId, text, at, keptAt: at });
+  if ((await outbox.list(conversationId)).some((entry) => entry.id === id)) {
+    try {
+      storage?.removeItem(key);
+    } catch {
+      // Left in place: taking it over again is the same message, under the same id.
+    }
+  }
+}
+
+/** A conversation's send as the earlier way kept it (`PendingSend`, without a conversation id). */
+function isLegacySend(value: unknown): value is Omit<PendingSend, 'conversationId'> {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v['id'] === 'string' &&
+    ID.test(v['id']) &&
+    typeof v['text'] === 'string' &&
+    v['text'].trim() !== '' &&
+    typeof v['at'] === 'number' &&
+    v['conversationId'] === undefined
+  );
 }
