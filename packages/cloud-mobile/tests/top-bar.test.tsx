@@ -36,8 +36,10 @@ test('the sections are tabs in one pill: the open one is selected, the others na
   expect(screen.getByRole('tab', { name: 'Home' }).props.accessibilityState).toEqual({
     selected: true,
   });
-  // Every segment is a full touch target.
+  // Every segment is a full touch target, and larger text cannot push the pill off a narrow screen.
   for (const tab of tabs) expect(flat(tab.props.style).minHeight).toBeGreaterThanOrEqual(44);
+  expect(screen.getByText('Settings').props.maxFontSizeMultiplier).toBeLessThanOrEqual(1.3);
+  expect(screen.getByText('Settings').props.numberOfLines).toBe(1);
   // The open section is the one dark pill on the sky.
   expect(flat(screen.getByRole('tab', { name: 'Home' }).props.style).backgroundColor).toBe(
     LIGHT.pillOn,

@@ -27,7 +27,11 @@ export function TopBar({ state, descriptors, emitter, navigateToTab, insets }: T
         pointerEvents="box-none"
         style={[
           styles.bar,
-          { paddingTop: insets.top + 8, paddingLeft: insets.left, paddingRight: insets.right },
+          {
+            paddingTop: insets.top + 8,
+            paddingLeft: insets.left + 12,
+            paddingRight: insets.right + 12,
+          },
         ]}
       >
         {!onPanel && (
@@ -68,7 +72,17 @@ export function TopBar({ state, descriptors, emitter, navigateToTab, insets }: T
                     { opacity: pressed && !focused ? 0.7 : 1 },
                   ]}
                 >
-                  <Text style={[styles.label, { color: ink }]} allowFontScaling>
+                  {/* Larger text grows the labels up to 1.3 times, as the system tab bars do, so the
+                      pill keeps its 44 pt height (HEADER_SPACE) and fits a narrow phone; a label
+                      that still does not fit shrinks a little rather than clip. */}
+                  <Text
+                    style={[styles.label, { color: ink }]}
+                    allowFontScaling
+                    maxFontSizeMultiplier={1.3}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.8}
+                  >
                     {label}
                   </Text>
                 </Pressable>
@@ -83,11 +97,13 @@ export function TopBar({ state, descriptors, emitter, navigateToTab, insets }: T
 
 const styles = StyleSheet.create({
   bar: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'center' },
-  pill: { borderRadius: radius.pill },
+  // Never wider than the screen: the segments give up width before the pill overflows.
+  pill: { borderRadius: radius.pill, maxWidth: '100%' },
   segments: { flexDirection: 'row', padding: 4, gap: 2 },
   segment: {
     minHeight: TOUCH,
-    minWidth: 72,
+    minWidth: 64,
+    flexShrink: 1,
     paddingHorizontal: 18,
     borderRadius: radius.pill,
     alignItems: 'center',
