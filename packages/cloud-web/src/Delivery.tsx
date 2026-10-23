@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowUpRight, FileDiff } from 'lucide-react';
 import {
@@ -67,6 +68,7 @@ function SourceCard({
   tiltDegrees: number;
   onTop: boolean;
 }) {
+  const { shared } = useT();
   const [preview, setPreview] = useState<SourcePreview | undefined>();
   const [picture, setPicture] = useState<Blob | undefined>();
   const src = useObjectUrl(picture);
@@ -99,7 +101,7 @@ function SourceCard({
       <div className="source-text">
         <span className="source-title">{title}</span>
         <span className="source-meta">
-          {site} · {LABEL_WORDS[source.label]}
+          {site} · {shared(LABEL_WORDS[source.label])}
         </span>
       </div>
     </>
@@ -129,11 +131,12 @@ export function SourcesStack({
   taskId: string;
   sources: readonly SourceListing[];
 }) {
+  const { t } = useT();
   const shown = stackOf(sources);
   if (shown.length === 0) return null;
   const middle = shown.length === 3 ? 1 : shown.length - 1;
   return (
-    <section className="sources-stack" aria-label="Sources">
+    <section className="sources-stack" aria-label={t('Sources')}>
       {shown.map((source, i) => (
         <SourceCard
           key={source.index}
@@ -182,6 +185,7 @@ function ViewShot({
   onOpen: (blob: Blob) => void;
   onFailed: () => void;
 }) {
+  const { t, shared } = useT();
   const [blob, setBlob] = useState<Blob | undefined>();
   const url = useObjectUrl(blob);
   const index = view.listing.index;
@@ -200,13 +204,21 @@ function ViewShot({
       <button
         type="button"
         className="view-frame"
-        aria-label={`Open large: ${view.viewport}`}
+        aria-label={t('Open large: {p0}', { p0: shared(view.viewport) })}
         disabled={!blob}
         onClick={() => blob && onOpen(blob)}
       >
-        {url ? <img src={url} alt={`${view.viewport}: ${displayText(view.listing.name)}`} /> : null}
+        {url ? (
+          <img
+            src={url}
+            alt={t('{viewport}: {name}', {
+              viewport: shared(view.viewport),
+              name: displayText(view.listing.name),
+            })}
+          />
+        ) : null}
       </button>
-      <figcaption>{view.viewport}</figcaption>
+      <figcaption>{shared(view.viewport)}</figcaption>
     </figure>
   );
 }
@@ -236,6 +248,7 @@ export function DeliveryCard({
   /** Opens the task's own page (plan, steps, changes, review, cost). */
   onOpenTask?: (task: TaskView) => void;
 }) {
+  const { t, shared } = useT();
   const model = deliveryModel(task, listings, sources);
   const views = model?.views;
   // With views each screenshot loads itself; the single picture is not loaded a second time.
@@ -261,7 +274,8 @@ export function DeliveryCard({
   }, [client, task.taskId, shotIndex]);
 
   if (!model) return null;
-  const { outcome, caption, actions } = model;
+  const { outcome, actions } = model;
+  const caption = views || (!shot && diff) ? shared(model.caption) : model.caption;
 
   async function openDiff() {
     if (!diff) return;
@@ -270,7 +284,7 @@ export function DeliveryCard({
       if (content.kind === 'text')
         setOpened({
           kind: 'diff',
-          title: caption || 'The changes',
+          title: caption || t('The changes'),
           text: content.text,
         });
     } catch {
@@ -279,13 +293,16 @@ export function DeliveryCard({
   }
 
   return (
-    <article className="card delivery" aria-label={`Result: ${displayText(task.title ?? 'Task')}`}>
+    <article
+      className="card delivery"
+      aria-label={t('Result: {p0}', { p0: displayText(task.title ?? t('Task')) })}
+    >
       <div className="section-heading">
         <span className="status-mark succeeded" />
-        Finished
+        {t('Finished')}
         {onOpenTask && (
           <button type="button" className="text-link" onClick={() => onOpenTask(task)}>
-            Details
+            {t('Details')}
           </button>
         )}
       </div>
@@ -298,7 +315,7 @@ export function DeliveryCard({
               client={client}
               taskId={task.taskId}
               view={view}
-              onOpen={(blob) => setOpened({ kind: 'image', title: view.viewport, blob })}
+              onOpen={(blob) => setOpened({ kind: 'image', title: shared(view.viewport), blob })}
               onFailed={markFailed}
             />
           ))}
@@ -308,11 +325,11 @@ export function DeliveryCard({
         <button
           type="button"
           className="delivery-visual"
-          aria-label={`Open large: ${caption || 'picture'}`}
+          aria-label={t('Open large: {p0}', { p0: caption || t('Picture') })}
           onClick={() =>
             setOpened({
               kind: 'image',
-              title: caption || 'Picture',
+              title: caption || t('Picture'),
               blob: proof,
             })
           }
@@ -324,16 +341,16 @@ export function DeliveryCard({
         <button
           type="button"
           className="delivery-visual delivery-diff-tile"
-          aria-label="Open large: the changes"
+          aria-label={t('Open large: the changes')}
           onClick={() => void openDiff()}
         >
-          <FileDiff aria-hidden="true" size={16} className="icon-inline" /> View the changes
+          <FileDiff aria-hidden="true" size={16} className="icon-inline" /> {t('View the changes')}
         </button>
       )}
       {/* The caption names a single picture: the changes tile already says what it is, and with
           views each frame is labelled while the caption names the group instead. */}
       {shot && caption && <p className="delivery-caption muted">{caption}</p>}
-      {failed && <p className="muted">The picture could not be loaded.</p>}
+      {failed && <p className="muted">{t('The picture could not be loaded.')}</p>}
       {actions.length > 0 && (
         <div className="delivery-actions">
           {actions.map((action) => (
@@ -344,7 +361,8 @@ export function DeliveryCard({
               target="_blank"
               rel="noreferrer noopener"
             >
-              {action.label} <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
+              {shared(action.label)}{' '}
+              <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           ))}
         </div>
@@ -354,7 +372,7 @@ export function DeliveryCard({
           label={opened.title}
           status={
             <>
-              <span className="status-mark succeeded" /> Finished · {opened.title}
+              <span className="status-mark succeeded" /> {t('Finished ·')} {opened.title}
             </>
           }
           onClose={() => setOpened(undefined)}

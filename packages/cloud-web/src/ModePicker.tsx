@@ -1,8 +1,10 @@
+import { useT } from './i18n';
+import type { Key } from './strings';
 import { ChevronDown } from 'lucide-react';
 import { useRef } from 'react';
 import { type Mode, MODES } from '@maka-cloud/client';
 
-const LABELS: Record<Mode, { label: string; hint: string }> = {
+const LABELS: Record<Mode, { label: Key; hint: Key }> = {
   quick: { label: 'Quick', hint: 'Small, well-understood work: fast and cheap.' },
   standard: { label: 'Standard', hint: 'The usual: careful work with an independent review.' },
   deep: { label: 'Deep', hint: 'Hard or risky work: the most care, and the most spend.' },
@@ -26,24 +28,29 @@ export function ModePicker({
   idPrefix: string;
   disabled?: boolean;
 }) {
+  const { t } = useT();
   const menu = useRef<HTMLDetailsElement>(null);
   const options: Array<{ value: Mode | undefined; label: string; hint: string }> = [
     {
       value: undefined,
-      label: 'Let it decide',
-      hint: 'It picks from the size of the work and your budget.',
+      label: t('Let it decide'),
+      hint: t('It picks from the size of the work and your budget.'),
     },
-    ...MODES.map((mode) => ({ value: mode, ...LABELS[mode] })),
+    ...MODES.map((mode) => ({
+      value: mode,
+      label: t(LABELS[mode].label),
+      hint: t(LABELS[mode].hint),
+    })),
   ];
   const current = options.find((option) => option.value === value) ?? options[0];
   return (
     <details className="mode-menu" ref={menu}>
-      <summary aria-label={`How much care: ${current?.label}`}>
+      <summary aria-label={t('How much care: {p0}', { p0: current?.label })}>
         {current?.label}
         <ChevronDown aria-hidden="true" size={14} className="mode-caret" />
       </summary>
       <fieldset className="mode-picker" disabled={disabled}>
-        <legend className="sr-only">How much care this needs</legend>
+        <legend className="sr-only">{t('How much care this needs')}</legend>
         {options.map((option) => {
           const id = `${idPrefix}-${option.value ?? 'auto'}`;
           return (

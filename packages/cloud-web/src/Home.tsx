@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ArrowUp } from 'lucide-react';
 import {
@@ -20,6 +21,8 @@ import {
   verbOf,
   type VisitStore,
 } from '@maka-cloud/client';
+import { localizedSentence } from './Failure';
+import { failureWords } from '@maka-cloud/client';
 import { InboxCard, ResultCard } from './Inbox';
 import { ModePicker } from './ModePicker';
 import { pendingSends } from './pending';
@@ -72,23 +75,24 @@ function InboxStatus({
   failed: boolean;
   onRetry: () => void;
 }) {
+  const { t } = useT();
   if (failed)
     return (
-      <section className="card section-card" aria-label="Decisions could not be loaded">
-        <p className="muted">Decisions could not be loaded.</p>
+      <section className="card section-card" aria-label={t('Decisions could not be loaded')}>
+        <p className="muted">{t('Decisions could not be loaded.')}</p>
         <button type="button" className="quiet-action" onClick={onRetry}>
-          Try again
+          {t('Try again')}
         </button>
       </section>
     );
   if (loaded)
     return (
-      <section className="card section-card" aria-label="Nothing needs you">
-        <p className="muted">Nothing needs you.</p>
+      <section className="card section-card" aria-label={t('Nothing needs you')}>
+        <p className="muted">{t('Nothing needs you.')}</p>
       </section>
     );
   return (
-    <section className="card section-card" aria-label="Loading" aria-busy="true">
+    <section className="card section-card" aria-label={t('Loading')} aria-busy="true">
       <span className="skeleton-line" style={{ width: '60%' }} />
       <span className="skeleton-line" />
       <span className="skeleton-line" style={{ width: '80%' }} />
@@ -117,6 +121,7 @@ export function Home({
   onOpenTask?: (task: TaskView) => void;
   now?: () => number;
 }) {
+  const { t, shared } = useT();
   const [draft, setDraft] = useState('');
   const [onboarding, setOnboarding] = useState(() => !onboardingSkipped());
   const [workMode, setWorkMode] = useState<Mode | undefined>();
@@ -164,7 +169,7 @@ export function Home({
   const titleOf = (conversationId: string) =>
     displayText(
       conversations.find((c) => c.conversationId === conversationId)?.title ??
-        'Untitled conversation',
+        t('Untitled conversation'),
     );
   const recent = recentConversations(conversations);
 
@@ -174,8 +179,11 @@ export function Home({
           A phone reads one column, in this order: waiting, suggested, start, results. */}
       <div className="home-side">
         {open.length > 0 && (
-          <section className="card section-card" aria-label="Decisions waiting">
-            <h2>Waiting on you ({open.length})</h2>
+          <section
+            className="card section-card decisions-waiting"
+            aria-label={t('Decisions waiting')}
+          >
+            <h2>{t('Waiting on you ({count})', { count: open.length })}</h2>
             {open.map((item) => {
               const parts = finishedParts(item);
               const task = done?.get(item.conversationId)?.find((t) => t.taskId === item.taskId);
@@ -192,7 +200,7 @@ export function Home({
                 />
               ) : (
                 <div key={item.itemId} className="decision">
-                  <span className="chip verb">{verbOf(item.kind)}</span>
+                  <span className="chip verb">{shared(verbOf(item.kind))}</span>
                   <InboxCard
                     item={item}
                     disabled={busy}
@@ -201,17 +209,17 @@ export function Home({
                   <button
                     type="button"
                     className="quiet-action"
-                    aria-label={`Open “${titleOf(item.conversationId)}”`}
+                    aria-label={t('Open “{p0}”', { p0: titleOf(item.conversationId) })}
                     onClick={() => onOpen(item.conversationId)}
                   >
-                    Open conversation
+                    {t('Open conversation')}
                   </button>
                 </div>
               );
             })}
             {answerError && (
               <p role="alert" className="error">
-                {answerError}
+                {shared(answerError)}
               </p>
             )}
           </section>
@@ -222,9 +230,9 @@ export function Home({
         )}
 
         {suggested.length > 0 && (
-          <section className="card section-card" aria-label="Suggestions">
-            <h2>Noticed for you ({suggested.length})</h2>
-            <p className="muted">Nothing starts until you tap its first word.</p>
+          <section className="card section-card" aria-label={t('Suggestions')}>
+            <h2>{t('Noticed for you ({count})', { count: suggested.length })}</h2>
+            <p className="muted">{t('Nothing starts until you tap its first word.')}</p>
             {suggested.map((item) => (
               <div key={item.itemId} className="decision">
                 <SuggestionCard
@@ -236,15 +244,15 @@ export function Home({
             ))}
             {open.length === 0 && answerError && (
               <p role="alert" className="error">
-                {answerError}
+                {shared(answerError)}
               </p>
             )}
           </section>
         )}
 
         {schedule && (schedule.scheduled.length > 0 || schedule.watching > 0) && (
-          <section className="card section-card" aria-label="What runs next">
-            <h2>What runs next</h2>
+          <section className="card section-card runs-next" aria-label={t('What runs next')}>
+            <h2>{t('What runs next')}</h2>
             {schedule.scheduled.length > 0 && (
               <ul className="done-lines">
                 {schedule.scheduled.map((run) => (
@@ -253,7 +261,7 @@ export function Home({
                       <strong>{displayText(run.name)}</strong>
                       <span className="muted">{displayText(run.repo)}</span>
                     </span>
-                    <span className="done-cost muted">{relativeTime(run.at, now())}</span>
+                    <span className="done-cost muted">{shared(relativeTime(run.at, now()))}</span>
                   </li>
                 ))}
               </ul>
@@ -261,8 +269,10 @@ export function Home({
             {schedule.watching > 0 && (
               <p className="muted">
                 {schedule.watching === 1
-                  ? '1 more duty wakes when something happens on GitHub.'
-                  : `${schedule.watching} more duties wake when something happens on GitHub.`}
+                  ? t('1 more duty wakes when something happens on GitHub.')
+                  : t('{p0} more duties wake when something happens on GitHub.', {
+                      p0: schedule.watching,
+                    })}
               </p>
             )}
           </section>
@@ -280,9 +290,13 @@ export function Home({
           />
         )}
 
-        <section className="card start" aria-label="Start something">
-          <h1>Make room for your next idea.</h1>
-          <p>Tell {BRAND.name} what you’d like done, in a sentence. It takes it from there.</p>
+        <section className="card start" aria-label={t('Start something')}>
+          <h1>{t('Make room for your next idea.')}</h1>
+          <p>
+            {t('Tell {name} what you’d like done, in a sentence. It takes it from there.', {
+              name: BRAND.name,
+            })}
+          </p>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -296,14 +310,14 @@ export function Home({
             }}
           >
             <label htmlFor="first-message" className="sr-only">
-              What would you like to get done?
+              {t('What would you like to get done?')}
             </label>
             <div className="pill-field">
               <textarea
                 id="first-message"
                 rows={1}
                 maxLength={16000}
-                placeholder="What would you like to get done?"
+                placeholder={t('What would you like to get done?')}
                 onKeyDown={submitOnEnter}
                 value={draft}
                 onChange={(e) => {
@@ -314,7 +328,7 @@ export function Home({
               <button
                 type="submit"
                 className="round-button"
-                aria-label={starting ? 'Starting…' : 'Start'}
+                aria-label={starting ? t('Starting…') : t('Start')}
                 disabled={starting || !draft.trim()}
               >
                 <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
@@ -329,17 +343,17 @@ export function Home({
           </form>
           {startError && (
             <p role="alert" className="error">
-              {startError}
+              {shared(startError)}
             </p>
           )}
         </section>
 
         {since !== undefined && done !== undefined && finished.length > 0 && (
-          <section className="card section-card" aria-label="Since you were last here">
-            <h2>Since you were last here</h2>
+          <section className="card section-card" aria-label={t('Since you were last here')}>
+            <h2>{t('Since you were last here')}</h2>
             <div className="stat-tiles">
-              <StatTile label="Done" value={String(finished.length)} />
-              <StatTile label="Spent" value={anySpend ? dollars(spent) : 'Not reported'} />
+              <StatTile label={t('Done')} value={String(finished.length)} />
+              <StatTile label={t('Spent')} value={anySpend ? dollars(spent) : t('Not reported')} />
             </div>
             <ul className="done-lines">
               {finished.map((entry) => (
@@ -355,10 +369,20 @@ export function Home({
                       className={`status-mark ${entry.state === 'succeeded' ? 'succeeded' : 'failed'}`}
                     />
                     <span className="done-text">
-                      <strong>{displayText(entry.title)}</strong>
-                      <span className="muted">{displayText(entry.outcome)}</span>
+                      <strong>{displayText(entry.task.title ?? t('Task'))}</strong>
+                      <span className="muted">
+                        {entry.state === 'succeeded' && entry.task.manifest?.summary !== undefined
+                          ? displayText(entry.outcome)
+                          : entry.task.failureReason
+                            ? localizedSentence(
+                                failureWords(entry.task.failureReason),
+                                entry.task.failureReason,
+                                shared,
+                              )
+                            : shared(displayText(entry.outcome))}
+                      </span>
                     </span>
-                    <span className="done-cost muted">{dollars(entry.costUsd)}</span>
+                    <span className="done-cost muted">{shared(dollars(entry.costUsd))}</span>
                   </button>
                 </li>
               ))}
@@ -367,13 +391,13 @@ export function Home({
         )}
 
         {recent.length > 0 && (
-          <section className="card section-card" aria-label="Recent conversations">
-            <h2>Pick up where you left off</h2>
+          <section className="card section-card" aria-label={t('Recent conversations')}>
+            <h2>{t('Pick up where you left off')}</h2>
             <ul className="recent">
               {recent.map((c) => (
                 <li key={c.conversationId}>
                   <button type="button" onClick={() => onOpen(c.conversationId)}>
-                    {displayText(c.title ?? 'Untitled conversation')}
+                    {displayText(c.title ?? t('Untitled conversation'))}
                   </button>
                 </li>
               ))}
