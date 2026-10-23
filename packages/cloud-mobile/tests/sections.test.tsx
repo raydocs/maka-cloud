@@ -1,12 +1,13 @@
 import type { TaskView } from '@maka-cloud/client';
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
-import { Text } from 'react-native';
+import { Dimensions, Keyboard, type KeyboardEvent, Platform, Text } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Chat from '@/app/(tabs)/chat';
 import Projects from '@/app/(tabs)/projects';
 import Me from '@/app/me';
 import Search from '@/app/search';
-import { Composer, ConversationSheet } from '@/components/Composer';
+import { Composer, ConversationSheet, Dock } from '@/components/Composer';
 import { TaskRow } from '@/components/TaskRow';
 import { Screen, StatusMark, Thinking, Tile } from '@/components/ui';
 import { ReduceMotion } from '@/lib/appearance';
@@ -226,6 +227,60 @@ test.each([
 
 // With no tab bar under the screens, every screen keeps clear of the bottom edge itself (the home
 // indicator, Android's navigation), so the floating composer never sits under them.
+// The composer floats (absolutely placed), so a keyboard-avoiding view's padding never moved it:
+// on the iOS simulator the keyboard covered the field and Start. It is lifted by the keyboard's
+// reach above the screen's safe bottom edge instead, and the room it reports grows with it.
+test('on iOS the floating composer rides above the keyboard, and comes down when it hides', async () => {
+  expect(Platform.OS).toBe('ios');
+  const handlers: Partial<Record<string, (event: KeyboardEvent) => void>> = {};
+  const listen = jest.spyOn(Keyboard, 'addListener').mockImplementation(((
+    name: string,
+    handler: (event: KeyboardEvent) => void,
+  ) => {
+    handlers[name] = handler;
+    return { remove: jest.fn() };
+  }) as never);
+  try {
+    const rooms: number[] = [];
+    let safeBottom = -1;
+    function Probe() {
+      safeBottom = useSafeAreaInsets().bottom;
+      return null;
+    }
+    await render(
+      <ThemeContext.Provider value={LIGHT}>
+        <Probe />
+        <Dock height={0} onHeight={(room) => rooms.push(room)}>
+          <Text>Composer</Text>
+        </Dock>
+      </ThemeContext.Provider>,
+    );
+    const dock = () => flat(screen.getByTestId('dock').props.style);
+    expect(dock().bottom).toBe(0);
+    await fireEvent(screen.getByTestId('dock'), 'layout', {
+      nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 70 } },
+    });
+    expect(rooms.at(-1)).toBe(70);
+    const window = Dimensions.get('window').height;
+    const keyboard = (screenY: number, height: number) =>
+      ({
+        duration: 250,
+        easing: 'keyboard',
+        endCoordinates: { screenX: 0, screenY, width: 390, height },
+      }) as KeyboardEvent;
+    await act(async () => handlers.keyboardWillShow?.(keyboard(window - 336, 336)));
+    const lift = 336 - safeBottom;
+    expect(lift).toBeGreaterThan(0);
+    expect(dock().bottom).toBe(lift);
+    expect(rooms.at(-1)).toBe(70 + lift);
+    await act(async () => handlers.keyboardWillHide?.(keyboard(window, 0)));
+    expect(dock().bottom).toBe(0);
+    expect(rooms.at(-1)).toBe(70);
+  } finally {
+    listen.mockRestore();
+  }
+});
+
 test('every screen keeps clear of the bottom edge', async () => {
   await render(
     <Screen>

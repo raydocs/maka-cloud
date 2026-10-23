@@ -9,7 +9,7 @@ import {
 } from '@maka-cloud/client';
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
 import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { Card, Screen, SkeletonLine, StatusMark, T, TOP_BAR } from '@/components/ui';
 import { useT } from '@/lib/i18n';
@@ -74,10 +74,7 @@ export default function Projects() {
 
   return (
     <Screen>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={{ flex: 1 }}
-      >
+      <View style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={{
             padding: 16,
@@ -164,7 +161,7 @@ export default function Projects() {
           />
         </Dock>
         {sheet}
-      </KeyboardAvoidingView>
+      </View>
     </Screen>
   );
 }

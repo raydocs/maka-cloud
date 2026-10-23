@@ -14,14 +14,7 @@ import {
 } from '@maka-cloud/client';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import {
-  AppState,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  ScrollView,
-  View,
-} from 'react-native';
+import { AppState, Pressable, ScrollView, View } from 'react-native';
 import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { DecisionCard } from '@/components/Decision';
 import { InboxStatus } from '@/components/InboxStatus';
@@ -114,10 +107,7 @@ export default function Home() {
 
   return (
     <Screen>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={{ flex: 1 }}
-      >
+      <View style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={{
             padding: 16,
@@ -297,7 +287,7 @@ export default function Home() {
           />
         </Dock>
         {sheet}
-      </KeyboardAvoidingView>
+      </View>
     </Screen>
   );
 }

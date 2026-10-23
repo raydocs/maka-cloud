@@ -18,10 +18,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import {
   AppState,
   FlatList,
-  KeyboardAvoidingView,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  Platform,
   ScrollView,
   View,
 } from 'react-native';
@@ -125,10 +123,7 @@ function NewConversation() {
     );
   };
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={{ flex: 1 }}
-    >
+    <View style={{ flex: 1 }}>
       {/* Scrolls, so large text or the keyboard never hides the ideas or a failure under the
           composer. */}
       <ScrollView
@@ -167,7 +162,7 @@ function NewConversation() {
         />
       </Dock>
       {sheet}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -251,10 +246,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={{ flex: 1 }}
-    >
+    <View style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
         <FlatList
           ref={scroll}
@@ -444,6 +436,6 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         />
       )}
       {sheet}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
