@@ -151,3 +151,9 @@ export function questionCardModel(question: Question, answered?: string) {
     firstOption: options[0]?.id ?? '',
   };
 }
+
+/** "Pull request #42" for a GitHub pull request link, which would otherwise be named "github.com". */
+export function pullRequestName(url: string | undefined): string | undefined {
+  const number = url?.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)(?:[/?#]|$)/u)?.[1];
+  return number ? `Pull request #${number}` : undefined;
+}

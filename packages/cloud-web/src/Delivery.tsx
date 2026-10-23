@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ArrowUpRight, FileDiff } from 'lucide-react';
 import {
   type ArtifactListing,
   type CloudClient,
@@ -326,11 +327,12 @@ export function DeliveryCard({
           aria-label="Open large: the changes"
           onClick={() => void openDiff()}
         >
-          <span aria-hidden="true">±</span> View the changes
+          <FileDiff aria-hidden="true" size={16} className="icon-inline" /> View the changes
         </button>
       )}
-      {/* With views each frame is labelled, and the caption names the group instead. */}
-      {caption && !views && <p className="delivery-caption muted">{caption}</p>}
+      {/* The caption names a single picture: the changes tile already says what it is, and with
+          views each frame is labelled while the caption names the group instead. */}
+      {shot && caption && <p className="delivery-caption muted">{caption}</p>}
       {failed && <p className="muted">The picture could not be loaded.</p>}
       {actions.length > 0 && (
         <div className="delivery-actions">
@@ -342,7 +344,7 @@ export function DeliveryCard({
               target="_blank"
               rel="noreferrer noopener"
             >
-              {action.label} ↗
+              {action.label} <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           ))}
         </div>

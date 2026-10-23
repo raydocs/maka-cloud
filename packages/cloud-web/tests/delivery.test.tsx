@@ -194,7 +194,8 @@ test('at most two actions: the pull request, then the preview; nothing that is n
     <DeliveryCard client={client} task={task()} listings={[pull]} sources={sources} />,
   );
   const links = screen.getAllByRole('link');
-  expect(links.map((a) => a.textContent)).toEqual(['Open pull request ↗', 'Open preview ↗']);
+  // The arrow is an icon now, so each link's text is its words.
+  expect(links.map((a) => a.textContent?.trim())).toEqual(['Open pull request', 'Open preview']);
   expect(links.map((a) => a.getAttribute('href'))).toEqual([
     'https://github.com/example/repo/pull/12',
     'https://preview.example.dev/app',

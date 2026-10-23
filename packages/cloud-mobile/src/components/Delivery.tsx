@@ -312,8 +312,9 @@ export function DeliveryCard({
       {actions.map((action, i) => (
         <PillButton
           key={action.label}
-          label={`${action.label} · ${action.host} ↗`}
+          label={`${action.label} · ${action.host}`}
           primary={i === 0}
+          external
           onPress={() => openLink(action.url)}
         />
       ))}

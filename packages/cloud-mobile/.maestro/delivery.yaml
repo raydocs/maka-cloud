@@ -20,8 +20,15 @@ appId: cloud.maka.app
           element:
             id: "delivery-picture"
           direction: UP
+# The picture can stop the scroll with its caption still under the composer, so bring the caption up too.
+- scrollUntilVisible:
+    element: "Login page after fix"
 - assertVisible: "Login page after fix"
-- assertVisible: "Open pull request · github.com ↗"
+# The pull request button sits under the picture; a longer conversation title above can leave it
+# just below the fold, so scroll to it rather than assume it fits.
+- scrollUntilVisible:
+    element: "Open pull request · github.com"
+- assertVisible: "Open pull request · github.com"
 - takeScreenshot: delivery-card
 - tapOn:
     id: "delivery-picture"
