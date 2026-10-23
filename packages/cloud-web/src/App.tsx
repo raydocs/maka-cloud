@@ -28,6 +28,7 @@ import {
   questionCardModel,
   Unsupported,
 } from '@maka-cloud/client';
+import { GrantsPanel } from './Grants';
 import { Home } from './Home';
 import { InboxPanel } from './Inbox';
 import { Computer } from './Computer';
@@ -624,6 +625,7 @@ export function Settings({
         <MemoryPanel client={client} errorText={errorText} />
       </section>
       <NotificationsPanel client={client} />
+      <GrantsPanel client={client} />
       <section className="card section-card" aria-label="Connection">
         <h2>This device</h2>
         <p className="muted">Disconnecting forgets the invite on this device and nothing else.</p>

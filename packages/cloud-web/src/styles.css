@@ -1349,6 +1349,71 @@ textarea {
 .mode-picker:disabled {
   opacity: 0.6;
 }
+
+/* Kept approvals: by repository, one line each, a quiet revoke. */
+.mono {
+  font-family: var(--font-mono);
+}
+.grant-group {
+  display: grid;
+  gap: 6px;
+}
+.grant-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.grant-head h3 {
+  font-size: var(--t-sm, 13px);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.grant-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.grant {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-small);
+  background: var(--chip);
+}
+.grant-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.grant-text .muted {
+  font-size: 13px;
+}
+/* Main does not carry the design stack's global .quiet-action yet; the same look, scoped here. */
+.grant .quiet-action,
+.grant-head .quiet-action {
+  min-height: 40px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+.grant .quiet-action:hover:not(:disabled),
+.grant-head .quiet-action:hover:not(:disabled) {
+  color: var(--ink);
+}
+.grant .quiet-action:disabled,
+.grant-head .quiet-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 /* Inside the chat composer the modes are a quiet single row under the field, never two lines. */
 .composer .mode-picker {
   flex-wrap: nowrap;
