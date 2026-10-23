@@ -662,3 +662,84 @@ form (where, why, change, test that fails on main). A finding that violates no i
 to section 5 first. A PR that changes `egress.ts`, `agent-user.ts`, `scripts.ts`, `machine.ts`,
 `process-channel.ts` or the coding `scripts.ts`/`sandbox.ts` says in its description which
 invariants it touches and how each still holds.
+
+## 11. Audits: preview exposure and revocation (2026-10-23)
+
+Two checks of our own code, recorded so the next change on these paths starts from them. Line
+numbers are as of this audit.
+
+### 11.1 Preview exposure
+
+**No port on a box is exposed to a browser or a phone today.** Nothing forwards, tunnels or proxies
+a box port: the instabox client has no port or preview call (`cloud-instabox/src/client.ts`, exec,
+files, lifecycle, snapshots and leases only), and the screen handoff route
+(`cloud-server/src/http.ts:1106`) reaches a `ComputerSource` (`cloud-server/src/computer.ts:2`) that
+no package implements yet. What "preview" means today:
+
+- The task's sources card. The host records a page the agent fetched and got an answer for
+  (`cloud-host/src/stack.ts:330`), only for a task that exists (`cloud-server/src/cloud-server.ts:789`),
+  and only a plain public https URL, 20 a task (`cloud-server/src/previews.ts:43`). The server's
+  proxy (`http.ts:815`) takes an index into that task's log, never a URL, checks the owner before and
+  after the fetch, and fetches through `createSafeFetch`: https on 443 only, no address literals or
+  local names (`safe-fetch.ts:111`), every resolved address public, 169.254/16, 100.64/10, loopback,
+  private and NAT64/6to4 forms refused (`public-address.ts:14`, `:133`), the socket pinned to the
+  checked address, each redirect hop checked again (`safe-fetch.ts:185`), 512 KiB page, 1 MiB image,
+  6 s, 4 fetches at once, 60 a minute per invite (`previews.ts:121`, `http.ts:79`).
+- The "Open preview" action on a delivery (`cloud-client/src/delivery.ts:77`): a link the user's
+  own browser opens, shown only for a plain https URL with its host beside it. No server fetches it,
+  and nothing records the `preview` label in production yet (the host records `source` only).
+
+Against the five checks: (1) and (2) hold because no box port is reachable at all and the proxy
+refuses every non-public address and port, so the box agent, the relay, the gateway, the
+orchestrator's MCP endpoint (all on 127.0.0.1 or private addresses) and 169.254.169.254 are out of
+reach; (3) holds by the task log and the owner check on every request (a page of another owner's
+task is a 404); (4) holds by the per-hop redirect check and the pinned socket; (5) holds by the
+limits above. No change was needed.
+
+**When a dev-server preview of a box port is built (T24's "Open preview" for a coding task), it is
+a new subsystem and must hold these before it ships:** the port is one the task's own process
+listens on, read from the box by the control user, never a number from the model or the URL; a
+denylist on top of that for the box agent, relay, gateway, MCP and control ports; a capability
+sealed with the invite, the task id, the box id and an expiry, checked on every request and dead
+once the task ends or the box is reassigned; the proxy connects only to that box's address and
+port and never follows a redirect off it; and size, time and concurrency caps like the sources
+proxy's.
+
+### 11.2 Revocation takes effect
+
+**Kept approvals (grants, #381 and #382): fine.** A grant is looked up in the database at the
+moment of each call, in one synchronous transaction with its use record
+(`cloud-conductor/src/state.ts:1526`), right before the tool runs with no await in between
+(`cloud-conductor/src/tools.ts:1058` to `:1071`). Revoking (`state.ts:1586`, `:1599`; the inbox route
+`cloud-server/src/inbox.ts:215`) sets `revoked_at`, so the next call of a running task is held for a
+card. No decision is cached in a run or a turn. A grant of an invite that was revoked, or that no
+longer owns the conversation, gives nothing (`useGrant`'s `ownerOk`, `cloud-host/src/host.ts:119`),
+and a duty's run never uses one. One edge is by design: the answer that kept a grant also approved
+the one held call it was given on; revoking the grant does not withdraw that single approval, which
+the owner gave on its own card (`consumeApproval`, `state.ts:1678`).
+
+**Duty turned off while its run was launching: fixed.** Turning a duty off cancelled only its
+`pending` requests (`cloud-duties/src/engine.ts:675`). A request that was `launching` at that moment
+came back to `pending` after a failed attempt, or after a restart (`engine.ts:202`), and
+`beginLaunch` re-checked only the project, not the duty, so it started a run for a duty the owner
+had turned off. `beginLaunch` (`engine.ts:859`) now also requires the duty to be active, and ends
+the request as `duty_off` otherwise (test: `cloud-duties/src/__tests__/exits.test.ts`, "the duty is
+turned off while a launch is in flight"). A removed project was already caught there, because
+`permitted` (`engine.ts:213`) reads `removed`.
+
+**A run already started when its project is removed or its duty is turned off: open, documented.**
+`removeProject` (`engine.ts:630`) says "runs already started finish", and a duty run's authority
+is a copy on the run row, read at each call (`tools.ts:775`). Such a run keeps spending to its run
+budget and may start more tasks on the repository; every pull request it would open is still held
+for the owner's card, and grants never apply to a duty run, so nothing irreversible happens
+without the owner. Closing it needs the duties runtime to stop the conductor runs of the removed
+project or turned-off duty (a stop path from `cloud-host/src/duties/runtime.ts` into the conductor,
+with the settler recording `stopped`), which is a change across three packages, so it is left as a
+follow-up.
+
+**Repository access: open, documented.** A project is the repository's registration for standing
+duties only. The pull request publisher uses one server-wide GitHub token (`cloud-host/src/stack.ts`,
+`GitHubPublisher`), and an owner's "this repository" grants are not tied to a project, so removing a
+project neither revokes those grants nor stops a user's own task on that repository. Whether
+removing a project should also revoke the owner's grants for its repository is a product decision;
+the inbox's revoke-all with a `repository` filter already does it in one call.
