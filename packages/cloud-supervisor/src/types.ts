@@ -122,7 +122,9 @@ export type AskTemplate =
       detail: string;
     }
   | { id: 'verification_failed'; title: string; count: number; detail: string; more: number }
-  | { id: 'verification_incomplete'; title: string; detail: string };
+  | { id: 'verification_incomplete'; title: string; detail: string }
+  /** `label` is the kind's own English words, lower case; another language says "this kind" instead. */
+  | { id: 'suggestion_offer'; count: number; label: string; repo: string };
 
 /** What a proposed card shows beside its verb-first title. Cost and mode are the kind's, not words. */
 export interface SuggestionFacts {

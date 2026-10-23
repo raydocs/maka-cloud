@@ -60,6 +60,7 @@ test('the conversational agent is told to reply in Chinese, and to keep code and
     /Reply to them in Simplified Chinese unless they write to you in another language/u,
   );
   assert.match(zh, /Keep code, commands, file names/u);
+  assert.match(zh, /"From my inbox:"\) are not the person writing/u);
   assert.match(zh, /commit messages, pull request titles and code in English/u);
   assert.equal(languageInstruction('en'), undefined, 'English needs nothing added');
 });
@@ -139,6 +140,11 @@ const TEMPLATES = [
     template: { id: 'verification_incomplete', title: 'Report', detail: 'timeout' },
     en: 'The independent check of “Report” could not be completed, so the result is not verified: timeout',
     zh: '对“Report”的独立核查没能完成，结果未经核实：timeout',
+  },
+  {
+    template: { id: 'suggestion_offer', count: 3, label: 'fix failing checks', repo: 'acme/api' },
+    en: '3 suggestions in a row to fix failing checks on acme/api went unanswered. Stop suggesting them?',
+    zh: 'acme/api 上连续 3 条这类建议没有得到回应。要停止这类建议吗？',
   },
 ];
 

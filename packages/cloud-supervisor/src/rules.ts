@@ -332,7 +332,16 @@ export const offerRef = (projectId: string, kind: string): string => `offer:${pr
 /** A non-interrupting item asking whether to keep suggesting a kind: "Turn off" or "Keep". */
 export function suggestionOfferSpec(store: Store, input: SuggestionOfferChoice): ItemSpec {
   const ref = offerRef(input.projectId, input.kind);
-  const context: ItemContext = { subject: 'suggestion', detail: ref };
+  const context: ItemContext = {
+    subject: 'suggestion',
+    detail: ref,
+    askTemplate: {
+      id: 'suggestion_offer',
+      count: input.ignored,
+      label: clip(input.label.toLowerCase(), 120),
+      repo: clip(input.repo, 200),
+    },
+  };
   return {
     kind: 'suggestion',
     conversationId: input.conversationId,

@@ -55,6 +55,8 @@ export interface Messages {
     failed: (title: string, detail: string) => string;
     verificationFailed: (title: string, count: number, detail: string, more: number) => string;
     verificationIncomplete: (title: string, detail: string) => string;
+    /** `label` is the card kind's English words; a language without them says "this kind". */
+    suggestionOffer: (count: number, label: string, repo: string) => string;
   };
   /** Prefixes of the conversation notice that tells the person an item needs them. */
   needsYou: { one: (ask: string) => string; many: (count: number, list: string) => string };
@@ -108,6 +110,8 @@ const en: Messages = {
       `The independent check of ${quote(title, '(untitled)')} found ${count} ${count === 1 ? 'problem' : 'problems'}: ${detail}${more > 0 ? ` (and ${more} more)` : ''}`,
     verificationIncomplete: (title, detail) =>
       `The independent check of ${quote(title, '(untitled)')} could not be completed, so the result is not verified: ${detail}`,
+    suggestionOffer: (count, label, repo) =>
+      `${count} suggestions in a row to ${label} on ${repo} went unanswered. Stop suggesting them?`,
   },
   needsYou: {
     one: (ask) => `Needs you: ${ask}`,
@@ -155,6 +159,8 @@ const zhHans: Messages = {
       `对${quote(title, UNTITLED_ZH)}的独立核查发现 ${count} 个问题：${detail}${more > 0 ? `（另有 ${more} 个）` : ''}`,
     verificationIncomplete: (title, detail) =>
       `对${quote(title, UNTITLED_ZH)}的独立核查没能完成，结果未经核实：${detail}`,
+    suggestionOffer: (count, _label, repo) =>
+      `${repo} 上连续 ${count} 条这类建议没有得到回应。要停止这类建议吗？`,
   },
   needsYou: {
     one: (ask) => `需要你处理：${ask}`,
@@ -179,5 +185,5 @@ export function messages(language: string | undefined): Messages {
  */
 export function languageInstruction(language: Language): string | undefined {
   if (language !== 'zh-Hans') return undefined;
-  return `Language: the person you work for reads Simplified Chinese. Reply to them in Simplified Chinese unless they write to you in another language; then reply in theirs. Questions and notes you show them follow the same rule. Keep code, commands, file names, URLs and quoted text exactly as they are. Write the briefs you delegate in English, and keep commit messages, pull request titles and code in English unless the repository's own conventions say otherwise.`;
+  return `Language: the person you work for reads Simplified Chinese. Reply to them in Simplified Chinese unless they write to you in another language; then reply in theirs. Questions and notes you show them follow the same rule. Messages the app writes on their behalf (such as those starting with "From my inbox:") are not the person writing, so they do not change the reply language. Keep code, commands, file names, URLs and quoted text exactly as they are. Write the briefs you delegate in English, and keep commit messages, pull request titles and code in English unless the repository's own conventions say otherwise.`;
 }

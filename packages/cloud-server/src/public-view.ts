@@ -76,6 +76,12 @@ const AskTemplate = z.discriminatedUnion('id', [
     more: templateCount,
   }),
   z.object({ id: z.literal('verification_incomplete'), title: templateText, detail: templateText }),
+  z.object({
+    id: z.literal('suggestion_offer'),
+    count: templateCount,
+    label: templateText,
+    repo: templateText,
+  }),
 ]);
 
 const MAX_ASK = 600;
@@ -108,6 +114,9 @@ export function localizedAsk(template: unknown, language: Language): string | un
       break;
     case 'verification_incomplete':
       said = ask.verificationIncomplete(t.title, t.detail);
+      break;
+    case 'suggestion_offer':
+      said = ask.suggestionOffer(t.count, t.label, t.repo);
       break;
   }
   const chars = [...said];
