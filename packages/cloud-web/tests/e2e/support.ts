@@ -18,9 +18,15 @@ export async function control<T = unknown>(
 export async function signIn(page: Page, request: APIRequestContext) {
   const invite = await control<{ token: string; inviteId: string }>(request, 'invite');
   await page.goto('/');
-  await page.getByLabel('Invite token').fill(invite.token);
-  await page.getByRole('button', { name: 'Enter your workspace' }).click();
+  await useInviteToken(page, invite.token);
   return invite;
+}
+
+/** The first screen offers an emailed code; a token made by hand is behind a link. */
+export async function useInviteToken(page: Page, token: string) {
+  await page.getByRole('button', { name: 'I have an invite token' }).click();
+  await page.getByLabel('Invite token').fill(token);
+  await page.getByRole('button', { name: 'Enter your workspace' }).click();
 }
 
 /** The segmented navigation at the top of every signed-in screen. */

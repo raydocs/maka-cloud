@@ -1,5 +1,13 @@
 import { expect, test } from '@playwright/test';
-import { API, control, conversationsOf, noHorizontalScroll, openSettings, signIn } from './support';
+import {
+  API,
+  control,
+  conversationsOf,
+  noHorizontalScroll,
+  openSettings,
+  signIn,
+  useInviteToken,
+} from './support';
 
 test('profile facts can be saved, edited and deleted without returning after a reload', async ({
   page,
@@ -39,8 +47,7 @@ test('profile facts can be saved, edited and deleted without returning after a r
   await panel.getByRole('button', { name: 'Save fact', exact: true }).click();
   await expect(panel.getByRole('alert')).toContainText('forgotten');
   await page.reload();
-  await page.getByLabel('Invite token').fill(invite.token);
-  await page.getByRole('button', { name: 'Enter your workspace' }).click();
+  await useInviteToken(page, invite.token);
   await openSettings(page);
   await page.getByText('Memory', { exact: true }).click();
   await expect(panel.getByText('No saved facts yet.')).toBeVisible();

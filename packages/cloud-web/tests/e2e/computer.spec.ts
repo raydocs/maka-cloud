@@ -57,7 +57,7 @@ test('watch, take over, type and point, reopen, then hand back; revoke clears th
   );
   await noHorizontalScroll(page);
   await control(request, 'revoke', { inviteId: invite.inviteId });
-  await expect(page.getByLabel('Invite token')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Email me a code' })).toBeVisible();
   await expect(page.getByRole('img', { name: 'Task desktop' })).toHaveCount(0);
 });
 
