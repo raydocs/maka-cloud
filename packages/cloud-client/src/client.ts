@@ -19,6 +19,7 @@ import {
   type PersonSettings,
   type Mode,
   type ProjectView,
+  type QuotaReason,
   type SuggestionsView,
   type RunTimeline,
   type SourceListing,
@@ -28,6 +29,7 @@ import {
   type TaskMessageState,
   type TaskView,
 } from './contract';
+import { quotaReason } from './quota';
 import { randomId } from './ids';
 
 const PICTURE_TYPES: ReadonlySet<string> = new Set([
@@ -39,6 +41,7 @@ const PICTURE_TYPES: ReadonlySet<string> = new Set([
 
 /** A refused request. `code` is the server's error code, when it sent one. */
 export class ApiError extends Error {
+  readonly quota: QuotaReason | undefined;
   constructor(
     readonly status: number,
     readonly code?: string,
@@ -46,6 +49,10 @@ export class ApiError extends Error {
     readonly body?: unknown,
   ) {
     super(`Request failed (${status}).`);
+    this.quota =
+      code === 'budget_exceeded' && typeof body === 'object' && body !== null
+        ? quotaReason((body as { quota?: unknown }).quota)
+        : undefined;
   }
 }
 /** The server has no such feature: its route answered 404 or 405. */

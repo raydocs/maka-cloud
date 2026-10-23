@@ -10,6 +10,7 @@ import {
   displayText,
   doneSince,
   dollars,
+  type ErrorText,
   errorText,
   finishedParts,
   HomeFeed,
@@ -135,7 +136,7 @@ export function Home({
   const [onboarding, setOnboarding] = useState(() => !onboardingSkipped());
   const [workMode, setWorkMode] = useState<Mode | undefined>();
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState('');
+  const [startError, setStartError] = useState<ErrorText>('');
   const starter = useMemo(() => new ConversationStarter(client, Date.now, pendingSends), [client]);
   // `now` may be a new function each render; the feed keeps asking the latest one.
   const clock = useRef(now);

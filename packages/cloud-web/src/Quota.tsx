@@ -4,6 +4,7 @@ import {
   type QuotaReason,
   type UsageView,
   quotaText,
+  type ErrorText,
   errorText,
   Unsupported,
 } from '@maka-cloud/client';
@@ -21,7 +22,7 @@ export function QuotaNotice({ quota, refusal = true }: { quota: QuotaReason; ref
 export function Usage({ client }: { client: CloudClient }) {
   const { t, shared } = useT();
   const [usage, setUsage] = useState<UsageView>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [unsupported, setUnsupported] = useState(false);
   useEffect(() => {
     let live = true;

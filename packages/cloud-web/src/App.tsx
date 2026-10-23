@@ -17,6 +17,7 @@ import {
   conversationSummary,
   displayText,
   dollars,
+  type ErrorText,
   errorText,
   type InboxItem,
   type Mode,
@@ -613,7 +614,7 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
   const { t, shared, languageChoice } = useT();
   const [on, setOn] = useState(false);
   const [hint, setHint] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   async function act(work: () => Promise<void>) {
@@ -901,7 +902,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   // The task page opens over whichever section the person came from and goes back to it.
   const [decision, setDecision] = useState<{ task: string }>();
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const connect = async (token: string) => {
     setBusy(true);

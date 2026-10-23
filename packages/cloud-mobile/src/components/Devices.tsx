@@ -2,6 +2,7 @@ import {
   activeWords,
   displayText,
   type CloudClient,
+  type ErrorText,
   errorText,
   identityWords,
   type SignedInDevices,
@@ -52,7 +53,7 @@ function waysLabel(identities: SignedInDevices['identities'], say: Translator['t
  */
 export function Devices({ client, now = Date.now }: { client: CloudClient; now?: () => number }) {
   const [devices, setDevices] = useState<SignedInDevices | undefined>();
-  const [problem, setProblem] = useState('');
+  const [problem, setProblem] = useState<ErrorText>('');
   const [busy, setBusy] = useState('');
   const { t: say, tx, lang } = useT();
   const load = useCallback(async () => {

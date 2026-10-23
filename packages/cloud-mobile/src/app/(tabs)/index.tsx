@@ -3,6 +3,7 @@ import {
   ConversationStarter,
   displayText,
   dollars,
+  type ErrorText,
   errorText,
   HomeFeed,
   relativeTime,
@@ -113,7 +114,7 @@ export default function Home() {
 
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState('');
+  const [startError, setStartError] = useState<ErrorText>('');
   const [dock, setDock] = useState(76);
   const { openSheet, sheet } = useConversationSheet(() => router.navigate('/chat'));
 

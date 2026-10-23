@@ -1,13 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import {
-  ApiError,
-  CloudClient,
-  errorText,
-  localizedQuotaText,
-  quotaReason,
-  quotaText,
-  mergeViews,
-} from '../src/index';
+import { ApiError, CloudClient, errorText, quotaReason, quotaText, mergeViews } from '../src/index';
 import type { ConversationState, QuotaReason, TaskView } from '../src/index';
 
 afterEach(() => {
@@ -32,26 +24,26 @@ test('quota parser rejects malformed and unrenderable values', () => {
     { ...quota, usedUsd: -1 },
     { ...quota, limitUsd: Infinity },
     { ...quota, resetsAt: 1e100 },
-  ])
+  ]) {
     expect(quotaReason(invalid)).toBeUndefined();
+    const error = new ApiError(429, 'budget_exceeded', { quota: invalid });
+    expect(error.quota).toBeUndefined();
+    expect(errorText(error)).toBe('Too many requests. Try again in a moment.');
+  }
 });
 
 test('typed refusal text explains scope, use, reset and next action in all languages', () => {
   expect(quotaText(quota, 'en')).toContain('Monthly spending limit: $4.50 of $5.00.');
   expect(quotaText(quota, 'en', false)).not.toContain('Wait until');
-  expect(
-    localizedQuotaText(
-      'Daily spending limit: $1.00 of $2.00. Resets at invalid. Wait until invalid.',
-      'zh-Hant',
-    ),
-  ).toBeUndefined();
   vi.useFakeTimers();
   vi.setSystemTime(Date.UTC(2026, 9, 23));
   expect(quotaText(quota)).toContain('请等到');
   expect(quotaText(quota, 'zh-Hant')).toContain('請等到');
   expect(quotaText(quota, 'en')).not.toContain('2026-11-01T');
-  const text = errorText(new ApiError(429, 'budget_exceeded', { quota }));
-  expect(localizedQuotaText(text, 'zh-Hant')).toBe(quotaText(quota, 'zh-Hant'));
+  const error = new ApiError(429, 'budget_exceeded', { quota });
+  expect(error.quota).toEqual(quota);
+  const text = errorText(error);
+  expect(text).toEqual({ quota });
   expect(
     quotaText({ ...quota, scope: 'task', resetsAt: null, nextStep: 'ask_owner' }, 'en'),
   ).toContain('Ask the workspace owner');
@@ -102,17 +94,13 @@ test.each(['zh-Hans', 'zh-Hant', 'en'] as const)(
     vi.spyOn(Date, 'parse').mockImplementation(() => {
       throw new Error('No localized date parsing on this phone');
     });
-    expect(localizedQuotaText(text, language)).toBe(quotaText(service, language));
+    expect(text).toEqual({ quota: service });
     expect(quotaText(service, language)).not.toContain('$');
     expect(quotaText(service, language)).not.toContain('T00:00');
     vi.setSystemTime(Date.UTC(2026, 10, 2));
     const history = quotaText(quota, 'en');
     expect(history).toContain('Was limited until');
     expect(history).not.toMatch(/Wait until|Raise the limit|Ask the workspace owner/);
-    expect(localizedQuotaText(history, language)).toBe(quotaText(quota, language));
-    expect(localizedQuotaText(quotaText(service, 'en'), language)).toBe(
-      quotaText(service, language),
-    );
     expect(quotaText({ ...quota, scope: 'run', resetsAt: null }, 'en')).toContain(
       'Run spending limit',
     );
@@ -125,9 +113,31 @@ test('reset uses the viewer timezone and language', () => {
     process.env.TZ = 'Asia/Taipei';
     const text = quotaText({ ...quota, resetsAt: Date.UTC(2026, 9, 24) }, 'zh-Hant');
     expect(text).toContain('10月24日');
-    expect(text).toMatch(/08:00:00/);
+    expect(text).toMatch(/08:00/);
   } finally {
     if (before === undefined) delete process.env.TZ;
     else process.env.TZ = before;
   }
 });
+
+test.each(['zh-Hans', 'zh-Hant', 'en'] as const)(
+  'reset is concise and includes only a different year (%s)',
+  (language) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1));
+    const options: Intl.DateTimeFormatOptions[] = [];
+    const NativeFormat = Intl.DateTimeFormat;
+    vi.spyOn(Intl, 'DateTimeFormat').mockImplementation((locale, settings) => {
+      options.push(settings ?? {});
+      return new NativeFormat(locale, { ...settings, hour12: false });
+    });
+    const sameYear = quotaText(quota, language);
+    expect(sameYear).not.toContain('2026');
+    expect(options[0]?.second).toBeUndefined();
+    expect(options[0]?.year).toBeUndefined();
+    expect(quotaText({ ...quota, resetsAt: new Date(2027, 0, 2).getTime() }, language)).toContain(
+      '2027',
+    );
+    expect(options[1]?.year).toBe('numeric');
+  },
+);

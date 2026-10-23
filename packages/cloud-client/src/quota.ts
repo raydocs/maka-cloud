@@ -38,12 +38,12 @@ export function quotaText(q: QuotaReason, language: Language = 'zh-Hans', advice
     q.resetsAt === null
       ? null
       : new Intl.DateTimeFormat({ en: 'en-US', 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW' }[language], {
-          year: 'numeric',
+          year:
+            new Date(q.resetsAt).getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
           month: 'short',
           day: 'numeric',
           hour: '2-digit',
           minute: '2-digit',
-          second: '2-digit',
         }).format(q.resetsAt);
   const past = q.resetsAt !== null && q.resetsAt <= Date.now();
   if (q.scope === 'service') {
@@ -92,70 +92,4 @@ export function quotaText(q: QuotaReason, language: Language = 'zh-Hans', advice
         ? `请等到 ${time}。`
         : '请联系工作区所有者提高上限。';
   return advice && !past ? `${summary}${next}` : summary;
-}
-
-// Parse our fixed en-US presentation explicitly: phone engines need not accept localized
-// dates in Date.parse. Constructing a local date preserves the viewer's timezone.
-function englishReset(text: string): number {
-  const match =
-    /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{1,2}), (\d{4}), (\d{1,2}):(\d{2}):(\d{2})\s+(AM|PM)$/u.exec(
-      text,
-    );
-  if (!match) return NaN;
-  const month = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ].indexOf(match[1] ?? '');
-  const hour = (Number(match[4]) % 12) + (match[7] === 'PM' ? 12 : 0);
-  return new Date(
-    Number(match[3]),
-    month,
-    Number(match[2]),
-    hour,
-    Number(match[5]),
-    Number(match[6]),
-  ).getTime();
-}
-
-/** Re-localizes the fixed English presentation returned by errorText; never model prose. */
-export function localizedQuotaText(text: string, language: Language): string | undefined {
-  const service =
-    /^The service (?:has reached today's limit\. Try again after (.+)|was limited until (.+))\.$/u.exec(
-      text,
-    );
-  if (service) {
-    const quota = quotaReason({
-      scope: 'service',
-      resetsAt: englishReset(service[1] ?? service[2] ?? ''),
-      nextStep: 'wait',
-    });
-    return quota && quotaText(quota, language);
-  }
-  const match =
-    /^(Task|Run|Daily|Monthly) spending limit: \$(\d+\.\d+) of \$(\d+\.\d+)\. (?:Resets at (.+?)\.|Was limited until (.+?)\.|No automatic reset\.)(?: (Raise the limit in settings\.|Wait until .+\.|Ask the workspace owner to raise the limit\.))?$/u.exec(
-      text,
-    );
-  if (!match) return;
-  const quota = quotaReason({
-    scope: { Task: 'task', Run: 'run', Daily: 'day', Monthly: 'month' }[match[1] ?? ''],
-    usedUsd: Number(match[2]),
-    limitUsd: Number(match[3]),
-    resetsAt: match[4] || match[5] ? englishReset(match[4] ?? match[5] ?? '') : null,
-    nextStep: match[6]?.startsWith('Raise')
-      ? 'raise_limit'
-      : match[6]?.startsWith('Wait') || match[5]
-        ? 'wait'
-        : 'ask_owner',
-  });
-  return quota && quotaText(quota, language, match[6] !== undefined);
 }

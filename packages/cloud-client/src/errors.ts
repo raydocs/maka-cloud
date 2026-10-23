@@ -1,5 +1,8 @@
-import { quotaReason, quotaText } from './quota';
+import type { QuotaReason } from './contract';
 import { ApiError, Unsupported } from './client';
+
+/** Quota refusals stay structured until the viewer renders them in their language. */
+export type ErrorText = string | { quota: QuotaReason };
 
 const ERROR_TEXT: Record<string, string> = {
   pause_unsupported: 'This task cannot be paused.',
@@ -28,14 +31,11 @@ const ERROR_TEXT: Record<string, string> = {
   too_many_subscriptions: 'Notifications are already on for as many devices as are allowed.',
 };
 
-export function errorText(error: unknown): string {
+export function errorText(error: unknown): ErrorText {
   if (error instanceof Unsupported)
     return 'This action is unavailable on this server. No change was made.';
   if (error instanceof ApiError) {
-    if (error.code === 'budget_exceeded' && typeof error.body === 'object' && error.body !== null) {
-      const quota = quotaReason((error.body as { quota?: unknown }).quota);
-      if (quota) return quotaText(quota, 'en');
-    }
+    if (error.quota) return { quota: error.quota };
     if (error.status === 401) return 'Your sign-in is no longer valid. Please sign in again.';
     const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
     if (known) return known;

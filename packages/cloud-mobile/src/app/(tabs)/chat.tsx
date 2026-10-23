@@ -6,6 +6,7 @@ import {
   ConversationStarter,
   conversationSummary,
   displayText,
+  type ErrorText,
   errorText,
   TERMINAL,
   type TaskControl,
@@ -114,7 +115,7 @@ function NewConversation() {
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [failure, setFailure] = useState('');
+  const [failure, setFailure] = useState<ErrorText>('');
   const [dock, setDock] = useState(76);
   const { openSheet, sheet } = useConversationSheet();
   const send = () => {

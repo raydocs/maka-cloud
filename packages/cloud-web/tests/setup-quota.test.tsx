@@ -84,6 +84,10 @@ test('an older server hides unsupported setup and usage', async () => {
 test.each(['zh-Hans', 'zh-Hant', 'en'] as Language[])(
   'the composer presents a typed budget refusal in the selected language (%s)',
   async (language) => {
+    const NativeFormat = Intl.DateTimeFormat;
+    vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
+      (locale, options) => new NativeFormat(locale, { ...options, hour12: false }),
+    );
     const client = new CloudClient('test', (async (url, init) => {
       const path = String(url);
       if (path.startsWith('/v1/events'))

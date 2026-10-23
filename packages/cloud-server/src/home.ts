@@ -190,6 +190,7 @@ export class HomeStore {
           `INSERT INTO home_setup VALUES (?, ?, ?) ON CONFLICT (owner, step) DO UPDATE SET until_at = excluded.until_at`,
         )
         .run(owner, report.dismiss, this.now() + DAY_MS);
+    // Readiness only goes up: this is a one-time setup nudge, not live permission state.
     if (report.notificationsAllowed !== undefined)
       this.db
         .prepare(

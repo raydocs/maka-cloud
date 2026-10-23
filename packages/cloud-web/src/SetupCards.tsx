@@ -4,6 +4,7 @@ import {
   type Readiness,
   type SetupCard,
   type SetupStep,
+  type ErrorText,
   errorText,
   Unsupported,
 } from '@maka-cloud/client';
@@ -29,7 +30,7 @@ export function SetupCards({
   const pushAvailable =
     'Notification' in globalThis && 'PushManager' in globalThis && 'serviceWorker' in navigator;
   const [readiness, setReadiness] = useState<Readiness>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const [retry, setRetry] = useState(0);
   useEffect(() => {

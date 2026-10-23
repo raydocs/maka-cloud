@@ -1,4 +1,4 @@
-import { type AuthState, BRAND, errorText } from '@maka-cloud/client';
+import { type AuthState, BRAND, type ErrorText, errorText } from '@maka-cloud/client';
 import Constants from 'expo-constants';
 import { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
@@ -124,7 +124,7 @@ function TokenCard({ server, onBack }: { server: string; onBack: () => void }) {
   const { signIn } = useSession();
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState('');
+  const [problem, setProblem] = useState<ErrorText>('');
   const { t: say, tx } = useT();
   async function submit() {
     if (busy) return;

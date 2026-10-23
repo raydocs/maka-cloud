@@ -210,22 +210,32 @@ test('every translated server choice is one the server offers, with that label',
 });
 
 test.each(LANGUAGES)('quota errors use the phone language (%s)', (lang) => {
-  const quota = {
-    scope: 'day' as const,
-    usedUsd: 5,
-    limitUsd: 5,
-    resetsAt: Date.UTC(2099, 9, 24),
-    nextStep: 'wait' as const,
-  };
-  expect(translator(lang).tx(errorText(new ApiError(402, 'budget_exceeded', { quota })))).toBe(
-    quotaText(quota, lang),
-  );
-  const service = {
-    scope: 'service' as const,
-    resetsAt: quota.resetsAt,
-    nextStep: 'wait' as const,
-  };
-  expect(
-    translator(lang).tx(errorText(new ApiError(402, 'budget_exceeded', { quota: service }))),
-  ).toBe(quotaText(service, lang));
+  const NativeFormat = Intl.DateTimeFormat;
+  const format = jest
+    .spyOn(Intl, 'DateTimeFormat')
+    .mockImplementation(
+      (locale, options) => new NativeFormat(locale, { ...options, hour12: false }),
+    );
+  try {
+    const quota = {
+      scope: 'day' as const,
+      usedUsd: 5,
+      limitUsd: 5,
+      resetsAt: Date.UTC(2099, 9, 24),
+      nextStep: 'wait' as const,
+    };
+    expect(translator(lang).tx(errorText(new ApiError(402, 'budget_exceeded', { quota })))).toBe(
+      quotaText(quota, lang),
+    );
+    const service = {
+      scope: 'service' as const,
+      resetsAt: quota.resetsAt,
+      nextStep: 'wait' as const,
+    };
+    expect(
+      translator(lang).tx(errorText(new ApiError(402, 'budget_exceeded', { quota: service }))),
+    ).toBe(quotaText(service, lang));
+  } finally {
+    format.mockRestore();
+  }
 });
