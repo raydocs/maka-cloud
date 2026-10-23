@@ -202,6 +202,16 @@ export class AuthFlow extends Store<AuthState> {
     }
   }
 
+  /**
+   * The flow is no longer on screen (another server was chosen, or the screen went away). Whatever
+   * it was waiting for is dropped, and a session the server still issues for it is ended instead of
+   * being handed on. Starting the flow again makes it live again.
+   */
+  close(): void {
+    this.turn += 1;
+    this.forget();
+  }
+
   /** Leaves the email or invite step and forgets what it held. */
   back(): void {
     if (this.state.step !== 'emailSent' && this.state.step !== 'needsInvite') return;

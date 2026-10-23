@@ -493,3 +493,30 @@ test('a code abandoned before its answer arrives leaves nothing in the flow', as
   await auth.verifyEmail('123456');
   expect(calls.some((c) => c.path === '/v1/auth/email/verify')).toBe(false);
 });
+
+test('a flow that was closed never signs the device in, and the session it was issued is ended', async () => {
+  let release: (reply: Reply) => void = () => {};
+  const saved: string[] = [];
+  const { auth, calls, auths } = flow(
+    {
+      'POST /v1/auth/email': () => ({
+        body: { challengeId: 'c1', deviceSecret: 'device-secret', expiresAt: 1 },
+      }),
+      'POST /v1/auth/email/verify': () => new Promise<Reply>((resolve) => (release = resolve)),
+      'POST /v1/auth/sign-out': () => ({ body: {} }),
+    },
+    {},
+    (token) => void saved.push(token),
+  );
+  await auth.start();
+  await auth.sendEmail('ada@example.com');
+  const verifying = auth.verifyEmail('123456');
+  await until(() => calls.some((c) => c.path === '/v1/auth/email/verify'));
+  auth.close(); // another server was chosen; the code is still being checked
+  release({ body: { status: 'signed_in', token: 'mks_closed.tok', sessionId: 's' } });
+  await verifying;
+  await until(() => calls.some((c) => c.path === '/v1/auth/sign-out'));
+  expect(saved).toEqual([]);
+  expect(auths.at(-1)).toBe('Bearer mks_closed.tok');
+  expect(step(auth)).not.toBe('signedIn');
+});

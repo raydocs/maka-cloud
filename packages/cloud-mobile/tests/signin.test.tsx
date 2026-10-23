@@ -225,3 +225,52 @@ test('a server that cannot be reached when signing out still lets the device for
   expect(api.session.status).toBe('out');
   expect(secure().has('maka.account')).toBe(false);
 });
+
+test('a sign-in left behind by choosing another server cannot replace the one that followed', async () => {
+  let release: (response: Response) => void = () => {};
+  const calls: Array<{ host: string; path: string; auth: string | undefined }> = [];
+  fetchMock().mockImplementation(async (url: string, init: RequestInit = {}) => {
+    const { host, pathname } = new URL(url);
+    const auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+    calls.push({ host, path: pathname, auth });
+    const route = `${init.method ?? 'GET'} ${pathname}`;
+    if (route === 'GET /v1/auth/options') return Response.json(WAYS);
+    if (route === 'POST /v1/auth/email')
+      return Response.json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 });
+    if (route === 'POST /v1/auth/email/verify')
+      return new Promise<Response>((resolve) => (release = resolve));
+    if (route === 'POST /v1/auth/sign-out') return Response.json({});
+    if (route === 'GET /v1/conversations') return conversations();
+    return new Response('{}', { status: 404 });
+  });
+  await mount();
+  await chooseServer(); // server A
+  await screen.findByTestId('field-Email');
+  await fireEvent.changeText(screen.getByTestId('field-Email'), 'ada@example.com');
+  await fireEvent.press(screen.getByTestId('button-Email me a code'));
+  await screen.findByText('Check your email');
+  await fireEvent.changeText(screen.getByTestId('field-Code'), '123456');
+  await fireEvent.press(screen.getByTestId('button-Sign in')); // the answer is still out
+  await waitFor(() => expect(calls.some((c) => c.path === '/v1/auth/email/verify')).toBe(true));
+  await fireEvent.press(screen.getByTestId('button-Use another server'));
+  await fireEvent.changeText(screen.getByTestId('field-Server address'), 'other.example.com');
+  await fireEvent.press(screen.getByTestId('button-Continue'));
+  await screen.findByTestId('button-I have an invite token');
+  await fireEvent.press(screen.getByTestId('button-I have an invite token'));
+  await fireEvent.changeText(screen.getByTestId('field-Invite token'), 'inv_b');
+  await fireEvent.press(screen.getByTestId('button-Enter your workspace'));
+  await waitFor(() => expect(screen.getByTestId('status').props.children).toBe('in'));
+  // Server A answers late, with a session for the phone.
+  await act(async () => {
+    release(Response.json({ status: 'signed_in', token: 'mks_a.late', sessionId: 's' }));
+  });
+  await waitFor(() =>
+    expect(
+      calls.some((c) => c.path === '/v1/auth/sign-out' && c.auth === 'Bearer mks_a.late'),
+    ).toBe(true),
+  );
+  expect(JSON.parse(secure().get('maka.account') as string)).toEqual({
+    server: 'https://other.example.com',
+    token: 'inv_b',
+  });
+});

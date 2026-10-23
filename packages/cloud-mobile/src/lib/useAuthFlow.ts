@@ -26,6 +26,8 @@ export function useAuthFlow(
   );
   useEffect(() => {
     void flow.start();
+    // A flow the person has left (another server, another screen) must not sign the phone in later.
+    return () => flow.close();
   }, [flow]);
   const state = useSyncExternalStore(flow.subscribe, flow.getSnapshot);
   return { flow, state };
