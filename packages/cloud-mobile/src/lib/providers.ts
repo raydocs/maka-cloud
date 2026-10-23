@@ -50,15 +50,24 @@ export function googleRedirectUri(clientId: string, os: string, packageName: str
   return `${packageName}:/oauthredirect`;
 }
 
+/**
+ * What the sheet is given: the SHA-256 of the server's nonce, in hex. The provider signs back what it
+ * was given, and the server accepts that hash. A token seen by anyone else (a log, a crash report)
+ * then does not hand over the nonce, which `POST /v1/auth/session` needs along with the token.
+ */
+async function nonceForSheet(nonce: string): Promise<string> {
+  const Crypto = require('expo-crypto') as typeof import('expo-crypto');
+  return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, nonce);
+}
+
 async function appleToken(nonce: string): Promise<string> {
   // Loaded when the button is used, so a build that never offers it never loads the native module.
   const Apple = require('expo-apple-authentication') as typeof import('expo-apple-authentication');
   if (!(await Apple.isAvailableAsync())) throw new Error('Apple sign-in is not available here.');
   try {
-    // The server's nonce goes in as it is. The server accepts it back, or its SHA-256 in hex.
     const credential = await Apple.signInAsync({
       requestedScopes: [Apple.AppleAuthenticationScope.EMAIL],
-      nonce,
+      nonce: await nonceForSheet(nonce),
     });
     if (!credential.identityToken) throw new Error('Apple did not send a sign-in.');
     return credential.identityToken;
@@ -84,7 +93,7 @@ async function googleToken(nonce: string): Promise<string> {
     scopes: ['openid', 'email', 'profile'],
     responseType: Auth.ResponseType.Code,
     usePKCE: true,
-    extraParams: { nonce },
+    extraParams: { nonce: await nonceForSheet(nonce) },
   });
   const result = await request.promptAsync(GOOGLE);
   if (result.type === 'cancel' || result.type === 'dismiss') throw new SignInCancelled();

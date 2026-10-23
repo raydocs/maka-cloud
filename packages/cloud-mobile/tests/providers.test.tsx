@@ -25,6 +25,15 @@ const mockApple = {
 };
 jest.mock('expo-apple-authentication', () => mockApple);
 
+// Real SHA-256, so the tests check the hash the server will compare with.
+jest.mock('expo-crypto', () => ({
+  CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
+  digestStringAsync: async (_algorithm: string, data: string) =>
+    require('node:crypto').createHash('sha256').update(data).digest('hex'),
+}));
+const sha256 = (text: string) =>
+  require('node:crypto').createHash('sha256').update(text).digest('hex');
+
 const mockPrompt = jest.fn();
 const mockExchange = jest.fn();
 const mockRequests: Array<Record<string, unknown>> = [];
@@ -66,13 +75,13 @@ test('a build with no sign-in settings has no Apple or Google button, and one wi
   expect(nativeProviders().google).toBe(false);
 });
 
-test('Apple: the server’s nonce goes to the sheet unchanged, and the identity token comes back', async () => {
+test('Apple: the sheet is given the SHA-256 of the server’s nonce, and the identity token comes back', async () => {
   mockApple.isAvailableAsync.mockResolvedValue(true);
   mockApple.signInAsync.mockResolvedValue({ identityToken: 'apple.id.token' });
   expect(await authPlatform.credential('apple', 'server-nonce')).toBe('apple.id.token');
   expect(mockApple.signInAsync).toHaveBeenCalledWith({
     requestedScopes: [mockApple.AppleAuthenticationScope.EMAIL],
-    nonce: 'server-nonce',
+    nonce: sha256('server-nonce'),
   });
 });
 
@@ -98,7 +107,7 @@ test('Google: the code is asked for with PKCE and the nonce, then exchanged for 
     redirectUri: 'com.googleusercontent.apps.1234-abcd:/oauthredirect',
     scopes: ['openid', 'email', 'profile'],
     usePKCE: true,
-    extraParams: { nonce: 'server-nonce' },
+    extraParams: { nonce: sha256('server-nonce') },
   });
   expect(mockExchange).toHaveBeenCalledWith(
     {
