@@ -157,6 +157,25 @@ async function language() {
     : 'zh-Hans';
 }
 
+// One bounded record survives notification dismissal and service worker restarts.
+const TERMINAL_URL = '/.maka-terminal-tasks';
+async function terminalTasks(account, task, terminal) {
+  try {
+    const cache = await caches.open('maka-terminal-tasks');
+    const key = TERMINAL_URL + '/' + encodeURIComponent(account);
+    const stored = await cache.match(key);
+    const entries = stored ? JSON.parse(await stored.text()) : [];
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const recent = entries.filter(([id, time]) => typeof id === 'string' && time > cutoff);
+    const ended = recent.some(([id]) => id === task);
+    if (terminal && !ended) recent.push([task, Date.now()]);
+    await cache.put(key, new Response(JSON.stringify(recent.slice(-200))));
+    return ended;
+  } catch {
+    return false;
+  }
+}
+
 self.addEventListener('push', (event) => {
   const payload = payloadOf(event);
   const known = typeof payload.type === 'string' && Object.hasOwn(NOTIFICATIONS, payload.type);
@@ -187,6 +206,10 @@ self.addEventListener('push', (event) => {
     const task = identifier(payload.taskId);
     const taskState = known && payload.type.startsWith('task.');
     const rank = taskState ? (payload.type === 'task.running' ? 1 : 2) : 0;
+    if (task && known && (taskState || shown.approval)) {
+      const ended = await terminalTasks(account, task, rank === 2);
+      if (ended && rank !== 2) return neutral(true);
+    }
     const approval = identifier(payload.actionRef) || identifier(payload.approvalId) || task;
     const tag =
       shown.approval && approval
@@ -194,14 +217,6 @@ self.addEventListener('push', (event) => {
         : taskState && task
           ? 'maka-task:' + encodeURIComponent(task)
           : shown.tag;
-    const records = await caches.open('maka-task-terminal');
-    const recordKey = '/.maka-terminal/' + account + '/' + encodeURIComponent(task || '');
-    if (rank === 1 && (await records.match(recordKey))) return neutral(true);
-    if (rank === 2 && task) {
-      await records.put(recordKey, new Response('terminal'));
-      const keys = await records.keys();
-      for (const key of keys.slice(0, Math.max(0, keys.length - 200))) await records.delete(key);
-    }
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const contexts = await Promise.all(windows.map(contextOf));
     if (identifier(payload.conversationId)) {
@@ -238,12 +253,21 @@ self.addEventListener('push', (event) => {
   event.waitUntil(work);
 });
 
+let openId = 0;
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      const own = windows.find((client) => new URL(client.url).origin === self.location.origin);
+      const own = windows.find((client) => {
+        const url = new URL(client.url);
+        return (
+          url.origin === self.location.origin &&
+          url.href.startsWith(self.registration.scope) &&
+          !url.pathname.startsWith('/callback')
+        );
+      });
       await pushQueue;
       const account = await accountTag();
       const context = own ? await contextOf(own) : undefined;
@@ -253,13 +277,38 @@ self.addEventListener('notificationclick', (event) => {
         event.notification.data?.accountTag === account
           ? event.notification.data?.path
           : '/';
+
       const target = new URL(typeof raw === 'string' ? raw : '/', self.location.origin);
       const path = target.origin === self.location.origin ? target.pathname + target.search : '/';
       if (own) {
         try {
-          await own.focus().catch(() => {});
-          own.postMessage({ type: 'maka.open', path });
-          return;
+          // A refused focus still leaves the open app able to route; only no answer opens a window.
+          await own.focus().catch(() => undefined);
+          const id = ++openId;
+          const acknowledged = await new Promise((resolve) => {
+            const channel = new MessageChannel();
+            let live = true;
+            const finish = (ok) => {
+              if (!live) return;
+              live = false;
+              if (ok) channel.port1.postMessage({ type: 'maka.open.go', id });
+              clearTimeout(timer);
+              channel.port1.close();
+              resolve(ok);
+            };
+            // Firefox's notification activation is tighter (~1 s); keep this below it.
+            // Chromium documents a 10 s notificationclick window. Do not wait near that limit.
+            const timer = setTimeout(() => finish(false), 500);
+            channel.port1.onmessage = (message) => {
+              if (message.data?.type === 'maka.open.ack' && message.data.id === id) finish(true);
+            };
+            try {
+              own.postMessage({ type: 'maka.open', path, id }, [channel.port2]);
+            } catch {
+              finish(false);
+            }
+          });
+          if (acknowledged) return;
         } catch {
           // An unavailable client must not swallow the click.
         }

@@ -15,8 +15,9 @@ function load(
     focused?: boolean;
     url: string;
     focus: () => Promise<unknown>;
-    postMessage: (data: unknown) => void;
+    postMessage: (data: unknown, ports?: MessagePort[]) => void;
   }> = [],
+  registrationScope = 'https://maka.example.test/',
 ) {
   if (!saved.has('/.maka-account')) saved.set('/.maka-account', 'account-a');
   const caches = {
@@ -36,6 +37,7 @@ function load(
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
+      scope: registrationScope,
       getNotifications: async ({ tag }: { tag: string }) =>
         shown
           .filter((notice) => notice.options.tag === tag)
@@ -63,6 +65,19 @@ function load(
     URL,
     URLSearchParams,
     Object,
+    setTimeout,
+    clearTimeout,
+    MessageChannel: class {
+      port1 = {
+        onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
+        postMessage: (data: unknown) => this.port2.onmessage?.({ data }),
+        close() {},
+      };
+      port2 = {
+        onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
+        postMessage: (data: unknown) => this.port1.onmessage?.({ data }),
+      };
+    },
   });
   const push = async (data: unknown, tagged = true) => {
     const waits: Promise<unknown>[] = [];
@@ -282,20 +297,23 @@ test('the server terminal envelope preserves failed and stopped outcomes', async
   expect(worker.shown.map((n) => n.title)).toEqual(['Task failed', 'Task stopped', TASK.title]);
   expect(new Set(worker.shown.map((n) => n.options.tag)).size).toBe(1);
   await worker.push({ type: 'approval.required', taskId: 'same', conversationId: 'chat' });
-  expect(worker.shown.at(-1)?.options.data).toEqual({
-    accountTag: 'account-a',
-    path: '/?conversation=chat&task=same&decision=1',
-  });
+  expect(worker.shown).toHaveLength(4);
+  expect(worker.shown.at(-1)?.options.silent).toBe(true);
 });
 
 test('existing uncontrolled clients receive in-app links without navigation or reload', async () => {
   const focus = vi.fn(async () => {});
-  const postMessage = vi.fn();
+  const postMessage = vi.fn((data, ports) =>
+    ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+  );
   const worker = load('en', new Map(), [{ url: 'https://maka.example.test/', focus, postMessage }]);
   await worker.message({ type: 'maka.context', accountTag: 'account-a' });
   await worker.click('/?task=one');
   expect(focus).toHaveBeenCalledOnce();
-  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/?task=one' });
+  expect(postMessage).toHaveBeenCalledWith(
+    { type: 'maka.open', path: '/?task=one', id: expect.any(Number) },
+    expect.anything(),
+  );
   expect(worker.opened).toEqual([]);
 });
 
@@ -418,7 +436,10 @@ test('a matching notification cannot deep-link an existing tab of another accoun
     { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
   ]);
   await worker.click('/?conversation=private', 'account-a');
-  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/' });
+  expect(postMessage).toHaveBeenCalledWith(
+    { type: 'maka.open', path: '/', id: expect.any(Number) },
+    expect.anything(),
+  );
 });
 
 test('a push with no data still displays a neutral root-only notification', async () => {
@@ -445,4 +466,126 @@ test('a visible unfocused or unreachable conversation still gets its task notifi
   tab.focused = true;
   await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
   expect(worker.shown.map((notice) => notice.title)).toEqual([TASK.title, TASK.title]);
+});
+
+test('dismissed terminal tasks survive a restart, expire after seven days, and keep only 200 records', async () => {
+  const saved = new Map<string, string>();
+  await load('en', saved).push({ type: 'task.finished', taskId: 'ended' });
+  const restarted = load('en', saved);
+  await restarted.push({ type: 'task.running', taskId: 'ended' });
+  expect(restarted.shown).toHaveLength(1);
+  expect(restarted.shown[0]?.options.silent).toBe(true);
+  const key = '/.maka-terminal-tasks/account-a';
+  saved.set(key, JSON.stringify([['expired', Date.now() - 8 * 86400000]]));
+  await restarted.push({ type: 'task.running', taskId: 'expired' });
+  expect(restarted.shown).toHaveLength(2);
+  for (let i = 0; i < 201; i++) await restarted.push({ type: 'task.finished', taskId: String(i) });
+  const records = JSON.parse(saved.get(key)!);
+  expect(records).toHaveLength(200);
+  expect(records[0][0]).toBe('1');
+});
+
+test('callback clients are skipped and an app without an ack falls back after half a second when focused', async () => {
+  vi.useFakeTimers();
+  try {
+    const callback = vi.fn();
+    const app = vi.fn();
+    const worker = load('en', new Map(), [
+      { url: 'https://maka.example.test/callback', focus: async () => {}, postMessage: callback },
+      { url: 'https://maka.example.test/', focus: async () => {}, postMessage: app },
+    ]);
+    await worker.message({ type: 'maka.context', accountTag: 'account-a' });
+    const click = worker.click('/?task=one');
+    await vi.advanceTimersByTimeAsync(499);
+    expect(callback).not.toHaveBeenCalled();
+    expect(app).toHaveBeenCalledOnce();
+    expect(worker.opened).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await click;
+    expect(worker.opened).toEqual(['/?task=one']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each([100, 600])(
+  'focused nested app ack at %s ms routes only with worker go',
+  async (delay) => {
+    vi.useFakeTimers();
+    try {
+      const routes: string[] = [];
+      const worker = load('en', new Map(), [
+        {
+          url: 'https://maka.example.test/tasks/one',
+          focus: async () => {},
+          postMessage: (data, ports) => {
+            const { id, path } = data as { id: number; path: string };
+            const port = ports![0];
+            port.onmessage = (reply) => {
+              if (reply.data.type === 'maka.open.go' && reply.data.id === id) routes.push(path);
+            };
+            setTimeout(() => port.postMessage({ type: 'maka.open.ack', id }), delay);
+          },
+        },
+      ]);
+      await worker.message({ type: 'maka.context', accountTag: 'account-a' });
+      const click = worker.click('/?task=one');
+      await vi.advanceTimersByTimeAsync(1000);
+      await click;
+      expect(routes).toEqual(delay < 500 ? ['/?task=one'] : []);
+      expect(worker.opened).toEqual(delay < 500 ? [] : ['/?task=one']);
+      expect(routes.length + worker.opened.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test('a refused focus still lets the open app route; no answer opens a window', async () => {
+  const refused = async () => {
+    throw new Error('unavailable');
+  };
+  const answering = vi.fn((data, ports) =>
+    ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+  );
+  const routed = load('en', new Map(), [
+    { url: 'https://maka.example.test/', focus: refused, postMessage: answering },
+  ]);
+  await routed.message({ type: 'maka.context', accountTag: 'account-a' });
+  await routed.click('/?task=one');
+  expect(answering).toHaveBeenCalledOnce();
+  expect(routed.opened).toEqual([]);
+
+  const silent = vi.fn();
+  const opened = load('en', new Map(), [
+    { url: 'https://maka.example.test/', focus: refused, postMessage: silent },
+  ]);
+  await opened.message({ type: 'maka.context', accountTag: 'account-a' });
+  await opened.click('/?task=one');
+  expect(silent).toHaveBeenCalledOnce();
+  expect(opened.opened).toEqual(['/?task=one']);
+});
+
+test('clients outside the worker registration scope are skipped', async () => {
+  const outside = vi.fn();
+  const inside = vi.fn((data, ports) =>
+    ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+  );
+  const worker = load(
+    'en',
+    new Map(),
+    [
+      { url: 'https://maka.example.test/other/', focus: async () => {}, postMessage: outside },
+      {
+        url: 'https://maka.example.test/app/tasks/one',
+        focus: async () => {},
+        postMessage: inside,
+      },
+    ],
+    'https://maka.example.test/app/',
+  );
+  await worker.click('/app/?task=one');
+  expect(outside).not.toHaveBeenCalled();
+  expect(inside).toHaveBeenCalledOnce();
+  expect(worker.opened).toEqual([]);
 });

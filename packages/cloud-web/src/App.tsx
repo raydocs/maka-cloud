@@ -447,22 +447,44 @@ export function ConversationView({
 
   const conversationNode = useRef<HTMLElement>(null);
   const focusedDecision = useRef<typeof decision>(undefined);
+  const decisionWait = useRef<{ decision: typeof decision; until: number } | undefined>(undefined);
+  const liveAt = useRef<number | undefined>(undefined);
+  if (status !== 'Live') liveAt.current = undefined;
+  else liveAt.current ??= Date.now();
   useEffect(() => {
     if (decision === undefined || focusedDecision.current === decision) return;
-    const cards = Array.from(
-      conversationNode.current?.querySelectorAll<HTMLElement>('.question[data-decision="true"]') ??
-        [],
+    if (decisionWait.current?.decision !== decision)
+      decisionWait.current = { decision, until: Date.now() + 5000 };
+    // The target card has a second after the stream goes live to arrive, and at most five in all.
+    if (liveAt.current !== undefined)
+      decisionWait.current.until = Math.min(decisionWait.current.until, liveAt.current + 1000);
+    let expired = Date.now() >= decisionWait.current.until;
+    const focus = () => {
+      const cards = Array.from(
+        conversationNode.current?.querySelectorAll<HTMLElement>(
+          '.question[data-decision="true"]',
+        ) ?? [],
+      );
+      const card =
+        cards.find((node) => !decision.task || node.dataset.task === decision.task) ??
+        (expired && status === 'Live' ? cards.find((node) => !node.dataset.task) : undefined);
+      if (card) {
+        focusedDecision.current = decision;
+        card.scrollIntoView?.({ block: 'center' });
+        card.tabIndex = -1;
+        card.focus({ preventScroll: true });
+      }
+    };
+    focus();
+    const timer = setTimeout(
+      () => {
+        expired = true;
+        focus();
+      },
+      Math.max(0, decisionWait.current.until - Date.now()),
     );
-    const card =
-      cards.find((node) => !decision.task || node.dataset.task === decision.task) ??
-      cards.find((node) => !node.dataset.task);
-    if (card) {
-      focusedDecision.current = decision;
-      card.scrollIntoView?.({ block: 'center' });
-      card.tabIndex = -1;
-      card.focus({ preventScroll: true });
-    }
-  }, [decision, state]);
+    return () => clearTimeout(timer);
+  }, [decision, state, status]);
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
   const decisions = useRef<HTMLDivElement>(null);
   const total = totalCost(tasks);
@@ -1067,8 +1089,16 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       if (typeof event.data.path !== 'string') return;
       const target = new URL(event.data.path, window.location.origin);
       if (target.origin !== window.location.origin) return;
-      window.history.replaceState(window.history.state, '', target.pathname + target.search);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      const port = event.ports?.[0];
+      const id = event.data.id;
+      if (!port || typeof id !== 'number') return;
+      port.onmessage = (reply) => {
+        if (reply.data?.type !== 'maka.open.go' || reply.data.id !== id) return;
+        port.close();
+        window.history.replaceState(window.history.state, '', target.pathname + target.search);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      };
+      port.postMessage({ type: 'maka.open.ack', id });
     };
     navigator.serviceWorker?.addEventListener('message', message);
     return () => navigator.serviceWorker?.removeEventListener('message', message);
@@ -1093,36 +1123,26 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       }
       const conversation = query.get('conversation');
       const taskId = query.get('task');
-      const candidates = conversation
-        ? session.conversations.filter((c) => c.conversationId === conversation)
-        : session.conversations.slice(0, 20);
-      if (conversation && candidates.length) {
+      if (conversation && session.conversations.some((c) => c.conversationId === conversation)) {
         setChosen(conversation);
         setView('chat');
       }
       if (!taskId || (conversation && query.has('decision'))) return;
       try {
-        // No owner-scoped task lookup exists. Bound the search and run at most four requests at once.
-        for (let offset = 0; offset < candidates.length; offset += 4) {
-          const batch = await Promise.all(
-            candidates.slice(offset, offset + 4).map(async (candidate) => ({
-              candidate,
-              tasks: await session.client.listTasks(candidate.conversationId),
-            })),
-          );
-          if (!current || ticket !== request) return;
-          for (const { candidate, tasks } of batch) {
-            const task = tasks.find((task) => task.taskId === taskId);
-            if (task) {
-              setChosen(candidate.conversationId);
-              setView('chat');
-              if (!query.has('decision')) setTaskPage({ task, from: 'chat' });
-              return;
-            }
-          }
+        const { conversationId, task } = await session.client.taskConversation(taskId);
+        if (!current || ticket !== request) return;
+        if (task) {
+          setChosen(conversationId);
+          setView('chat');
+          if (!query.has('decision')) setTaskPage({ task, from: 'chat' });
+          return;
         }
+        if (current && ticket === request) setError("Couldn't find that task.");
       } catch (e) {
-        if (current) setError(errorText(e));
+        if (current && ticket === request)
+          setError(
+            e instanceof ApiError && e.status === 404 ? "Couldn't find that task." : errorText(e),
+          );
       }
     };
     void openLink();

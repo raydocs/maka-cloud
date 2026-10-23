@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App, NotificationsPanel, Settings, Shell } from '../src/App';
+import { LanguageProvider, type Language } from '../src/i18n';
 import { Home } from '../src/Home';
 import { CloudClient, type Conversation } from '@maka-cloud/client';
 import { readMode, ThemeProvider, useMode } from '../src/theme';
@@ -256,6 +257,118 @@ test('someone with conversations lands in the latest one; a first visit lands on
   );
   expect(await screen.findByLabelText('What would you like to get done?')).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Conversation' })).toBeNull();
+});
+
+test('task-only links resolve conversation 21 and report an unavailable task in all languages', async () => {
+  const conversations = Array.from({ length: 21 }, (_, i) => ({
+    conversationId: `cnv_${i}`,
+    title: `Chat ${i}`,
+    createdAt: i,
+  }));
+  const task = {
+    taskId: 'deep',
+    title: 'Deep task',
+    state: 'succeeded',
+    createdAt: 0,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+  };
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations });
+    if (url.endsWith('/v1/tasks/deep/conversation')) return json({ conversationId: 'cnv_0', task });
+    return json({}, 404);
+  });
+  window.history.replaceState(null, '', '/?task=deep');
+  const { unmount } = render(<App initialToken="token" />);
+  expect(await screen.findByRole('article', { name: 'Task: Deep task' })).toBeTruthy();
+  unmount();
+  for (const [language, note] of [
+    ['en', "Couldn't find that task."],
+    ['zh-Hans', '找不到该任务。'],
+    ['zh-Hant', '找不到該任務。'],
+  ]) {
+    localStorage.setItem('maka.language', language);
+    window.history.replaceState(null, '', '/?task=missing');
+    const mounted = render(
+      <LanguageProvider language={language as Language}>
+        <App initialToken="token" />
+      </LanguageProvider>,
+    );
+    expect(await screen.findByText(note)).toBeTruthy();
+    mounted.unmount();
+  }
+  window.history.replaceState(null, '', '/');
+});
+
+test('app acknowledges worker links after accepting their same-origin destination', async () => {
+  const listeners = new Map<string, EventListener>();
+  vi.stubGlobal('navigator', {
+    ...navigator,
+    serviceWorker: {
+      addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+    },
+  });
+  render(<App />);
+  const postMessage = vi.fn(() => {
+    expect(window.location.search).not.toBe('?task=one');
+  });
+  const port = {
+    postMessage,
+    onmessage: undefined as ((event: MessageEvent) => void) | undefined,
+    close: vi.fn(),
+  };
+  act(() =>
+    listeners.get('message')?.({
+      origin: window.location.origin,
+      data: { type: 'maka.open', path: '/?task=one', id: 1 },
+      ports: [port],
+    } as unknown as Event),
+  );
+  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open.ack', id: 1 });
+  expect(window.location.search).not.toBe('?task=one');
+  act(() => port.onmessage?.({ data: { type: 'maka.open.go', id: 2 } } as MessageEvent));
+  expect(window.location.search).not.toBe('?task=one');
+  act(() => port.onmessage?.({ data: { type: 'maka.open.go', id: 1 } } as MessageEvent));
+  expect(window.location.search).toBe('?task=one');
+  postMessage.mockClear();
+  act(() =>
+    listeners.get('message')?.({
+      origin: window.location.origin,
+      data: { type: 'maka.open', path: 'https://evil.example/' },
+      ports: [{ postMessage }],
+    } as unknown as Event),
+  );
+  expect(postMessage).not.toHaveBeenCalled();
+  window.history.replaceState(null, '', '/');
+});
+
+test.each([
+  [401, 'Your invite is no longer valid. Please reconnect.'],
+  [429, 'Too many requests. Try again in a moment.'],
+  [500, 'Could not complete the request (500). Try again.'],
+  [0, 'Could not complete the request. Check your connection and try again.'],
+])('task link preserves the error for status %s', async (status, note) => {
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+    if (url.endsWith('/v1/tasks/broken/conversation')) {
+      if (!status) throw new TypeError('offline');
+      return json({}, status);
+    }
+    return json({}, 404);
+  });
+  window.history.replaceState(null, '', '/?task=broken');
+  render(
+    <LanguageProvider language="en">
+      <App initialToken="token" />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText(note)).toBeTruthy();
+  expect(screen.queryByText("Couldn't find that task.")).toBeNull();
+  window.history.replaceState(null, '', '/');
 });
 
 test('a failed readiness report does not turn successfully enabled notifications off', async () => {
