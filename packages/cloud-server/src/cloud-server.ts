@@ -45,6 +45,7 @@ import {
   type JwksSource,
   jwksFromSafeFetch,
 } from './identity.js';
+import { DEFAULT_LANGUAGE, type Language } from './i18n.js';
 import { InviteStore } from './invites.js';
 import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
@@ -157,6 +158,8 @@ export interface SupervisorParts {
       signal: AbortSignal,
     ): Promise<ArtifactRead>;
   };
+  /** The language the owner of a conversation reads, for words the supervisor's host composes. */
+  languageOf(conversationId: string): Language;
   onWarning(message: string, detail?: unknown): void;
 }
 
@@ -223,6 +226,11 @@ export interface CloudServerOptions {
     ownerOfConversation(conversationId: string): string | undefined;
     /** The conversation a task belongs to, or undefined for an unknown task. */
     conversationOfTask(taskId: string): string | undefined;
+    /**
+     * The language the person who owns the conversation reads, read now; the default for an
+     * unknown or unowned conversation.
+     */
+    languageOf(conversationId: string): Language;
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
@@ -470,6 +478,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       const owner = conversations.ownerOf(conversationId);
       return owner !== undefined && ownInviteStore.active(owner) ? owner : undefined;
     };
+    /** The language the owner of a conversation reads; the default for an unowned one. */
+    const languageOfConversation = (conversationId: string): Language => {
+      const owner = conversations.ownerOf(conversationId);
+      return owner === undefined ? DEFAULT_LANGUAGE : ownInviteStore.language(owner);
+    };
     handler = options.createHandler
       ? await options.createHandler({
           publisher,
@@ -506,6 +519,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           },
           conversationOfTask,
           ownerOfConversation: (conversationId) => conversations.ownerOf(conversationId),
+          languageOf: languageOfConversation,
         })
       : options.handler;
     const ownHandler = handler;
@@ -573,6 +587,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           subscribe: (listener) => hub.subscribe(listener),
         },
         publish: (event) => void extensions.publish(event),
+        languageOf: languageOfConversation,
         answers: {
           deliver: async (answer, signal) => {
             signal.throwIfAborted();
@@ -696,13 +711,18 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         homeStore,
         { ...(inbox ? { inbox } : {}), ...(options.duties ? { duties: options.duties } : {}) },
         new RateLimiter(limits.controlPerMinute),
-        { active: callerActive, conversationsOf: (inviteId) => conversations.idsOf(inviteId) },
+        {
+          active: callerActive,
+          conversationsOf: (inviteId) => conversations.idsOf(inviteId),
+          languageOf: (inviteId) => ownInviteStore.language(inviteId),
+        },
       ),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
               active: callerActive,
               conversationsOf: (inviteId) => conversations.idsOf(inviteId),
+              languageOf: (inviteId) => ownInviteStore.language(inviteId),
             }),
           }
         : {}),

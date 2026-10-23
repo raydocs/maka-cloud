@@ -98,6 +98,12 @@ export interface ConductorOptions {
    * taints the conversation (T15) unless it says `external: false`; a non-empty string always does.
    */
   turnContext?: (conversationId: string) => string | TurnContext;
+  /**
+   * Instructions for one conversation (the language its person reads), added to the end of the
+   * system prompt when the conversation's conductor session is made. Read once, then kept with the
+   * session: history is never edited, and the prompt of a conversation never changes.
+   */
+  conversationInstructions?: (conversationId: string) => string | undefined;
   /** Tools playbooks add; `irreversible` ones are held for approval. */
   tools?: readonly ConductorToolSpec[];
   limits?: Partial<ConductorLimits>;
@@ -265,6 +271,7 @@ export class Conductor {
   private readonly warn: (message: string, detail?: unknown) => void;
   private readonly hooks: NonNullable<ConductorOptions['hooks']>;
   private readonly turnContext: ConductorOptions['turnContext'];
+  private readonly conversationInstructions: ConductorOptions['conversationInstructions'];
   private readonly lanes = new Map<string, Lane>();
   private readonly turns = new Map<string, Turn>();
   private readonly plannerTurns = new Map<string, Turn>();
@@ -303,6 +310,7 @@ export class Conductor {
     this.warn = options.onWarning ?? (() => undefined);
     this.hooks = options.hooks ?? {};
     this.turnContext = options.turnContext;
+    this.conversationInstructions = options.conversationInstructions;
     this.orchestratorAccess = options.orchestratorAccess;
     this.tasksSurviveRestart = options.tasksSurviveRestart === true;
     this.scrubTaskText = options.scrubTaskText;
@@ -842,9 +850,12 @@ export class Conductor {
   private async ensureSession(conversationId: string, runId: string): Promise<string> {
     const existing = this.state.conversationSession(conversationId);
     if (existing) return existing;
+    const instructions = this.conversationInstructions?.(conversationId);
     const makaSessionId = await this.host.createSession({
       kind: 'conductor',
-      systemPrompt: conductorSystemPrompt(this.playbooks, this.modes !== undefined, this.deepMode),
+      systemPrompt:
+        conductorSystemPrompt(this.playbooks, this.modes !== undefined, this.deepMode) +
+        (instructions ? `\n\n${instructions}` : ''),
       thinkingLevel: this.effortOf(runId, 'conductor'),
       runId: null,
     });

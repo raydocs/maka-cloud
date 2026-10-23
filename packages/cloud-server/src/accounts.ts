@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { isLanguage, type Language } from './i18n.js';
 import { migrateInvites } from './invites.js';
 
 const PREFIX = 'mks_';
@@ -125,6 +126,22 @@ export class AccountStore {
   linkIdentity(accountId: string, identity: Identity): 'linked' | 'already_here' | 'taken' {
     if (this.insertIdentity(accountId, identity)) return 'linked';
     return this.accountOfIdentity(identity) === accountId ? 'already_here' : 'taken';
+  }
+
+  /**
+   * The language the person behind an identity has, when the identity belongs to an account of an
+   * active invite that has one; nothing otherwise.
+   */
+  languageOf(identity: Pick<Identity, 'provider' | 'subject'>): Language | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT i.language FROM identities d
+         JOIN accounts a ON a.account_id = d.account_id
+         JOIN invites i ON i.invite_id = a.invite_id
+         WHERE d.provider = ? AND d.subject = ? AND i.revoked_at IS NULL`,
+      )
+      .get(identity.provider, identity.subject) as { language: string | null } | undefined;
+    return isLanguage(row?.language) ? row.language : undefined;
   }
 
   /** The ways to sign in to an account, for its owner to see. */

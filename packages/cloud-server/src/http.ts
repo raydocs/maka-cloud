@@ -31,6 +31,7 @@ import { type OpenedPages, type PreviewService, PreviewBusy, siteOf } from './pr
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
 import type { HomeRoutes } from './home.js';
+import { LANGUAGES } from './i18n.js';
 import type { InboxRoutes } from './inbox.js';
 import type { AccountStore } from './accounts.js';
 import type { AuthRoutes } from './auth-routes.js';
@@ -203,6 +204,7 @@ const pushSubscription = z
     expirationTime: z.number().nullable().optional(),
   })
   .strict();
+const settingsPatch = z.object({ language: z.enum(LANGUAGES) }).strict();
 const pushRemoval = z.object({ endpoint: z.string().min(1).max(2048) }).strict();
 const postMessage = z
   .object({
@@ -487,6 +489,23 @@ export class PublicApi {
     const method = req.method ?? 'GET';
     if (this.deps.auth && path.startsWith('/v1/auth/')) {
       if (await this.deps.auth.handleSigned(req, res, url, invite)) return;
+    }
+    if (path === '/v1/settings') {
+      // The person's own settings. Today that is the language the server speaks to them in.
+      if (method === 'GET') {
+        return respond(res, 200, { language: this.deps.invites.language(invite.inviteId) });
+      }
+      if (method === 'PATCH') {
+        take(this.deps.controlLimiter, invite);
+        const body = settingsPatch.safeParse(await readJson(req, false));
+        if (!body.success) throw new HttpError(400, 'invalid_request');
+        this.reauthenticate(invite);
+        if (!this.deps.invites.setLanguage(invite.inviteId, body.data.language)) {
+          throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+        }
+        return respond(res, 200, { language: this.deps.invites.language(invite.inviteId) });
+      }
+      throw new HttpError(405, 'method_not_allowed', { allow: 'GET, PATCH' });
     }
     if (path === '/v1/memory' && method === 'GET') {
       return respond(res, 200, this.deps.memory.profile(invite.inviteId));
@@ -1365,7 +1384,9 @@ export class PublicApi {
         while (dirty && !closed) {
           dirty = false;
           for (;;) {
-            const page = readOwnFeed(db, invite.inviteId, position, FEED_PAGE, conversationId);
+            const page = readOwnFeed(db, invite.inviteId, position, FEED_PAGE, conversationId, {
+              language: this.deps.invites.language(invite.inviteId),
+            });
             if (page.scannedTo === position) break;
             for (const entry of page.entries) {
               if (closed || !stillValid()) return;

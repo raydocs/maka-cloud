@@ -10,7 +10,7 @@ const LOOPBACK = ['127.0.0.1', '::1'];
 interface Rig {
   h: Awaited<ReturnType<typeof startHarness>>;
   key: Signer;
-  mail: Array<{ to: string; text: string }>;
+  mail: Array<{ to: string; subject: string; text: string }>;
   codeOf(): string;
   /** An ID token for `sub`, signed by the fake provider, with the nonce the server just gave out. */
   idToken(provider: 'apple' | 'google', sub: string, nonce: string): string;
@@ -620,4 +620,83 @@ test('sign-in bodies are strict', async (t) => {
   }
   assert.equal((await r.call('POST', '/v1/auth/session', 'nope' as unknown)).status, 400);
   assert.equal((await r.call('GET', '/v1/auth/session')).status, 405);
+});
+
+test('a new account reads Chinese unless its sign-up asked for English, and a language chosen first is kept', async (t) => {
+  const r = await rig(t);
+  const language = async (bearer: string) =>
+    (
+      (await (await r.call('GET', '/v1/settings', undefined, bearer)).json()) as {
+        language: string;
+      }
+    ).language;
+  const claim = async (sub: string, inviteToken: string, headers: Record<string, string> = {}) => {
+    const pending = (await (await r.google(sub)).json()) as NeedsInvite;
+    const claimed = await r.call(
+      'POST',
+      '/v1/auth/claim',
+      { pendingToken: pending.pendingToken, inviteToken },
+      null,
+      headers,
+    );
+    assert.equal(claimed.status, 200);
+    return (await claimed.json()) as SignedIn;
+  };
+  const ada = await claim('g-ada', r.h.token, { 'accept-language': 'zh-CN,en;q=0.8' });
+  assert.equal(await language(ada.token), 'zh-Hans');
+  const bob = await claim('g-bob', r.h.server.invites.create('bob').token, {
+    'accept-language': 'en-GB,en;q=0.9',
+  });
+  assert.equal(await language(bob.token), 'en');
+  const chosen = r.h.server.invites.create('chosen');
+  const set = await r.call('PATCH', '/v1/settings', { language: 'zh-Hans' }, chosen.token);
+  assert.equal(set.status, 200);
+  const cleo = await claim('g-cleo', chosen.token, { 'accept-language': 'en-US' });
+  assert.equal(await language(cleo.token), 'zh-Hans', 'the choice made before sign-up wins');
+});
+
+test('the sign-in mail is in Chinese by default, in English when asked, and in the account’s language once it has one', async (t) => {
+  const r = await rig(t);
+  assert.equal(
+    (await r.call('POST', '/v1/auth/email', { address: 'ada@example.com' })).status,
+    200,
+  );
+  const zh = r.mail.at(-1);
+  assert.equal(zh?.subject, '你的登录验证码');
+  assert.equal(
+    zh?.text,
+    `你的登录验证码是 ${r.codeOf()}。它只能用一次，10 分钟内有效，请在发起请求的应用或网页中输入。如果不是你本人操作，请忽略这封邮件。`,
+  );
+  const en = await r.call('POST', '/v1/auth/email', { address: 'bob@example.com' }, null, {
+    'accept-language': 'en-US,en;q=0.9',
+  });
+  assert.equal(en.status, 200);
+  const challenge = (await en.json()) as { challengeId: string; deviceSecret: string };
+  assert.equal(r.mail.at(-1)?.subject, 'Your sign-in code');
+  assert.equal(
+    r.mail.at(-1)?.text,
+    `Your sign-in code is ${r.codeOf()}. It works once, for ten minutes, in the app or page that asked for it. If you did not ask, ignore this mail.`,
+  );
+  // Bob signs up from an English device: his account reads English, so his next code is English
+  // even when asked for from a device set to Chinese.
+  const verified = (await (
+    await r.call('POST', '/v1/auth/email/verify', {
+      challengeId: challenge.challengeId,
+      deviceSecret: challenge.deviceSecret,
+      code: r.codeOf(),
+    })
+  ).json()) as NeedsInvite;
+  const claimed = await r.call(
+    'POST',
+    '/v1/auth/claim',
+    { pendingToken: verified.pendingToken, inviteToken: r.h.token },
+    null,
+    { 'accept-language': 'en' },
+  );
+  assert.equal(claimed.status, 200);
+  r.advance(31_000);
+  await r.call('POST', '/v1/auth/email', { address: 'bob@example.com' }, null, {
+    'accept-language': 'zh-CN',
+  });
+  assert.equal(r.mail.at(-1)?.subject, 'Your sign-in code');
 });

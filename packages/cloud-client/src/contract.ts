@@ -427,7 +427,18 @@ export const routes = {
   // Web Push answers 404 until the server is configured with its signing key.
   pushKey: '/v1/push/key',
   pushSubscriptions: '/v1/push/subscriptions',
+  // The person's own settings: `GET`, and `PATCH` with `{language}`.
+  settings: '/v1/settings',
 } as const;
+
+/** The languages the server speaks to a person. A person who never chose reads `zh-Hans`. */
+export type Language = 'zh-Hans' | 'en';
+
+/** `GET /v1/settings`, and the answer to `PATCH /v1/settings`. */
+export interface PersonSettings {
+  /** What the server writes to this person in: mail, push words, Home notes, inbox asks, and the agent's replies in new conversations. */
+  language: Language;
+}
 
 /** One device signed in to an account (`GET /v1/auth/sessions`). It never carries the token. */
 export interface DeviceSession {

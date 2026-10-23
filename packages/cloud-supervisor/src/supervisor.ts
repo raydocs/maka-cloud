@@ -1106,5 +1106,6 @@ function interruptItem(item: ItemRecord): Interrupt['items'][number] {
     conversationId: item.conversationId,
     kind: item.kind,
     ask: item.ask,
+    ...(item.context.askTemplate ? { askTemplate: item.context.askTemplate } : {}),
   };
 }

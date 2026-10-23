@@ -216,3 +216,23 @@ test('suggestion switches are read and set on the project, and a server without 
   expect(client.unsupported.has('suggestions')).toBe(true);
   expect(client.unsupported.has('projects')).toBe(false);
 });
+
+test('the person’s language is read and set on the settings route; an older server is unsupported', async () => {
+  const calls: string[] = [];
+  let language = 'zh-Hans';
+  const fetcher = (async (url, init) => {
+    calls.push(`${init?.method ?? 'GET'} ${String(url)} ${String(init?.body ?? '')}`.trim());
+    if (init?.method === 'PATCH')
+      language = (JSON.parse(String(init.body)) as { language: string }).language;
+    return Response.json({ language });
+  }) as typeof fetch;
+  const client = new CloudClient('mks_a.b', { fetcher });
+  expect(await client.settings()).toEqual({ language: 'zh-Hans' });
+  expect(await client.setLanguage('en')).toEqual({ language: 'en' });
+  expect(calls).toEqual(['GET /v1/settings', 'PATCH /v1/settings {"language":"en"}']);
+  const old = new CloudClient('mks_a.b', {
+    fetcher: (async () => new Response('{}', { status: 404 })) as typeof fetch,
+  });
+  await expect(old.settings()).rejects.toThrow('not available');
+  expect(old.unsupported.has('settings')).toBe(true);
+});

@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { DEFAULT_LANGUAGE, type Language, messages } from './i18n.js';
 
 const NONCE_TTL_MS = 10 * 60 * 1000;
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -108,10 +109,14 @@ export class EmailCodes {
   /**
    * Mails a code to a valid address and returns the challenge, or says why not: `invalid` for a
    * bad address, `slow_down` when this address was mailed too recently or too often, `mail_failed`
-   * when the mailer refused. It never says whether the address already has an account.
+   * when the mailer refused. It never says whether the address already has an account. The mail is
+   * in `language`, or in the language of the account the address signs in to when `languageOf`
+   * knows one.
    */
   async request(
     rawAddress: string,
+    language: Language = DEFAULT_LANGUAGE,
+    languageOf?: (address: string) => Language | undefined,
   ): Promise<
     | { ok: true; challenge: EmailChallenge }
     | { ok: false; reason: 'invalid' | 'slow_down' | 'mail_failed' }
@@ -154,12 +159,9 @@ export class EmailCodes {
     });
     this.sends.set(address, [...recent, at]);
     this.mailed.push(at);
+    const words = messages(languageOf?.(address) ?? language).signInMail;
     try {
-      await this.mailer.send({
-        to: address,
-        subject: 'Your sign-in code',
-        text: `Your sign-in code is ${code}. It works once, for ten minutes, in the app or page that asked for it. If you did not ask, ignore this mail.`,
-      });
+      await this.mailer.send({ to: address, subject: words.subject, text: words.text(code) });
     } catch {
       this.pending.delete(challengeId);
       return { ok: false, reason: 'mail_failed' };
