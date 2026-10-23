@@ -46,7 +46,8 @@ so it cannot start next to a running deployment on the same ports either (set `M
 `flow.mjs` plays a first user and the first operator against the stack, over HTTP only:
 
 1. `health`: the health check passes through the proxy, over TLS.
-2. `sign-in`: the invite's token opens the API; no token and a wrong one do not.
+2. `sign-in`: the invite's token opens the API; no token and a wrong one do not. The invite reads
+   Simplified Chinese by default; the flow reads English words, so it chooses English in `/v1/settings`.
 3. `task`: a message starts a task; the result card (an inbox item of kind `finished`) and the
    closing message arrive.
 4. `checkout` (the gate for the first live run): a coding task. The server's own clone script fetches a
