@@ -153,6 +153,7 @@ export interface PublicApiDeps {
   accounts: AccountStore;
   conversations: ConversationStore;
   tasks: SqliteTaskStore;
+  acceptsMessages?: (runner: string) => boolean;
   hub: FeedHub;
   messageLimiter: RateLimiter;
   controlLimiter: RateLimiter;
@@ -733,7 +734,14 @@ export class PublicApi {
     const page = this.deps.tasks.tasksOfRoot(sessionId, after, limit);
     const tasks = page.flatMap(({ taskId }) => {
       const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-      return record ? [toPublicView(toView(record))] : [];
+      return record
+        ? [
+            {
+              ...toPublicView(toView(record)),
+              steerable: this.deps.acceptsMessages?.(record.runner) === true,
+            },
+          ]
+        : [];
     });
     const last = page.at(-1);
     respond(res, 200, {
@@ -968,7 +976,12 @@ export class PublicApi {
           : action === 'pause'
             ? await orchestrator.pauseAs(access, taskId)
             : await orchestrator.resumeAs(access, taskId);
-      respond(res, 200, { task: toPublicView(view) });
+      respond(res, 200, {
+        task: {
+          ...toPublicView(view),
+          steerable: this.deps.acceptsMessages?.(view.runner) === true,
+        },
+      });
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
     }

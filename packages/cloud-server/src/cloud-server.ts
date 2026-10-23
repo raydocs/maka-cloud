@@ -681,6 +681,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       ...(auth ? { auth } : {}),
       conversations,
       tasks: store,
+      acceptsMessages: (runner) => options.runners.get(runner)?.steerable === true,
       hub,
       messageLimiter: new RateLimiter(limits.messagesPerMinute),
       controlLimiter: new RateLimiter(limits.controlPerMinute),

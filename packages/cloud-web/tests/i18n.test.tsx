@@ -281,3 +281,15 @@ test('Chinese catalogues use full-width punctuation after Chinese words', () => 
       expect(value).not.toMatch(/[\p{Script=Han}][,:?()]/u);
   }
 });
+
+test.each(['en', 'zh-Hans', 'zh-Hant'] as const)(
+  'durations use readable localized units in %s',
+  (language) => {
+    const { duration } = translator(language);
+    expect(duration(3400)).toContain('3.4');
+    expect(duration(3720000)).toMatch(/1.*2/u);
+    expect(duration(3720000)).not.toContain('3720000');
+    if (language === 'en') expect(duration(3720000)).toBe('1 hr 2 min');
+    else expect(duration(3720000)).toMatch(/1.*(?:小时|小時).*2.*(?:分钟|分鐘)/u);
+  },
+);

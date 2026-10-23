@@ -201,7 +201,7 @@ test('the service worker shows one generic notification and ignores whatever the
     return shown;
   });
   expect(notification).toMatchObject({
-    title: 'Your background task has finished',
-    options: { body: 'Open Maka to review the result.', data: { path: '/' } },
+    title: 'Something needs a look',
+    options: { body: 'Open Maka to check your inbox.', data: { path: '/?inbox=1' } },
   });
 });

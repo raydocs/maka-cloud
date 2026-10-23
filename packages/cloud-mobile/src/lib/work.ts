@@ -6,6 +6,7 @@ import {
   type TaskPanel,
   type TaskView,
 } from '@maka-cloud/client';
+import type { Steer } from './steer';
 import type { Key } from './strings';
 
 type Message = ConversationState['messages'][number];
@@ -20,17 +21,23 @@ export type ChatItem =
   | { type: 'message'; key: string; message: Message }
   | { type: 'work'; key: string; tasks: TaskView[]; last: boolean }
   | { type: 'task'; key: string; task: TaskView }
-  | { type: 'result'; key: string; task: TaskView };
+  | { type: 'result'; key: string; task: TaskView }
+  | { type: 'steer'; key: string; steer: Steer };
 
-/** Within the same moment: the person's message, its work, a task, a reply, then a result. */
-const RANK = { user: 0, work: 1, task: 2, reply: 3, result: 4 } as const;
+/** Within the same moment: the person's message, its work, a task, a reply, a result, then a steer. */
+const RANK = { user: 0, work: 1, task: 2, reply: 3, result: 4, steer: 5 } as const;
 
 /**
  * The chat in time order. A task belongs to the latest message the person sent before it was
  * created; tasks from before any message (a standing duty's) share one block at the top. A message
- * without a time (none is sent without one) keeps its place after the one before it.
+ * without a time (none is sent without one) keeps its place after the one before it. What the
+ * person told a running task (`steers`) sits where it was sent.
  */
-export function chatTimeline(messages: readonly Message[], roots: readonly TaskView[]): ChatItem[] {
+export function chatTimeline(
+  messages: readonly Message[],
+  roots: readonly TaskView[],
+  steers: readonly Steer[] = [],
+): ChatItem[] {
   const placed: Array<{ item: ChatItem; at: number; rank: number; seq: number }> = [];
   let seq = 0;
   const put = (item: ChatItem, at: number, rank: number) =>
@@ -57,6 +64,8 @@ export function chatTimeline(messages: readonly Message[], roots: readonly TaskV
         RANK.result,
       );
   }
+  for (const steer of steers)
+    put({ type: 'steer', key: `steer-${steer.id}`, steer }, steer.at, RANK.steer);
   const lastSent = sent.at(-1)?.id;
   if (lead.length > 0)
     put(
@@ -128,6 +137,28 @@ export function workedFor(tasks: readonly TaskView[]): number | undefined {
   const start = Math.min(...tasks.map((task) => task.startedAt ?? task.createdAt));
   const end = Math.max(...tasks.map((task) => task.finishedAt ?? 0));
   return end >= start ? end - start : undefined;
+}
+
+/**
+ * When the work now running began: the earliest start of the tasks that are running. Undefined
+ * when none runs (paused or waiting tasks have no clock) or none has said when it started.
+ */
+export function runningSince(tasks: readonly TaskView[]): number | undefined {
+  const starts = tasks
+    .filter((task) => task.state === 'running' && task.startedAt !== undefined)
+    .map((task) => task.startedAt as number);
+  return starts.length > 0 ? Math.min(...starts) : undefined;
+}
+
+/** A stopwatch reading: "0:07", "12:30", "1:02:03". */
+export function clockOf(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = String(total % 60).padStart(2, '0');
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}`
+    : `${minutes}:${seconds}`;
 }
 
 /** "Worked for 4 min · 6 steps": only the parts that are known. */

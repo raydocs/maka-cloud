@@ -10,7 +10,7 @@ import {
   type TaskView,
 } from '@maka-cloud/client';
 import * as Haptics from 'expo-haptics';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useState, useSyncExternalStore } from 'react';
 import { Linking, Pressable, View } from 'react-native';
 import { ButtonRow, Chip, Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
 import { useT } from '@/lib/i18n';
@@ -33,6 +33,32 @@ const SCOPES: ReadonlyArray<readonly [id: string, key: Key]> = [
   ['approve_repository', 'decision.scope.repository'],
 ];
 const SCOPED = new Set(SCOPES.map(([id]) => id));
+/**
+ * The answer the server took for each card answered on this phone, while the app runs: the item
+ * does not say which was chosen. Only an acknowledged answer is kept, so a receipt never states the
+ * reach of an answer that was refused, or of one given elsewhere.
+ */
+const PICKED = new Map<string, string>();
+const pickListeners = new Set<() => void>();
+let pickVersion = 0;
+function setPicked(itemId: string, optionId: string) {
+  PICKED.set(itemId, optionId);
+  pickVersion++;
+  for (const listener of pickListeners) listener();
+}
+const subscribePicks = (listener: () => void) => {
+  pickListeners.add(listener);
+  return () => {
+    pickListeners.delete(listener);
+  };
+};
+const picksVersion = () => pickVersion;
+/** What a receipt says for each approving answer: how far the approval reaches. */
+const RECEIPTS = new Map<string, Key>([
+  ['approve', 'receipt.once'],
+  ['approve_task', 'receipt.task'],
+  ['approve_repository', 'receipt.repository'],
+]);
 const KNOWN_CHOICES = new Set(SERVER_CHOICES.map(([id, label]) => `${id}\n${label}`));
 
 const PANEL_WORDS = {
@@ -356,11 +382,25 @@ function Header({ text, open }: { text: string; open: boolean }) {
 /** An answered card, shrunk to one line. */
 /**
  * An answered card, shrunk to one line. An approval keeps what was approved: "Details" opens its
- * exact text again.
+ * exact text again. An approval answered on this phone also says how far it reaches (once, this
+ * task, this repository); one that is kept points to Me, where it can be revoked.
  */
-export function Receipt({ text, details }: { text: string; details?: ReactNode }) {
+export function Receipt({
+  text,
+  details,
+  scope,
+  onOpenGrants,
+}: {
+  text: string;
+  details?: ReactNode;
+  /** The approving answer chosen (`approve`, `approve_task`, `approve_repository`), when known. */
+  scope?: string | undefined;
+  onOpenGrants?: (() => void) | undefined;
+}) {
   const { t: say } = useT();
   const [open, setOpen] = useState(false);
+  const reach = scope === undefined ? undefined : RECEIPTS.get(scope);
+  const kept = scope !== undefined && scope !== 'approve';
   return (
     <View testID="decision-receipt" style={{ gap: 6 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 28 }}>
@@ -376,6 +416,27 @@ export function Receipt({ text, details }: { text: string; details?: ReactNode }
           />
         ) : null}
       </View>
+      {reach && (
+        <View style={{ gap: 2, paddingLeft: 18 }}>
+          <T kind="small" testID="receipt-scope">
+            {say(reach)}
+          </T>
+          {kept && onOpenGrants && (
+            <Pressable
+              testID="button-Revoke in Me"
+              accessibilityRole="link"
+              accessibilityLabel={say('receipt.revoke')}
+              onPress={onOpenGrants}
+              hitSlop={4}
+              style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
+            >
+              <T kind="small" style={{ textDecorationLine: 'underline' }}>
+                {say('receipt.revoke')}
+              </T>
+            </Pressable>
+          )}
+        </View>
+      )}
       {open && details}
     </View>
   );
@@ -392,14 +453,20 @@ export function DecisionCard({
   task,
   disabled,
   onAnswer,
+  onOpenGrants,
 }: {
   item: InboxItem;
   /** The task the card is about, when this screen has it: its checks are the card's evidence. */
   task?: TaskView | undefined;
   disabled: boolean;
-  onAnswer: (optionId: string, text?: string) => void;
+  /** Resolves `true` once the server took the answer; only then does a receipt say its reach. */
+  onAnswer: (optionId: string, text?: string) => unknown;
+  /** Opens Me, where a kept approval can be revoked. */
+  onOpenGrants?: (() => void) | undefined;
 }) {
   const [note, setNote] = useState('');
+  useSyncExternalStore(subscribePicks, picksVersion);
+  const picked = PICKED.get(item.itemId);
   const { t: say, tx } = useT();
   const card = inboxCardModel(item);
   const held = card.evidence.find((line) => line.kind === 'action');
@@ -409,12 +476,21 @@ export function DecisionCard({
       <Receipt
         text={tx(card.answering)}
         details={exact ? <Exact text={card.text} held={held} /> : undefined}
+        scope={item.kind === 'approval' && picked && RECEIPTS.has(picked) ? picked : undefined}
+        onOpenGrants={onOpenGrants}
       />
     );
   // A finished task reads as a title, how far it was checked, and the outcome; any other wording is
   // shown whole, as the supervisor sent it.
   const finished = finishedParts(item);
-  const answer = (optionId: string) => onAnswer(optionId, note.trim() || undefined);
+  const answer = (optionId: string) => {
+    void Promise.resolve(onAnswer(optionId, note.trim() || undefined)).then(
+      (taken) => {
+        if (taken === true) setPicked(item.itemId, optionId);
+      },
+      () => {},
+    );
+  };
   return (
     <View style={{ gap: 10 }} accessible={false}>
       {finished ? (
@@ -472,11 +548,14 @@ export function QuestionBlock({
   answered,
   disabled,
   onAnswer,
+  onOpenGrants,
 }: {
   question: Question;
   answered?: string;
   disabled: boolean;
   onAnswer: (optionId: string, text?: string) => void;
+  /** Opens Me, where a kept approval can be revoked. */
+  onOpenGrants?: (() => void) | undefined;
 }) {
   const card = questionCardModel(question, answered);
   const [note, setNote] = useState('');
@@ -497,6 +576,8 @@ export function QuestionBlock({
             <Exact text={asked.text} held={asked.held} />
           ) : undefined
         }
+        scope={question.reason === 'irreversible' && RECEIPTS.has(answered) ? answered : undefined}
+        onOpenGrants={onOpenGrants}
       />
     );
   }

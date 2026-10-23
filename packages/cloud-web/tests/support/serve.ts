@@ -47,10 +47,13 @@ async function run(body: Body): Promise<unknown> {
       return {
         taskId: await stack.delegate(text('conversationId'), {
           title: text('title'),
+          ...(body.steerable === false ? { steerable: false } : {}),
           ...(body.parent === undefined ? {} : { parent: text('parent') }),
           ...(body.budgetUsd === undefined ? {} : { budgetUsd: Number(body.budgetUsd) }),
         }),
       };
+    case 'read-steers':
+      return (await stack.run(text('taskId'))).readWaiting();
     case 'progress':
       return (await stack.run(text('taskId'))).progress(text('note'));
     case 'usage':

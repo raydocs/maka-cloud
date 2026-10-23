@@ -14,7 +14,10 @@ async function setup(t: TestContext, steerable = true) {
     () => h.server.orchestrator.status(session, task.taskId).state === 'running',
     'running',
   );
-  return { h, conversationId, taskId: task.taskId, run: h.fake.runFor(task.taskId) };
+  const listed = await h.api(`/v1/conversations/${conversationId}/tasks`);
+  const views = (await listed.json()) as { tasks: { taskId: string; steerable: boolean }[] };
+  assert.equal(views.tasks.find((view) => view.taskId === task.taskId)?.steerable, steerable);
+  return { h, session, conversationId, taskId: task.taskId, run: h.fake.runFor(task.taskId) };
 }
 
 const send = (h: Harness, taskId: string, body: unknown, token?: string | null) =>
@@ -108,4 +111,29 @@ test('only the owner can send: a wrong token is 401 and another owner’s task i
   h.server.invites.revoke(inviteId);
   assert.equal((await send(h, taskId, { text: 'hi' }, other.token)).status, 401);
   assert.equal(run.offers.length, 0);
+});
+
+test('an unread message can still be checked after the task ends', async (t) => {
+  const { h, session, taskId, run } = await setup(t);
+  await send(h, taskId, { messageId: 'late', text: 'Use v2' });
+  await run.complete();
+  await eventually(
+    () => h.server.orchestrator.status(session, taskId).state === 'succeeded',
+    'ended',
+  );
+  const receipt = await send(h, taskId, { messageId: 'late', text: 'Use v2' });
+  assert.equal(receipt.status, 200);
+  assert.deepEqual(await receipt.json(), { message: { messageId: 'late', state: 'unseen' } });
+});
+
+test('control responses preserve runner steering capability', async (t) => {
+  for (const steerable of [true, false]) {
+    const { h, taskId } = await setup(t, steerable);
+    const response = await h.api(`/v1/tasks/${taskId}/cancel`, {
+      method: 'POST',
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { task: { steerable: boolean } };
+    assert.equal(body.task.steerable, steerable);
+  }
 });

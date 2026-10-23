@@ -1,4 +1,4 @@
-import { displayText } from '@maka-cloud/client';
+import { displayText, type InboxItem, type TaskView } from '@maka-cloud/client';
 import { type ReactNode, useEffect, useState } from 'react';
 import {
   Dimensions,
@@ -7,13 +7,16 @@ import {
   LayoutAnimation,
   Modal,
   Platform,
+  Pressable,
   ScrollView,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useReduceMotion } from '@/lib/appearance';
+import { groupConversations, type RowState, type SheetRow } from '@/lib/groups';
 import { useT } from '@/lib/i18n';
 import { useWorkspace } from '@/lib/session';
+import type { Key } from '@/lib/strings';
 import { clearOf, radius, useTheme } from '@/lib/theme';
 import {
   Card,
@@ -24,6 +27,7 @@ import {
   GlassGroup,
   PillButton,
   RoundButton,
+  StatusMark,
   T,
   TOP_BAR,
 } from './ui';
@@ -180,9 +184,124 @@ export function TopFade() {
 // Solid behind the bar (TOP_BAR), then fading out below it.
 const TOP_FADE = TOP_BAR + 32;
 
+/** The conversations whose tasks the sheet reads for their state: the most recent, as Search does. */
+const TASK_CONVERSATIONS = 20;
+
+const ROW_WORDS: Record<RowState, Key> = {
+  needs: 'sheet.state.needs',
+  working: 'sheet.state.working',
+  paused: 'sheet.state.paused',
+  queued: 'sheet.state.queued',
+  finished: 'sheet.state.finished',
+  failed: 'sheet.state.failed',
+  stopped: 'sheet.state.stopped',
+  talk: 'sheet.state.talk',
+};
+
 /**
- * What "+" opens: a new conversation first, then the conversations, newest first, the open one
- * filled. An opaque sheet of its own, so it reads on the dimmed screen.
+ * The open decisions and the recent conversations' tasks, read each time the sheet opens. Until
+ * they are read (or when a read fails) a conversation is listed under Recent without a state line.
+ */
+function useSheetData(visible: boolean) {
+  const { client, conversations } = useWorkspace();
+  const [items, setItems] = useState<InboxItem[]>([]);
+  const [tasks, setTasks] = useState<Record<string, TaskView[]>>({});
+  // What an earlier opening read may be out of date: dropped as the sheet opens, before it is drawn,
+  // so nothing is shown as current until it is read again.
+  const [wasVisible, setWasVisible] = useState(visible);
+  if (visible !== wasVisible) {
+    setWasVisible(visible);
+    if (visible) {
+      setItems([]);
+      setTasks({});
+    }
+  }
+  useEffect(() => {
+    if (!visible) return;
+    let current = true;
+    client.listInbox('open').then(
+      (open) => {
+        if (current) setItems(open);
+      },
+      () => {},
+    );
+    for (const { conversationId } of conversations.slice(-TASK_CONVERSATIONS))
+      client.listTasks(conversationId).then(
+        (list) => {
+          if (current) setTasks((before) => ({ ...before, [conversationId]: list }));
+        },
+        () => {
+          if (current)
+            setTasks((before) => {
+              const { [conversationId]: _stale, ...rest } = before;
+              return rest;
+            });
+        },
+      );
+    return () => {
+      current = false;
+    };
+  }, [visible, client, conversations]);
+  return groupConversations(conversations, items, tasks);
+}
+
+/** One conversation in the sheet: its title and, under it, its state (with the attention dot when it needs the person). */
+function SheetRowButton({
+  row,
+  chosen,
+  onPress,
+}: {
+  row: SheetRow;
+  chosen: boolean;
+  onPress: () => void;
+}) {
+  const t = useTheme();
+  const { t: say } = useT();
+  const title = row.conversation.title
+    ? displayText(row.conversation.title)
+    : say('common.untitled');
+  const state = row.state === undefined ? undefined : say(ROW_WORDS[row.state]);
+  const ink = chosen ? { color: t.onPillOn } : undefined;
+  return (
+    <Pressable
+      testID={`conversation-${row.conversation.conversationId}`}
+      accessibilityRole="button"
+      accessibilityLabel={state ? say('sheet.rowLabel', { title, state }) : title}
+      accessibilityState={{ selected: chosen }}
+      onPress={onPress}
+      style={({ pressed }) => ({
+        minHeight: 52,
+        justifyContent: 'center',
+        gap: 2,
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: radius.card,
+        borderWidth: 1,
+        borderColor: chosen ? t.pillOn : t.cardEdge,
+        backgroundColor: chosen ? t.pillOn : t.chip,
+        opacity: pressed ? 0.8 : 1,
+      })}
+    >
+      <T kind="body" numberOfLines={1} style={ink}>
+        {title}
+      </T>
+      {state && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          {row.state === 'needs' && <StatusMark tone="attention" />}
+          <T kind="small" style={ink}>
+            {state}
+          </T>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+/**
+ * What "+" opens: a new conversation first, then the conversations in three groups, each newest
+ * first: what needs the person, what is working, and the rest. Each row says its state under its
+ * title, and the open one is filled; an empty group is left out. An opaque sheet of its own, so it
+ * reads on the dimmed screen.
  */
 export function ConversationSheet({
   visible,
@@ -194,16 +313,22 @@ export function ConversationSheet({
   /** After a choice (the new conversation included): for example, show Chat. */
   onChosen?: () => void;
 }) {
-  const { conversations, chosen, open } = useWorkspace();
+  const { chosen, open } = useWorkspace();
   const theme = useTheme();
   const reduce = useReduceMotion();
   const { t: say } = useT();
+  const groups = useSheetData(visible);
   const pick = (conversationId: string) => {
     // No conversation chosen is the empty Chat, where the first message starts one.
     open(conversationId);
     onClose();
     onChosen?.();
   };
+  const sections = [
+    ['needs', 'sheet.needs', groups.needs],
+    ['working', 'sheet.working', groups.working],
+    ['recent', 'sheet.recent', groups.recent],
+  ] as const;
   return (
     <Modal
       testID="conversation-sheet"
@@ -225,14 +350,23 @@ export function ConversationSheet({
           <T kind="heading">{say('chat.conversations')}</T>
           <PillButton label={say('chat.new')} id="New conversation" onPress={() => pick('')} />
           <ScrollView style={{ maxHeight: 340 }} contentContainerStyle={{ gap: 8 }}>
-            {[...conversations].reverse().map((c) => (
-              <PillButton
-                key={c.conversationId}
-                label={c.title ? displayText(c.title) : say('common.untitled')}
-                primary={c.conversationId === chosen}
-                onPress={() => pick(c.conversationId)}
-              />
-            ))}
+            {sections.map(([id, heading, rows]) =>
+              rows.length === 0 ? null : (
+                <View key={id} testID={`sheet-${id}`} style={{ gap: 8 }}>
+                  <T kind="small" accessibilityRole="header">
+                    {say(heading)}
+                  </T>
+                  {rows.map((row) => (
+                    <SheetRowButton
+                      key={row.conversation.conversationId}
+                      row={row}
+                      chosen={row.conversation.conversationId === chosen}
+                      onPress={() => pick(row.conversation.conversationId)}
+                    />
+                  ))}
+                </View>
+              ),
+            )}
           </ScrollView>
           <PillButton label={say('common.close')} id="Close" onPress={onClose} />
         </Card>
