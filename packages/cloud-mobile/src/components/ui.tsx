@@ -29,17 +29,16 @@ import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
 import { Icon, type IconName } from './Icon';
 
 /**
- * The soft full-bleed background every screen sits on. On iOS the system tab bar floats over the
- * content, so the screen keeps clear of the bottom edge; on Android the tab bar sits below it.
+ * The soft full-bleed background every screen sits on. Nothing sits below the screen (no tab bar),
+ * so on every platform it keeps clear of all four edges: the home indicator, Android's navigation.
  */
-const SCREEN_EDGES: Edge[] =
-  Platform.OS === 'ios' ? ['top', 'left', 'right', 'bottom'] : ['top', 'left', 'right'];
+const SCREEN_EDGES: Edge[] = ['top', 'left', 'right', 'bottom'];
 
 export function Screen({ children }: { children: ReactNode }) {
   const t = useTheme();
   return (
     <LinearGradient colors={[t.bgTop, t.bgBottom]} style={styles.fill}>
-      <SafeAreaView style={styles.fill} edges={SCREEN_EDGES}>
+      <SafeAreaView testID="screen" style={styles.fill} edges={SCREEN_EDGES}>
         {children}
       </SafeAreaView>
     </LinearGradient>
@@ -370,27 +369,38 @@ export function ButtonRow({ children }: { children: ReactNode }) {
 }
 
 /**
- * A line that is still going (the agent working, the current step): its opacity breathes slowly.
- * Still under Reduce Motion.
+ * A line that is still going (the agent working, the current step): a short thin rule under it
+ * breathes slowly. The text itself stays fully opaque, so it keeps its contrast. No rule under
+ * Reduce Motion.
  */
 export function Shimmer({ children }: { children: ReactNode }) {
   const reduce = useReduceMotion();
-  const opacity = useRef(new Animated.Value(1)).current;
+  const t = useTheme();
+  const opacity = useRef(new Animated.Value(0.6)).current;
   useEffect(() => {
-    if (reduce) {
-      opacity.setValue(1);
-      return;
-    }
+    if (reduce) return;
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(opacity, { toValue: 0.45, duration: 900, useNativeDriver: NATIVE }),
-        Animated.timing(opacity, { toValue: 1, duration: 900, useNativeDriver: NATIVE }),
+        Animated.timing(opacity, { toValue: 0.15, duration: 900, useNativeDriver: NATIVE }),
+        Animated.timing(opacity, { toValue: 0.6, duration: 900, useNativeDriver: NATIVE }),
       ]),
     );
     loop.start();
     return () => loop.stop();
   }, [reduce, opacity]);
-  return <Animated.View style={{ opacity }}>{children}</Animated.View>;
+  return (
+    <View style={{ gap: 3 }}>
+      {children}
+      {!reduce && (
+        <Animated.View
+          testID="shimmer"
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={{ width: 28, height: 2, borderRadius: 1, backgroundColor: t.inkMuted, opacity }}
+        />
+      )}
+    </View>
+  );
 }
 
 /**

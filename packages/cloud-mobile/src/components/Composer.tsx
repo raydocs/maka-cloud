@@ -1,6 +1,7 @@
 import { displayText } from '@maka-cloud/client';
 import { type ReactNode, useState } from 'react';
 import { Modal, ScrollView, View } from 'react-native';
+import { useReduceMotion } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
 import { useWorkspace } from '@/lib/session';
 import { clearOf, radius, useTheme } from '@/lib/theme';
@@ -74,6 +75,8 @@ export function Composer({
             multiline
             maxLength={16000}
             value={draft}
+            // What is being sent is cleared when it lands: nothing typed meanwhile may be lost.
+            editable={!sending}
             onChangeText={(text) => onDraft(displayText(text))}
             style={{ backgroundColor: 'transparent', borderWidth: 0, maxHeight: 140 }}
           />
@@ -142,6 +145,7 @@ export function ConversationSheet({
 }) {
   const { conversations, chosen, open } = useWorkspace();
   const theme = useTheme();
+  const reduce = useReduceMotion();
   const { t: say } = useT();
   const pick = (conversationId: string) => {
     // No conversation chosen is the empty Chat, where the first message starts one.
@@ -150,7 +154,13 @@ export function ConversationSheet({
     onChosen?.();
   };
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal
+      testID="conversation-sheet"
+      visible={visible}
+      transparent
+      animationType={reduce ? 'none' : 'slide'}
+      onRequestClose={onClose}
+    >
       <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
         <Card
           label={say('chat.conversations')}

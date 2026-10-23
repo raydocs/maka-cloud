@@ -6,8 +6,9 @@ import Chat from '@/app/(tabs)/chat';
 import Projects from '@/app/(tabs)/projects';
 import Me from '@/app/me';
 import Search from '@/app/search';
+import { Composer, ConversationSheet } from '@/components/Composer';
 import { TaskRow } from '@/components/TaskRow';
-import { StatusMark, Thinking } from '@/components/ui';
+import { Screen, StatusMark, Thinking } from '@/components/ui';
 import { ReduceMotion } from '@/lib/appearance';
 import { SessionProvider, useSession } from '@/lib/session';
 import { DARK, LIGHT, type Palette, ThemeContext } from '@/lib/theme';
@@ -137,6 +138,96 @@ test('Me leaves out memory and kept approvals where the server keeps neither', a
   expect(await screen.findByText('Appearance')).toBeTruthy();
   expect(screen.queryByText('Memory')).toBeNull();
   expect(screen.queryByText('Kept approvals')).toBeNull();
+});
+
+test('Me says when memory could not be loaded, and loads it again on retry', async () => {
+  let down = true;
+  await signedIn(<Me />, {
+    '/v1/memory': () =>
+      down
+        ? Response.json({ error: 'internal' }, { status: 500 })
+        : Response.json({ facts: [{ id: 'f1', text: 'Prefers short answers.' }], summaries: [] }),
+    '/v1/inbox/grants': () => Response.json({ grants: [] }),
+  });
+  expect(await screen.findByText('This could not be loaded.')).toBeTruthy();
+  expect(screen.getByText('Memory')).toBeTruthy();
+  down = false;
+  await fireEvent.press(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByText('Prefers short answers.')).toBeTruthy();
+  expect(screen.queryByText('This could not be loaded.')).toBeNull();
+});
+
+test('a failed refresh keeps the kept approvals already shown, and says so', async () => {
+  const grant = {
+    grantId: 'g1',
+    tool: 'Bash',
+    repository: 'example/site',
+    scope: 'repository',
+    createdAt: 1,
+    expiresAt: 2,
+    uses: 0,
+    lastUsedAt: null,
+  };
+  let reads = 0;
+  await signedIn(<Me />, {
+    '/v1/inbox/grants': () => {
+      reads += 1;
+      return reads === 1
+        ? Response.json({ grants: [grant] })
+        : Response.json({ error: 'internal' }, { status: 500 });
+    },
+    '/v1/inbox/grants/g1': () => new Response(null, { status: 204 }),
+  });
+  expect(await screen.findByText('Bash · example/site')).toBeTruthy();
+  await fireEvent.press(screen.getByRole('button', { name: 'Revoke: Bash in example/site' }));
+  expect(await screen.findByText('This could not be loaded.')).toBeTruthy();
+  expect(screen.getByText('Bash · example/site')).toBeTruthy();
+});
+
+test('while a message is on its way the field cannot be typed in, so nothing typed is lost', async () => {
+  const field = (sending: boolean) => (
+    <ThemeContext.Provider value={LIGHT}>
+      <Composer
+        draft="Hello"
+        onDraft={() => {}}
+        sending={sending}
+        disabled={sending}
+        onSend={() => {}}
+      />
+    </ThemeContext.Provider>
+  );
+  await render(field(true));
+  expect(screen.getByTestId('field-Keep the conversation going').props.editable).toBe(false);
+  await screen.rerender(field(false));
+  expect(screen.getByTestId('field-Keep the conversation going').props.editable).toBe(true);
+});
+
+test.each([
+  [false, 'slide'],
+  [true, 'none'],
+])('the conversation sheet slides in unless Reduce Motion is on (%s)', async (reduce, kind) => {
+  await signedIn(
+    <ReduceMotion.Provider value={reduce}>
+      <ConversationSheet visible onClose={() => {}} />
+    </ReduceMotion.Provider>,
+    {},
+  );
+  expect(
+    screen.getByTestId('conversation-sheet', { includeHiddenElements: true }).props.animationType,
+  ).toBe(kind);
+});
+
+// With no tab bar under the screens, every screen keeps clear of the bottom edge itself (the home
+// indicator, Android's navigation), so the floating composer never sits under them.
+test('every screen keeps clear of the bottom edge', async () => {
+  await render(
+    <Screen>
+      <Text>Inside</Text>
+    </Screen>,
+  );
+  expect(screen.getByTestId('screen').props.edges).toEqual(
+    expect.objectContaining({ top: 'additive', bottom: 'additive' }),
+  );
 });
 
 test('Search filters the conversations and tasks already on the phone, and opens a hit in Chat', async () => {

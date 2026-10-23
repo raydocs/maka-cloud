@@ -107,6 +107,7 @@ export const ZH_HANT: Record<Key, string> = {
   'me.grants.revoke': '撤銷',
   'me.grants.revokeLabel': '撤銷 {repository} 中的 {tool} 授權',
   'me.failed': '沒能修改，請重試。',
+  'me.loadFailed': '無法載入。',
   'settings.follows': '跟隨手機設定：目前為{mode}。',
   'settings.light': '淺色',
   'settings.dark': '深色',

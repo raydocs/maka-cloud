@@ -82,9 +82,10 @@ From `docs/fork/design/hark-patterns.md`, principles only (no Hark fonts, icons,
   stopping buzzes a warning (`expo-haptics`).
 - **Sign-in.** The server address and "Use another server" wait behind "Advanced". The invite token
   is a small link, and a disabled main button is a faint outline, not a grey slab.
-- **Motion.** A slow shimmer on the working line and the current step, and a soft spring for
-  messages and cards that arrive while the chat is open (not for the history). Both are off under
-  Reduce Motion.
+- **Motion.** A short thin rule that breathes under the working line and the current step (the
+  words themselves never fade, so they keep their contrast), and a soft spring for messages and
+  cards that arrive while the chat is open (not for the history). Both are off under Reduce Motion,
+  and so is the slide of the conversation sheet.
 
 ## Language
 

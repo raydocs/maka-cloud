@@ -1,4 +1,11 @@
-import { BRAND, displayText, type Grant, type MemoryProfile } from '@maka-cloud/client';
+import {
+  ApiError,
+  BRAND,
+  displayText,
+  type Grant,
+  type MemoryProfile,
+  Unsupported,
+} from '@maka-cloud/client';
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
@@ -60,17 +67,69 @@ function LanguagePicker() {
   );
 }
 
+/** The server does not offer this at all (as opposed to failing to answer this time). */
+const absent = (error: unknown) =>
+  error instanceof Unsupported ||
+  (error instanceof ApiError && (error.status === 404 || error.status === 405));
+
+/**
+ * Something the server may or may not keep. Where it keeps none, nothing shows; where loading
+ * fails, what was loaded stays and the failure is said, with a retry.
+ */
+function useOptional<Data>(read: () => Promise<Data>) {
+  const [data, setData] = useState<Data | undefined>();
+  const [none, setNone] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const load = useCallback(() => {
+    let current = true;
+    read().then(
+      (loaded) => {
+        if (!current) return;
+        setData(loaded);
+        setLoadFailed(false);
+      },
+      (error: unknown) => {
+        if (!current) return;
+        if (absent(error)) setNone(true);
+        else setLoadFailed(true);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [read]);
+  useEffect(load, [load]);
+  return { data, none, loadFailed, load };
+}
+
+/** Says a failed load, with a retry. */
+function LoadFailed({ onRetry }: { onRetry: () => void }) {
+  const { t: say } = useT();
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <T kind="error" style={{ flex: 1 }}>
+        {say('me.loadFailed')}
+      </T>
+      <QuietButton label={say('common.tryAgain')} onPress={onRetry} />
+    </View>
+  );
+}
+
 /** What the agent remembers about the person; each fact can be forgotten. Hidden where the server keeps none. */
 function Memory() {
   const { client } = useWorkspace();
   const { t: say } = useT();
-  const [memory, setMemory] = useState<MemoryProfile | undefined>();
+  const read = useCallback(() => client.memory(), [client]);
+  const { data: memory, none, loadFailed, load } = useOptional<MemoryProfile>(read);
   const [failed, setFailed] = useState(false);
-  const load = useCallback(() => {
-    client.memory().then(setMemory, () => setMemory(undefined));
-  }, [client]);
-  useEffect(load, [load]);
-  if (!memory) return null;
+  if (none || (!memory && !loadFailed)) return null;
+  if (!memory)
+    return (
+      <Card label={say('me.memory')}>
+        <T kind="heading">{say('me.memory')}</T>
+        <LoadFailed onRetry={load} />
+      </Card>
+    );
   return (
     <Card label={say('me.memory')}>
       <T kind="heading">{say('me.memory')}</T>
@@ -92,6 +151,7 @@ function Memory() {
         </View>
       ))}
       {failed && <T kind="error">{say('me.failed')}</T>}
+      {loadFailed && <LoadFailed onRetry={load} />}
     </Card>
   );
 }
@@ -100,13 +160,17 @@ function Memory() {
 function KeptApprovals() {
   const { client } = useWorkspace();
   const { t: say } = useT();
-  const [grants, setGrants] = useState<Grant[] | undefined>();
+  const read = useCallback(() => client.listGrants(), [client]);
+  const { data: grants, none, loadFailed, load } = useOptional<Grant[]>(read);
   const [failed, setFailed] = useState(false);
-  const load = useCallback(() => {
-    client.listGrants().then(setGrants, () => setGrants(undefined));
-  }, [client]);
-  useEffect(load, [load]);
-  if (!grants) return null;
+  if (none || (!grants && !loadFailed)) return null;
+  if (!grants)
+    return (
+      <Card label={say('me.grants')}>
+        <T kind="heading">{say('me.grants')}</T>
+        <LoadFailed onRetry={load} />
+      </Card>
+    );
   return (
     <Card label={say('me.grants')}>
       <T kind="heading">{say('me.grants')}</T>
@@ -134,6 +198,7 @@ function KeptApprovals() {
         </View>
       ))}
       {failed && <T kind="error">{say('me.failed')}</T>}
+      {loadFailed && <LoadFailed onRetry={load} />}
     </Card>
   );
 }

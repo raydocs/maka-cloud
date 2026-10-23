@@ -154,6 +154,17 @@ test('the answers sit side by side, each as wide as its words; refusing buzzes a
   expect(warn).toHaveBeenCalledWith('warning');
 });
 
+// Every opacity below 1 on a node or anything around it.
+type Node = { props: { style?: unknown }; parent: Node | null } | null;
+const fadedAbove = (node: Node) => {
+  const faded: number[] = [];
+  for (let at = node; at; at = at.parent) {
+    const opacity = flat(at.props.style).opacity;
+    if (typeof opacity === 'number' && opacity < 1) faded.push(opacity);
+  }
+  return faded;
+};
+
 const moving = (reduce: boolean, node: React.ReactElement) =>
   render(
     <ReduceMotion.Provider value={reduce}>
@@ -208,6 +219,13 @@ test('a working line breathes, and stops when it goes', async () => {
     );
     expect(loop).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalled();
+    // The breathing is a decorative rule under the line; the words never fade, so they keep
+    // their contrast.
+    expect(
+      screen.getByTestId('shimmer', { includeHiddenElements: true }).props
+        .accessibilityElementsHidden,
+    ).toBe(true);
+    expect(fadedAbove(screen.getByTestId('line'))).toEqual([]);
     await screen.unmount();
     expect(stop).toHaveBeenCalled();
   } finally {
@@ -225,7 +243,8 @@ test('under Reduce Motion a working line holds still', async () => {
       </Shimmer>,
     );
     expect(loop).not.toHaveBeenCalled();
-    expect(flat(screen.getByTestId('line').parent?.props.style).opacity).toBe(1);
+    expect(screen.queryByTestId('shimmer')).toBeNull();
+    expect(fadedAbove(screen.getByTestId('line'))).toEqual([]);
   } finally {
     loop.mockRestore();
   }
