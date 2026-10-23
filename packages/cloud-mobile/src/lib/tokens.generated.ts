@@ -24,6 +24,14 @@ export const LIGHT_COLORS = {
   diffAdd: '#e3f4e8',
   diffDel: '#fbe6e6',
   overlay: 'rgba(235, 243, 255, 0.55)',
+  glass: 'rgba(255, 255, 255, 0.55)',
+  bgTopClear: 'rgba(180, 203, 238, 0)',
+  panel: '#0b0b0c',
+  panelInk: '#f4f4f6',
+  panelMuted: '#a6a6ae',
+  panelGlass: 'rgba(255, 255, 255, 0.1)',
+  panelGlassOn: 'rgba(255, 255, 255, 0.24)',
+  panelClear: 'rgba(11, 11, 12, 0)',
 } as const;
 
 export const DARK_COLORS = {
@@ -50,9 +58,23 @@ export const DARK_COLORS = {
   diffAdd: '#12301f',
   diffDel: '#3a1a1d',
   overlay: 'rgba(5, 10, 22, 0.6)',
+  glass: 'rgba(255, 255, 255, 0.1)',
+  bgTopClear: 'rgba(13, 19, 34, 0)',
+  panel: '#0b0b0c',
+  panelInk: '#f4f4f6',
+  panelMuted: '#a6a6ae',
+  panelGlass: 'rgba(255, 255, 255, 0.1)',
+  panelGlassOn: 'rgba(255, 255, 255, 0.24)',
+  panelClear: 'rgba(11, 11, 12, 0)',
 } satisfies Record<keyof typeof LIGHT_COLORS, string>;
 
-export const RADIUS = { card: 22, small: 14, pill: 9999 } as const;
+export const RADIUS = {
+  card: 22,
+  small: 14,
+  pill: 9999,
+  tile: 28,
+  panel: 36,
+} as const;
 
 export const TYPE = { xs: 12, sm: 13, md: 15, lg: 17, xl: 24, hero: 40 } as const;
 

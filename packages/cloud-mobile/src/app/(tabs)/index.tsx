@@ -24,7 +24,18 @@ import {
 } from 'react-native';
 import { DecisionCard } from '@/components/Decision';
 import { InboxStatus } from '@/components/InboxStatus';
-import { Card, Chip, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
+import { HEADER_SPACE } from '@/components/TopBar';
+import {
+  Card,
+  Chip,
+  Field,
+  RoundButton,
+  Screen,
+  StatusMark,
+  T,
+  Tile,
+  Tiles,
+} from '@/components/ui';
 import { useWorkspace } from '@/lib/session';
 import { mono } from '@/lib/theme';
 
@@ -118,7 +129,9 @@ export default function Home() {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: 16, gap: 14 }}
+          // The page starts under the floating section pill and scrolls on beneath it.
+          contentContainerStyle={{ padding: 16, paddingTop: HEADER_SPACE + 4, gap: 14 }}
+          scrollIndicatorInsets={{ top: HEADER_SPACE }}
           keyboardShouldPersistTaps="handled"
           contentInsetAdjustmentBehavior="automatic"
         >
@@ -185,26 +198,28 @@ export default function Home() {
           {conversations.length === 0 && waiting.length === 0 && (
             <Card label="Ideas to start with">
               <T kind="heading">Not sure where to begin?</T>
-              {EXAMPLES.map((example) => (
-                <PillButton
-                  key={example}
-                  label={example}
-                  onPress={() => {
-                    setDraft(example);
-                    starter.draftEdited();
-                  }}
-                />
-              ))}
+              <Tiles>
+                {EXAMPLES.map((example) => (
+                  <Tile
+                    key={example}
+                    title={example}
+                    onPress={() => {
+                      setDraft(example);
+                      starter.draftEdited();
+                    }}
+                  />
+                ))}
+              </Tiles>
             </Card>
           )}
 
           {since !== undefined && done !== undefined && finished.length > 0 && (
             <Card label="Since you were last here">
               <T kind="heading">Since you were last here</T>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
+              <Tiles>
                 <Stat label="Done" value={String(finished.length)} />
                 <Stat label="Spent" value={anySpend ? dollars(spent) : '—'} />
-              </View>
+              </Tiles>
               {!anySpend && finished.length > 0 && <T kind="small">Spend not reported.</T>}
               {finished.map((entry) => (
                 <Pressable
@@ -264,16 +279,16 @@ export default function Home() {
           {conversations.length > 0 && (
             <Card label="Recent conversations">
               <T kind="heading">Pick up where you left off</T>
-              {recentConversations(conversations).map((c) => (
-                <Pressable
-                  key={c.conversationId}
-                  accessibilityRole="button"
-                  onPress={() => openConversation(c.conversationId)}
-                  style={{ minHeight: 44, justifyContent: 'center' }}
-                >
-                  <T kind="body">{displayText(c.title ?? 'Untitled conversation')}</T>
-                </Pressable>
-              ))}
+              <Tiles>
+                {recentConversations(conversations).map((c) => (
+                  <Tile
+                    key={c.conversationId}
+                    over={startedOn(c.createdAt)}
+                    title={displayText(c.title ?? 'Untitled conversation')}
+                    onPress={() => openConversation(c.conversationId)}
+                  />
+                ))}
+              </Tiles>
             </Card>
           )}
         </ScrollView>
@@ -282,13 +297,18 @@ export default function Home() {
   );
 }
 
+/** The day a conversation began, short ("Oct 16"), in the phone's own language. */
+function startedOn(at: number): string {
+  return new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <View style={{ flex: 1, gap: 2 }} accessible accessibilityLabel={`${label}: ${value}`}>
-      <T kind="small">{label}</T>
-      <T kind="heading" style={/\d/u.test(value) ? mono : undefined}>
-        {value}
-      </T>
-    </View>
+    <Tile
+      over={label}
+      title={value}
+      titleStyle={/\d/u.test(value) ? [{ fontSize: 24, lineHeight: 30 }, mono] : undefined}
+      accessibilityLabel={`${label}: ${value}`}
+    />
   );
 }

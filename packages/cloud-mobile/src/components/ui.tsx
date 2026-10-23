@@ -17,16 +17,14 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { type Edge, SafeAreaView } from 'react-native-safe-area-context';
-import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
+import { mono, PANEL, radius, ThemeContext, TOUCH, useTheme } from '@/lib/theme';
 import { Icon, type IconName } from './Icon';
 
 /**
- * The soft full-bleed background every screen sits on. On iOS the tab bar floats over the screen, so
- * its height is part of the bottom inset (the chat box sat on top of it); Android lays the bar out
- * below the screen already.
+ * The soft full-bleed background every screen sits on. The sections are a glass pill at the top
+ * (`TopBar`), so nothing sits below a screen: every edge is a safe-area edge, on both platforms.
  */
-const SCREEN_EDGES: Edge[] =
-  Platform.OS === 'ios' ? ['top', 'left', 'right', 'bottom'] : ['top', 'left', 'right'];
+const SCREEN_EDGES: Edge[] = ['top', 'left', 'right', 'bottom'];
 
 export function Screen({ children }: { children: ReactNode }) {
   const t = useTheme();
@@ -42,8 +40,76 @@ export function Screen({ children }: { children: ReactNode }) {
 const glass = Platform.OS === 'ios' && isLiquidGlassAvailable();
 
 /**
+ * The compact panel: one near-black rounded slab the conversation sits on, in either appearance.
+ * Everything inside it reads the panel palette (`PANEL`), so cards, buttons and text follow it.
+ */
+export function Panel({ children }: { children: ReactNode }) {
+  return (
+    <ThemeContext.Provider value={PANEL}>
+      <View style={[styles.panel, { backgroundColor: PANEL.panel, borderColor: PANEL.cardEdge }]}>
+        {children}
+      </View>
+    </ThemeContext.Provider>
+  );
+}
+
+/**
+ * A translucent glass surface for controls that float over content (the section pill, the round
+ * buttons, the message field): Liquid Glass on iOS 26 and later, a blur under the `glass` fill
+ * elsewhere. The style sets its shape; children sit on top.
+ */
+export function Glass({ children, style }: { children?: ReactNode; style?: StyleProp<ViewStyle> }) {
+  const t = useTheme();
+  if (glass)
+    return (
+      <GlassView colorScheme={t.scheme} style={[styles.glass, style]}>
+        {children}
+      </GlassView>
+    );
+  return (
+    <View style={[styles.glass, style]}>
+      <BlurView
+        intensity={30}
+        tint={t.scheme === 'dark' ? 'dark' : 'light'}
+        style={StyleSheet.absoluteFill}
+      />
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: t.glass }]} />
+      {children}
+    </View>
+  );
+}
+
+/**
+ * Where content scrolls under something that floats (the section pill, the composer): it fades
+ * out into `color` instead of meeting a hard edge. Drawn over the content, never touchable.
+ */
+export function Fade({
+  edge,
+  height,
+  color,
+  clear,
+}: {
+  edge: 'top' | 'bottom';
+  height: number;
+  color: string;
+  clear: string;
+}) {
+  return (
+    <LinearGradient
+      pointerEvents="none"
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      colors={edge === 'top' ? [color, color, clear] : [clear, color, color]}
+      locations={edge === 'top' ? [0, 0.55, 1] : [0, 0.5, 1]}
+      style={[styles.fade, edge === 'top' ? { top: 0 } : { bottom: 0 }, { height }]}
+    />
+  );
+}
+
+/**
  * A frosted card: the system's Liquid Glass on iOS 26 and later, a blur with a translucent fill
- * elsewhere. Anything that holds code or a diff uses `Solid` instead and is never blurred.
+ * elsewhere, and a flat fill inside the panel. Anything that holds code or a diff uses `Solid`
+ * instead and is never blurred.
  * The label names the card for tests and the web preview; the card is never one accessibility
  * element itself, or iOS would fold the fields and buttons inside it into it.
  */
@@ -58,9 +124,18 @@ export function Card({
 }) {
   const t = useTheme();
   const body = [styles.cardBody, { borderColor: t.cardEdge }, style];
+  if (t.surface === 'panel')
+    return (
+      <View
+        style={[styles.cardBody, { borderColor: t.cardEdge, backgroundColor: t.card }, style]}
+        accessibilityLabel={label}
+      >
+        {children}
+      </View>
+    );
   if (glass)
     return (
-      <GlassView style={body} accessibilityLabel={label}>
+      <GlassView colorScheme={t.scheme} style={body} accessibilityLabel={label}>
         {children}
       </GlassView>
     );
@@ -127,8 +202,8 @@ export function T({
 const TEXT: Record<TextKind, TextStyle> = {
   title: { fontSize: 28, lineHeight: 34, fontWeight: '700' },
   heading: { fontSize: 18, lineHeight: 24, fontWeight: '600' },
-  body: { fontSize: 16, lineHeight: 22 },
-  muted: { fontSize: 15, lineHeight: 21 },
+  body: { fontSize: 16, lineHeight: 24 },
+  muted: { fontSize: 15, lineHeight: 22 },
   small: { fontSize: 13, lineHeight: 18 },
   error: { fontSize: 15, lineHeight: 21 },
 };
@@ -252,6 +327,126 @@ export function RoundButton({
   );
 }
 
+/** A round glass button with an icon, for the corners of a floating bar. At least 44 pt. */
+export function GlassButton({
+  label,
+  icon,
+  onPress,
+}: {
+  label: string;
+  icon: IconName;
+  onPress: () => void;
+}) {
+  const t = useTheme();
+  return (
+    <Pressable
+      testID={`button-${label}`}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      style={({ pressed }) => [styles.round, { opacity: pressed ? 0.7 : 1 }]}
+    >
+      <Glass style={[StyleSheet.absoluteFill, { borderRadius: TOUCH / 2 }]} />
+      <Icon name={icon} size={20} color={t.ink} />
+    </Pressable>
+  );
+}
+
+/** `**words**` on one line, with no space just inside the marks (as Markdown reads it). */
+const BOLD = /\*\*(?=[^\s*])([^*\n]*?[^\s*])\*\*/gu;
+
+/** A message split into plain runs and the `**bold**` lead-ins an answer marks. */
+export function boldRuns(text: string): { text: string; bold: boolean }[] {
+  const runs: { text: string; bold: boolean }[] = [];
+  let last = 0;
+  for (const match of text.matchAll(BOLD)) {
+    if (match.index > last) runs.push({ text: text.slice(last, match.index), bold: false });
+    runs.push({ text: match[1] ?? '', bold: true });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) runs.push({ text: text.slice(last), bold: false });
+  return runs;
+}
+
+/** The words of a message without the `**` marks, as a screen reader should hear them. */
+export const withoutMarks = (text: string) => text.replace(BOLD, '$1');
+
+/** Message text with its bold lead-ins drawn bold; anything else is shown exactly as written. */
+export function Rich({ text }: { text: string }) {
+  const runs = boldRuns(text);
+  return (
+    <T kind="body" selectable>
+      {runs.length === 1 && !runs[0]?.bold
+        ? text
+        : runs.map((run, i) =>
+            run.bold ? (
+              // The runs never reorder, so the position is their identity.
+              <Text key={i} style={styles.bold}>
+                {run.text}
+              </Text>
+            ) : (
+              run.text
+            ),
+          )}
+    </T>
+  );
+}
+
+/** Rounded tiles two to a row, in reading order; an odd last tile stays half wide. */
+export function Tiles({ children }: { children: ReactNode }) {
+  return <View style={styles.tiles}>{children}</View>;
+}
+
+/** One tile: a small line above it (a date, a name) and a bold title of up to three lines. */
+export function Tile({
+  over,
+  title,
+  titleStyle,
+  onPress,
+  accessibilityLabel,
+}: {
+  over?: string;
+  title: string;
+  titleStyle?: StyleProp<TextStyle>;
+  onPress?: () => void;
+  accessibilityLabel?: string;
+}) {
+  const t = useTheme();
+  const body = (
+    <>
+      {over ? (
+        <T kind="small" numberOfLines={1}>
+          {over}
+        </T>
+      ) : null}
+      <T kind="body" style={[styles.bold, titleStyle]} numberOfLines={3}>
+        {title}
+      </T>
+    </>
+  );
+  const shape = [styles.tile, { backgroundColor: t.chip, borderColor: t.cardEdge }];
+  if (!onPress)
+    return (
+      <View
+        style={shape}
+        accessible
+        accessibilityLabel={accessibilityLabel ?? [over, title].filter(Boolean).join(', ')}
+      >
+        {body}
+      </View>
+    );
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? title}
+      onPress={onPress}
+      style={({ pressed }) => [...shape, { opacity: pressed ? 0.75 : 1 }]}
+    >
+      {body}
+    </Pressable>
+  );
+}
+
 export function Chip({ children }: { children: string }) {
   const t = useTheme();
   return (
@@ -347,9 +542,29 @@ export function SkeletonLine({ width = '100%' }: { width?: ViewStyle['width'] })
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  cardWrap: { borderRadius: radius.card, borderWidth: 1, overflow: 'hidden' },
+  panel: {
+    flex: 1,
+    marginHorizontal: 8,
+    marginBottom: 8,
+    borderRadius: radius.panel,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  glass: { overflow: 'hidden', borderRadius: radius.pill },
+  fade: { position: 'absolute', left: 0, right: 0 },
+  cardWrap: { borderRadius: radius.tile, borderWidth: 1, overflow: 'hidden' },
   cardFill: { padding: 16, gap: 10 },
-  cardBody: { borderRadius: radius.card, borderWidth: 1, padding: 16, gap: 10 },
+  cardBody: { borderRadius: radius.tile, borderWidth: 1, padding: 16, gap: 10 },
+  bold: { fontWeight: '700' },
+  tiles: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10 },
+  tile: {
+    width: '48.5%',
+    minHeight: 96,
+    borderRadius: radius.tile,
+    borderWidth: 1,
+    padding: 14,
+    gap: 4,
+  },
   pill: {
     minHeight: TOUCH,
     borderRadius: radius.pill,
@@ -385,7 +600,7 @@ const styles = StyleSheet.create({
   quiet: { minHeight: TOUCH, justifyContent: 'center', alignSelf: 'flex-start' },
   field: {
     minHeight: TOUCH,
-    borderRadius: radius.small,
+    borderRadius: radius.card,
     borderWidth: 1,
     paddingHorizontal: 14,
     paddingVertical: 10,

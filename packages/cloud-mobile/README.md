@@ -11,7 +11,9 @@ the look (`lib/theme.ts`, the web's palette).
 - **Home and Chat**: as on the web. Decisions are one-tap cards; an approval is shown exactly as the server
   sent it and cannot be approved if it cannot be shown exactly. Never any model or vendor name.
 - **Look**: dark by default, light in Settings. Cards are frosted (the system's Liquid Glass on iOS 26 and later,
-  a blur elsewhere); anything that holds code is opaque. The tab bar is the system's own.
+  a blur elsewhere); anything that holds code is opaque. The sections are a glass pill at the top
+  (`components/TopBar.tsx`), and the chat is the compact panel, a dark slab in both appearances
+  (`docs/fork/design/compact-panel.md`).
 - Next (T29 PRs 4 to 6): Projects, the task page and the viewer; push, share and deep links; release profiles.
 
 ## Run and verify
@@ -42,5 +44,4 @@ Not done by an agent, and listed for the owner: the Apple Developer account and 
 `app.config.ts` is provisional), App Store Connect, APNs; Google Play, the package name, FCM; the Expo account and
 EAS project; signing keys and secrets (EAS only, set by the owner).
 
-`expo start --web` renders the same screens in a browser for review (`src/app/(tabs)/_layout.web.tsx` draws a
-plain bottom bar there; the apps use the system's).
+`expo start --web` renders the same screens in a browser for review, with the same section pill.

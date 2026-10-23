@@ -1,25 +1,21 @@
-import { NativeTabs } from 'expo-router/native-tabs';
+import { Tabs } from 'expo-router';
+import { TopBar } from '@/components/TopBar';
 import { useLanding } from '@/lib/landing';
-import { useTheme } from '@/lib/theme';
 
-/** The system's own tab bar: Liquid Glass on iOS 26 and later, Material on Android. */
+/**
+ * The three sections as a glass pill at the top (`TopBar`), the same on iOS, Android and the browser
+ * preview. Each screen leaves `HEADER_SPACE` above its content for it.
+ */
 export default function TabsLayout() {
-  const t = useTheme();
   useLanding();
   return (
-    <NativeTabs tintColor={t.ink}>
-      <NativeTabs.Trigger name="index">
-        <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>
-        <NativeTabs.Trigger.Icon sf="house" md="home" />
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="chat">
-        <NativeTabs.Trigger.Label>Chat</NativeTabs.Trigger.Label>
-        <NativeTabs.Trigger.Icon sf="bubble.left" md="chat" />
-      </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="settings">
-        <NativeTabs.Trigger.Label>Settings</NativeTabs.Trigger.Label>
-        <NativeTabs.Trigger.Icon sf="gearshape" md="settings" />
-      </NativeTabs.Trigger>
-    </NativeTabs>
+    <Tabs
+      tabBar={(props) => <TopBar {...props} />}
+      screenOptions={{ headerShown: false, sceneStyle: { backgroundColor: 'transparent' } }}
+    >
+      <Tabs.Screen name="index" options={{ title: 'Home' }} />
+      <Tabs.Screen name="chat" options={{ title: 'Chat' }} />
+      <Tabs.Screen name="settings" options={{ title: 'Settings' }} />
+    </Tabs>
   );
 }

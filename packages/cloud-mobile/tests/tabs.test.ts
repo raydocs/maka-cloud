@@ -3,13 +3,15 @@ import { join } from 'node:path';
 
 const root = join(__dirname, '..');
 
-// NativeTabs draws Material icons on Android through expo-symbols and throws without it: the app
-// closed itself on the first screen of the Android emulator run.
-test('the tab bar has the package its Android icons need', () => {
-  const layout = readFileSync(join(root, 'src/app/(tabs)/_layout.tsx'), 'utf8');
+// expo-symbols draws Material icons on Android and throws without the package: the app closed
+// itself on the first screen of the Android emulator run (then from the system tab bar's icons; now
+// every icon the app draws goes through `Icon`).
+test('the icons have the package their Android symbols need', () => {
+  const icons = readFileSync(join(root, 'src/components/Icon.tsx'), 'utf8');
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
     dependencies: Record<string, string>;
   };
-  expect(layout).toMatch(/\bmd="/u);
+  expect(icons).toMatch(/from 'expo-symbols'/u);
+  expect(icons).toMatch(/\bandroid: '/u);
   expect(pkg.dependencies['expo-symbols']).toMatch(/^\d+\.\d+\.\d+$/u);
 });

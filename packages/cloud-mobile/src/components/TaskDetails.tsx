@@ -22,7 +22,7 @@ import { Image, Modal, ScrollView, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useBlobUri } from '@/lib/picture';
 import { mono, radius, useTheme } from '@/lib/theme';
-import { DiffLines, openLink, SourcesStack, useSources } from './Delivery';
+import { DiffLines, openLink, Report, SourcesStack, useSources } from './Delivery';
 import { FailureNote, PillButton, Solid, StatusMark, T } from './ui';
 
 function List({ title, items }: { title: string; items: readonly string[] }) {
@@ -49,30 +49,6 @@ function ImageResult({ name, blob }: { name: string; blob: Blob }) {
       style={{ width: '100%', aspectRatio: 16 / 10, borderRadius: radius.small }}
     />
   ) : null;
-}
-
-const REPORT_CHARS = 20_000;
-/** The most characters ever drawn; a report beyond this is read on the web. */
-const REPORT_CHARS_MAX = 200_000;
-
-/** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
-function Report({ text }: { text: string }) {
-  const t = useTheme();
-  const [all, setAll] = useState(false);
-  const shown = text.slice(0, all ? REPORT_CHARS_MAX : REPORT_CHARS);
-  return (
-    <Solid>
-      <T kind="body" selectable style={{ color: t.solidInk }}>
-        {displayText(shown)}
-      </T>
-      {shown.length < text.length && !all && (
-        <PillButton label="Show more" onPress={() => setAll(true)} />
-      )}
-      {all && text.length > REPORT_CHARS_MAX && (
-        <T kind="small">Showing the first part of this report. Read the rest on the web.</T>
-      )}
-    </Solid>
-  );
 }
 
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;

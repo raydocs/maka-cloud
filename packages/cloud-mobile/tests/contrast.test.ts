@@ -1,4 +1,4 @@
-import { DARK, type Palette, LIGHT } from '@/lib/theme';
+import { DARK, type Palette, LIGHT, PANEL } from '@/lib/theme';
 
 /**
  * The palette is the web's (cloud-web/src/tokens.css); this checks the pairs the app shows
@@ -34,12 +34,15 @@ const ratio = (a: string, b: string) => {
   return (hi + 0.05) / (lo + 0.05);
 };
 
-describe.each([DARK, LIGHT])('%#', (p: Palette) => {
+// The panel palette's ground is the slab itself (bgTop and bgBottom are the panel), so the same
+// checks cover the conversation's cards and chips; its glass controls are checked below.
+describe.each([DARK, LIGHT, PANEL])('%#', (p: Palette) => {
+  const name = p.surface ?? p.scheme;
   const surfaces = [p.bgTop, p.bgBottom].flatMap((bg) => {
     const card = over(p.card, bg);
-    return [card, over(p.chip, card)];
+    return [card, over(p.chip, card), over(p.glass, bg)];
   });
-  test(`${p.scheme}: text on cards and chips is readable at both ends of the background`, () => {
+  test(`${name}: text on cards, chips and glass is readable at both ends of the background`, () => {
     for (const s of surfaces) {
       expect(ratio(p.ink, s)).toBeGreaterThanOrEqual(7);
       expect(ratio(p.inkMuted, s)).toBeGreaterThanOrEqual(4.5);
@@ -49,11 +52,23 @@ describe.each([DARK, LIGHT])('%#', (p: Palette) => {
       expect(ratio(p.bad, s)).toBeGreaterThanOrEqual(4.5);
     }
   });
-  test(`${p.scheme}: buttons, the send button and code read well and code is opaque`, () => {
+  test(`${name}: buttons, the send button and code read well and code is opaque`, () => {
     expect(ratio(p.onAccent, p.accent)).toBeGreaterThanOrEqual(4.5);
     expect(ratio(p.onPillOn, p.pillOn)).toBeGreaterThanOrEqual(7);
     expect(ratio(p.solidInk, p.solid)).toBeGreaterThanOrEqual(7);
     expect(ratio(p.solidMuted, p.solid)).toBeGreaterThanOrEqual(4.5);
     expect(p.solid.startsWith('#')).toBe(true);
   });
+});
+
+test('the panel is the same opaque slab in both schemes, and its glass reads well', () => {
+  expect(LIGHT.panel).toBe(DARK.panel);
+  expect(PANEL.panel.startsWith('#')).toBe(true);
+  // The selected section is a lighter glass pill with the panel's ink on it.
+  expect(ratio(PANEL.ink, over(PANEL.panelGlassOn, PANEL.panel))).toBeGreaterThanOrEqual(7);
+  expect(ratio(PANEL.ink, over(PANEL.panelGlass, PANEL.panel))).toBeGreaterThanOrEqual(7);
+  expect(ratio(PANEL.inkMuted, PANEL.panel)).toBeGreaterThanOrEqual(4.5);
+  // A fade ends in the colour it starts from, at no opacity.
+  expect(over(PANEL.panelClear, '#ffffff')).toBe('#ffffff');
+  expect(over(LIGHT.bgTopClear, '#000000')).toBe('#000000');
 });

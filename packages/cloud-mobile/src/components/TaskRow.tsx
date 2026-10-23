@@ -63,7 +63,8 @@ export function TaskRow({
     <View style={{ gap: 6 }}>
       <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
         <StatusMark tone={TONE[task.state as keyof typeof TONE] ?? 'attention'} />
-        <T kind="heading" style={{ flex: 1 }}>
+        {/* A bold lead-in at reading size, as the panel's text has; still a heading to a screen reader. */}
+        <T kind="heading" style={{ flex: 1, fontSize: 16, lineHeight: 22, fontWeight: '700' }}>
           {title}
         </T>
       </View>

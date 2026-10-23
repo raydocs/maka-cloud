@@ -33,9 +33,31 @@ export type ColorName =
   | 'solid-line'
   | 'diff-add'
   | 'diff-del'
-  | 'overlay';
+  | 'overlay'
+  | 'glass'
+  | 'bg-top-clear'
+  | 'panel'
+  | 'panel-ink'
+  | 'panel-muted'
+  | 'panel-glass'
+  | 'panel-glass-on'
+  | 'panel-clear';
 
 export type Colors = Record<ColorName, string>;
+
+/**
+ * The compact panel (docs/fork/design/compact-panel.md): the conversation sits on one near-black
+ * rounded slab, the same in both schemes, with translucent glass controls on it and fades instead of
+ * edges. `panel-clear` is the panel at zero opacity, where a fade ends.
+ */
+const PANEL = {
+  panel: '#0b0b0c',
+  'panel-ink': '#f4f4f6',
+  'panel-muted': '#a6a6ae',
+  'panel-glass': 'rgb(255 255 255 / 0.1)',
+  'panel-glass-on': 'rgb(255 255 255 / 0.24)',
+  'panel-clear': 'rgb(11 11 12 / 0)',
+} as const satisfies Partial<Colors>;
 
 export const light: Colors = {
   'bg-top': '#b4cbee',
@@ -61,6 +83,9 @@ export const light: Colors = {
   'diff-add': '#e3f4e8',
   'diff-del': '#fbe6e6',
   overlay: 'rgb(235 243 255 / 0.55)',
+  glass: 'rgb(255 255 255 / 0.55)',
+  'bg-top-clear': 'rgb(180 203 238 / 0)',
+  ...PANEL,
 };
 
 export const dark: Colors = {
@@ -87,6 +112,9 @@ export const dark: Colors = {
   'diff-add': '#12301f',
   'diff-del': '#3a1a1d',
   overlay: 'rgb(5 10 22 / 0.6)',
+  glass: 'rgb(255 255 255 / 0.1)',
+  'bg-top-clear': 'rgb(13 19 34 / 0)',
+  ...PANEL,
 };
 
 /** Card shadows differ by scheme but are not colors a contrast check reads. */
@@ -113,7 +141,8 @@ export const type = {
   medium: 500,
 } as const;
 
-export const radius = { card: 22, inner: 14, pill: 9999 } as const;
+/** `tile` and `panel` are the compact panel's large radii: Home's tiles and the conversation slab. */
+export const radius = { card: 22, inner: 14, pill: 9999, tile: 28, panel: 36 } as const;
 
 /** Everything is spaced in multiples of 4. */
 export const space = { 1: 4, 2: 8, 3: 12, 4: 16, 5: 20, 6: 24, 8: 32 } as const;

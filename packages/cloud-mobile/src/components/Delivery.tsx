@@ -5,6 +5,7 @@ import {
   type DeliveryView,
   deliveryModel,
   displayText,
+  isDiffListing,
   LABEL_WORDS,
   loadSources,
   publicLink,
@@ -17,7 +18,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Image, Linking, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useBlobUri, usePicture } from '@/lib/picture';
-import { mono, radius, useTheme } from '@/lib/theme';
+import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
+import { Icon } from './Icon';
 import { Card, PillButton, Solid, StatusMark, T } from './ui';
 
 const MONO = Platform.OS === 'ios' ? mono.fontFamily : 'monospace';
@@ -60,6 +62,30 @@ export function DiffLines({ text }: { text: string }) {
       )}
       {all && lines.length > DIFF_LINES_MAX && (
         <T kind="small">{`Showing the first ${DIFF_LINES_MAX} of ${lines.length} lines. Read the rest on the web.`}</T>
+      )}
+    </Solid>
+  );
+}
+
+const REPORT_CHARS = 20_000;
+/** The most characters ever drawn; a report beyond this is read on the web. */
+const REPORT_CHARS_MAX = 200_000;
+
+/** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
+export function Report({ text }: { text: string }) {
+  const t = useTheme();
+  const [all, setAll] = useState(false);
+  const shown = text.slice(0, all ? REPORT_CHARS_MAX : REPORT_CHARS);
+  return (
+    <Solid>
+      <T kind="body" selectable style={{ color: t.solidInk }}>
+        {displayText(shown)}
+      </T>
+      {shown.length < text.length && !all && (
+        <PillButton label="Show more" onPress={() => setAll(true)} />
+      )}
+      {all && text.length > REPORT_CHARS_MAX && (
+        <T kind="small">Showing the first part of this report. Read the rest on the web.</T>
       )}
     </Solid>
   );
@@ -116,10 +142,34 @@ function ViewerPicture({ blob, title }: { blob: Blob; title: string }) {
 }
 
 interface Opened {
-  kind: 'image' | 'diff';
+  kind: 'image' | 'diff' | 'text';
   title: string;
   blob?: Blob;
   text?: string;
+}
+
+/** A file the task made, quietly: one line, a small file icon and its name. A tap opens it. */
+function FileRow({ name, onOpen }: { name: string; onOpen: () => void }) {
+  const t = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${name}`}
+      onPress={onOpen}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        minHeight: TOUCH,
+        opacity: pressed ? 0.6 : 1,
+      })}
+    >
+      <Icon name="file" size={16} color={t.inkMuted} />
+      <T kind="muted" numberOfLines={1} style={{ flex: 1 }}>
+        {name}
+      </T>
+    </Pressable>
+  );
 }
 
 /**
@@ -204,11 +254,14 @@ export function DeliveryCard({
   client,
   task,
   model,
+  files = [],
   onOpenTask,
 }: {
   client: CloudClient;
   task: TaskView;
   model: DeliveryModel;
+  /** The other files the task made, each shown as one quiet line. */
+  files?: readonly ArtifactListing[];
   onOpenTask?: (task: TaskView) => void;
 }) {
   const t = useTheme();
@@ -241,6 +294,21 @@ export function DeliveryCard({
         setOpened({ kind: 'diff', title: caption || 'The changes', text: content.text });
     } catch {
       setFailed(true);
+    }
+  }
+
+  const [fileFailed, setFileFailed] = useState(false);
+  async function openFile(file: ArtifactListing) {
+    setFileFailed(false);
+    const title = displayText(file.name);
+    try {
+      const content = await client.readArtifact(task.taskId, file.index);
+      if (content.kind === 'image') setOpened({ kind: 'image', title, blob: content.blob });
+      else if (content.kind === 'text')
+        setOpened({ kind: isDiffListing(file) ? 'diff' : 'text', title, text: content.text });
+      else setFileFailed(true);
+    } catch {
+      setFileFailed(true);
     }
   }
 
@@ -309,6 +377,18 @@ export function DeliveryCard({
       {(failed || proofFailed) && (
         <T kind="muted">The picture is too large or could not be loaded.</T>
       )}
+      {files.length > 0 && (
+        <View>
+          {files.map((file) => (
+            <FileRow
+              key={file.index}
+              name={displayText(file.name)}
+              onOpen={() => void openFile(file)}
+            />
+          ))}
+        </View>
+      )}
+      {fileFailed && <T kind="muted">This file could not be opened.</T>}
       {actions.map((action, i) => (
         <PillButton
           key={action.label}
@@ -324,6 +404,7 @@ export function DeliveryCard({
             <ViewerPicture blob={opened.blob} title={opened.title} />
           )}
           {opened.kind === 'diff' && <DiffLines text={opened.text ?? ''} />}
+          {opened.kind === 'text' && <Report text={opened.text ?? ''} />}
         </Viewer>
       )}
     </Card>
@@ -375,20 +456,18 @@ function SourceCard({
         alignItems: 'center',
         gap: 12,
         minHeight: 56,
-        padding: 8,
-        borderRadius: radius.small,
-        backgroundColor: t.chip,
+        paddingVertical: 6,
       }}
     >
       <View
         style={{
           width: 40,
           height: 40,
-          borderRadius: 8,
+          borderRadius: 12,
           overflow: 'hidden',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: t.card,
+          backgroundColor: t.chip,
         }}
       >
         {uri ? (
@@ -458,9 +537,23 @@ export function TaskDelivery({
 }) {
   const sources = useSources(client, task.taskId, task.state);
   const model = deliveryModel(task, listings, sources);
+  // Every other file is one quiet line: not the pictures, and not the diff when the card already
+  // offers it as "View the changes".
+  const diffShown = model && !model.views && !model.shot ? model.diff : undefined;
+  const files = listings.filter(
+    (listing) => listing.kind === 'file' && !listing.image && listing.index !== diffShown?.index,
+  );
   return (
     <>
-      {model && <DeliveryCard client={client} task={task} model={model} onOpenTask={onOpenTask} />}
+      {model && (
+        <DeliveryCard
+          client={client}
+          task={task}
+          model={model}
+          files={files}
+          onOpenTask={onOpenTask}
+        />
+      )}
       <SourcesStack client={client} taskId={task.taskId} sources={sources} />
     </>
   );

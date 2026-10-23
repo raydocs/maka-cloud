@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ScrollView, View } from 'react-native';
+import { HEADER_SPACE } from '@/components/TopBar';
 import { Card, PillButton, Screen, T } from '@/components/ui';
 import { type ModeChoice, useAppearance } from '@/lib/appearance';
 import { useSession } from '@/lib/session';
@@ -16,7 +17,10 @@ export default function Settings() {
   const [signOutError, setSignOutError] = useState('');
   return (
     <Screen>
-      <ScrollView contentContainerStyle={{ padding: 16, gap: 14 }}>
+      <ScrollView
+        contentContainerStyle={{ padding: 16, paddingTop: HEADER_SPACE + 4, gap: 14 }}
+        scrollIndicatorInsets={{ top: HEADER_SPACE }}
+      >
         <T kind="title">Settings</T>
         <Card label="Appearance">
           <T kind="heading">Appearance</T>
@@ -25,7 +29,8 @@ export default function Settings() {
               ? `Follows this phone: ${mode === 'dark' ? 'dark' : 'light'} now.`
               : mode === 'dark'
                 ? 'Dark is on.'
-                : 'Light is on.'}
+                : 'Light is on.'}{' '}
+            The conversation stays on its dark panel in both.
           </T>
           <View style={{ flexDirection: 'row', gap: 8 }}>
             {CHOICES.map(({ value, label }) => (

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react-native';
 import { Linking } from 'react-native';
 import type { CloudClient, DeliveryModel, TaskView } from '@maka-cloud/client';
-import { DiffLines, DeliveryCard } from '@/components/Delivery';
+import { DiffLines, DeliveryCard, TaskDelivery } from '@/components/Delivery';
 import { DARK, ThemeContext } from '@/lib/theme';
 
 const task = {
@@ -53,6 +53,52 @@ test('the card says the outcome, offers the changes and opens each action as a l
   expect(screen.getByText('-redirect forever')).toBeTruthy();
   await fireEvent.press(screen.getByRole('button', { name: 'Close' }));
   expect(screen.queryByText('+redirect once')).toBeNull();
+});
+
+test('the other files a task made are one quiet line each, and open as inert text', async () => {
+  const reads: number[] = [];
+  const client = {
+    readArtifact: async (_task: string, index: number) => {
+      reads.push(index);
+      return { kind: 'text', name: 'notes.md', text: '**Done.** <b>kept as text</b>' };
+    },
+  } as unknown as CloudClient;
+  const finished = {
+    ...task,
+    manifest: { summary: 'The login page no longer loops.' },
+  } as TaskView;
+  const listings = [
+    { index: 1, name: 'out/changes.diff', kind: 'file' as const },
+    { index: 2, name: 'notes.md', kind: 'file' as const },
+    {
+      index: 3,
+      name: 'https://example.test/',
+      kind: 'link' as const,
+      url: 'https://example.test/',
+    },
+  ];
+  await render(wrap(<TaskDelivery client={client} task={finished} listings={listings} />));
+  // The diff is already the card's "View the changes", and a link is not a file.
+  expect(await screen.findByRole('button', { name: 'View the changes' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Open out/changes.diff' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Open https/u })).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Open notes.md' }));
+  expect(await screen.findByText('**Done.** <b>kept as text</b>')).toBeTruthy();
+  expect(reads).toEqual([2]);
+});
+
+test('with a picture as the proof, the diff is one of the quiet file lines', async () => {
+  const client = {
+    readArtifact: async () => ({ kind: 'image', name: 'a.png', blob: new Blob(['png']) }),
+  } as unknown as CloudClient;
+  const finished = { ...task, manifest: { summary: 'Done.' } } as TaskView;
+  const listings = [
+    { index: 1, name: 'out/changes.diff', kind: 'file' as const },
+    { index: 2, name: 'login.png', kind: 'file' as const, image: true as const },
+  ];
+  await render(wrap(<TaskDelivery client={client} task={finished} listings={listings} />));
+  expect(await screen.findByRole('button', { name: 'Open out/changes.diff' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Open login.png' })).toBeNull();
 });
 
 test('a result with no links offers none, and Details is only there when it can be opened', async () => {
