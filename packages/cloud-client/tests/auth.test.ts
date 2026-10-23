@@ -146,6 +146,22 @@ test('closing the provider’s sheet is not an error, and nothing is sent to the
   expect(calls.map((c) => c.path)).toEqual(['/v1/auth/options', '/v1/auth/nonce']);
 });
 
+test('a sheet that fails is said in its own words, not as a lost connection, and the person can try again', async () => {
+  const { auth, calls } = flow(
+    { 'POST /v1/auth/nonce': () => ({ body: { nonce: 'n' } }) },
+    {
+      credential: async () => {
+        throw new Error('ERR_SOMETHING_NATIVE');
+      },
+    },
+  );
+  await auth.start();
+  await auth.signInWith('apple');
+  expect(step(auth)).toBe('choose');
+  expect(errorOf(auth)).toBe('That sign-in did not finish. Try again, or use another way.');
+  expect(calls.some((c) => c.path === '/v1/auth/session')).toBe(false);
+});
+
 test('a way the server did not offer is not tried', async () => {
   const { auth, calls } = flow({
     'GET /v1/auth/options': () => ({ body: { apple: false, google: true, email: false } }),

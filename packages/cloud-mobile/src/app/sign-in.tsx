@@ -329,8 +329,9 @@ function Step({
         />
       </>
     );
-  const apple = state.ways.apple && nativeProviders.apple;
-  const google = state.ways.google && nativeProviders.google;
+  const native = nativeProviders();
+  const apple = state.ways.apple && native.apple;
+  const google = state.ways.google && native.google;
   return (
     <>
       <T kind="heading">{say('signin.label')}</T>
