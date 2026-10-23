@@ -7,6 +7,7 @@ import {
   type ComputerInput,
   displayText,
   type TaskView,
+  TERMINAL,
 } from '@maka-cloud/client';
 
 export function Computer({ client, task }: { client: CloudClient; task: TaskView }) {
@@ -15,7 +16,12 @@ export function Computer({ client, task }: { client: CloudClient; task: TaskView
   return (
     <details className="computer" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>{t('Open computer')}</summary>
-      {open && <ComputerViewer client={client} task={task} />}
+      {open &&
+        (TERMINAL.has(task.state) ? (
+          <p role="status">{t('The task finished. Send a message to continue.')}</p>
+        ) : (
+          <ComputerViewer client={client} task={task} />
+        ))}
     </details>
   );
 }
@@ -27,6 +33,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
   const [controller, setController] = useState<'agent' | 'human'>('agent');
   const [live, setLive] = useState(false);
   const [error, setError] = useState('');
+  const [unavailable, setUnavailable] = useState<'asleep' | 'held' | 'dropped'>();
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [command, setCommand] = useState('');
@@ -36,11 +43,14 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
     mounted.current = true;
     const abort = new AbortController();
     setError('');
+    setLive(false);
+    setUnavailable(undefined);
     void client
       .watchComputer(
         task.taskId,
         (frame) => {
           setLive(true);
+          setUnavailable(undefined);
           setController(frame.controller);
           if (
             frame.desktop &&
@@ -53,13 +63,17 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         },
         abort.signal,
       )
-      .catch(() => {
+      .catch((failure: unknown) => {
         if (abort.signal.aborted) return;
         setLive(false);
         setDesktop(undefined);
         setTerminal('');
-        setError(
-          'Computer disconnected or unavailable. Input is disabled. Reconnect to check control.',
+        setUnavailable(
+          failure instanceof ApiError && failure.status === 404
+            ? 'asleep'
+            : failure instanceof ApiError && failure.code === 'computer_busy'
+              ? 'held'
+              : 'dropped',
         );
       });
     return () => {
@@ -77,6 +91,13 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       await work();
     } catch (error) {
       if (!mounted.current) return;
+      if (
+        error instanceof ApiError &&
+        ['computer_busy', 'computer_not_in_control'].includes(error.code ?? '')
+      ) {
+        setUnavailable('held');
+        setLive(false);
+      }
       setError(
         error instanceof ApiError && error.code === 'pause_unsupported'
           ? 'This task cannot safely pause. Watching only; no control was granted.'
@@ -94,13 +115,21 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
   return (
     <section className="computer-viewer" aria-label={t('Task computer')}>
       <p role="status">
-        {!live
-          ? error
-            ? t('Computer unavailable · Input disabled')
-            : t('Connecting to computer…')
-          : controller === 'human'
-            ? t('You have control · Task paused')
-            : t('Watching · Task has control')}
+        {unavailable
+          ? t(
+              unavailable === 'asleep'
+                ? 'The computer may be asleep or unavailable. Wait, then reconnect.'
+                : unavailable === 'held'
+                  ? 'Control is held elsewhere or changing. Retry after it is returned.'
+                  : 'The connection dropped. Reconnect to continue watching.',
+            )
+          : !live
+            ? error
+              ? t('Computer unavailable · Input disabled')
+              : t('Connecting to computer…')
+            : controller === 'human'
+              ? t('You have control · Task paused')
+              : t('Watching · Task has control')}
       </p>
       <div className="computer-actions">
         <button
@@ -189,7 +218,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         </button>
       </form>
       {error && <p role="alert">{shared(error)}</p>}
-      {!live && error && (
+      {!live && unavailable && (
         <button type="button" onClick={() => setAttempt((value) => value + 1)}>
           {t('Reconnect computer')}
         </button>

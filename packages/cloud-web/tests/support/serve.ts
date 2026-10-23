@@ -51,6 +51,8 @@ async function run(body: Body): Promise<unknown> {
           ...(body.budgetUsd === undefined ? {} : { budgetUsd: Number(body.budgetUsd) }),
         }),
       };
+    case 'read-steers':
+      return (await stack.run(text('taskId'))).readWaiting();
     case 'progress':
       return (await stack.run(text('taskId'))).progress(text('note'));
     case 'usage':

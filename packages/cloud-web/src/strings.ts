@@ -1,6 +1,40 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  'A message to a running task can have up to 4,000 characters.':
+    'A message to a running task can have up to 4,000 characters.',
+  Working: 'Working',
+  'To the running task': 'To the running task',
+  'Send as a new request': 'Send as a new request',
+  'Waiting for the next step': 'Waiting for the next step',
+  'Read by the task': 'Read by the task',
+  'Taken back': 'Taken back',
+  'Not read before the task ended': 'Not read before the task ended',
+  'Take back': 'Take back',
+  'Delivery not confirmed. Try again with the same message.':
+    'Delivery not confirmed. Try again with the same message.',
+  'Check delivery': 'Check delivery',
+  'Work keeps going on the server. Nothing needs resending.':
+    'Work keeps going on the server. Nothing needs resending.',
+  Recent: 'Recent',
+  '{count} waiting': '{count} waiting',
+  'Working for {time}': 'Working for {time}',
+  'Allowed once': 'Allowed once',
+  'Allowed for this task': 'Allowed for this task',
+  'Allowed for this repository': 'Allowed for this repository',
+  'Revoke in Me · Grants': 'Revoke in Me · Grants',
+  'Continue “{title}”': 'Continue “{title}”',
+  'Plan my next project': 'Plan my next project',
+  'Review my recent work': 'Review my recent work',
+  'Explore an idea': 'Explore an idea',
+  'The task finished. Send a message to continue.':
+    'The task finished. Send a message to continue.',
+  'The computer may be asleep or unavailable. Wait, then reconnect.':
+    'The computer may be asleep or unavailable. Wait, then reconnect.',
+  'Control is held elsewhere or changing. Retry after it is returned.':
+    'Control is held elsewhere or changing. Retry after it is returned.',
+  'The connection dropped. Reconnect to continue watching.':
+    'The connection dropped. Reconnect to continue watching.',
   Me: 'Me',
   Search: 'Search',
   'Search conversations': 'Search conversations',
@@ -507,6 +541,37 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  'A message to a running task can have up to 4,000 characters.':
+    '发送到运行中任务的消息最多可包含 4,000 个字符。',
+  Working: '工作中',
+  'To the running task': '发送到运行中的任务',
+  'Send as a new request': '作为新请求发送',
+  'Waiting for the next step': '等待下一步读取',
+  'Read by the task': '任务已读取',
+  'Taken back': '已撤回',
+  'Not read before the task ended': '任务结束前未读取',
+  'Take back': '撤回',
+  'Delivery not confirmed. Try again with the same message.': '尚未确认送达。请重试同一条消息。',
+  'Check delivery': '查看送达状态',
+  'Work keeps going on the server. Nothing needs resending.':
+    '工作会在服务器上继续，无需重新发送。',
+  Recent: '最近',
+  '{count} waiting': '需要你：{count}',
+  'Working for {time}': '已工作 {time}',
+  'Allowed once': '仅允许这一次',
+  'Allowed for this task': '已允许此任务',
+  'Allowed for this repository': '已允许此仓库',
+  'Revoke in Me · Grants': '前往我的 · 已记住的授权撤销',
+  'Continue “{title}”': '继续“{title}”',
+  'Plan my next project': '规划我的下一个项目',
+  'Review my recent work': '回顾我最近的工作',
+  'Explore an idea': '探索一个想法',
+  'The task finished. Send a message to continue.': '任务已结束。发送消息即可继续。',
+  'The computer may be asleep or unavailable. Wait, then reconnect.':
+    '电脑可能正在休眠或尚不可用。请稍候再重新连接。',
+  'Control is held elsewhere or changing. Retry after it is returned.':
+    '控制权在别处或正在切换。请在交还控制权后重试。',
+  'The connection dropped. Reconnect to continue watching.': '连接已断开。重新连接即可继续查看。',
   Me: '我的',
   Search: '搜索',
   'Search conversations': '搜索对话',
@@ -979,6 +1044,37 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  'A message to a running task can have up to 4,000 characters.':
+    '傳送至執行中任務的訊息最多可包含 4,000 個字元。',
+  Working: '工作中',
+  'To the running task': '傳送至執行中的任務',
+  'Send as a new request': '作為新要求傳送',
+  'Waiting for the next step': '等待下一步讀取',
+  'Read by the task': '任務已讀取',
+  'Taken back': '已撤回',
+  'Not read before the task ended': '任務結束前未讀取',
+  'Take back': '撤回',
+  'Delivery not confirmed. Try again with the same message.': '尚未確認送達。請重試同一則訊息。',
+  'Check delivery': '查看傳送狀態',
+  'Work keeps going on the server. Nothing needs resending.':
+    '工作會在伺服器上繼續，無需重新傳送。',
+  Recent: '最近',
+  '{count} waiting': '需要你：{count}',
+  'Working for {time}': '已工作 {time}',
+  'Allowed once': '僅允許這一次',
+  'Allowed for this task': '已允許此任務',
+  'Allowed for this repository': '已允許此儲存庫',
+  'Revoke in Me · Grants': '前往我的 · 已記住的授權撤銷',
+  'Continue “{title}”': '繼續「{title}」',
+  'Plan my next project': '規劃我的下一個專案',
+  'Review my recent work': '回顧我最近的工作',
+  'Explore an idea': '探索一個想法',
+  'The task finished. Send a message to continue.': '任務已結束。傳送訊息即可繼續。',
+  'The computer may be asleep or unavailable. Wait, then reconnect.':
+    '電腦可能正在休眠或尚無法使用。請稍候再重新連線。',
+  'Control is held elsewhere or changing. Retry after it is returned.':
+    '控制權在別處或正在切換。請在交還控制權後重試。',
+  'The connection dropped. Reconnect to continue watching.': '連線已中斷。重新連線即可繼續查看。',
   Me: '我的',
   Search: '搜尋',
   'Search conversations': '搜尋對話',

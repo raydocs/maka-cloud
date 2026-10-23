@@ -31,6 +31,7 @@ import {
   totalCost,
   openWorkspace,
   questionCardModel,
+  visibleInbox,
   Unsupported,
 } from '@maka-cloud/client';
 import { GrantsPanel } from './Grants';
@@ -45,6 +46,13 @@ import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
 import { submitOnEnter } from './keys';
+import {
+  RunningClock,
+  SteerComposer,
+  WaitingJump,
+  ConversationChoices,
+  ApprovalReceipt,
+} from './WorkStatus';
 
 export function QuestionCard({
   question,
@@ -64,7 +72,7 @@ export function QuestionCard({
   // The same shape as the card on Home: the answers are the buttons, the recommended one first and
   // filled, and a note only when asked for. One tap answers.
   return (
-    <section className="question" aria-label={t('Your decision')}>
+    <section className="question" data-waiting={!answered} aria-label={t('Your decision')}>
       <div className="section-heading">
         <span className={`status-mark ${answered ? 'succeeded' : 'attention'}`} />
         {shared(card.heading)}
@@ -88,6 +96,7 @@ export function QuestionCard({
             answered,
             question.options.find((raw) => raw.id === answered)?.label ?? t('Selected option'),
           )}
+          {question.reason === 'irreversible' && <ApprovalReceipt option={answered} />}
         </p>
       ) : (
         <>
@@ -207,12 +216,13 @@ function TaskBranch({
           <p className="muted">{t('Still stopping. The cost may change until it has stopped.')}</p>
         )}
         {/* A finished task has no "current step", and a top-level result is on its own card. */}
+        <RunningClock task={task} />
         {task.progress.length > 0 && live && <StepLine notes={task.progress} />}
         {task.failureReason && <FailureNote reason={task.failureReason} />}
         {task.manifest && task.parentTaskId !== undefined && (
           <p>{displayText(task.manifest.summary)}</p>
         )}
-        {live && <Computer client={client} task={task} />}
+        <Computer client={client} task={task} />
         {live && (
           // Quiet words, not three pills: the task is the thing to read, the controls are a glance.
           <div className="task-actions">
@@ -398,6 +408,13 @@ export function ConversationView({
     void feed.answerItem(item, optionId, text);
 
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
+  const decisions = useRef<HTMLDivElement>(null);
+  const waiting =
+    questions.filter((q) => !state.answers[q.questionId]).length +
+    visibleInbox(
+      Object.values(state.inbox).filter((i) => i.kind !== 'suggestion'),
+      openQuestions,
+    ).live.length;
   const total = totalCost(tasks);
   const topLevel = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
   // A top-level task's result card holds its outcome, so the inbox here does not announce it again.
@@ -453,28 +470,30 @@ export function ConversationView({
             onOpenTask={onOpenTask}
           />
         ))}
-        {questions.map((question) => (
-          <QuestionCard
-            key={question.questionId}
-            question={question}
-            answered={state.answers[question.questionId]}
-            disabled={Boolean(busy)}
-            onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
-          />
-        ))}
-        {/* Proposed cards live on Home. A finished task whose result card is above is not
+        <div ref={decisions}>
+          {questions.map((question) => (
+            <QuestionCard
+              key={question.questionId}
+              question={question}
+              answered={state.answers[question.questionId]}
+              disabled={Boolean(busy)}
+              onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
+            />
+          ))}
+          {/* Proposed cards live on Home. A finished task whose result card is above is not
             announced again here; it is acknowledged on Home. */}
-        <InboxPanel
-          items={Object.values(state.inbox).filter(
-            (item) =>
-              item.kind !== 'suggestion' &&
-              !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
-          )}
-          openQuestions={openQuestions}
-          disabled={Boolean(busy)}
-          onAnswer={answerItem}
-          shownResults={shown}
-        />
+          <InboxPanel
+            items={Object.values(state.inbox).filter(
+              (item) =>
+                item.kind !== 'suggestion' &&
+                !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
+            )}
+            openQuestions={openQuestions}
+            disabled={Boolean(busy)}
+            onAnswer={answerItem}
+            shownResults={shown}
+          />
+        </div>
         {error && (
           <p role="alert" className="error">
             {shared(error)}
@@ -538,49 +557,61 @@ export function ConversationView({
           {status !== 'Live' && status !== 'Connecting…' && (
             <>
               <span className="status-mark attention" />
-              {shared(status)}
+              {shared(status)}{' '}
+              {['Reconnecting…', 'Disconnected', 'Offline'].includes(status) &&
+                t('Work keeps going on the server. Nothing needs resending.')}
             </>
           )}
         </span>
-        <form
-          className="composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void feed.send(draft, workMode).then((sent) => sent && setDraft(''));
-          }}
+        <SteerComposer
+          client={client}
+          tasks={topLevel}
+          draft={draft}
+          setDraft={setDraft}
+          act={act}
+          busy={Boolean(busy)}
         >
-          <label htmlFor="message" className="sr-only">
-            {t('Keep the conversation going')}
-          </label>
-          <div className="pill-field">
-            <textarea
-              id="message"
-              rows={1}
-              maxLength={16000}
-              value={draft}
-              onChange={(e) => {
-                setDraft(displayText(e.target.value));
-                feed.draftEdited();
-              }}
-              placeholder={t('What would you like to do next?')}
-              onKeyDown={submitOnEnter}
+          <WaitingJump count={waiting} target={decisions} />
+          <form
+            className="composer-fields"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void feed.send(draft, workMode).then((sent) => sent && setDraft(''));
+            }}
+          >
+            <label htmlFor="message" className="sr-only">
+              {t('Keep the conversation going')}
+            </label>
+            <div className="pill-field">
+              <textarea
+                id="message"
+                rows={1}
+                maxLength={16000}
+                value={draft}
+                onChange={(e) => {
+                  setDraft(displayText(e.target.value));
+                  feed.draftEdited();
+                }}
+                placeholder={t('What would you like to do next?')}
+                onKeyDown={submitOnEnter}
+              />
+              <button
+                type="submit"
+                className="round-button"
+                aria-label={busy === 'message' ? t('Sending…') : t('Send message')}
+                disabled={Boolean(busy) || !draft.trim()}
+              >
+                <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
+              </button>
+            </div>
+            <ModePicker
+              value={workMode}
+              onChange={setWorkMode}
+              idPrefix="chat"
+              disabled={Boolean(busy)}
             />
-            <button
-              type="submit"
-              className="round-button"
-              aria-label={busy === 'message' ? t('Sending…') : t('Send message')}
-              disabled={Boolean(busy) || !draft.trim()}
-            >
-              <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
-            </button>
-          </div>
-          <ModePicker
-            value={workMode}
-            onChange={setWorkMode}
-            idPrefix="chat"
-            disabled={Boolean(busy)}
-          />
-        </form>
+          </form>
+        </SteerComposer>
       </section>
     </div>
   );
@@ -868,12 +899,22 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   }, []);
   const [chosen, setChosen] = useState('');
   const [searching, setSearching] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const searchInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (searching) searchInput.current?.focus();
   }, [searching]);
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('home');
+  useEffect(() => {
+    const openGrants = () => {
+      setTaskPage(undefined);
+      setView('settings');
+      requestAnimationFrame(() => document.getElementById('grants')?.scrollIntoView());
+    };
+    window.addEventListener('maka:grants', openGrants);
+    return () => window.removeEventListener('maka:grants', openGrants);
+  }, []);
   // The task page opens over whichever section the person came from and goes back to it.
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
   const [error, setError] = useState('');
@@ -922,7 +963,10 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       }}
     >
       {!taskPage && (wide || view !== 'settings') && (
-        <details className="composer-menu">
+        <details
+          className="composer-menu"
+          onToggle={(event) => setChoosing(event.currentTarget.open)}
+        >
           <summary aria-label={t('Switch conversation')}>
             <Plus size={18} strokeWidth={1.5} />
           </summary>
@@ -939,21 +983,17 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
             >
               {t('New conversation')}
             </button>
-            {session.conversations.map((conversation) => (
-              <button
-                type="button"
-                key={conversation.conversationId}
-                onClick={(e) => {
-                  setChosen(conversation.conversationId);
+            {choosing && (
+              <ConversationChoices
+                client={session.client}
+                conversations={session.conversations}
+                onChoose={(id) => {
+                  setChosen(id);
                   setView('chat');
-                  const menu = e.currentTarget.closest('details');
-                  menu?.removeAttribute('open');
-                  menu?.querySelector('summary')?.focus();
+                  document.querySelector('.composer-menu')?.removeAttribute('open');
                 }}
-              >
-                {displayText(conversation.title ?? t('Untitled conversation'))}
-              </button>
-            ))}
+              />
+            )}
           </div>
         </details>
       )}

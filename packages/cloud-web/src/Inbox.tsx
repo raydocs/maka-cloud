@@ -28,7 +28,11 @@ export function InboxCard({
   const [noting, setNoting] = useState(false);
   const card = inboxCardModel(item);
   return (
-    <section className="question" aria-label={shared(card.heading)}>
+    <section
+      className="question"
+      data-waiting={item.state !== 'closed'}
+      aria-label={shared(card.heading)}
+    >
       <div className="section-heading">
         <span className={`status-mark ${item.state === 'open' ? 'attention' : 'succeeded'}`} />
         {shared(card.heading)}

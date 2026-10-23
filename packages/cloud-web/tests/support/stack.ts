@@ -170,7 +170,7 @@ export async function startStack(
 ): Promise<Stack> {
   const language = options.language ?? 'en';
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
-  const fake = new FakeRunner({ pausable: options.pausable ?? true });
+  const fake = new FakeRunner({ pausable: options.pausable ?? true, steerable: true });
   const computer = await fakeComputer();
   const questions = new Map<
     string,
