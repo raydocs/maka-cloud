@@ -167,6 +167,8 @@ self.addEventListener('push', (event) => {
   event.waitUntil(work);
 });
 
+let openId = 0;
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil(
@@ -189,19 +191,27 @@ self.addEventListener('notificationclick', (event) => {
             () => true,
             () => false,
           );
+          if (!focused) return self.clients.openWindow(path);
+          const id = ++openId;
           const acknowledged = await new Promise((resolve) => {
             const channel = new MessageChannel();
+            let live = true;
             const finish = (ok) => {
+              if (!live) return;
+              live = false;
+              if (ok) channel.port1.postMessage({ type: 'maka.open.go', id });
               clearTimeout(timer);
               channel.port1.close();
               resolve(ok);
             };
-            const timer = setTimeout(() => finish(false), focused ? 10000 : 1500);
+            // Firefox's notification activation is tighter (~1 s); keep this below it.
+            // Chromium documents a 10 s notificationclick window. Do not wait near that limit.
+            const timer = setTimeout(() => finish(false), 500);
             channel.port1.onmessage = (message) => {
-              if (message.data?.type === 'maka.open.ack') finish(true);
+              if (message.data?.type === 'maka.open.ack' && message.data.id === id) finish(true);
             };
             try {
-              own.postMessage({ type: 'maka.open', path }, [channel.port2]);
+              own.postMessage({ type: 'maka.open', path, id }, [channel.port2]);
             } catch {
               finish(false);
             }

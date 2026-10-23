@@ -278,7 +278,6 @@ test('task-only links resolve conversation 21 and report an unavailable task in 
     const url = String(input);
     if (url.endsWith('/v1/conversations')) return json({ conversations });
     if (url.endsWith('/v1/tasks/deep/conversation')) return json({ conversationId: 'cnv_0', task });
-    if (url.includes('/v1/conversations/cnv_0/tasks')) return json({ tasks: [task] });
     return json({}, 404);
   });
   window.history.replaceState(null, '', '/?task=deep');
@@ -316,14 +315,23 @@ test('app acknowledges worker links after accepting their same-origin destinatio
   const postMessage = vi.fn(() => {
     expect(window.location.search).not.toBe('?task=one');
   });
+  const port = {
+    postMessage,
+    onmessage: undefined as ((event: MessageEvent) => void) | undefined,
+    close: vi.fn(),
+  };
   act(() =>
     listeners.get('message')?.({
       origin: window.location.origin,
-      data: { type: 'maka.open', path: '/?task=one' },
-      ports: [{ postMessage }],
+      data: { type: 'maka.open', path: '/?task=one', id: 1 },
+      ports: [port],
     } as unknown as Event),
   );
-  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open.ack' });
+  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open.ack', id: 1 });
+  expect(window.location.search).not.toBe('?task=one');
+  act(() => port.onmessage?.({ data: { type: 'maka.open.go', id: 2 } } as MessageEvent));
+  expect(window.location.search).not.toBe('?task=one');
+  act(() => port.onmessage?.({ data: { type: 'maka.open.go', id: 1 } } as MessageEvent));
   expect(window.location.search).toBe('?task=one');
   postMessage.mockClear();
   act(() =>

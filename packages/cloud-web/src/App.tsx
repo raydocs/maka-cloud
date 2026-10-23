@@ -947,9 +947,16 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       if (typeof event.data.path !== 'string') return;
       const target = new URL(event.data.path, window.location.origin);
       if (target.origin !== window.location.origin) return;
-      event.ports?.[0]?.postMessage({ type: 'maka.open.ack' });
-      window.history.replaceState(window.history.state, '', target.pathname + target.search);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      const port = event.ports?.[0];
+      const id = event.data.id;
+      if (!port || typeof id !== 'number') return;
+      port.onmessage = (reply) => {
+        if (reply.data?.type !== 'maka.open.go' || reply.data.id !== id) return;
+        port.close();
+        window.history.replaceState(window.history.state, '', target.pathname + target.search);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      };
+      port.postMessage({ type: 'maka.open.ack', id });
     };
     navigator.serviceWorker?.addEventListener('message', message);
     return () => navigator.serviceWorker?.removeEventListener('message', message);

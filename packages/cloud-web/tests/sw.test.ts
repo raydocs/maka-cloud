@@ -14,6 +14,7 @@ function load(
     focus: () => Promise<unknown>;
     postMessage: (data: unknown, ports?: MessagePort[]) => void;
   }> = [],
+  registrationScope = 'https://maka.example.test/',
 ) {
   const caches = {
     open: async () => ({
@@ -29,7 +30,7 @@ function load(
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
-      scope: 'https://maka.example.test/',
+      scope: registrationScope,
       getNotifications: async ({ tag }: { tag: string }) =>
         shown
           .filter((notice) => notice.options.tag === tag)
@@ -59,9 +60,13 @@ function load(
     MessageChannel: class {
       port1 = {
         onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
+        postMessage: (data: unknown) => this.port2.onmessage?.({ data }),
         close() {},
       };
-      port2 = { postMessage: (data: unknown) => this.port1.onmessage?.({ data }) };
+      port2 = {
+        onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
+        postMessage: (data: unknown) => this.port1.onmessage?.({ data }),
+      };
     },
   });
   const push = async (data: unknown) => {
@@ -271,12 +276,14 @@ test('the server terminal envelope preserves failed and stopped outcomes', async
 
 test('existing uncontrolled clients receive in-app links without navigation or reload', async () => {
   const focus = vi.fn(async () => {});
-  const postMessage = vi.fn((_data, ports) => ports[0].postMessage({ type: 'maka.open.ack' }));
+  const postMessage = vi.fn((data, ports) =>
+    ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+  );
   const worker = load('en', new Map(), [{ url: 'https://maka.example.test/', focus, postMessage }]);
   await worker.click('/?task=one');
   expect(focus).toHaveBeenCalledOnce();
   expect(postMessage).toHaveBeenCalledWith(
-    { type: 'maka.open', path: '/?task=one' },
+    { type: 'maka.open', path: '/?task=one', id: expect.any(Number) },
     expect.anything(),
   );
   expect(worker.opened).toEqual([]);
@@ -331,7 +338,7 @@ test('dismissed terminal tasks survive a restart, expire after seven days, and k
   expect(records[0][0]).toBe('1');
 });
 
-test('callback clients are skipped and an app without an ack falls back after ten seconds when focused', async () => {
+test('callback clients are skipped and an app without an ack falls back after half a second when focused', async () => {
   vi.useFakeTimers();
   try {
     const callback = vi.fn();
@@ -341,7 +348,7 @@ test('callback clients are skipped and an app without an ack falls back after te
       { url: 'https://maka.example.test/', focus: async () => {}, postMessage: app },
     ]);
     const click = worker.click('/?task=one');
-    await vi.advanceTimersByTimeAsync(9999);
+    await vi.advanceTimersByTimeAsync(499);
     expect(callback).not.toHaveBeenCalled();
     expect(app).toHaveBeenCalledOnce();
     expect(worker.opened).toEqual([]);
@@ -353,23 +360,74 @@ test('callback clients are skipped and an app without an ack falls back after te
   }
 });
 
-test('a focused app on a nested route acknowledges after the old timeout without a duplicate window', async () => {
-  vi.useFakeTimers();
-  try {
-    const worker = load('en', new Map(), [
-      {
-        url: 'https://maka.example.test/tasks/one',
-        focus: async () => {},
-        postMessage: (_data, ports) => {
-          setTimeout(() => ports?.[0]?.postMessage({ type: 'maka.open.ack' }), 2500);
+test.each([100, 600])(
+  'focused nested app ack at %s ms routes only with worker go',
+  async (delay) => {
+    vi.useFakeTimers();
+    try {
+      const routes: string[] = [];
+      const worker = load('en', new Map(), [
+        {
+          url: 'https://maka.example.test/tasks/one',
+          focus: async () => {},
+          postMessage: (data, ports) => {
+            const { id, path } = data as { id: number; path: string };
+            const port = ports![0];
+            port.onmessage = (reply) => {
+              if (reply.data.type === 'maka.open.go' && reply.data.id === id) routes.push(path);
+            };
+            setTimeout(() => port.postMessage({ type: 'maka.open.ack', id }), delay);
+          },
         },
+      ]);
+      const click = worker.click('/?task=one');
+      await vi.advanceTimersByTimeAsync(1000);
+      await click;
+      expect(routes).toEqual(delay < 500 ? ['/?task=one'] : []);
+      expect(worker.opened).toEqual(delay < 500 ? [] : ['/?task=one']);
+      expect(routes.length + worker.opened.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test('focus failure opens immediately without messaging the app', async () => {
+  const postMessage = vi.fn();
+  const worker = load('en', new Map(), [
+    {
+      url: 'https://maka.example.test/',
+      focus: async () => {
+        throw new Error('unavailable');
       },
-    ]);
-    const click = worker.click('/?task=one');
-    await vi.advanceTimersByTimeAsync(2500);
-    await click;
-    expect(worker.opened).toEqual([]);
-  } finally {
-    vi.useRealTimers();
-  }
+      postMessage,
+    },
+  ]);
+  await worker.click('/?task=one');
+  expect(postMessage).not.toHaveBeenCalled();
+  expect(worker.opened).toEqual(['/?task=one']);
+});
+
+test('clients outside the worker registration scope are skipped', async () => {
+  const outside = vi.fn();
+  const inside = vi.fn((data, ports) =>
+    ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+  );
+  const worker = load(
+    'en',
+    new Map(),
+    [
+      { url: 'https://maka.example.test/other/', focus: async () => {}, postMessage: outside },
+      {
+        url: 'https://maka.example.test/app/tasks/one',
+        focus: async () => {},
+        postMessage: inside,
+      },
+    ],
+    'https://maka.example.test/app/',
+  );
+  await worker.click('/app/?task=one');
+  expect(outside).not.toHaveBeenCalled();
+  expect(inside).toHaveBeenCalledOnce();
+  expect(worker.opened).toEqual([]);
 });

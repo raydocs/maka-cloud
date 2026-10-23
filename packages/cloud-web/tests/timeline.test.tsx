@@ -125,7 +125,7 @@ test('progress ticks preserve loaded pages; terminal and visible refreshes dedup
   expect(timeline).toHaveBeenCalledTimes(2);
   expect(document.querySelectorAll('[data-state]')).toHaveLength(2);
   rerender(view({ ...task, state: 'succeeded' }));
-  await waitFor(() => expect(timeline).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(timeline).toHaveBeenCalledTimes(4));
   await waitFor(() => expect(document.querySelectorAll('[data-state]')).toHaveLength(2));
   fireEvent(document, new Event('visibilitychange'));
   await waitFor(() => expect(timeline).toHaveBeenCalledTimes(4));
@@ -181,7 +181,7 @@ function timelineFixture() {
   return { client, page, view };
 }
 
-test('running timelines refresh at most once per five seconds and retain loaded pages', async () => {
+test('running timelines refresh at most once per ten seconds and retain loaded pages', async () => {
   const { client, page, view } = timelineFixture();
   const timeline = vi
     .spyOn(client, 'timeline')
@@ -195,7 +195,7 @@ test('running timelines refresh at most once per five seconds and retain loaded 
     fireEvent.click(screen.getByRole('button', { name: 'Load more steps' }));
     await act(async () => {});
     rerender(view(['tick']));
-    await act(() => vi.advanceTimersByTimeAsync(4999));
+    await act(() => vi.advanceTimersByTimeAsync(9999));
     expect(timeline).toHaveBeenCalledTimes(2);
     await act(() => vi.advanceTimersByTimeAsync(1));
     expect(timeline).toHaveBeenCalledTimes(3);
@@ -250,7 +250,7 @@ test('hidden tabs skip polls and a terminal response stops polling a stale runni
     expect(timeline).toHaveBeenCalledTimes(1);
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
     timeline.mockResolvedValue({ timeline: { ...response.timeline, state: 'succeeded' } });
-    await act(() => vi.advanceTimersByTimeAsync(5000));
+    await act(() => vi.advanceTimersByTimeAsync(10000));
     expect(timeline).toHaveBeenCalledTimes(2);
     await act(() => vi.advanceTimersByTimeAsync(15000));
     expect(timeline).toHaveBeenCalledTimes(2);
@@ -260,7 +260,7 @@ test('hidden tabs skip polls and a terminal response stops polling a stale runni
   }
 });
 
-test('three loaded pages cost one request per poll and preserve earlier steps', async () => {
+test('three loaded closed pages cost one request per poll and preserve earlier steps', async () => {
   const { client, page, view } = timelineFixture();
   const timeline = vi.spyOn(client, 'timeline').mockImplementation(async (_id, cursor) => {
     const after = cursor?.after ?? 0;
@@ -275,10 +275,125 @@ test('three loaded pages cost one request per poll and preserve earlier steps', 
       await act(async () => {});
     }
     expect(timeline).toHaveBeenCalledTimes(3);
-    await act(() => vi.advanceTimersByTimeAsync(5000));
+    await act(() => vi.advanceTimersByTimeAsync(10000));
     expect(timeline).toHaveBeenCalledTimes(4);
     expect(timeline).toHaveBeenLastCalledWith('t', { after: 2 });
     expect(document.querySelectorAll('[data-state]')).toHaveLength(3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each(['poll', 'terminal-prop', 'terminal-response', 'terminal-more'])(
+  'earlier loaded running steps update on %s without unbounded running polls',
+  async (mode) => {
+    const { client, page, view } = timelineFixture();
+    let finished = false;
+    const timeline = vi.spyOn(client, 'timeline').mockImplementation(async (_id, cursor) => {
+      const after = cursor?.after ?? 0;
+      const result = page([String(after)], after < 2 ? after + 1 : undefined);
+      result.timeline.steps[0].state = finished ? 'done' : 'running';
+      if (finished && (mode === 'terminal-response' || mode === 'terminal-more'))
+        result.timeline.state = 'succeeded';
+      return result;
+    });
+    vi.useFakeTimers();
+    try {
+      const { rerender } = render(view());
+      await act(async () => {});
+      for (let i = 0; i < 2; i++) {
+        if (mode === 'terminal-more' && i === 1) finished = true;
+        fireEvent.click(screen.getByRole('button', { name: 'Load more steps' }));
+        await act(async () => {});
+      }
+      finished = true;
+      if (mode === 'terminal-prop') {
+        rerender(
+          <LanguageProvider language="en">
+            <TaskPage
+              client={client}
+              task={{ taskId: 't', state: 'succeeded', progress: [] } as unknown as TaskView}
+              onBack={() => {}}
+            />
+          </LanguageProvider>,
+        );
+        await act(async () => {});
+      } else if (mode !== 'terminal-more') {
+        const before = timeline.mock.calls.length;
+        await act(() => vi.advanceTimersByTimeAsync(10000));
+        expect(timeline.mock.calls.length - before).toBe(mode === 'poll' ? 2 : 3);
+      }
+      expect(document.querySelector('[data-state]')?.getAttribute('data-state')).toBe('done');
+      if (mode === 'poll') {
+        const before = timeline.mock.calls.length;
+        await act(() => vi.advanceTimersByTimeAsync(10000));
+        expect(timeline.mock.calls.length - before).toBe(2);
+      }
+      expect(document.querySelectorAll('[data-state="running"]')).toHaveLength(0);
+      expect(document.querySelectorAll('[data-state]')).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test('open older pages rotate with at most two requests per running tick', async () => {
+  const { client, page, view } = timelineFixture();
+  const timeline = vi.spyOn(client, 'timeline').mockImplementation(async (_id, cursor) => {
+    const after = cursor?.after ?? 0;
+    const result = page([String(after)], after < 3 ? after + 1 : undefined);
+    result.timeline.steps[0].state = 'running';
+    return result;
+  });
+  vi.useFakeTimers();
+  try {
+    render(view());
+    await act(async () => {});
+    for (let i = 0; i < 3; i++) {
+      fireEvent.click(screen.getByRole('button', { name: 'Load more steps' }));
+      await act(async () => {});
+    }
+    timeline.mockClear();
+    for (let i = 0; i < 3; i++) {
+      await act(() => vi.advanceTimersByTimeAsync(10000));
+      expect(timeline.mock.calls).toHaveLength((i + 1) * 2);
+    }
+    expect(timeline.mock.calls.map((call) => call[1]?.after)).toEqual([3, undefined, 3, 1, 3, 2]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('terminal Load more queues a full refresh behind an obsolete in-flight poll', async () => {
+  const { client, page, view } = timelineFixture();
+  const first = page(['one'], 1);
+  first.timeline.steps[0].state = 'running';
+  const timeline = vi.spyOn(client, 'timeline').mockResolvedValue(first);
+  vi.useFakeTimers();
+  try {
+    render(view());
+    await act(async () => {});
+    let finish!: (value: ReturnType<typeof page>) => void;
+    timeline.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await act(() => vi.advanceTimersByTimeAsync(10000));
+    timeline.mockImplementation(async (_id, cursor) => {
+      const response = cursor?.after === undefined ? page(['one'], 1) : page(['two']);
+      response.timeline.state = 'succeeded';
+      return response;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Load more steps' }));
+    await act(async () => {});
+    await act(async () => finish(first));
+    expect(document.querySelectorAll('[data-state="running"]')).toHaveLength(0);
+    expect(document.querySelectorAll('[data-state]')).toHaveLength(2);
+    expect(timeline.mock.calls.slice(-2).map((call) => call[1]?.after)).toEqual([1, undefined]);
+    await act(() => vi.advanceTimersByTimeAsync(20000));
+    expect(timeline).toHaveBeenCalledTimes(5);
   } finally {
     vi.useRealTimers();
   }
