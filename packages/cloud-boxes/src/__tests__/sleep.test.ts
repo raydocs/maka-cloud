@@ -327,3 +327,18 @@ describe('waking boxes', () => {
     assert.equal(t.fleet.callsTo('ensureRunning').length, 2);
   });
 });
+
+describe('the sleep sweep and task labels', () => {
+  it('refuses, and does not suspend, an idle box whose label names another live task', async () => {
+    const t = await idleBox(30 * MIN);
+    t.live.add('elsewhere');
+    const machine = t.fleet.machines.get(t.machineId);
+    assert.ok(machine);
+    machine.metadata = { ...machine.metadata, [LABEL.task]: 'elsewhere' };
+    assert.deepEqual(await t.pool.sweepIdle(), []);
+    assert.equal(t.fleet.callsTo('suspendMachine').length, 0);
+    assert.equal(t.fleet.execLog.length, 0, 'no checkpoint ran in it');
+    assert.equal(t.pool.state()[0]?.state, 'refused');
+    assert.equal(labelsOf(t.fleet, t.machineId)?.[LABEL.task], 'elsewhere');
+  });
+});

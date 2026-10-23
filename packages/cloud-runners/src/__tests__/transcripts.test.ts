@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -309,6 +310,61 @@ test('an empty transcript is written as an empty file; a missing one counts as n
   assert.equal(await fs.readFile(r.file, 'utf8'), '');
 });
 
+test('a restored transcript takes the configured group, never the destination directory’s group', async (t) => {
+  const group = process.getgid?.();
+  const otherGroup =
+    process.getgroups?.().find((value) => value !== group) ??
+    (process.getuid?.() === 0 ? (group ?? 0) + 1 : undefined);
+  if (group === undefined || otherGroup === undefined) {
+    t.skip('needs a second group for the destination directory');
+    return;
+  }
+  const r = await rig(t, 'tsk_up_group');
+  const dir = join(r.machine.configDir('tsk_up_group'), 'projects', KEY.projectKey);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.chown(dir, -1, otherGroup);
+  assert.notEqual((await fs.stat(dir)).gid, group);
+  const store = new MemoryTranscriptStore();
+  await store.append('tsk_up_group', KEY, [line(1)]);
+  const input = {
+    machine: r.machine,
+    store,
+    taskId: 'tsk_up_group',
+    sessionId: SESSION,
+    agentGroup: String(group),
+  };
+  assert.equal((await restoreTranscript(input)).status, 'restored');
+  assert.equal((await fs.stat(r.file)).gid, group);
+});
+
+test('a transcript replaced after rename is refused even when its bytes match', async (t) => {
+  const r = await rig(t, 'tsk_up_inode');
+  const text = '{"n":1}\n';
+  // Substitute a new inode at the exact rename boundary, while keeping the same bytes and mode.
+  const script = `mv() {
+    command mv "$@" || return
+    command cp -p -- "$file" "$MAKA_DIR/replacement" || return
+    command mv -fT -- "$MAKA_DIR/replacement" "$file"
+  }
+${TRANSCRIPT_CHUNK_SCRIPT}`;
+  await assert.rejects(
+    r.machine.execOk(script, {
+      envs: {
+        MAKA_DIR: r.machine.taskDir('tsk_up_inode'),
+        MAKA_KEY: KEY.projectKey,
+        MAKA_SESSION: SESSION,
+        MAKA_OFFSET: '0',
+        MAKA_LEN: String(Buffer.byteLength(text)),
+        MAKA_LAST: '1',
+        MAKA_HASH: createHash('sha256').update(text).digest('hex'),
+      },
+      stdin: Buffer.from(text).toString('base64'),
+    }),
+    /the transcript file changed during rename/,
+  );
+  assert.equal(await fs.readFile(r.file, 'utf8'), text);
+});
+
 test('an upload that fails halfway leaves no file behind and the earlier transcript stays', async (t) => {
   const r = await rig(t, 'tsk_up_fail');
   await r.machine.installTranscript({
@@ -346,12 +402,8 @@ test('a chunk sent again lands once, a chunk out of step is refused, and a damag
       },
       stdin: Buffer.from(stdin).toString('base64'),
     });
-  const tmp = join(
-    r.machine.configDir('tsk_up_chunks'),
-    'projects',
-    KEY.projectKey,
-    `.restore-${SESSION}.tmp`,
-  );
+  // In the task directory, which the agent's group cannot write, not in the configuration directory.
+  const tmp = join(r.machine.taskDir('tsk_up_chunks'), `.restore-${SESSION}.tmp`);
   await run({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n');
   await run({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n'); // the first chunk again: starts over
   await run({ MAKA_OFFSET: '4', MAKA_LEN: '3' }, 'de\n');
@@ -365,6 +417,39 @@ test('a chunk sent again lands once, a chunk out of step is refused, and a damag
   );
   await assert.rejects(fs.stat(r.file), 'a damaged file is not put in place');
   await assert.rejects(fs.stat(tmp), 'and its temporary file is removed');
+});
+
+test('a link planted where the upload is being built is not written through between two chunks', async (t) => {
+  const r = await rig(t, 'tsk_up_plant');
+  const run = (extra: Record<string, string>, stdin: string) =>
+    r.machine.execOk(TRANSCRIPT_CHUNK_SCRIPT, {
+      envs: {
+        MAKA_DIR: r.machine.taskDir('tsk_up_plant'),
+        MAKA_KEY: KEY.projectKey,
+        MAKA_SESSION: SESSION,
+        MAKA_LAST: '0',
+        MAKA_HASH: '',
+        ...extra,
+      },
+      stdin: Buffer.from(stdin).toString('base64'),
+    });
+  const victim = join(r.h.tmp, 'victim.txt');
+  await fs.writeFile(victim, 'xxxx');
+  await run({ MAKA_OFFSET: '0', MAKA_LEN: '4' }, 'abc\n');
+  // What the agent's group could do in the configuration directory between two chunks: a link, of the
+  // size the next chunk expects, at the name an upload built there would have.
+  const planted = join(r.machine.configDir('tsk_up_plant'), 'projects', KEY.projectKey);
+  await fs.mkdir(planted, { recursive: true });
+  const name = join(planted, `.restore-${SESSION}.tmp`);
+  await fs.rm(name, { force: true });
+  await fs.symlink(victim, name);
+  await run({ MAKA_OFFSET: '4', MAKA_LEN: '3' }, 'de\n');
+  assert.equal(await fs.readFile(victim, 'utf8'), 'xxxx', 'the link was not written through');
+  const hash = createHash('sha256').update('abc\nde\n').digest('hex');
+  await run({ MAKA_OFFSET: '7', MAKA_LEN: '0', MAKA_LAST: '1', MAKA_HASH: hash }, '');
+  assert.equal(await fs.readFile(r.file, 'utf8'), 'abc\nde\n');
+  assert.equal((await fs.stat(r.file)).mode & 0o777, 0o660);
+  assert.equal(await fs.readFile(victim, 'utf8'), 'xxxx');
 });
 
 test('a link where the configuration directory should be is not followed', async (t) => {

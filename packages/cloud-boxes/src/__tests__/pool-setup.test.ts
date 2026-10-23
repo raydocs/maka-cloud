@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { InstaboxApiError } from '@maka-cloud/instabox';
 import { builderLabels, builderName, LABEL } from '../labels.js';
 import { BoxPool } from '../pool.js';
 import { BoxRefusedError, NoFreeBoxError } from '../types.js';
@@ -507,5 +508,63 @@ describe('boxes to build setup snapshots in', () => {
     );
     assert.equal(t.fleet.execRequests.length, 0);
     assert.equal(t.fleet.snapshots.size, 0);
+  });
+});
+
+describe('a builder box left over from an earlier build', () => {
+  it('does not block the next build once it is gone', async () => {
+    const t = setup();
+    const boxes = t.pool.builderBoxes();
+    const first = await boxes.lease({ tenantId: A, job: 'setup-abc' });
+    const realDelete = t.fleet.deleteMachine.bind(t.fleet);
+    let failing = true;
+    t.fleet.deleteMachine = async (id: string) => {
+      if (failing) throw new Error('instabox is unreachable');
+      // Instabox answers 404 for a sandbox that is already gone.
+      if (t.fleet.machines.get(id)?.state !== 'running') {
+        throw new InstaboxApiError(404, { code: 'not_found', message: 'no such sandbox' });
+      }
+      return await realDelete(id);
+    };
+    await first.release();
+    // The delete went through after all (or the operator removed the box).
+    const leftover = t.fleet.machines.get(first.machineId);
+    assert.ok(leftover);
+    leftover.state = 'deleted';
+    failing = false;
+    const second = await boxes.lease({ tenantId: A, job: 'setup-def' });
+    assert.notEqual(second.machineId, first.machineId);
+    await second.release();
+    assert.equal(t.fleet.machines.get(second.machineId)?.state, 'deleted');
+  });
+
+  it('is waited for at shutdown while its guard runs, then deleted, not handed out', async () => {
+    let guardDone!: () => void;
+    let guardReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      guardReached = resolve;
+    });
+    const t = setup({
+      beforeUse: async () => {
+        guardReached();
+        await new Promise<void>((resolve) => {
+          guardDone = resolve;
+        });
+      },
+    });
+    const leasing = t.pool.builderBoxes().lease({ tenantId: A, job: 'setup-abc' });
+    await reached;
+    t.pool.dispose();
+    let settled = false;
+    const waiting = t.pool.settled().then(() => {
+      settled = true;
+    });
+    await flush();
+    assert.equal(settled, false, 'the shutdown waits for the builder');
+    guardDone();
+    await assert.rejects(leasing, /shut down/);
+    await waiting;
+    const [machineId] = t.fleet.callsTo('deleteMachine')[0] as [string];
+    assert.equal(t.fleet.machines.get(machineId)?.state, 'deleted');
   });
 });

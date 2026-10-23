@@ -107,6 +107,18 @@ lead becomes visible. Seeing the reproduction test fail and then pass is the pro
 **Tests.** Panel summaries come only from check results. The scrub runs on `tail`. Caps hold. A
 replayed event stream rebuilds the same panels. No panel text reaches a model.
 
+**Status (built, #383).** `task_narration` and `task_panel` events, emitted by the coding runner at
+its phase boundaries, folded into `TaskView.narration` and `TaskView.panels` by `cloud-client`. No
+UI yet (design lane). What to know before relying on it:
+- A summary is a fixed shape from the sandbox exit status, the change as git listed it and the
+  review's counts. The counts are the test suite's own word: the reproduction test is the agent's,
+  so its panels show a verdict only, not totals.
+- A `tail` is scrubbed for secrets and capped (40 lines, 4 KiB), but it is what the check printed,
+  so it can carry a vendor's words; the public view scrubs vendor names on top.
+- Caps are 400 narration lines and 400 panel updates per task, reset when a task restarts. Panels
+  are not in `TaskView` for a model, the recovery note or a brief, and they are not liveness for the
+  supervisor.
+
 ## 3. Answer from the notification
 
 **Hark.** Push carries Approve and Deny actions and resolves an approval without the app open.
@@ -151,6 +163,18 @@ The order is code, "seen" is the browser's last visit, and the employee cannot p
 **Where.** Server and supervisor (T28 lane), `cloud-client`, web and phone Home.
 **Tests.** Ranking is stable. Seen is per owner. Another owner's cards never appear. Note cards are
 template-only.
+
+**Status (built, #385).** `GET /v1/home` with `kind:ref` card ids, per-owner seen, visit and order
+rows, and `HomeFeed` in `cloud-client` using it (the old feed remains the fallback). What to know:
+- Order is waiting (interrupts first, then oldest), suggestion, finished since last visit (newest,
+  at most 8; the first visit shows the last day), note (newest, at most 5, 7 days), scheduled
+  (soonest, at most 5). A card moves only within its kind; moved cards keep the owner's order and new
+  arrivals come before them.
+- A hidden tab counts as a visit, so "since last visit" resets then.
+- Notes are template-only (`pull_request_merged`, `checks_failed`) with typed params. Nothing
+  produces them yet: `addHomeNote` on `CloudServer` is there for the duties engine to call when a
+  PR merges. `GET /v1/home` has no rate limit of its own, and the finished list has no index; both
+  are post-launch backlog.
 
 ## 5. How results are shown: websites, artifacts, projects, slides
 

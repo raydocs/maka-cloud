@@ -22,6 +22,7 @@ import {
 } from '@maka-cloud/client';
 import { InboxCard, ResultCard } from './Inbox';
 import { ModePicker } from './ModePicker';
+import { pendingSends } from './pending';
 import { SuggestionCard } from './Suggestion';
 import { submitOnEnter } from './keys';
 import { Onboarding, onboardingSkipped } from './Onboarding';
@@ -121,7 +122,7 @@ export function Home({
   const [workMode, setWorkMode] = useState<Mode | undefined>();
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
-  const starter = useMemo(() => new ConversationStarter(client), [client]);
+  const starter = useMemo(() => new ConversationStarter(client, Date.now, pendingSends), [client]);
   // `now` may be a new function each render; the feed keeps asking the latest one.
   const clock = useRef(now);
   clock.current = now;

@@ -97,9 +97,7 @@ export class FleetCodingSandbox implements CodingSandbox {
     };
     return {
       dir: machine.taskDir(taskId),
-      // Putting the change back after a base check is the host's own fixed script: like the check
-      // stop, it must reach a box whose guard now fails, or the change stays in the backup.
-      exec: (script, options = {}) => run(script, options, script !== BASE_RESTORE_SCRIPT),
+      exec: (script, options = {}) => run(script, options),
       execCheck: async (script, options = {}) => {
         if (channel === undefined) {
           throw new Error('checks run as the agent account, and none is configured');
@@ -107,7 +105,13 @@ export class FleetCodingSandbox implements CodingSandbox {
         await fleet.ensureAgentIsolation(machine, options.signal);
         // The task directory and workspace belong to the agent's group before its tests enter them.
         await machine.prepareAgent(taskId, channel.group, options.signal);
-        return run(asAgentScript(script, channel, Object.keys(options.envs ?? {})), options);
+        // Putting the change back after a base check is the host's own fixed script: like the check
+        // stop, it must reach a box whose guard now fails, or the change stays in the backup.
+        return run(
+          asAgentScript(script, channel, Object.keys(options.envs ?? {})),
+          options,
+          script !== BASE_RESTORE_SCRIPT,
+        );
       },
       // The host's own stop, not task code: it must reach a box whose guard now fails.
       execCheckStop: (script, options = {}) =>

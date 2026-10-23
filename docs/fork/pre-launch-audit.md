@@ -96,8 +96,9 @@ Findings:
   the running task delegates are its own tree and are not held. A task that waits through a restart
   waits again. Covered by `admission.test.ts` and `tasks-per-invite.test.ts`. Lift it when per-task
   accounts land (`post-launch-backlog.md`).
-- **P2 (follow-up to #312, told to T28)**: the base-check revert and restore and the `add -A` of the
-  change are check-then-act and hold only while no agent process is alive, but the runner stops the
+- **P2 (follow-up to #312, told to T28)**: the `add -A` of the change is check-then-act and holds only
+  while no agent process is alive (the base-check revert and restore now run as the agent account and
+  no longer depend on it), but the runner stops the
   agent's runs only in the final cleanup (`cloud-playbooks/src/coding/runner.ts:1797`); a background
   process the agent left in its turn survives into `verify` and `collect`. Fix: stop the task's agent
   runs, with no survivors, before the first revert and before `collect` (isolation-model.md F1).

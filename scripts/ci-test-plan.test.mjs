@@ -222,6 +222,28 @@ test('coding playbook changes enable user namespaces for its check isolation', (
   assert.equal(plan.runtimeSandbox, true);
 });
 
+test('web and phone app changes are linted but leave the tests to their own lanes', () => {
+  for (const path of [
+    'packages/cloud-web/src/Delivery.tsx',
+    'packages/cloud-mobile/src/components/Delivery.tsx',
+    'packages/cloud-client/src/delivery.ts',
+    'packages/cloud-design/src/tokens.json',
+  ]) {
+    const plan = planTests([path]);
+    assert.equal(plan.full, false, path);
+    assert.equal(plan.code, true, path);
+    assert.deepEqual(plan.workspaces, [], path);
+  }
+});
+
+test('deploy inputs select the host, whose tests read them, not the full suite', () => {
+  for (const path of ['deploy/Dockerfile', 'deploy/install.sh', '.dockerignore']) {
+    const plan = planTests([path]);
+    assert.equal(plan.full, false, path);
+    assert.ok(plan.workspaces.includes('packages/cloud-host'), path);
+  }
+});
+
 test('CLI release inputs select installed-package validation', () => {
   const plan = planTests(['packages/runtime/src/runtime.ts'], { graph });
 

@@ -287,6 +287,7 @@ test('a conversation put back by the sandbox user is read and extended by the ag
     dirName: dir,
     projectKey: '-work-x',
     sessionId: session,
+    agentGroup: CHANNEL.group,
     bytes: (async function* () {
       yield Buffer.from('{"n":1}\n');
     })(),

@@ -675,6 +675,7 @@ export class RemoteMachine {
     dirName: string;
     projectKey: string;
     sessionId: string;
+    agentGroup?: string;
     bytes: AsyncIterable<Buffer>;
     signal?: AbortSignal;
   }): Promise<void> {
@@ -685,6 +686,9 @@ export class RemoteMachine {
     const send = async (chunk: Buffer, last: boolean): Promise<void> => {
       const envs = {
         ...base,
+        ...(input.agentGroup === undefined
+          ? {}
+          : { MAKA_AGENT_GROUP: assertSafeId('group', input.agentGroup) }),
         MAKA_OFFSET: String(offset),
         MAKA_LEN: String(chunk.length),
         MAKA_LAST: last ? '1' : '0',
