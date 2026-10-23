@@ -883,7 +883,12 @@ export function verificationFailedSpec(
           detail: clip(detail, 500),
           more: Math.max(0, outcome.mismatches.length - 3),
         }
-      : { id: 'verification_incomplete', title: quotable(task.title), detail: clip(detail, 500) },
+      : {
+          id: 'verification_incomplete',
+          title: quotable(task.title),
+          detail: clip(detail, 500),
+          code: outcome.code,
+        },
   };
   return {
     kind: 'verification_failed',

@@ -137,9 +137,19 @@ const TEMPLATES = [
     zh: '对“Report”的独立核查发现 5 个问题：“a”: “b”（另有 2 个）',
   },
   {
-    template: { id: 'verification_incomplete', title: 'Report', detail: 'timeout' },
-    en: 'The independent check of “Report” could not be completed, so the result is not verified: timeout',
-    zh: '对“Report”的独立核查没能完成，结果未经核实：timeout',
+    template: {
+      id: 'verification_incomplete',
+      title: 'Report',
+      detail: 'no model of another vendor is available to check this work',
+      code: 'no_verifier',
+    },
+    en: 'The independent check of “Report” could not be completed, so the result is not verified: no model of another vendor is available to check this work',
+    zh: '对“Report”的独立核查没能完成，结果未经核实：没有另一家厂商的模型可以核查这项工作。',
+  },
+  {
+    template: { id: 'verification_incomplete', title: 'Report', detail: 'something new' },
+    en: 'The independent check of “Report” could not be completed, so the result is not verified: something new',
+    zh: '对“Report”的独立核查没能完成，结果未经核实：原因未知。',
   },
   {
     template: { id: 'suggestion_offer', count: 3, label: 'fix failing checks', repo: 'acme/api' },

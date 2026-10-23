@@ -75,7 +75,12 @@ const AskTemplate = z.discriminatedUnion('id', [
     detail: templateText,
     more: templateCount,
   }),
-  z.object({ id: z.literal('verification_incomplete'), title: templateText, detail: templateText }),
+  z.object({
+    id: z.literal('verification_incomplete'),
+    title: templateText,
+    detail: templateText,
+    code: z.string().max(40).optional(),
+  }),
   z.object({
     id: z.literal('suggestion_offer'),
     count: templateCount,
@@ -113,7 +118,7 @@ export function localizedAsk(template: unknown, language: Language): string | un
       said = ask.verificationFailed(t.title, t.count, t.detail, t.more);
       break;
     case 'verification_incomplete':
-      said = ask.verificationIncomplete(t.title, t.detail);
+      said = ask.verificationIncomplete(t.title, t.detail, t.code);
       break;
     case 'suggestion_offer':
       said = ask.suggestionOffer(t.count, t.label, t.repo);

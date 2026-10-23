@@ -54,7 +54,8 @@ export interface Messages {
     ) => string;
     failed: (title: string, detail: string) => string;
     verificationFailed: (title: string, count: number, detail: string, more: number) => string;
-    verificationIncomplete: (title: string, detail: string) => string;
+    /** `detail` is the supervisor's English reason; `code` lets another language say why in its own words. */
+    verificationIncomplete: (title: string, detail: string, code?: string) => string;
     /** `label` is the card kind's English words; a language without them says "this kind". */
     suggestionOffer: (count: number, label: string, repo: string) => string;
   };
@@ -121,6 +122,17 @@ const en: Messages = {
 
 const UNTITLED_ZH = '（未命名）';
 
+/** Why a check could not finish, by the verification's code. The English reason can quote agent text, so it is not shown here. */
+const UNCHECKED_ZH: Readonly<Record<string, string>> = {
+  budget: '核查的预算已用完，模型核查没有运行',
+  no_verifier: '没有另一家厂商的模型可以核查这项工作',
+  unavailable: '没能取得核查所需的材料',
+  model_error: '核查模型没有给出可用的回答',
+  incomplete: '有些内容没能核查完',
+  aborted: '核查被中止了',
+  unverified: '任务自己报告的检查无法独立复现',
+};
+
 const zhHans: Messages = {
   signInMail: {
     subject: '你的登录验证码',
@@ -157,8 +169,10 @@ const zhHans: Messages = {
     failed: (title, detail) => `${quote(title, UNTITLED_ZH)}失败了：${quote(detail, UNTITLED_ZH)}`,
     verificationFailed: (title, count, detail, more) =>
       `对${quote(title, UNTITLED_ZH)}的独立核查发现 ${count} 个问题：${detail}${more > 0 ? `（另有 ${more} 个）` : ''}`,
-    verificationIncomplete: (title, detail) =>
-      `对${quote(title, UNTITLED_ZH)}的独立核查没能完成，结果未经核实：${detail}`,
+    verificationIncomplete: (title, _detail, code) =>
+      `对${quote(title, UNTITLED_ZH)}的独立核查没能完成，结果未经核实：${
+        UNCHECKED_ZH[code ?? ''] ?? '原因未知'
+      }。`,
     suggestionOffer: (count, _label, repo) =>
       `${repo} 上连续 ${count} 条这类建议没有得到回应。要停止这类建议吗？`,
   },

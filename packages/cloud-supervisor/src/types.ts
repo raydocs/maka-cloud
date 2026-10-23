@@ -122,7 +122,8 @@ export type AskTemplate =
       detail: string;
     }
   | { id: 'verification_failed'; title: string; count: number; detail: string; more: number }
-  | { id: 'verification_incomplete'; title: string; detail: string }
+  /** `code` says why the check could not finish; `detail` is the English reason, which can quote agent text. */
+  | { id: 'verification_incomplete'; title: string; detail: string; code: string }
   /** `label` is the kind's own English words, lower case; another language says "this kind" instead. */
   | { id: 'suggestion_offer'; count: number; label: string; repo: string };
 
