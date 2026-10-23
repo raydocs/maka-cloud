@@ -147,16 +147,12 @@ for (const locale of ['zh-CN', 'zh-TW']) {
           regions.indexOf(copy('开始新任务', '開始新任務')),
         );
       else {
-        const pane = page.locator('.content-pane');
-        const sections = await pane
-          .getByRole('region')
-          .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
-        expect(sections.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeGreaterThanOrEqual(
-          0,
-        );
-        expect(sections.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeLessThan(
-          sections.indexOf(copy('即将运行', '即將執行')),
-        );
+        const waitingBox = await waiting.boundingBox();
+        const mainBox = await page.locator('.content-pane .home-main').boundingBox();
+        expect(
+          waitingBox!.y + waitingBox!.height <= mainBox!.y ||
+            waitingBox!.x + waitingBox!.width <= mainBox!.x,
+        ).toBe(true);
       }
       expect(
         await waiting.locator('h2').evaluate((el) => getComputedStyle(el, '::before').content),

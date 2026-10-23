@@ -260,6 +260,7 @@ export function DeliveryCard({
   const diff = model?.diff;
   const [proof, setProof] = useState<Blob | undefined>();
   const proofUrl = useObjectUrl(proof);
+  const showDiffTile = !views && !(shot && proofUrl) && diff;
   const [opened, setOpened] = useState<Opened | undefined>();
   const [failed, setFailed] = useState(false);
   const markFailed = useCallback(() => setFailed(true), []);
@@ -341,7 +342,7 @@ export function DeliveryCard({
           <img className="picture" src={proofUrl} alt={displayText(shot.name)} />
         </button>
       )}
-      {!views && !(shot && proofUrl) && diff && (
+      {showDiffTile && (
         <button
           type="button"
           className="delivery-visual delivery-diff-tile"
@@ -375,7 +376,7 @@ export function DeliveryCard({
         (listing) =>
           listing.kind === 'file' &&
           listing.index !== shot?.index &&
-          listing.index !== model?.diff?.index &&
+          (!showDiffTile || listing.index !== diff?.index) &&
           !views?.some((view) => view.listing.index === listing.index),
       ).length > 0 && (
         <div className="delivery-files">
@@ -384,7 +385,7 @@ export function DeliveryCard({
               (listing) =>
                 listing.kind === 'file' &&
                 listing.index !== shot?.index &&
-                listing.index !== model?.diff?.index &&
+                (!showDiffTile || listing.index !== diff?.index) &&
                 !views?.some((view) => view.listing.index === listing.index),
             )
             .map((listing) => (

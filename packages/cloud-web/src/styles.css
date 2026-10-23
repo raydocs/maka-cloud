@@ -1914,8 +1914,6 @@ strong {
 .seg-item {
   padding: 6px clamp(2px, 2vw, 14px);
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   min-height: 44px;
 }
 .seg-settings {
@@ -2314,4 +2312,18 @@ strong {
 
 .onboarding h3 {
   font-weight: 400;
+}
+
+@media (max-width: 399px) {
+  .seg {
+    flex: 1;
+  }
+  .seg-nav {
+    gap: 4px;
+  }
+  .seg .seg-item {
+    font-size: 12px;
+    padding-inline: 3px;
+    white-space: nowrap;
+  }
 }

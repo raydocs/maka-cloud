@@ -39,16 +39,11 @@ test('Home leads with what waits on you, answers it once, and says what was done
   if (info.project.name === 'phone')
     expect(order.indexOf('Decisions waiting')).toBeLessThan(order.indexOf('Start something'));
   else {
-    const pane = page.locator('.content-pane');
+    const waitingBox = await page.getByRole('region', { name: 'Decisions waiting' }).boundingBox();
+    const mainBox = await page.locator('.content-pane .home-main').boundingBox();
     expect(
-      await pane
-        .getByRole('region', { name: 'Decisions waiting' })
-        .evaluate((el) =>
-          Boolean(
-            el.compareDocumentPosition(el.closest('.home')!.querySelector('.home-main')!) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-          ),
-        ),
+      waitingBox!.y + waitingBox!.height <= mainBox!.y ||
+        waitingBox!.x + waitingBox!.width <= mainBox!.x,
     ).toBe(true);
   }
   await noHorizontalScroll(page);

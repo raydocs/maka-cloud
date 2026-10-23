@@ -189,10 +189,13 @@ function TaskBranch({
           {task.parentTaskId === undefined &&
             (task.costUsd !== undefined || task.budgetUsd !== undefined) && (
               <span>
-                {live ? t('Cost so far:') : t('Cost:')}{' '}
+                {task.costUsd === undefined ? t('Budget:') : live ? t('Cost so far:') : t('Cost:')}{' '}
                 <span className={task.costUsd === undefined ? undefined : 'mono'}>
                   {task.costUsd !== undefined && shared(dollars(task.costUsd))}
-                  {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
+                  {task.budgetUsd !== undefined &&
+                    (task.costUsd === undefined
+                      ? shared(dollars(task.budgetUsd))
+                      : t(' of {p0}', { p0: dollars(task.budgetUsd) }))}
                 </span>
               </span>
             )}
@@ -865,6 +868,10 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   }, []);
   const [chosen, setChosen] = useState('');
   const [searching, setSearching] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (searching) searchInput.current?.focus();
+  }, [searching]);
   const [query, setQuery] = useState('');
   const [view, setView] = useState<View>('home');
   // The task page opens over whichever section the person came from and goes back to it.
@@ -963,7 +970,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         >
           <label htmlFor="search-conversations">{t('Search conversations')}</label>
           <input
-            ref={(input) => input?.focus()}
+            ref={searchInput}
             id="search-conversations"
             type="search"
             value={query}

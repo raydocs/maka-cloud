@@ -505,3 +505,27 @@ test('the source count names only the cards that open', () => {
   expect(screen.getByText('Sources (3)')).toBeTruthy();
   expect(container.querySelectorAll('.sources-stack a')).toHaveLength(3);
 });
+
+for (const multiple of [false, true]) {
+  test(`a ${multiple ? 'viewport group' : 'screenshot'} keeps the diff available as a file row`, async () => {
+    const pictures: ArtifactListing[] = multiple
+      ? [
+          { ...shot, name: 'home-desktop.png' },
+          { ...shot, index: 2, name: 'home-phone.png' },
+        ]
+      : [shot];
+    const { client } = fakeClient({
+      0: { name: pictures[0].name, type: 'image/png', body: PNG },
+      2: { name: 'home-phone.png', type: 'image/png', body: PNG },
+      1: { name: diff.name, type: 'text/plain', body: '+The fix' },
+    });
+    render(
+      <DeliveryCard client={client} task={task()} listings={[...pictures, diff]} sources={[]} />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('img')).toHaveLength(pictures.length));
+    expect(screen.queryByRole('button', { name: 'Open large: the changes' })).toBeNull();
+    fireEvent.click(screen.getByText(diff.name, { selector: 'summary' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes.diff' }));
+    expect(await screen.findByText('+The fix')).toBeTruthy();
+  });
+}

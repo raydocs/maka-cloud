@@ -178,6 +178,7 @@ export const en = {
   'Current step': 'Current step',
   'Cost so far:': 'Cost so far:',
   'Cost:': 'Cost:',
+  'Budget:': 'Budget:',
   ' of {p0}': ' of {p0}',
   'The budget was reached, so the work was stopped.':
     'The budget was reached, so the work was stopped.',
@@ -667,6 +668,7 @@ export const zhHans: Record<Key, string> = {
   'Current step': '当前步骤',
   'Cost so far:': '目前花费：',
   'Cost:': '花费：',
+  'Budget:': '预算：',
   ' of {p0}': '，预算 {p0}',
   'The budget was reached, so the work was stopped.': '已达到预算，工作已停止。',
   'Still stopping. The cost may change until it has stopped.':
@@ -1138,6 +1140,7 @@ export const zhHant: Record<Key, string> = {
   'Current step': '目前步驟',
   'Cost so far:': '目前花費：',
   'Cost:': '花費：',
+  'Budget:': '預算：',
   ' of {p0}': '，預算 {p0}',
   'The budget was reached, so the work was stopped.': '已達到預算，工作已停止。',
   'Still stopping. The cost may change until it has stopped.':

@@ -25,7 +25,10 @@ test('chat stays docked beside sections on desktop; phone sections share a float
   expect(box!.y + box!.height).toBeGreaterThan(page.viewportSize()!.height - 40);
   await noHorizontalScroll(page);
   await page.getByTestId('button-search').click();
+  await expect(page.getByRole('searchbox')).toBeFocused();
   await page.getByRole('searchbox').fill('launch');
+  await page.getByTestId('button-me').click();
+  await expect(page.getByTestId('button-me')).toBeFocused();
   await page
     .getByRole('region', { name: 'Search', exact: true })
     .getByRole('button', { name: 'Plan the launch' })
@@ -49,7 +52,11 @@ test('unknown values stay absent and reduced motion stops live shimmer and inser
   const { taskId } = await control<{ taskId: string }>(request, 'delegate', {
     conversationId,
     title: 'Launch check',
+    budgetUsd: 7,
   });
+  await expect(page.getByRole('article', { name: 'Launch check', exact: true })).toContainText(
+    'Budget: $7.00',
+  );
   await control(request, 'progress', { taskId, note: 'Checking the build' });
   const line = page.locator('.current-step summary');
   await expect(line).toContainText('Checking the build');
@@ -74,6 +81,9 @@ for (const language of ['en', 'zh-Hans', 'zh-Hant']) {
       await expect(page.locator('html')).toHaveAttribute('lang', language);
       await expect(page.getByTestId('button-me')).toBeVisible();
       await noHorizontalScroll(page);
+      for (const label of await page.locator('.seg-item').all()) {
+        expect(await label.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      }
       const pill = await page.locator('.seg').boundingBox();
       const me = await page.getByTestId('button-me').boundingBox();
       const search = await page.getByTestId('button-search').boundingBox();

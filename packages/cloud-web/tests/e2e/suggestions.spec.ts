@@ -63,16 +63,11 @@ test('a proposed card shows on Home with its cost, and one tap delivers one acce
   if (info.project.name === 'phone')
     expect(order.indexOf('Suggestions')).toBeLessThan(order.indexOf('Start something'));
   else {
-    const pane = page.locator('.content-pane');
+    const waitingBox = await page.getByRole('region', { name: 'Suggestions' }).boundingBox();
+    const mainBox = await page.locator('.content-pane .home-main').boundingBox();
     expect(
-      await pane
-        .getByRole('region', { name: 'Suggestions' })
-        .evaluate((el) =>
-          Boolean(
-            el.compareDocumentPosition(el.closest('.home')!.querySelector('.home-main')!) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-          ),
-        ),
+      waitingBox!.y + waitingBox!.height <= mainBox!.y ||
+        waitingBox!.x + waitingBox!.width <= mainBox!.x,
     ).toBe(true);
   }
   await noHorizontalScroll(page);
