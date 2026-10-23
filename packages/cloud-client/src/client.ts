@@ -281,6 +281,7 @@ export class CloudClient {
   }
   computerInput(task: string, input: ComputerInput) {
     return this.request(`${routes.computer(task)}/input`, {
+      signal: AbortSignal.timeout(10_000),
       method: 'POST',
       body: JSON.stringify(input),
     });

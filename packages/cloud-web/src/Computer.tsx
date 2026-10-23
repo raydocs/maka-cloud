@@ -1,5 +1,5 @@
 import { useT } from './i18n';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   type CloudClient,
@@ -33,13 +33,25 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
   const [controller, setController] = useState<'agent' | 'human'>('agent');
   const [live, setLive] = useState(false);
   const [error, setError] = useState('');
+  const [unsent, setUnsent] = useState<number>();
+  const control = useRef<(() => Promise<unknown>) | undefined>(undefined);
   const [unavailable, setUnavailable] = useState<'asleep' | 'crowded' | 'dropped' | 'revoked'>();
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [command, setCommand] = useState('');
   const [retryAt, setRetryAt] = useState(0);
   const [controlRetryAt, setControlRetryAt] = useState(0);
+  const [inputRetryAt, setInputRetryAt] = useState(0);
   const pending = useRef(false);
+  const inputs = useRef<{ value: ComputerInput; sent?: () => void; done?: () => void }[]>([]);
+  const terminalQueued = useRef(false);
+  const [queueVersion, setQueueVersion] = useState(0);
+  const [overflow, setOverflow] = useState(false);
+  useEffect(() => {
+    if (!overflow) return;
+    const timer = setTimeout(() => setOverflow(false), 3000);
+    return () => clearTimeout(timer);
+  }, [overflow]);
   useEffect(() => {
     if (!retryAt) return;
     const timer = setTimeout(() => setRetryAt(0), Math.max(0, retryAt - Date.now()));
@@ -56,6 +68,11 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
     );
     return () => clearTimeout(timer);
   }, [controlRetryAt]);
+  useEffect(() => {
+    if (!inputRetryAt) return;
+    const timer = setTimeout(() => setInputRetryAt(0), Math.max(0, inputRetryAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [inputRetryAt]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -69,6 +86,10 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         (frame) => {
           setLive(true);
           setUnavailable(undefined);
+          if (frame.controller !== 'human') {
+            inputs.current = [];
+            terminalQueued.current = false;
+          }
           setController(frame.controller);
           if (
             frame.desktop &&
@@ -85,6 +106,8 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         if (abort.signal.aborted) return;
         if (failure instanceof ApiError && failure.status === 429)
           setRetryAt(Date.now() + Math.min(failure.retryAfterMs ?? 10000, 60000));
+        inputs.current = [];
+        terminalQueued.current = false;
         setLive(false);
         setDesktop(undefined);
         setTerminal('');
@@ -99,47 +122,110 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         );
       });
     return () => {
+      inputs.current = [];
+      terminalQueued.current = false;
+      control.current = undefined;
       mounted.current = false;
       abort.abort();
     };
   }, [client, task.taskId, attempt]);
 
-  async function act(work: () => Promise<unknown>) {
-    if (pending.current || Date.now() < controlRetryAt) return;
-    pending.current = true;
-    setBusy(true);
-    setError('');
-    try {
-      await work();
-    } catch (error) {
-      if (!mounted.current) return;
-      if (error instanceof ApiError && error.code === 'computer_not_in_control')
-        setController('agent');
-      if (error instanceof ApiError && error.status === 429)
-        setControlRetryAt(Date.now() + Math.min(error.retryAfterMs ?? 10000, 60000));
-      if (error instanceof ApiError && error.status === 401) {
-        setUnavailable('revoked');
-        setLive(false);
+  const act = useCallback(
+    async (work: () => Promise<unknown>, onThrottled?: () => void) => {
+      if (pending.current || Date.now() < controlRetryAt) return;
+      pending.current = true;
+      setBusy(true);
+      setError('');
+      setUnsent(undefined);
+      try {
+        await work();
+      } catch (error) {
+        if (!mounted.current) return;
+        if (onThrottled && !(error instanceof ApiError && error.status === 429)) {
+          setUnsent(inputs.current.length);
+          inputs.current = [];
+          terminalQueued.current = false;
+        }
+        if (error instanceof ApiError && error.code === 'computer_not_in_control') {
+          inputs.current = [];
+          terminalQueued.current = false;
+          setController('agent');
+        }
+        if (error instanceof ApiError && error.status === 429) {
+          onThrottled?.();
+          const until = Date.now() + Math.min(error.retryAfterMs ?? 10000, 60000);
+          if (onThrottled) setInputRetryAt(until);
+          else setControlRetryAt(until);
+        }
+        if (error instanceof ApiError && error.status === 401) {
+          inputs.current = [];
+          terminalQueued.current = false;
+          setUnavailable('revoked');
+          setLive(false);
+        }
+        setError(
+          (error instanceof Error || error instanceof DOMException) && error.name === 'TimeoutError'
+            ? 'Not sure the last input arrived; check the screen.'
+            : error instanceof ApiError && error.status === 429
+              ? 'Slow down. Try again in a moment.'
+              : error instanceof ApiError && error.code === 'pause_unsupported'
+                ? 'This task cannot safely pause. Watching only; no control was granted.'
+                : error instanceof ApiError && error.code === 'computer_busy'
+                  ? 'A computer request is still in progress. Wait, then try again.'
+                  : error instanceof ApiError && error.code === 'computer_not_in_control'
+                    ? 'Your control has ended. You are watching the task.'
+                    : 'The action was not confirmed. Check the connection and try again.',
+        );
+      } finally {
+        pending.current = false;
+        if (mounted.current) {
+          setBusy(false);
+          setQueueVersion((value) => value + 1);
+        }
       }
-      setError(
-        error instanceof ApiError && error.status === 429
-          ? 'Slow down. Try again in a moment.'
-          : error instanceof ApiError && error.code === 'pause_unsupported'
-            ? 'This task cannot safely pause. Watching only; no control was granted.'
-            : error instanceof ApiError && error.code === 'computer_busy'
-              ? 'A computer request is still in progress. Wait, then try again.'
-              : error instanceof ApiError && error.code === 'computer_not_in_control'
-                ? 'Your control has ended. You are watching the task.'
-                : 'The action was not confirmed. Check the connection and try again.',
-      );
-    } finally {
-      pending.current = false;
-      if (mounted.current) setBusy(false);
-    }
-  }
+    },
+    [controlRetryAt],
+  );
   const human = live && controller === 'human' && task.state === 'paused';
-  const input = (value: ComputerInput) => {
-    if (human) void act(() => client.computerInput(task.taskId, value));
+  useEffect(() => {
+    if (pending.current) return;
+    if (control.current) {
+      if (controlRetryAt > Date.now()) return;
+      const work = control.current;
+      control.current = undefined;
+      void act(work);
+      return;
+    }
+    if (!human) {
+      inputs.current = [];
+      terminalQueued.current = false;
+      return;
+    }
+    if (pending.current || inputRetryAt > Date.now() || controlRetryAt > Date.now()) return;
+    const queue = inputs.current;
+    const entry = queue.shift();
+    if (!entry) return;
+    void act(
+      async () => {
+        await client.computerInput(task.taskId, entry.value);
+        if (mounted.current && inputs.current === queue) entry.sent?.();
+      },
+      () => {
+        if (inputs.current === queue) queue.unshift(entry);
+      },
+    ).then(() => {
+      if (!queue.includes(entry)) entry.done?.();
+    });
+  }, [human, queueVersion, controlRetryAt, inputRetryAt, act, client, task.taskId]);
+  const input = (value: ComputerInput, sent?: () => void, done?: () => void) => {
+    if (!human || control.current) return false;
+    if (inputs.current.length >= 50) {
+      setOverflow(true);
+      return false;
+    }
+    inputs.current.push({ value, sent, done });
+    setQueueVersion((version) => version + 1);
+    return true;
   };
   return (
     <section className="computer-viewer" aria-label={t('Task computer')}>
@@ -165,22 +251,27 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       <div className="computer-actions">
         <button
           type="button"
-          disabled={!live || busy || (controller === 'agent' && task.state !== 'running')}
-          onClick={() =>
-            void act(async () => {
+          disabled={!live || (controller === 'agent' && task.state !== 'running')}
+          onClick={() => {
+            inputs.current = [];
+            terminalQueued.current = false;
+            control.current = async () => {
               const result = await client.computerControl(
                 task.taskId,
                 controller === 'human' ? 'handback' : 'takeover',
               );
-              if (mounted.current) setController(result.controller);
-            })
-          }
+              if (mounted.current) {
+                if (result.controller !== 'human') {
+                  inputs.current = [];
+                  terminalQueued.current = false;
+                }
+                setController(result.controller);
+              }
+            };
+            setQueueVersion((value) => value + 1);
+          }}
         >
-          {busy
-            ? t('Working…')
-            : controller === 'human'
-              ? t('Hand back control')
-              : t('Take control')}
+          {controller === 'human' ? t('Hand back control') : t('Take control')}
         </button>
       </div>
       <p className="computer-hint">
@@ -226,11 +317,15 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (!human || !command.trim()) return;
-          void act(async () => {
-            await client.computerInput(task.taskId, { type: 'terminal', text: `${command}\n` });
-            if (mounted.current) setCommand('');
-          });
+          if (!human || !command.trim() || terminalQueued.current) return;
+          const submitted = command;
+          terminalQueued.current = input(
+            { type: 'terminal', text: `${submitted}\n` },
+            () => setCommand((current) => (current === submitted ? '' : current)),
+            () => {
+              terminalQueued.current = false;
+            },
+          );
         }}
       >
         <label>
@@ -248,7 +343,20 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
           {t('Send input')}
         </button>
       </form>
-      {error && <p role="alert">{shared(error)}</p>}
+      {terminalQueued.current && (
+        <p role="status">{t('Terminal input queued. Waiting for confirmation…')}</p>
+      )}
+      {overflow && error !== 'Slow down. Try again in a moment.' && (
+        <p role="alert">{t('Slow down. Try again in a moment.')}</p>
+      )}
+      {error && (
+        <p role="alert">
+          {shared(error)}
+          {unsent !== undefined && (
+            <> {t('{count} queued inputs were not sent.', { count: unsent })}</>
+          )}
+        </p>
+      )}
       {!live && unavailable && unavailable !== 'revoked' && (
         <button
           type="button"
