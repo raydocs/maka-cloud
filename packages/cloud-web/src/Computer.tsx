@@ -84,7 +84,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       .catch((failure: unknown) => {
         if (abort.signal.aborted) return;
         if (failure instanceof ApiError && failure.status === 429)
-          setRetryAt(Date.now() + (failure.retryAfterMs ?? 10000));
+          setRetryAt(Date.now() + Math.min(failure.retryAfterMs ?? 10000, 60000));
         setLive(false);
         setDesktop(undefined);
         setTerminal('');
@@ -116,7 +116,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       if (error instanceof ApiError && error.code === 'computer_not_in_control')
         setController('agent');
       if (error instanceof ApiError && error.status === 429)
-        setControlRetryAt(Date.now() + (error.retryAfterMs ?? 10000));
+        setControlRetryAt(Date.now() + Math.min(error.retryAfterMs ?? 10000, 60000));
       if (error instanceof ApiError && error.status === 401) {
         setUnavailable('revoked');
         setLive(false);

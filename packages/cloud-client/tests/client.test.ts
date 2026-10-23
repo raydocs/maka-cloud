@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { CloudClient, readEvents } from '../src/client';
+import { ApiError, CloudClient, readEvents } from '../src/client';
 import { displayJson, displayText, publicLink } from '../src/presentation';
 import type { FeedEvent } from '../src/contract';
 import { applyEvent, emptyState } from '../src/state';
@@ -258,7 +258,8 @@ test('throttled requests expose Retry-After seconds and HTTP dates', async () =>
     );
     const error = await client
       .computerInput('task', { type: 'key', key: 'a' })
-      .catch((error) => error);
+      .catch((error: unknown) => error);
+    if (!(error instanceof ApiError)) throw new Error('expected an ApiError');
     expect(error.status).toBe(429);
     if (delay === undefined) expect(error.retryAfterMs).toBeUndefined();
     else expect(error.retryAfterMs).toBeGreaterThan(delay - 2000);
