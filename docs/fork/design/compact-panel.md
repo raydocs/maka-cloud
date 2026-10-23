@@ -2,7 +2,7 @@
 
 The phone app's conversation sits on one dark rounded slab over the sky, with Liquid Glass controls
 floating on it and the system's own tab bar below. Home and Settings stay on the light sky with
-glass cards. The app speaks Simplified Chinese first. This note says what the look is, where its
+glass cards. The app speaks Simplified Chinese first, with Traditional Chinese and English. This note says what the look is, where its
 ideas came from, what is ours, which tokens carry it, how the language works, and what comes next.
 
 ## The look
@@ -56,27 +56,43 @@ so under Appearance. The task page opened from a result keeps the person's own a
 
 ## Language
 
-Simplified Chinese is the main language and the fallback. The app shows English only when the
-phone's first preferred language is English (`languageFor` in `src/lib/i18n.tsx`, which reads
-`expo-localization`).
+Three languages: 简体中文, 繁體中文 and English. Simplified Chinese is the main language and the
+fallback.
 
-- **One catalogue.** `src/lib/strings.ts` holds every string the app shows (`EN` and `ZH`, keyed
-  and with `{name}` values), including sign-in, errors, empty states and accessibility labels.
-  `useT().t(key, values)` reads it. A test checks both languages have the same keys, no empty
-  value and the same values to fill in.
+- **Detection** (`languageFor` in `src/lib/i18n.tsx`, from the first of the phone's preferred
+  languages, read with `expo-localization`):
+  - `zh-Hant`, `zh-TW`, `zh-HK` and `zh-MO` get Traditional Chinese;
+  - `zh-Hans`, `zh-CN`, `zh-SG` and plain `zh` get Simplified Chinese;
+  - `en-*` gets English;
+  - anything else gets Simplified Chinese.
+- **The picker.** Settings has a Language card with the three languages, each named in its own
+  words. The choice is kept on the device (the secure store, `maka.language`) and wins over
+  detection from then on.
+- **Catalogues.** `src/lib/strings.ts` holds every string the app shows in English (`EN`) and
+  Simplified Chinese (`ZH`); `src/lib/strings.hant.ts` holds the Traditional Chinese (`ZH_HANT`).
+  That covers sign-in, errors, empty states and accessibility labels, keyed and with `{name}` values.
+  - Traditional Chinese uses Taiwan's words (軟體, 訊息, 帳號, 設定, 檔案, 網路, 登入, 連結, 資料,
+    伺服器, 存放庫), which Hong Kong and Macau read as well. It is a translation, not a character
+    conversion, and nothing falls back to Simplified.
+  - `useT().t(key, values)` reads the catalogues. A test checks all three have the same keys, no
+    empty value and the same values to fill in.
 - **Words from the shared logic.** `packages/cloud-client` is shared with the web app and returns
   finished English (connection states, error sentences, inbox headings, "in 5 min"). The phone
-  does not change it: `useT().tx(text)` looks such text up in `PHRASES_ZH` and `PATTERNS_ZH`.
-  Anything not listed, which is everything the server or the agent wrote, is shown exactly as sent.
-- **Type.** The system face in both languages (PingFang SC for Chinese on iOS). Chinese text gets
-  line heights of about 1.5 to 1.6 times the size (`TEXT['zh-Hans']` in `ui.tsx`); neither language
+  does not change it: `useT().tx(text)` looks such text up in `PHRASES_ZH` and `PATTERNS_ZH`
+  (`PHRASES_HANT` and `PATTERNS_HANT` for Traditional). Anything not listed, which is everything the
+  server or the agent wrote, is shown exactly as sent.
+- **Decision choices.** The server's fixed choices (the supervisor's rules and the conductor's
+  approval card) are product words: matched on id and exact label, they come from the catalogue in
+  both Chinese languages. Any other choice is shown as sent.
+- **Type.** The system face in every language (PingFang SC or TC on iOS). Chinese text gets
+  line heights of about 1.5 to 1.6 times the size (`CJK` in `ui.tsx`); no language
   sets letter spacing. Text scales with the system size.
 - **Device tests.** Buttons and fields carry fixed English test ids (`button-Continue`,
   `field-Code`, `home-waiting-1`, `details-outcome`, `tab-home`), so the Maestro flows do not read
   the labels. Builds made with `MAKA_E2E=1` are also fixed to Chinese (`extra.language`;
   `MAKA_LANG` overrides it), and the one text the flows still tap, the Home tab, is `首页`.
-- **iOS.** `CFBundleDevelopmentRegion` is `zh-Hans` and `CFBundleLocalizations` lists `zh-Hans`
-  and `en`, so the system's own words (the share sheet, the keyboard's buttons) follow.
+- **iOS.** `CFBundleDevelopmentRegion` is `zh-Hans` and `CFBundleLocalizations` lists `zh-Hans`,
+  `zh-Hant` and `en`, so the system's own words (the share sheet, the keyboard's buttons) follow.
 
 ## Where it came from
 

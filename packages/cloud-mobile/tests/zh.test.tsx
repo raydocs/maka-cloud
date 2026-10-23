@@ -74,6 +74,10 @@ test('Settings in Chinese', async () => {
   expect(await screen.findByText('外观')).toBeTruthy();
   expect(screen.getByRole('button', { name: '退出登录' })).toBeTruthy();
   expect(screen.getByRole('button', { name: '深色' })).toBeTruthy();
+  // The language picker names each language in its own words.
+  for (const name of ['简体中文', '繁體中文', 'English'])
+    expect(screen.getByRole('button', { name })).toBeTruthy();
+  expect(screen.getByText('语言')).toBeTruthy();
 });
 
 test('sign-in in Chinese', async () => {

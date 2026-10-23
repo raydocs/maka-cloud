@@ -1,32 +1,92 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { render, screen } from '@testing-library/react-native';
-import { Text } from 'react-native';
-import { languageFor, LanguageProvider, translator, useT } from '@/lib/i18n';
+import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import { Pressable, Text } from 'react-native';
+import { LANGUAGES, languageFor, LanguageProvider, translator, useT } from '@/lib/i18n';
 import { EN, PATTERNS_ZH, PHRASES_ZH, SERVER_CHOICES, ZH } from '@/lib/strings';
+import { PATTERNS_HANT, PHRASES_HANT, ZH_HANT } from '@/lib/strings.hant';
 
 const placeholders = (text: string) => [...text.matchAll(/\{(\w+)\}/gu)].map((m) => m[1]).sort();
+const secure = () => (globalThis as unknown as { __secure: Map<string, string> }).__secure;
 
-test('every string exists in both languages, with the same values to fill in', () => {
-  expect(Object.keys(ZH).sort()).toEqual(Object.keys(EN).sort());
-  for (const [key, english] of Object.entries(EN)) {
-    const chinese = ZH[key as keyof typeof EN];
-    expect(english.trim()).not.toBe('');
-    expect(chinese.trim()).not.toBe('');
-    expect([key, placeholders(chinese)]).toEqual([key, placeholders(english)]);
+test('every string exists in all three languages, with the same values to fill in', () => {
+  for (const [name, table] of [
+    ['zh-Hans', ZH],
+    ['zh-Hant', ZH_HANT],
+  ] as const) {
+    expect([name, Object.keys(table).sort()]).toEqual([name, Object.keys(EN).sort()]);
+    for (const [key, english] of Object.entries(EN)) {
+      const chinese = table[key as keyof typeof EN];
+      expect(english.trim()).not.toBe('');
+      expect([name, key, chinese.trim() !== '']).toEqual([name, key, true]);
+      expect([name, key, placeholders(chinese)]).toEqual([name, key, placeholders(english)]);
+    }
   }
-  for (const [english, chinese] of Object.entries(PHRASES_ZH)) {
-    expect([english, chinese.trim()]).not.toEqual([english, '']);
-  }
+  // Traditional Chinese has its own words for everything the shared logic says.
+  expect(Object.keys(PHRASES_HANT).sort()).toEqual(Object.keys(PHRASES_ZH).sort());
+  expect(PATTERNS_HANT.length).toBe(PATTERNS_ZH.length);
+  for (const phrases of [PHRASES_ZH, PHRASES_HANT])
+    for (const [english, chinese] of Object.entries(phrases))
+      expect([english, chinese.trim()]).not.toEqual([english, '']);
+  // No Traditional string is the Simplified one (a few short words are the same in both).
+  const same = Object.keys(EN).filter(
+    (key) =>
+      /[一-鿿]/u.test(ZH[key as keyof typeof EN]) &&
+      ZH[key as keyof typeof EN] === ZH_HANT[key as keyof typeof EN],
+  );
+  expect(same.length).toBeLessThan(Object.keys(EN).length / 5);
 });
 
-test('Chinese is the main language; English only when the phone puts English first', () => {
-  expect(languageFor(['en-US', 'zh-Hans-CN'])).toBe('en');
-  expect(languageFor(['en'])).toBe('en');
-  expect(languageFor(['zh-Hans-CN', 'en-US'])).toBe('zh-Hans');
-  expect(languageFor(['zh-Hant-TW'])).toBe('zh-Hans');
-  expect(languageFor(['fr-FR', 'en-US'])).toBe('zh-Hans');
+test('the phone’s first language decides: each family of locales', () => {
+  for (const tag of ['zh-Hant', 'zh-TW', 'zh-HK', 'zh-MO', 'zh-Hant-TW', 'zh-Hant-HK', 'zh_TW'])
+    expect([tag, languageFor([tag])]).toEqual([tag, 'zh-Hant']);
+  for (const tag of ['zh-Hans', 'zh-CN', 'zh-SG', 'zh', 'zh-Hans-CN', 'zh-Hans-HK'])
+    expect([tag, languageFor([tag])]).toEqual([tag, 'zh-Hans']);
+  for (const tag of ['en', 'en-US', 'en-GB', 'en-AU'])
+    expect([tag, languageFor([tag])]).toEqual([tag, 'en']);
+  for (const tag of ['fr-FR', 'ja-JP', 'ko-KR', ''])
+    expect([tag, languageFor([tag])]).toEqual([tag, 'zh-Hans']);
   expect(languageFor([])).toBe('zh-Hans');
+  // Only the first language counts.
+  expect(languageFor(['en-US', 'zh-Hant-TW'])).toBe('en');
+  expect(languageFor(['fr-FR', 'en-US'])).toBe('zh-Hans');
+});
+
+test('a language picked in the app is kept on the device and wins over the phone’s', async () => {
+  function Picker() {
+    const { lang, chosen, choose, t } = useT();
+    return (
+      <>
+        <Text>{`${lang} ${chosen ?? 'phone'} ${t('tab.settings')}`}</Text>
+        {LANGUAGES.map((language) => (
+          <Pressable key={language} accessibilityRole="button" onPress={() => choose(language)}>
+            <Text>{`pick ${language}`}</Text>
+          </Pressable>
+        ))}
+      </>
+    );
+  }
+  // The test phone is set to English.
+  const first = await render(
+    <LanguageProvider>
+      <Picker />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText('en phone Settings')).toBeTruthy();
+  await fireEvent.press(screen.getByText('pick zh-Hant'));
+  expect(screen.getByText('zh-Hant zh-Hant 設定')).toBeTruthy();
+  expect(secure().get('maka.language')).toBe('zh-Hant');
+  await act(async () => first.unmount());
+  // A new start reads the choice back.
+  await render(
+    <LanguageProvider>
+      <Picker />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText('zh-Hant zh-Hant 設定')).toBeTruthy();
+  await fireEvent.press(screen.getByText('pick zh-Hans'));
+  expect(screen.getByText('zh-Hans zh-Hans 设置')).toBeTruthy();
+  expect(secure().get('maka.language')).toBe('zh-Hans');
 });
 
 test('values are filled in, and the shared logic’s English is translated only when known', () => {
@@ -43,7 +103,13 @@ test('values are filled in, and the shared logic’s English is translated only 
   expect(en.tx('Reconnecting…')).toBe('Reconnecting…');
   expect(zh.tx('constructor')).toBe('constructor');
   expect(zh.tx('toString')).toBe('toString');
-  expect(PATTERNS_ZH.length).toBeGreaterThan(0);
+  const hant = translator('zh-Hant');
+  expect(hant.t('home.waiting', { count: 2 })).toBe('等你處理（2）');
+  expect(hant.tx('Reconnecting…')).toBe('正在重新連線…');
+  expect(hant.tx('in 5 min')).toBe('5 分鐘後');
+  expect(hant.tx('Desktop, tablet and phone')).toBe('桌機、平板和手機');
+  expect(hant.tx('Fixed the login redirect')).toBe('Fixed the login redirect');
+  expect(hant.tx('constructor')).toBe('constructor');
 });
 
 test('the provider picks the language for everything under it', async () => {
@@ -72,8 +138,15 @@ test('every translated server choice is one the server offers, with that label',
     expect([id, label, source.includes(`label: ${quoted}`)]).toEqual([id, label, true]);
     expect([id, source.includes(constants[id] ?? `id: '${id}'`)]).toEqual([id, true]);
   }
+  // Every choice maps in all three languages: the catalogue's words in Chinese, the server's in English.
+  for (const [id, label, key] of SERVER_CHOICES) {
+    expect(translator('zh-Hans').choice(id, label)).toBe(ZH[key]);
+    expect(translator('zh-Hant').choice(id, label)).toBe(ZH_HANT[key]);
+    expect(translator('en').choice(id, label)).toBe(label);
+  }
   const zh = translator('zh-Hans');
   expect(zh.choice('ok', 'Got it')).toBe('知道了');
+  expect(translator('zh-Hant').choice('later', 'Not now')).toBe('以後再說');
   expect(zh.choice('ok', 'Sure')).toBe('Sure');
   expect(zh.choice('maybe', 'Got it')).toBe('Got it');
   expect(translator('en').choice('reject', "Don't do it")).toBe("Don't do it");

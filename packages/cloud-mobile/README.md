@@ -14,9 +14,10 @@ the look (`lib/theme.ts`, the web's palette).
   a blur elsewhere); anything that holds code is opaque. The tab bar is the system's own, and the chat is the
   compact panel, a dark slab in both appearances with Liquid Glass controls floating on it
   (`docs/fork/design/compact-panel.md`).
-- **Language**: Simplified Chinese first, and the fallback; English when the phone's first language is
-  English. Every string is in `lib/strings.ts`, read through `lib/i18n.tsx`; what the server or the agent
-  wrote is shown as sent. Builds made with `MAKA_E2E=1` are fixed to Chinese (`MAKA_LANG` overrides).
+- **Language**: 简体中文 (first, and the fallback), 繁體中文 (Taiwan's words) and English, from the phone's
+  first language or the picker in Settings, whose choice is kept on the device. The strings are in
+  `lib/strings.ts` and `lib/strings.hant.ts`, read through `lib/i18n.tsx`; what the server or the agent
+  wrote is shown as sent. Builds made with `MAKA_E2E=1` default to Simplified Chinese (`MAKA_LANG` overrides).
 - Next (T29 PRs 4 to 6): Projects, the task page and the viewer; push, share and deep links; release profiles.
 
 ## Run and verify

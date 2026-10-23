@@ -10,9 +10,10 @@ import type { ExpoConfig } from 'expo/config';
 const e2e = process.env.MAKA_E2E === '1';
 
 /**
- * The app's language is the phone's (Simplified Chinese, or English when the phone's first language
- * is English). `MAKA_LANG` fixes it for a build; the device-test builds fix Chinese, so the Maestro
- * flows always see the same words.
+ * The app's language is the one picked in Settings, else the phone's (Simplified Chinese,
+ * Traditional Chinese, or English). `MAKA_LANG` (`zh-Hans`, `zh-Hant` or `en`) fixes the default for
+ * a build; the device-test builds fix Simplified Chinese, so the Maestro flows always see the same
+ * words.
  */
 const language = process.env.MAKA_LANG ?? (e2e ? 'zh-Hans' : undefined);
 
@@ -31,7 +32,7 @@ const config: ExpoConfig = {
       ITSAppUsesNonExemptEncryption: false,
       // Chinese first, so the system's own words (the keyboard, menus) follow the app's language.
       CFBundleDevelopmentRegion: 'zh-Hans',
-      CFBundleLocalizations: ['zh-Hans', 'en'],
+      CFBundleLocalizations: ['zh-Hans', 'zh-Hant', 'en'],
       ...(e2e ? { NSAppTransportSecurity: { NSAllowsLocalNetworking: true } } : {}),
     },
   },

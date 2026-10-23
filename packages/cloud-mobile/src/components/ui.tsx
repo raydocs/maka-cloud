@@ -273,9 +273,18 @@ export function T({
 }
 
 /**
- * The system face in both languages (PingFang SC for Chinese on iOS). Chinese reads best with more
- * room between lines, about 1.5 to 1.6 times the size; neither language adds letter spacing.
+ * The system face in every language (PingFang SC or TC for Chinese on iOS). Chinese reads best with
+ * more room between lines, about 1.5 to 1.6 times the size; no language adds letter spacing.
  */
+const CJK: Record<TextKind, TextStyle> = {
+  title: { fontSize: 28, lineHeight: 42, fontWeight: '700' },
+  heading: { fontSize: 18, lineHeight: 28, fontWeight: '600' },
+  body: { fontSize: 16, lineHeight: 25 },
+  muted: { fontSize: 15, lineHeight: 23 },
+  small: { fontSize: 13, lineHeight: 20 },
+  error: { fontSize: 15, lineHeight: 23 },
+};
+
 const TEXT: Record<Language, Record<TextKind, TextStyle>> = {
   en: {
     title: { fontSize: 28, lineHeight: 34, fontWeight: '700' },
@@ -285,14 +294,8 @@ const TEXT: Record<Language, Record<TextKind, TextStyle>> = {
     small: { fontSize: 13, lineHeight: 18 },
     error: { fontSize: 15, lineHeight: 21 },
   },
-  'zh-Hans': {
-    title: { fontSize: 28, lineHeight: 42, fontWeight: '700' },
-    heading: { fontSize: 18, lineHeight: 28, fontWeight: '600' },
-    body: { fontSize: 16, lineHeight: 25 },
-    muted: { fontSize: 15, lineHeight: 23 },
-    small: { fontSize: 13, lineHeight: 20 },
-    error: { fontSize: 15, lineHeight: 23 },
-  },
+  'zh-Hans': CJK,
+  'zh-Hant': CJK,
 };
 
 /**

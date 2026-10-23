@@ -1,24 +1,48 @@
 import Constants from 'expo-constants';
 import { getLocales } from 'expo-localization';
-import { createContext, type ReactNode, useContext, useMemo } from 'react';
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+import { readSecure, writeSecure } from './secure';
 import { EN, type Key, PATTERNS_ZH, PHRASES_ZH, SERVER_CHOICES, ZH } from './strings';
+import { PATTERNS_HANT, PHRASES_HANT, ZH_HANT } from './strings.hant';
 
-/** Simplified Chinese is the app's main language and its fallback; English is the one alternative. */
-export type Language = 'zh-Hans' | 'en';
+/** Simplified Chinese is the app's main language and its fallback; Traditional and English follow. */
+export type Language = 'zh-Hans' | 'zh-Hant' | 'en';
 
-/** English only when the phone's first preferred language is English; Chinese otherwise. */
+export const LANGUAGES: readonly Language[] = ['zh-Hans', 'zh-Hant', 'en'];
+
+const isLanguage = (value: unknown): value is Language => LANGUAGES.includes(value as Language);
+
+/**
+ * The language for the phone's preferred languages, from the first one only: English for `en-*`;
+ * Traditional Chinese for a `Hant` script or Taiwan, Hong Kong and Macau; Simplified Chinese for any
+ * other Chinese and for everything else.
+ */
 export function languageFor(tags: readonly string[]): Language {
-  const first = tags[0]?.toLowerCase() ?? '';
-  return first === 'en' || first.startsWith('en-') ? 'en' : 'zh-Hans';
+  const parts = (tags[0] ?? '').toLowerCase().replace(/_/gu, '-').split('-');
+  if (parts[0] === 'en') return 'en';
+  if (parts[0] !== 'zh') return 'zh-Hans';
+  if (parts.includes('hant')) return 'zh-Hant';
+  if (parts.includes('hans')) return 'zh-Hans';
+  return parts.some((part) => part === 'tw' || part === 'hk' || part === 'mo')
+    ? 'zh-Hant'
+    : 'zh-Hans';
 }
 
 /**
  * The language this phone asks for. A build can fix it (`extra.language`, from `MAKA_LANG`; the
- * device-test builds fix Chinese so the Maestro flows always read the same words).
+ * device-test builds fix Simplified Chinese so the Maestro flows always read the same words).
  */
 export function deviceLanguage(): Language {
   const fixed = (Constants.expoConfig?.extra as { language?: string } | undefined)?.language;
-  if (fixed === 'en' || fixed === 'zh-Hans') return fixed;
+  if (isLanguage(fixed)) return fixed;
   try {
     return languageFor(getLocales().map((locale) => locale.languageTag));
   } catch {
@@ -33,16 +57,24 @@ const fill = (text: string, params?: Params) =>
     params?.[name] === undefined ? all : String(params[name]),
   );
 
-/** English text from the shared logic, in Chinese when it is known; otherwise exactly as sent. */
-function phraseZh(text: string): string {
+type Patterns = ReadonlyArray<[RegExp, (m: RegExpMatchArray) => string]>;
+
+/** English text from the shared logic in the given words when it is known; otherwise exactly as sent. */
+function phrase(text: string, phrases: Record<string, string>, patterns: Patterns): string {
   // Own entries only: server text such as "constructor" is not a phrase.
-  if (Object.prototype.hasOwnProperty.call(PHRASES_ZH, text)) return PHRASES_ZH[text] as string;
-  for (const [pattern, render] of PATTERNS_ZH) {
+  if (Object.prototype.hasOwnProperty.call(phrases, text)) return phrases[text] as string;
+  for (const [pattern, render] of patterns) {
     const match = pattern.exec(text);
     if (match) return render(match);
   }
   return text;
 }
+
+const TABLES = {
+  en: { strings: EN as Record<Key, string>, phrases: undefined, patterns: [] as Patterns },
+  'zh-Hans': { strings: ZH, phrases: PHRASES_ZH, patterns: PATTERNS_ZH },
+  'zh-Hant': { strings: ZH_HANT, phrases: PHRASES_HANT, patterns: PATTERNS_HANT },
+} as const;
 
 export interface Translator {
   lang: Language;
@@ -57,22 +89,39 @@ export interface Translator {
 const CHOICE_KEYS = new Map(SERVER_CHOICES.map(([id, label, key]) => [`${id}\n${label}`, key]));
 
 export function translator(lang: Language): Translator {
-  const table = lang === 'en' ? EN : ZH;
+  const { strings, phrases, patterns } = TABLES[lang];
   return {
     lang,
-    t: (key, params) => fill(table[key], params),
-    tx: (text) => (lang === 'en' ? text : phraseZh(text)),
+    t: (key, params) => fill(strings[key], params),
+    tx: (text) => (phrases ? phrase(text, phrases, patterns) : text),
     choice: (id, label) => {
       const key = lang === 'en' ? undefined : CHOICE_KEYS.get(`${id}\n${label}`);
-      return key ? fill(table[key]) : label;
+      return key ? fill(strings[key]) : label;
     },
   };
 }
 
-const LanguageContext = createContext<Translator>(translator(deviceLanguage()));
+interface LanguageApi extends Translator {
+  /** The language picked in Settings, or undefined while the phone's own decides. */
+  chosen: Language | undefined;
+  /** Picks a language for this app on this device; it then wins over the phone's setting. */
+  choose(language: Language): void;
+}
+
+const KEY = 'maka.language';
+
+const LanguageContext = createContext<LanguageApi>({
+  ...translator(deviceLanguage()),
+  chosen: undefined,
+  choose: () => {},
+});
 
 export const useT = () => useContext(LanguageContext);
 
+/**
+ * The app's language: `language` when given (tests), else the one picked in Settings (kept on this
+ * device), else the phone's.
+ */
 export function LanguageProvider({
   language,
   children,
@@ -80,6 +129,23 @@ export function LanguageProvider({
   language?: Language;
   children: ReactNode;
 }) {
-  const value = useMemo(() => translator(language ?? deviceLanguage()), [language]);
+  const [chosen, setChosen] = useState<Language | undefined>();
+  useEffect(() => {
+    let current = true;
+    void readSecure(KEY)
+      .then((stored) => {
+        if (current && isLanguage(stored)) setChosen(stored);
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, []);
+  const choose = useCallback((next: Language) => {
+    setChosen(next);
+    void writeSecure(KEY, next).catch(() => {});
+  }, []);
+  const lang = language ?? chosen ?? deviceLanguage();
+  const value = useMemo(() => ({ ...translator(lang), chosen, choose }), [lang, chosen, choose]);
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
 }

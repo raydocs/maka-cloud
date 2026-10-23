@@ -1,7 +1,8 @@
 /**
- * Every word the phone app itself shows, in its two languages. Simplified Chinese is the main
- * language; English is for phones whose first language is English. `{name}` marks a value filled in
- * when the string is shown. A test checks both languages have the same keys and the same values.
+ * Every word the phone app itself shows. Simplified Chinese is the main language; Traditional
+ * Chinese is in `strings.hant.ts`; English is for phones whose first language is English. `{name}`
+ * marks a value filled in when the string is shown. A test checks all three have the same keys and
+ * the same values.
  */
 export const EN = {
   'common.loading': 'Loading',
@@ -86,6 +87,9 @@ export const EN = {
   'settings.system': 'System',
   'settings.lightChoice': 'Light',
   'settings.darkChoice': 'Dark',
+  'settings.language': 'Language',
+  'settings.language.body':
+    'Once chosen, the app keeps this language instead of following the phone.',
   'settings.account': 'Account',
   'settings.account.body':
     'Signing out removes this device’s access. Your work stays on the server.',
@@ -295,6 +299,8 @@ export const ZH: Record<Key, string> = {
   'settings.system': '跟随系统',
   'settings.lightChoice': '浅色',
   'settings.darkChoice': '深色',
+  'settings.language': '语言',
+  'settings.language.body': '选择后，App 会一直使用这个语言，不再跟随手机设置。',
   'settings.account': '账户',
   'settings.account.body': '退出登录会移除这台设备的访问权限，你的工作仍保存在服务器上。',
   'settings.signOut': '退出登录',
@@ -595,6 +601,9 @@ export const PHRASES_ZH: Record<string, string> = {
   'any moment now': '马上',
 };
 
+/** The shared logic's list of screenshot sizes: "Desktop, tablet and phone". */
+export const VIEWPORTS = /^(Desktop|Tablet|Phone)((?:, (?:tablet|phone))*) and (tablet|phone)$/u;
+
 /** Templated English from the shared logic: the pattern, and its Chinese. */
 export const PATTERNS_ZH: ReadonlyArray<[RegExp, (m: RegExpMatchArray) => string]> = [
   [/^Request failed \((\d+)\)\.$/u, (m) => `请求失败（${m[1]}）。`],
@@ -617,19 +626,15 @@ export const PATTERNS_ZH: ReadonlyArray<[RegExp, (m: RegExpMatchArray) => string
     /^Could not resume “(.*)”\. It stays paused\. (.*)$/su,
     (m) => `无法继续“${m[1]}”，它仍处于暂停。${m[2]}`,
   ],
-  [/^(Desktop|Tablet|Phone)((?:, (?:tablet|phone))*) and (tablet|phone)$/u, viewports],
+  [VIEWPORTS, viewportsIn({ desktop: '桌面', tablet: '平板', phone: '手机' })],
 ];
 
-const VIEWPORT_ZH: Record<string, string> = {
-  desktop: '桌面',
-  tablet: '平板',
-  phone: '手机',
-};
-
-/** "Desktop, tablet and phone" → "桌面、平板和手机". */
-function viewports(m: RegExpMatchArray): string {
-  const names = [m[1] ?? '', ...(m[2] ?? '').split(', ').filter(Boolean), m[3] ?? ''].map(
-    (name) => VIEWPORT_ZH[name.toLowerCase()] ?? name,
-  );
-  return `${names.slice(0, -1).join('、')}和${names.at(-1)}`;
+/** "Desktop, tablet and phone" → "桌面、平板和手机", in the given words. */
+export function viewportsIn(words: Record<string, string>) {
+  return (m: RegExpMatchArray): string => {
+    const names = [m[1] ?? '', ...(m[2] ?? '').split(', ').filter(Boolean), m[3] ?? ''].map(
+      (name) => words[name.toLowerCase()] ?? name,
+    );
+    return `${names.slice(0, -1).join('、')}和${names.at(-1)}`;
+  };
 }
