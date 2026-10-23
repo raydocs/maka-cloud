@@ -53,8 +53,8 @@ ours, which tokens carry it, how the language works, and what comes next.
   a sheet with "New conversation" and the conversations in three groups, each newest first: Needs
   you (an open decision), Working (a top-level task running, paused or waiting to start) and Recent.
   Each row's second line is its state, from the open inbox items and the tasks of the 20 most
-  recent conversations, read when the sheet opens; a row whose tasks were not read has no state
-  line. In Chat the composer continues the open conversation. On Home and Projects it starts a new
+  recent conversations, read anew each time the sheet opens (nothing from an earlier opening is
+  shown); a row whose tasks were not read has no state line. In Chat the composer continues the open conversation. On Home and Projects it starts a new
   one and shows it in Chat. With no conversation open, Chat shows one opening line and the same
   ideas as Home above it, and the first message starts a conversation.
 - **Talking to a running task** (`src/lib/steer.ts`). While a top-level task in the open
@@ -66,25 +66,32 @@ ours, which tokens carry it, how the language works, and what comes next.
   - *Received*: the server holds it (`pending`) and the task is running: the agent reads it after
     the step under way.
   - *Queued for the next turn*: `pending`, and the task is paused or waiting to start.
-  - *Being worked in*: `delivered` while the task runs; *read* once it has ended.
+  - *Being worked in*: `delivered` while the task runs; *read* when it is paused or has ended.
   - *Taken back*, and *not read* (`unseen`, or a task that ended with it pending, settled from the
-    task's timeline counts when they can tell).
+    task's timeline counts when they can tell; any withdrawn message makes "read" undecidable).
 
-  "Take back" (`withdrawTaskMessage`) is offered only while it is pending. The phone asks again by
-  sending the same message id and words, which the server answers without applying twice: when
-  the task shows a new step (at most every 8 seconds) and every 20 seconds. A task that takes no
-  messages gives the words back to the box and turns the chip off.
+  "Take back" (`withdrawTaskMessage`) is offered only while it is pending: by the composer for the
+  latest message, and on the bubble of each earlier one. A take-back the server refuses (409) does
+  not assume the message was read; the phone asks where it stands. The phone asks again by sending
+  the same message id and words, which the server answers without applying twice: when the task
+  shows a new step (at most every 8 seconds) and every 20 seconds, one request per task (its oldest
+  unread message), only while Chat is in front and the app is not in the background, and not at all
+  for a minute after a 429, so Stop and Take back keep the shared control budget. A refused first
+  send gives the words back to the box and turns the chip off; a refused resend keeps the message,
+  failed, with "Delete".
 - **Status lines in the dock.** While the stream is not live, the connection is its own line
   ("Reconnecting…" or "Offline"), with "The work keeps going on the server. Nothing needs
   resending." under it, and the running task's state is its own line, as last seen. A stop the
   machine has not confirmed (`stopPending`) is a third line. Nothing in them uses the attention
-  colour, so a dropped connection never reads as a failure. A decision card below the screen shows
-  an "N waiting" chip by the composer; a tap scrolls to it.
+  colour, so a dropped connection never reads as a failure. Decision cards none of which can be
+  seen (below the composer or scrolled off above) show an "N waiting" chip by the composer, N
+  counting only those; a tap scrolls to the first of them.
 - **The working clock.** A work block that is running shows "Working for m:ss" from the earliest
   start of its running tasks, ticking each second. Only the digits change, with or without Reduce
   Motion. A paused task has no clock: the task view has no paused spans to subtract.
 - **Approval receipts** restate how far an approval answered on this phone reaches (once, this
-  task, this repository). One that is kept links to Me, where it can be revoked.
+  task, this repository), only once the server took that answer; one refused, or answered
+  elsewhere, states no reach. One that is kept links to Me, where it can be revoked.
 - **Content scrolls under both bars** and fades out into the sky's colour at each end (`TopFade`,
   `Dock` and `clearOf` in `theme.ts`). There are no divider lines.
 - **Liquid Glass on the floating controls.** The top pill, the corner buttons, "+" and the field

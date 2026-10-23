@@ -367,15 +367,22 @@ const STEER_WORDS: Record<SteerPhase, Key> = {
  * What the person told a running task, on their side like their messages, marked as going to the
  * task, with where it stands under it. One taken back is faint.
  */
-function SteerBubble({ steer, phase }: { steer: Steer; phase: SteerPhase }) {
+function SteerBubble({
+  steer,
+  phase,
+  onWithdraw,
+}: {
+  steer: Steer;
+  phase: SteerPhase;
+  /** For a message that is not the latest: its own "Take back" while the agent has not read it. */
+  onWithdraw?: () => void;
+}) {
   const theme = useTheme();
   const { t: say } = useT();
   const status = say(STEER_WORDS[phase]);
   return (
     <View
       testID="steer-bubble"
-      accessible
-      accessibilityLabel={say('steer.said', { text: withoutMarks(steer.text), status })}
       style={{
         alignSelf: 'flex-end',
         maxWidth: '85%',
@@ -388,11 +395,27 @@ function SteerBubble({ steer, phase }: { steer: Steer; phase: SteerPhase }) {
         opacity: phase === 'withdrawn' ? 0.6 : 1,
       }}
     >
-      <T kind="small">{say('steer.marker')}</T>
-      <Rich text={steer.text} />
-      <T kind="small" testID={`steer-phase-${phase}`}>
-        {status}
-      </T>
+      {/* Read as one line; the button after it is its own stop. */}
+      <View
+        accessible
+        accessibilityLabel={say('steer.said', { text: withoutMarks(steer.text), status })}
+        style={{ gap: 4 }}
+      >
+        <T kind="small">{say('steer.marker')}</T>
+        <Rich text={steer.text} />
+        <T kind="small" testID={`steer-phase-${phase}`}>
+          {status}
+        </T>
+      </View>
+      {onWithdraw && withdrawable(phase) && (
+        <QuietButton
+          label={say('steer.withdraw')}
+          accessibilityLabel={say('steer.withdrawOne', { text: withoutMarks(steer.text) })}
+          id="Take back earlier"
+          disabled={steer.request !== undefined}
+          onPress={onWithdraw}
+        />
+      )}
     </View>
   );
 }
@@ -653,23 +676,30 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
    * where they start in it.
    */
   const where = useRef({ offset: 0, viewport: 0, content: 0, footer: 0 });
-  /** Where each open card starts in the footer, by its id. */
-  const tops = useRef(new Map<string, number>());
-  const [cardsBelow, setCardsBelow] = useState(false);
+  /** Where each open card sits in the footer (its top and height), by its id. */
+  const tops = useRef(new Map<string, { y: number; height: number }>());
+  /** The open cards none of which can be seen, top to bottom, by where they start in the list. */
+  const [hiddenCards, setHiddenCards] = useState<readonly number[]>([]);
   const measure = (change: Partial<typeof where.current> = {}) => {
     const at = Object.assign(where.current, change);
-    const first = Math.min(...tops.current.values());
-    if (at.viewport === 0 || at.content === 0 || !Number.isFinite(first)) {
-      setCardsBelow(false);
+    if (at.viewport === 0 || at.content === 0 || tops.current.size === 0) {
+      setHiddenCards((now) => (now.length === 0 ? now : []));
       return;
     }
     const padding = dock + 16;
-    const top = at.content - padding - at.footer + first;
-    // Below the composer's top edge: none of it can be seen.
-    setCardsBelow(top > at.offset + at.viewport - dock);
+    const hidden = [...tops.current.values()]
+      .map(({ y, height }) => ({ top: at.content - padding - at.footer + y, height }))
+      // Below the composer's top edge, or scrolled off above: none of it can be seen.
+      .filter(({ top, height }) => top > at.offset + at.viewport - dock || top + height < at.offset)
+      .map(({ top }) => top)
+      .sort((a, b) => a - b);
+    setHiddenCards((now) =>
+      now.length === hidden.length && now.every((top, i) => top === hidden[i]) ? now : hidden,
+    );
   };
   const placeCard = (key: string) => (event: LayoutChangeEvent) => {
-    tops.current.set(key, event.nativeEvent.layout.y);
+    const { y, height } = event.nativeEvent.layout;
+    tops.current.set(key, { y, height });
     measure();
   };
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
@@ -742,11 +772,30 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const latest = useRef({ steering, moving });
   latest.current = { steering, moving };
   const checked = useRef(Date.now());
+  /** Checks run only while this screen is in front and the app is in the foreground. */
+  const inFront = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      inFront.current = true;
+      return () => {
+        inFront.current = false;
+      };
+    }, []),
+  );
   useEffect(() => {
     if (activity === '') return;
+    // One request per task each round: its oldest message the agent may not have read yet (the
+    // server hands them over in order), so a backlog does not use up the shared control budget
+    // that Stop and Take back need.
     const check = () => {
+      if (!inFront.current || AppState.currentState === 'background') return;
       checked.current = Date.now();
-      for (const steer of latest.current.moving) latest.current.steering.check(steer.id);
+      const asked = new Set<string>();
+      for (const steer of latest.current.moving) {
+        if (asked.has(steer.taskId)) continue;
+        asked.add(steer.taskId);
+        latest.current.steering.check(steer.id);
+      }
     };
     if (Date.now() - checked.current >= 8_000) check();
     const timer = setInterval(check, 20_000);
@@ -754,7 +803,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   }, [activity]);
   // A task that ended with a message still pending: its log says whether the agent read it.
   const toSettle = steering.steers
-    .filter((steer) => steer.server === 'pending' && !steer.settled && phaseOf(steer) === 'unknown')
+    .filter(
+      (steer) =>
+        steer.server === 'pending' &&
+        !steer.settled &&
+        !steer.request &&
+        phaseOf(steer) === 'unknown',
+    )
     .map((steer) => steer.id)
     .join(',');
   useEffect(() => {
@@ -788,9 +843,12 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       .map((item) => item.itemId),
   ]);
   for (const key of [...tops.current.keys()]) if (!openCards.has(key)) tops.current.delete(key);
+  /** To the first card that cannot be seen. */
   const toCards = () => {
-    atEnd.current = true;
-    scroll.current?.scrollToEnd({ animated: !reduce });
+    const first = hiddenCards[0];
+    if (first === undefined) return;
+    atEnd.current = false;
+    scroll.current?.scrollToOffset({ offset: Math.max(0, first - 24), animated: !reduce });
   };
   const stopping = roots.some((task) => task.stopPending || task.treeStopPending);
   // A question or decision waiting on the person is not work; a reply still owed is.
@@ -874,7 +932,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       case 'steer':
         return (
           <Appear enter={arrived(item.key)}>
-            <SteerBubble steer={item.steer} phase={phaseOf(item.steer)} />
+            <SteerBubble
+              steer={item.steer}
+              phase={phaseOf(item.steer)}
+              {...(item.steer.id === lastSteer?.id
+                ? {}
+                : { onWithdraw: () => steering.withdraw(item.steer.id) })}
+            />
           </Appear>
         );
       case 'task': {
@@ -1028,7 +1092,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                       item={item}
                       task={item.taskId ? state.tasks[item.taskId] : undefined}
                       disabled={Boolean(busy)}
-                      onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
+                      onAnswer={(optionId, text) => feed.answerItem(item, optionId, text)}
                       onOpenGrants={openGrants}
                     />
                   );
@@ -1071,7 +1135,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               {say('steer.refused')}
             </T>
           )}
-          {(target || (openCards.size > 0 && cardsBelow)) && (
+          {(target || hiddenCards.length > 0) && (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               {target && (
                 <SteerChip
@@ -1084,8 +1148,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 />
               )}
               <View style={{ flex: 1 }} />
-              {openCards.size > 0 && cardsBelow && (
-                <WaitingChip count={openCards.size} onPress={toCards} />
+              {hiddenCards.length > 0 && (
+                <WaitingChip count={hiddenCards.length} onPress={toCards} />
               )}
             </View>
           )}

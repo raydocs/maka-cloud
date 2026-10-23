@@ -209,6 +209,9 @@ function useSheetData(visible: boolean) {
   useEffect(() => {
     if (!visible) return;
     let current = true;
+    // What an earlier opening read may be out of date: nothing is shown as current until read again.
+    setItems([]);
+    setTasks({});
     client.listInbox('open').then(
       (open) => {
         if (current) setItems(open);
@@ -220,7 +223,13 @@ function useSheetData(visible: boolean) {
         (list) => {
           if (current) setTasks((before) => ({ ...before, [conversationId]: list }));
         },
-        () => {},
+        () => {
+          if (current)
+            setTasks((before) => {
+              const { [conversationId]: _stale, ...rest } = before;
+              return rest;
+            });
+        },
       );
     return () => {
       current = false;

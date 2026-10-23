@@ -64,11 +64,11 @@ const ask = (questionId: string) =>
   });
 
 test('a decision below the screen shows "N waiting" by the composer; a tap goes to it', async () => {
-  const toEnd = jest.spyOn(FlatList.prototype, 'scrollToEnd');
+  const toCard = jest.spyOn(FlatList.prototype, 'scrollToOffset');
   try {
     await openChat([...running(), ask('q1')]);
     await screen.findByText('Which branch should it use?');
-    toEnd.mockClear();
+    toCard.mockClear();
     const list = screen.getByLabelText('Messages');
     // A long conversation scrolled to its top: the card is far below the composer.
     await act(async () => {
@@ -93,7 +93,7 @@ test('a decision below the screen shows "N waiting" by the composer; a tap goes 
     const chip = await screen.findByTestId('waiting-chip');
     expect(chip).toHaveTextContent('1 waiting');
     await fireEvent.press(chip);
-    expect(toEnd).toHaveBeenCalled();
+    expect(toCard).toHaveBeenCalledWith(expect.objectContaining({ offset: 2524 }));
     // Scrolled down to it: the card is on screen and the chip goes.
     await act(async () =>
       fireEvent.scroll(list, {
@@ -106,7 +106,56 @@ test('a decision below the screen shows "N waiting" by the composer; a tap goes 
     );
     expect(screen.queryByTestId('waiting-chip')).toBeNull();
   } finally {
-    toEnd.mockRestore();
+    toCard.mockRestore();
+  }
+});
+
+test('"N waiting" counts only the cards that cannot be seen, above or below', async () => {
+  const toCard = jest.spyOn(FlatList.prototype, 'scrollToOffset');
+  try {
+    await openChat([...running(), ask('q1'), ask('q2')]);
+    await screen.findByTestId('decision-slot-q2');
+    toCard.mockClear();
+    const list = screen.getByLabelText('Messages');
+    const scrollTo = (y: number) =>
+      act(async () =>
+        fireEvent.scroll(list, {
+          nativeEvent: {
+            contentOffset: { x: 0, y },
+            contentSize: { width: 390, height: 3000 },
+            layoutMeasurement: { width: 390, height: 700 },
+          },
+        }),
+      );
+    // Footer 700 high at the end of 3000; the cards start 2248 and 2568 down, 300 high each.
+    await act(async () => {
+      fireEvent(screen.getByTestId('chat-footer'), 'layout', {
+        nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 700 } },
+      });
+      fireEvent(screen.getByTestId('decision-slot-q1'), 'layout', {
+        nativeEvent: { layout: { x: 0, y: 40, width: 390, height: 300 } },
+      });
+      fireEvent(screen.getByTestId('decision-slot-q2'), 'layout', {
+        nativeEvent: { layout: { x: 0, y: 360, width: 390, height: 300 } },
+      });
+      fireEvent(list, 'layout', {
+        nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 700 } },
+      });
+      fireEvent(list, 'contentSizeChange', 390, 3000);
+    });
+    // The first card is in view, the second below the composer.
+    await scrollTo(1700);
+    expect(await screen.findByTestId('waiting-chip')).toHaveTextContent('1 waiting');
+    await fireEvent.press(screen.getByTestId('waiting-chip'));
+    expect(toCard).toHaveBeenCalledWith(expect.objectContaining({ offset: 2544 }));
+    // Both in view: no chip.
+    await scrollTo(2400);
+    expect(screen.queryByTestId('waiting-chip')).toBeNull();
+    // The first scrolled off above: it counts too.
+    await scrollTo(2560);
+    expect(await screen.findByTestId('waiting-chip')).toHaveTextContent('1 waiting');
+  } finally {
+    toCard.mockRestore();
   }
 });
 

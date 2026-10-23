@@ -337,6 +337,7 @@ export const ZH_HANT: Record<Key, string> = {
   'steer.unread': '任務在代理程式讀到之前就結束了。如果還需要，請當成新訊息再傳一次。',
   'steer.unknown': '任務已結束，可能沒有讀到這則訊息。',
   'steer.withdraw': '收回',
+  'steer.withdrawOne': '收回「{text}」',
   'steer.withdrawing': '正在收回…',
   'steer.refused': '這個任務現在無法接收訊息，你的話已放回輸入框。現在傳送會傳到對話裡。',
   'status.task': '任務',

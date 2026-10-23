@@ -38,7 +38,7 @@ export interface Steer {
  * - `received`: the server has it and the task is running: the agent reads it after the step under way;
  * - `queued`: the server has it but the task is paused or not started: it waits for the next turn;
  * - `applying`: the agent has it, and the task is still working;
- * - `read`: the agent had it before the task ended;
+ * - `read`: the agent had it, and the task has ended or is not running;
  * - `withdrawn`: taken back before the agent read it;
  * - `unread`: the task ended before the agent read it;
  * - `unknown`: the task ended and its log cannot tell this message from others.
@@ -63,7 +63,8 @@ export function steerPhase(steer: Steer, task: TaskView | undefined): SteerPhase
     case 'unseen':
       return 'unread';
     case 'delivered':
-      return ended ? 'read' : 'applying';
+      // Working it in only while the task runs; paused or not started, all we know is it was read.
+      return !ended && task?.state === 'running' ? 'applying' : 'read';
     case 'pending':
       if (!ended) return task === undefined || task.state === 'running' ? 'received' : 'queued';
       return steer.settled ?? 'unknown';
@@ -79,13 +80,13 @@ export const unsettled = (phase: SteerPhase) =>
 
 /**
  * What a task's log says of a message still pending when the task ended. The server marks every
- * message the agent never read as unseen before it records the end, and only the sender can take
- * one back. So with none unseen it was read; with none read it was not; otherwise the counts
- * cannot tell this message from the others.
+ * message the agent never read as unseen before it records the end. With none read, this one was
+ * not read. With none unseen and none taken back, it was. A take-back whose answer never reached
+ * the phone counts as withdrawn, so with any withdrawn the counts cannot place this one.
  */
 export function settledFrom(messages: RunTimeline['messages']): 'read' | 'unread' | 'unknown' {
-  if (messages.unseen === 0) return 'read';
   if (messages.read === 0) return 'unread';
+  if (messages.unseen === 0 && messages.withdrawn === 0) return 'read';
   return 'unknown';
 }
 
@@ -140,9 +141,16 @@ const bookOf = (conversationId: string) => {
   return book;
 };
 
+/**
+ * Until when checks stay quiet: the server said the controls were asked too often, and Stop and
+ * Take back share that budget, so they get it first.
+ */
+let quietUntil = 0;
+
 /** For tests: every conversation starts with no steers. */
 export function forgetSteers() {
   books.clear();
+  quietUntil = 0;
 }
 
 const answered = (state: TaskMessageState) => (steer: Steer) => {
@@ -162,7 +170,11 @@ const failedWith = (error: unknown) => (steer: Steer) => {
 export function useSteers(client: CloudClient, conversationId: string) {
   const book = bookOf(conversationId);
   const steers = useSyncExternalStore(book.subscribe, book.getSnapshot);
-  const post = (id: string): Promise<boolean> => {
+  /**
+   * Sends a steer. Only a first send that is refused outright drops it (its words go back to the
+   * box); a refused resend stays, failed, with "Delete", so its words are never lost.
+   */
+  const post = (id: string, first: boolean): Promise<boolean> => {
     const steer = book.find(id);
     if (!steer) return Promise.resolve(true);
     book.change(id, (s) => {
@@ -175,7 +187,7 @@ export function useSteers(client: CloudClient, conversationId: string) {
         return true;
       },
       (error: unknown) => {
-        if (refused(error) && book.find(id)?.server === undefined) {
+        if (first && refused(error) && book.find(id)?.server === undefined) {
           book.set(book.getSnapshot().filter((s) => s.id !== id));
           return false;
         }
@@ -184,34 +196,37 @@ export function useSteers(client: CloudClient, conversationId: string) {
       },
     );
   };
+  /** Asks the server where it stands, by sending it again unchanged. */
+  const check = (id: string) => {
+    const steer = book.find(id);
+    if (!steer || steer.request || Date.now() < quietUntil) return;
+    book.change(id, (s) => ({ ...s, request: 'check' }));
+    client.sendTaskMessage(steer.taskId, steer.text, steer.id).then(
+      ({ message }) => book.change(id, answered(message.state)),
+      // A check that fails changes nothing the person sees: the last answer still stands.
+      (error: unknown) => {
+        if (error instanceof ApiError && error.status === 429) quietUntil = Date.now() + 60_000;
+        book.change(id, (s) => {
+          const { request: _request, ...rest } = s;
+          return rest;
+        });
+      },
+    );
+  };
   return {
     steers,
     send(taskId: string, text: string, now = Date.now()) {
       const id = randomId();
       book.set([...book.getSnapshot(), { id, taskId, text, at: now }]);
-      return post(id);
+      return post(id, true);
     },
     /** The same message again, with the same id: the server applies it once. */
-    resend: (id: string) => void post(id),
+    resend: (id: string) => void post(id, false),
     /** A message that never reached the server is dropped from the phone. */
     discard(id: string) {
       book.set(book.getSnapshot().filter((steer) => steer.id !== id));
     },
-    /** Asks the server where it stands, by sending it again unchanged. */
-    check(id: string) {
-      const steer = book.find(id);
-      if (!steer || steer.request) return;
-      book.change(id, (s) => ({ ...s, request: 'check' }));
-      client.sendTaskMessage(steer.taskId, steer.text, steer.id).then(
-        ({ message }) => book.change(id, answered(message.state)),
-        // A check that fails changes nothing the person sees: the last answer still stands.
-        () =>
-          book.change(id, (s) => {
-            const { request: _request, ...rest } = s;
-            return rest;
-          }),
-      );
-    },
+    check,
     withdraw(id: string) {
       const steer = book.find(id);
       if (!steer || steer.request) return;
@@ -221,15 +236,12 @@ export function useSteers(client: CloudClient, conversationId: string) {
       });
       client.withdrawTaskMessage(steer.taskId, steer.id).then(
         ({ message }) => book.change(id, answered(message.state)),
-        (error: unknown) =>
-          // Refused because the agent read it first: it stands as read. Any other failure leaves
-          // it pending, with the reason.
-          book.change(
-            id,
-            error instanceof ApiError && error.status === 409
-              ? answered('delivered')
-              : failedWith(error),
-          ),
+        (error: unknown) => {
+          // Any failure leaves it where it stood, with the reason. A 409 means it is no longer
+          // pending (read, or unseen because the task ended): ask the server which.
+          book.change(id, failedWith(error));
+          if (error instanceof ApiError && error.status === 409) check(id);
+        },
       );
     },
     /** The task ended with this message pending: its log says whether it was read. */

@@ -340,6 +340,7 @@ export const EN = {
     'The task ended before the agent read it. Send it again as a new message if it still matters.',
   'steer.unknown': 'The task ended. It may not have read this.',
   'steer.withdraw': 'Take back',
+  'steer.withdrawOne': 'Take back “{text}”',
   'steer.withdrawing': 'Taking back…',
   'steer.refused':
     'This task can’t take messages now, so your words are back in the box. Sending goes to the conversation.',
@@ -713,6 +714,7 @@ export const ZH: Record<Key, string> = {
   'steer.unread': '任务在智能体读到之前就结束了。如果还需要，请作为新消息再发一次。',
   'steer.unknown': '任务已结束，可能没有读到这条。',
   'steer.withdraw': '撤回',
+  'steer.withdrawOne': '撤回“{text}”',
   'steer.withdrawing': '正在撤回…',
   'steer.refused': '这个任务现在收不了消息，你的话已放回输入框。现在发送会发到对话里。',
   'status.task': '任务',

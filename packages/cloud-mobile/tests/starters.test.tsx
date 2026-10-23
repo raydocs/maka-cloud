@@ -163,9 +163,10 @@ describe('approval receipts', () => {
     expect(screen.queryByTestId('receipt-scope')).toBeNull();
   });
 
-  test('a card answered "this task" says so once its answer is on the way', async () => {
+  /** Answers "this task" on an open card, then draws it as the server now has it. */
+  const answerThisTask = async (itemId: string, taken: boolean) => {
     const item = (state: InboxItem['state']): InboxItem => ({
-      itemId: 'i-scope',
+      itemId,
       kind: 'approval',
       conversationId: 'c1',
       taskId: 't1',
@@ -192,7 +193,14 @@ describe('approval receipts', () => {
     });
     const answers: string[] = [];
     const view = await shown(
-      <DecisionCard item={item('open')} disabled={false} onAnswer={(id) => answers.push(id)} />,
+      <DecisionCard
+        item={item('open')}
+        disabled={false}
+        onAnswer={(id) => {
+          answers.push(id);
+          return Promise.resolve(taken);
+        }}
+      />,
     );
     await fireEvent.press(screen.getByTestId('scope-approve_task'));
     await fireEvent.press(
@@ -209,10 +217,21 @@ describe('approval receipts', () => {
         onOpenGrants={() => {}}
       />,
     );
+  };
+
+  test('a card answered "this task" says so once the server took the answer', async () => {
+    await answerThisTask('i-taken', true);
     expect(screen.getByTestId('receipt-scope')).toHaveTextContent(
       'Approved for the rest of this task. It won’t ask again for this repository until the task ends.',
     );
     expect(screen.getByRole('link', { name: 'Revoke in Me' })).toBeTruthy();
+  });
+
+  test('an answer the server refused (answered elsewhere) states no reach', async () => {
+    await answerThisTask('i-refused', false);
+    expect(screen.getByTestId('decision-receipt')).toBeTruthy();
+    expect(screen.queryByTestId('receipt-scope')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Revoke in Me' })).toBeNull();
   });
 });
 

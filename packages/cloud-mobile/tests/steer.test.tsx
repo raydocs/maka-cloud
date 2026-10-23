@@ -55,6 +55,8 @@ test('each state of a message to a task is told apart only as far as the server 
   // The agent has it: being worked in while the task goes on, read once it has ended.
   expect(steerPhase(steer({ server: 'delivered' }), view())).toBe('applying');
   expect(steerPhase(steer({ server: 'delivered' }), view({ state: 'succeeded' }))).toBe('read');
+  // Read, but the task is not running: nothing says it is being worked in.
+  expect(steerPhase(steer({ server: 'delivered' }), view({ state: 'paused' }))).toBe('read');
   expect(steerPhase(steer({ server: 'withdrawn' }), view())).toBe('withdrawn');
   expect(steerPhase(steer({ server: 'unseen' }), view({ state: 'failed' }))).toBe('unread');
   // Pending when the task ended: what the log says, or that it cannot say.
@@ -73,6 +75,58 @@ test('the log settles a message still pending at the end only when its counts ca
   expect(settledFrom({ sent: 2, read: 2, unseen: 0, withdrawn: 0 })).toBe('read');
   expect(settledFrom({ sent: 2, read: 0, unseen: 1, withdrawn: 1 })).toBe('unread');
   expect(settledFrom({ sent: 3, read: 1, unseen: 1, withdrawn: 1 })).toBe('unknown');
+  // A take-back whose answer was lost may be this one: it cannot be called read.
+  expect(settledFrom({ sent: 2, read: 1, unseen: 0, withdrawn: 1 })).toBe('unknown');
+});
+
+test('a take-back refused because the message moved on asks the server where it stands', async () => {
+  let sends = 0;
+  const { calls } = await openChat(running(), (call) => {
+    if (call.method === 'POST' && call.path === '/v1/tasks/t1/messages')
+      return Response.json({
+        message: { messageId: call.body?.messageId, state: ++sends > 1 ? 'delivered' : 'pending' },
+      });
+    if (call.method === 'DELETE') return Response.json({ error: 'invalid_state' }, { status: 409 });
+    return undefined;
+  });
+  await screen.findByTestId('steer-chip');
+  await fireEvent.changeText(
+    screen.getByTestId('field-Keep the conversation going'),
+    'Use the staging database',
+  );
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  await screen.findByTestId('steer-phase-received');
+  await fireEvent.press(screen.getByRole('button', { name: 'Take back' }));
+  // Not taken to be read: the same message again, and what the server says.
+  expect(await screen.findByTestId('steer-phase-applying')).toBeTruthy();
+  expect(posts(calls)).toHaveLength(2);
+  expect(posts(calls)[1]?.body?.messageId).toBe(posts(calls)[0]?.body?.messageId);
+});
+
+test('an earlier message the agent has not read keeps its own "Take back"', async () => {
+  const { calls } = await openChat(running(), (call) => {
+    if (call.method === 'POST' && call.path === '/v1/tasks/t1/messages')
+      return Response.json({ message: { messageId: call.body?.messageId, state: 'pending' } });
+    if (call.method === 'DELETE')
+      return Response.json({
+        message: { messageId: call.path.split('/').at(-1), state: 'withdrawn' },
+      });
+    return undefined;
+  });
+  await screen.findByTestId('steer-chip');
+  const field = () => screen.getByTestId('field-Keep the conversation going');
+  await fireEvent.changeText(field(), 'First note');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  await screen.findByTestId('steer-phase-received');
+  await fireEvent.changeText(field(), 'Second note');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  await screen.findAllByTestId('steer-phase-received');
+  await fireEvent.press(screen.getByRole('button', { name: 'Take back “First note”' }));
+  const first = posts(calls)[0]?.body?.messageId as string;
+  expect(calls.some((call) => call.method === 'DELETE' && call.path.endsWith(`/${first}`))).toBe(
+    true,
+  );
+  expect(await screen.findByTestId('steer-phase-withdrawn')).toBeTruthy();
 });
 
 test('the task to steer is a top-level task still going, the running one first', () => {
@@ -237,6 +291,29 @@ test('a message that did not reach the server is sent again as the same message,
   const sent = posts(calls);
   expect(sent).toHaveLength(2);
   expect(sent[1]?.body?.messageId).toBe(sent[0]?.body?.messageId);
+});
+
+test('a resend the task refuses keeps the message, failed, with its words and "Delete"', async () => {
+  let answer = () => new Response('{}', { status: 503 });
+  await openChat(running(), (call) =>
+    call.method === 'POST' && call.path === '/v1/tasks/t1/messages' ? answer() : undefined,
+  );
+  await screen.findByTestId('steer-chip');
+  await fireEvent.changeText(
+    screen.getByTestId('field-Keep the conversation going'),
+    'Use the staging database',
+  );
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByTestId('steer-phase-failed')).toBeTruthy();
+  answer = () => Response.json({ error: 'invalid_state' }, { status: 409 });
+  await fireEvent.press(screen.getByRole('button', { name: 'Send again' }));
+  expect(
+    await screen.findByText('The task is not in a state where that can be done.'),
+  ).toBeTruthy();
+  expect(screen.getByTestId('steer-phase-failed')).toBeTruthy();
+  expect(screen.getByText('Use the staging database')).toBeTruthy();
+  await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
+  expect(screen.queryByTestId('steer-bubble')).toBeNull();
 });
 
 test('a task that ended before reading the message says so, from its log', async () => {

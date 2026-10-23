@@ -10,7 +10,7 @@ import {
   type TaskView,
 } from '@maka-cloud/client';
 import * as Haptics from 'expo-haptics';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useState, useSyncExternalStore } from 'react';
 import { Linking, Pressable, View } from 'react-native';
 import { ButtonRow, Chip, Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
 import { useT } from '@/lib/i18n';
@@ -34,10 +34,25 @@ const SCOPES: ReadonlyArray<readonly [id: string, key: Key]> = [
 ];
 const SCOPED = new Set(SCOPES.map(([id]) => id));
 /**
- * The answer chosen on each card on this phone, while the app runs: the item does not say which
- * was chosen, and the card is drawn anew once its answer is on the way.
+ * The answer the server took for each card answered on this phone, while the app runs: the item
+ * does not say which was chosen. Only an acknowledged answer is kept, so a receipt never states the
+ * reach of an answer that was refused, or of one given elsewhere.
  */
 const PICKED = new Map<string, string>();
+const pickListeners = new Set<() => void>();
+let pickVersion = 0;
+function setPicked(itemId: string, optionId: string) {
+  PICKED.set(itemId, optionId);
+  pickVersion++;
+  for (const listener of pickListeners) listener();
+}
+const subscribePicks = (listener: () => void) => {
+  pickListeners.add(listener);
+  return () => {
+    pickListeners.delete(listener);
+  };
+};
+const picksVersion = () => pickVersion;
 /** What a receipt says for each approving answer: how far the approval reaches. */
 const RECEIPTS = new Map<string, Key>([
   ['approve', 'receipt.once'],
@@ -444,11 +459,13 @@ export function DecisionCard({
   /** The task the card is about, when this screen has it: its checks are the card's evidence. */
   task?: TaskView | undefined;
   disabled: boolean;
-  onAnswer: (optionId: string, text?: string) => void;
+  /** Resolves `true` once the server took the answer; only then does a receipt say its reach. */
+  onAnswer: (optionId: string, text?: string) => unknown;
   /** Opens Me, where a kept approval can be revoked. */
   onOpenGrants?: (() => void) | undefined;
 }) {
   const [note, setNote] = useState('');
+  useSyncExternalStore(subscribePicks, picksVersion);
   const picked = PICKED.get(item.itemId);
   const { t: say, tx } = useT();
   const card = inboxCardModel(item);
@@ -467,8 +484,12 @@ export function DecisionCard({
   // shown whole, as the supervisor sent it.
   const finished = finishedParts(item);
   const answer = (optionId: string) => {
-    PICKED.set(item.itemId, optionId);
-    onAnswer(optionId, note.trim() || undefined);
+    void Promise.resolve(onAnswer(optionId, note.trim() || undefined)).then(
+      (taken) => {
+        if (taken === true) setPicked(item.itemId, optionId);
+      },
+      () => {},
+    );
   };
   return (
     <View style={{ gap: 10 }} accessible={false}>

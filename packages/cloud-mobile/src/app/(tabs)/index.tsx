@@ -190,7 +190,7 @@ export default function Home() {
                   <DecisionCard
                     item={item}
                     disabled={busy}
-                    onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+                    onAnswer={(optionId, text) => feed.answer(item, optionId, text)}
                     onOpenGrants={() => router.push('/me')}
                   />
                   <Pressable
