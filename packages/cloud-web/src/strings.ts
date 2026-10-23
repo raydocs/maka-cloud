@@ -987,9 +987,9 @@ export const zhHant: Record<Key, string> = {
   'This item does not take additional context.': '這一項不能新增補充說明。',
   'The inbox is restarting. Try again in a moment.': '收件匣正在重新啟動，請稍後再試。',
   'You have not approved this duty yet. Decide it from Home first.':
-    '你還沒有批准這項值守任務，請先在首頁做決定。',
+    '你還沒有批准這項常駐任務，請先在首頁做決定。',
   'You can have up to 20 duties on at once. Turn one off first.':
-    '最多同時開啟 20 項值守任務，請先關閉一項。',
+    '最多同時開啟 20 項常駐任務，請先關閉一項。',
   'This action is unavailable on this server. No change was made.':
     '這個伺服器不支援此操作，沒有做任何改動。',
   'Your sign-in is no longer valid. Please sign in again.': '你的登入已失效，請重新登入。',
@@ -1086,20 +1086,20 @@ export const zhHant: Record<Key, string> = {
   'the preview': '預覽',
   'the test report': '測試報告',
   'any moment now': '馬上',
-  'Ask the agent to check on it': '讓智慧代理查看一下',
+  'Ask the agent to check on it': '讓代理程式查看一下',
   'Cancel it': '取消',
   'Keep waiting': '繼續等待',
-  'Ask the agent to try a different approach': '讓智慧代理換個方法再試',
+  'Ask the agent to try a different approach': '讓代理程式換個方法再試',
   'Stop this work': '停止這項工作',
   'Leave it': '先不管',
-  'Ask the agent to redo it': '讓智慧代理重做',
+  'Ask the agent to redo it': '讓代理程式重做',
   'Accept it as is': '就這樣接受',
   'Got it': '知道了',
   'Do it': '去做吧',
   'Not now': '以後再說',
   'Turn off': '關閉',
   Keep: '保留',
-  'Ask the agent to fix it': '讓智慧代理修復',
+  'Ask the agent to fix it': '讓代理程式修復',
   'Accept it anyway': '仍然接受',
   'Check again': '再檢查一次',
   'Go ahead': '可以執行',
@@ -1222,7 +1222,7 @@ export const zhHant: Record<Key, string> = {
   'Finished ·': '已完成 ·',
   'Kept approvals': '已記住的授權',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
-    '智慧代理可以再次執行而無需詢問的操作。撤銷後，下次執行時會重新詢問。',
+    '代理程式可以再次執行而無需詢問的操作。撤銷後，下次執行時會重新詢問。',
   'Nothing kept. When you approve a step for a task or for a repository, it shows here.':
     '還沒有保留的授權。為任務或儲存庫批准的操作會顯示在這裡。',
   'Revoke all': '全部撤銷',
@@ -1243,9 +1243,9 @@ export const zhHant: Record<Key, string> = {
   'Nothing starts until you tap its first word.': '點選建議的第一個詞才會開始。',
   'What runs next': '即將執行',
   '1 more duty wakes when something happens on GitHub.':
-    '還有 1 項值守任務會在 GitHub 上有動靜時啟動。',
+    '還有 1 項常駐任務會在 GitHub 上有動靜時啟動。',
   '{p0} more duties wake when something happens on GitHub.':
-    '還有 {p0} 項值守任務會在 GitHub 上有動靜時啟動。',
+    '還有 {p0} 項常駐任務會在 GitHub 上有動靜時啟動。',
   'Start something': '開始新任務',
   'Make room for your next idea.': '給下一個想法留個位置。',
   'Tell {name} what you’d like done, in a sentence. It takes it from there.':
@@ -1257,8 +1257,8 @@ export const zhHant: Record<Key, string> = {
   Spent: '花費',
   'Recent conversations': '最近的對話',
   'Pick up where you left off': '接著上次繼續',
-  'Checked by a second agent': '已由另一位智慧代理檢查',
-  'Not checked by a second agent': '未經另一位智慧代理檢查',
+  'Checked by a second agent': '已由另一個代理程式檢查',
+  'Not checked by a second agent': '未經另一個代理程式檢查',
   'Needs you ({count})': '需要你處理（{count}）',
   'Done ({count})': '已完成（{count}）',
   Memory: '記憶',
@@ -1310,7 +1310,7 @@ export const zhHant: Record<Key, string> = {
     '會自動填入下方，開始前可以自由修改。',
   'Watch it work': '跟進工作',
   'You see each step, the test that proves the change, a second agent’s review and the cost. Nothing reaches your repository until you approve it.':
-    '每個步驟、驗證改動的測試、另一位智慧代理的審查和花費都能看到。未經你批准，不會改動你的儲存庫。',
+    '每個步驟、驗證改動的測試、另一個代理程式的審查和花費都能看到。未經你批准，不會改動你的儲存庫。',
   'Waiting for your approval. It shows on Home when it is ready.':
     '等待你批准，準備好後會顯示在首頁。',
   'Turned off after it failed {count} times in a row.': '連續失敗 {count} 次後已關閉。',
@@ -1329,7 +1329,7 @@ export const zhHant: Record<Key, string> = {
   'No projects yet': '還沒有專案',
   'A project is a repository {name} looks after.': '專案就是交給 {name} 照看的儲存庫。',
   'Default branch:': '預設分支：',
-  'No duties yet.': '還沒有值守任務。',
+  'No duties yet.': '還沒有常駐任務。',
   '{mode} · about {cost}{typical} · {repo}': '{mode} · 約 {cost}{typical} · {repo}',
   ' (typical)': '（通常）',
   'Part of this was written by someone else. The task asks you before it does anything risky.':
@@ -1368,7 +1368,7 @@ export const zhHant: Record<Key, string> = {
   简体中文: '简体中文',
   繁體中文: '繁體中文',
   English: 'English',
-  'Your personal agent.': '你的個人智慧代理。',
+  'Your personal agent.': '你的個人代理程式。',
   Limited: '受限',
   'your work, together': '一起把事情做完',
   'That fact was forgotten and cannot be saved again.': '這筆資訊已被遺忘，無法再次儲存。',
