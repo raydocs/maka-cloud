@@ -13,7 +13,20 @@ appId: cloud.maka.app
 - extendedWaitUntil:
     visible:
       id: "field-Server address"
-    timeout: 60000
+    timeout: 45000
+    optional: true
+# Android can kill the freshly launched process while it is still removing the task that clearState
+# stopped ("Destroy timeout of remove-task"), leaving a blank window. Launch once more if so.
+- runFlow:
+    when:
+      notVisible:
+        id: "field-Server address"
+    commands:
+      - launchApp
+      - extendedWaitUntil:
+          visible:
+            id: "field-Server address"
+          timeout: 60000
 - takeScreenshot: sign-in-empty
 - tapOn:
     id: "field-Server address"
