@@ -6,10 +6,9 @@ coordinator and the lanes that own the pieces named under "Where".
 
 ## Source and limits
 
-- **What was read.** The public Android package of Hark Pro 1.0.0-36, looked at without running it:
-  its manifest, library list, and the class and type names that survived the build's shrinking.
-  No method bodies were recovered and none were looked for. Each statement below about Hark
-  comes from names, not from a trace of the running app. The iOS app was seen only as a user.
+- **What was read.** The public Android app, looked at without running it, and the iOS app as a
+  user. Only names survived its build; no method bodies were recovered or looked for, so each
+  statement below about Hark comes from names, not from a trace of the running app.
 - **What never enters this repository.** Hark's code, prompts, assets, typeface (GT Standard is
   licensed), sky data, endpoints, keys or hostnames. This repository is public. Each design below
   is our own and is built from Maka's existing pieces.

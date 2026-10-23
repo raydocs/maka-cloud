@@ -1,23 +1,19 @@
 # What Grok Bot does, and what Maka takes from it
 
-Grok Bot is xAI's desktop agent, built on Cursor's code (the package is named `sand`, carries
-`@anysphere` packages and is signed by Anysphere). It is the closest shipped example of the runtime
-Maka is building: an interface, a coordinator that keeps a conversation alive, and an executor that
-runs tools. This note sets each of its runtime patterns beside Maka's code and says what to adopt.
-It is the companion of `hark-patterns.md`: Hark is the reference for the feel, Grok Bot for the
-plumbing. Both notes are for the coordinator and the lanes named under "Where".
+Grok Bot is xAI's desktop agent, built on Cursor's code. It is the closest shipped example of the
+runtime Maka is building: an interface, a coordinator that keeps a conversation alive, and an
+executor that runs tools. This note sets each of its runtime patterns beside Maka's code and says
+what to adopt. It is the companion of `hark-patterns.md`: Hark is the reference for the feel, Grok
+Bot for the plumbing. Both notes are for the coordinator and the lanes named under "Where".
 
 ## Source and limits
 
-- **What was read.** A static inspection of the Grok Bot 0.75.0 desktop package, done in the
-  owner's own workspace: formatted bundles, protocol descriptors, file names and native helper
-  metadata. The app was not launched, no request was sent, and no account was used. Each statement
-  below is about shipped code, not observed behavior. Code being present does not mean it runs.
+- **What was read.** A static look at the shipped desktop app in the owner's own workspace; it was
+  not run and no account or request was used. Each statement below is about shipped code, not
+  observed behavior, and code being present does not mean it runs.
 - **What never enters this repository.** Cursor's or xAI's code, protocol descriptors, field
   numbers, endpoints, prompts or names. Every design below is our own and is built from Maka's
   existing pieces.
-- Nine native helper files do not match the archive's declared integrity, and the cause is unknown.
-  Nothing here relies on them.
 
 ## How Grok Bot is built
 
