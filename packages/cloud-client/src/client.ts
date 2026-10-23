@@ -30,6 +30,7 @@ import {
 } from './contract';
 import type { ConnectionState } from './connection';
 import { randomId } from './ids';
+import { outboxScope } from './outbox';
 
 /** A device session's token starts so; any other bearer token is an invite. */
 const SESSION_TOKEN_PREFIX = 'mks_';
@@ -390,6 +391,10 @@ export class CloudClient {
   /** Ends this device's own session on the server. Refused (400) for an invite token, which is not a device. */
   endSession() {
     return this.request<void>('/v1/auth/sign-out', { method: 'POST' });
+  }
+  /** The outbox scope of this server and token (`outboxScope`): one account's unsent messages. */
+  outboxScope(): string {
+    return outboxScope(this.baseUrl, this.token);
   }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {

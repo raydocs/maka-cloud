@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import { CloudClient } from '../src/client';
 import { connectionAction, connectionNeedsBanner, connectionText } from '../src/connection';
 import { ConversationFeed, type SendFailure, sendFailureText } from '../src/conversation';
-import { OUTBOX_KEEP_MS, storageOutbox, webStorageOutbox } from '../src/outbox';
+import { OUTBOX_KEEP_MS, outboxScope, storageOutbox, webStorageOutbox } from '../src/outbox';
 
 /** A Web Storage stand-in that outlives the feeds made over it, like localStorage over a reload. */
 function memoryStorage() {
@@ -12,6 +12,10 @@ function memoryStorage() {
     getItem: (k: string) => map.get(k) ?? null,
     setItem: (k: string, v: string) => void map.set(k, v),
     removeItem: (k: string) => void map.delete(k),
+    key: (i: number) => [...map.keys()][i] ?? null,
+    get length() {
+      return map.size;
+    },
   };
 }
 
@@ -26,7 +30,11 @@ type Answer = (body: { text: string; clientMessageId: string }) => Response | Pr
  * A server with one conversation, `c1`: posts go to `answer`, and `push` sends frames down the open
  * event stream. A post the answer throws on (a lost acknowledgment) still lands, as on a real server.
  */
-function server(answer: Answer = () => Response.json({ messageId: 'srv' }, { status: 202 })) {
+function server(
+  answer: Answer = () => Response.json({ messageId: 'srv' }, { status: 202 }),
+  /** What the stream replays when it opens: the person's earlier messages, without client ids. */
+  history: string[] = [],
+) {
   const posts: { text: string; clientMessageId: string }[] = [];
   let push: (frame: string) => void = () => {};
   let streams = 0;
@@ -39,6 +47,17 @@ function server(answer: Answer = () => Response.json({ messageId: 'srv' }, { sta
         start(controller) {
           push = (frame) => controller.enqueue(new TextEncoder().encode(frame));
           push(': open\n\n');
+          history.forEach((text, index) => {
+            const data = {
+              conversationId: 'c1',
+              messageId: `old${index}`,
+              role: 'user',
+              text,
+              at: 0,
+            };
+            push(`id: ${index + 1}\nevent: message.posted\ndata: ${JSON.stringify(data)}\n\n`);
+          });
+          nextId = Math.max(nextId, history.length);
         },
       });
       return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
@@ -81,7 +100,7 @@ test('a lost acknowledgment leaves the message failed and kept; after a reload i
     return Response.json({ messageId: 'srv' }, { status: 202 });
   });
   const client = new CloudClient('t', api.fetcher);
-  const first = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage));
+  const first = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
   expect(await first.send('Fix the login loop')).toBe(false);
   expect(first.getSnapshot().outgoing[0]?.status).toEqual({
     state: 'failed',
@@ -90,7 +109,7 @@ test('a lost acknowledgment leaves the message failed and kept; after a reload i
   });
   expect(storage.map.size).toBe(1);
   // The app is killed and opened again: a new feed over the same storage.
-  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage));
+  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
   await until(() => reloaded.getSnapshot().outgoing.length === 1, 'the kept message');
   const [back] = reloaded.getSnapshot().outgoing;
   expect(back?.text).toBe('Fix the login loop');
@@ -111,9 +130,11 @@ test('a message still on its way when the app is killed comes back as interrupte
   // The post never answers: the app is gone before it does.
   const api = server(() => new Promise<Response>(() => {}));
   const client = new CloudClient('t', api.fetcher);
-  void new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage)).send('Pay the invoice');
+  void new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me')).send(
+    'Pay the invoice',
+  );
   await until(() => api.posts.length === 1, 'the post');
-  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage));
+  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
   await until(() => reloaded.getSnapshot().outgoing.length === 1, 'the kept message');
   expect(reloaded.getSnapshot().outgoing[0]?.status).toEqual({
     state: 'failed',
@@ -129,9 +150,11 @@ test('a kept message the conversation already shows is dropped when the feed ope
     throw new TypeError('lost');
   });
   const client = new CloudClient('t', api.fetcher);
-  await new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage)).send('Book the flight');
+  await new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me')).send(
+    'Book the flight',
+  );
   const id = api.posts[0]?.clientMessageId;
-  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage));
+  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
   await until(() => reloaded.getSnapshot().outgoing.length === 1, 'the kept message');
   reloaded.start();
   await until(
@@ -182,7 +205,7 @@ test('an id reused for other words is refused for good: not retryable, not kept,
     new CloudClient('t', api.fetcher),
     'c1',
     0,
-    webStorageOutbox(storage),
+    webStorageOutbox(storage, 'me'),
   );
   expect(await feed.send('cancel the flight')).toBe(false);
   const [refused] = feed.getSnapshot().outgoing;
@@ -225,6 +248,7 @@ test('the outbox: a late remove of an older message never clears a newer one; ol
       set: (k, v) => new Promise<void>((r) => setTimeout(() => r(storage.setItem(k, v)), 5)),
       remove: (k) => storage.removeItem(k),
     },
+    'me',
     'maka.outbox.',
     () => now,
   );
@@ -235,27 +259,104 @@ test('the outbox: a late remove of an older message never clears a newer one; ol
   expect((await outbox.list('c1')).map((e) => e.id)).toEqual(['b']);
   now += OUTBOX_KEEP_MS;
   expect(await outbox.list('c1')).toEqual([]);
-  storage.setItem(
-    'maka.outbox.c2',
-    '[{"id":"has spaces","conversationId":"c2","text":"t","at":1}]',
-  );
+  // A store without a key listing keeps an index: junk in it, or in a record, is dropped.
+  storage.setItem('maka.outbox.me.c2', '["x"]');
+  storage.setItem('maka.outbox.me.c2.x', '{"id":"has spaces","conversationId":"c2","text":"t"}');
   expect(await outbox.list('c2')).toEqual([]);
-  storage.setItem('maka.outbox.c3', 'not json');
+  expect(storage.map.has('maka.outbox.me.c2.x')).toBe(false);
+  storage.setItem('maka.outbox.me.c3', 'not json');
   expect(await outbox.list('c3')).toEqual([]);
 });
 
+test('two tabs over the same storage never lose each other’s messages', async () => {
+  const shared = memoryStorage();
+  // The second tab's own view of the same storage: no queue is shared, so their calls interleave.
+  const otherTab = {
+    ...shared,
+    setItem: (k: string, v: string) => shared.setItem(k, v),
+    getItem: (k: string) => shared.getItem(k),
+    removeItem: (k: string) => shared.removeItem(k),
+    key: (i: number) => shared.key(i),
+    get length() {
+      return shared.map.size;
+    },
+  };
+  const tabA = webStorageOutbox(shared, 'me');
+  const tabB = webStorageOutbox(otherTab, 'me');
+  const entry = (id: string) => ({ id, conversationId: 'c1', text: id, at: Date.now() });
+  await Promise.all([tabA.put(entry('a')), tabB.put(entry('b'))]);
+  expect((await tabA.list('c1')).map((e) => e.id).sort()).toEqual(['a', 'b']);
+  await Promise.all([tabA.remove('c1', 'a'), tabB.put(entry('c'))]);
+  expect((await tabB.list('c1')).map((e) => e.id).sort()).toEqual(['b', 'c']);
+  expect((await tabA.list('c1')).map((e) => e.id).sort()).toEqual(['b', 'c']);
+});
+
+test('each account on each server has its own outbox', async () => {
+  const shared = memoryStorage();
+  const mine = webStorageOutbox(shared, outboxScope('https://a.example', 'mks_one'));
+  const theirs = webStorageOutbox(shared, outboxScope('https://a.example', 'mks_two'));
+  const elsewhere = webStorageOutbox(shared, outboxScope('https://b.example', 'mks_one'));
+  await mine.put({ id: 'm1', conversationId: 'c1', text: 'private words', at: Date.now() });
+  expect(await theirs.list('c1')).toEqual([]);
+  expect(await elsewhere.list('c1')).toEqual([]);
+  expect((await mine.list('c1')).map((e) => e.text)).toEqual(['private words']);
+  // The scope never carries the token.
+  expect([...shared.map.keys()].join()).not.toContain('mks_one');
+  expect(new CloudClient('mks_one', { baseUrl: 'https://a.example' }).outboxScope()).toBe(
+    outboxScope('https://a.example', 'mks_one'),
+  );
+});
+
+test('an older message with the same words, replayed late, never takes the place of an unsent or unconfirmed one', async () => {
+  const storage = memoryStorage();
+  let offline = true;
+  const api = server(() => {
+    if (offline) throw new TypeError('offline');
+    return Response.json({ messageId: 'srv-new' }, { status: 202 });
+  }, ['Yes']);
+  const feed = new ConversationFeed(
+    new CloudClient('t', api.fetcher),
+    'c1',
+    0,
+    webStorageOutbox(storage, 'me'),
+  );
+  // Sent before the stream has replayed anything, and it fails.
+  expect(await feed.send('Yes')).toBe(false);
+  feed.start();
+  await until(() => feed.getSnapshot().state.messages.length === 1, 'the replayed older message');
+  await new Promise((r) => setTimeout(r, 30));
+  expect(feed.getSnapshot().outgoing.map((m) => m.status.state)).toEqual(['failed']);
+  expect(storage.map.size).toBe(1);
+  // Confirmed with the server's id: only that id, or its own client id, takes it off.
+  offline = false;
+  expect(await feed.retry(feed.getSnapshot().outgoing[0]?.id ?? '')).toBe(true);
+  api.posted('Yes');
+  await new Promise((r) => setTimeout(r, 30));
+  expect(feed.getSnapshot().outgoing).toHaveLength(1);
+  api.posted('Yes', undefined, 'srv-new');
+  await until(() => feed.getSnapshot().outgoing.length === 0, 'matched by the server id');
+  feed.stop();
+});
+
 test('storage that is blocked or full keeps nothing and breaks nothing', async () => {
-  const blocked = webStorageOutbox({
-    getItem: () => {
-      throw new Error('blocked');
+  const blocked = webStorageOutbox(
+    {
+      getItem: () => {
+        throw new Error('blocked');
+      },
+      setItem: () => {
+        throw new Error('full');
+      },
+      removeItem: () => {
+        throw new Error('blocked');
+      },
+      key: () => {
+        throw new Error('blocked');
+      },
+      length: 0,
     },
-    setItem: () => {
-      throw new Error('full');
-    },
-    removeItem: () => {
-      throw new Error('blocked');
-    },
-  });
+    'me',
+  );
   await expect(
     blocked.put({ id: 'a', conversationId: 'c', text: 't', at: Date.now() }),
   ).resolves.toBeUndefined();

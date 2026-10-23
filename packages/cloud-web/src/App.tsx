@@ -42,7 +42,7 @@ import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
 import { ModePicker } from './ModePicker';
-import { outbox } from './pending';
+import { outboxFor } from './pending';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
@@ -383,7 +383,7 @@ export function ConversationView({
 }) {
   const { t, shared } = useT();
   const feed = useMemo(
-    () => new ConversationFeed(client, conversation.conversationId, undefined, outbox),
+    () => new ConversationFeed(client, conversation.conversationId, undefined, outboxFor(client)),
     [client, conversation.conversationId],
   );
   useEffect(() => {

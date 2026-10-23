@@ -225,7 +225,8 @@ test('a send that looked failed but reached the server is taken off once it show
   await fireEvent.changeText(field, 'Also update the docs');
   await fireEvent.press(screen.getByTestId('button-Send message'));
   expect(await screen.findByText('Not sent')).toBeTruthy();
-  // The server had taken it: the stream brings it.
+  // The server had taken it: the stream brings it, named by the id it was sent under (a failed
+  // send is never matched by its words alone).
   await act(async () =>
     push(
       frame('message.posted', {
@@ -233,6 +234,7 @@ test('a send that looked failed but reached the server is taken off once it show
         role: 'user',
         text: 'Also update the docs',
         at: 3000,
+        clientMessageId: posts[0],
       }),
     ),
   );
@@ -383,12 +385,13 @@ test('a send the server did not confirm is kept on the device and says why; a re
   expect(await screen.findByText('Not sent')).toBeTruthy();
   expect(screen.getByText('The server did not answer. Send it again.')).toBeTruthy();
   // In the secure store, so a killed app still has it.
-  expect(secure.get('maka.outbox.c1')).toContain('Also update the docs');
+  const kept = () => [...secure].filter(([key]) => key.startsWith('maka.outbox.'));
+  expect(kept().some(([, value]) => value.includes('Also update the docs'))).toBe(true);
   await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
   answer = () => Response.json({ error: 'text_too_long' }, { status: 400 });
   await fireEvent.changeText(field(), 'Thanks');
   await fireEvent.press(screen.getByTestId('button-Send message'));
   expect(await screen.findByText('The server refused this message.')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Send again' })).toBeNull();
-  expect(secure.has('maka.outbox.c1')).toBe(false);
+  expect(kept().some(([, value]) => value.includes('Thanks'))).toBe(false);
 });

@@ -52,8 +52,12 @@ export interface OutgoingMessage {
   text: string;
   at: number;
   mode?: Mode;
-  /** The person's last message the conversation showed when this one was sent. */
-  after?: string;
+  /**
+   * The id of the last event the live stream had brought when this was sent. Only a message from a
+   * later event can stand in for it by its words (see `showsMessage`); unset when the stream was
+   * not live.
+   */
+  afterEvent?: number;
   status: OutgoingStatus;
 }
 
@@ -100,6 +104,11 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   /** Cuts the wait before the stream's next try short, while it waits. */
   private wake: (() => void) | undefined;
   private readonly listed = new Set<string>();
+  /** The newest event id the stream brought, and which event brought each message. */
+  private lastEventId = 0;
+  private readonly eventOf = new Map<string, number>();
+  /** Messages already taken as some outgoing message by their words, so one never stands for two. */
+  private readonly claimed = new Set<string>();
   private readonly answerInboxItem: ReturnType<typeof inboxAnswerer>;
 
   constructor(
@@ -179,6 +188,9 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
         this.conversationId,
         (event) => {
           if (event.data.conversationId !== this.conversationId) return;
+          this.lastEventId = Math.max(this.lastEventId, event.id);
+          if (event.kind === 'message.posted' && !this.eventOf.has(event.data.messageId))
+            this.eventOf.set(event.data.messageId, event.id);
           this.setState((previous) => applyEvent(previous, event));
           if (event.kind === 'task.event' && REFRESH_AFTER.has(event.data.event.type))
             this.reconcile(controller);
@@ -235,7 +247,9 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   private settle(): void {
     const { state, outgoing } = this.getSnapshot();
     if (outgoing.length === 0) return;
-    const shown = outgoing.filter((message) => showsMessage(state, message));
+    const shown = outgoing.filter((message) =>
+      showsMessage(state, message, this.eventOf, this.claimed),
+    );
     if (shown.length === 0) return;
     const ids = new Set(shown.map((message) => message.id));
     this.update((s) => ({ ...s, outgoing: s.outgoing.filter((m) => !ids.has(m.id)) }));
@@ -334,15 +348,13 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   send(text: string, mode?: Mode): Promise<boolean> {
     const body = text.trim();
     if (!body || this.pending) return Promise.resolve(false);
-    const last = this.getSnapshot()
-      .state.messages.filter((message) => message.role === 'user')
-      .at(-1);
+    const live = this.getSnapshot().connection.state === 'live';
     const message: OutgoingMessage = {
       id: randomId(),
       text: body,
       at: this.now(),
       ...(mode === undefined ? {} : { mode }),
-      ...(last ? { after: last.id } : {}),
+      ...(live ? { afterEvent: this.lastEventId } : {}),
       status: { state: 'queued' },
     };
     this.update((s) => ({ ...s, outgoing: [...s.outgoing, message] }));
@@ -412,7 +424,6 @@ function outgoingOf(entry: OutboxEntry): Omit<OutgoingMessage, 'status'> {
     text: entry.text,
     at: entry.at,
     ...(entry.mode === undefined ? {} : { mode: entry.mode }),
-    ...(entry.after === undefined ? {} : { after: entry.after }),
   };
 }
 
@@ -423,7 +434,6 @@ function entryOf(conversationId: string, message: OutgoingMessage): OutboxEntry 
     text: message.text,
     at: message.at,
     ...(message.mode === undefined ? {} : { mode: message.mode }),
-    ...(message.after === undefined ? {} : { after: message.after }),
   };
 }
 
@@ -441,25 +451,34 @@ export function sendFailure(error: unknown): { reason: SendFailure; retryable: b
 
 /**
  * Whether the conversation shows this outgoing message: by the server's id for it, or by the id it
- * was sent under. A server that names neither is matched by the words, among the person's messages
- * after the one that was last when it was sent (an older message with the same words is not it).
+ * was sent under. Only a message the server confirmed without naming its id (an older server) may
+ * be matched by its words, and only by a message without a client id that a later event than the
+ * last one seen live at sending brought, so a replayed older message with the same words never
+ * stands in for it. A queued, sending or failed message is matched by id only: matching one wrongly
+ * would drop words the server may never have had.
  */
-function showsMessage(state: ConversationState, message: OutgoingMessage): boolean {
+function showsMessage(
+  state: ConversationState,
+  message: OutgoingMessage,
+  eventOf: ReadonlyMap<string, number>,
+  claimed: Set<string>,
+): boolean {
   const mine = state.messages.filter((m) => m.role === 'user');
   const { status } = message;
-  if (status.state === 'sent' && status.messageId && mine.some((m) => m.id === status.messageId))
-    return true;
+  if (status.state === 'sent' && status.messageId)
+    return mine.some((m) => m.id === status.messageId || m.clientMessageId === message.id);
   if (mine.some((m) => m.clientMessageId === message.id)) return true;
-  let from = 0;
-  if (message.after !== undefined) {
-    const index = mine.findIndex((m) => m.id === message.after);
-    // The conversation has not caught up to where it was sent yet.
-    if (index < 0) return false;
-    from = index + 1;
-  }
-  return mine
-    .slice(from)
-    .some((m) => m.clientMessageId === undefined && m.text.trim() === message.text);
+  const boundary = message.afterEvent;
+  if (status.state !== 'sent' || boundary === undefined) return false;
+  const match = mine.find(
+    (m) =>
+      m.clientMessageId === undefined &&
+      !claimed.has(m.id) &&
+      (eventOf.get(m.id) ?? 0) > boundary &&
+      m.text.trim() === message.text,
+  );
+  if (match) claimed.add(match.id);
+  return match !== undefined;
 }
 
 /** Why a message was not sent, in words the apps translate (shown after their own "Not sent"). */

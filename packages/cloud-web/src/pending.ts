@@ -1,4 +1,4 @@
-import { storagePendingSends, webStorageOutbox } from '@maka-cloud/client';
+import { type CloudClient, storagePendingSends, webStorageOutbox } from '@maka-cloud/client';
 
 function sessionStore() {
   try {
@@ -24,5 +24,9 @@ function localStore() {
 /**
  * The conversation's messages the server has not confirmed, in `localStorage`, so a reload or a
  * closed tab offers them again ("Send again") instead of losing them. Nothing is resent on its own.
+ * Kept per account (`outboxScope`): another account signed in to this browser never sees them.
+ * Signing out keeps them, under that account; they go when sent, deleted, or a day old.
  */
-export const outbox = webStorageOutbox(localStore());
+export function outboxFor(client: CloudClient) {
+  return webStorageOutbox(localStore(), client.outboxScope());
+}

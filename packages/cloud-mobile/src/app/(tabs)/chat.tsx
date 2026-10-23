@@ -328,9 +328,11 @@ function OutgoingBubble({
  * The person's messages the server has not confirmed, kept in the secure store from before each
  * post until the server answers, so leaving the conversation, or the app being killed, does not
  * lose them. Coming back shows them as not sent, with "Send again" (the same id, so the server runs
- * a message once) and "Delete"; nothing is resent on its own.
+ * a message once) and "Delete"; nothing is resent on its own. Kept per server and account
+ * (`outboxScope`), so signing in elsewhere never shows them; signing out keeps them under that
+ * account until they are sent, deleted, or a day old.
  */
-const outbox = storageOutbox({ get: readSecure, set: writeSecure, remove: removeSecure });
+const secureStore = { get: readSecure, set: writeSecure, remove: removeSecure };
 
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
@@ -342,7 +344,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
   const feed = useMemo(
-    () => new ConversationFeed(client, conversationId, undefined, outbox),
+    () =>
+      new ConversationFeed(
+        client,
+        conversationId,
+        undefined,
+        storageOutbox(secureStore, client.outboxScope()),
+      ),
     [client, conversationId],
   );
   // The stream runs only while this tab is in front and the app is in the foreground.
