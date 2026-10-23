@@ -157,6 +157,17 @@ test('with the server’s cards: their order, only what this phone can show, and
   expect(today.shown).toEqual(['waiting:i1', 'finished:t-done', 'finished:t-far', 'note:n1']);
 });
 
+test('a note seen on an earlier visit is not news again', () => {
+  const note = CARDS[4] as HomeCard;
+  const today = todayOf(
+    snapshot({ cards: [note, { ...note, cardId: 'note:n2', seenAt: NOW - 1000 }] }),
+    [],
+    NOW,
+  );
+  expect(today.since.map((row) => row.key)).toEqual(['note:n1']);
+  expect(today.shown).toEqual(['note:n1']);
+});
+
 test('a scheduled card shows its duty once the project is read', () => {
   const today = todayOf(
     snapshot({

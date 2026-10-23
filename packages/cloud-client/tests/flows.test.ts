@@ -457,6 +457,38 @@ test('Home tells the server only the cards the screen showed, at most 100, once 
   expect(seen).toHaveLength(2);
 });
 
+test("a failed read of a conversation's tasks keeps what Home last read of them", async () => {
+  let down = false;
+  const running = {
+    taskId: 't1',
+    state: 'running',
+    createdAt: 1,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+  };
+  const { client } = served({
+    '/v1/conversations/c1/tasks': () =>
+      down ? new Response('{}', { status: 500 }) : Response.json({ tasks: [running] }),
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  feed.start([{ conversationId: 'c1', title: 'Release', createdAt: 1 }]);
+  await until(() => feed.getSnapshot().done?.get('c1')?.length === 1, 'the tasks');
+  const first = feed.getSnapshot().done;
+  down = true;
+  feed.refresh();
+  await until(() => feed.getSnapshot().done !== first, 'the second read');
+  expect(
+    feed
+      .getSnapshot()
+      .done?.get('c1')
+      ?.map((t) => t.taskId),
+  ).toEqual(['t1']);
+  feed.stop();
+});
+
 test('Home without a server Home stays on its own parts and tells the server nothing', async () => {
   const { client, calls } = served({
     '/v1/inbox/items': () => Response.json({ items: [] }),

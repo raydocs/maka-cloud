@@ -188,7 +188,8 @@ export class HomeFeed extends Store<HomeSnapshot> {
         this.client
           .listTasks(id)
           .then((tasks) => [id, tasks] as const)
-          .catch(() => [id, [] as TaskView[]] as const),
+          // A read that failed keeps what was last read, so a blip does not empty Home.
+          .catch(() => [id, this.getSnapshot().done?.get(id) ?? ([] as TaskView[])] as const),
       ),
     ).then(
       (pairs) =>

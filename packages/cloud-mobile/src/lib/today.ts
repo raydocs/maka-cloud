@@ -134,6 +134,8 @@ export function todayOf(
         costUsd: entry?.costUsd,
       });
     } else if (card.kind === 'note' && card.text) {
+      // The server keeps a note for a week; once seen on a visit that ended, it is not news.
+      if (card.seenAt !== null) continue;
       sinceRows.push({ kind: 'note', key: card.cardId, text: card.text });
     } else if (card.kind === 'scheduled' && ref.type === 'duty') {
       const project = projects?.find((p) => p.projectId === ref.projectId);
