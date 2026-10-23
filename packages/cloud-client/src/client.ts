@@ -9,6 +9,7 @@ import {
   type ComputerInput,
   type ComputerState,
   type FeedEvent,
+  type Grant,
   type HomeCard,
   type InboxAnswerRequest,
   type InboxAnswerResult,
@@ -286,6 +287,24 @@ export class CloudClient {
       'inbox',
     );
     return Array.isArray(result.items) ? result.items : [];
+  }
+  /** The approvals this invite kept, newest first; `Unsupported` where nothing keeps them. */
+  async listGrants(): Promise<Grant[]> {
+    const result = await this.request<{ grants: Grant[] }>(routes.grants, {}, 'grants');
+    return Array.isArray(result.grants) ? result.grants : [];
+  }
+  /** Revokes one kept approval; the next such call asks again. */
+  revokeGrant(id: string) {
+    return this.request(routes.grant(id), { method: 'DELETE' }, 'grants');
+  }
+  /** Revokes every kept approval for a repository (or all of them); returns how many. */
+  async revokeGrants(filter: { repository?: string } = {}): Promise<number> {
+    const result = await this.request<{ revoked: number }>(
+      routes.grantsRevoke,
+      { method: 'POST', body: JSON.stringify(filter) },
+      'grants',
+    );
+    return typeof result.revoked === 'number' ? result.revoked : 0;
   }
   /** Home's cards in the server's order; `Unsupported` on a server without `/v1/home`. */
   async home(): Promise<HomeCard[]> {

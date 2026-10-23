@@ -602,3 +602,71 @@ test('a card shows what finished tasks of its kind typically cost, and the table
   assert.equal(other?.typical ?? false, false);
   r.cleanup();
 });
+
+test('a failed refresh never verifies the old precondition as fresh', async (t) => {
+  for (const reason of ['invalid', 'closed', 'not_found'] as const) {
+    await t.test(reason, async (t) => {
+      const r = await rig();
+      let runId = 1;
+      const scanner = new CardScanner(r.engine, {
+        reader: {
+          read: async () => ({
+            ...EMPTY,
+            failingOnDefault: [{ name: 'CI', runId, headSha: 'a'.repeat(40) }],
+          }),
+        },
+      });
+      const result = await scanner.scan(OWNER, r.projectId);
+      assert.ok(result.ok);
+      const card = result.outcome.created[0];
+      assert.ok(card);
+      runId = 2;
+      t.mock.method(r.engine.cards, 'refresh', () => ({ ok: false, reason }));
+      assert.deepEqual(await scanner.verify(OWNER, card.cardId), {
+        ok: false,
+        reason: reason === 'invalid' ? 'read_failed' : reason,
+      });
+      r.cleanup();
+    });
+  }
+});
+
+test('a project scan expires only its own cards, without leaking another owner or project', async () => {
+  const r = await rig();
+  const otherProject = r.engine.addProject(OWNER, {
+    repo: 'acme/other',
+    installationId: 1,
+    defaultBranch: 'main',
+    selfLogins: ['maka-bot'],
+  });
+  const otherOwner = r.engine.addProject('inv_other', {
+    repo: 'acme/private',
+    installationId: 2,
+    defaultBranch: 'main',
+    selfLogins: ['maka-bot'],
+  });
+  assert.ok(otherProject.ok && otherOwner.ok);
+  const scanner = new CardScanner(r.engine, {
+    reader: {
+      read: async () => ({
+        ...EMPTY,
+        newIssues: [{ number: 1, title: 'Issue' }],
+      }),
+    },
+  });
+  for (const [owner, projectId] of [
+    [OWNER, r.projectId],
+    [OWNER, otherProject.project.projectId],
+    ['inv_other', otherOwner.project.projectId],
+  ] as const) {
+    assert.ok((await scanner.scan(owner, projectId)).ok);
+  }
+  r.clock.advance(3 * DAY);
+  const result = await scanner.scan(OWNER, r.projectId);
+  assert.ok(result.ok);
+  assert.equal(result.outcome.expired.length, 1);
+  assert.ok(result.outcome.expired.every((c) => c.owner === OWNER && c.projectId === r.projectId));
+  assert.equal(r.engine.cards.list(OWNER, otherProject.project.projectId, ['open']).length, 1);
+  assert.equal(r.engine.cards.list('inv_other', otherOwner.project.projectId, ['open']).length, 1);
+  r.cleanup();
+});

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import { z } from 'zod';
 import { transaction } from '../db.js';
 import { type Authority, dayOf, fromMicro, toMicro } from '../types.js';
@@ -96,6 +97,17 @@ export const NewCardSchema = z
     message: 'A brief shows printable characters only.',
   });
 export type NewCard = z.infer<typeof NewCardSchema>;
+
+function parseForWrite(input: unknown) {
+  const parsed = NewCardSchema.safeParse(input);
+  if (!parsed.success) return parsed;
+  return NewCardSchema.safeParse({
+    ...parsed.data,
+    title: scrubSecretShapes(parsed.data.title),
+    detail: scrubSecretShapes(parsed.data.detail),
+    brief: scrubSecretShapes(parsed.data.brief),
+  });
+}
 
 export type ProposeResult =
   | { ok: true; card: Card }
@@ -194,7 +206,7 @@ export class CardStore {
 
   /** Stores a new card unless a limit says not to. The first limit that applies is the reason. */
   propose(owner: string, projectId: string, input: unknown): ProposeResult {
-    const parsed = NewCardSchema.safeParse(input);
+    const parsed = parseForWrite(input);
     if (!parsed.success) return { ok: false, reason: 'invalid' };
     const card = parsed.data;
     if (!this.options.projectOk(owner, projectId)) return { ok: false, reason: 'not_found' };
@@ -232,7 +244,7 @@ export class CardStore {
     cardId: string,
     input: unknown,
   ): { ok: true; card: Card } | { ok: false; reason: 'invalid' | 'not_found' | 'closed' } {
-    const parsed = NewCardSchema.safeParse(input);
+    const parsed = parseForWrite(input);
     if (!parsed.success) return { ok: false, reason: 'invalid' };
     return transaction(this.db, () => {
       const old = this.rowOf(owner, cardId);
@@ -390,12 +402,18 @@ export class CardStore {
    * Open cards nobody answered in `EXPIRE_AFTER_MS` end `expired` and count as ignored. Returns
    * them, so whoever shows them can take them down.
    */
-  expire(): Card[] {
+  expire(scope?: { owner: string; projectId: string }): Card[] {
     return transaction(this.db, () => {
       const at = this.now();
       const rows = this.db
-        .prepare("SELECT * FROM cards WHERE state = 'open' AND created_at <= ?")
-        .all(at - EXPIRE_AFTER_MS) as unknown as CardRow[];
+        .prepare(
+          "SELECT * FROM cards WHERE state = 'open' AND created_at <= ?" +
+            (scope ? ' AND owner = ? AND project_id = ?' : ''),
+        )
+        .all(
+          at - EXPIRE_AFTER_MS,
+          ...(scope ? [scope.owner, scope.projectId] : []),
+        ) as unknown as CardRow[];
       for (const row of rows) {
         this.db
           .prepare("UPDATE cards SET state = 'expired', decided_at = ? WHERE card_id = ?")
