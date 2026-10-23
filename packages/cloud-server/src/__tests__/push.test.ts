@@ -1193,3 +1193,32 @@ test('a person who reads English gets the push words in English; the ids and sta
     body: 'Open Maka to see where it went.',
   });
 });
+
+test('a person who reads Traditional Chinese gets the push words in Traditional Chinese', async (t) => {
+  const { h, fake, conversationId, finish } = await setup(t);
+  const d = device();
+  await subscribe(h, d);
+  const set = await h.api('/v1/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ language: 'zh-Hant' }),
+  });
+  assert.equal(set.status, 200);
+  const taskId = await finish();
+  await eventually(() => fake.calls.length === 1, 'a push');
+  assert.deepEqual(payloadOf(fake.calls[0] as Call, d), {
+    type: 'task.finished',
+    conversationId,
+    taskId,
+    state: 'succeeded',
+    lang: 'zh-Hant',
+    title: '背景任務已完成',
+    body: '開啟 Maka 查看結果。',
+  });
+  assert.equal(await h.server.pushAlert(h.inviteId, 'spend:2026-10-22'), true);
+  assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    type: 'spend.alert',
+    lang: 'zh-Hant',
+    title: '今天的花費偏高',
+    body: '開啟 Maka 查看明細。',
+  });
+});

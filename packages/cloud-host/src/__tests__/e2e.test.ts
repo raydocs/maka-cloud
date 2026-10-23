@@ -326,6 +326,43 @@ test('the conversational agent is told the person’s language in its system pro
   assert.ok(en && zhLater);
   assert.ok(!system(en).includes('Simplified Chinese'));
   assert.equal(system(zhLater), system(zh[0] as (typeof zh)[number]));
+
+  // A Traditional Chinese reader's new conversation gets the zh-Hant paragraph, in its system
+  // prompt only and the same on every turn; the earlier conversations keep theirs.
+  const hantInstruction = languageInstruction('zh-Hant') ?? '';
+  assert.ok(hantInstruction.includes('Traditional Chinese, Taiwan usage'));
+  const setHant = await fetch(`${stack.cloud.server.url}/v1/settings`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${stack.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ language: 'zh-Hant' }),
+  });
+  assert.equal(setHant.status, 200);
+  const hantConversation = await newConversation(stack);
+  for (const n of [1, 2]) {
+    stack.model.script('conductor', text(`回答 ${n}`));
+    await stack.api(`/v1/conversations/${hantConversation}/messages`, { text: `問題 ${n}` });
+    await readFeed(stack, hantConversation, (events) => assistantTexts(events).length === n);
+    await stack.cloud.conductor.idle();
+  }
+  const hant = stack.model.requests.filter((request) => request.lane === 'conductor').slice(4);
+  assert.equal(hant.length, 2);
+  for (const request of hant) {
+    assert.ok(system(request).includes(JSON.stringify(hantInstruction).slice(1, -1)));
+    assert.ok(!system(request).includes('Simplified Chinese'));
+    assert.ok(!JSON.stringify(request.body.messages).includes('Traditional Chinese'));
+  }
+  const hantHistory = checkHistory(hant, stack.model.emittedThinking.slice(-2), {
+    isRequestOnlyBlock: () => false,
+  });
+  assert.deepEqual(hantHistory.contentPrefix.breaks, []);
+  assert.deepEqual(hantHistory.systemChanges, []);
+  stack.model.script('conductor', text('回答 4'));
+  await stack.api(`/v1/conversations/${zhConversation}/messages`, { text: '问题 4' });
+  await readFeed(stack, zhConversation, (events) => assistantTexts(events).length === 4);
+  await stack.cloud.conductor.idle();
+  const zhLatest = stack.model.requests.filter((request) => request.lane === 'conductor').at(-1);
+  assert.ok(zhLatest);
+  assert.equal(system(zhLatest), system(zh[0] as (typeof zh)[number]));
 });
 
 test('a fact in memory taints every new conversation of its invite: its first delegation waits for the user', async (t) => {

@@ -376,7 +376,8 @@ test('a notice is in the language of the conversation’s owner, an ask built fr
   const notices: Array<{ conversationId: string; text: string }> = [];
   const notifier = conductorNotifier(
     { postNotice: async (notice) => void notices.push(notice as never) },
-    (conversationId) => (conversationId === 'c_en' ? 'en' : 'zh-Hans'),
+    (conversationId) =>
+      conversationId === 'c_en' ? 'en' : conversationId === 'c_hant' ? 'zh-Hant' : 'zh-Hans',
   );
   const stall = {
     itemId: 'i-1',
@@ -394,6 +395,14 @@ test('a notice is in the language of the conversation’s owner, an ask built fr
     ],
     batch: true,
   });
+  await notifier.interrupt({ items: [{ ...stall, conversationId: 'c_hant' }], batch: false });
+  await notifier.interrupt({
+    items: [
+      { ...stall, conversationId: 'c_hant' },
+      { ...question, conversationId: 'c_hant' },
+    ],
+    batch: true,
+  });
   assert.deepEqual(notices, [
     { conversationId: 'c_zh', text: '需要你处理：任务“Deploy”已经 40 分钟没有进展。' },
     {
@@ -403,6 +412,11 @@ test('a notice is in the language of the conversation’s owner, an ask built fr
     {
       conversationId: 'c_zh',
       text: '需要你处理（2 项）：\n- 任务“Deploy”已经 40 分钟没有进展。\n- Which colour?',
+    },
+    { conversationId: 'c_hant', text: '需要你處理：任務“Deploy”已經 40 分鐘沒有進展。' },
+    {
+      conversationId: 'c_hant',
+      text: '需要你處理（2 項）：\n- 任務“Deploy”已經 40 分鐘沒有進展。\n- Which colour?',
     },
   ]);
 });

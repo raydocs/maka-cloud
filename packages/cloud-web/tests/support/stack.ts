@@ -20,6 +20,7 @@ import {
   type AnswerOutcome,
   type CloudServer,
   type InboxService,
+  type Language,
   type ConversationHandler,
   type ConversationPublisher,
   type PushTransport,
@@ -164,7 +165,7 @@ export async function startStack(
      * words (its own Chinese comes with its translation), so its people choose English, as one does
      * with `PATCH /v1/settings`. The server's own default is Simplified Chinese.
      */
-    language?: 'zh-Hans' | 'en';
+    language?: Language;
   } = {},
 ): Promise<Stack> {
   const language = options.language ?? 'en';

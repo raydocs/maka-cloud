@@ -120,7 +120,7 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `GET /v1/home` | The caller's Home as the server keeps it: `{cards: [{cardId, kind, ref, rank, seenAt, at, state?, text?}]}` (see "Home cards"). |
 | `POST /v1/home/seen` | `{cardIds}` (at most 100): the person saw these cards and left Home. Records the ones that are on this Home and moves the caller's visit to now. 200 `{seen, visitedAt}`. |
 | `POST /v1/home/order` | `{cardId, after}`: moves a card to just after `after` (first when null) inside its kind. 200 `{cards}`; 404 a card that is not on this Home; 400 `after` in another kind, itself, or not there. |
-| `GET /v1/settings` | `{language}`: what the server writes to the caller's invite in, `zh-Hans` (the default) or `en` (see "Language"). |
+| `GET /v1/settings` | `{language}`: what the server writes to the caller's invite in, `zh-Hans` (the default), `zh-Hant` or `en` (see "Language"). |
 | `PATCH /v1/settings` | `{language}` -> 200 `{language}`. 400 for any other value or field; 429 over the control limit. |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
@@ -243,11 +243,15 @@ send ends after 10 s or when the server closes; and the response is read to 4 Ki
 
 ### Language
 
-`i18n.ts`. Each invite has a language, `zh-Hans` or `en`, in the invites file
-(`invites.language`, null until set, which reads as `zh-Hans`). An account made
-by `/v1/auth/claim`, or by linking the first identity, gets `en` when the first
-entry of the request's `Accept-Language` is English and `zh-Hans` otherwise; a
-language already set is kept. `/v1/settings` reads and changes it.
+`i18n.ts`. Each invite has a language, `zh-Hans`, `zh-Hant` (Traditional
+Chinese, Taiwan usage) or `en`, in the invites file (`invites.language`, null
+until set, which reads as `zh-Hans`). An account made by `/v1/auth/claim`, or by
+linking the first identity, takes it from the first entry of the request's
+`Accept-Language`: `en` for English; `zh-Hant` for `zh-Hant` or the Chinese of
+Taiwan, Hong Kong or Macau (`zh-TW`, `zh-HK`, `zh-MO`); `zh-Hans` for `zh-Hans`,
+`zh-CN`, `zh-SG`, plain `zh` and anything else. A script subtag beats a region
+(`zh-Hans-HK` is `zh-Hans`). A language already set is kept. `/v1/settings`
+reads and changes it, and accepts only those three values.
 
 What the server says in it, from one typed catalogue with an English fallback:
 the sign-in mail (the account's language when the address has one, else the
@@ -258,8 +262,9 @@ approval's card, the conductor's own words and every option label and id stay as
 they are; the apps translate known option ids.
 
 The conversational agent gets one paragraph at the end of its system prompt for a
-`zh-Hans` reader (`languageInstruction`): reply in Simplified Chinese unless the
-person writes in another language, keep code, commands, file names and quoted
+`zh-Hans` reader (`languageInstruction`): reply in Simplified Chinese (for a
+`zh-Hant` reader, Traditional Chinese in Taiwan usage) unless the person writes
+in another language, keep code, commands, file names and quoted
 text as they are, and keep delegated briefs, commit messages, pull request titles
 and code in English. It is read when a conversation's conductor session is made
 and kept with it, so a conversation's prompt never changes and its history is

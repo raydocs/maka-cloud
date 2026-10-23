@@ -397,6 +397,18 @@ test('no runner, model or vendor name reaches the client, even in a failure a ru
   await view.stop();
 });
 
+test('a stack seeded in Traditional Chinese gives its invites zh-Hant, and the client reads it', async () => {
+  const hant = await startStack({ language: 'zh-Hant' });
+  try {
+    const client = new CloudClient(hant.token, { baseUrl: hant.url });
+    expect(await client.settings()).toEqual({ language: 'zh-Hant' });
+    const other = new CloudClient(hant.newInvite().token, { baseUrl: hant.url });
+    expect(await other.settings()).toEqual({ language: 'zh-Hant' });
+  } finally {
+    await hant.close();
+  }
+});
+
 test('a server without Web Push says so with a 404, and the client hides the control instead of guessing', async () => {
   const bare = await startStack({ push: false });
   try {
