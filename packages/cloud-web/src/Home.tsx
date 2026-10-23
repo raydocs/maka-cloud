@@ -87,7 +87,7 @@ function InboxStatus({
     );
   if (loaded)
     return (
-      <section className="card section-card" aria-label={t('Nothing needs you')}>
+      <section className="section-card" aria-label={t('Nothing needs you')}>
         <p className="muted">{t('Nothing needs you.')}</p>
       </section>
     );
@@ -107,6 +107,9 @@ function InboxStatus({
  */
 export function Home({
   client,
+  startOnly = false,
+  hideStart = false,
+  active = true,
   conversations,
   onStarted,
   onOpen,
@@ -114,6 +117,9 @@ export function Home({
   now = Date.now,
 }: {
   client: CloudClient;
+  startOnly?: boolean;
+  hideStart?: boolean;
+  active?: boolean;
   conversations: Conversation[];
   onStarted: (conversation: Conversation) => void;
   onOpen: (conversationId: string) => void;
@@ -138,7 +144,9 @@ export function Home({
   // The last visit is read once; it is written when the person leaves, so a reload is a visit.
   // Come back to this tab and the decisions, results and schedule are read again.
   const latestConversations = useRef(conversations);
+  const wasActive = useRef(active);
   useEffect(() => {
+    if (startOnly) return;
     feed.start(latestConversations.current);
     const onVisible = () => {
       if (document.visibilityState === 'visible') feed.refresh();
@@ -151,11 +159,15 @@ export function Home({
       window.removeEventListener('pagehide', leave);
       feed.stop();
     };
-  }, [feed]);
+  }, [feed, startOnly]);
+  useEffect(() => {
+    if (active && !wasActive.current && !startOnly) feed.refresh();
+    wasActive.current = active;
+  }, [active, feed, startOnly]);
   useEffect(() => {
     latestConversations.current = conversations;
-    feed.conversationsChanged(conversations);
-  }, [feed, conversations]);
+    if (!startOnly) feed.conversationsChanged(conversations);
+  }, [feed, conversations, startOnly]);
 
   const live = Object.values(items)
     .filter((item) => item.state !== 'closed')
@@ -177,7 +189,7 @@ export function Home({
     <div className="page home">
       {/* Desktop: what waits on you beside the work, as Hark keeps its cards beside the chat.
           A phone reads one column, in this order: waiting, suggested, start, results. */}
-      <div className="home-side">
+      <div className="home-side" hidden={startOnly}>
         {open.length > 0 && (
           <section
             className="card section-card decisions-waiting"
@@ -279,7 +291,7 @@ export function Home({
         )}
       </div>
       <div className="home-main">
-        {onboarding && conversations.length === 0 && (
+        {!hideStart && onboarding && conversations.length === 0 && (
           <Onboarding
             onPick={(sentence) => {
               setDraft(sentence);
@@ -290,70 +302,72 @@ export function Home({
           />
         )}
 
-        <section className="card start" aria-label={t('Start something')}>
-          <h1>{t('Make room for your next idea.')}</h1>
-          <p>
-            {t('Tell {name} what you’d like done, in a sentence. It takes it from there.', {
-              name: BRAND.name,
-            })}
-          </p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!draft.trim() || starting) return;
-              setStarting(true);
-              setStartError('');
-              void starter.start(draft, workMode).then(onStarted, (failure: unknown) => {
-                setStartError(errorText(failure));
-                setStarting(false);
-              });
-            }}
-          >
-            <label htmlFor="first-message" className="sr-only">
-              {t('What would you like to get done?')}
-            </label>
-            <div className="pill-field">
-              <textarea
-                id="first-message"
-                rows={1}
-                maxLength={16000}
-                placeholder={t('What would you like to get done?')}
-                onKeyDown={submitOnEnter}
-                value={draft}
-                onChange={(e) => {
-                  setDraft(displayText(e.target.value));
-                  starter.draftEdited();
-                }}
-              />
-              <button
-                type="submit"
-                className="round-button"
-                aria-label={starting ? t('Starting…') : t('Start')}
-                disabled={starting || !draft.trim()}
-              >
-                <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
-              </button>
-            </div>
-            <ModePicker
-              value={workMode}
-              onChange={setWorkMode}
-              idPrefix="start"
-              disabled={starting}
-            />
-          </form>
-          {startError && (
-            <p role="alert" className="error">
-              {shared(startError)}
+        {!hideStart && (
+          <section className="card start" aria-label={t('Start something')}>
+            <h1>{t('Make room for your next idea.')}</h1>
+            <p>
+              {t('Tell {name} what you’d like done, in a sentence. It takes it from there.', {
+                name: BRAND.name,
+              })}
             </p>
-          )}
-        </section>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!draft.trim() || starting) return;
+                setStarting(true);
+                setStartError('');
+                void starter.start(draft, workMode).then(onStarted, (failure: unknown) => {
+                  setStartError(errorText(failure));
+                  setStarting(false);
+                });
+              }}
+            >
+              <label htmlFor="first-message" className="sr-only">
+                {t('What would you like to get done?')}
+              </label>
+              <div className="pill-field">
+                <textarea
+                  id="first-message"
+                  rows={1}
+                  maxLength={16000}
+                  placeholder={t('What would you like to get done?')}
+                  onKeyDown={submitOnEnter}
+                  value={draft}
+                  onChange={(e) => {
+                    setDraft(displayText(e.target.value));
+                    starter.draftEdited();
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="round-button"
+                  aria-label={starting ? t('Starting…') : t('Start')}
+                  disabled={starting || !draft.trim()}
+                >
+                  <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
+                </button>
+              </div>
+              <ModePicker
+                value={workMode}
+                onChange={setWorkMode}
+                idPrefix="start"
+                disabled={starting}
+              />
+            </form>
+            {startError && (
+              <p role="alert" className="error">
+                {shared(startError)}
+              </p>
+            )}
+          </section>
+        )}
 
-        {since !== undefined && done !== undefined && finished.length > 0 && (
+        {!startOnly && since !== undefined && done !== undefined && finished.length > 0 && (
           <section className="card section-card" aria-label={t('Since you were last here')}>
             <h2>{t('Since you were last here')}</h2>
             <div className="stat-tiles">
               <StatTile label={t('Done')} value={String(finished.length)} />
-              <StatTile label={t('Spent')} value={anySpend ? dollars(spent) : t('Not reported')} />
+              {anySpend && <StatTile label={t('Spent')} value={dollars(spent)} />}
             </div>
             <ul className="done-lines">
               {finished.map((entry) => (
@@ -382,7 +396,9 @@ export function Home({
                             : shared(displayText(entry.outcome))}
                       </span>
                     </span>
-                    <span className="done-cost muted">{shared(dollars(entry.costUsd))}</span>
+                    {entry.costUsd !== undefined && (
+                      <span className="done-cost muted">{dollars(entry.costUsd)}</span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -390,7 +406,7 @@ export function Home({
           </section>
         )}
 
-        {recent.length > 0 && (
+        {!startOnly && recent.length > 0 && (
           <section className="card section-card" aria-label={t('Recent conversations')}>
             <h2>{t('Pick up where you left off')}</h2>
             <ul className="recent">

@@ -146,9 +146,12 @@ test('Settings switches immediately, persists the choice, follows browser change
       <CurrentLanguage />
     </LanguageProvider>,
   );
-  expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: '我的' })).toBeTruthy();
+  expect(screen.getByText('语言', { exact: true })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '繁體中文' }));
-  expect(screen.getByRole('heading', { name: '設定' })).toBeTruthy();
+  expect(screen.getByText('語言', { exact: true })).toBeTruthy();
+  expect(screen.queryByText('语言', { exact: true })).toBeNull();
+  expect(screen.getByRole('heading', { name: '我的' })).toBeTruthy();
   expect(localStorage.getItem(LANGUAGE_KEY)).toBe('zh-Hant');
   expect(document.documentElement.lang).toBe('zh-Hant');
   view.unmount();
@@ -157,9 +160,9 @@ test('Settings switches immediately, persists the choice, follows browser change
       <Settings client={api} onDisconnect={() => {}} />
     </LanguageProvider>,
   );
-  expect(screen.getByRole('heading', { name: '設定' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: '我的' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'English' }));
-  expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Me' })).toBeTruthy();
   expect(localStorage.getItem(LANGUAGE_KEY)).toBe('en');
   expect(document.documentElement.lang).toBe('en');
   expect(document.title).toBe('Maka — your work, together');
@@ -170,9 +173,9 @@ test('Settings switches immediately, persists the choice, follows browser change
       <CurrentLanguage />
     </LanguageProvider>,
   );
-  expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Me' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '简体中文' }));
-  expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: '我的' })).toBeTruthy();
   expect(localStorage.getItem(LANGUAGE_KEY)).toBe('zh-Hans');
   fireEvent.click(
     within(screen.getByRole('group', { name: '语言' })).getByRole('button', { name: '跟随系统' }),
@@ -180,7 +183,7 @@ test('Settings switches immediately, persists the choice, follows browser change
   expect(localStorage.getItem(LANGUAGE_KEY)).toBe('system');
   vi.spyOn(navigator, 'languages', 'get').mockReturnValue(['en-SG']);
   fireEvent(window, new Event('languagechange'));
-  expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Me' })).toBeTruthy();
 });
 
 test('blocked storage and invalid saved preferences safely follow the browser', () => {
@@ -269,5 +272,12 @@ test('the language is sent again when a replacement worker takes control', async
   } finally {
     if (original) Object.defineProperty(navigator, 'serviceWorker', original);
     else Reflect.deleteProperty(navigator, 'serviceWorker');
+  }
+});
+
+test('Chinese catalogues use full-width punctuation after Chinese words', () => {
+  for (const catalogue of [zhHans, zhHant]) {
+    for (const value of Object.values(catalogue))
+      expect(value).not.toMatch(/[\p{Script=Han}][,:?()]/u);
   }
 });

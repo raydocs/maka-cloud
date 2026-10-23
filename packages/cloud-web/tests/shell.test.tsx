@@ -107,12 +107,12 @@ test('the navigation marks the open section and moves between them', () => {
   const names = within(nav)
     .getAllByRole('button')
     .map((button) => button.textContent);
-  expect(names).toEqual(['Home', 'Chat', 'Projects', 'Settings']);
+  expect(names).toEqual(['Search', 'Home', 'Chat', 'Projects', 'Me']);
   expect(within(nav).getByRole('button', { name: 'Chat' }).getAttribute('aria-current')).toBe(
     'page',
   );
   expect(within(nav).getByRole('button', { name: 'Home' }).getAttribute('aria-current')).toBeNull();
-  fireEvent.click(within(nav).getByRole('button', { name: 'Settings' }));
+  fireEvent.click(within(nav).getByRole('button', { name: 'Me' }));
   expect(seen).toEqual(['settings']);
 });
 
@@ -182,7 +182,7 @@ test('Settings holds appearance, memory, notifications and the way out', () => {
       />
     </ThemeProvider>,
   );
-  expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Me' })).toBeTruthy();
   const choice = screen.getByRole('group', { name: 'Color mode' });
   const pressed = (name: string) =>
     within(choice).getByRole('button', { name }).getAttribute('aria-pressed');

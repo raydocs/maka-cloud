@@ -9,6 +9,7 @@ import {
 } from '@maka-cloud/client';
 import { Projects } from '../src/Projects';
 import { TaskPage } from '../src/TaskPage';
+import { LanguageProvider, translator } from '../src/i18n';
 
 beforeEach(() => {
   let n = 0;
@@ -387,4 +388,23 @@ test('a server without suggestions shows no suggestion section and no error', as
   await screen.findByRole('region', { name: 'example/repo' });
   expect(screen.queryByRole('list', { name: 'Suggestions' })).toBeNull();
   expect(screen.queryByRole('alert')).toBeNull();
+});
+
+test.each([
+  ['en', 'Budget:'],
+  ['zh-Hans', '预算：'],
+  ['zh-Hant', '預算：'],
+] as const)('a task page labels a budget without cost in %s', async (language, label) => {
+  const api = serveTask();
+  const { container } = render(
+    <LanguageProvider language={language}>
+      <TaskPage
+        client={api.client}
+        task={finished({ costUsd: undefined, budgetUsd: 7 })}
+        onBack={() => {}}
+      />
+    </LanguageProvider>,
+  );
+  expect(container.querySelector('.task-page-meta')?.textContent).toContain(`${label} $7.00`);
+  await screen.findByRole('region', { name: translator(language).t('Outcome') });
 });

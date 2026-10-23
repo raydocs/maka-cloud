@@ -2,6 +2,7 @@ import { useT } from './i18n';
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowUpRight, FileDiff } from 'lucide-react';
 import {
+  type ArtifactContent,
   type ArtifactListing,
   type CloudClient,
   type DeliveryModel,
@@ -136,18 +137,21 @@ export function SourcesStack({
   if (shown.length === 0) return null;
   const middle = shown.length === 3 ? 1 : shown.length - 1;
   return (
-    <section className="sources-stack" aria-label={t('Sources')}>
-      {shown.map((source, i) => (
-        <SourceCard
-          key={source.index}
-          client={client}
-          taskId={taskId}
-          source={source}
-          tiltDegrees={tilt(i, shown.length)}
-          onTop={i === middle}
-        />
-      ))}
-    </section>
+    <details className="sources-disclosure">
+      <summary>{t('Sources ({count})', { count: shown.length })}</summary>
+      <section className="sources-stack" aria-label={t('Sources')}>
+        {shown.map((source, i) => (
+          <SourceCard
+            key={source.index}
+            client={client}
+            taskId={taskId}
+            source={source}
+            tiltDegrees={tilt(i, shown.length)}
+            onTop={i === middle}
+          />
+        ))}
+      </section>
+    </details>
   );
 }
 
@@ -256,6 +260,7 @@ export function DeliveryCard({
   const diff = model?.diff;
   const [proof, setProof] = useState<Blob | undefined>();
   const proofUrl = useObjectUrl(proof);
+  const showDiffTile = !views && !(shot && proofUrl) && diff;
   const [opened, setOpened] = useState<Opened | undefined>();
   const [failed, setFailed] = useState(false);
   const markFailed = useCallback(() => setFailed(true), []);
@@ -337,7 +342,7 @@ export function DeliveryCard({
           <img className="picture" src={proofUrl} alt={displayText(shot.name)} />
         </button>
       )}
-      {!views && !(shot && proofUrl) && diff && (
+      {showDiffTile && (
         <button
           type="button"
           className="delivery-visual delivery-diff-tile"
@@ -365,6 +370,30 @@ export function DeliveryCard({
               <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           ))}
+        </div>
+      )}
+      {listings.filter(
+        (listing) =>
+          listing.kind === 'file' &&
+          listing.index !== shot?.index &&
+          (!showDiffTile || listing.index !== diff?.index) &&
+          !views?.some((view) => view.listing.index === listing.index),
+      ).length > 0 && (
+        <div className="delivery-files">
+          {listings
+            .filter(
+              (listing) =>
+                listing.kind === 'file' &&
+                listing.index !== shot?.index &&
+                (!showDiffTile || listing.index !== diff?.index) &&
+                !views?.some((view) => view.listing.index === listing.index),
+            )
+            .map((listing) => (
+              <details className="artifact" key={listing.index}>
+                <summary>{displayText(listing.name)}</summary>
+                <FilePreview client={client} taskId={task.taskId} listing={listing} />
+              </details>
+            ))}
         </div>
       )}
       {opened && (
@@ -415,6 +444,46 @@ export function TaskDelivery({
         onOpenTask={onOpenTask}
       />
       <SourcesStack client={client} taskId={task.taskId} sources={sources} />
+    </>
+  );
+}
+
+function FilePreview({
+  client,
+  taskId,
+  listing,
+}: {
+  client: CloudClient;
+  taskId: string;
+  listing: ArtifactListing;
+}) {
+  const { t } = useT();
+  const [content, setContent] = useState<ArtifactContent>();
+  const [failed, setFailed] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const src = useObjectUrl(content?.kind === 'image' ? content.blob : undefined);
+  return (
+    <>
+      <button
+        type="button"
+        className="quiet-action"
+        onClick={() => {
+          if (content || loading) return;
+          setLoading(true);
+          setFailed(false);
+          void client
+            .readArtifact(taskId, listing.index)
+            .then(setContent, () => setFailed(true))
+            .finally(() => setLoading(false));
+        }}
+      >
+        {t('Review {p0}', { p0: displayText(listing.name) })}
+      </button>
+      {content?.kind === 'text' && (
+        <pre className="report-content">{displayText(content.text)}</pre>
+      )}
+      {src && <img className="picture" src={src} alt={displayText(listing.name)} />}
+      {failed && <p role="alert">{t('The file could not be loaded.')}</p>}
     </>
   );
 }

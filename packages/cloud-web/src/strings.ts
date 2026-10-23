@@ -1,6 +1,12 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  Me: 'Me',
+  Search: 'Search',
+  'Search conversations': 'Search conversations',
+  'New conversation': 'New conversation',
+  'Sources ({count})': 'Sources ({count})',
+
   'starter.update': 'Update',
   Live: 'Live',
   'Connecting…': 'Connecting…',
@@ -172,6 +178,7 @@ export const en = {
   'Current step': 'Current step',
   'Cost so far:': 'Cost so far:',
   'Cost:': 'Cost:',
+  'Budget:': 'Budget:',
   ' of {p0}': ' of {p0}',
   'The budget was reached, so the work was stopped.':
     'The budget was reached, so the work was stopped.',
@@ -278,6 +285,7 @@ export const en = {
   'Open large: the changes': 'Open large: the changes',
   'View the changes': 'View the changes',
   'The picture could not be loaded.': 'The picture could not be loaded.',
+  'The file could not be loaded.': 'The file could not be loaded.',
   'Finished ·': 'Finished ·',
   'Kept approvals': 'Kept approvals',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
@@ -499,6 +507,12 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  Me: '我的',
+  Search: '搜索',
+  'Search conversations': '搜索对话',
+  'New conversation': '新对话',
+  'Sources ({count})': '来源（{count}）',
+
   'starter.update': '更新',
   Live: '已连接',
   'Connecting…': '正在连接…',
@@ -654,6 +668,7 @@ export const zhHans: Record<Key, string> = {
   'Current step': '当前步骤',
   'Cost so far:': '目前花费：',
   'Cost:': '花费：',
+  'Budget:': '预算：',
   ' of {p0}': '，预算 {p0}',
   'The budget was reached, so the work was stopped.': '已达到预算，工作已停止。',
   'Still stopping. The cost may change until it has stopped.':
@@ -755,6 +770,7 @@ export const zhHans: Record<Key, string> = {
   'Open large: the changes': '放大查看：改动',
   'View the changes': '查看改动',
   'The picture could not be loaded.': '无法加载图片。',
+  'The file could not be loaded.': '无法加载文件。',
   'Finished ·': '已完成 ·',
   'Kept approvals': '已记住的授权',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
@@ -963,6 +979,12 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  Me: '我的',
+  Search: '搜尋',
+  'Search conversations': '搜尋對話',
+  'New conversation': '新對話',
+  'Sources ({count})': '來源（{count}）',
+
   'starter.update': '更新',
   Live: '已連線',
   'Connecting…': '正在連線…',
@@ -1118,6 +1140,7 @@ export const zhHant: Record<Key, string> = {
   'Current step': '目前步驟',
   'Cost so far:': '目前花費：',
   'Cost:': '花費：',
+  'Budget:': '預算：',
   ' of {p0}': '，預算 {p0}',
   'The budget was reached, so the work was stopped.': '已達到預算，工作已停止。',
   'Still stopping. The cost may change until it has stopped.':
@@ -1219,6 +1242,7 @@ export const zhHant: Record<Key, string> = {
   'Open large: the changes': '放大查看：改動',
   'View the changes': '查看改動',
   'The picture could not be loaded.': '無法載入圖片。',
+  'The file could not be loaded.': '無法載入檔案。',
   'Finished ·': '已完成 ·',
   'Kept approvals': '已記住的授權',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
