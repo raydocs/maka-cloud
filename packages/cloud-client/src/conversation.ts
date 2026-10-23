@@ -34,6 +34,7 @@ export interface ConversationSnapshot {
 
 /** Events after which the server's own task list is read again (cost, budget, stops still owed). */
 const REFRESH_AFTER = new Set([
+  'task_created',
   'task_succeeded',
   'task_failed',
   'task_cancelled',

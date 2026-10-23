@@ -71,6 +71,7 @@ export interface UsageView {
 /** A task as the public API shows it: the runner id never leaves the server. */
 export interface TaskView {
   quota?: QuotaReason;
+  steerable?: boolean;
   taskId: string;
   parentTaskId?: string;
   title?: string;

@@ -66,7 +66,7 @@ export function GrantsPanel({
   }
 
   return (
-    <section className="card section-card" aria-label={t('Kept approvals')}>
+    <section id="grants" className="card section-card" aria-label={t('Kept approvals')}>
       <h2>{t('Kept approvals')}</h2>
       <p className="muted">
         {t(

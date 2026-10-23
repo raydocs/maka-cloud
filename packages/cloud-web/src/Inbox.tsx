@@ -30,6 +30,7 @@ export function InboxCard({
   return (
     <section
       className="question"
+      data-waiting={item.state !== 'closed'}
       data-task={item.taskId}
       data-decision={item.state === 'open'}
       aria-label={shared(card.heading)}

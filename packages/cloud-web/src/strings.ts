@@ -7,6 +7,56 @@ export const en = {
   'Ask the owner for model access': 'Ask the owner for model access',
   'Send your first message': 'Send your first message',
   Later: 'Later',
+  'Slow down. Try again in a moment.': 'Slow down. Try again in a moment.',
+  'Too many open views. Wait a moment, then reconnect.':
+    'Too many open views. Wait a moment, then reconnect.',
+  'Delivery not confirmed. Your message is back in the draft.':
+    'Delivery not confirmed. Your message is back in the draft.',
+  'This task cannot take messages. Your draft is kept; send it as a new request.':
+    'This task cannot take messages. Your draft is kept; send it as a new request.',
+  'A computer request is still in progress. Wait, then try again.':
+    'A computer request is still in progress. Wait, then try again.',
+  'Your control has ended. You are watching the task.':
+    'Your control has ended. You are watching the task.',
+  'This computer is being watched in another tab or device. Close that view first.':
+    'This computer is being watched in another tab or device. Close that view first.',
+  'This invite was revoked. Sign in with a valid invite.':
+    'This invite was revoked. Sign in with a valid invite.',
+
+  'A message to a running task can have up to 4,000 characters.':
+    'A message to a running task can have up to 4,000 characters.',
+  Working: 'Working',
+  'To the running task': 'To the running task',
+  'Send as a new request': 'Send as a new request',
+  'Waiting for the next step': 'Waiting for the next step',
+  'Read by the task': 'Read by the task',
+  'Taken back': 'Taken back',
+  'Not read before the task ended': 'Not read before the task ended',
+  'Take back': 'Take back',
+  'Delivery not confirmed. Try again with the same message.':
+    'Delivery not confirmed. Try again with the same message.',
+  'Check delivery': 'Check delivery',
+  'Work keeps going on the server. Nothing needs resending.':
+    'Work keeps going on the server. Nothing needs resending.',
+  Recent: 'Recent',
+  '{count} waiting': '{count} waiting',
+  'Working for {time}': 'Working for {time}',
+  'Allowed once': 'Allowed once',
+  'Allowed for this task': 'Allowed for this task',
+  'Allowed for this repository': 'Allowed for this repository',
+  'Revoke in Me · Grants': 'Revoke in Me · Grants',
+  'Continue “{title}”': 'Continue “{title}”',
+  'Plan my next project': 'Plan my next project',
+  'Review my recent work': 'Review my recent work',
+  'Explore an idea': 'Explore an idea',
+  'The task finished. Send a message to continue.':
+    'The task finished. Send a message to continue.',
+  'The computer may be asleep or unavailable. Wait, then reconnect.':
+    'The computer may be asleep or unavailable. Wait, then reconnect.',
+  'Control is held elsewhere or changing. Retry after it is returned.':
+    'Control is held elsewhere or changing. Retry after it is returned.',
+  'The connection dropped. Reconnect to continue watching.':
+    'The connection dropped. Reconnect to continue watching.',
   Open: 'Open',
   'Something needs a look': 'Something needs a look',
   'Open Maka to check your inbox.': 'Open Maka to check your inbox.',
@@ -534,6 +584,49 @@ export const zhHans: Record<Key, string> = {
   'Ask the owner for model access': '请联系所有者配置模型 API 密钥',
   'Send your first message': '发送第一条消息',
   Later: '稍后',
+  'Slow down. Try again in a moment.': '请放慢操作，稍后再试。',
+  'Too many open views. Wait a moment, then reconnect.': '打开的视图过多。请稍候再重新连接。',
+  'Delivery not confirmed. Your message is back in the draft.': '尚未确认送达。消息已放回草稿。',
+  'This task cannot take messages. Your draft is kept; send it as a new request.':
+    '此任务无法接收消息。草稿已保留，请作为新请求发送。',
+  'A computer request is still in progress. Wait, then try again.':
+    '电脑请求仍在处理中，请稍后重试。',
+  'Your control has ended. You are watching the task.': '你的控制已结束，现在正在观看任务。',
+  'This computer is being watched in another tab or device. Close that view first.':
+    '另一标签页或设备正在观看此电脑，请先关闭该视图。',
+  'This invite was revoked. Sign in with a valid invite.': '此邀请已撤销，请使用有效邀请登录。',
+
+  'A message to a running task can have up to 4,000 characters.':
+    '发送到运行中任务的消息最多可包含 4,000 个字符。',
+  Working: '工作中',
+  'To the running task': '发送到运行中的任务',
+  'Send as a new request': '作为新请求发送',
+  'Waiting for the next step': '等待下一步读取',
+  'Read by the task': '任务已读取',
+  'Taken back': '已撤回',
+  'Not read before the task ended': '任务结束前未读取',
+  'Take back': '撤回',
+  'Delivery not confirmed. Try again with the same message.': '尚未确认送达。请重试同一条消息。',
+  'Check delivery': '查看送达状态',
+  'Work keeps going on the server. Nothing needs resending.':
+    '工作会在服务器上继续，无需重新发送。',
+  Recent: '最近',
+  '{count} waiting': '需要你：{count}',
+  'Working for {time}': '已工作 {time}',
+  'Allowed once': '仅允许这一次',
+  'Allowed for this task': '已允许此任务',
+  'Allowed for this repository': '已允许此仓库',
+  'Revoke in Me · Grants': '前往我的 · 已记住的授权撤销',
+  'Continue “{title}”': '继续“{title}”',
+  'Plan my next project': '规划我的下一个项目',
+  'Review my recent work': '回顾我最近的工作',
+  'Explore an idea': '探索一个想法',
+  'The task finished. Send a message to continue.': '任务已结束。发送消息即可继续。',
+  'The computer may be asleep or unavailable. Wait, then reconnect.':
+    '电脑可能正在休眠或尚不可用。请稍候再重新连接。',
+  'Control is held elsewhere or changing. Retry after it is returned.':
+    '控制权在别处或正在切换。请在交还控制权后重试。',
+  'The connection dropped. Reconnect to continue watching.': '连接已断开。重新连接即可继续查看。',
   Open: '打开',
   'Something needs a look': '有件事需要查看',
   'Open Maka to check your inbox.': '打开 Maka 查看收件箱。',
@@ -1027,6 +1120,49 @@ export const zhHant: Record<Key, string> = {
   'Ask the owner for model access': '請聯絡擁有者設定模型 API 金鑰',
   'Send your first message': '傳送第一則訊息',
   Later: '稍後',
+  'Slow down. Try again in a moment.': '請放慢操作，稍後再試。',
+  'Too many open views. Wait a moment, then reconnect.': '開啟的檢視過多。請稍候再重新連線。',
+  'Delivery not confirmed. Your message is back in the draft.': '尚未確認送達。訊息已放回草稿。',
+  'This task cannot take messages. Your draft is kept; send it as a new request.':
+    '此任務無法接收訊息。草稿已保留，請作為新請求傳送。',
+  'A computer request is still in progress. Wait, then try again.':
+    '電腦請求仍在處理中，請稍後重試。',
+  'Your control has ended. You are watching the task.': '你的控制已結束，現在正在觀看任務。',
+  'This computer is being watched in another tab or device. Close that view first.':
+    '另一分頁或裝置正在觀看此電腦，請先關閉該檢視。',
+  'This invite was revoked. Sign in with a valid invite.': '此邀請已撤銷，請使用有效邀請登入。',
+
+  'A message to a running task can have up to 4,000 characters.':
+    '傳送至執行中任務的訊息最多可包含 4,000 個字元。',
+  Working: '工作中',
+  'To the running task': '傳送至執行中的任務',
+  'Send as a new request': '作為新要求傳送',
+  'Waiting for the next step': '等待下一步讀取',
+  'Read by the task': '任務已讀取',
+  'Taken back': '已撤回',
+  'Not read before the task ended': '任務結束前未讀取',
+  'Take back': '撤回',
+  'Delivery not confirmed. Try again with the same message.': '尚未確認送達。請重試同一則訊息。',
+  'Check delivery': '查看傳送狀態',
+  'Work keeps going on the server. Nothing needs resending.':
+    '工作會在伺服器上繼續，無需重新傳送。',
+  Recent: '最近',
+  '{count} waiting': '需要你：{count}',
+  'Working for {time}': '已工作 {time}',
+  'Allowed once': '僅允許這一次',
+  'Allowed for this task': '已允許此任務',
+  'Allowed for this repository': '已允許此儲存庫',
+  'Revoke in Me · Grants': '前往我的 · 已記住的授權撤銷',
+  'Continue “{title}”': '繼續「{title}」',
+  'Plan my next project': '規劃我的下一個專案',
+  'Review my recent work': '回顧我最近的工作',
+  'Explore an idea': '探索一個想法',
+  'The task finished. Send a message to continue.': '任務已結束。傳送訊息即可繼續。',
+  'The computer may be asleep or unavailable. Wait, then reconnect.':
+    '電腦可能正在休眠或尚無法使用。請稍候再重新連線。',
+  'Control is held elsewhere or changing. Retry after it is returned.':
+    '控制權在別處或正在切換。請在交還控制權後重試。',
+  'The connection dropped. Reconnect to continue watching.': '連線已中斷。重新連線即可繼續查看。',
   Open: '開啟',
   'Something needs a look': '有件事需要查看',
   'Open Maka to check your inbox.': '開啟 Maka 查看收件匣。',

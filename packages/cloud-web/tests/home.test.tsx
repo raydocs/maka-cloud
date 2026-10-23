@@ -501,3 +501,21 @@ test('where decisions would be: bars while loading, a retry when they could not 
   expect(calm.textContent).toBe('Nothing needs you.');
   expect(screen.queryByRole('region', { name: 'Loading' })).toBeNull();
 });
+
+test('project and recent-conversation starters fill the composer without sending', async () => {
+  const api = renderHome({
+    projects: [{ projectId: 'p1', repo: 'alice/garden', defaultBranch: 'main', duties: [] }],
+  });
+  const fix = await screen.findByRole('button', {
+    name: 'Fix the failing test in alice/garden and open a pull request.',
+  });
+  fireEvent.click(fix);
+  expect(
+    (screen.getByLabelText('What would you like to get done?') as HTMLTextAreaElement).value,
+  ).toBe('Fix the failing test in alice/garden and open a pull request.');
+  fireEvent.click(screen.getByRole('button', { name: 'Continue “Taxes”' }));
+  expect(
+    (screen.getByLabelText('What would you like to get done?') as HTMLTextAreaElement).value,
+  ).toBe('Continue “Taxes”');
+  expect(api.posted).toEqual([]);
+});
