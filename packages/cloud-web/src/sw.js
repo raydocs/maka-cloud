@@ -32,6 +32,9 @@ function typeOf(event) {
 const LANGUAGE_CACHE = 'maka-language';
 const LANGUAGE_URL = '/.maka-language';
 
+self.addEventListener('install', (event) => event.waitUntil(self.skipWaiting()));
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+
 self.addEventListener('message', (event) => {
   if (!event.source?.url || new URL(event.source.url).origin !== self.location.origin) return;
   const language = event.data?.type === 'maka.language' ? event.data.language : undefined;

@@ -2,8 +2,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { expect, test } from 'vitest';
-import ts from 'typescript';
-import { en, zhHans } from '../src/strings';
 
 type Listener = (event: unknown) => void;
 
@@ -30,23 +28,13 @@ function load(language = 'en-US', saved = new Map<string, string>()) {
     navigator: { languages: [language] },
     clients: { matchAll: async () => [], openWindow: async () => undefined },
   };
-  vm.runInNewContext(
-    ts.transpileModule(readFileSync(join(__dirname, '../src/sw.js'), 'utf8'), {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-    }).outputText,
-    {
-      exports: {},
-      caches,
-      Response,
-      require: (path: string) => {
-        if (path === './strings') return { en, zhHans };
-        throw new Error(path);
-      },
-      self: scope,
-      URL,
-      Object,
-    },
-  );
+  vm.runInNewContext(readFileSync(join(__dirname, '../dist/sw.js'), 'utf8'), {
+    caches,
+    Response,
+    self: scope,
+    URL,
+    Object,
+  });
   const push = async (data: unknown) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('push')?.({
@@ -167,4 +155,10 @@ test('notification language survives worker restart and ignores messages from ot
   const chineseBrowser = load('zh-TW', saved);
   await chineseBrowser.push({ type: 'task.finished' });
   expect(chineseBrowser.shown[0]?.title).toBe('你的后台任务已完成');
+});
+
+test('the production worker is a self-contained classic script', () => {
+  const script = readFileSync(join(__dirname, '../dist/sw.js'), 'utf8');
+  expect(script).not.toMatch(/\b(?:import|export)\s*(?:[{'"*]|\w)/u);
+  expect(() => new vm.Script(script)).not.toThrow();
 });

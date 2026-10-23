@@ -24,7 +24,7 @@ export async function enablePush(
   const permission = await Notification.requestPermission();
   if (permission !== 'granted')
     throw new Error('Allow notifications in your browser settings to enable them.');
-  await navigator.serviceWorker.register('/sw.js', { type: 'module' });
+  await navigator.serviceWorker.register('/sw.js');
   const registration = await navigator.serviceWorker.ready;
   registration.active?.postMessage({
     type: 'maka.language',

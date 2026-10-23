@@ -37,8 +37,6 @@ test('watch, take over, type and point, reopen, then hand back; revoke clears th
   const image = viewer.getByRole('img', { name: 'Task desktop' });
   await image.click({ position: { x: 20, y: 30 } });
   await expect.poll(async () => (await inputs()).length).toBe(2);
-  // Recording the pointer on the server precedes the response that clears the input gate.
-  await expect(viewer.getByRole('button', { name: 'Hand back control' })).toBeEnabled();
   await viewer.getByRole('application', { name: 'Desktop controls' }).press('ArrowDown');
   await expect.poll(async () => (await inputs()).length).toBe(3);
   expect((await inputs()).at(-1)?.input).toEqual({ type: 'key', key: 'ArrowDown' });

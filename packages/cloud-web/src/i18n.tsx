@@ -166,7 +166,8 @@ export function LanguageProvider({
   );
   useEffect(() => {
     document.documentElement.lang = active;
-    if ('serviceWorker' in navigator) {
+    const sendLanguage = () => {
+      if (!('serviceWorker' in navigator)) return;
       void navigator.serviceWorker
         .getRegistration('/sw.js')
         .then((registration) => {
@@ -176,8 +177,11 @@ export function LanguageProvider({
           });
         })
         .catch(() => {});
-    }
+    };
+    sendLanguage();
+    navigator.serviceWorker?.addEventListener('controllerchange', sendLanguage);
     document.title = `${BRAND.name} — ${value.t(BRAND.tagline)}`;
+    return () => navigator.serviceWorker?.removeEventListener('controllerchange', sendLanguage);
   }, [active, value]);
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
 }

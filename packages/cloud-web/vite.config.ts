@@ -1,32 +1,51 @@
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+import { build } from 'vite';
+
+async function workerScript(): Promise<string> {
+  const result = await build({
+    configFile: false,
+    publicDir: false,
+    build: {
+      write: false,
+      lib: {
+        entry: fileURLToPath(new URL('./src/sw.js', import.meta.url)),
+        formats: ['iife'],
+        name: 'MakaWorker',
+      },
+    },
+  });
+  const bundle = Array.isArray(result) ? result[0] : result;
+  if ('output' in bundle) {
+    const worker = bundle.output.find((chunk) => chunk.type === 'chunk');
+    if (worker?.type === 'chunk') return worker.code;
+  }
+  throw new Error('Service worker build produced no script');
+}
+
+let building = false;
 
 export default defineConfig({
   plugins: [
     react(),
     {
       name: 'cloud-web-service-worker',
+      configResolved(config) {
+        building = config.command === 'build';
+      },
       configureServer(server) {
-        // Serve the module at the root in dev too, so the worker retains its existing scope.
-        server.middlewares.use((request, _response, next) => {
-          if (request.url === '/sw.js') request.url = '/src/sw.js';
-          next();
+        server.middlewares.use('/sw.js', async (_request, response) => {
+          response.setHeader('Content-Type', 'text/javascript');
+          response.end(await workerScript());
         });
+      },
+      async buildStart() {
+        if (!building) return;
+        this.emitFile({ type: 'asset', fileName: 'sw.js', source: await workerScript() });
       },
     },
   ],
-  build: {
-    rollupOptions: {
-      input: {
-        index: fileURLToPath(new URL('./index.html', import.meta.url)),
-        sw: fileURLToPath(new URL('./src/sw.js', import.meta.url)),
-      },
-      output: {
-        entryFileNames: (chunk) => (chunk.name === 'sw' ? 'sw.js' : 'assets/[name]-[hash].js'),
-      },
-    },
-  },
   resolve: {
     // Reuse the public ChoicePanel export without building the desktop/UI graph.
     // This is the same implementation exported by packages/ui/src/index.ts.

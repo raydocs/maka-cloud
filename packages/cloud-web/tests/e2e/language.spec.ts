@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { control, conversationsOf, noHorizontalScroll } from './support';
+import { control, conversationsOf, finishedTask, noHorizontalScroll } from './support';
 
 // Chinese is Simplified even for a Traditional Chinese browser outside mainland China.
 test.use({ locale: 'zh-TW' });
@@ -50,4 +50,93 @@ test('Chinese Home and Chat preserve server text; Settings remembers an English 
   await page.reload();
   await expect(page.getByRole('button', { name: 'Enter your workspace' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+});
+
+test.describe('Chinese Home layout', () => {
+  test.use({ locale: 'zh-CN' });
+
+  test('decisions lead, scheduled work goes last on phones, and unspaced titles fit', async ({
+    page,
+    request,
+  }, info) => {
+    await page.route('**/v1/projects', (route) =>
+      route.fulfill({
+        json: {
+          projects: [
+            {
+              projectId: 'layout-project',
+              repo: 'acme/widgets',
+              defaultBranch: 'main',
+              duties: [
+                {
+                  dutyId: 'layout-duty',
+                  name: 'Nightly check',
+                  trigger: { kind: 'schedule', everyMinutes: 60 },
+                  authority: 'open-pr',
+                  runBudgetUsd: 2,
+                  dailyCapUsd: 5,
+                  state: 'active',
+                  activatedAt: Date.now(),
+                  offReason: null,
+                  consecutiveFailures: 0,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const invite = await control<{ token: string }>(request, 'invite');
+    await page.goto('/');
+    await page.getByLabel('邀请令牌').fill(invite.token);
+    await page.getByRole('button', { name: '进入工作区' }).click();
+    await page.getByPlaceholder('想完成什么？').fill('Layout test');
+    await page.getByRole('button', { name: '开始', exact: true }).click();
+    await expect(page.getByRole('log')).toContainText('Layout test');
+    const [{ conversationId }] = await conversationsOf(request, invite.token);
+    await finishedTask(request, conversationId, 'Weekly report');
+    await control(request, 'suggest', {
+      choice: {
+        lineage: `layout_${info.project.name}:fix_main_ci:main`,
+        conversationId,
+        cardId: `layout_${info.project.name}`,
+        title: '修复主分支上持续失败的测试并检查所有相关改动确保发布顺利完成',
+        facts: {
+          kind: 'fix_main_ci',
+          mode: 'standard',
+          estimateUsd: 3,
+          typical: false,
+          repo: 'acme/widgets',
+          external: false,
+        },
+      },
+    });
+    await page.getByRole('navigation').getByRole('button', { name: '首页', exact: true }).click();
+    const waiting = page.getByRole('region', { name: '待你处理的决定' });
+    await expect(waiting).toBeVisible();
+    const next = page.getByRole('region', { name: '即将运行' });
+    await expect(next).toBeVisible();
+    const regions = await page
+      .getByRole('region')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
+    expect(regions.indexOf('待你处理的决定')).toBeLessThan(regions.indexOf('开始新任务'));
+    expect(
+      await waiting.locator('h2').evaluate((el) => getComputedStyle(el, '::before').content),
+    ).not.toBe('none');
+    if (info.project.name === 'phone') {
+      expect(await next.evaluate((el) => getComputedStyle(el).order)).toBe('1');
+      const boxes = await page
+        .locator('.home .section-card')
+        .evaluateAll((els) => els.map((el) => el.getBoundingClientRect().top));
+      expect((await next.boundingBox())?.y).toBe(Math.max(...boxes));
+    }
+    const chip = page.locator('.suggestion .verb-chip');
+    await expect(chip).toBeVisible();
+    const cardBox = await page.locator('.suggestion').boundingBox();
+    const chipBox = await chip.boundingBox();
+    expect(chipBox!.x + chipBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width);
+    expect(chipBox!.x + chipBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    await page.screenshot({ path: info.outputPath('home-layout-zh.png'), fullPage: true });
+    await noHorizontalScroll(page);
+  });
 });

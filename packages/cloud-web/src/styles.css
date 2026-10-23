@@ -278,7 +278,7 @@ textarea {
 .home-main {
   display: contents;
 }
-.home section[aria-label="What runs next"] {
+.home .runs-next {
   order: 1;
 }
 .section-card {
@@ -1074,7 +1074,7 @@ a.evidence-chip:hover {
     gap: 16px;
     min-width: 0;
   }
-  .home section[aria-label="What runs next"] {
+  .home .runs-next {
     order: 0;
   }
   .home:has(> .home-side:empty) {
@@ -1756,7 +1756,7 @@ a.evidence-chip:hover {
   letter-spacing: -0.01em;
 }
 /* Colour only for what needs you: an amber dot beside "Waiting on you" (your decision). */
-section[aria-label="Decisions waiting"] > h2::before {
+.decisions-waiting > h2::before {
   content: "";
   display: inline-block;
   width: 8px;
@@ -1844,6 +1844,8 @@ html:lang(zh-Hans) :is(p, textarea, .message, .muted, .mode-hint) {
 }
 
 html:lang(zh-Hans) .verb-chip {
-  white-space: nowrap;
-  flex-shrink: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  flex-shrink: 1;
 }

@@ -179,7 +179,10 @@ export function Home({
           A phone reads one column, in this order: waiting, suggested, start, results. */}
       <div className="home-side">
         {open.length > 0 && (
-          <section className="card section-card" aria-label={t('Decisions waiting')}>
+          <section
+            className="card section-card decisions-waiting"
+            aria-label={t('Decisions waiting')}
+          >
             <h2>{t('Waiting on you ({count})', { count: open.length })}</h2>
             {open.map((item) => {
               const parts = finishedParts(item);
@@ -248,7 +251,7 @@ export function Home({
         )}
 
         {schedule && (schedule.scheduled.length > 0 || schedule.watching > 0) && (
-          <section className="card section-card" aria-label={t('What runs next')}>
+          <section className="card section-card runs-next" aria-label={t('What runs next')}>
             <h2>{t('What runs next')}</h2>
             {schedule.scheduled.length > 0 && (
               <ul className="done-lines">

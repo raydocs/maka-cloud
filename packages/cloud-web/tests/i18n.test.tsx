@@ -207,3 +207,44 @@ test('generated failure copy is Chinese but server prose and raw details remain 
   );
   expect(screen.getByText('Decide whether to start it again.')).toBeTruthy();
 });
+
+test('the language is sent again when a replacement worker takes control', async () => {
+  localStorage.setItem(LANGUAGE_KEY, 'zh-Hans');
+  const oldWorker = { postMessage: vi.fn() };
+  const newWorker = { postMessage: vi.fn() };
+  const registration = { active: oldWorker };
+  const workers = Object.assign(new EventTarget(), {
+    getRegistration: vi.fn(async () => registration),
+  });
+  const original = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: workers });
+  try {
+    const view = render(
+      <LanguageProvider>
+        <span>Workspace</span>
+      </LanguageProvider>,
+    );
+    await waitFor(() =>
+      expect(oldWorker.postMessage).toHaveBeenCalledWith({
+        type: 'maka.language',
+        language: 'zh-Hans',
+      }),
+    );
+    registration.active = newWorker;
+    workers.dispatchEvent(new Event('controllerchange'));
+    await waitFor(() =>
+      expect(newWorker.postMessage).toHaveBeenCalledWith({
+        type: 'maka.language',
+        language: 'zh-Hans',
+      }),
+    );
+    view.unmount();
+    newWorker.postMessage.mockClear();
+    workers.dispatchEvent(new Event('controllerchange'));
+    await Promise.resolve();
+    expect(newWorker.postMessage).not.toHaveBeenCalled();
+  } finally {
+    if (original) Object.defineProperty(navigator, 'serviceWorker', original);
+    else Reflect.deleteProperty(navigator, 'serviceWorker');
+  }
+});

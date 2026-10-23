@@ -188,7 +188,7 @@ function TaskBranch({
           <span>{shared(taskLabel(task))}</span>
           {task.parentTaskId === undefined && (
             <span>
-              {live ? t('Cost so far') : t('Cost')}:{' '}
+              {live ? t('Cost so far:') : t('Cost:')}{' '}
               <span className={task.costUsd === undefined ? undefined : 'mono'}>
                 {shared(dollars(task.costUsd))}
                 {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}

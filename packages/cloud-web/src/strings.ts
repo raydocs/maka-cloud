@@ -170,8 +170,8 @@ export const en = {
   'Add a note': 'Add a note',
   Note: 'Note',
   'Current step': 'Current step',
-  'Cost so far': 'Cost so far',
-  Cost: 'Cost',
+  'Cost so far:': 'Cost so far:',
+  'Cost:': 'Cost:',
   ' of {p0}': ' of {p0}',
   'The budget was reached, so the work was stopped.':
     'The budget was reached, so the work was stopped.',
@@ -597,8 +597,8 @@ export const zhHans: Record<Key, string> = {
   Task: '任务',
   Approve: '批准',
   Decide: '决定',
-  Unblock: '解除阻塞',
-  Review: '审查',
+  Unblock: '帮它继续',
+  Review: '查看',
   Suggested: '建议',
   'Not reported': '未上报',
   'Cancelling…': '正在取消…',
@@ -651,8 +651,8 @@ export const zhHans: Record<Key, string> = {
   'Add a note': '添加备注',
   Note: '备注',
   'Current step': '当前步骤',
-  'Cost so far': '目前花费',
-  Cost: '花费',
+  'Cost so far:': '目前花费：',
+  'Cost:': '花费：',
   ' of {p0}': '，预算 {p0}',
   'The budget was reached, so the work was stopped.': '已达到预算，工作已停止。',
   'Still stopping. The cost may change until it has stopped.':
@@ -755,7 +755,7 @@ export const zhHans: Record<Key, string> = {
   'View the changes': '查看改动',
   'The picture could not be loaded.': '无法加载图片。',
   'Finished ·': '已完成 ·',
-  'Kept approvals': '已保留的授权',
+  'Kept approvals': '已记住的授权',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
     '智能体可以再次执行而无需询问的操作。撤销后，下次执行时会重新询问。',
   'Nothing kept. When you approve a step for a task or for a repository, it shows here.':
@@ -774,9 +774,9 @@ export const zhHans: Record<Key, string> = {
   'Open “{p0}”': '打开“{p0}”',
   'Open conversation': '打开对话',
   Suggestions: '建议',
-  'Noticed for you ({count})': '为你发现（{count}）',
+  'Noticed for you ({count})': '主动建议（{count}）',
   'Nothing starts until you tap its first word.': '点击建议的第一个词才会开始。',
-  'What runs next': '接下来要运行的',
+  'What runs next': '即将运行',
   '1 more duty wakes when something happens on GitHub.':
     '还有 1 项值守任务会在 GitHub 上有动静时启动。',
   '{p0} more duties wake when something happens on GitHub.':
@@ -817,8 +817,8 @@ export const zhHans: Record<Key, string> = {
   'A fact you delete stays forgotten.': '删除的信息不会再被记住。',
   'Let it decide': '让它决定',
   'It picks from the size of the work and your budget.': '根据工作量和你的预算选择。',
-  'How much care: {p0}': '处理方式：{p0}',
-  'How much care this needs': '选择处理方式',
+  'How much care: {p0}': '细致程度：{p0}',
+  'How much care this needs': '这项工作要多细致',
   Fix: '修复',
   'the failing test in {repo}': '{repo} 中失败的测试',
   'Fix the failing test in {repo} and open a pull request.':
@@ -918,7 +918,7 @@ export const zhHans: Record<Key, string> = {
   'Not used yet': '尚未使用',
   'Used once': '已使用一次',
   'Used {count} times': '已使用 {count} 次',
-  '{uses}, last {time}': '{uses}，上次使用于{time}',
+  '{uses}, last {time}': '{uses}，最近一次在{time}',
   'Ends {time}': '{time}到期',
   'just now': '刚刚',
   '{count} min ago': '{count} 分钟前',
