@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
 import { BRAND, type CloudClient, displayText, type MemoryProfile } from '@maka-cloud/client';
@@ -10,6 +11,7 @@ export function MemoryPanel({
   client: CloudClient;
   errorText: (error: unknown) => string;
 }) {
+  const { t, shared } = useT();
   const [profile, setProfile] = useState<MemoryProfile>({ facts: [], summaries: [] });
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState('');
@@ -43,19 +45,19 @@ export function MemoryPanel({
       }}
     >
       <summary>
-        <span>Memory</span>
-        <span className="muted">What {BRAND.name} remembers about you</span>
+        <span>{t('Memory')}</span>
+        <span className="muted">{t('What {name} remembers about you', { name: BRAND.name })}</span>
       </summary>
-      <section aria-label="Your memory" className="memory-content">
-        <h2>Your saved facts</h2>
-        <p className="muted">Used in all your conversations, from the next message on.</p>
+      <section aria-label={t('Your memory')} className="memory-content">
+        <h2>{t('Your saved facts')}</h2>
+        <p className="muted">{t('Used in all your conversations, from the next message on.')}</p>
         {error && (
           <p className="error" role="alert">
-            {error}
+            {shared(error)}
           </p>
         )}
-        {!loaded && !error && <p role="status">Loading memory…</p>}
-        {loaded && profile.facts.length === 0 && <p>No saved facts yet.</p>}
+        {!loaded && !error && <p role="status">{t('Loading memory…')}</p>}
+        {loaded && profile.facts.length === 0 && <p>{t('No saved facts yet.')}</p>}
         <ul className="memory-facts">
           {profile.facts.map((fact) => (
             <li key={fact.id}>
@@ -70,7 +72,7 @@ export function MemoryPanel({
                   }}
                 >
                   <label>
-                    Edit fact
+                    {t('Edit fact')}
                     <textarea
                       maxLength={500}
                       value={editing.text}
@@ -82,13 +84,13 @@ export function MemoryPanel({
                   </label>
                   <div className="task-actions">
                     <Button
-                      label="Save changes"
+                      label={t('Save changes')}
                       variant="primary"
                       type="submit"
                       isDisabled={busy || !editing.text.trim()}
                     />
                     <Button
-                      label="Cancel edit"
+                      label={t('Cancel edit')}
                       variant="secondary"
                       isDisabled={busy}
                       onClick={() => setEditing(null)}
@@ -100,13 +102,13 @@ export function MemoryPanel({
                   <p>{displayText(fact.text)}</p>
                   <div className="task-actions">
                     <Button
-                      label="Edit"
+                      label={t('Edit')}
                       variant="secondary"
                       isDisabled={busy}
                       onClick={() => setEditing({ id: fact.id, text: displayText(fact.text) })}
                     />
                     <Button
-                      label="Delete"
+                      label={t('Delete')}
                       variant="secondary"
                       isDisabled={busy}
                       onClick={() =>
@@ -131,7 +133,7 @@ export function MemoryPanel({
           }}
         >
           <label>
-            Add a fact
+            {t('Add a fact')}
             <textarea
               rows={2}
               maxLength={500}
@@ -141,21 +143,23 @@ export function MemoryPanel({
             />
           </label>
           <Button
-            label="Save fact"
+            label={t('Save fact')}
             variant="primary"
             type="submit"
             isDisabled={busy || !draft.trim() || !loaded}
           />
         </form>
-        <h2>Recent task summaries</h2>
-        <p className="muted">Short excerpts of delivered replies, not independent verification.</p>
-        {loaded && profile.summaries.length === 0 && <p>No task summaries yet.</p>}
+        <h2>{t('Recent task summaries')}</h2>
+        <p className="muted">
+          {t('Short excerpts of delivered replies, not independent verification.')}
+        </p>
+        {loaded && profile.summaries.length === 0 && <p>{t('No task summaries yet.')}</p>}
         <ul>
           {profile.summaries.map((summary) => (
             <li key={summary.id}>{displayText(summary.text)}</li>
           ))}
         </ul>
-        <p className="muted">A fact you delete stays forgotten.</p>
+        <p className="muted">{t('A fact you delete stays forgotten.')}</p>
       </section>
     </details>
   );

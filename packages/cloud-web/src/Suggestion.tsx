@@ -1,5 +1,6 @@
+import { useT } from './i18n';
 import { Button } from '@astryxdesign/core';
-import { displayText, type InboxItem, suggestionLine } from '@maka-cloud/client';
+import { displayText, dollars, type InboxItem } from '@maka-cloud/client';
 
 /**
  * A task Maka noticed and proposes (T30): the verb-first title, what it will cost and where,
@@ -16,6 +17,7 @@ export function SuggestionCard({
   disabled: boolean;
   onAnswer: (optionId: string) => void;
 }) {
+  const { t, shared, choiceLabel } = useT();
   const facts = item.suggestion;
   const options = [...item.options].sort((a, b) => Number(b.recommended) - Number(a.recommended));
   const title = displayText(item.ask);
@@ -30,7 +32,7 @@ export function SuggestionCard({
           <button
             type="button"
             className="verb-chip"
-            aria-label={`${displayText(act.label)}: ${title}`}
+            aria-label={`${choiceLabel(act.id, act.label)}: ${title}`}
             disabled={disabled}
             onClick={() => onAnswer(act.id)}
           >
@@ -43,19 +45,27 @@ export function SuggestionCard({
       )}
       {facts ? (
         <>
-          <p className="muted">{suggestionLine(facts)}</p>
+          <p className="muted">
+            {t('{mode} · about {cost}{typical} · {repo}', {
+              mode: shared({ quick: 'Quick', standard: 'Standard', deep: 'Deep' }[facts.mode]),
+              cost: shared(dollars(facts.estimateUsd)),
+              typical: facts.typical ? t(' (typical)') : '',
+              repo: displayText(facts.repo),
+            })}
+          </p>
           {facts.detail && <p className="suggestion-detail">{displayText(facts.detail)}</p>}
           {facts.external && (
             <p className="muted">
-              Part of this was written by someone else. The task asks you before it does anything
-              risky.
+              {t(
+                'Part of this was written by someone else. The task asks you before it does anything risky.',
+              )}
             </p>
           )}
         </>
       ) : null}
       {item.state === 'answering' ? (
         <p className="acknowledged" role="status">
-          Sending…
+          {t('Sending…')}
         </p>
       ) : (
         <div className="inbox-options">
@@ -70,12 +80,12 @@ export function SuggestionCard({
                   disabled={disabled}
                   onClick={() => onAnswer(option.id)}
                 >
-                  {displayText(option.label)}
+                  {choiceLabel(option.id, option.label)}
                 </button>
               ) : (
                 <Button
                   key={option.id}
-                  label={displayText(option.label)}
+                  label={choiceLabel(option.id, option.label)}
                   variant={option.recommended ? 'primary' : 'secondary'}
                   isDisabled={disabled}
                   onClick={() => onAnswer(option.id)}

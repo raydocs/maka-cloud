@@ -397,6 +397,18 @@ test('no runner, model or vendor name reaches the client, even in a failure a ru
   await view.stop();
 });
 
+test('a stack seeded in Traditional Chinese gives its invites zh-Hant, and the client reads it', async () => {
+  const hant = await startStack({ language: 'zh-Hant' });
+  try {
+    const client = new CloudClient(hant.token, { baseUrl: hant.url });
+    expect(await client.settings()).toEqual({ language: 'zh-Hant' });
+    const other = new CloudClient(hant.newInvite().token, { baseUrl: hant.url });
+    expect(await other.settings()).toEqual({ language: 'zh-Hant' });
+  } finally {
+    await hant.close();
+  }
+});
+
 test('a server without Web Push says so with a 404, and the client hides the control instead of guessing', async () => {
   const bare = await startStack({ push: false });
   try {
@@ -433,10 +445,9 @@ test('a finished task reaches the inbox with the supervisor’s own words, and o
   const view = watch(client, conversationId);
   const item = await finishedItem(view, conversationId, 'Weekly report');
   if (!item) throw new Error('no item');
-  // The label is the supervisor's: with no verification configured it says so itself, in the
-  // account's language (Simplified Chinese by default).
-  expect(item.ask).toContain('（未经独立核查）');
-  expect(item.ask).not.toContain('（已独立核查）');
+  // The label is the supervisor's: with no verification configured it says so itself.
+  expect(item.ask).toContain('(not independently checked)');
+  expect(item.ask).not.toContain('(independently checked)');
   expect(item.state).toBe('open');
   expect(item.options.map((o) => [o.id, o.recommended])).toEqual([['ok', true]]);
   expect(JSON.stringify(view.frames)).not.toMatch(NAMES);
