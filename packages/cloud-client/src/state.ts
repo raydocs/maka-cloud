@@ -1,7 +1,8 @@
 import { type FeedEvent, type InboxItem, type Question, TERMINAL, type TaskView } from './contract';
 
 export interface ConversationState {
-  messages: { id: string; role: 'user' | 'assistant' | 'notice'; text: string }[];
+  /** `at` is when the server says it was posted, so a view can place a task's work between messages. */
+  messages: { id: string; role: 'user' | 'assistant' | 'notice'; text: string; at?: number }[];
   tasks: Record<string, TaskView>;
   questions: Record<string, Question>;
   answers: Record<string, string>;
@@ -62,13 +63,22 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
           id: frame.data.messageId,
           role: frame.data.role === 'assistant' ? 'assistant' : 'user',
           text: frame.data.text,
+          ...(typeof frame.data.at === 'number' ? { at: frame.data.at } : {}),
         },
       ];
       break;
     case 'conductor.notice': {
       const id = frame.data.noticeId ?? String(frame.id);
       if (state.messages.some((m) => m.id === id)) return state;
-      next.messages = [...state.messages, { id, role: 'notice', text: frame.data.text }];
+      next.messages = [
+        ...state.messages,
+        {
+          id,
+          role: 'notice',
+          text: frame.data.text,
+          ...(typeof frame.data.at === 'number' ? { at: frame.data.at } : {}),
+        },
+      ];
       break;
     }
     case 'conductor.question':

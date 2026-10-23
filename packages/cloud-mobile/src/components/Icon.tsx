@@ -16,6 +16,8 @@ const SYMBOLS = {
   person: { ios: 'person', android: 'person', web: 'person' },
   chevronDown: { ios: 'chevron.down', android: 'expand_more', web: 'expand_more' },
   chevronUp: { ios: 'chevron.up', android: 'expand_less', web: 'expand_less' },
+  check: { ios: 'checkmark', android: 'check', web: 'check' },
+  cross: { ios: 'xmark', android: 'close', web: 'close' },
 } as const;
 
 export type IconName = keyof typeof SYMBOLS;

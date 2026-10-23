@@ -112,3 +112,23 @@ test('a panel or line for a task the client does not know changes nothing', () =
   ]).reduce(applyEvent, emptyState());
   expect(state.tasks).toEqual({});
 });
+
+test('a message and a notice keep when the server posted them, so a view can place work between them', () => {
+  const posted: FeedEvent[] = [
+    {
+      id: 1,
+      kind: 'message.posted',
+      data: { conversationId: 'c1', messageId: 'm1', role: 'user', text: 'Fix it', at: 10 },
+    },
+    {
+      id: 2,
+      kind: 'conductor.notice',
+      data: { conversationId: 'c1', noticeId: 'n1', text: 'Started', at: 20 },
+    },
+  ];
+  const state = posted.reduce(applyEvent, emptyState());
+  expect(state.messages.map((message) => [message.id, message.at])).toEqual([
+    ['m1', 10],
+    ['n1', 20],
+  ]);
+});
