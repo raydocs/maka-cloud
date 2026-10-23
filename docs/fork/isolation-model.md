@@ -727,6 +727,15 @@ the request as `duty_off` otherwise (test: `cloud-duties/src/__tests__/exits.tes
 turned off while a launch is in flight"). A removed project was already caught there, because
 `permitted` (`engine.ts:213`) reads `removed`.
 
+**Card tapped before its project was removed: fixed.** A tapped card whose task did not begin (the
+start failed, or the process died between spending the card and starting the task) is started
+again by the cards' maintenance pass (`cloud-host/src/cards/service.ts`, `maintain` and
+`startTask`), and that start did not look at the project again, so a project removed after the
+tap still got a new run. `startTask` now starts nothing for a card whose project is removed or no
+longer named by the operator; a run that had already begun is attached to its card so it is
+settled (test: `cloud-host/src/__tests__/cards-service.test.ts`, "a card tapped before its project
+was removed"). Such a card stays unstarted and is looked at again each pass, which costs one read.
+
 **A run already started when its project is removed or its duty is turned off: open, documented.**
 `removeProject` (`engine.ts:630`) says "runs already started finish", and a duty run's authority
 is a copy on the run row, read at each call (`tools.ts:775`). Such a run keeps spending to its run
