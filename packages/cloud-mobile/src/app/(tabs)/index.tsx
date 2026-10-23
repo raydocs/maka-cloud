@@ -103,6 +103,13 @@ export default function Home() {
     const timer = setInterval(() => feed.refresh(), WORKING_REFRESH_MS);
     return () => clearInterval(timer);
   }, [feed, onScreen, working]);
+  // When the last work ends on screen, Home is read once more: the cards may have been read just
+  // before it ended, without its result.
+  const wasWorking = useRef(false);
+  useEffect(() => {
+    if (onScreen && wasWorking.current && !working) feed.refresh();
+    wasWorking.current = working;
+  }, [feed, onScreen, working]);
 
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);

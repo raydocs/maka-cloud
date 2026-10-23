@@ -77,12 +77,12 @@ export function todayOf(
   };
   const runs = projects === undefined ? undefined : nextRuns(projects, now);
   const working = workingNow(done);
+  const open = Object.values(items)
+    .filter((item) => item.state !== 'closed')
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const { waiting, suggested } = splitSuggestions(open);
 
   if (cards === undefined) {
-    const open = Object.values(items)
-      .filter((item) => item.state !== 'closed')
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-    const { waiting, suggested } = splitSuggestions(open);
     const finished = since === undefined || done === undefined ? [] : doneSince(done, since);
     return {
       needs: [...waiting, ...suggested],
@@ -103,7 +103,8 @@ export function todayOf(
     };
   }
 
-  const needs: InboxItem[] = [];
+  const waitingCards: InboxItem[] = [];
+  const suggestedCards: InboxItem[] = [];
   const sinceRows: SinceRow[] = [];
   const next: NextRun[] = [];
   const shown: string[] = [];
@@ -112,7 +113,7 @@ export function todayOf(
     if ((card.kind === 'waiting' || card.kind === 'suggestion') && ref.type === 'inbox') {
       const item = items[ref.id];
       if (item === undefined || item.state === 'closed') continue;
-      needs.push(item);
+      (card.kind === 'waiting' ? waitingCards : suggestedCards).push(item);
     } else if (card.kind === 'finished' && ref.type === 'task') {
       const task = done?.get(ref.conversationId)?.find((t) => t.taskId === ref.id);
       // The task as this phone read it, when it has; else how the server says it ended.
@@ -147,6 +148,15 @@ export function todayOf(
     }
     shown.push(card.cardId);
   }
+  // An open item the cards do not name yet (the cards were read before it, or their last read
+  // failed) still needs the person: it follows the carded ones of its kind.
+  const carded = new Set([...waitingCards, ...suggestedCards].map((item) => item.itemId));
+  const needs = [
+    ...waitingCards,
+    ...waiting.filter((item) => !carded.has(item.itemId)),
+    ...suggestedCards,
+    ...suggested.filter((item) => !carded.has(item.itemId)),
+  ];
   return { needs, working, since: sinceRows, next, watching: runs?.watching ?? 0, shown };
 }
 

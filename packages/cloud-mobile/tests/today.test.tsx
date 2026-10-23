@@ -157,6 +157,24 @@ test('with the server’s cards: their order, only what this phone can show, and
   expect(today.shown).toEqual(['waiting:i1', 'finished:t-done', 'finished:t-far', 'note:n1']);
 });
 
+test('an open item the cards do not name yet still needs the person, after the carded ones', () => {
+  const today = todayOf(
+    snapshot({
+      items: {
+        i1: item('i1'),
+        i9: item('i9', { updatedAt: 5 }),
+        s9: item('s9', { kind: 'suggestion' }),
+      },
+      cards: [CARDS[0] as HomeCard],
+    }),
+    [],
+    NOW,
+  );
+  expect(today.needs.map((i) => i.itemId)).toEqual(['i1', 'i9', 's9']);
+  // Only the carded one is the server's to be told about.
+  expect(today.shown).toEqual(['waiting:i1']);
+});
+
 test('a note seen on an earlier visit is not news again', () => {
   const note = CARDS[4] as HomeCard;
   const today = todayOf(
@@ -377,6 +395,58 @@ test('while something works and Home is on screen, Home is read again', async ()
     await act(async () => tick?.run());
     await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
     expect(reads).toBeGreaterThan(before);
+  } finally {
+    every.mockRestore();
+  }
+});
+
+test('when the last work ends on screen, Home is read once more for its result', async () => {
+  const timers: Array<{ run: () => void; ms: number | undefined }> = [];
+  const every = jest.spyOn(globalThis, 'setInterval').mockImplementation(((
+    run: () => void,
+    ms?: number,
+  ) => {
+    timers.push({ run, ms });
+    return 0 as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval);
+  try {
+    let ended = false;
+    let homeReads = 0;
+    const endedCard = card('finished:t-run', {
+      kind: 'finished',
+      ref: { type: 'task', id: 't-run', conversationId: 'c1' },
+      state: 'succeeded',
+    });
+    await home({
+      ...busyServer,
+      '/v1/conversations/c1/tasks': () =>
+        Response.json({
+          tasks: ended
+            ? [
+                task('t-run', {
+                  title: 'Update the changelog',
+                  state: 'succeeded',
+                  finishedAt: NOW,
+                  manifest: { summary: 'The changelog is up to date.' } as TaskView['manifest'],
+                }),
+              ]
+            : TASKS.slice(0, 1),
+        }),
+      // The cards of the read that sees the work end were read just before it ended.
+      '/v1/home': () => {
+        homeReads += 1;
+        return Response.json({ cards: homeReads >= 3 ? [endedCard] : [] });
+      },
+    });
+    await screen.findByText('Reading the release notes');
+    await act(async () => {
+      mockFocus.effect?.();
+    });
+    ended = true;
+    await act(async () => timers.find((t) => t.ms === WORKING_REFRESH_MS)?.run());
+    expect(await screen.findByText('The changelog is up to date.')).toBeTruthy();
+    expect(screen.queryByTestId('home-working')).toBeNull();
+    expect(homeReads).toBe(3);
   } finally {
     every.mockRestore();
   }
