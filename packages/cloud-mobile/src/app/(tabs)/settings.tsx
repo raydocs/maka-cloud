@@ -20,20 +20,34 @@ const LANGUAGE_NAMES: ReadonlyArray<{ value: Language; name: string }> = [
   { value: 'en', name: 'English' },
 ];
 
-/** Three languages; the one picked is kept on this device and wins over the phone's own. */
+/**
+ * The phone's language (the default), or one of three; a language picked is kept on this device
+ * and wins over the phone's own until "use phone language" is picked again.
+ */
 function LanguagePicker() {
-  const { t: say, lang, choose } = useT();
+  const { t: say, chosen, choose } = useT();
   return (
     <Card label={say('settings.language')}>
       <T kind="heading">{say('settings.language')}</T>
       <T kind="muted">{say('settings.language.body')}</T>
       <View style={{ gap: 8 }}>
+        <PillButton
+          label={say('settings.language.phone')}
+          // Appearance has a "跟随系统" too: a screen reader hears which one this is.
+          accessibilityLabel={say('common.labelValue', {
+            label: say('settings.language'),
+            value: say('settings.language.phone'),
+          })}
+          id="language-phone"
+          primary={chosen === undefined}
+          onPress={() => choose(undefined)}
+        />
         {LANGUAGE_NAMES.map(({ value, name }) => (
           <PillButton
             key={value}
             label={name}
             id={`language-${value}`}
-            primary={lang === value}
+            primary={chosen === value}
             onPress={() => choose(value)}
           />
         ))}

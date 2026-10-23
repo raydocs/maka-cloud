@@ -7,9 +7,10 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
-import { readSecure, writeSecure } from './secure';
+import { readSecure, removeSecure, writeSecure } from './secure';
 import { EN, type Key, PATTERNS_ZH, PHRASES_ZH, SERVER_CHOICES, ZH } from './strings';
 import { PATTERNS_HANT, PHRASES_HANT, ZH_HANT } from './strings.hant';
 
@@ -104,8 +105,11 @@ export function translator(lang: Language): Translator {
 interface LanguageApi extends Translator {
   /** The language picked in Settings, or undefined while the phone's own decides. */
   chosen: Language | undefined;
-  /** Picks a language for this app on this device; it then wins over the phone's setting. */
-  choose(language: Language): void;
+  /**
+   * Picks a language for this app on this device, which then wins over the phone's setting; with
+   * none, the saved choice is removed and the phone's language decides again.
+   */
+  choose(language: Language | undefined): void;
 }
 
 const KEY = 'maka.language';
@@ -130,20 +134,23 @@ export function LanguageProvider({
   children: ReactNode;
 }) {
   const [chosen, setChosen] = useState<Language | undefined>();
+  // A pick made before the saved one is read back wins over it.
+  const picked = useRef(false);
   useEffect(() => {
     let current = true;
     void readSecure(KEY)
       .then((stored) => {
-        if (current && isLanguage(stored)) setChosen(stored);
+        if (current && !picked.current && isLanguage(stored)) setChosen(stored);
       })
       .catch(() => {});
     return () => {
       current = false;
     };
   }, []);
-  const choose = useCallback((next: Language) => {
+  const choose = useCallback((next: Language | undefined) => {
+    picked.current = true;
     setChosen(next);
-    void writeSecure(KEY, next).catch(() => {});
+    void (next ? writeSecure(KEY, next) : removeSecure(KEY)).catch(() => {});
   }, []);
   const lang = language ?? chosen ?? deviceLanguage();
   const value = useMemo(() => ({ ...translator(lang), chosen, choose }), [lang, chosen, choose]);

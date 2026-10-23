@@ -89,6 +89,38 @@ test('a language picked in the app is kept on the device and wins over the phone
   expect(secure().get('maka.language')).toBe('zh-Hans');
 });
 
+test('"use phone language" clears a saved choice, and the phone decides again', async () => {
+  function Phone() {
+    const { lang, chosen, choose, t } = useT();
+    return (
+      <>
+        <Text>{`${lang} ${chosen ?? 'phone'} ${t('tab.settings')}`}</Text>
+        <Pressable accessibilityRole="button" onPress={() => choose(undefined)}>
+          <Text>use phone</Text>
+        </Pressable>
+      </>
+    );
+  }
+  secure().set('maka.language', 'zh-Hant');
+  const first = await render(
+    <LanguageProvider>
+      <Phone />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText('zh-Hant zh-Hant 設定')).toBeTruthy();
+  await fireEvent.press(screen.getByText('use phone'));
+  // The test phone is set to English.
+  expect(screen.getByText('en phone Settings')).toBeTruthy();
+  expect(secure().has('maka.language')).toBe(false);
+  await act(async () => first.unmount());
+  await render(
+    <LanguageProvider>
+      <Phone />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText('en phone Settings')).toBeTruthy();
+});
+
 test('values are filled in, and the shared logic’s English is translated only when known', () => {
   const zh = translator('zh-Hans');
   const en = translator('en');

@@ -65,9 +65,10 @@ fallback.
   - `zh-Hans`, `zh-CN`, `zh-SG` and plain `zh` get Simplified Chinese;
   - `en-*` gets English;
   - anything else gets Simplified Chinese.
-- **The picker.** Settings has a Language card with the three languages, each named in its own
-  words. The choice is kept on the device (the secure store, `maka.language`) and wins over
-  detection from then on.
+- **The picker.** Settings has a Language card. Its first option, the default, is to use the phone's
+  language (跟随系统 / 跟隨系統 / Use phone language); then come the three languages, each named in
+  its own words. A language picked is kept on the device (the secure store, `maka.language`) and wins
+  over detection; picking the phone's language removes it, and detection decides again.
 - **Catalogues.** `src/lib/strings.ts` holds every string the app shows in English (`EN`) and
   Simplified Chinese (`ZH`); `src/lib/strings.hant.ts` holds the Traditional Chinese (`ZH_HANT`).
   That covers sign-in, errors, empty states and accessibility labels, keyed and with `{name}` values.
