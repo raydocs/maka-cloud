@@ -40,7 +40,7 @@ import { pushAccountTag, type PushApi } from './push.js';
 import type { QuotaSource } from './quota.js';
 import { toPublicView } from './public-view.js';
 import { scrubSecretFields } from './secret-shapes.js';
-import type { RateLimiter } from './rate-limit.js';
+import { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -277,6 +277,9 @@ export class PublicApi {
   private artifactReads = 0;
   private readonly humanComputers = new Map<string, { inviteId: string; abort: AbortController }>();
   private readonly busyComputers = new Set<string>();
+
+  // Ten inputs/second sustained, with a 20-input burst, independent of control actions.
+  private readonly computerInputLimiter = new RateLimiter(600, Date.now, 1024, 20);
 
   constructor(private readonly deps: PublicApiDeps) {}
 
@@ -1189,7 +1192,7 @@ export class PublicApi {
       this.ownTaskSession(invite, taskId);
       return respond(res, 200, { controller: this.humanComputers.has(taskId) ? 'human' : 'agent' });
     }
-    take(this.deps.controlLimiter, invite);
+    take(action === 'input' ? this.computerInputLimiter : this.deps.controlLimiter, invite);
     const body = await readJson(req, true);
     const authorize = () => {
       this.reauthenticate(invite);

@@ -17,6 +17,7 @@ export class RateLimiter {
     private readonly perMinute: number,
     private readonly now: () => number = Date.now,
     keys = 1024,
+    private readonly burst = perMinute,
   ) {
     this.buckets = new BoundedCache({ maxEntries: keys });
   }
@@ -25,8 +26,8 @@ export class RateLimiter {
   take(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
     const now = this.now();
     const perMs = this.perMinute / 60_000;
-    const bucket = this.buckets.get(key) ?? { tokens: this.perMinute, at: now };
-    bucket.tokens = Math.min(this.perMinute, bucket.tokens + (now - bucket.at) * perMs);
+    const bucket = this.buckets.get(key) ?? { tokens: this.burst, at: now };
+    bucket.tokens = Math.min(this.burst, bucket.tokens + (now - bucket.at) * perMs);
     bucket.at = now;
     if (bucket.tokens < 1) {
       this.buckets.set(key, bucket);

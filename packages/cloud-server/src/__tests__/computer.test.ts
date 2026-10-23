@@ -306,3 +306,34 @@ test('computer streams share feed quotas, release slots on disconnect, and close
   assert.equal((await reader.read()).done, true);
   assert.equal((await postJson(h, `${path}/takeover`, {})).status, 409);
 });
+
+test('computer inputs have a separate typing budget and cannot exhaust control actions', async (t) => {
+  const computer = fakeComputer();
+  const handler = recordingHandler();
+  const h = await startHarness(t, {
+    computer: computer.source,
+    fake: { pausable: true },
+    handler: handler.handler,
+  });
+  const conversation = await newConversation(h);
+  const { session } = await conductorSession(h, handler.seen, conversation);
+  const task = await h.server.orchestrator.delegate(session, { runner: 'fake', brief: 'Type' });
+  await h.server.orchestrator.settled();
+  const path = `/v1/tasks/${task.taskId}/computer`;
+  assert.equal((await postJson(h, `${path}/takeover`, {})).status, 200);
+  let accepted = 0;
+  let throttled = 0;
+  for (let i = 0; i < 60; i++) {
+    const response = await postJson(h, `${path}/input`, { type: 'key', key: 'a' });
+    if (response.status === 200) accepted++;
+    else {
+      assert.equal(response.status, 429);
+      assert.ok(response.headers.get('retry-after'));
+      throttled++;
+    }
+  }
+  assert.ok(accepted >= 20, 'typing burst is accepted');
+  assert.ok(throttled > 0, 'typing remains rate limited');
+  assert.equal((await postJson(h, `${path}/handback`, {})).status, 200);
+  assert.equal((await postJson(h, `/v1/tasks/${task.taskId}/cancel`, {})).status, 200);
+});

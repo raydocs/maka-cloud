@@ -18,9 +18,10 @@ async function setup(computerInput = vi.fn().mockResolvedValue({})) {
       disconnect = reject;
     });
   });
+  const computerControl = vi.fn().mockResolvedValue({ controller: 'agent' });
   const view = render(
     <Computer
-      client={{ watchComputer, computerInput } as unknown as CloudClient}
+      client={{ watchComputer, computerInput, computerControl } as unknown as CloudClient}
       task={{ taskId: 'queue-task', state: 'paused' } as TaskView}
     />,
   );
@@ -36,6 +37,7 @@ async function setup(computerInput = vi.fn().mockResolvedValue({})) {
     receive: (controller: 'agent' | 'human') => receive({ controller }),
     disconnect,
     computerInput,
+    computerControl,
   };
 }
 
@@ -132,6 +134,7 @@ test('terminal submission is guarded until acknowledged and keeps its draft on f
   fireEvent.submit(form);
   fireEvent.submit(form);
   expect(held.computerInput).toHaveBeenCalledTimes(1);
+  expect(screen.getByText('Terminal input queued. Waiting for confirmation…')).toBeTruthy();
   expect((field as HTMLInputElement).value).toBe('pwd');
   await act(async () => held.finish());
   expect(held.computerInput).toHaveBeenCalledTimes(1);
@@ -141,4 +144,68 @@ test('terminal submission is guarded until acknowledged and keeps its draft on f
     fireEvent.submit(form);
   });
   expect((field as HTMLInputElement).value).toBe('ls');
+});
+
+test.each([
+  [new Error('offline'), 'The action was not confirmed.'],
+  [
+    new DOMException('timed out', 'TimeoutError'),
+    'Not sure the last input arrived; check the screen.',
+  ],
+])(
+  'an uncertain input failure stops the queue and keeps its error visible: %s',
+  async (failure, message) => {
+    let reject!: (error: Error) => void;
+    const computerInput = vi.fn(
+      () =>
+        new Promise<void>((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const { desktop, key } = await setup(computerInput);
+    fireEvent.click(desktop);
+    key('a');
+    key('b');
+    await act(async () => reject(failure));
+    expect(computerInput).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('alert').textContent).toContain(message);
+    expect(screen.getByRole('alert').textContent).toContain('2 queued inputs were not sent.');
+    await act(async () => {});
+    expect(screen.getByRole('alert').textContent).toContain(message);
+  },
+);
+
+test('hand back clears queued keys and is the next request after the in-flight input', async () => {
+  const held = heldInput();
+  const { desktop, key, computerControl } = await setup(held.computerInput);
+  fireEvent.click(desktop);
+  key('a');
+  key('b');
+  const handback = screen.getByRole('button', { name: 'Hand back control' });
+  expect((handback as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(handback);
+  expect(computerControl).not.toHaveBeenCalled();
+  await act(async () => held.finish());
+  expect(held.computerInput).toHaveBeenCalledTimes(1);
+  expect(computerControl).toHaveBeenCalledExactlyOnceWith('queue-task', 'handback');
+});
+
+test('input throttling does not delay hand back and overflow shows only one slow down alert', async () => {
+  vi.useFakeTimers();
+  let reject!: (error: Error) => void;
+  const computerInput = vi.fn(
+    () =>
+      new Promise<void>((_resolve, fail) => {
+        reject = fail;
+      }),
+  );
+  const { key, computerControl } = await setup(computerInput);
+  key('a');
+  for (let i = 0; i < 51; i++) key('b');
+  await act(async () => reject(new ApiError(429, 'rate_limited', undefined, 20000)));
+  expect(screen.getAllByRole('alert')).toHaveLength(1);
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Hand back control' })));
+  expect(computerControl).toHaveBeenCalledExactlyOnceWith('queue-task', 'handback');
+  await act(async () => vi.advanceTimersByTimeAsync(20000));
+  expect(computerInput).toHaveBeenCalledTimes(1);
 });

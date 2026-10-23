@@ -282,3 +282,19 @@ test('throttled requests expose Retry-After seconds and HTTP dates', async () =>
     if (delay !== undefined) expect(error.retryAfterMs).toBeLessThanOrEqual(delay);
   }
 });
+
+test('computer input aborts after ten seconds without retrying an unknown outcome', async () => {
+  let calls = 0;
+  const client = new CloudClient('fake', async (_url, init) => {
+    calls++;
+    return new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+    });
+  });
+  const start = Date.now();
+  await expect(client.computerInput('task', { type: 'key', key: 'a' })).rejects.toMatchObject({
+    name: 'TimeoutError',
+  });
+  expect(Date.now() - start).toBeGreaterThanOrEqual(9900);
+  expect(calls).toBe(1);
+}, 15000);
