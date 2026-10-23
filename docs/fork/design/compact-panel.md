@@ -102,13 +102,16 @@ From `docs/fork/design/hark-patterns.md`, principles only (no Hark fonts, icons,
   result card carries "From task", which goes back to the pill.
 - **Instant acknowledgement.** A sent message is in the list at once with "Sending…" (dimmed only
   after two seconds), then the working line. A failed send says "Not sent" with "Send again" (the
-  same message id, so it runs once) and "Delete".
+  same message id, so it runs once) and "Delete". It is kept (the client's `PendingSends`, in
+  memory) when the person leaves the conversation, and is taken off once the stream shows a new
+  message of theirs with the same words: the server names a message by its own id, not the send's.
 - **The approval card in fixed slots:** what will happen, what it touches (the `Repository:`,
   `Branch:` and `Base branch:` lines the card itself carries), the exact text and held call as
   sent, evidence badges (the task's panels, its files and links), and the scope (once, this task,
   this repository) when the server offers it (#381). One "Go ahead" pill answers with the chosen
   scope; only the recommended answer is filled. Changing scope ticks a selection haptic; approving
-  taps lightly; refusing buzzes a warning. An answered card is a one-line receipt.
+  taps lightly; refusing buzzes a warning. An answered card is a one-line receipt; on an approval,
+  "Details" opens the exact text and held call again.
 - **Not sent by the server, so not shown:** a turn of the conversation's own (its model calls) has
   no events, so a message that started no task shows only "working" until the reply; the time an
   answer was given is not kept, so the receipt has none. Not built yet: a row does not open its

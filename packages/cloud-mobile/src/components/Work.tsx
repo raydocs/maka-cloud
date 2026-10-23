@@ -156,7 +156,10 @@ export function WorkBlock({ tasks, working }: { tasks: readonly TaskView[]; work
         <Pressable
           testID="work-summary"
           accessibilityRole={steps.length > 0 ? 'button' : 'text'}
-          accessibilityLabel={`${summary}. ${say(open ? 'work.hide' : 'work.show')}`}
+          accessibilityLabel={say('work.summaryLabel', {
+            summary,
+            action: say(open ? 'work.hide' : 'work.show'),
+          })}
           {...(steps.length > 0 ? { accessibilityState: { expanded: open } } : {})}
           disabled={steps.length === 0}
           onPress={toggle}

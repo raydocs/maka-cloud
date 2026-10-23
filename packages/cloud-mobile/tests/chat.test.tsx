@@ -311,3 +311,63 @@ test('a send still on its way when the person leaves is kept if it fails, and go
   expect(posts).toHaveLength(2);
   expect(posts[1]).not.toBe(posts[0]);
 });
+
+test('older messages with the same words never stand in for a send that failed, even after coming back', async () => {
+  const { open } = await openChat(
+    [
+      ...finished(),
+      frame('message.posted', { messageId: 'm3', role: 'user', text: 'Try again', at: 3000 }),
+      frame('message.posted', { messageId: 'm4', role: 'assistant', text: 'Tried.', at: 4000 }),
+    ],
+    async () => new Response('{}', { status: 500 }),
+  );
+  await screen.findByText('Tried.');
+  await fireEvent.changeText(screen.getByTestId('field-Keep the conversation going'), 'Try again');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  // The screen reader hears where it stands, with the words.
+  expect(screen.getByLabelText('You: Try again (Not sent)')).toBeTruthy();
+  await open('c2');
+  await screen.findByText('Docs');
+  await open('c1');
+  await screen.findByText('Tried.');
+  expect(screen.getByText('Not sent')).toBeTruthy();
+  // Kept for as long as the app runs: deleted here, so the next test starts without it.
+  await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
+});
+
+test('a request of an earlier visit that ends late does not clear a newer send', async () => {
+  const posts: string[] = [];
+  const answers: Array<(response: Response) => void> = [];
+  const { open } = await openChat(finished(), (body) => {
+    posts.push(body.clientMessageId);
+    return new Promise((resolve) => {
+      answers.push(resolve);
+    });
+  });
+  await screen.findByText('Fixed.');
+  const field = () => screen.getByTestId('field-Keep the conversation going');
+  await fireEvent.changeText(field(), 'Also update the docs');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  // Away and back while it is still on its way: it is offered again, and deleted.
+  await open('c2');
+  await screen.findByText('Docs');
+  await open('c1');
+  await fireEvent.press(await screen.findByRole('button', { name: 'Delete' }));
+  await fireEvent.changeText(field(), 'Thanks');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(screen.getByLabelText('You: Thanks (Sending…)')).toBeTruthy();
+  // The first request ends now, after all; the second fails.
+  await act(async () => answers[0]?.(Response.json({})));
+  await act(async () => answers[1]?.(new Response('{}', { status: 503 })));
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  await open('c2');
+  await screen.findByText('Docs');
+  await open('c1');
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  expect(screen.getByText('Thanks')).toBeTruthy();
+  await fireEvent.press(screen.getByRole('button', { name: 'Send again' }));
+  expect(posts).toHaveLength(3);
+  expect(posts[2]).toBe(posts[1]);
+  expect(posts[1]).not.toBe(posts[0]);
+});

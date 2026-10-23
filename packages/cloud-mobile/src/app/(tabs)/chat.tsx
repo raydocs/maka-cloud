@@ -188,22 +188,34 @@ function useArrivals(ids: readonly string[], ready: boolean): (id: string) => bo
 }
 
 /** One message as the chat shows it: the person's on the right in a bubble, the rest full width. */
-function Bubble({ message, children }: { message: Message; children?: ReactNode }) {
+function Bubble({
+  message,
+  status,
+  children,
+}: {
+  message: Message;
+  /** Where a message of the person's stands ("Sending…", "Not sent"), heard with it. */
+  status?: string;
+  children?: ReactNode;
+}) {
   const theme = useTheme();
   const { t: say } = useT();
+  const said = {
+    who:
+      message.role === 'user'
+        ? say('chat.you')
+        : message.role === 'notice'
+          ? say('chat.update')
+          : BRAND.name,
+    text: withoutMarks(displayText(message.text)),
+  };
   return (
     // Who said it is plain from the side it sits on; a screen reader still hears the name.
     <View
       accessible
-      accessibilityLabel={say('chat.said', {
-        who:
-          message.role === 'user'
-            ? say('chat.you')
-            : message.role === 'notice'
-              ? say('chat.update')
-              : BRAND.name,
-        text: withoutMarks(displayText(message.text)),
-      })}
+      accessibilityLabel={
+        status ? say('chat.saidStatus', { ...said, status }) : say('chat.said', said)
+      }
       style={[
         { gap: 2, marginBottom: 18 },
         message.role === 'user'
@@ -262,7 +274,16 @@ function OutgoingBubble({
   }, [outgoing.state]);
   return (
     <View testID="outgoing" style={{ opacity: outgoing.state === 'sending' && slow ? 0.6 : 1 }}>
-      <Bubble message={{ id: 'outgoing', role: 'user', text: outgoing.text }}>
+      <Bubble
+        message={{ id: 'outgoing', role: 'user', text: outgoing.text }}
+        status={
+          outgoing.state === 'sending'
+            ? say('chat.sending')
+            : outgoing.state === 'failed'
+              ? say('chat.notSent')
+              : undefined
+        }
+      >
         {outgoing.state === 'sending' && (
           <T kind="small" testID="outgoing-sending">
             {say('chat.sending')}
@@ -310,16 +331,30 @@ function OutgoingBubble({
  * the server runs it once even if it had taken it. A send that finishes after the person left
  * clears itself.
  */
-const keptSends = new Map<string, PendingSend>();
-const SENDS: PendingSends = {
-  read: (key) => keptSends.get(key),
-  write: (key, value) => {
-    keptSends.set(key, value);
-  },
-  clear: (key) => {
-    keptSends.delete(key);
-  },
-};
+const keptSends = new Map<string, { send: PendingSend; seen?: ReadonlySet<string> }>();
+/** The person's messages a conversation showed when its next send started (`Outgoing.seen`). */
+const seenAtSend = new Map<string, ReadonlySet<string>>();
+
+/**
+ * One feed's view of the kept sends. A feed clears only the send it wrote itself, so a request of
+ * an earlier visit that ends late cannot clear a newer send of the same conversation.
+ */
+function sendsOfFeed(): PendingSends {
+  let mine: string | undefined;
+  return {
+    read: (key) => keptSends.get(key)?.send,
+    write: (key, send) => {
+      mine = send.id;
+      const kept = keptSends.get(key);
+      // The same send again keeps the boundary it started with.
+      const seen = kept?.send.id === send.id ? kept.seen : seenAtSend.get(key);
+      keptSends.set(key, seen ? { send, seen } : { send });
+    },
+    clear: (key) => {
+      if (mine !== undefined && keptSends.get(key)?.send.id === mine) keptSends.delete(key);
+    },
+  };
+}
 
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
@@ -331,7 +366,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
   const feed = useMemo(
-    () => new ConversationFeed(client, conversationId, undefined, SENDS),
+    () => new ConversationFeed(client, conversationId, undefined, sendsOfFeed()),
     [client, conversationId],
   );
   // The stream runs only while this tab is in front and the app is in the foreground.
@@ -341,10 +376,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { tasks, questions, openQuestions } = conversationSummary(snapshot);
   const [draft, setDraft] = useState('');
   const [outgoing, setOutgoing] = useState<Outgoing | undefined>(() => {
-    const kept = SENDS.read(conversationId);
-    return kept && reusable(kept, kept.text, Date.now())
-      ? { text: kept.text, state: 'failed' }
-      : undefined;
+    const kept = keptSends.get(conversationId);
+    if (!kept || !reusable(kept.send, kept.send.text, Date.now())) return undefined;
+    return kept.seen
+      ? { text: kept.send.text, state: 'failed', seen: kept.seen }
+      : { text: kept.send.text, state: 'failed' };
   });
   const [detail, setDetail] = useState<TaskView | undefined>();
   /** The task pills opened to show their row (the step, the cost and the controls). */
@@ -397,7 +433,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     if (!arrivedOutgoing) return;
     // It is done with: the next message is a new one, with an id of its own.
     feed.draftEdited();
-    SENDS.clear(conversationId);
+    keptSends.delete(conversationId);
     setOutgoing(undefined);
   }, [arrivedOutgoing, feed, conversationId]);
   const pending = arrivedOutgoing ? undefined : outgoing;
@@ -429,11 +465,10 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const send = () => {
     const text = draft.trim();
     if (!text || busy || pending) return;
-    setOutgoing({
-      text,
-      state: 'sending',
-      seen: new Set(sentByPerson.map((message) => message.id)),
-    });
+    const seen = new Set(sentByPerson.map((message) => message.id));
+    // Kept with the send, so a later visit still tells it from older messages with the same words.
+    seenAtSend.set(conversationId, seen);
+    setOutgoing({ text, state: 'sending', seen });
     setDraft('');
     post(text);
   };
@@ -445,7 +480,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const discard = () => {
     // The next message is a new one: the failed one's id is not used again.
     feed.draftEdited();
-    SENDS.clear(conversationId);
+    keptSends.delete(conversationId);
     setOutgoing(undefined);
   };
   const togglePill = (taskId: string) =>

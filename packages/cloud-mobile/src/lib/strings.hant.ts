@@ -183,6 +183,7 @@ export const ZH_HANT: Record<Key, string> = {
   'task.panel.search': '搜尋',
 
   'chat.notSent': '未傳送',
+  'chat.saidStatus': '{who}：{text}（{status}）',
   'chat.resend': '重新傳送',
   'chat.discard': '刪除',
   'work.label': '這則訊息帶來的工作',
@@ -193,6 +194,7 @@ export const ZH_HANT: Record<Key, string> = {
   'work.steps': '{count} 個步驟',
   'work.show': '展開步驟',
   'work.hide': '收合步驟',
+  'work.summaryLabel': '{summary}。{action}',
   'work.stepLabel': '{title}：{summary}',
   'work.state.running': '進行中',
   'work.state.passed': '已通過',

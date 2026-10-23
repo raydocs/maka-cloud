@@ -185,6 +185,7 @@ export const EN = {
   'task.panel.search': 'Search',
 
   'chat.notSent': 'Not sent',
+  'chat.saidStatus': '{who}: {text} ({status})',
   'chat.resend': 'Send again',
   'chat.discard': 'Delete',
   'work.label': 'The work on this message',
@@ -195,6 +196,7 @@ export const EN = {
   'work.steps': '{count} steps',
   'work.show': 'Show the steps',
   'work.hide': 'Hide the steps',
+  'work.summaryLabel': '{summary}. {action}',
   'work.stepLabel': '{title}: {summary}',
   'work.state.running': 'Running',
   'work.state.passed': 'Passed',
@@ -502,6 +504,7 @@ export const ZH: Record<Key, string> = {
   'task.panel.search': '搜索',
 
   'chat.notSent': '未发送',
+  'chat.saidStatus': '{who}：{text}（{status}）',
   'chat.resend': '重新发送',
   'chat.discard': '删除',
   'work.label': '这条消息带来的工作',
@@ -512,6 +515,7 @@ export const ZH: Record<Key, string> = {
   'work.steps': '{count} 个步骤',
   'work.show': '展开步骤',
   'work.hide': '收起步骤',
+  'work.summaryLabel': '{summary}。{action}',
   'work.stepLabel': '{title}：{summary}',
   'work.state.running': '进行中',
   'work.state.passed': '已通过',
