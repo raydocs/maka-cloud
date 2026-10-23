@@ -55,12 +55,30 @@ test('unknown values stay absent and reduced motion stops live shimmer and inser
   await expect(line).toContainText('Checking the build');
   expect(await line.evaluate((el) => getComputedStyle(el, '::after').animationName)).toBe('none');
   expect(
-    await page
-      .locator('.message')
-      .first()
-      .evaluate((el) => getComputedStyle(el).animationName),
+    await page.locator('.message:last-child').evaluate((el) => getComputedStyle(el).animationName),
   ).toBe('none');
   await expect(page.getByRole('article', { name: 'Launch check', exact: true })).not.toContainText(
     'Cost',
   );
 });
+
+for (const language of ['en', 'zh-Hans', 'zh-Hant']) {
+  for (const width of [320, 360]) {
+    test(`navigation fits ${language} at ${width}px`, async ({ page, request }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await signIn(page, request);
+      await page.evaluate((value) => {
+        localStorage.setItem('maka.language', value);
+        window.dispatchEvent(new StorageEvent('storage', { key: 'maka.language' }));
+      }, language);
+      await expect(page.locator('html')).toHaveAttribute('lang', language);
+      await expect(page.getByTestId('button-me')).toBeVisible();
+      await noHorizontalScroll(page);
+      const pill = await page.locator('.seg').boundingBox();
+      const me = await page.getByTestId('button-me').boundingBox();
+      const search = await page.getByTestId('button-search').boundingBox();
+      expect(pill!.x + pill!.width).toBeLessThanOrEqual(me!.x);
+      expect(search!.x + search!.width).toBeLessThanOrEqual(pill!.x);
+    });
+  }
+}

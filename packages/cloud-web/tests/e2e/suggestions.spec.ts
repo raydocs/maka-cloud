@@ -62,7 +62,19 @@ test('a proposed card shows on Home with its cost, and one tap delivers one acce
   expect(order.indexOf('Suggestions')).toBeGreaterThanOrEqual(0);
   if (info.project.name === 'phone')
     expect(order.indexOf('Suggestions')).toBeLessThan(order.indexOf('Start something'));
-  else await expect(page.locator('.chat-dock')).toBeVisible();
+  else {
+    const pane = page.locator('.content-pane');
+    expect(
+      await pane
+        .getByRole('region', { name: 'Suggestions' })
+        .evaluate((el) =>
+          Boolean(
+            el.compareDocumentPosition(el.closest('.home')!.querySelector('.home-main')!) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+          ),
+        ),
+    ).toBe(true);
+  }
   await noHorizontalScroll(page);
   const doIt = region.getByRole('button', { name: 'Do it' });
   expect(await contrastOf(doIt)).toBeGreaterThanOrEqual(4.5);

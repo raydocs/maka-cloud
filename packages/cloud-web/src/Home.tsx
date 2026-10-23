@@ -144,6 +144,7 @@ export function Home({
   // The last visit is read once; it is written when the person leaves, so a reload is a visit.
   // Come back to this tab and the decisions, results and schedule are read again.
   const latestConversations = useRef(conversations);
+  const wasActive = useRef(active);
   useEffect(() => {
     if (startOnly) return;
     feed.start(latestConversations.current);
@@ -160,12 +161,13 @@ export function Home({
     };
   }, [feed, startOnly]);
   useEffect(() => {
-    if (active && !startOnly) feed.refresh();
+    if (active && !wasActive.current && !startOnly) feed.refresh();
+    wasActive.current = active;
   }, [active, feed, startOnly]);
   useEffect(() => {
     latestConversations.current = conversations;
-    feed.conversationsChanged(conversations);
-  }, [feed, conversations]);
+    if (!startOnly) feed.conversationsChanged(conversations);
+  }, [feed, conversations, startOnly]);
 
   const live = Object.values(items)
     .filter((item) => item.state !== 'closed')

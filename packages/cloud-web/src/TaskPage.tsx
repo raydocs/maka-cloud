@@ -113,9 +113,9 @@ export function TaskPage({
       <p className="task-page-meta muted">
         <span className={`status-mark ${task.state}`} /> {shared(taskLabel(task))}{' '}
         {task.costUsd !== undefined && t('· Cost')}{' '}
-        {task.costUsd !== undefined && (
+        {(task.costUsd !== undefined || task.budgetUsd !== undefined) && (
           <span className="mono">
-            {shared(dollars(task.costUsd))}
+            {task.costUsd !== undefined && shared(dollars(task.costUsd))}
             {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
           </span>
         )}

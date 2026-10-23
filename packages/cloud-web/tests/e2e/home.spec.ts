@@ -38,7 +38,19 @@ test('Home leads with what waits on you, answers it once, and says what was done
   expect(order.indexOf('Decisions waiting')).toBeGreaterThanOrEqual(0);
   if (info.project.name === 'phone')
     expect(order.indexOf('Decisions waiting')).toBeLessThan(order.indexOf('Start something'));
-  else await expect(page.locator('.chat-dock')).toBeVisible();
+  else {
+    const pane = page.locator('.content-pane');
+    expect(
+      await pane
+        .getByRole('region', { name: 'Decisions waiting' })
+        .evaluate((el) =>
+          Boolean(
+            el.compareDocumentPosition(el.closest('.home')!.querySelector('.home-main')!) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+          ),
+        ),
+    ).toBe(true);
+  }
   await noHorizontalScroll(page);
 
   // What was done since the last visit: the first visit shows the last day.

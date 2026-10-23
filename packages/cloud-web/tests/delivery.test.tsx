@@ -473,3 +473,35 @@ test('screenshots at several sizes are shown side by side, widest first, each lo
   fireEvent.click(frames[1] as HTMLElement);
   expect(screen.getByRole('dialog', { name: 'Phone' })).toBeTruthy();
 });
+
+test('file rows cache text reads and omit the diff already shown', async () => {
+  const report: ArtifactListing = { index: 3, name: 'report.txt', kind: 'file' };
+  const { client, reads } = fakeClient({
+    3: { name: report.name, type: 'text/plain', body: 'A long report' },
+  });
+  render(<DeliveryCard client={client} task={task()} listings={[diff, report]} sources={[]} />);
+  expect(screen.queryByRole('button', { name: 'Review changes.diff' })).toBeNull();
+  const review = screen.getByRole('button', { name: 'Review report.txt' });
+  fireEvent.click(review);
+  expect(await screen.findByText('A long report')).toBeTruthy();
+  fireEvent.click(review);
+  expect(reads.filter((index) => index === 3)).toHaveLength(1);
+});
+
+test('the source count names only the cards that open', () => {
+  const { client } = fakeClient();
+  const { container } = render(
+    <SourcesStack
+      client={client}
+      taskId="t1"
+      sources={[
+        source(0, 'pull_request'),
+        source(1, 'preview'),
+        source(2, 'test_report'),
+        source(3, 'docs'),
+      ]}
+    />,
+  );
+  expect(screen.getByText('Sources (3)')).toBeTruthy();
+  expect(container.querySelectorAll('.sources-stack a')).toHaveLength(3);
+});

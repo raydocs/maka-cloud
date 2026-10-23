@@ -138,7 +138,7 @@ export function SourcesStack({
   const middle = shown.length === 3 ? 1 : shown.length - 1;
   return (
     <details className="sources-disclosure">
-      <summary>{t('Sources ({count})', { count: sources.length })}</summary>
+      <summary>{t('Sources ({count})', { count: shown.length })}</summary>
       <section className="sources-stack" aria-label={t('Sources')}>
         {shown.map((source, i) => (
           <SourceCard
@@ -375,6 +375,7 @@ export function DeliveryCard({
         (listing) =>
           listing.kind === 'file' &&
           listing.index !== shot?.index &&
+          listing.index !== model?.diff?.index &&
           !views?.some((view) => view.listing.index === listing.index),
       ).length > 0 && (
         <div className="delivery-files">
@@ -383,10 +384,11 @@ export function DeliveryCard({
               (listing) =>
                 listing.kind === 'file' &&
                 listing.index !== shot?.index &&
+                listing.index !== model?.diff?.index &&
                 !views?.some((view) => view.listing.index === listing.index),
             )
             .map((listing) => (
-              <details key={listing.index}>
+              <details className="artifact" key={listing.index}>
                 <summary>{displayText(listing.name)}</summary>
                 <FilePreview client={client} taskId={task.taskId} listing={listing} />
               </details>
@@ -457,6 +459,7 @@ function FilePreview({
   const { t } = useT();
   const [content, setContent] = useState<ArtifactContent>();
   const [failed, setFailed] = useState(false);
+  const [loading, setLoading] = useState(false);
   const src = useObjectUrl(content?.kind === 'image' ? content.blob : undefined);
   return (
     <>
@@ -464,7 +467,13 @@ function FilePreview({
         type="button"
         className="quiet-action"
         onClick={() => {
-          void client.readArtifact(taskId, listing.index).then(setContent, () => setFailed(true));
+          if (content || loading) return;
+          setLoading(true);
+          setFailed(false);
+          void client
+            .readArtifact(taskId, listing.index)
+            .then(setContent, () => setFailed(true))
+            .finally(() => setLoading(false));
         }}
       >
         {t('Review {p0}', { p0: displayText(listing.name) })}
@@ -473,7 +482,7 @@ function FilePreview({
         <pre className="report-content">{displayText(content.text)}</pre>
       )}
       {src && <img className="picture" src={src} alt={displayText(listing.name)} />}
-      {failed && <p role="alert">{t('The picture could not be loaded.')}</p>}
+      {failed && <p role="alert">{t('The file could not be loaded.')}</p>}
     </>
   );
 }

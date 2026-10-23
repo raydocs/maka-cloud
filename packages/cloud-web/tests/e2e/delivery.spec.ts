@@ -234,6 +234,11 @@ test('a task page opens from the card, shows its changes and review on an opaque
   await page.getByRole('button', { name: 'Details' }).click();
   const taskPage = page.getByRole('article', { name: 'Task: Fix the login loop' });
   await expect(taskPage).toBeVisible();
+  if (info.project.name === 'desktop') {
+    const taskBox = await taskPage.boundingBox();
+    const mainBox = await page.locator('.shell main').boundingBox();
+    expect(taskBox!.width).toBeGreaterThan(mainBox!.width * 0.9);
+  }
   await expect(taskPage.getByRole('region', { name: 'Outcome' })).toContainText('Redirects once');
   await expect(taskPage.getByRole('region', { name: 'Outcome' })).toContainText('The mobile app');
   await expect(taskPage.getByRole('region', { name: 'Steps' })).toContainText(
@@ -255,6 +260,20 @@ test('a task page opens from the card, shows its changes and review on an opaque
   // Back returns to the chat as it was, not a fresh one.
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('article', { name: /^Result: Fix the login loop/u })).toBeVisible();
+  await page.getByRole('button', { name: 'Details' }).click();
+  const search = page.getByTestId('button-search');
+  await search.click();
+  await expect(search).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('searchbox')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(search).toBeFocused();
+  await expect(search).toHaveAttribute('aria-expanded', 'false');
+  await search.click();
+  await page.locator('.search-sheet button').first().click();
+  await expect(taskPage).toHaveCount(0);
+  await expect(page.getByTestId('tab-chat')).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('log')).toBeVisible();
+  await expect(search).toBeFocused();
 });
 
 test('another invite cannot open a task page by its id', async ({ page, request }) => {

@@ -186,15 +186,16 @@ function TaskBranch({
         </div>
         <div className="task-meta">
           <span>{shared(taskLabel(task))}</span>
-          {task.parentTaskId === undefined && task.costUsd !== undefined && (
-            <span>
-              {live ? t('Cost so far:') : t('Cost:')}{' '}
-              <span className={task.costUsd === undefined ? undefined : 'mono'}>
-                {shared(dollars(task.costUsd))}
-                {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
+          {task.parentTaskId === undefined &&
+            (task.costUsd !== undefined || task.budgetUsd !== undefined) && (
+              <span>
+                {live ? t('Cost so far:') : t('Cost:')}{' '}
+                <span className={task.costUsd === undefined ? undefined : 'mono'}>
+                  {task.costUsd !== undefined && shared(dollars(task.costUsd))}
+                  {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
+                </span>
               </span>
-            </span>
-          )}
+            )}
         </div>
         {task.budgetExceeded && (
           <p className="failure">{t('The budget was reached, so the work was stopped.')}</p>
@@ -763,21 +764,52 @@ export function Shell({
   onView,
   children,
   onSearch,
+  searching = false,
 }: {
+  searching?: boolean;
   onSearch?: () => void;
   view: View;
   onView: (view: View) => void;
   children: ReactNode;
 }) {
   const { t } = useT();
+  const shell = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const root = shell.current;
+    if (!root || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const heights = [...root.querySelectorAll('.composer, .start form')]
+        .filter((el) => el.getClientRects().length > 0)
+        .map((el) => el.getBoundingClientRect().height);
+      root.style.setProperty('--composer-height', `${Math.max(0, ...heights)}px`);
+    };
+    const resize = new ResizeObserver(update);
+    const observe = () => {
+      root.querySelectorAll('.composer, .start form').forEach((el) => resize.observe(el));
+      update();
+    };
+    const mutations = new MutationObserver(observe);
+    mutations.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['hidden'],
+    });
+    observe();
+    return () => {
+      resize.disconnect();
+      mutations.disconnect();
+    };
+  }, []);
   return (
-    <div className="shell" data-view={view}>
+    <div ref={shell} className="shell" data-view={view}>
       <header className="shell-top">
         <nav className="seg-nav" aria-label={t('Sections')}>
           <button
             type="button"
             className="seg-settings"
             data-testid="button-search"
+            aria-expanded={searching}
             aria-label={t('Search')}
             onClick={onSearch}
           >
@@ -874,8 +906,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   const selected = session?.conversations.find((c) => c.conversationId === chosen);
   return session ? (
     <Shell
+      searching={searching}
       onSearch={() => setSearching(!searching)}
-      view={wide && (taskPage?.from ?? view) === 'chat' ? 'home' : (taskPage?.from ?? view)}
+      view={taskPage?.from ?? view}
       onView={(next) => {
         setTaskPage(undefined);
         setView(next);
@@ -892,7 +925,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               onClick={(e) => {
                 setChosen('');
                 setView('chat');
-                e.currentTarget.closest('details')?.removeAttribute('open');
+                const menu = e.currentTarget.closest('details');
+                menu?.removeAttribute('open');
+                menu?.querySelector('summary')?.focus();
               }}
             >
               {t('New conversation')}
@@ -904,7 +939,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
                 onClick={(e) => {
                   setChosen(conversation.conversationId);
                   setView('chat');
-                  e.currentTarget.closest('details')?.removeAttribute('open');
+                  const menu = e.currentTarget.closest('details');
+                  menu?.removeAttribute('open');
+                  menu?.querySelector('summary')?.focus();
                 }}
               >
                 {displayText(conversation.title ?? t('Untitled conversation'))}
@@ -914,9 +951,19 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         </details>
       )}
       {searching && (
-        <section className="search-sheet card section-card" aria-label={t('Search')}>
+        <section
+          className="search-sheet card section-card"
+          aria-label={t('Search')}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setSearching(false);
+              document.querySelector<HTMLButtonElement>('[data-testid="button-search"]')?.focus();
+            }
+          }}
+        >
           <label htmlFor="search-conversations">{t('Search conversations')}</label>
           <input
+            ref={(input) => input?.focus()}
             id="search-conversations"
             type="search"
             value={query}
@@ -930,15 +977,26 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
                 type="button"
                 key={c.conversationId}
                 onClick={() => {
+                  setTaskPage(undefined);
                   setChosen(c.conversationId);
                   setView('chat');
                   setSearching(false);
+                  document
+                    .querySelector<HTMLButtonElement>('[data-testid="button-search"]')
+                    ?.focus();
                 }}
               >
                 {displayText(c.title ?? t('Untitled conversation'))}
               </button>
             ))}
-          <button type="button" className="quiet-action" onClick={() => setSearching(false)}>
+          <button
+            type="button"
+            className="quiet-action"
+            onClick={() => {
+              setSearching(false);
+              document.querySelector<HTMLButtonElement>('[data-testid="button-search"]')?.focus();
+            }}
+          >
             {t('Close')}
           </button>
         </section>
@@ -1010,7 +1068,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
             <Home
               startOnly
               client={session.client}
-              conversations={[]}
+              conversations={session.conversations}
               onStarted={(conversation) => {
                 setSession({ ...session, conversations: [...session.conversations, conversation] });
                 setChosen(conversation.conversationId);

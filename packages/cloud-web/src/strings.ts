@@ -284,6 +284,7 @@ export const en = {
   'Open large: the changes': 'Open large: the changes',
   'View the changes': 'View the changes',
   'The picture could not be loaded.': 'The picture could not be loaded.',
+  'The file could not be loaded.': 'The file could not be loaded.',
   'Finished ·': 'Finished ·',
   'Kept approvals': 'Kept approvals',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
@@ -767,6 +768,7 @@ export const zhHans: Record<Key, string> = {
   'Open large: the changes': '放大查看：改动',
   'View the changes': '查看改动',
   'The picture could not be loaded.': '无法加载图片。',
+  'The file could not be loaded.': '无法加载文件。',
   'Finished ·': '已完成 ·',
   'Kept approvals': '已记住的授权',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':
@@ -1237,6 +1239,7 @@ export const zhHant: Record<Key, string> = {
   'Open large: the changes': '放大查看：改動',
   'View the changes': '查看改動',
   'The picture could not be loaded.': '無法載入圖片。',
+  'The file could not be loaded.': '無法載入檔案。',
   'Finished ·': '已完成 ·',
   'Kept approvals': '已記住的授權',
   'What the agent may do again without asking. Revoke one and the next such step asks you.':

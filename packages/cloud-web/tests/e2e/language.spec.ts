@@ -146,7 +146,18 @@ for (const locale of ['zh-CN', 'zh-TW']) {
         expect(regions.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeLessThan(
           regions.indexOf(copy('开始新任务', '開始新任務')),
         );
-      else await expect(page.locator('.chat-dock')).toBeVisible();
+      else {
+        const pane = page.locator('.content-pane');
+        const sections = await pane
+          .getByRole('region')
+          .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
+        expect(sections.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeGreaterThanOrEqual(
+          0,
+        );
+        expect(sections.indexOf(copy('待你处理的决定', '待你處理的決定'))).toBeLessThan(
+          sections.indexOf(copy('即将运行', '即將執行')),
+        );
+      }
       expect(
         await waiting.locator('h2').evaluate((el) => getComputedStyle(el, '::before').content),
       ).not.toBe('none');

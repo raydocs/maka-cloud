@@ -388,3 +388,16 @@ test('a server without suggestions shows no suggestion section and no error', as
   expect(screen.queryByRole('list', { name: 'Suggestions' })).toBeNull();
   expect(screen.queryByRole('alert')).toBeNull();
 });
+
+test('a task page keeps the budget visible before cost is reported', async () => {
+  const api = serveTask();
+  render(
+    <TaskPage
+      client={api.client}
+      task={finished({ costUsd: undefined, budgetUsd: 7 })}
+      onBack={() => {}}
+    />,
+  );
+  expect(screen.getByText('of $7.00', { exact: false })).toBeTruthy();
+  await screen.findByRole('region', { name: 'Outcome' });
+});

@@ -1909,9 +1909,13 @@ strong {
 }
 .seg {
   flex: 0 1 auto;
+  min-width: 0;
 }
 .seg-item {
-  padding: 6px 14px;
+  padding: 6px clamp(2px, 2vw, 14px);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   min-height: 44px;
 }
 .seg-settings {
@@ -1927,7 +1931,7 @@ strong {
 }
 .page,
 .chat {
-  padding-bottom: 150px;
+  padding-bottom: calc(var(--composer-height, 118px) + 32px);
 }
 .home {
   grid-template-columns: minmax(0, 1fr);
@@ -2110,6 +2114,10 @@ strong {
     gap: 24px;
     align-items: start;
   }
+  .task-page {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
   .chat-dock {
     grid-column: 1;
     grid-row: 1;
@@ -2117,7 +2125,7 @@ strong {
     top: 16px;
     height: calc(100dvh - 96px);
     overflow-y: auto;
-    padding-bottom: 130px;
+    padding-bottom: calc(var(--composer-height, 98px) + 32px);
   }
   .content-pane {
     grid-column: 2;
@@ -2206,9 +2214,6 @@ strong {
 }
 
 @media (min-width: 900px) {
-  [data-testid="tab-chat"] {
-    display: none;
-  }
   [data-testid="button-me"] {
     width: auto;
     padding: 0 16px;

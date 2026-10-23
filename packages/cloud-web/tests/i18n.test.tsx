@@ -147,7 +147,10 @@ test('Settings switches immediately, persists the choice, follows browser change
     </LanguageProvider>,
   );
   expect(screen.getByRole('heading', { name: '我的' })).toBeTruthy();
+  expect(screen.getByText('语言', { exact: true })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '繁體中文' }));
+  expect(screen.getByText('語言', { exact: true })).toBeTruthy();
+  expect(screen.queryByText('语言', { exact: true })).toBeNull();
   expect(screen.getByRole('heading', { name: '我的' })).toBeTruthy();
   expect(localStorage.getItem(LANGUAGE_KEY)).toBe('zh-Hant');
   expect(document.documentElement.lang).toBe('zh-Hant');
