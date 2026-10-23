@@ -152,8 +152,8 @@ export interface IdentityVerifier {
   /**
    * The identity in an ID token, when and only when the token is signed by the provider's key,
    * was issued by the provider for one of the owner's client ids, has not expired, and carries
-   * exactly the nonce this server gave out for the sign-in (or its SHA-256 in hex). Anything else is nothing: no reason is
-   * returned, so a caller cannot tell a caller which check failed.
+   * exactly the nonce this server gave out for the sign-in (or its SHA-256 in hex). Anything else
+   * is nothing: no reason is returned, so a caller cannot tell a caller which check failed.
    */
   verify(idToken: string, nonce: string): Promise<VerifiedIdentity | undefined>;
 }
