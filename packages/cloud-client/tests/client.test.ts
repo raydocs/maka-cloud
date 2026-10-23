@@ -241,3 +241,18 @@ test('the person’s language is read and set on the settings route; an older se
   await expect(old.settings()).rejects.toThrow('not available');
   expect(old.unsupported.has('settings')).toBe(true);
 });
+
+test('task conversation lookup uses the authenticated owner-scoped route and encodes the task id', async () => {
+  const calls: Array<{ path: string; authorization: string | null }> = [];
+  const client = new CloudClient('owner-token', async (input, init) => {
+    calls.push({
+      path: String(input),
+      authorization: new Headers(init?.headers).get('authorization'),
+    });
+    return Response.json({ conversationId: 'cnv_target' });
+  });
+  expect(await client.taskConversation('task/a')).toEqual({ conversationId: 'cnv_target' });
+  expect(calls).toEqual([
+    { path: '/v1/tasks/task%2Fa/conversation', authorization: 'Bearer owner-token' },
+  ]);
+});

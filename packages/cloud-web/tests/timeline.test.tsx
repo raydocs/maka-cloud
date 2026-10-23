@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { CloudClient, type TaskView, type TimelineStep } from '@maka-cloud/client';
 import { TaskPage } from '../src/TaskPage';
@@ -131,3 +131,108 @@ test('progress ticks preserve loaded pages; terminal and visible refreshes dedup
   await waitFor(() => expect(timeline).toHaveBeenCalledTimes(6));
   expect(document.querySelectorAll('[data-state]')).toHaveLength(2);
 });
+
+function timelineFixture() {
+  const client = new CloudClient('test');
+  vi.spyOn(client, 'listArtifacts').mockResolvedValue({ artifacts: [], total: 0 });
+  vi.spyOn(client, 'listInbox').mockResolvedValue([]);
+  vi.spyOn(client, 'listSources').mockResolvedValue({ sources: [], total: 0 });
+  const page = (ids: string[], next?: number): Awaited<ReturnType<CloudClient['timeline']>> => ({
+    timeline: {
+      taskId: 't',
+      state: 'running',
+      createdAt: 0,
+      runMs: 0,
+      turns: [],
+      turnsTotal: 0,
+      stepsTotal: 3,
+      cost: [],
+      costReports: 0,
+      content: false,
+      messages: { sent: 0, read: 0, unseen: 0, withdrawn: 0 },
+      steps: ids.map(
+        (stepId) =>
+          ({
+            stepId,
+            kind: stepId,
+            state: 'done',
+            replay: 'safe',
+            epoch: 1,
+            attempts: 1,
+            startedAt: 0,
+          }) as TimelineStep,
+      ),
+      stepsNext: next,
+    },
+  });
+  const task = {
+    taskId: 't',
+    state: 'running',
+    createdAt: 0,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+  } as TaskView;
+  const view = (progress: string[] = []) => (
+    <LanguageProvider language="en">
+      <TaskPage client={client} task={{ ...task, progress }} onBack={() => {}} />
+    </LanguageProvider>
+  );
+  return { client, page, view };
+}
+
+test('running timelines refresh at most once per five seconds and retain loaded pages', async () => {
+  const { client, page, view } = timelineFixture();
+  const timeline = vi
+    .spyOn(client, 'timeline')
+    .mockImplementation(async (_id, cursor) =>
+      cursor?.after === undefined ? page(['one'], 1) : page(['one', 'two']),
+    );
+  vi.useFakeTimers();
+  try {
+    const { rerender } = render(view());
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Load more steps' }));
+    await act(async () => {});
+    rerender(view(['tick']));
+    await act(() => vi.advanceTimersByTimeAsync(4999));
+    expect(timeline).toHaveBeenCalledTimes(2);
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(timeline).toHaveBeenCalledTimes(4);
+    expect(document.querySelectorAll('[data-state]')).toHaveLength(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each(['refresh-first', 'more-first'])(
+  'refresh racing Load more preserves pages: %s',
+  async (order) => {
+    const { client, page, view } = timelineFixture();
+    const timeline = vi.spyOn(client, 'timeline').mockResolvedValue(page(['one'], 1));
+    render(view());
+    await screen.findByRole('button', { name: 'Load more steps' });
+    let finishRefresh!: (value: ReturnType<typeof page>) => void;
+    let finishMore!: (value: ReturnType<typeof page>) => void;
+    timeline.mockImplementation(
+      (_id, cursor) =>
+        new Promise((resolve) => {
+          if (cursor?.after === undefined) finishRefresh = resolve;
+          else finishMore = resolve;
+        }),
+    );
+    fireEvent(document, new Event('visibilitychange'));
+    fireEvent.click(screen.getByRole('button', { name: 'Load more steps' }));
+    if (order === 'refresh-first') {
+      await act(async () => finishRefresh(page(['one'], 1)));
+      await act(async () => finishMore(page(['one', 'two'], 2)));
+    } else {
+      await act(async () => finishMore(page(['one', 'two'], 2)));
+      await act(async () => finishRefresh(page(['one'], 1)));
+    }
+    expect(document.querySelectorAll('[data-state]')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Load more steps' }).hasAttribute('disabled')).toBe(
+      false,
+    );
+  },
+);

@@ -231,6 +231,11 @@ export class CloudClient {
       body: JSON.stringify({ text, clientMessageId, ...(mode === undefined ? {} : { mode }) }),
     });
   }
+  taskConversation(task: string) {
+    return this.request<{ conversationId: string }>(
+      `/v1/tasks/${encodeURIComponent(task)}/conversation`,
+    );
+  }
   async listTasks(id: string): Promise<TaskView[]> {
     const result: TaskView[] = [];
     let after = 0;

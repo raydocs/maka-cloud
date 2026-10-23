@@ -1,6 +1,7 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  "Couldn't find that task.": "Couldn't find that task.",
   Open: 'Open',
   'Something needs a look': 'Something needs a look',
   'Open Maka to check your inbox.': 'Open Maka to check your inbox.',
@@ -522,6 +523,7 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  "Couldn't find that task.": '找不到该任务。',
   Open: '打开',
   'Something needs a look': '有件事需要查看',
   'Open Maka to check your inbox.': '打开 Maka 查看收件箱。',
@@ -1009,6 +1011,7 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  "Couldn't find that task.": '找不到該任務。',
   Open: '開啟',
   'Something needs a look': '有件事需要查看',
   'Open Maka to check your inbox.': '開啟 Maka 查看收件匣。',

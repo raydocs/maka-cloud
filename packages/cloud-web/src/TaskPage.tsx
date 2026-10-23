@@ -74,6 +74,10 @@ export function TaskPage({
   const [loadingSteps, setLoadingSteps] = useState(false);
   const loadedCount = useRef(0);
   const generation = useRef(0);
+  const sequence = useRef(0);
+  const loadingMore = useRef(false);
+  const refreshSteps = useRef<() => void>(() => {});
+  const lastRefresh = useRef(0);
   const terminal = TERMINAL.has(task.state);
   useEffect(() => {
     loadedCount.current = 0;
@@ -85,26 +89,34 @@ export function TaskPage({
   useEffect(() => {
     const version = ++generation.current;
     setLoadingSteps(false);
-    let request = 0;
+    loadingMore.current = false;
+    let refreshing = false;
     const refresh = async () => {
-      const ticket = ++request;
+      if (loadingMore.current || refreshing) return;
+      refreshing = true;
+      const ticket = ++sequence.current;
+      lastRefresh.current = Date.now();
       try {
         const steps = new Map<string, TimelineStep>();
         let after: number | undefined;
         do {
           const { timeline } = await client.timeline(task.taskId, { after });
+          if (generation.current !== version || ticket !== sequence.current) return;
           for (const step of timeline.steps) steps.set(step.stepId, step);
           after = timeline.stepsNext;
         } while (after !== undefined && steps.size < loadedCount.current);
-        if (generation.current !== version || ticket !== request) return;
+        if (generation.current !== version || ticket !== sequence.current) return;
         setTimeline([...steps.values()]);
         loadedCount.current = steps.size;
         setNext(after);
         setTimelineError(false);
       } catch {
-        if (generation.current === version) setTimelineError(true);
+        if (generation.current === version && ticket === sequence.current) setTimelineError(true);
+      } finally {
+        refreshing = false;
       }
     };
+    refreshSteps.current = () => void refresh();
     void refresh();
     const visible = () => {
       if (document.visibilityState === 'visible') void refresh();
@@ -115,12 +127,21 @@ export function TaskPage({
       document.removeEventListener('visibilitychange', visible);
     };
   }, [client, task.taskId, terminal]);
+  useEffect(() => {
+    if (terminal) return;
+    const timer = setInterval(() => {
+      if (Date.now() - lastRefresh.current >= 5000) refreshSteps.current();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [client, task.taskId, terminal]);
   const moreSteps = async () => {
     const version = generation.current;
+    const ticket = ++sequence.current;
+    loadingMore.current = true;
     setLoadingSteps(true);
     try {
       const page = await client.timeline(task.taskId, { after: next });
-      if (generation.current !== version) return;
+      if (generation.current !== version || ticket !== sequence.current) return;
       setTimeline((steps) => {
         const merged = new Map(steps.map((step) => [step.stepId, step]));
         for (const step of page.timeline.steps) merged.set(step.stepId, step);
@@ -130,9 +151,12 @@ export function TaskPage({
       setNext(page.timeline.stepsNext);
       setTimelineError(false);
     } catch {
-      if (generation.current === version) setTimelineError(true);
+      if (generation.current === version && ticket === sequence.current) setTimelineError(true);
     } finally {
-      if (generation.current === version) setLoadingSteps(false);
+      if (generation.current === version && ticket === sequence.current) {
+        loadingMore.current = false;
+        setLoadingSteps(false);
+      }
     }
   };
   const sources = useSources(client, task.taskId, task.state);

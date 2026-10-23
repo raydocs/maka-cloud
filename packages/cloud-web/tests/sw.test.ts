@@ -12,7 +12,7 @@ function load(
   windows: Array<{
     url: string;
     focus: () => Promise<unknown>;
-    postMessage: (data: unknown) => void;
+    postMessage: (data: unknown, ports?: MessagePort[]) => void;
   }> = [],
 ) {
   const caches = {
@@ -53,6 +53,15 @@ function load(
     URL,
     URLSearchParams,
     Object,
+    setTimeout,
+    clearTimeout,
+    MessageChannel: class {
+      port1 = {
+        onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
+        close() {},
+      };
+      port2 = { postMessage: (data: unknown) => this.port1.onmessage?.({ data }) };
+    },
   });
   const push = async (data: unknown) => {
     const waits: Promise<unknown>[] = [];
@@ -256,18 +265,19 @@ test('the server terminal envelope preserves failed and stopped outcomes', async
   expect(worker.shown.map((n) => n.title)).toEqual(['Task failed', 'Task stopped', TASK.title]);
   expect(new Set(worker.shown.map((n) => n.options.tag)).size).toBe(1);
   await worker.push({ type: 'approval.required', taskId: 'same', conversationId: 'chat' });
-  expect(worker.shown.at(-1)?.options.data).toEqual({
-    path: '/?conversation=chat&task=same&decision=1',
-  });
+  expect(worker.shown).toHaveLength(3);
 });
 
 test('existing uncontrolled clients receive in-app links without navigation or reload', async () => {
   const focus = vi.fn(async () => {});
-  const postMessage = vi.fn();
+  const postMessage = vi.fn((_data, ports) => ports[0].postMessage({ type: 'maka.open.ack' }));
   const worker = load('en', new Map(), [{ url: 'https://maka.example.test/', focus, postMessage }]);
   await worker.click('/?task=one');
   expect(focus).toHaveBeenCalledOnce();
-  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/?task=one' });
+  expect(postMessage).toHaveBeenCalledWith(
+    { type: 'maka.open', path: '/?task=one' },
+    expect.anything(),
+  );
   expect(worker.opened).toEqual([]);
 });
 
@@ -302,4 +312,42 @@ test('approval and unknown tags stay separate; terminal replaces ongoing and res
   expect(worker.shown.at(-1)?.options.renotify).toBe(true);
   await worker.push({ type: 'task.running', taskId: 'one' });
   expect(worker.shown).toHaveLength(5);
+});
+
+test('dismissed terminal tasks survive a restart, expire after seven days, and keep only 200 records', async () => {
+  const saved = new Map<string, string>();
+  await load('en', saved).push({ type: 'task.finished', taskId: 'ended' });
+  const restarted = load('en', saved);
+  await restarted.push({ type: 'task.running', taskId: 'ended' });
+  expect(restarted.shown).toHaveLength(0);
+  const key = '/.maka-terminal-tasks';
+  saved.set(key, JSON.stringify([['expired', Date.now() - 8 * 86400000]]));
+  await restarted.push({ type: 'task.running', taskId: 'expired' });
+  expect(restarted.shown).toHaveLength(1);
+  for (let i = 0; i < 201; i++) await restarted.push({ type: 'task.finished', taskId: String(i) });
+  const records = JSON.parse(saved.get(key)!);
+  expect(records).toHaveLength(200);
+  expect(records[0][0]).toBe('1');
+});
+
+test('callback clients are skipped and an app without an ack falls back after 1.5 seconds', async () => {
+  vi.useFakeTimers();
+  try {
+    const callback = vi.fn();
+    const app = vi.fn();
+    const worker = load('en', new Map(), [
+      { url: 'https://maka.example.test/callback', focus: async () => {}, postMessage: callback },
+      { url: 'https://maka.example.test/', focus: async () => {}, postMessage: app },
+    ]);
+    const click = worker.click('/?task=one');
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(callback).not.toHaveBeenCalled();
+    expect(app).toHaveBeenCalledOnce();
+    expect(worker.opened).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await click;
+    expect(worker.opened).toEqual(['/?task=one']);
+  } finally {
+    vi.useRealTimers();
+  }
 });

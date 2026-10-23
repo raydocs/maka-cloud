@@ -569,6 +569,17 @@ export class PublicApi {
       const action = control[2] as ControlAction;
       return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
     }
+    const taskConversation = /^\/v1\/tasks\/([^/]+)\/conversation$/u.exec(path);
+    if (taskConversation) {
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      const session = this.ownTaskSession(invite, decodeURIComponent(taskConversation[1] ?? ''));
+      return respond(
+        res,
+        200,
+        { conversationId: this.deps.conversations.conversationOf(session) },
+        { 'cache-control': 'private, no-store' },
+      );
+    }
     const timeline = /^\/v1\/tasks\/([^/]+)\/timeline$/u.exec(path);
     if (timeline) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
