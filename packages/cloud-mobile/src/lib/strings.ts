@@ -49,6 +49,8 @@ export const EN = {
   'chat.new': 'New conversation',
   'chat.more': 'Conversations',
   'search.field': 'Search conversations and tasks',
+  'chat.storageNotice':
+    "This device can't keep unsent messages; they'll be lost if you close the app before they send.",
   'search.hint': 'Looks through the conversations and tasks on this phone.',
   'search.none': 'Nothing matches “{query}”.',
   'search.incomplete': 'Some tasks could not be loaded, so results may be missing.',
@@ -429,6 +431,7 @@ export const ZH: Record<Key, string> = {
   'chat.new': '新对话',
   'chat.more': '对话列表',
   'search.field': '搜索对话和任务',
+  'chat.storageNotice': '此设备无法保存未发送的消息；如果在发送前关闭应用，这些消息将会丢失。',
   'search.hint': '在这台手机已载入的对话和任务里查找。',
   'search.none': '没有与“{query}”相关的内容。',
   'search.incomplete': '有些任务没能加载，结果可能不全。',

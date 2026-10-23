@@ -61,7 +61,7 @@ import { useReduceMotion } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
 import { type Idea, startersFor, useProjects } from '@/lib/ideas';
 import { keepLive } from '@/lib/live';
-import { readSecure, removeSecure, writeSecure } from '@/lib/secure';
+import { readSecure, removeSecure, writeDurableSecure } from '@/lib/secure';
 import { useWorkspace } from '@/lib/session';
 import {
   STEER_MAX_CHARS,
@@ -623,7 +623,7 @@ function WaitingChip({ count, onPress }: { count: number; onPress: () => void })
  * (`outboxScope`), so signing in elsewhere never shows them; signing out keeps them under that
  * account until they are sent, deleted, or a day old.
  */
-const secureStore = { get: readSecure, set: writeSecure, remove: removeSecure };
+const secureStore = { get: readSecure, set: writeDurableSecure, remove: removeSecure };
 
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
@@ -1131,6 +1131,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               )}
             </View>
           )}
+          {snapshot.unsentStorageFailed && <T kind="small">{say('chat.storageNotice')}</T>}
           <Composer
             draft={draft}
             // While a send is unsettled, words typed meanwhile wait: they cannot be sent until it

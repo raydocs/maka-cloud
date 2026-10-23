@@ -1,6 +1,12 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  "This device can't keep unsent messages; they'll be lost if you close the app before they send.":
+    "This device can't keep unsent messages; they'll be lost if you close the app before they send.",
+  'Search conversation titles.': 'Search conversation titles.',
+  'No matches for “{query}”.': 'No matches for “{query}”.',
+  'Search could not be loaded.': 'Search could not be loaded.',
+
   "Couldn't find that task.": "Couldn't find that task.",
   Usage: 'Usage',
   'Choose your language': 'Choose your language',
@@ -606,6 +612,12 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  "This device can't keep unsent messages; they'll be lost if you close the app before they send.":
+    '此设备无法保存未发送的消息；如果在发送前关闭应用，这些消息将会丢失。',
+  'Search conversation titles.': '搜索对话标题。',
+  'No matches for “{query}”.': '没有与“{query}”匹配的结果。',
+  'Search could not be loaded.': '无法加载搜索结果。',
+
   "Couldn't find that task.": '找不到该任务。',
   Usage: '用量',
   'Choose your language': '选择语言',
@@ -1166,6 +1178,12 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  "This device can't keep unsent messages; they'll be lost if you close the app before they send.":
+    '這台裝置無法儲存尚未傳送的訊息；如果在傳送前關閉 App，這些訊息就會遺失。',
+  'Search conversation titles.': '搜尋對話標題。',
+  'No matches for “{query}”.': '沒有符合「{query}」的結果。',
+  'Search could not be loaded.': '無法載入搜尋結果。',
+
   "Couldn't find that task.": '找不到該任務。',
   Usage: '用量',
   'Choose your language': '選擇語言',

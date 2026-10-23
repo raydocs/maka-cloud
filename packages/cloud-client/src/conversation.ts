@@ -89,6 +89,8 @@ export interface ConversationSnapshot {
    * when the conversation shows it, or when the person discards it.
    */
   outgoing: OutgoingMessage[];
+  /** Storage failed during this feed; one quiet notice stays by the composer. */
+  unsentStorageFailed?: boolean;
   error: ErrorText;
   /** The key of the action in flight, or ''. One action runs at a time. */
   busy: string;
@@ -448,7 +450,12 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     let sent = false;
     const ran = await this.act('message', async () => {
       // Kept before the post: a reload while it is in flight finds it.
-      await this.outbox.put(entryOf(this.conversationId, message, this.now())).catch(() => {});
+      const kept = await this.outbox
+        .put(entryOf(this.conversationId, message, this.now()))
+        .catch(() => false);
+      if (kept === false && !this.getSnapshot().unsentStorageFailed) {
+        this.update((s) => ({ ...s, unsentStorageFailed: true }));
+      }
       this.setOutgoing(message.id, { state: 'sending' });
       try {
         const answer: unknown = await this.client.postMessage(

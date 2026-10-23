@@ -1,6 +1,6 @@
 import { displayText, type TaskView } from '@maka-cloud/client';
 import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Card, Field, PillButton, QuietButton, Screen, StatusMark, T } from '@/components/ui';
 import { useT } from '@/lib/i18n';
@@ -36,8 +36,9 @@ export default function Search() {
   );
   // A retry of the failed reads, for the conversations it was asked for (new ones read afresh).
   const [attempt, setAttempt] = useState<{ of: string[]; ids: string[] } | undefined>();
+  const sequence = useRef(0);
   useEffect(() => {
-    let current = true;
+    const current = ++sequence.current;
     const ids = attempt?.of === recent ? attempt.ids : recent;
     setLoading(true);
     void Promise.all(
@@ -48,7 +49,7 @@ export default function Search() {
         ),
       ),
     ).then((results) => {
-      if (!current) return;
+      if (current !== sequence.current) return;
       setRead((before) => {
         const after = { ...before };
         for (const { id, list } of results) if (list) after[id] = list;
@@ -58,7 +59,7 @@ export default function Search() {
       setLoading(false);
     });
     return () => {
-      current = false;
+      sequence.current++;
     };
   }, [client, recent, attempt]);
   const tasks = recent.flatMap((conversationId) =>

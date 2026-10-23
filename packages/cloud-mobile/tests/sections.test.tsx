@@ -466,3 +466,76 @@ test('a work item carries a small tabular line: when, who, and the latest tool',
   expect(meta.props.children).toMatch(/^\d{1,2}:\d{2}( [AP]M)? · Maka · Tests$/u);
   expect(flat(meta.props.style).fontVariant).toEqual(['tabular-nums']);
 });
+
+test('Search shows the hint and loading, then applies a delayed task read to the latest query', async () => {
+  let finish!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  await signedIn(<Search />, {
+    '/v1/conversations': () =>
+      Response.json({ conversations: [{ conversationId: 'c1', title: 'Release', createdAt: 1 }] }),
+    '/v1/conversations/c1/tasks': () => pending,
+  });
+  expect(screen.getByText('Looks through the conversations and tasks on this phone.')).toBeTruthy();
+  const field = screen.getByTestId('field-Search');
+  await fireEvent.changeText(field, 'old');
+  expect(screen.getByText('Loading')).toBeTruthy();
+  await fireEvent.changeText(field, 'new');
+  await act(async () =>
+    finish(
+      Response.json({
+        tasks: [
+          {
+            taskId: 't',
+            title: 'old result',
+            state: 'succeeded',
+            createdAt: 1,
+            progress: [],
+            cancelRequested: false,
+            pauseRequested: false,
+          },
+        ],
+      }),
+    ),
+  );
+  expect(await screen.findByText('Nothing matches “new”.')).toBeTruthy();
+  expect(screen.queryByText('old result')).toBeNull();
+  await fireEvent.changeText(field, '');
+  expect(screen.getByText('Looks through the conversations and tasks on this phone.')).toBeTruthy();
+});
+
+test('Search ignores an older task read that finishes after a newer read', async () => {
+  let finish!: (response: Response) => void;
+  const older = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  let reads = 0;
+  const tasks = (title: string) =>
+    Response.json({
+      tasks: [
+        {
+          taskId: 't',
+          title,
+          state: 'succeeded',
+          createdAt: 1,
+          progress: [],
+          cancelRequested: false,
+          pauseRequested: false,
+        },
+      ],
+    });
+  await signedIn(<Search />, {
+    '/v1/conversations': () =>
+      Response.json({ conversations: [{ conversationId: 'c1', title: 'Release', createdAt: 1 }] }),
+    '/v1/conversations/c1/tasks': () => (++reads === 1 ? older : tasks('new result')),
+    '/v1/conversations/c2/tasks': () => Response.json({ tasks: [] }),
+  });
+  await fireEvent.changeText(screen.getByTestId('field-Search'), 'old');
+  await act(async () => api?.started({ conversationId: 'c2', title: 'Another', createdAt: 2 }));
+  await fireEvent.changeText(screen.getByTestId('field-Search'), 'new');
+  expect(await screen.findByText('new result')).toBeTruthy();
+  await act(async () => finish(tasks('old result')));
+  expect(screen.getByText('new result')).toBeTruthy();
+  expect(screen.queryByText('Nothing matches “new”.')).toBeNull();
+});

@@ -529,3 +529,31 @@ for (const multiple of [false, true]) {
     expect(await screen.findByText('+The fix')).toBeTruthy();
   });
 }
+
+test.each([false, true])(
+  'storage failure %s shows one quiet composer notice without blocking sends',
+  async (fails) => {
+    const original = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
+      if (fails && key.startsWith('maka.outbox.')) throw new Error('quota');
+      original.call(this, key, value);
+    });
+    const api = chatApi([]);
+    render(
+      <ConversationView
+        client={new CloudClient('fake', api.fetcher)}
+        conversation={conversation}
+      />,
+    );
+    const notice =
+      "This device can't keep unsent messages; they'll be lost if you close the app before they send.";
+    expect(screen.queryByText(notice)).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText('What would you like to do next?'), {
+      target: { value: 'Hello' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(api.calls.some((path) => path.endsWith('/messages'))).toBe(true));
+    if (fails) expect(screen.getAllByText(notice)).toHaveLength(1);
+    else expect(screen.queryByText(notice)).toBeNull();
+  },
+);

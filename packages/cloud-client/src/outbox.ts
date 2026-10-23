@@ -30,7 +30,8 @@ export interface OutboxEntry {
  */
 export interface Outbox {
   list(conversationId: string): Promise<OutboxEntry[]>;
-  put(entry: OutboxEntry): Promise<void>;
+  /** False when persistence failed; void remains compatible with custom outboxes. */
+  put(entry: OutboxEntry): Promise<boolean | void>;
   remove(conversationId: string, id: string): Promise<void>;
 }
 
@@ -181,13 +182,12 @@ export function storageOutbox(
   };
   const writeIndex = async (s: string, conversationId: string, list: string[]) => {
     if (!storage || storage.keys) return;
-    await quietly(
-      () =>
-        list.length === 0
-          ? storage.remove(base(s, conversationId))
-          : storage.set(base(s, conversationId), JSON.stringify(list)),
-      undefined,
-    );
+    return quietly(async () => {
+      await (list.length === 0
+        ? storage.remove(base(s, conversationId))
+        : storage.set(base(s, conversationId), JSON.stringify(list)));
+      return true;
+    }, false);
   };
   const read = async (s: string, conversationId: string): Promise<OutboxEntry[]> => {
     const entries: OutboxEntry[] = [];
@@ -228,7 +228,7 @@ export function storageOutbox(
     // No count limit: every unsent message is kept until it is sent, deleted, or shown as expired.
     if (!storage.keys) {
       const listed = (await ids(s, entry.conversationId)).filter((id) => id !== entry.id);
-      await writeIndex(s, entry.conversationId, [...listed, entry.id]);
+      return (await writeIndex(s, entry.conversationId, [...listed, entry.id])) === true;
     }
     return true;
   };
@@ -264,7 +264,7 @@ export function storageOutbox(
       }),
     put: (entry) =>
       serial(async () => {
-        await write(await current(), entry);
+        return write(await current(), entry);
       }),
     remove: (conversationId, id) =>
       serial(async () => {

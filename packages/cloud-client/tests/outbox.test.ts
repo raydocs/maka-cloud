@@ -576,7 +576,7 @@ test('storage that is blocked or full keeps nothing and breaks nothing', async (
   );
   await expect(
     blocked.put({ id: 'a', conversationId: 'c', text: 't', at: Date.now() }),
-  ).resolves.toBeUndefined();
+  ).resolves.toBe(false);
   expect(await blocked.list('c')).toEqual([]);
   await expect(blocked.remove('c', 'a')).resolves.toBeUndefined();
   // And a feed over it still sends.
@@ -681,3 +681,48 @@ test('a limit with no automatic reset never becomes retryable; the message can b
   feed.discard(refused?.id ?? '');
   expect(feed.getSnapshot().outgoing).toEqual([]);
 });
+
+test.each(['missing', 'throwing', 'index', 'ok'] as const)(
+  'storage %s reports one persistent notice without blocking sends',
+  async (kind) => {
+    const store = memoryStorage();
+    const outbox =
+      kind === 'index'
+        ? storageOutbox(
+            {
+              get: () => null,
+              set: (_key, value) => {
+                if (value.startsWith('[')) throw new Error('index full');
+              },
+              remove: () => {},
+            },
+            'scope',
+          )
+        : webStorageOutbox(
+            kind === 'missing'
+              ? undefined
+              : {
+                  ...store,
+                  setItem: (key, value) => {
+                    if (kind === 'throwing') throw new Error('quota');
+                    store.setItem(key, value);
+                  },
+                },
+            'scope',
+          );
+    const client = new CloudClient('token', server().fetcher);
+    const feed = new ConversationFeed(client, 'c1', 250, outbox);
+    let notices = 0;
+    let shown = false;
+    const unsubscribe = feed.subscribe(() => {
+      const next = feed.getSnapshot().unsentStorageFailed === true;
+      if (next && !shown) notices++;
+      shown = next;
+    });
+    expect(await feed.send('first')).toBe(true);
+    expect(await feed.send('second')).toBe(true);
+    expect(notices).toBe(kind === 'ok' ? 0 : 1);
+    unsubscribe();
+    feed.stop();
+  },
+);
