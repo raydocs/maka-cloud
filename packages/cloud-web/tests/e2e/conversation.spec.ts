@@ -141,7 +141,7 @@ test('a revoked invite ends the session at once and keeps nothing', async ({ pag
   await page.getByRole('button', { name: 'Start' }).click();
   await expect(page.getByRole('log')).toContainText('Something private');
   await control(request, 'revoke', { inviteId: invite.inviteId });
-  await expect(page.getByLabel('Invite token')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Email me a code' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('no longer valid');
   await expect(page.getByText('Something private')).toHaveCount(0);
 });
