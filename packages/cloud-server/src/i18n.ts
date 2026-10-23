@@ -243,7 +243,7 @@ const zhHant: Messages = {
         UNCHECKED_ZH_HANT[code ?? ''] ?? '原因不明'
       }。`,
     suggestionOffer: (count, _label, repo) =>
-      `存放庫 ${repo} 上連續 ${count} 則這類建議都沒有得到回應。要停止這類建議嗎？`,
+      `存放庫 ${repo} 上連續 ${count} 項這類建議都沒有得到回應。要停止這類建議嗎？`,
   },
   needsYou: {
     one: (ask) => `需要你處理：${ask}`,

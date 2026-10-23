@@ -248,7 +248,7 @@ const TEMPLATES = [
     template: { id: 'suggestion_offer', count: 3, label: 'fix failing checks', repo: 'acme/api' },
     en: '3 suggestions in a row to fix failing checks on acme/api went unanswered. Stop suggesting them?',
     zh: 'acme/api 上连续 3 条这类建议没有得到回应。要停止这类建议吗？',
-    hant: '存放庫 acme/api 上連續 3 則這類建議都沒有得到回應。要停止這類建議嗎？',
+    hant: '存放庫 acme/api 上連續 3 項這類建議都沒有得到回應。要停止這類建議嗎？',
   },
 ];
 
