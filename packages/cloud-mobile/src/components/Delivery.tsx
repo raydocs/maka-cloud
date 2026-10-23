@@ -17,6 +17,7 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { Image, Linking, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { useT } from '@/lib/i18n';
 import { useBlobUri, usePicture } from '@/lib/picture';
 import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
 import { Icon } from './Icon';
@@ -31,6 +32,7 @@ const DIFF_LINES_MAX = 5000;
 /** A diff, line by line, on an opaque page: added lines green, removed lines red. A very long one is cut short. */
 export function DiffLines({ text }: { text: string }) {
   const t = useTheme();
+  const { t: say } = useT();
   const [all, setAll] = useState(false);
   const lines = text.split('\n');
   const shown = lines.slice(0, all ? DIFF_LINES_MAX : DIFF_LINES_SHOWN);
@@ -56,12 +58,17 @@ export function DiffLines({ text }: { text: string }) {
       </ScrollView>
       {lines.length > shown.length && !all && (
         <PillButton
-          label={`Show ${Math.min(lines.length, DIFF_LINES_MAX)} of ${lines.length} lines`}
+          label={say('delivery.showLines', {
+            shown: Math.min(lines.length, DIFF_LINES_MAX),
+            total: lines.length,
+          })}
           onPress={() => setAll(true)}
         />
       )}
       {all && lines.length > DIFF_LINES_MAX && (
-        <T kind="small">{`Showing the first ${DIFF_LINES_MAX} of ${lines.length} lines. Read the rest on the web.`}</T>
+        <T kind="small">
+          {say('delivery.firstLines', { shown: DIFF_LINES_MAX, total: lines.length })}
+        </T>
       )}
     </Solid>
   );
@@ -74,6 +81,7 @@ const REPORT_CHARS_MAX = 200_000;
 /** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
 export function Report({ text }: { text: string }) {
   const t = useTheme();
+  const { t: say } = useT();
   const [all, setAll] = useState(false);
   const shown = text.slice(0, all ? REPORT_CHARS_MAX : REPORT_CHARS);
   return (
@@ -82,11 +90,9 @@ export function Report({ text }: { text: string }) {
         {displayText(shown)}
       </T>
       {shown.length < text.length && !all && (
-        <PillButton label="Show more" onPress={() => setAll(true)} />
+        <PillButton label={say('common.showMore')} id="Show more" onPress={() => setAll(true)} />
       )}
-      {all && text.length > REPORT_CHARS_MAX && (
-        <T kind="small">Showing the first part of this report. Read the rest on the web.</T>
-      )}
+      {all && text.length > REPORT_CHARS_MAX && <T kind="small">{say('delivery.reportCut')}</T>}
     </Solid>
   );
 }
@@ -107,6 +113,7 @@ export function Viewer({
   children: React.ReactNode;
 }) {
   const t = useTheme();
+  const { t: say } = useT();
   return (
     <Modal visible animationType="fade" onRequestClose={onClose}>
       {/* A modal is its own native window: it needs its own insets, or the header sits under the status bar. */}
@@ -114,12 +121,12 @@ export function Viewer({
         <SafeAreaView style={{ flex: 1, backgroundColor: t.solid }}>
           <View
             style={{ flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 }}
-            accessibilityLabel={`Viewer: ${title}`}
+            accessibilityLabel={say('delivery.viewer', { title })}
           >
             <T kind="heading" style={{ flex: 1 }} numberOfLines={1}>
               {title}
             </T>
-            <PillButton label="Close" onPress={onClose} />
+            <PillButton label={say('common.close')} id="Close" onPress={onClose} />
           </View>
           <ScrollView contentContainerStyle={{ padding: 12 }}>{children}</ScrollView>
         </SafeAreaView>
@@ -151,10 +158,11 @@ interface Opened {
 /** A file the task made, quietly: one line, a small file icon and its name. A tap opens it. */
 function FileRow({ name, onOpen }: { name: string; onOpen: () => void }) {
   const t = useTheme();
+  const { t: say } = useT();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open ${name}`}
+      accessibilityLabel={say('delivery.openFile', { name })}
       onPress={onOpen}
       style={({ pressed }) => ({
         flexDirection: 'row',
@@ -197,6 +205,8 @@ function ViewShot({
   onFailed: () => void;
 }) {
   const t = useTheme();
+  const { t: say, tx } = useT();
+  const viewport = tx(view.viewport);
   const [blob, setBlob] = useState<Blob | undefined>();
   const { uri, failed } = usePicture(blob);
   const index = view.listing.index;
@@ -218,7 +228,7 @@ function ViewShot({
     <View style={{ flex, gap: 4, alignItems: 'center' }}>
       <Pressable
         accessibilityRole="imagebutton"
-        accessibilityLabel={`Open large: ${view.viewport}`}
+        accessibilityLabel={say('delivery.openLarge', { name: viewport })}
         disabled={!blob}
         onPress={() => blob && onOpen(blob)}
         style={{ width: '100%' }}
@@ -237,7 +247,10 @@ function ViewShot({
           {uri ? (
             <Image
               source={{ uri }}
-              accessibilityLabel={`${view.viewport}: ${displayText(view.listing.name)}`}
+              accessibilityLabel={say('common.labelValue', {
+                label: viewport,
+                value: displayText(view.listing.name),
+              })}
               resizeMode="cover"
               resizeMethod="resize"
               style={{ width: '100%', height: '100%' }}
@@ -245,7 +258,7 @@ function ViewShot({
           ) : null}
         </View>
       </Pressable>
-      <T kind="small">{view.viewport}</T>
+      <T kind="small">{viewport}</T>
     </View>
   );
 }
@@ -265,7 +278,10 @@ export function DeliveryCard({
   onOpenTask?: (task: TaskView) => void;
 }) {
   const t = useTheme();
-  const { diff, outcome, caption, actions, views } = model;
+  const { t: say, tx } = useT();
+  const { diff, outcome } = model;
+  const caption = model.caption ? tx(model.caption) : model.caption;
+  const { actions, views } = model;
   // With views each screenshot loads itself; the single picture is not loaded a second time.
   const shot = views ? undefined : model.shot;
   const [proof, setProof] = useState<Blob | undefined>();
@@ -291,7 +307,7 @@ export function DeliveryCard({
     try {
       const content = await client.readArtifact(task.taskId, diff.index);
       if (content.kind === 'text')
-        setOpened({ kind: 'diff', title: caption || 'The changes', text: content.text });
+        setOpened({ kind: 'diff', title: caption || tx('The changes'), text: content.text });
     } catch {
       setFailed(true);
     }
@@ -313,27 +329,31 @@ export function DeliveryCard({
   }
 
   return (
-    <Card label={`Result: ${displayText(task.title ?? 'Task')}`}>
+    <Card
+      label={say('delivery.result', {
+        title: task.title ? displayText(task.title) : say('task.title'),
+      })}
+    >
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <StatusMark tone="ok" />
         <T kind="small" style={{ flex: 1 }}>
-          Finished
+          {say('delivery.finished')}
         </T>
         {onOpenTask && (
           <Pressable
             accessibilityRole="button"
             testID="button-Details"
-            accessibilityLabel="Details"
+            accessibilityLabel={say('common.details')}
             onPress={() => onOpenTask(task)}
             style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 4 }}
           >
             <T kind="muted" style={{ textDecorationLine: 'underline' }}>
-              Details
+              {say('common.details')}
             </T>
           </Pressable>
         )}
       </View>
-      <T kind="heading">{outcome}</T>
+      <T kind="heading">{tx(outcome)}</T>
       {views ? (
         <View
           accessibilityLabel={caption}
@@ -345,7 +365,7 @@ export function DeliveryCard({
               client={client}
               taskId={task.taskId}
               view={view}
-              onOpen={(blob) => setOpened({ kind: 'image', title: view.viewport, blob })}
+              onOpen={(blob) => setOpened({ kind: 'image', title: tx(view.viewport), blob })}
               onFailed={markFailed}
             />
           ))}
@@ -354,8 +374,12 @@ export function DeliveryCard({
         <Pressable
           testID="delivery-picture"
           accessibilityRole="imagebutton"
-          accessibilityLabel={`Open large: ${caption || 'picture'}`}
-          onPress={() => setOpened({ kind: 'image', title: caption || 'Picture', blob: proof })}
+          accessibilityLabel={say('delivery.openLarge', {
+            name: caption || say('delivery.picture'),
+          })}
+          onPress={() =>
+            setOpened({ kind: 'image', title: caption || say('delivery.picture'), blob: proof })
+          }
         >
           <Image
             source={{ uri: proofUri }}
@@ -371,12 +395,16 @@ export function DeliveryCard({
           />
         </Pressable>
       ) : (
-        diff && <PillButton label="View the changes" onPress={() => void openDiff()} />
+        diff && (
+          <PillButton
+            label={say('delivery.viewChanges')}
+            id="View the changes"
+            onPress={() => void openDiff()}
+          />
+        )
       )}
       {caption && !views ? <T kind="muted">{caption}</T> : null}
-      {(failed || proofFailed) && (
-        <T kind="muted">The picture is too large or could not be loaded.</T>
-      )}
+      {(failed || proofFailed) && <T kind="muted">{say('delivery.pictureFailed')}</T>}
       {files.length > 0 && (
         <View>
           {files.map((file) => (
@@ -388,11 +416,12 @@ export function DeliveryCard({
           ))}
         </View>
       )}
-      {fileFailed && <T kind="muted">This file could not be opened.</T>}
+      {fileFailed && <T kind="muted">{say('delivery.fileFailed')}</T>}
       {actions.map((action, i) => (
         <PillButton
           key={action.label}
-          label={`${action.label} · ${action.host}`}
+          label={say('delivery.action', { label: tx(action.label), host: action.host })}
+          id={`${action.label} · ${action.host}`}
           primary={i === 0}
           external
           onPress={() => openLink(action.url)}
@@ -421,6 +450,7 @@ function SourceCard({
   source: SourceListing;
 }) {
   const t = useTheme();
+  const { t: say, tx } = useT();
   const [preview, setPreview] = useState<SourcePreview | undefined>();
   const [picture, setPicture] = useState<Blob | undefined>();
   const uri = useBlobUri(picture);
@@ -445,10 +475,11 @@ function SourceCard({
   const site = displayText(source.site);
   const title = displayText(preview?.title ?? source.site);
   const href = publicLink(source.url);
+  const kind = tx(LABEL_WORDS[source.label]);
   return (
     <Pressable
       accessibilityRole={href ? 'link' : 'text'}
-      accessibilityLabel={`${title}, ${site}, ${LABEL_WORDS[source.label]}`}
+      accessibilityLabel={say('delivery.source', { title, site, label: kind })}
       disabled={!href}
       onPress={() => href && openLink(href)}
       style={{
@@ -481,7 +512,7 @@ function SourceCard({
           {title}
         </T>
         <T kind="small" numberOfLines={1}>
-          {site} · {LABEL_WORDS[source.label]}
+          {site} · {kind}
         </T>
       </View>
     </Pressable>
@@ -498,11 +529,12 @@ export function SourcesStack({
   taskId: string;
   sources: readonly SourceListing[];
 }) {
+  const { t: say } = useT();
   const shown = stackOf(sources);
   if (shown.length === 0) return null;
   return (
-    <Card label="Sources">
-      <T kind="small">Sources</T>
+    <Card label={say('delivery.sources')}>
+      <T kind="small">{say('delivery.sources')}</T>
       {shown.map((source) => (
         <SourceCard key={source.index} client={client} taskId={taskId} source={source} />
       ))}

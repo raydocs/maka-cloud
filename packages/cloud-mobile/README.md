@@ -11,9 +11,12 @@ the look (`lib/theme.ts`, the web's palette).
 - **Home and Chat**: as on the web. Decisions are one-tap cards; an approval is shown exactly as the server
   sent it and cannot be approved if it cannot be shown exactly. Never any model or vendor name.
 - **Look**: dark by default, light in Settings. Cards are frosted (the system's Liquid Glass on iOS 26 and later,
-  a blur elsewhere); anything that holds code is opaque. The sections are a glass pill at the top
-  (`components/TopBar.tsx`), and the chat is the compact panel, a dark slab in both appearances
+  a blur elsewhere); anything that holds code is opaque. The tab bar is the system's own, and the chat is the
+  compact panel, a dark slab in both appearances with Liquid Glass controls floating on it
   (`docs/fork/design/compact-panel.md`).
+- **Language**: Simplified Chinese first, and the fallback; English when the phone's first language is
+  English. Every string is in `lib/strings.ts`, read through `lib/i18n.tsx`; what the server or the agent
+  wrote is shown as sent. Builds made with `MAKA_E2E=1` are fixed to Chinese (`MAKA_LANG` overrides).
 - Next (T29 PRs 4 to 6): Projects, the task page and the viewer; push, share and deep links; release profiles.
 
 ## Run and verify
@@ -44,4 +47,5 @@ Not done by an agent, and listed for the owner: the Apple Developer account and 
 `app.config.ts` is provisional), App Store Connect, APNs; Google Play, the package name, FCM; the Expo account and
 EAS project; signing keys and secrets (EAS only, set by the owner).
 
-`expo start --web` renders the same screens in a browser for review, with the same section pill.
+`expo start --web` renders the same screens in a browser for review (`src/app/(tabs)/_layout.web.tsx` draws a
+plain bottom bar there; the apps use the system's). A browser draws the blur fallback, never Liquid Glass.

@@ -30,7 +30,7 @@ export const LIGHT_COLORS = {
   panelInk: '#f4f4f6',
   panelMuted: '#a6a6ae',
   panelGlass: 'rgba(255, 255, 255, 0.1)',
-  panelGlassOn: 'rgba(255, 255, 255, 0.24)',
+  panelRaised: '#2c2c30',
   panelClear: 'rgba(11, 11, 12, 0)',
 } as const;
 
@@ -64,7 +64,7 @@ export const DARK_COLORS = {
   panelInk: '#f4f4f6',
   panelMuted: '#a6a6ae',
   panelGlass: 'rgba(255, 255, 255, 0.1)',
-  panelGlassOn: 'rgba(255, 255, 255, 0.24)',
+  panelRaised: '#2c2c30',
   panelClear: 'rgba(11, 11, 12, 0)',
 } satisfies Record<keyof typeof LIGHT_COLORS, string>;
 

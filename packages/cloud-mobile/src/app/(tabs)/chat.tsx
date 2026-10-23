@@ -27,13 +27,13 @@ import { DecisionCard, QuestionBlock } from '@/components/Decision';
 import { TaskDelivery } from '@/components/Delivery';
 import { TaskDetails } from '@/components/TaskDetails';
 import { TaskRow } from '@/components/TaskRow';
-import { HEADER_SPACE } from '@/components/TopBar';
 import {
   Card,
   Fade,
   Field,
   Glass,
   GlassButton,
+  GlassGroup,
   Panel,
   PillButton,
   Rich,
@@ -44,6 +44,7 @@ import {
   withoutMarks,
 } from '@/components/ui';
 import { useAppearance } from '@/lib/appearance';
+import { useT } from '@/lib/i18n';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
 import { DARK, LIGHT, mono, radius, ThemeContext, useTheme } from '@/lib/theme';
@@ -53,6 +54,7 @@ type Message = ConversationState['messages'][number];
 export default function Chat() {
   const { conversations, chosen } = useWorkspace();
   const selected = conversations.find((c) => c.conversationId === chosen);
+  const { t: say } = useT();
   return (
     <Screen>
       <Panel>
@@ -62,10 +64,10 @@ export default function Chat() {
             conversationId={selected.conversationId}
           />
         ) : (
-          <View style={{ padding: 16, paddingTop: HEADER_SPACE + 8 }}>
-            <Card label="No conversation">
-              <T kind="heading">No conversation open</T>
-              <T kind="muted">Start one from Home.</T>
+          <View style={{ padding: 16, paddingTop: 20 }}>
+            <Card label={say('chat.none.label')}>
+              <T kind="heading">{say('chat.none.title')}</T>
+              <T kind="muted">{say('chat.none.body')}</T>
             </Card>
           </View>
         )}
@@ -77,6 +79,7 @@ export default function Chat() {
 function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { client, conversations, open } = useWorkspace();
   const theme = useTheme();
+  const { t: say, tx } = useT();
   // The task page opens over the whole screen, in the person's own appearance, not the panel's.
   const { mode } = useAppearance();
   /** The floating composer's height: the list scrolls on under it, by this much more. */
@@ -146,33 +149,39 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           }
           onScrollEndDrag={trackEnd}
           onMomentumScrollEnd={trackEnd}
-          // The list runs on under the section pill and the composer, which float over fades.
+          // The list runs on under the composer, which floats over a fade.
           contentContainerStyle={{
             paddingHorizontal: 20,
-            paddingTop: HEADER_SPACE + 8,
+            paddingTop: 20,
             paddingBottom: composer + 16,
           }}
-          scrollIndicatorInsets={{ top: HEADER_SPACE, bottom: composer }}
+          scrollIndicatorInsets={{ top: 12, bottom: composer }}
           keyboardShouldPersistTaps="handled"
-          accessibilityLabel="Messages"
+          accessibilityLabel={say('chat.messages')}
           ListHeaderComponent={
             <T kind="heading" numberOfLines={2} style={{ marginBottom: 14 }}>
-              {displayText(conversation?.title ?? 'A fresh start')}
+              {conversation?.title ? displayText(conversation.title) : say('chat.freshStart')}
             </T>
           }
           ListEmptyComponent={
-            <Card label="Empty conversation">
-              <T kind="heading">What would you like to get done?</T>
-              <T kind="muted">
-                Bring a question, a project, or a plan. {BRAND.name} keeps the work here.
-              </T>
+            <Card label={say('chat.empty.label')}>
+              <T kind="heading">{say('chat.empty.title')}</T>
+              <T kind="muted">{say('chat.empty.body', { name: BRAND.name })}</T>
             </Card>
           }
           renderItem={({ item: message }) => (
             // Who said it is plain from the side it sits on; a screen reader still hears the name.
             <View
               accessible
-              accessibilityLabel={`${message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}: ${withoutMarks(displayText(message.text))}`}
+              accessibilityLabel={say('chat.said', {
+                who:
+                  message.role === 'user'
+                    ? say('chat.you')
+                    : message.role === 'notice'
+                      ? say('chat.update')
+                      : BRAND.name,
+                text: withoutMarks(displayText(message.text)),
+              })}
               style={[
                 { gap: 2, marginBottom: 18 },
                 message.role === 'user'
@@ -196,21 +205,21 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 <View
                   accessible
                   accessibilityRole="text"
-                  accessibilityLabel="Maka is working"
+                  accessibilityLabel={say('chat.workingLabel', { name: BRAND.name })}
                   style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
                 >
                   <ActivityIndicator size="small" color={theme.inkMuted} />
-                  <T kind="muted">Maka is working…</T>
+                  <T kind="muted">{say('chat.working', { name: BRAND.name })}</T>
                 </View>
               )}
               {roots.length > 0 && (
-                <Card label="Running">
+                <Card label={say('chat.running.label')}>
                   <T kind="small">
-                    {running} running · Total cost so far:{' '}
+                    {say('chat.running', { count: running })}
                     <T kind="small" style={mono}>
-                      {dollars(total.usd)}
+                      {tx(dollars(total.usd))}
                     </T>
-                    {total.usd !== undefined && !total.complete && ' (not all reported)'}
+                    {total.usd !== undefined && !total.complete && say('chat.notAllReported')}
                   </T>
                   {roots.map((task) => (
                     <TaskRow
@@ -236,7 +245,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 />
               ))}
               {questions.map((question) => (
-                <Card key={question.questionId} label="Your decision">
+                <Card key={question.questionId} label={say('chat.decision.label')}>
                   <QuestionBlock
                     question={question}
                     answered={state.answers[question.questionId]}
@@ -250,7 +259,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               {waiting
                 .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
                 .map((item) => (
-                  <Card key={item.itemId} label="Needs you">
+                  <Card key={item.itemId} label={say('chat.needsYou.label')}>
                     <DecisionCard
                       item={item}
                       disabled={Boolean(busy)}
@@ -258,11 +267,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                     />
                   </Card>
                 ))}
-              {error ? <T kind="error">{error}</T> : null}
+              {error ? <T kind="error">{tx(error)}</T> : null}
             </View>
           }
         />
-        <Fade edge="top" height={HEADER_SPACE + 24} color={theme.panel} clear={theme.panelClear} />
+        <Fade edge="top" height={20} color={theme.panel} clear={theme.panelClear} />
         <Fade edge="bottom" height={composer + 36} color={theme.panel} clear={theme.panelClear} />
         <View
           onLayout={(event) => setComposer(Math.ceil(event.nativeEvent.layout.height))}
@@ -273,22 +282,25 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             <View
               accessible
               accessibilityRole="text"
-              accessibilityLabel={status}
+              accessibilityLabel={tx(status)}
               style={{ flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'center' }}
             >
               {status !== 'Connecting…' && <StatusMark tone="attention" />}
-              <T kind="small">{status}</T>
+              <T kind="small">{tx(status)}</T>
             </View>
           )}
-          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
+          {/* One glass group: the button and the field blend as one floating control. */}
+          <GlassGroup style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
             {conversations.length > 1 && (
               <GlassButton
-                label="Select conversation"
+                label={say('chat.select')}
+                id="Select conversation"
                 icon="conversations"
                 onPress={() => setPicking(true)}
               />
             )}
             <Glass
+              interactive
               style={{
                 flex: 1,
                 flexDirection: 'row',
@@ -298,8 +310,9 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             >
               <View style={{ flex: 1 }}>
                 <Field
-                  label="Keep the conversation going"
-                  placeholder="What would you like to do next?"
+                  label={say('chat.field')}
+                  id="Keep the conversation going"
+                  placeholder={say('chat.placeholder')}
                   multiline
                   maxLength={16000}
                   value={draft}
@@ -311,7 +324,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 />
               </View>
               <RoundButton
-                label={busy === 'message' ? 'Sending…' : 'Send message'}
+                label={say(busy === 'message' ? 'chat.sending' : 'chat.send')}
+                id={busy === 'message' ? 'Sending…' : 'Send message'}
                 icon="send"
                 disabled={Boolean(busy) || !draft.trim()}
                 onPress={() => {
@@ -323,7 +337,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 }}
               />
             </Glass>
-          </View>
+          </GlassGroup>
         </View>
       </View>
       {detail && (
@@ -344,7 +358,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
           {/* An opaque slab of its own: the panel's translucent cards would vanish on the dimmed screen. */}
           <Card
-            label="Conversations"
+            label={say('chat.conversations')}
             style={{
               backgroundColor: theme.panel,
               margin: 8,
@@ -352,11 +366,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               borderRadius: radius.panel,
             }}
           >
-            <T kind="heading">Conversations</T>
+            <T kind="heading">{say('chat.conversations')}</T>
             {[...conversations].reverse().map((c) => (
               <PillButton
                 key={c.conversationId}
-                label={displayText(c.title ?? 'Untitled conversation')}
+                label={c.title ? displayText(c.title) : say('common.untitled')}
                 primary={c.conversationId === conversationId}
                 onPress={() => {
                   open(c.conversationId);
@@ -364,7 +378,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                 }}
               />
             ))}
-            <PillButton label="Close" onPress={() => setPicking(false)} />
+            <PillButton label={say('common.close')} id="Close" onPress={() => setPicking(false)} />
           </Card>
         </View>
       </Modal>

@@ -64,10 +64,17 @@ describe.each([DARK, LIGHT, PANEL])('%#', (p: Palette) => {
 test('the panel is the same opaque slab in both schemes, and its glass reads well', () => {
   expect(LIGHT.panel).toBe(DARK.panel);
   expect(PANEL.panel.startsWith('#')).toBe(true);
-  // The selected section is a lighter glass pill with the panel's ink on it.
-  expect(ratio(PANEL.ink, over(PANEL.panelGlassOn, PANEL.panel))).toBeGreaterThanOrEqual(7);
   expect(ratio(PANEL.ink, over(PANEL.panelGlass, PANEL.panel))).toBeGreaterThanOrEqual(7);
+  // With Reduce Transparency on, a glass control on the panel is the solid raised fill.
+  expect(PANEL.panelRaised.startsWith('#')).toBe(true);
+  expect(ratio(PANEL.ink, PANEL.panelRaised)).toBeGreaterThanOrEqual(7);
+  expect(ratio(PANEL.inkMuted, PANEL.panelRaised)).toBeGreaterThanOrEqual(4.5);
   expect(ratio(PANEL.inkMuted, PANEL.panel)).toBeGreaterThanOrEqual(4.5);
+  // Off the panel, Reduce Transparency puts glass and cards on the opaque `solid` fill.
+  for (const p of [LIGHT, DARK]) {
+    expect(ratio(p.ink, p.solid)).toBeGreaterThanOrEqual(7);
+    expect(ratio(p.inkMuted, p.solid)).toBeGreaterThanOrEqual(4.5);
+  }
   // A fade ends in the colour it starts from, at no opacity.
   expect(over(PANEL.panelClear, '#ffffff')).toBe('#ffffff');
   expect(over(LIGHT.bgTopClear, '#000000')).toBe('#000000');

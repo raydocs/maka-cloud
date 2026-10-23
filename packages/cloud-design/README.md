@@ -32,6 +32,6 @@ shown together, on both schemes.
   missing, add it here.
 - **Light first.** Light is the default on the web and the phones; dark is the same sky at night.
 - **The compact panel.** The phone's conversation is one near-black slab (`panel`, `radius.panel`)
-  in both schemes, with its own ink, glass controls (`panel-glass`, `panel-glass-on`) and fades
+  in both schemes, with its own ink, glass controls (`panel-glass`; `panel-raised` with Reduce Transparency) and fades
   that end in `panel-clear`; on the sky, controls use `glass` and fades end in `bg-top-clear`. See
   `docs/fork/design/compact-panel.md`.

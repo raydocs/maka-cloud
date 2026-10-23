@@ -1,5 +1,10 @@
 import { BlurView } from 'expo-blur';
-import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
+import {
+  GlassContainer,
+  GlassView,
+  isGlassEffectAPIAvailable,
+  isLiquidGlassAvailable,
+} from 'expo-glass-effect';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { displayText, failureWords } from '@maka-cloud/client';
@@ -17,14 +22,17 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { type Edge, SafeAreaView } from 'react-native-safe-area-context';
+import { useReduceTransparency } from '@/lib/appearance';
+import { type Language, useT } from '@/lib/i18n';
 import { mono, PANEL, radius, ThemeContext, TOUCH, useTheme } from '@/lib/theme';
 import { Icon, type IconName } from './Icon';
 
 /**
- * The soft full-bleed background every screen sits on. The sections are a glass pill at the top
- * (`TopBar`), so nothing sits below a screen: every edge is a safe-area edge, on both platforms.
+ * The soft full-bleed background every screen sits on. On iOS the system tab bar floats over the
+ * content, so the screen keeps clear of the bottom edge; on Android the tab bar sits below it.
  */
-const SCREEN_EDGES: Edge[] = ['top', 'left', 'right', 'bottom'];
+const SCREEN_EDGES: Edge[] =
+  Platform.OS === 'ios' ? ['top', 'left', 'right', 'bottom'] : ['top', 'left', 'right'];
 
 export function Screen({ children }: { children: ReactNode }) {
   const t = useTheme();
@@ -37,7 +45,13 @@ export function Screen({ children }: { children: ReactNode }) {
   );
 }
 
-const glass = Platform.OS === 'ios' && isLiquidGlassAvailable();
+/** The system's Liquid Glass: iOS 26 and later (and never a beta without the API). */
+const glass = Platform.OS === 'ios' && isLiquidGlassAvailable() && isGlassEffectAPIAvailable();
+
+/** Whether this phone draws Liquid Glass and the person has not asked for less transparency. */
+function useGlass(): boolean {
+  return glass && !useReduceTransparency();
+}
 
 /**
  * The compact panel: one near-black rounded slab the conversation sits on, in either appearance.
@@ -54,15 +68,42 @@ export function Panel({ children }: { children: ReactNode }) {
 }
 
 /**
- * A translucent glass surface for controls that float over content (the section pill, the round
- * buttons, the message field): Liquid Glass on iOS 26 and later, a blur under the `glass` fill
- * elsewhere. The style sets its shape; children sit on top.
+ * A translucent glass surface for controls that float over content (the round buttons, the message
+ * field): Liquid Glass on iOS 26 and later, `interactive` when it is tapped; a blur under the `glass`
+ * fill on Android, older iOS and the web. With Reduce Transparency on it is a solid fill with an edge.
+ * The style sets its shape; children sit on top.
  */
-export function Glass({ children, style }: { children?: ReactNode; style?: StyleProp<ViewStyle> }) {
+export function Glass({
+  children,
+  style,
+  interactive = false,
+}: {
+  children?: ReactNode;
+  style?: StyleProp<ViewStyle>;
+  interactive?: boolean;
+}) {
   const t = useTheme();
-  if (glass)
+  const liquid = useGlass();
+  const reduce = useReduceTransparency();
+  if (reduce)
     return (
-      <GlassView colorScheme={t.scheme} style={[styles.glass, style]}>
+      <View
+        testID="glass-solid"
+        style={[
+          styles.glass,
+          styles.edge,
+          t.surface === 'panel'
+            ? { backgroundColor: t.panelRaised, borderColor: t.panelMuted }
+            : { backgroundColor: t.solid, borderColor: t.solidLine },
+          style,
+        ]}
+      >
+        {children}
+      </View>
+    );
+  if (liquid)
+    return (
+      <GlassView colorScheme={t.scheme} isInteractive={interactive} style={[styles.glass, style]}>
         {children}
       </GlassView>
     );
@@ -77,6 +118,28 @@ export function Glass({ children, style }: { children?: ReactNode; style?: Style
       {children}
     </View>
   );
+}
+
+/**
+ * Glass shapes that sit close together (the composer's button and field): on Liquid Glass they share
+ * one sampling region and blend as they near each other; elsewhere a plain view.
+ */
+export function GlassGroup({
+  children,
+  style,
+  spacing = 8,
+}: {
+  children: ReactNode;
+  style?: StyleProp<ViewStyle>;
+  spacing?: number;
+}) {
+  if (useGlass())
+    return (
+      <GlassContainer spacing={spacing} style={style}>
+        {children}
+      </GlassContainer>
+    );
+  return <View style={style}>{children}</View>;
 }
 
 /**
@@ -108,8 +171,8 @@ export function Fade({
 
 /**
  * A frosted card: the system's Liquid Glass on iOS 26 and later, a blur with a translucent fill
- * elsewhere, and a flat fill inside the panel. Anything that holds code or a diff uses `Solid`
- * instead and is never blurred.
+ * elsewhere, and a flat fill inside the panel; with Reduce Transparency on, a solid fill. Anything
+ * that holds code or a diff uses `Solid` instead and is never blurred.
  * The label names the card for tests and the web preview; the card is never one accessibility
  * element itself, or iOS would fold the fields and buttons inside it into it.
  */
@@ -123,17 +186,25 @@ export function Card({
   style?: StyleProp<ViewStyle>;
 }) {
   const t = useTheme();
+  const liquid = useGlass();
+  const reduce = useReduceTransparency();
   const body = [styles.cardBody, { borderColor: t.cardEdge }, style];
-  if (t.surface === 'panel')
+  if (t.surface === 'panel' || reduce)
     return (
       <View
-        style={[styles.cardBody, { borderColor: t.cardEdge, backgroundColor: t.card }, style]}
+        style={[
+          styles.cardBody,
+          reduce && t.surface !== 'panel'
+            ? { borderColor: t.solidLine, backgroundColor: t.solid }
+            : { borderColor: t.cardEdge, backgroundColor: t.card },
+          style,
+        ]}
         accessibilityLabel={label}
       >
         {children}
       </View>
     );
-  if (glass)
+  if (liquid)
     return (
       <GlassView colorScheme={t.scheme} style={body} accessibilityLabel={label}>
         {children}
@@ -182,13 +253,15 @@ export function T({
   numberOfLines?: number;
   accessibilityRole?: 'header' | 'text' | 'alert' | 'link';
   onPress?: () => void;
+  testID?: string;
 }) {
   const t = useTheme();
+  const { lang } = useT();
   const color =
     kind === 'muted' || kind === 'small' ? t.inkMuted : kind === 'error' ? t.bad : t.ink;
   return (
     <Text
-      style={[TEXT[kind], { color }, style]}
+      style={[TEXT[lang][kind], { color }, style]}
       allowFontScaling
       {...(kind === 'title' || kind === 'heading' ? { accessibilityRole: 'header' as const } : {})}
       {...(kind === 'error' ? { accessibilityRole: 'alert' as const } : {})}
@@ -199,13 +272,27 @@ export function T({
   );
 }
 
-const TEXT: Record<TextKind, TextStyle> = {
-  title: { fontSize: 28, lineHeight: 34, fontWeight: '700' },
-  heading: { fontSize: 18, lineHeight: 24, fontWeight: '600' },
-  body: { fontSize: 16, lineHeight: 24 },
-  muted: { fontSize: 15, lineHeight: 22 },
-  small: { fontSize: 13, lineHeight: 18 },
-  error: { fontSize: 15, lineHeight: 21 },
+/**
+ * The system face in both languages (PingFang SC for Chinese on iOS). Chinese reads best with more
+ * room between lines, about 1.5 to 1.6 times the size; neither language adds letter spacing.
+ */
+const TEXT: Record<Language, Record<TextKind, TextStyle>> = {
+  en: {
+    title: { fontSize: 28, lineHeight: 34, fontWeight: '700' },
+    heading: { fontSize: 18, lineHeight: 24, fontWeight: '600' },
+    body: { fontSize: 16, lineHeight: 24 },
+    muted: { fontSize: 15, lineHeight: 22 },
+    small: { fontSize: 13, lineHeight: 18 },
+    error: { fontSize: 15, lineHeight: 21 },
+  },
+  'zh-Hans': {
+    title: { fontSize: 28, lineHeight: 42, fontWeight: '700' },
+    heading: { fontSize: 18, lineHeight: 28, fontWeight: '600' },
+    body: { fontSize: 16, lineHeight: 25 },
+    muted: { fontSize: 15, lineHeight: 23 },
+    small: { fontSize: 13, lineHeight: 20 },
+    error: { fontSize: 15, lineHeight: 23 },
+  },
 };
 
 /**
@@ -219,6 +306,7 @@ export function PillButton({
   disabled = false,
   external = false,
   accessibilityLabel,
+  id,
 }: {
   label: string;
   onPress: () => void;
@@ -226,11 +314,13 @@ export function PillButton({
   disabled?: boolean;
   external?: boolean;
   accessibilityLabel?: string;
+  /** A fixed name for the device tests (`button-<id>`), the same in every language. */
+  id?: string;
 }) {
   const t = useTheme();
   return (
     <Pressable
-      testID={`button-${label}`}
+      testID={`button-${id ?? label}`}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? label}
       accessibilityState={{ disabled }}
@@ -263,15 +353,19 @@ export function QuietButton({
   onPress,
   accessibilityLabel,
   disabled = false,
+  id,
 }: {
   label: string;
   onPress: () => void;
   accessibilityLabel?: string;
   disabled?: boolean;
+  /** A fixed name for the device tests (`button-<id>`), the same in every language. */
+  id?: string;
 }) {
   const t = useTheme();
   return (
     <Pressable
+      {...(id ? { testID: `button-${id}` } : {})}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? label}
       accessibilityState={{ disabled }}
@@ -297,16 +391,19 @@ export function RoundButton({
   icon,
   onPress,
   disabled,
+  id,
 }: {
   label: string;
   icon: IconName;
   onPress: () => void;
   disabled: boolean;
+  /** A fixed name for the device tests (`button-<id>`), the same in every language. */
+  id?: string;
 }) {
   const t = useTheme();
   return (
     <Pressable
-      testID={`button-${label}`}
+      testID={`button-${id ?? label}`}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ disabled }}
@@ -332,21 +429,24 @@ export function GlassButton({
   label,
   icon,
   onPress,
+  id,
 }: {
   label: string;
   icon: IconName;
   onPress: () => void;
+  /** A fixed name for the device tests (`button-<id>`), the same in every language. */
+  id?: string;
 }) {
   const t = useTheme();
   return (
     <Pressable
-      testID={`button-${label}`}
+      testID={`button-${id ?? label}`}
       accessibilityRole="button"
       accessibilityLabel={label}
       onPress={onPress}
       style={({ pressed }) => [styles.round, { opacity: pressed ? 0.7 : 1 }]}
     >
-      <Glass style={[StyleSheet.absoluteFill, { borderRadius: TOUCH / 2 }]} />
+      <Glass interactive style={[StyleSheet.absoluteFill, { borderRadius: TOUCH / 2 }]} />
       <Icon name={icon} size={20} color={t.ink} />
     </Pressable>
   );
@@ -474,18 +574,19 @@ export function StatusMark({ tone }: { tone: 'ok' | 'attention' | 'bad' | 'idle'
 /** Why a task failed, in a plain sentence and a next step; the server's own words behind "Details". */
 export function FailureNote({ reason }: { reason: string }) {
   const t = useTheme();
+  const { t: say, tx } = useT();
   const words = failureWords(displayText(reason));
   const [open, setOpen] = useState(false);
   return (
     <View style={{ gap: 2 }}>
       <T kind="error">
-        {words.sentence} <Text style={{ color: t.ink }}>{words.next}</Text>
+        {tx(words.sentence)} <Text style={{ color: t.ink }}>{tx(words.next)}</Text>
       </T>
       {words.detail !== words.sentence && (
         <>
           <QuietButton
-            label={open ? 'Hide details' : 'Details'}
-            accessibilityLabel="Details"
+            label={say(open ? 'common.hideDetails' : 'common.details')}
+            accessibilityLabel={say('common.details')}
             onPress={() => setOpen(!open)}
           />
           {open && (
@@ -500,12 +601,13 @@ export function FailureNote({ reason }: { reason: string }) {
 }
 
 /** A text field. `showLabel` puts its name above it (a placeholder alone disappears once typing starts). */
-export function Field(props: TextInputProps & { label: string; showLabel?: boolean }) {
+/** `id` is a fixed name for the device tests (`field-<id>`), the same in every language. */
+export function Field(props: TextInputProps & { label: string; showLabel?: boolean; id?: string }) {
   const t = useTheme();
-  const { label, showLabel = false, style, ...rest } = props;
+  const { label, showLabel = false, style, id, ...rest } = props;
   const input = (
     <TextInput
-      testID={`field-${label}`}
+      testID={`field-${id ?? label}`}
       accessibilityLabel={label}
       placeholderTextColor={t.inkMuted}
       allowFontScaling
@@ -551,6 +653,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   glass: { overflow: 'hidden', borderRadius: radius.pill },
+  edge: { borderWidth: 1 },
   fade: { position: 'absolute', left: 0, right: 0 },
   cardWrap: { borderRadius: radius.tile, borderWidth: 1, overflow: 'hidden' },
   cardFill: { padding: 16, gap: 10 },

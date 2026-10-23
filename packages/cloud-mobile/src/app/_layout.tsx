@@ -2,6 +2,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AppearanceProvider, useAppearance } from '@/lib/appearance';
+import { LanguageProvider, useT } from '@/lib/i18n';
 import { SessionProvider, useSession } from '@/lib/session';
 import { Screen } from '@/components/ui';
 import { View } from 'react-native';
@@ -9,10 +10,11 @@ import { View } from 'react-native';
 function Routes() {
   const { session } = useSession();
   const { mode } = useAppearance();
+  const { t: say } = useT();
   if (session.status === 'loading')
     return (
       <Screen>
-        <View accessibilityLabel="Loading" style={{ flex: 1 }} />
+        <View accessibilityLabel={say('common.loading')} style={{ flex: 1 }} />
       </Screen>
     );
   return (
@@ -35,11 +37,13 @@ function Routes() {
 export default function RootLayout() {
   return (
     <SafeAreaProvider>
-      <AppearanceProvider>
-        <SessionProvider>
-          <Routes />
-        </SessionProvider>
-      </AppearanceProvider>
+      <LanguageProvider>
+        <AppearanceProvider>
+          <SessionProvider>
+            <Routes />
+          </SessionProvider>
+        </AppearanceProvider>
+      </LanguageProvider>
     </SafeAreaProvider>
   );
 }

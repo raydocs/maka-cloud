@@ -40,22 +40,23 @@ export type ColorName =
   | 'panel-ink'
   | 'panel-muted'
   | 'panel-glass'
-  | 'panel-glass-on'
+  | 'panel-raised'
   | 'panel-clear';
 
 export type Colors = Record<ColorName, string>;
 
 /**
  * The compact panel (docs/fork/design/compact-panel.md): the conversation sits on one near-black
- * rounded slab, the same in both schemes, with translucent glass controls on it and fades instead of
- * edges. `panel-clear` is the panel at zero opacity, where a fade ends.
+ * rounded slab, the same in both schemes, with glass controls on it and fades instead of edges.
+ * `panel-clear` is the panel at zero opacity, where a fade ends; `panel-raised` is the solid fill a
+ * glass control on the panel takes when the system's Reduce Transparency is on.
  */
 const PANEL = {
   panel: '#0b0b0c',
   'panel-ink': '#f4f4f6',
   'panel-muted': '#a6a6ae',
   'panel-glass': 'rgb(255 255 255 / 0.1)',
-  'panel-glass-on': 'rgb(255 255 255 / 0.24)',
+  'panel-raised': '#2c2c30',
   'panel-clear': 'rgb(11 11 12 / 0)',
 } as const satisfies Partial<Colors>;
 

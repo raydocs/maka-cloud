@@ -29,7 +29,8 @@ appId: cloud.maka.app
 - tapOn:
     id: "button-Email me a code"
 - extendedWaitUntil:
-    visible: "Check your email"
+    visible:
+      id: "field-Code"
     timeout: 30000
 - takeScreenshot: sign-in-email-code
 - runScript:
@@ -44,7 +45,8 @@ appId: cloud.maka.app
     id: "button-Sign in"
 # A person with no account yet is asked for the invite code, once.
 - extendedWaitUntil:
-    visible: "Enter your invite code"
+    visible:
+      id: "field-Invite code"
     timeout: 30000
 - takeScreenshot: sign-in-email-invite
 - tapOn:
@@ -53,6 +55,7 @@ appId: cloud.maka.app
 - tapOn:
     id: "button-Continue"
 - extendedWaitUntil:
-    visible: "Make room for your next idea."
+    visible:
+      id: "home-start-title"
     timeout: 30000
 - takeScreenshot: sign-in-email-home

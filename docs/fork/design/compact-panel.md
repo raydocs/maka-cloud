@@ -1,35 +1,51 @@
 # The compact panel
 
-The phone app's conversation sits on one dark rounded slab over the sky, with the sections in a
-glass pill at the top and a composer floating at the bottom. Home and Settings stay on the light
-sky with frosted cards. This note says what the look is, where its ideas came from, what is ours,
-which tokens carry it, and what comes next.
+The phone app's conversation sits on one dark rounded slab over the sky, with Liquid Glass controls
+floating on it and the system's own tab bar below. Home and Settings stay on the light sky with
+glass cards. The app speaks Simplified Chinese first. This note says what the look is, where its
+ideas came from, what is ours, which tokens carry it, how the language works, and what comes next.
 
 ## The look
 
-- **The panel.** The chat is a near-black slab (`panel`, `#0b0b0c`), inset 8 pt from the screen's
-  sides and bottom, with a 36 pt radius (`radius.panel`) and a faint rim. Everything inside reads
-  the panel palette (`PANEL` in `packages/cloud-mobile/src/lib/theme.ts`): white ink
-  (`panel-ink`), a muted grey (`panel-muted`), and the dark scheme's status colours and buttons.
-  Body text is 16 pt with a 24 pt line height; an answer's `**bold**` lead-ins are drawn bold.
-- **The section pill.** Home, Chat and Settings are tabs in one translucent pill at the top of
-  every screen (`TopBar`): Liquid Glass on iOS 26 and later, a blur under the `glass` fill
-  elsewhere. On the sky the open section is the one dark pill (`pill-on`), as Hark does it; over
-  the panel it is a lighter glass pill (`panel-glass-on`). Each segment is a 44 pt tab with its
-  selected state, and Maestro still taps "Home" by its text.
-- **Fades, no edges.** Content scrolls under the pill and the composer and fades out
-  (`Fade`, a gradient from the ground colour to the same colour at no opacity: `panel-clear`
-  in the panel, `bg-top-clear` on the sky). No divider lines.
+- **Liquid Glass first.** Every glass surface is the system's Liquid Glass on iOS 26 and later
+  (`expo-glass-effect`, gated by `isLiquidGlassAvailable()` and `isGlassEffectAPIAvailable()`):
+  - the tab bar is expo-router's `NativeTabs`, the system's own bar (Liquid Glass on iOS, Material
+    on Android);
+  - the composer's field pill and its conversation-list button are `GlassView`s with
+    `isInteractive`, grouped in a `GlassContainer` so they blend as one floating control;
+  - the round glass buttons (`GlassButton`) are interactive glass;
+  - Home's and Settings' cards are glass.
+  On Android, older iOS and the web preview the same shapes are an `expo-blur` blur under the
+  `glass` fill. Chips stay plain fills: they sit inside glass cards, and glass on glass is what
+  Apple's guidance says to avoid.
+- **Reduce Transparency.** When the system setting is on (`AccessibilityInfo`), glass and cards
+  become opaque: `solid` with a `solid-line` edge on the sky, `panel-raised` on the panel. Tested
+  in `tests/rich.test.tsx` and `tests/contrast.test.ts`.
+- **The panel: a dark slab, not tinted glass.** The chat is a near-black slab (`panel`,
+  `#0b0b0c`), inset 8 pt from the sides and bottom, 36 pt radius (`radius.panel`), faint rim.
+  We tried a dark-tinted Liquid Glass slab and kept the opaque one:
+  - Liquid Glass takes its colour from whatever is behind it and adds its own highlights, so its
+    final colour cannot be pinned, and a contrast test cannot hold it to 4.5:1.
+  - Worked out at a 90% tint over the lightest sky, body text passes only before the glass's own
+    highlight is counted, and muted text on the chips inside the cards fails first.
+  - The fades need one known solid colour to fade into.
+  So the slab stays opaque and the glass is on the controls floating over it.
+  Everything inside reads the panel palette (`PANEL` in `packages/cloud-mobile/src/lib/theme.ts`):
+  white ink (`panel-ink`), a muted grey (`panel-muted`), and the dark scheme's status colours and
+  buttons. An answer's `**bold**` lead-ins are drawn bold.
+- **Fades, no edges.** Content scrolls under the composer and fades out (`Fade`, a gradient from
+  the ground colour to the same colour at no opacity: `panel-clear` in the panel). No divider
+  lines.
 - **The floating composer.** A round glass button opens the conversation list (when there is more
-  than one conversation) and a pill-shaped glass field holds the message and the send button. A
-  dropped connection shows as one small line above it.
+  than one conversation) and a glass field pill holds the message and the send button. A dropped
+  connection shows as one small line above it.
 - **Quiet results.** Any file a finished task made, other than its pictures and the diff the card
   already offers, is one line under the result: a small file icon and the name. A tap opens it
-  as inert text (or the picture, or the diff) in the viewer. The pages a task opened lost their
-  chip background and are plain rows.
+  as inert text (or the picture, or the diff) in the viewer. The pages a task opened are plain
+  rows.
 - **Tiles on Home.** The first-visit ideas, the "since you were last here" numbers and the recent
-  conversations are rounded tiles two to a row (`Tiles`, `Tile`, `radius.tile` 28 pt): a small
-  line above (the day a conversation began), a bold title below. Cards are 28 pt round too.
+  conversations are rounded tiles two to a row (`Tiles`, `Tile`, `radius.tile` 28 pt). Cards are
+  28 pt round too.
 
 ### Light and dark
 
@@ -37,6 +53,30 @@ The panel is the same dark slab in both appearances. It is the point of the look
 checked once, and a light slab would make the chat read like the rest of Home. In light mode the
 sky around it stays light; in dark mode the slab sits on the night sky with its rim. Settings says
 so under Appearance. The task page opened from a result keeps the person's own appearance.
+
+## Language
+
+Simplified Chinese is the main language and the fallback. The app shows English only when the
+phone's first preferred language is English (`languageFor` in `src/lib/i18n.tsx`, which reads
+`expo-localization`).
+
+- **One catalogue.** `src/lib/strings.ts` holds every string the app shows (`EN` and `ZH`, keyed
+  and with `{name}` values), including sign-in, errors, empty states and accessibility labels.
+  `useT().t(key, values)` reads it. A test checks both languages have the same keys, no empty
+  value and the same values to fill in.
+- **Words from the shared logic.** `packages/cloud-client` is shared with the web app and returns
+  finished English (connection states, error sentences, inbox headings, "in 5 min"). The phone
+  does not change it: `useT().tx(text)` looks such text up in `PHRASES_ZH` and `PATTERNS_ZH`.
+  Anything not listed, which is everything the server or the agent wrote, is shown exactly as sent.
+- **Type.** The system face in both languages (PingFang SC for Chinese on iOS). Chinese text gets
+  line heights of about 1.5 to 1.6 times the size (`TEXT['zh-Hans']` in `ui.tsx`); neither language
+  sets letter spacing. Text scales with the system size.
+- **Device tests.** Buttons and fields carry fixed English test ids (`button-Continue`,
+  `field-Code`, `home-waiting-1`, `details-outcome`, `tab-home`), so the Maestro flows do not read
+  the labels. Builds made with `MAKA_E2E=1` are also fixed to Chinese (`extra.language`;
+  `MAKA_LANG` overrides it), and the one text the flows still tap, the Home tab, is `首页`.
+- **iOS.** `CFBundleDevelopmentRegion` is `zh-Hans` and `CFBundleLocalizations` lists `zh-Hans`
+  and `en`, so the system's own words (the share sheet, the keyboard's buttons) follow.
 
 ## Where it came from
 
@@ -48,12 +88,12 @@ this repository.
 | Principle | From the reference | Ours |
 |---|---|---|
 | A dark compact panel with large radii | yes | the values, the panel palette, how it sits on our sky |
-| A glass pill of sections, the selected one filled | yes | our three sections; Hark's dark pill on the sky |
 | Fades instead of hard edges | yes | the fade component and its tokens |
 | A floating composer: round glass button and pill field | yes | the button opens the conversation list; the send button sits in the field |
 | A made file as one line, icon and name | yes | which files are listed, and opening them inert |
 | Rounded two-column cards | yes (its notes app) | tiles for ideas, numbers and recent conversations |
-| A round button per corner | yes | not taken here: a corner button over the chat would cover the result card's Details button |
+| A glass pill of sections at the top | yes | not taken: the system tab bar has the real Liquid Glass |
+| A round button per corner | yes | not taken: a corner button over the chat would cover the result card's Details button |
 
 The rest is the Hark look we already had (`docs/fork/design/hark-patterns.md`,
 `packages/cloud-design/README.md`): the sky gradient, frosted cards, one dark pill for the
@@ -69,24 +109,29 @@ the same (its `tokens.css` gains the new custom properties, unused there).
 | `panel` | `#0b0b0c` | `#0b0b0c` | the slab |
 | `panel-ink` | `#f4f4f6` | `#f4f4f6` | text on the slab |
 | `panel-muted` | `#a6a6ae` | `#a6a6ae` | muted text on the slab |
-| `panel-glass` | white at 10% | white at 10% | glass controls on the slab |
-| `panel-glass-on` | white at 24% | white at 24% | the selected section on the slab |
+| `panel-glass` | white at 10% | white at 10% | the blur fallback's fill on the slab |
+| `panel-raised` | `#2c2c30` | `#2c2c30` | a glass control on the slab with Reduce Transparency on |
 | `panel-clear` | `#0b0b0c` at 0% | same | where a fade on the slab ends |
-| `glass` | white at 55% | white at 10% | glass controls on the sky |
-| `bg-top-clear` | `bg-top` at 0% | same | where the fade under the section pill ends |
+| `glass` | white at 55% | white at 10% | the blur fallback's fill on the sky |
+| `bg-top-clear` | `bg-top` at 0% | same | where a fade on the sky ends |
 | `radius.tile` | 28 | | cards and tiles |
 | `radius.panel` | 36 | | the slab |
 
 `tests/contrast.test.ts` in cloud-mobile checks the panel palette like the other two (text 7:1,
-muted and status colours 4.5:1 on its cards, chips and glass) and the section pill's ink on both
-glass fills.
+muted and status colours 4.5:1 on its cards, chips and glass fills) and the Reduce Transparency
+fills (`panel-raised`, `solid`).
 
 ## Dependencies
 
-None added. `expo-blur`, `expo-linear-gradient`, `expo-glass-effect` and `expo-symbols` were
-already dependencies. The system tab bar (`NativeTabs`) gave way to expo-router's JavaScript tabs
-with our own bar, so the iOS tab bar's Liquid Glass and Android's Material bar are gone; the pill
-uses Liquid Glass itself where the system has it.
+`expo-localization` 58.0.5 (MIT, a native module of the Expo SDK) is new, for the phone's
+preferred languages. `expo-blur`, `expo-linear-gradient`, `expo-glass-effect` and `expo-symbols`
+were already dependencies.
+
+## Not checked here
+
+The web preview cannot draw Liquid Glass; its screenshots show the blur fallback and a plain bottom
+bar. The glass itself, the `GlassContainer` blending and Reduce Transparency on a device are for the
+iOS simulator run in CI and a look on a phone.
 
 ## Next (planned, not built)
 
@@ -99,3 +144,5 @@ uses Liquid Glass itself where the system has it.
 3. **A notes-style Home.** Home as a grid of rounded cards (date, bold title, two-line preview)
    for decisions, results and runs, once the server sends a short preview per item; today a
    conversation has only a title and a start time.
+4. **The web app in Chinese.** The web shows the shared logic's English today; moving those
+   sentences into a shared catalogue would let both apps drop `PHRASES_ZH`.
