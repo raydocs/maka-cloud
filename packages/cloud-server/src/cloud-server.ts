@@ -149,7 +149,7 @@ export interface SupervisorParts {
     post(
       message: { conversationId: string; text: string; clientMessageId: string; caller?: string },
       signal: AbortSignal,
-    ): Promise<{ messageId: string } | { refused: 'not_found' }>;
+    ): Promise<{ messageId: string } | { refused: 'not_found' | 'client_message_id_conflict' }>;
   };
   /** Reads one artifact of a task of that conversation, with the checks of the artifact route. */
   artifacts: {
@@ -620,6 +620,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
               message.clientMessageId,
             );
             if (!result.found) throw new Error('The conversation does not exist');
+            if (result.conflict) return { refused: 'client_message_id_conflict' };
             deliverMessage({ messageId: result.messageId });
             return { messageId: result.messageId };
           },

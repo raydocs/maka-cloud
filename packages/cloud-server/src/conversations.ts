@@ -40,7 +40,15 @@ export type MessageMeta = z.infer<typeof MessageMetaSchema>;
 
 export type PostResult =
   | { found: false }
-  | { found: true; messageId: string; duplicate: boolean; text: string; sessionId: string };
+  | {
+      found: true;
+      messageId: string;
+      duplicate: boolean;
+      /** A duplicate whose text differs from the stored message's: the id was reused for other words. */
+      conflict: boolean;
+      text: string;
+      sessionId: string;
+    };
 
 /** Conversations and their messages. Rows are only ever added. */
 export class ConversationStore {
@@ -208,6 +216,7 @@ export class ConversationStore {
             found: true,
             messageId: earlier.message_id,
             duplicate: true,
+            conflict: earlier.text !== text,
             text: earlier.text,
             sessionId,
           };
@@ -242,7 +251,7 @@ export class ConversationStore {
           'INSERT INTO message_deliveries (message_id, conversation_id, next_attempt_at) VALUES (?, ?, ?)',
         )
         .run(messageId, conversationId, at);
-      return { found: true, messageId, duplicate: false, text, sessionId };
+      return { found: true, messageId, duplicate: false, conflict: false, text, sessionId };
     });
     if (result.found && !result.duplicate) this.hub.notify();
     return result;

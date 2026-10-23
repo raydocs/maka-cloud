@@ -1,6 +1,7 @@
 import {
   ApiError,
   type CloudClient,
+  type ErrorText,
   errorText,
   randomId,
   type RunTimeline,
@@ -25,8 +26,8 @@ export interface Steer {
   server?: TaskMessageState;
   /** A request about it is on its way. */
   request?: 'send' | 'check' | 'withdraw';
-  /** The last send or take-back failed: the client's sentence for why. */
-  failed?: string;
+  /** The last send or take-back failed: the client's sentence for why, or the limit that refused it. */
+  failed?: ErrorText;
   /** The task ended while the server still said "pending": what the task's log says happened. */
   settled?: 'read' | 'unread' | 'unknown';
 }

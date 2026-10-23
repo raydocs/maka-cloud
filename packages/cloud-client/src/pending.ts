@@ -55,6 +55,12 @@ export function storagePendingSends(
     | undefined,
   prefix = 'maka.pending.',
   now: () => number = Date.now,
+  /**
+   * The keys (without the prefix) whose records this store looks after. The sweep leaves every
+   * other record alone: the web keeps only its first message here now, and a conversation's record
+   * from before waits for `adoptPendingSend`, whatever its age.
+   */
+  owns: (key: string) => boolean = () => true,
 ): PendingSends {
   const expired = (value: PendingSend) =>
     !(now() - value.at >= 0 && now() - value.at < PENDING_SEND_MS);
@@ -80,7 +86,7 @@ export function storagePendingSends(
       const keys: string[] = [];
       for (let i = 0; i < storage.length; i += 1) {
         const key = storage.key(i);
-        if (key?.startsWith(prefix)) keys.push(key);
+        if (key?.startsWith(prefix) && owns(key.slice(prefix.length))) keys.push(key);
       }
       for (const key of keys) load(key);
     }

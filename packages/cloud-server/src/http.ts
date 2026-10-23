@@ -515,6 +515,12 @@ export class PublicApi {
       }
       throw new HttpError(405, 'method_not_allowed', { allow: 'GET, PATCH' });
     }
+    if (path === '/v1/me') {
+      // Who this token signs in as: the same for every session of an account, so a client can key
+      // what it keeps on the device (unsent messages) by the account rather than by the token.
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      return respond(res, 200, { ownerId: invite.inviteId });
+    }
     if (path === '/v1/memory' && method === 'GET') {
       return respond(res, 200, this.deps.memory.profile(invite.inviteId));
     }
@@ -710,6 +716,8 @@ export class PublicApi {
       body.data.mode === undefined ? undefined : { external: false, mode: body.data.mode },
     );
     if (!result.found) throw new HttpError(404, 'not_found');
+    // The same id with other words is not a retry: nothing is posted and the client is told.
+    if (result.conflict) throw new HttpError(409, 'client_message_id_conflict');
     respond(res, 202, { messageId: result.messageId });
     // A retry with the same client id asks again: the first delivery may have failed.
     this.deps.onMessage({

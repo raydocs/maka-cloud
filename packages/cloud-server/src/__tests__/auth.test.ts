@@ -173,6 +173,25 @@ test('a new identity gets nothing until it brings an invite, then it is that inv
   assert.equal(again.status, 401);
 });
 
+test('/v1/me names the account, the same for every session of it and for its invite', async (t) => {
+  const r = await rig(t);
+  const first = await signUp(r);
+  const again = (await (await r.google('g-ada', 'laptop')).json()) as SignedIn;
+  const other = await signUp(r, 'g-bob', r.h.server.invites.create('bob').token);
+  const owner = async (bearer: string) => {
+    const res = await r.call('GET', '/v1/me', undefined, bearer);
+    assert.equal(res.status, 200);
+    return ((await res.json()) as { ownerId: string }).ownerId;
+  };
+  const ada = await owner(first.token);
+  assert.match(ada, /^inv_/u);
+  assert.equal(await owner(again.token), ada);
+  assert.equal(await owner(r.h.token), ada);
+  assert.notEqual(await owner(other.token), ada);
+  assert.equal((await r.call('POST', '/v1/me', {}, first.token)).status, 405);
+  assert.equal((await r.call('GET', '/v1/me', undefined, null)).status, 401);
+});
+
 test('the same identity signs in again on another device, to the same invite', async (t) => {
   const r = await rig(t);
   const phone = await signUp(r);

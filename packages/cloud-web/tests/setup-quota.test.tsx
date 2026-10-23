@@ -82,8 +82,10 @@ test('an older server hides unsupported setup and usage', async () => {
 });
 
 test.each(['zh-Hans', 'zh-Hant', 'en'] as Language[])(
-  'the composer presents a typed budget refusal in the selected language (%s)',
+  'a message a budget refuses says which limit, its reset and the next step, in the selected language (%s)',
   async (language) => {
+    // Each language starts in a fresh browser: unsent messages are kept in localStorage.
+    localStorage.clear();
     const NativeFormat = Intl.DateTimeFormat;
     vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(
       (locale, options) => new NativeFormat(locale, { ...options, hour12: false }),
@@ -118,9 +120,12 @@ test.each(['zh-Hans', 'zh-Hant', 'en'] as Language[])(
       target: { value: 'hello' },
     });
     fireEvent.click(screen.getByRole('button', { name: t('Send message') }));
-    await waitFor(() =>
-      expect(screen.getByRole('alert').textContent).toBe(quotaText(quota, language)),
-    );
+    // The refusal is the message's own: under its words, as not sent, with the limit spelled out.
+    const reason = await screen.findByText(quotaText(quota, language));
+    const bubble = reason.closest('article');
+    expect(bubble?.textContent).toContain('hello');
+    expect(bubble?.textContent).toContain(t('Not sent'));
+    expect(reason.textContent).toBe(quotaText(quota, language));
   },
 );
 

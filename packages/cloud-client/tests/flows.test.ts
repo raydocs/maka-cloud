@@ -51,7 +51,7 @@ test('a conversation feed folds the stream into state and says it is live', asyn
   feed.stop();
 });
 
-test('a message that failed to post is retried under the same id; a changed draft is a new one', async () => {
+test('a message that failed to post stays as failed and is retried under the same id; the next one has its own', async () => {
   const bodies: { clientMessageId: string; text: string }[] = [];
   let failNext = true;
   const { client } = served({
@@ -67,23 +67,22 @@ test('a message that failed to post is retried under the same id; a changed draf
   });
   const feed = new ConversationFeed(client, 'c1');
   expect(await feed.send('  hello  ')).toBe(false);
-  expect(feed.getSnapshot().error).not.toBe('');
-  expect(await feed.send('hello')).toBe(true);
+  const [failed] = feed.getSnapshot().outgoing;
+  expect(failed?.text).toBe('hello');
+  expect(failed?.status).toEqual({ state: 'failed', reason: 'server', retryable: true });
+  // The message's own line says it; the conversation-wide error stays for other actions.
   expect(feed.getSnapshot().error).toBe('');
+  expect(await feed.retry(failed?.id ?? '')).toBe(true);
+  expect(feed.getSnapshot().outgoing).toEqual([
+    { ...failed, status: { state: 'sent', messageId: 'm' } },
+  ]);
   expect(bodies.map((b) => b.text)).toEqual(['hello', 'hello']);
   expect(bodies[1]?.clientMessageId).toBe(bodies[0]?.clientMessageId);
-  // After a success the next message has its own id.
-  await feed.send('next');
+  // The next message has its own id, even with the same words.
+  await feed.send('hello');
   expect(bodies[2]?.clientMessageId).not.toBe(bodies[0]?.clientMessageId);
-  // Edited text after a failure is a different message.
-  failNext = true;
-  await feed.send('draft');
-  feed.draftEdited();
-  await feed.send('draft edited');
-  expect(bodies[4]?.clientMessageId).not.toBe(bodies[3]?.clientMessageId);
   expect(await feed.send('   ')).toBe(false);
 });
-
 test('one action runs at a time: a second tap while one is in flight does nothing', async () => {
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => {

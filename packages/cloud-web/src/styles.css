@@ -435,6 +435,16 @@ textarea {
   background: var(--chip);
   color: var(--ink);
 }
+.message-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  color: var(--ink-muted);
+  font-size: var(--t-xs);
+  white-space: normal;
+}
 .message.user .message-author,
 .message.notice .message-author {
   display: none;

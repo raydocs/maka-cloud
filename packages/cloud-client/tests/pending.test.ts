@@ -1,6 +1,5 @@
 import { expect, test } from 'vitest';
 import { CloudClient } from '../src/client';
-import { ConversationFeed } from '../src/conversation';
 import { PENDING_SEND_MS, storagePendingSends } from '../src/pending';
 import { ConversationStarter } from '../src/starter';
 
@@ -55,43 +54,6 @@ function server() {
     created: () => created,
   };
 }
-
-test('the same text sent again after a reload reuses the unacknowledged id; an acknowledged one is cleared', async () => {
-  const storage = memoryStorage();
-  const api = server();
-  const client = new CloudClient('t', api.fetcher);
-  api.loseNext();
-  const first = new ConversationFeed(client, 'cnv_a', 0, storagePendingSends(storage));
-  expect(await first.send('Fix the login loop')).toBe(false);
-  // The page reloads: a new feed, the same tab storage.
-  const reloaded = new ConversationFeed(client, 'cnv_a', 0, storagePendingSends(storage));
-  expect(await reloaded.send('Fix the login loop')).toBe(true);
-  expect(api.posts.map((p) => p.id)).toEqual([api.posts[0]?.id, api.posts[0]?.id]);
-  expect(storage.map.size).toBe(0);
-  // Acknowledged, so the same words again are a new message.
-  await reloaded.send('Fix the login loop');
-  expect(new Set(api.posts.map((p) => p.id)).size).toBe(2);
-});
-
-test('different text, another conversation, or an hour later is a new message', async () => {
-  const storage = memoryStorage();
-  const api = server();
-  const client = new CloudClient('t', api.fetcher);
-  let now = 1_000_000;
-  const feed = (id: string) =>
-    new ConversationFeed(client, id, 0, storagePendingSends(storage), () => now);
-  api.loseNext();
-  await feed('cnv_a').send('One');
-  await feed('cnv_a').send('Two');
-  api.loseNext();
-  await feed('cnv_a').send('Three');
-  await feed('cnv_b').send('Three');
-  api.loseNext();
-  await feed('cnv_c').send('Four');
-  now += PENDING_SEND_MS;
-  await feed('cnv_c').send('Four');
-  expect(new Set(api.posts.map((p) => p.id)).size).toBe(api.posts.length);
-});
 
 test('a first message after a reload reuses its conversation and id: one conversation, one message', async () => {
   const storage = memoryStorage();
@@ -151,27 +113,6 @@ test('a kept first message from another invite in this tab is not reused', async
   ).start('Weekly report');
   expect(started.conversationId).toBe('cnv_1');
   expect(api.posts.map((p) => p.id)).not.toContain('other-id');
-});
-
-test('editing away from a failed send in this page makes the same words a new message, kept record included', async () => {
-  const storage = memoryStorage();
-  const api = server();
-  const client = new CloudClient('t', api.fetcher);
-  const feed = new ConversationFeed(client, 'cnv_a', 0, storagePendingSends(storage));
-  api.loseNext();
-  await feed.send('Again');
-  feed.draftEdited(); // away
-  feed.draftEdited(); // and back to the same words: a deliberate second message
-  await feed.send('Again');
-  expect(new Set(api.posts.map((p) => p.id)).size).toBe(2);
-  // After a reload, typing (draftEdited with no send in memory) does not drop the kept record.
-  api.loseNext();
-  await feed.send('Once');
-  const reloaded = new ConversationFeed(client, 'cnv_a', 0, storagePendingSends(storage));
-  reloaded.draftEdited();
-  await reloaded.send('Once');
-  const once = api.posts.filter((p) => p.text === 'Once').map((p) => p.id);
-  expect(new Set(once).size).toBe(1);
 });
 
 test('an edit while a first send is in flight makes the next send a new message', async () => {

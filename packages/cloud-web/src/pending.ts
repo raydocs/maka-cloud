@@ -1,4 +1,9 @@
-import { storagePendingSends } from '@maka-cloud/client';
+import {
+  adoptPendingSend,
+  type CloudClient,
+  storagePendingSends,
+  webStorageOutbox,
+} from '@maka-cloud/client';
 
 function sessionStore() {
   try {
@@ -9,5 +14,37 @@ function sessionStore() {
   }
 }
 
-/** This tab's unacknowledged sends, so a reload after a lost acknowledgment does not send twice. */
-export const pendingSends = storagePendingSends(sessionStore());
+/**
+ * This tab's unacknowledged first message (the starter's), so a reload after a lost acknowledgment
+ * does not send twice. A conversation's send kept here by an earlier version is not swept: the
+ * outbox takes it over (`adoptPendingSend`), however old.
+ */
+export const pendingSends = storagePendingSends(
+  sessionStore(),
+  'maka.pending.',
+  Date.now,
+  (key) => key === 'start',
+);
+
+function localStore() {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    // Blocked storage: unconfirmed messages are kept in memory only.
+    return undefined;
+  }
+}
+
+/**
+ * The conversation's messages the server has not confirmed, in `localStorage`, so a reload or a
+ * closed tab offers them again ("Send again") instead of losing them. Nothing is resent on its own.
+ * Kept per account on its server (`CloudClient.outboxScope`): another account signed in to this
+ * browser never sees them, and signing in again to the same account finds them. Signing out keeps
+ * them under that account; they go when sent or deleted, or after 30 days unsent, once shown.
+ * A send this tab kept the earlier way (`pendingSends`) is taken over first, under its own id.
+ */
+export function outboxFor(client: CloudClient, conversationId: string) {
+  const outbox = webStorageOutbox(localStore(), client.outboxScope());
+  void adoptPendingSend(sessionStore(), outbox, conversationId);
+  return outbox;
+}

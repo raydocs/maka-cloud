@@ -71,6 +71,7 @@ interface FeedRow {
   role: string | null;
   text: string | null;
   m_at: number | null;
+  client_message_id: string | null;
   title: string | null;
   c_at: number | null;
   e_data: string | null;
@@ -80,7 +81,7 @@ interface FeedRow {
 const PAGE_SQL = `
 SELECT f.id, f.kind, f.conversation_id, f.at,
   t.seq AS t_seq, t.at AS t_at, t.event AS t_event,
-  m.message_id, m.role, m.text, m.at AS m_at,
+  m.message_id, m.role, m.text, m.at AS m_at, m.client_message_id,
   c.title, c.created_at AS c_at,
   e.data AS e_data,
   x.data AS x_data
@@ -215,6 +216,11 @@ function payload(
         text:
           !internal && row.role === 'assistant' && row.text ? scrubSecretText(row.text) : row.text,
         at: row.m_at,
+        // The person's own message names the id their client sent it under, so the client can
+        // replace the copy it showed while sending. Internal readers keep the shape they had.
+        ...(!internal && row.role === 'user' && row.client_message_id
+          ? { clientMessageId: row.client_message_id }
+          : {}),
       };
     case 'conversation.created':
       return { title: row.title, at: row.c_at };
