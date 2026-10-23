@@ -243,7 +243,9 @@ function Step({
   if (state.step === 'emailSent')
     return (
       <>
-        <T kind="heading">{say('signin.checkEmail')}</T>
+        <T kind="heading" testID="signin-check-email">
+          {say('signin.checkEmail')}
+        </T>
         <T kind="muted">{say('signin.codeSent', { address: state.address })}</T>
         <Field
           label={say('signin.code')}
@@ -283,7 +285,9 @@ function Step({
   if (state.step === 'needsInvite')
     return (
       <>
-        <T kind="heading">{say('signin.invite.title')}</T>
+        <T kind="heading" testID="signin-invite-title">
+          {say('signin.invite.title')}
+        </T>
         <T kind="muted">{say('signin.invite.body', { name: BRAND.name })}</T>
         <Field
           label={say('signin.invite')}

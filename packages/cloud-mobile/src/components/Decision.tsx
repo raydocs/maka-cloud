@@ -167,8 +167,9 @@ export function QuestionBlock({
   const [note, setNote] = useState('');
   const { t: say, tx } = useT();
   // The option's own label is shown as sent; only the stand-in for a missing one is the app's.
-  const answeredLabel =
-    card.answeredLabel === 'Selected option' ? tx(card.answeredLabel) : card.answeredLabel;
+  const answeredLabel = question.options.some((option) => option.id === answered)
+    ? card.answeredLabel
+    : card.answeredLabel && tx(card.answeredLabel);
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
