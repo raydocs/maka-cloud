@@ -60,6 +60,6 @@ appId: cloud.maka.app
     id: "button-Continue"
 - extendedWaitUntil:
     visible:
-      id: "home-start-title"
+      id: "home-today-title"
     timeout: 30000
 - takeScreenshot: sign-in-email-home

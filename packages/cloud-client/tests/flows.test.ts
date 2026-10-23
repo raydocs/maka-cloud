@@ -414,6 +414,46 @@ test('Home takes the server’s cards and order, tells the server what was seen,
   expect(seen).toEqual([{ cardIds: ['waiting:b', 'waiting:a'] }]);
 });
 
+test('Home tells the server only the cards the screen showed, at most 100, once per visit', async () => {
+  const cards = Array.from({ length: 120 }, (_, i) => ({
+    cardId: `waiting:i${i}`,
+    kind: 'waiting',
+    ref: { type: 'inbox', id: `i${i}` },
+    rank: i,
+    seenAt: null,
+    at: i,
+  }));
+  const seen: Array<{ cardIds: string[] }> = [];
+  const { client } = served({
+    '/v1/home/seen': (_url, init) => {
+      seen.push(JSON.parse(String(init.body)));
+      return Response.json({ seen: [], visitedAt: 1 });
+    },
+    '/v1/home': () => Response.json({ cards }),
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  feed.start([]);
+  await until(() => feed.getSnapshot().cards !== undefined, 'the cards');
+
+  feed.leave(['waiting:i3', 'waiting:i1']);
+  // Leaving again (the screen goes away after the app went to the background) tells nothing new.
+  feed.stop(['waiting:i3']);
+  await until(() => seen.length === 1, 'the visit');
+  await new Promise((r) => setTimeout(r, 20));
+  expect(seen).toEqual([{ cardIds: ['waiting:i3', 'waiting:i1'] }]);
+
+  // Read again, then left with every card: the server takes 100 at most.
+  const again = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  again.start([]);
+  await until(() => again.getSnapshot().cards !== undefined, 'the cards again');
+  again.stop();
+  await until(() => seen.length === 2, 'the second visit');
+  expect(seen[1]?.cardIds).toHaveLength(100);
+  expect(seen[1]?.cardIds[0]).toBe('waiting:i0');
+});
+
 test('Home without a server Home stays on its own parts and tells the server nothing', async () => {
   const { client, calls } = served({
     '/v1/inbox/items': () => Response.json({ items: [] }),
