@@ -28,6 +28,19 @@ test('every string exists in all three languages, with the same values to fill i
   for (const phrases of [PHRASES_ZH, PHRASES_HANT])
     for (const [english, chinese] of Object.entries(phrases))
       expect([english, chinese.trim()]).not.toEqual([english, '']);
+  // The web app and the server's messages name duties and kept approvals one way; the phone
+  // must not coin its own words for them.
+  for (const [table, phrases, duty, kept] of [
+    [ZH, PHRASES_ZH, '值守任务', '已记住的授权'],
+    [ZH_HANT, PHRASES_HANT, '常駐任務', '已記住的授權'],
+  ] as const) {
+    expect(table['me.grants']).toBe(kept);
+    for (const key of ['projects.body', 'projects.duties', 'home.watching.one'] as const)
+      expect(table[key]).toContain(duty);
+    expect(Object.values(phrases).some((text) => text.includes(duty))).toBe(true);
+    for (const coined of ['日常任务', '例行任務', '已保留'])
+      expect(Object.values(table).join('\n')).not.toContain(coined);
+  }
   // No Traditional string is the Simplified one (a few short words are the same in both).
   const same = Object.keys(EN).filter(
     (key) =>
