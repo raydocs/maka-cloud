@@ -18,7 +18,7 @@ import {
   type ProjectView,
   nextRuns,
   recentConversations,
-  relativeTime,
+  dutyTime,
   splitSuggestions,
   type TaskView,
   verbOf,
@@ -132,7 +132,7 @@ export function Home({
   onOpenTask?: (task: TaskView) => void;
   now?: () => number;
 }) {
-  const { t, shared } = useT();
+  const { t, shared, language } = useT();
   const [draft, setDraft] = useState('');
   const [ownProjects, setOwnProjects] = useState<ProjectView[]>([]);
   useEffect(() => {
@@ -304,7 +304,7 @@ export function Home({
                       <strong>{displayText(run.name)}</strong>
                       <span className="muted">{displayText(run.repo)}</span>
                     </span>
-                    <span className="done-cost muted">{shared(relativeTime(run.at, now()))}</span>
+                    <span className="done-cost muted">{dutyTime(run.at, language, now())}</span>
                   </li>
                 ))}
               </ul>

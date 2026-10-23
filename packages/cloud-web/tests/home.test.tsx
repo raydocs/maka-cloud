@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import {
   CloudClient,
+  dutyTime,
   type Conversation,
   inboxAnswerer,
   type InboxItem,
@@ -307,7 +308,7 @@ test('what runs next lists scheduled duties with their time, and counts the ones
   const region = await screen.findByRole('region', { name: 'What runs next' });
   expect(within(region).getByText('Nightly dependency check')).toBeTruthy();
   expect(within(region).getByText('acme/web')).toBeTruthy();
-  expect(within(region).getByText('in 30 min')).toBeTruthy();
+  expect(within(region).getByText(dutyTime(NOW + 30 * MIN, 'en', NOW))).toBeTruthy();
   expect(
     within(region).getByText('1 more duty wakes when something happens on GitHub.'),
   ).toBeTruthy();

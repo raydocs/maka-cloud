@@ -6,7 +6,7 @@ import {
   type ErrorText,
   errorText,
   HomeFeed,
-  relativeTime,
+  dutyTime,
   verbOf,
 } from '@maka-cloud/client';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -253,7 +253,7 @@ export default function Home() {
                     <T kind="body">{displayText(run.name)}</T>
                     <T kind="muted">{displayText(run.repo)}</T>
                   </View>
-                  <T kind="muted">{tx(relativeTime(run.at, now))}</T>
+                  <T kind="muted">{dutyTime(run.at, lang, now)}</T>
                 </View>
               ))}
               {watching > 0 && (
