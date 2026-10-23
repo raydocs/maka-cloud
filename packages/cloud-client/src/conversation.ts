@@ -1,6 +1,6 @@
 import { ApiError, type CloudClient } from './client';
 import type { ArtifactListing, InboxItem, Mode, Question, TaskControl } from './contract';
-import { errorText } from './errors';
+import { type ErrorText, errorText } from './errors';
 import { randomId } from './ids';
 import { inboxAnswerer } from './inboxAnswer';
 import { type PendingSends, reusable } from './pending';
@@ -24,7 +24,7 @@ export interface ConversationSnapshot {
   state: ConversationState;
   /** 'Connecting…', 'Live', 'Disconnected' and the like, in words. */
   status: string;
-  error: string;
+  error: ErrorText;
   /** The key of the action in flight, or ''. One action runs at a time. */
   busy: string;
   artifacts: Record<string, TaskArtifacts>;

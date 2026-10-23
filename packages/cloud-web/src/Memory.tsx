@@ -1,7 +1,13 @@
 import { useT } from './i18n';
 import { useRef, useState } from 'react';
 import { Button } from '@astryxdesign/core';
-import { BRAND, type CloudClient, displayText, type MemoryProfile } from '@maka-cloud/client';
+import {
+  BRAND,
+  type CloudClient,
+  type ErrorText,
+  displayText,
+  type MemoryProfile,
+} from '@maka-cloud/client';
 
 /** The invite's profile, not the selected conversation's. Unmounted on disconnect. */
 export function MemoryPanel({
@@ -9,7 +15,7 @@ export function MemoryPanel({
   errorText,
 }: {
   client: CloudClient;
-  errorText: (error: unknown) => string;
+  errorText: (error: unknown) => ErrorText;
 }) {
   const { t, shared } = useT();
   const [profile, setProfile] = useState<MemoryProfile>({ facts: [], summaries: [] });
@@ -17,7 +23,7 @@ export function MemoryPanel({
   const [draft, setDraft] = useState('');
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const pending = useRef(false);
 
   async function act(work: () => Promise<unknown>) {

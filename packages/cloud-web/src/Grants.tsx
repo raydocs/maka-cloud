@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import {
   type CloudClient,
   displayText,
+  type ErrorText,
   errorText,
   type Grant,
   grantFacts,
@@ -25,7 +26,7 @@ export function GrantsPanel({
   const [grants, setGrants] = useState<Grant[] | undefined>();
   const [hidden, setHidden] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
 
   useEffect(() => {
     let current = true;

@@ -1,4 +1,5 @@
 import type { ResultManifest, TaskEvent, TaskView } from '@maka-cloud/orchestrator';
+import { taskQuota, type QuotaReason } from './quota.js';
 import { z } from 'zod';
 import { type Language, messages } from './i18n.js';
 import {
@@ -17,7 +18,7 @@ export { scrubSecretText };
  * orchestrator's `task_cost` events add up there, and it is absent until the
  * first one.
  */
-export type PublicTaskView = Omit<TaskView, 'runner'>;
+export type PublicTaskView = Omit<TaskView, 'runner'> & { quota?: QuotaReason };
 
 /** The names cloud-web hides (packages/cloud-web/src/presentation.ts); error text a runner wrote can carry them. */
 const HIDDEN_NAMES =
@@ -224,6 +225,9 @@ export function toPublicView(view: TaskView): PublicTaskView {
   const { runner: _runner, ...rest } = view;
   return {
     ...rest,
+    ...(rest.budgetExceeded && rest.budgetUsd !== undefined
+      ? { quota: taskQuota(rest.costUsd ?? 0, rest.budgetUsd) }
+      : {}),
     ...(rest.manifest === undefined ? {} : { manifest: toPublicManifest(rest.manifest) }),
     ...(rest.kept === undefined ? {} : { kept: toPublicManifest(rest.kept) }),
     // The runner's progress notes carry whatever its tools printed.

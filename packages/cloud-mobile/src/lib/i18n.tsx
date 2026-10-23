@@ -1,3 +1,4 @@
+import { quotaText, type ErrorText } from '@maka-cloud/client';
 import Constants from 'expo-constants';
 import { getLocales } from 'expo-localization';
 import {
@@ -81,8 +82,8 @@ export interface Translator {
   lang: Language;
   /** One of the app's own strings, with its values filled in. */
   t(key: Key, params?: Params): string;
-  /** Finished English from the shared client logic or the app's non-screen code, translated if known. */
-  tx(text: string): string;
+  /** Shared client text or a structured quota refusal, rendered in the phone's language. */
+  tx(text: ErrorText): string;
   /** A decision's choice: the app's words for one of the server's fixed choices, else its label as sent. */
   choice(id: string, label: string): string;
 }
@@ -94,7 +95,12 @@ export function translator(lang: Language): Translator {
   return {
     lang,
     t: (key, params) => fill(strings[key], params),
-    tx: (text) => (phrases ? phrase(text, phrases, patterns) : text),
+    tx: (text) =>
+      typeof text !== 'string'
+        ? quotaText(text.quota, lang)
+        : phrases
+          ? phrase(text, phrases, patterns)
+          : text,
     choice: (id, label) => {
       const key = lang === 'en' ? undefined : CHOICE_KEYS.get(`${id}\n${label}`);
       return key ? fill(strings[key]) : label;

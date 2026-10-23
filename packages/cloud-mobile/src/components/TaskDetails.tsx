@@ -3,6 +3,7 @@ import {
   confidenceWords,
   displayText,
   dollars,
+  type ErrorText,
   errorText,
   hostOf,
   type InboxItem,
@@ -75,7 +76,7 @@ export function TaskDetails({
   const { t: say, tx } = useT();
   const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const sources = useSources(client, task.taskId, task.state);
 
   useEffect(() => {

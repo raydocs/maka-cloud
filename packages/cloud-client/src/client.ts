@@ -19,6 +19,7 @@ import {
   type PersonSettings,
   type Mode,
   type ProjectView,
+  type QuotaReason,
   type SuggestionsView,
   type RunTimeline,
   type SourceListing,
@@ -28,6 +29,7 @@ import {
   type TaskMessageState,
   type TaskView,
 } from './contract';
+import { quotaReason } from './quota';
 import { randomId } from './ids';
 
 const PICTURE_TYPES: ReadonlySet<string> = new Set([
@@ -39,6 +41,7 @@ const PICTURE_TYPES: ReadonlySet<string> = new Set([
 
 /** A refused request. `code` is the server's error code, when it sent one. */
 export class ApiError extends Error {
+  readonly quota: QuotaReason | undefined;
   constructor(
     readonly status: number,
     readonly code?: string,
@@ -47,6 +50,10 @@ export class ApiError extends Error {
     readonly retryAfterMs?: number,
   ) {
     super(`Request failed (${status}).`);
+    this.quota =
+      code === 'budget_exceeded' && typeof body === 'object' && body !== null
+        ? quotaReason((body as { quota?: unknown }).quota)
+        : undefined;
   }
 }
 function retryAfterMs(value: string | null): number | undefined {
@@ -317,6 +324,20 @@ export class CloudClient {
     );
     return typeof result.revoked === 'number' ? result.revoked : 0;
   }
+  usage() {
+    return this.request<import('./contract').UsageView>('/v1/usage', {}, 'usage');
+  }
+  homeReadiness() {
+    return this.request<{ readiness: import('./contract').Readiness }>(routes.home, {}, 'home');
+  }
+  setup(report: { dismiss: import('./contract').SetupStep } | { notificationsAllowed: boolean }) {
+    return this.request<{ readiness: import('./contract').Readiness }>(
+      '/v1/home/setup',
+      { method: 'POST', body: JSON.stringify(report) },
+      'home',
+    );
+  }
+
   /** Home's cards in the server's order; `Unsupported` on a server without `/v1/home`. */
   async home(): Promise<HomeCard[]> {
     const result = await this.request<{ cards: HomeCard[] }>(routes.home, {}, 'home');

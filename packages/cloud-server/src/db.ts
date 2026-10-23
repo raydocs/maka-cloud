@@ -314,6 +314,9 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V10,
   SCHEMA_V11,
   SCHEMA_V12,
+  `CREATE TABLE home_setup (owner TEXT NOT NULL, step TEXT NOT NULL, until_at INTEGER NOT NULL,
+     PRIMARY KEY (owner, step));
+   CREATE TABLE home_permissions (owner TEXT PRIMARY KEY, notifications_allowed INTEGER NOT NULL);`,
 ];
 
 /**

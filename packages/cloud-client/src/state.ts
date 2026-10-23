@@ -253,6 +253,7 @@ export function mergeViews(state: ConversationState, views: TaskView[]): Convers
       'costUsd',
       'budgetUsd',
       'budgetExceeded',
+      'quota',
       'stopPending',
       'treeStopPending',
     ] as const) {
