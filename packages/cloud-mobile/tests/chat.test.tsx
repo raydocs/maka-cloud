@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import { quotaText, type QuotaReason } from '@maka-cloud/client';
 import { Text } from 'react-native';
 import Chat from '@/app/(tabs)/chat';
 import { SessionProvider, useSession } from '@/lib/session';
@@ -394,4 +395,26 @@ test('a send the server did not confirm is kept on the device and says why; a re
   expect(await screen.findByText('The server refused this message.')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Send again' })).toBeNull();
   expect(kept().some(([, value]) => value.includes('Thanks'))).toBe(false);
+});
+
+test('a message a spending limit refuses says which limit, when it resets and what to do, and waits for the reset', async () => {
+  const quota: QuotaReason = {
+    scope: 'day',
+    usedUsd: 5,
+    limitUsd: 5,
+    resetsAt: Date.now() + 60 * 60_000,
+    nextStep: 'wait',
+  };
+  await openChat(finished(), async () =>
+    Response.json({ error: 'budget_exceeded', quota }, { status: 402 }),
+  );
+  await screen.findByText('Fixed.');
+  await fireEvent.changeText(screen.getByTestId('field-Keep the conversation going'), 'Run it');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByText(quotaText(quota, 'en'))).toBeTruthy();
+  expect(screen.getByText('Not sent')).toBeTruthy();
+  // Not until the limit resets; deleting it is always possible.
+  expect(screen.queryByRole('button', { name: 'Send again' })).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
+  expect(screen.queryByText(quotaText(quota, 'en'))).toBeNull();
 });

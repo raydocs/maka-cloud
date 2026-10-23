@@ -1,5 +1,6 @@
-import type { Mode } from './contract';
+import type { Mode, QuotaReason } from './contract';
 import type { PendingSend } from './pending';
+import { quotaReason } from './quota';
 
 /**
  * A message the person sent that the server has not acknowledged yet. It is kept from before the
@@ -17,7 +18,9 @@ export interface OutboxEntry {
   keptAt?: number;
   mode?: Mode;
   /** Why the last try failed, when it ended in a failure that sending again can help. */
-  failure?: 'offline' | 'server';
+  failure?: 'offline' | 'server' | 'quota';
+  /** With `failure: 'quota'`: the limit it ran into, so a later visit explains it the same way. */
+  quota?: QuotaReason;
 }
 
 /**
@@ -99,7 +102,10 @@ function isEntry(value: unknown, conversationId: string): value is OutboxEntry {
     typeof v['at'] === 'number' &&
     (v['keptAt'] === undefined || typeof v['keptAt'] === 'number') &&
     (v['mode'] === undefined || typeof v['mode'] === 'string') &&
-    (v['failure'] === undefined || v['failure'] === 'offline' || v['failure'] === 'server')
+    (v['failure'] === undefined ||
+      v['failure'] === 'offline' ||
+      v['failure'] === 'server' ||
+      (v['failure'] === 'quota' && quotaReason(v['quota']) !== undefined))
   );
 }
 

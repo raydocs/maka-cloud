@@ -7,6 +7,7 @@ import {
   budgetWords,
   displayText,
   type DutyView,
+  type ErrorText,
   errorText,
   type ProjectView,
   type SuggestionKindView,
@@ -119,7 +120,7 @@ function SuggestionRow({
 function Suggestions({ client, projectId }: { client: CloudClient; projectId: string }) {
   const { t, shared } = useT();
   const [kinds, setKinds] = useState<SuggestionKindView[] | undefined>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const load = useCallback(async () => {
@@ -184,7 +185,7 @@ export function Projects({ client }: { client: CloudClient }) {
   const { t, shared } = useT();
   const [projects, setProjects] = useState<ProjectView[] | undefined>();
   const [unavailable, setUnavailable] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState('');
   const pending = useRef(false);
 

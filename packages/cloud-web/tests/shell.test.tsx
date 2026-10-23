@@ -257,3 +257,56 @@ test('someone with conversations lands in the latest one; a first visit lands on
   expect(await screen.findByLabelText('What would you like to get done?')).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Conversation' })).toBeNull();
 });
+
+test('a failed readiness report does not turn successfully enabled notifications off', async () => {
+  const subscription = {
+    toJSON: () => ({
+      endpoint: 'https://push.example/device',
+      keys: { p256dh: 'key', auth: 'auth' },
+    }),
+  };
+  vi.stubGlobal('Notification', { requestPermission: async () => 'granted' });
+  vi.stubGlobal('PushManager', class {});
+  Object.defineProperty(navigator, 'serviceWorker', {
+    configurable: true,
+    value: {
+      register: async () => {},
+      ready: Promise.resolve({ pushManager: { getSubscription: async () => subscription } }),
+    },
+  });
+  try {
+    const client = new CloudClient('token', (async (url) => {
+      if (String(url).endsWith('/v1/push/key')) return json({ publicKey: 'AQ' });
+      if (String(url).endsWith('/v1/home/setup')) return json({ error: 'unavailable' }, 503);
+      return json({});
+    }) as typeof fetch);
+    render(<NotificationsPanel client={client} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }));
+    expect(await screen.findByText('Background notifications enabled')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  } finally {
+    delete (navigator as unknown as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
+
+test('the first-message setup action focuses the visible chat composer', async () => {
+  signedIn([]);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+    if (url.endsWith('/v1/home'))
+      return json({
+        cards: [],
+        readiness: { completed: [], cards: [{ id: 'conversation', action: 'chat' }] },
+      });
+    return json({}, 404);
+  });
+  render(
+    <ThemeProvider>
+      <App initialToken="token" />
+    </ThemeProvider>,
+  );
+  fireEvent.click(await screen.findByRole('button', { name: 'Send your first message' }));
+  await waitFor(() => expect(document.activeElement?.closest('.chat-dock')).toBeTruthy());
+  expect(document.activeElement?.tagName).toBe('TEXTAREA');
+});

@@ -8,6 +8,7 @@ import {
   connectionAction,
   conversationSummary,
   displayText,
+  type ErrorText,
   errorText,
   type OutgoingMessage,
   sendFailureText,
@@ -143,7 +144,7 @@ function NewConversation() {
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [failure, setFailure] = useState('');
+  const [failure, setFailure] = useState<ErrorText>('');
   const [dock, setDock] = useState(76);
   const { openSheet, sheet } = useConversationSheet();
   const send = () => {
@@ -345,7 +346,8 @@ function OutgoingBubble({
       )}
       {status.state === 'failed' && (
         <T kind="small" style={{ alignSelf: 'flex-end', textAlign: 'right', marginBottom: 6 }}>
-          {tx(sendFailureText(status.reason))}
+          {/* A limit says which one, when it resets and what to do, in the phone's language. */}
+          {tx(status.quota ? { quota: status.quota } : sendFailureText(status.reason))}
         </T>
       )}
     </View>

@@ -1,7 +1,14 @@
 import { ApiError, type CloudClient, Unsupported } from './client';
 import { type ConnectionState, connectionText } from './connection';
-import type { ArtifactListing, InboxItem, Mode, Question, TaskControl } from './contract';
-import { errorText } from './errors';
+import type {
+  ArtifactListing,
+  InboxItem,
+  Mode,
+  Question,
+  QuotaReason,
+  TaskControl,
+} from './contract';
+import { type ErrorText, errorText } from './errors';
 import { randomId } from './ids';
 import { inboxAnswerer } from './inboxAnswer';
 import { memoryOutbox, OUTBOX_KEEP_MS, type Outbox, type OutboxEntry } from './outbox';
@@ -39,7 +46,12 @@ export type SendFailure =
    * Kept unsent for longer than `OUTBOX_KEEP_MS` since its last try: shown this once (it can still be
    * sent again, or its words copied) and no longer kept on the device.
    */
-  | 'expired';
+  | 'expired'
+  /**
+   * A spending or service limit refused it (`quota` says which, when it resets and what to do).
+   * Not retryable until the limit resets; then it may be sent again.
+   */
+  | 'quota';
 
 /**
  * Where a message the person sent stands, until the conversation shows it: `queued` (kept on the
@@ -49,7 +61,7 @@ export type OutgoingStatus =
   | { state: 'queued' }
   | { state: 'sending' }
   | { state: 'sent'; messageId?: string }
-  | { state: 'failed'; reason: SendFailure; retryable: boolean };
+  | { state: 'failed'; reason: SendFailure; retryable: boolean; quota?: QuotaReason };
 
 export interface OutgoingMessage {
   /** The `clientMessageId`, the same on every try. */
@@ -77,7 +89,7 @@ export interface ConversationSnapshot {
    * when the conversation shows it, or when the person discards it.
    */
   outgoing: OutgoingMessage[];
-  error: string;
+  error: ErrorText;
   /** The key of the action in flight, or ''. One action runs at a time. */
   busy: string;
   artifacts: Record<string, TaskArtifacts>;
@@ -109,6 +121,8 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
   private pending = false;
   /** Cuts the wait before the stream's next try short, while it waits. */
   private wake: (() => void) | undefined;
+  /** Timers that make a message refused by a limit sendable again once the limit resets. */
+  private readonly resets = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly listed = new Set<string>();
   /** The newest event id the stream brought, and which event brought each message. */
   private lastEventId = 0;
@@ -171,11 +185,18 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
           return {
             ...outgoingOf(entry),
             // A message whose last try ended without an answer may still have been in flight.
-            status: {
-              state: 'failed',
-              reason: expired(entry) ? 'expired' : (entry.failure ?? 'interrupted'),
-              retryable: true,
-            },
+            status:
+              !expired(entry) && entry.failure === 'quota' && entry.quota
+                ? quotaFailure(entry.quota, now)
+                : {
+                    state: 'failed',
+                    reason: expired(entry)
+                      ? 'expired'
+                      : entry.failure === 'quota'
+                        ? 'interrupted'
+                        : (entry.failure ?? 'interrupted'),
+                    retryable: true,
+                  },
           };
         });
       return back.length === 0 ? s : { ...s, outgoing: [...back, ...s.outgoing] };
@@ -184,7 +205,30 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     for (const entry of entries)
       if (expired(entry) && shown.includes(entry.id))
         void this.outbox.remove(this.conversationId, entry.id).catch(() => {});
+    this.armResets();
     this.settle();
+  }
+
+  /** A message a limit refused becomes sendable again when the limit resets, while the feed runs. */
+  private armResets(): void {
+    for (const message of this.getSnapshot().outgoing) {
+      const { status } = message;
+      if (status.state !== 'failed' || status.reason !== 'quota' || status.retryable) continue;
+      const resetsAt = status.quota?.resetsAt;
+      if (resetsAt == null || this.resets.has(message.id)) continue;
+      // Timers cannot wait longer than about 24 days at once: a longer wait is taken in steps.
+      const wait = Math.min(Math.max(0, resetsAt - this.now()), 2_147_483_647);
+      this.resets.set(
+        message.id,
+        setTimeout(() => {
+          this.resets.delete(message.id);
+          const now = this.getSnapshot().outgoing.find((m) => m.id === message.id)?.status;
+          if (now?.state !== 'failed' || now.reason !== 'quota' || !now.quota) return;
+          this.setOutgoing(message.id, quotaFailure(now.quota, this.now()));
+          this.armResets();
+        }, wait),
+      );
+    }
   }
 
   private setConnection(connection: ConnectionState): void {
@@ -202,6 +246,7 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     const controller = new AbortController();
     this.controller = controller;
     this.setConnection({ state: 'connecting' });
+    this.armResets();
     this.client
       .subscribe(
         this.conversationId,
@@ -238,6 +283,8 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
     this.controller?.abort();
     this.controller = undefined;
     this.wake = undefined;
+    for (const timer of this.resets.values()) clearTimeout(timer);
+    this.resets.clear();
     clearTimeout(this.refresh);
   }
 
@@ -417,17 +464,24 @@ export class ConversationFeed extends Store<ConversationSnapshot> {
         );
         sent = true;
       } catch (e) {
-        const failure = sendFailure(e);
+        const failure = sendFailure(e, this.now());
         this.setOutgoing(message.id, { state: 'failed', ...failure });
+        this.armResets();
         // Kept only while sending it again can help, with why it failed, for a later visit. One
         // the conversation showed meanwhile is gone from `outgoing` and is not kept again.
         const still = this.getSnapshot().outgoing.some((m) => m.id === message.id);
-        if (failure.reason === 'offline' || failure.reason === 'server') {
+        // A limit's refusal is kept too: the words can be sent once it resets.
+        if (
+          failure.reason === 'offline' ||
+          failure.reason === 'server' ||
+          failure.reason === 'quota'
+        ) {
           if (still)
             await this.outbox
               .put({
                 ...entryOf(this.conversationId, message, this.now()),
                 failure: failure.reason,
+                ...(failure.quota ? { quota: failure.quota } : {}),
               })
               .catch(() => {});
           return;
@@ -461,10 +515,30 @@ function entryOf(conversationId: string, message: OutgoingMessage, keptAt: numbe
   };
 }
 
-/** Why a post failed, and whether the same message sent again can succeed. */
-export function sendFailure(error: unknown): { reason: SendFailure; retryable: boolean } {
+/** A limit's refusal: sendable again only once the limit has reset. */
+function quotaFailure(
+  quota: QuotaReason,
+  now: number,
+): Extract<OutgoingStatus, { state: 'failed' }> {
+  return {
+    state: 'failed',
+    reason: 'quota',
+    retryable: quota.resetsAt !== null && quota.resetsAt <= now,
+    quota,
+  };
+}
+
+/** Why a post failed, and whether the same message sent again can succeed (`now`: for a limit's reset). */
+export function sendFailure(
+  error: unknown,
+  now: number = Date.now(),
+): { reason: SendFailure; retryable: boolean; quota?: QuotaReason } {
   if (error instanceof Unsupported) return { reason: 'rejected', retryable: false };
   if (!(error instanceof ApiError)) return { reason: 'offline', retryable: true };
+  if (error.quota) {
+    const { reason, retryable, quota } = quotaFailure(error.quota, now);
+    return { reason, retryable, ...(quota ? { quota } : {}) };
+  }
   if (error.status === 401) return { reason: 'signed_out', retryable: false };
   if (error.status === 409 && error.code === 'client_message_id_conflict')
     return { reason: 'conflict', retryable: false };
@@ -518,6 +592,9 @@ export function sendFailureText(reason: SendFailure): string {
       return 'A different message was already sent under this id.';
     case 'signed_out':
       return 'Sign in again to send it.';
+    case 'quota':
+      // The apps show the limit itself (`quotaText`); this is the words when it is not known.
+      return 'A spending limit was reached.';
     case 'expired':
       return 'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.';
     case 'interrupted':

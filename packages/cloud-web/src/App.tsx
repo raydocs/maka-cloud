@@ -26,6 +26,7 @@ import {
   conversationSummary,
   displayText,
   dollars,
+  type ErrorText,
   errorText,
   type InboxItem,
   type Mode,
@@ -45,6 +46,7 @@ import {
   Unsupported,
 } from '@maka-cloud/client';
 import { GrantsPanel } from './Grants';
+import { QuotaNotice, Usage } from './Quota';
 import { Home } from './Home';
 import { InboxPanel } from './Inbox';
 import { Computer } from './Computer';
@@ -225,7 +227,8 @@ function TaskBranch({
               </span>
             )}
         </div>
-        {task.budgetExceeded && (
+        {task.quota && <QuotaNotice quota={task.quota} />}
+        {task.budgetExceeded && !task.quota && (
           <p className="failure">{t('The budget was reached, so the work was stopped.')}</p>
         )}
         {stopping && (
@@ -524,7 +527,15 @@ export function ConversationView({
                 {message.status.state === 'failed' ? (
                   <>
                     <span className="status-mark attention" />
-                    {t('Not sent')} {shared(sendFailureText(message.status.reason))}
+                    {t('Not sent')}{' '}
+                    {/* A limit says which one, when it resets and what to do, in this language. */}
+                    <span className="message-reason">
+                      {shared(
+                        message.status.quota
+                          ? { quota: message.status.quota }
+                          : sendFailureText(message.status.reason),
+                      )}
+                    </span>
                     {message.status.retryable && (
                       <button
                         type="button"
@@ -718,7 +729,7 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
   const { t, shared, languageChoice } = useT();
   const [on, setOn] = useState(false);
   const [hint, setHint] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   async function act(work: () => Promise<void>) {
@@ -752,6 +763,7 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
                 await enablePush(client, languageChoice);
                 setOn(true);
                 setHint('');
+                void client.setup({ notificationsAllowed: true }).catch(() => {});
               } catch (e) {
                 if (!(e instanceof ApiError) && !(e instanceof Unsupported)) {
                   setHint(
@@ -862,6 +874,7 @@ export function Settings({
   return (
     <div className="page">
       <h1>{t('Me')}</h1>
+      <Usage client={client} />
       <AppearanceChoice />
       <LanguageChoice />
       <section className="card section-card">
@@ -1017,7 +1030,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   // The task page opens over whichever section the person came from and goes back to it.
   const [decision, setDecision] = useState<{ task: string }>();
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const connect = async (token: string) => {
     setBusy(true);
@@ -1242,6 +1255,16 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         // Kept while a task page is open, so coming back is not a new visit.
         <div className="content-pane" hidden={taskPage !== undefined}>
           <Home
+            onSetup={(action) => {
+              if (action === 'chat') {
+                setView('chat');
+                requestAnimationFrame(() => {
+                  const composer =
+                    document.querySelector<HTMLTextAreaElement>('.chat-dock textarea');
+                  composer?.focus();
+                });
+              } else setView(action);
+            }}
             active={view === 'home'}
             hideStart={wide}
             client={session.client}

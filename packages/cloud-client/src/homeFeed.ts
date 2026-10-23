@@ -1,7 +1,7 @@
 import type { CloudClient } from './client';
 import { Unsupported } from './client';
 import type { Conversation, HomeCard, InboxItem, ProjectView, TaskView } from './contract';
-import { errorText } from './errors';
+import { type ErrorText, errorText } from './errors';
 import { DAY_MS } from './home';
 import { inboxAnswerer } from './inboxAnswer';
 import { mergeInboxItem } from './state';
@@ -33,7 +33,7 @@ export interface HomeSnapshot {
   inboxLoaded: boolean;
   /** The last read of the open decisions failed. */
   inboxFailed: boolean;
-  answerError: string;
+  answerError: ErrorText;
   /** When the person last looked, or a day ago on a first visit; unknown until read. */
   since: number | undefined;
   /** Top-level and sub tasks of the recent conversations, by conversation; unknown until read. */

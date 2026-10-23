@@ -818,6 +818,7 @@ export const PHRASES_ZH: Record<string, string> = {
   'The server refused this message.': '服务器拒绝了这条消息。',
   'A different message was already sent under this id.': '这个编号下已经发送过另一条消息。',
   'Sign in again to send it.': '请重新登录后再发送。',
+  'A spending limit was reached.': '已达到用量上限。',
   'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.':
     '这条消息已有 30 天未发送，不再保存在这台设备上。请重新发送，或复制其中的文字。',
   'The app closed before the server confirmed it. It may have arrived.':

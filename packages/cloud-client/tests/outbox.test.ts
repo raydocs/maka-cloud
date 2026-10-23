@@ -623,3 +623,61 @@ test('a refused stream says signed out for a device session, invite expired for 
     feed.stop();
   }
 });
+
+test('a spending limit refuses a message: not retryable until it resets, kept with the limit, then sendable again', async () => {
+  const storage = memoryStorage();
+  const quota = {
+    scope: 'day' as const,
+    usedUsd: 5,
+    limitUsd: 5,
+    resetsAt: Date.now() + 150,
+    nextStep: 'wait' as const,
+  };
+  let refuse = true;
+  const api = server(() =>
+    refuse
+      ? Response.json({ error: 'budget_exceeded', quota }, { status: 402 })
+      : Response.json({ messageId: 'srv' }, { status: 202 }),
+  );
+  const client = new CloudClient('t', api.fetcher);
+  const feed = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
+  expect(await feed.send('Run the report')).toBe(false);
+  const [refused] = feed.getSnapshot().outgoing;
+  expect(refused?.status).toEqual({ state: 'failed', reason: 'quota', retryable: false, quota });
+  // The limit is the message's own explanation; the conversation's error stays for other actions.
+  expect(feed.getSnapshot().error).toBe('');
+  expect(await feed.retry(refused?.id ?? '')).toBe(false);
+  expect(api.posts).toHaveLength(1);
+  // Kept with the limit: a reload explains it the same way.
+  const reloaded = new ConversationFeed(client, 'c1', 0, webStorageOutbox(storage, 'me'));
+  await until(() => reloaded.getSnapshot().outgoing.length === 1, 'the kept message');
+  expect(reloaded.getSnapshot().outgoing[0]?.status).toMatchObject({ reason: 'quota', quota });
+  // Once the limit resets, it may be sent again, under the same id.
+  const retryable = () => {
+    const status = feed.getSnapshot().outgoing[0]?.status;
+    return status?.state === 'failed' && status.retryable;
+  };
+  await until(retryable, 'the reset');
+  refuse = false;
+  expect(await feed.retry(refused?.id ?? '')).toBe(true);
+  expect(api.posts.map((p) => p.clientMessageId)).toEqual([refused?.id, refused?.id]);
+  reloaded.stop();
+  feed.stop();
+});
+
+test('a limit with no automatic reset never becomes retryable; the message can be deleted', async () => {
+  const quota = {
+    scope: 'month' as const,
+    usedUsd: 20,
+    limitUsd: 20,
+    resetsAt: null,
+    nextStep: 'ask_owner' as const,
+  };
+  const api = server(() => Response.json({ error: 'budget_exceeded', quota }, { status: 402 }));
+  const feed = new ConversationFeed(new CloudClient('t', api.fetcher), 'c1');
+  expect(await feed.send('Run the report')).toBe(false);
+  const [refused] = feed.getSnapshot().outgoing;
+  expect(refused?.status).toEqual({ state: 'failed', reason: 'quota', retryable: false, quota });
+  feed.discard(refused?.id ?? '');
+  expect(feed.getSnapshot().outgoing).toEqual([]);
+});
