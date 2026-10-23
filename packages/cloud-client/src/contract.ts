@@ -44,8 +44,25 @@ export interface TaskPanel {
   tail?: string;
 }
 
+/** USD includes settled spend and reservations in flight. UTC reset timestamps are milliseconds;
+ * task limits do not reset. No self-service budget editor exists, so operator-owned caps
+ * offer ask_owner; clients must never invent a paid upgrade or top-up.
+ */
+export interface QuotaReason {
+  scope: 'task' | 'day' | 'month';
+  usedUsd: number;
+  limitUsd: number;
+  resetsAt: number | null;
+  nextStep: 'wait' | 'raise_limit' | 'ask_owner';
+}
+export interface UsageView {
+  limits: QuotaReason[];
+  refusal?: QuotaReason;
+}
+
 /** A task as the public API shows it: the runner id never leaves the server. */
 export interface TaskView {
+  quota?: QuotaReason;
   taskId: string;
   parentTaskId?: string;
   title?: string;
@@ -205,6 +222,20 @@ export interface InboxAnswerRequest {
 export interface InboxAnswerResult {
   duplicate: boolean;
   item: InboxItem;
+}
+
+/** Server-owned first-run facts, shared by web and phone. Missing steps never block chat.
+ * POST /v1/home/setup accepts {dismiss: id} (later, for 24h) or
+ * {notificationsAllowed: boolean}, a client permission report. Completion is recomputed.
+ */
+export type SetupStep = 'language' | 'project' | 'model' | 'notifications' | 'conversation';
+export interface SetupCard {
+  id: SetupStep;
+  action: 'settings' | 'projects' | 'chat';
+}
+export interface Readiness {
+  completed: SetupStep[];
+  cards: SetupCard[];
 }
 
 export type HomeCardKind = 'waiting' | 'suggestion' | 'finished' | 'note' | 'scheduled';

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
+import { accountReadiness, type Readiness } from './readiness.js';
 import { transaction } from './db.js';
 import { HttpError, readJson, respond, take } from './http.js';
 import { type Language, messages } from './i18n.js';
@@ -156,6 +157,46 @@ export class HomeStore {
     private readonly db: DatabaseSync,
     private readonly now: () => number = Date.now,
   ) {}
+
+  readiness(owner: string, language: boolean, project: boolean, model: boolean): Readiness {
+    const rows = this.db
+      .prepare('SELECT step, until_at AS untilAt FROM home_setup WHERE owner = ?')
+      .all(owner) as unknown as { step: string; untilAt: number }[];
+    const permission = this.db
+      .prepare('SELECT notifications_allowed AS allowed FROM home_permissions WHERE owner = ?')
+      .get(owner) as { allowed: number } | undefined;
+    const message = this.db
+      .prepare(
+        `SELECT 1 FROM messages m JOIN conversations c ON c.conversation_id = m.conversation_id WHERE c.owner = ? AND m.role = 'user' LIMIT 1`,
+      )
+      .get(owner);
+    return accountReadiness(
+      {
+        language,
+        project,
+        model,
+        notifications: permission?.allowed === 1,
+        conversation: !!message,
+      },
+      new Map(rows.map((row) => [row.step, row.untilAt])),
+      this.now(),
+    );
+  }
+
+  setup(owner: string, report: { dismiss?: string; notificationsAllowed?: boolean }): void {
+    if (report.dismiss !== undefined)
+      this.db
+        .prepare(
+          `INSERT INTO home_setup VALUES (?, ?, ?) ON CONFLICT (owner, step) DO UPDATE SET until_at = excluded.until_at`,
+        )
+        .run(owner, report.dismiss, this.now() + DAY_MS);
+    if (report.notificationsAllowed !== undefined)
+      this.db
+        .prepare(
+          `INSERT INTO home_permissions VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET notifications_allowed = excluded.notifications_allowed`,
+        )
+        .run(owner, Number(report.notificationsAllowed));
+  }
 
   visitedAt(owner: string): number | undefined {
     const row = this.db
@@ -343,7 +384,12 @@ const orderBody = z.object({ cardId: cardIdSchema, after: cardIdSchema.nullable(
 export class HomeRoutes {
   constructor(
     private readonly store: HomeStore,
-    private readonly sources: { inbox?: Pick<InboxService, 'list'>; duties?: HomeDuties },
+    private readonly sources: {
+      inbox?: Pick<InboxService, 'list'>;
+      duties?: HomeDuties;
+      languageChosen?: (owner: string) => boolean;
+      modelAvailable?: () => boolean;
+    },
     private readonly limiter: RateLimiter,
     private readonly owners: InboxOwners,
     private readonly now: () => number = Date.now,
@@ -362,7 +408,26 @@ export class HomeRoutes {
       case '/v1/home': {
         allow(method, 'GET');
         const { cards } = await this.build(owner);
-        respond(res, 200, { cards });
+        respond(res, 200, { cards, readiness: this.readiness(owner) });
+        return true;
+      }
+      case '/v1/home/setup': {
+        allow(method, 'POST');
+        take(this.limiter, invite);
+        const body = z
+          .union([
+            z
+              .object({
+                dismiss: z.enum(['language', 'project', 'model', 'notifications', 'conversation']),
+              })
+              .strict(),
+            z.object({ notificationsAllowed: z.boolean() }).strict(),
+          ])
+          .safeParse(await readJson(req, false));
+        if (!body.success) throw new HttpError(400, 'invalid_request');
+        this.checkActive(invite);
+        this.store.setup(owner, body.data);
+        respond(res, 200, { readiness: this.readiness(owner) });
         return true;
       }
       case '/v1/home/seen': {
@@ -412,6 +477,15 @@ export class HomeRoutes {
       }
     }
     return false;
+  }
+
+  private readiness(owner: string): Readiness {
+    return this.store.readiness(
+      owner,
+      this.sources.languageChosen?.(owner) ?? false,
+      (this.sources.duties?.listProjects(owner).length ?? 0) > 0,
+      this.sources.modelAvailable?.() ?? false,
+    );
   }
 
   private checkActive(invite: InviteInfo): void {

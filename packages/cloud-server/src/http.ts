@@ -37,6 +37,7 @@ import type { AccountStore } from './accounts.js';
 import type { AuthRoutes } from './auth-routes.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import type { PushApi } from './push.js';
+import type { QuotaSource } from './quota.js';
 import { toPublicView } from './public-view.js';
 import { scrubSecretFields } from './secret-shapes.js';
 import type { RateLimiter } from './rate-limit.js';
@@ -171,6 +172,7 @@ export interface PublicApiDeps {
   previews: PreviewService;
   previewLimiter: RateLimiter;
   limits: HttpLimits;
+  quota?: QuotaSource;
   /** The owner turned content on: a task's timeline includes what each step did, not only its kind. */
   timelineContent?: boolean;
   /** Bounds on one timeline response; tests lower them. */
@@ -249,6 +251,7 @@ export class HttpError extends Error {
     readonly status: number,
     readonly code: string,
     readonly headers: Record<string, string> = {},
+    readonly detail: Record<string, unknown> = {},
   ) {
     super(code);
   }
@@ -407,7 +410,7 @@ export class PublicApi {
         return;
       }
       if (error instanceof HttpError) {
-        respond(res, error.status, { error: error.code }, error.headers);
+        respond(res, error.status, { error: error.code, ...error.detail }, error.headers);
         return;
       }
       if (error instanceof MemoryError) {
@@ -489,6 +492,10 @@ export class PublicApi {
     const method = req.method ?? 'GET';
     if (this.deps.auth && path.startsWith('/v1/auth/')) {
       if (await this.deps.auth.handleSigned(req, res, url, invite)) return;
+    }
+    if (path === '/v1/usage' && method === 'GET') {
+      if (!this.deps.quota) throw new HttpError(404, 'not_found');
+      return respond(res, 200, this.deps.quota.usage(invite.inviteId));
     }
     if (path === '/v1/settings') {
       // The person's own settings. Today that is the language the server speaks to them in.
@@ -668,6 +675,15 @@ export class PublicApi {
     }
     this.reauthenticate(invite);
     this.ownSession(invite, conversationId);
+    const duplicate =
+      body.data.clientMessageId !== undefined &&
+      this.deps.db
+        .prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND client_message_id = ?')
+        .get(conversationId, body.data.clientMessageId);
+    if (!duplicate) {
+      const refusal = this.deps.quota?.usage(invite.inviteId).refusal;
+      if (refusal) throw new HttpError(429, 'budget_exceeded', {}, { quota: refusal });
+    }
     const result = this.deps.conversations.post(
       conversationId,
       body.data.text,
@@ -725,7 +741,9 @@ export class PublicApi {
     const page = this.deps.tasks.tasksOfRoot(sessionId, after, limit);
     const tasks = page.flatMap(({ taskId }) => {
       const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-      return record ? [toPublicView(toView(record))] : [];
+      if (!record) return [];
+      const quota = this.deps.quota?.refusal?.(record.taskId);
+      return [{ ...toPublicView(toView(record)), ...(quota ? { quota } : {}) }];
     });
     const last = page.at(-1);
     respond(res, 200, {
@@ -960,7 +978,8 @@ export class PublicApi {
           : action === 'pause'
             ? await orchestrator.pauseAs(access, taskId)
             : await orchestrator.resumeAs(access, taskId);
-      respond(res, 200, { task: toPublicView(view) });
+      const quota = this.deps.quota?.refusal?.(view.taskId);
+      respond(res, 200, { task: { ...toPublicView(view), ...(quota ? { quota } : {}) } });
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
     }

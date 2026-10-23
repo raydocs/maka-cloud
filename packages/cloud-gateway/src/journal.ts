@@ -98,6 +98,9 @@ function openJournal(path: string): DatabaseSync {
         task_id TEXT NOT NULL,
         usd REAL NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS cap_hits (
+        task_id TEXT PRIMARY KEY, owner TEXT NOT NULL, cap TEXT NOT NULL, at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS spent (
         epoch TEXT NOT NULL,
         task_id TEXT NOT NULL,
@@ -890,6 +893,55 @@ export class SqliteSpendJournal implements SpendJournal {
    * Everything the accounts spent on the UTC day of `at`, in USD: what settled plus what is still
    * held at its reserved amount. This is the number the server's daily cap counts.
    */
+  recordCap(taskId: string, owner: string, cap: CapHit, at = Date.now()): void {
+    const usage = this.accountUsage(cap.inviteId ?? '', at);
+    const run = this.db
+      .prepare('SELECT since_ms, since_seq FROM run_budget WHERE account = ?')
+      .get(cap.inviteId ?? '') as { since_ms: number; since_seq: number | null } | undefined;
+    const runUsd = run
+      ? (
+          this.db
+            .prepare(
+              'SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE account = ? AND (booked_at >= ? OR rowid > ?)',
+            )
+            .get(cap.inviteId ?? '', run.since_ms, run.since_seq) as { usd: number }
+        ).usd
+      : 0;
+    const usedUsd =
+      cap.scope === 'server_daily'
+        ? this.serverDaySpendUsd(at)
+        : cap.scope === 'invite_monthly'
+          ? usage.monthUsd
+          : cap.scope === 'invite_run'
+            ? runUsd
+            : usage.dayUsd;
+    this.db
+      .prepare(
+        'INSERT INTO cap_hits VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET cap = excluded.cap, at = excluded.at',
+      )
+      .run(taskId, owner, JSON.stringify({ ...cap, usedUsd }), at);
+  }
+
+  capHit(taskId: string): { cap: CapHit & { usedUsd: number }; at: number } | undefined {
+    const row = this.db.prepare('SELECT cap, at FROM cap_hits WHERE task_id = ?').get(taskId) as
+      | { cap: string; at: number }
+      | undefined;
+    return row && { cap: JSON.parse(row.cap) as CapHit & { usedUsd: number }, at: row.at };
+  }
+
+  accountUsage(inviteId: string, at: number = Date.now()): { dayUsd: number; monthUsd: number } {
+    const iso = new Date(at).toISOString();
+    const sum = (column: 'day' | 'month', period: string) =>
+      (
+        this.db
+          .prepare(
+            `SELECT COALESCE(SUM(usd), 0) AS usd FROM account_spend WHERE account = ? AND ${column} = ?`,
+          )
+          .get(inviteId, period) as { usd: number }
+      ).usd;
+    return { dayUsd: sum('day', iso.slice(0, 10)), monthUsd: sum('month', iso.slice(0, 7)) };
+  }
+
   serverDaySpendUsd(at: number = Date.now()): number {
     const day = new Date(at).toISOString().slice(0, 10);
     return (

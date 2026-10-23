@@ -59,6 +59,7 @@ import {
   startGateway,
 } from './gateway.js';
 import { type Cloud, startCloud } from './host.js';
+import { quotaSource } from './quota.js';
 import { capReporter } from './cap-report.js';
 import { SUMMARY_DAILY_CAP_USD } from './inbox/models.js';
 import { type InboxSetup, startInbox } from './inbox/setup.js';
@@ -211,6 +212,17 @@ export async function startStack(
   try {
     const inviteStore = new InviteStore(config.invitesPath);
     invites = inviteStore;
+    const reportCap = capReporter({
+      raise: (input) => {
+        if (raiseCapHit === undefined) throw new Error('The inbox is not running');
+        raiseCapHit(input);
+      },
+      notice: async (conversationId, text) => {
+        if (conductor === undefined) throw new Error('The conductor is not running');
+        await conductor.postNotice({ conversationId, text });
+      },
+      warn,
+    });
     gateway = await startGateway(
       config.gateway,
       env,
@@ -219,17 +231,11 @@ export async function startStack(
       journal,
       accountLedgerOf(journal, inviteStore, config.spend, pause),
       // A cap that ends spending is told to the conversation and raised as a budget item.
-      capReporter({
-        raise: (input) => {
-          if (raiseCapHit === undefined) throw new Error('The inbox is not running');
-          raiseCapHit(input);
-        },
-        notice: async (conversationId, text) => {
-          if (conductor === undefined) throw new Error('The conductor is not running');
-          await conductor.postNotice({ conversationId, text });
-        },
-        warn,
-      }),
+      (event) => {
+        if (event.taskId)
+          journal.recordCap(event.taskId, event.cap.inviteId ?? 'server', event.cap);
+        reportCap(event);
+      },
     );
   } catch (error) {
     invites?.close();
@@ -403,6 +409,8 @@ export async function startStack(
     };
     const signInOn = auth.apple || auth.google || auth.mailer;
     cloud = await startCloud({
+      modelAvailable: () => Boolean(env.ANTHROPIC_API_KEY?.trim() || env.OPENAI_API_KEY?.trim()),
+      quota: quotaSource(journal, invites!, config.spend),
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),

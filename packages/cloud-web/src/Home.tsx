@@ -1,3 +1,4 @@
+import { SetupCards } from './SetupCards';
 import { useT } from './i18n';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ArrowUp } from 'lucide-react';
@@ -112,6 +113,7 @@ export function Home({
   active = true,
   conversations,
   onStarted,
+  onSetup,
   onOpen,
   onOpenTask,
   now = Date.now,
@@ -122,6 +124,7 @@ export function Home({
   active?: boolean;
   conversations: Conversation[];
   onStarted: (conversation: Conversation) => void;
+  onSetup?: (action: 'settings' | 'projects' | 'chat') => void;
   onOpen: (conversationId: string) => void;
   /** Opens a finished task's own page; without it a finished line opens its conversation. */
   onOpenTask?: (task: TaskView) => void;
@@ -291,6 +294,13 @@ export function Home({
         )}
       </div>
       <div className="home-main">
+        {!startOnly && onSetup && (
+          <SetupCards
+            client={client}
+            onAction={onSetup}
+            version={active ? conversations.length + 1 : -1}
+          />
+        )}
         {!hideStart && onboarding && conversations.length === 0 && (
           <Onboarding
             onPick={(sentence) => {

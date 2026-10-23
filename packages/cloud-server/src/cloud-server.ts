@@ -32,6 +32,7 @@ import {
   PublicApi,
   type TimelineLimits,
 } from './http.js';
+import type { QuotaSource } from './quota.js';
 import { HomeRoutes, HomeStore } from './home.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { AccountStore } from './accounts.js';
@@ -264,6 +265,9 @@ export interface CloudServerOptions {
    * like any unknown path. The caller owns it and closes it after the server.
    */
   duties?: DutyService;
+  /** Whether the operator has configured API-key model access. */
+  modelAvailable?: () => boolean;
+  quota?: QuotaSource;
   /**
    * Signing in with Apple, Google or an emailed code (T31). `apple` and `google` list the client
    * ids the owner registered; a provider with none is off, and with no `mailer` there is no email
@@ -673,6 +677,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         : undefined;
     const homeStore = new HomeStore(db);
     const api = new PublicApi({
+      ...(options.quota ? { quota: options.quota } : {}),
       db,
       memory,
       invites,
@@ -709,7 +714,12 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         : {}),
       home: new HomeRoutes(
         homeStore,
-        { ...(inbox ? { inbox } : {}), ...(options.duties ? { duties: options.duties } : {}) },
+        {
+          ...(inbox ? { inbox } : {}),
+          ...(options.duties ? { duties: options.duties } : {}),
+          languageChosen: (owner) => ownInviteStore.languageChosen(owner),
+          ...(options.modelAvailable ? { modelAvailable: options.modelAvailable } : {}),
+        },
         new RateLimiter(limits.controlPerMinute),
         {
           active: callerActive,

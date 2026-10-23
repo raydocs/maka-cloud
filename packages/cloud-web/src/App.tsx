@@ -34,6 +34,7 @@ import {
   Unsupported,
 } from '@maka-cloud/client';
 import { GrantsPanel } from './Grants';
+import { QuotaNotice, Usage } from './Quota';
 import { Home } from './Home';
 import { InboxPanel } from './Inbox';
 import { Computer } from './Computer';
@@ -200,7 +201,8 @@ function TaskBranch({
               </span>
             )}
         </div>
-        {task.budgetExceeded && (
+        {task.quota && <QuotaNotice quota={task.quota} />}
+        {task.budgetExceeded && !task.quota && (
           <p className="failure">{t('The budget was reached, so the work was stopped.')}</p>
         )}
         {stopping && (
@@ -623,6 +625,9 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
             void act(async () => {
               try {
                 await enablePush(client, languageChoice);
+                await client.setup({ notificationsAllowed: true }).catch((error) => {
+                  if (!(error instanceof Unsupported)) throw error;
+                });
                 setOn(true);
                 setHint('');
               } catch (e) {
@@ -648,6 +653,9 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
             onClick={() =>
               void act(async () => {
                 await disablePush(client);
+                await client.setup({ notificationsAllowed: false }).catch((error) => {
+                  if (!(error instanceof Unsupported)) throw error;
+                });
                 setOn(false);
                 setHint('');
               })
@@ -735,6 +743,7 @@ export function Settings({
   return (
     <div className="page">
       <h1>{t('Me')}</h1>
+      <Usage client={client} />
       <AppearanceChoice />
       <LanguageChoice />
       <section className="card section-card">
@@ -1024,6 +1033,12 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         // Kept while a task page is open, so coming back is not a new visit.
         <div className="content-pane" hidden={taskPage !== undefined}>
           <Home
+            onSetup={(action) => {
+              if (action === 'chat') {
+                setView('chat');
+                document.getElementById('first-message')?.focus();
+              } else setView(action);
+            }}
             active={view === 'home'}
             hideStart={wide}
             client={session.client}

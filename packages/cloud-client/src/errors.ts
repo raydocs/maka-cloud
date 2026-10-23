@@ -1,3 +1,4 @@
+import { quotaReason, quotaText } from './quota';
 import { ApiError, Unsupported } from './client';
 
 const ERROR_TEXT: Record<string, string> = {
@@ -31,6 +32,10 @@ export function errorText(error: unknown): string {
   if (error instanceof Unsupported)
     return 'This action is unavailable on this server. No change was made.';
   if (error instanceof ApiError) {
+    if (error.code === 'budget_exceeded' && typeof error.body === 'object' && error.body !== null) {
+      const quota = quotaReason((error.body as { quota?: unknown }).quota);
+      if (quota) return quotaText(quota, 'en');
+    }
     if (error.status === 401) return 'Your sign-in is no longer valid. Please sign in again.';
     const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
     if (known) return known;
