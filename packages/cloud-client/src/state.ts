@@ -2,7 +2,14 @@ import { type FeedEvent, type InboxItem, type Question, TERMINAL, type TaskView 
 
 export interface ConversationState {
   /** `at` is when the server says it was posted, so a view can place a task's work between messages. */
-  messages: { id: string; role: 'user' | 'assistant' | 'notice'; text: string; at?: number }[];
+  messages: {
+    id: string;
+    role: 'user' | 'assistant' | 'notice';
+    text: string;
+    at?: number;
+    /** On the person's own message, when the server names it: the id it was sent under. */
+    clientMessageId?: string;
+  }[];
   tasks: Record<string, TaskView>;
   questions: Record<string, Question>;
   answers: Record<string, string>;
@@ -64,6 +71,9 @@ export function applyEvent(state: ConversationState, frame: FeedEvent): Conversa
           role: frame.data.role === 'assistant' ? 'assistant' : 'user',
           text: frame.data.text,
           ...(typeof frame.data.at === 'number' ? { at: frame.data.at } : {}),
+          ...(frame.data.role !== 'assistant' && typeof frame.data.clientMessageId === 'string'
+            ? { clientMessageId: frame.data.clientMessageId }
+            : {}),
         },
       ];
       break;

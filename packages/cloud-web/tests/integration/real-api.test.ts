@@ -4,6 +4,7 @@ import {
   ApiError,
   applyEvent,
   CloudClient,
+  connectionText,
   type ConversationState,
   emptyState,
   type FeedEvent,
@@ -60,7 +61,7 @@ function watch(client: CloudClient, conversationId: string) {
       watcher.frames.push(event);
       watcher.state = applyEvent(watcher.state, event);
     },
-    (status) => watcher.statuses.push(status),
+    (status) => watcher.statuses.push(connectionText(status)),
     abort.signal,
   );
   return {
@@ -338,7 +339,7 @@ test('another invite sees nothing of a conversation: every route and the stream 
   await other.subscribe(
     mine.conversationId,
     () => {},
-    (s) => statuses.push(s),
+    (s) => statuses.push(connectionText(s)),
     AbortSignal.timeout(2000),
   );
   expect(statuses).toEqual(['This conversation is not available.']);

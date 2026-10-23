@@ -191,6 +191,7 @@ export const EN = {
   'chat.saidStatus': '{who}: {text} ({status})',
   'chat.resend': 'Send again',
   'chat.discard': 'Delete',
+  'chat.retryNow': 'Retry now',
   'work.label': 'The work on this message',
   'work.underMinute': 'Worked for under a minute',
   'work.minutes': 'Worked for {count} min',
@@ -568,6 +569,7 @@ export const ZH: Record<Key, string> = {
   'chat.saidStatus': '{who}：{text}（{status}）',
   'chat.resend': '重新发送',
   'chat.discard': '删除',
+  'chat.retryNow': '立即重试',
   'work.label': '这条消息带来的工作',
   'work.underMinute': '用时不到 1 分钟',
   'work.minutes': '用时 {count} 分钟',
@@ -806,6 +808,21 @@ export const PHRASES_ZH: Record<string, string> = {
   Disconnected: '已断开',
   'Invite expired. Reconnect with a valid invite.': '邀请已过期，请用有效的邀请重新连接。',
   'This conversation is not available.': '这个对话不可用。',
+  'Offline. Check your connection.': '已离线，请检查网络连接。',
+  'You are signed out. Sign in again to continue.': '你已退出登录，请重新登录后继续。',
+  'The server sent something this app cannot read.': '服务器返回了这个应用无法读取的内容。',
+
+  // Why a message was not sent.
+  'Check your connection and send it again.': '请检查网络连接后重新发送。',
+  'The server did not answer. Send it again.': '服务器没有响应，请重新发送。',
+  'The server refused this message.': '服务器拒绝了这条消息。',
+  'A different message was already sent under this id.': '这个编号下已经发送过另一条消息。',
+  'Sign in again to send it.': '请重新登录后再发送。',
+  'A spending limit was reached.': '已达到用量上限。',
+  'Kept unsent for 30 days, so no longer saved on this device. Send it again or copy the words.':
+    '这条消息已有 30 天未发送，不再保存在这台设备上。请重新发送，或复制其中的文字。',
+  'The app closed before the server confirmed it. It may have arrived.':
+    '服务器确认之前应用已关闭，消息可能已经送达。',
   'The event stream went silent.': '连接中断了。',
 
   // Errors the server's answers turn into.

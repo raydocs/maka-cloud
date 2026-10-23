@@ -69,11 +69,11 @@ test('a stalled subscription reconnects from the last event, and says Live only 
       received.push(event.id);
       if (event.id === 93) abort.abort();
     },
-    (value) => statuses.push(value),
+    (value) => statuses.push(value.state),
     abort.signal,
   );
   expect(received).toEqual([71, 93]);
   expect(lastIds).toEqual([null, null, '71']);
   // A connection that never brought a byte was never called Live.
-  expect(statuses).toEqual(['Reconnecting…', 'Live', 'Reconnecting…', 'Live']);
+  expect(statuses).toEqual(['reconnecting', 'live', 'reconnecting', 'live']);
 });

@@ -1,18 +1,20 @@
 import {
   BRAND,
+  type ConnectionState,
   type Conversation,
   ConversationFeed,
   type ConversationState,
   ConversationStarter,
+  connectionAction,
   conversationSummary,
   displayText,
   type ErrorText,
   errorText,
+  type OutgoingMessage,
+  sendFailureText,
+  storageOutbox,
   TERMINAL,
   type TaskControl,
-  type PendingSend,
-  type PendingSends,
-  reusable,
   taskLabel,
   type TaskView,
 } from '@maka-cloud/client';
@@ -59,6 +61,7 @@ import { useReduceMotion } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
 import { type Idea, startersFor, useProjects } from '@/lib/ideas';
 import { keepLive } from '@/lib/live';
+import { readSecure, removeSecure, writeSecure } from '@/lib/secure';
 import { useWorkspace } from '@/lib/session';
 import {
   STEER_MAX_CHARS,
@@ -264,17 +267,6 @@ function Bubble({
   );
 }
 
-/** A message the person sent that the conversation has not shown yet. */
-interface Outgoing {
-  text: string;
-  state: 'sending' | 'sent' | 'failed';
-  /**
-   * The person's messages the conversation already showed when this one was sent: only a message
-   * beyond these can be it. Unknown for a send kept from an earlier visit.
-   */
-  seen?: ReadonlySet<string>;
-}
-
 /**
  * The person's message from the moment they send it, before the conversation shows it: in its
  * place at once, "Sending…" under it, dimmed only if that takes more than two seconds (a fast send
@@ -287,38 +279,40 @@ function OutgoingBubble({
   onDiscard,
   busy,
 }: {
-  outgoing: Outgoing;
+  outgoing: OutgoingMessage;
   onResend: () => void;
   onDiscard: () => void;
   busy: boolean;
 }) {
-  const { t: say } = useT();
+  const { t: say, tx } = useT();
+  const { status } = outgoing;
+  const sending = status.state === 'queued' || status.state === 'sending';
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     setSlow(false);
-    if (outgoing.state !== 'sending') return;
+    if (!sending) return;
     const timer = setTimeout(() => setSlow(true), 2000);
     return () => clearTimeout(timer);
-  }, [outgoing.state]);
+  }, [sending]);
   return (
-    <View testID="outgoing" style={{ opacity: outgoing.state === 'sending' && slow ? 0.6 : 1 }}>
+    <View testID="outgoing" style={{ opacity: sending && slow ? 0.6 : 1 }}>
       <Bubble
         message={{ id: 'outgoing', role: 'user', text: outgoing.text }}
         status={
-          outgoing.state === 'sending'
+          sending
             ? say('chat.sending')
-            : outgoing.state === 'failed'
+            : status.state === 'failed'
               ? say('chat.notSent')
               : undefined
         }
       >
-        {outgoing.state === 'sending' && (
+        {sending && (
           <T kind="small" testID="outgoing-sending">
             {say('chat.sending')}
           </T>
         )}
       </Bubble>
-      {outgoing.state === 'failed' && (
+      {status.state === 'failed' && (
         <View
           testID="outgoing-failed"
           style={{
@@ -334,12 +328,14 @@ function OutgoingBubble({
             <StatusMark tone="attention" />
             <T kind="small">{say('chat.notSent')}</T>
           </View>
-          <QuietButton
-            label={say('chat.resend')}
-            id="Send again"
-            disabled={busy}
-            onPress={onResend}
-          />
+          {status.retryable && (
+            <QuietButton
+              label={say('chat.resend')}
+              id="Send again"
+              disabled={busy}
+              onPress={onResend}
+            />
+          )}
           <QuietButton
             label={say('chat.discard')}
             id="Delete"
@@ -347,6 +343,12 @@ function OutgoingBubble({
             onPress={onDiscard}
           />
         </View>
+      )}
+      {status.state === 'failed' && (
+        <T kind="small" style={{ alignSelf: 'flex-end', textAlign: 'right', marginBottom: 6 }}>
+          {/* A limit says which one, when it resets and what to do, in the phone's language. */}
+          {tx(status.quota ? { quota: status.quota } : sendFailureText(status.reason))}
+        </T>
       )}
     </View>
   );
@@ -520,18 +522,24 @@ function SteerChip({ task, on, onToggle }: { task: TaskView; on: boolean; onTogg
  */
 function StatusLines({
   status,
+  connection: link,
   task,
   stopping,
+  onRetry,
 }: {
+  /** The connection in words (`connectionText`). */
   status: string;
+  connection: ConnectionState;
   task: TaskView | undefined;
   stopping: boolean;
+  /** "Retry now", while the stream waits to try again. */
+  onRetry: () => void;
 }) {
   const { t: say, tx } = useT();
-  const live = status === 'Live';
+  const live = link.state === 'live';
   if (live && !stopping) return null;
-  const dropped = status === 'Reconnecting…' || status === 'Disconnected';
-  const connection = status === 'Disconnected' ? say('status.offline') : tx(status);
+  const dropped = link.state === 'reconnecting' || link.state === 'offline';
+  const connection = link.state === 'offline' ? say('status.offline') : tx(status);
   const line = (label: Key, value: string) => say('status.line', { label: say(label), value });
   return (
     <View testID="status-lines" style={{ gap: 2, alignItems: 'center' }}>
@@ -548,7 +556,7 @@ function StatusLines({
           style={{ alignItems: 'center', gap: 2 }}
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            {status !== 'Connecting…' && <StatusMark tone="idle" />}
+            {link.state !== 'connecting' && <StatusMark tone="idle" />}
             <T kind="small">{line('status.connection', connection)}</T>
           </View>
           {dropped && (
@@ -557,6 +565,9 @@ function StatusLines({
             </T>
           )}
         </View>
+      )}
+      {!live && connectionAction(link) === 'retry' && (
+        <QuietButton label={say('chat.retryNow')} id="Retry now" onPress={onRetry} />
       )}
       {!live && task && (
         <T kind="small" testID="status-task">
@@ -605,36 +616,14 @@ function WaitingChip({ count, onPress }: { count: number; onPress: () => void })
 }
 
 /**
- * Each conversation's send that the server has not acknowledged, kept by the feed from before it
- * posts until the server answers (`PendingSends`), for as long as the app runs. Coming back to a
- * conversation shows it again with "Send again" and "Delete", and "Send again" reuses its id, so
- * the server runs it once even if it had taken it. A send that finishes after the person left
- * clears itself.
+ * The person's messages the server has not confirmed, kept in the secure store from before each
+ * post until the server answers, so leaving the conversation, or the app being killed, does not
+ * lose them. Coming back shows them as not sent, with "Send again" (the same id, so the server runs
+ * a message once) and "Delete"; nothing is resent on its own. Kept per server and account
+ * (`outboxScope`), so signing in elsewhere never shows them; signing out keeps them under that
+ * account until they are sent, deleted, or a day old.
  */
-const keptSends = new Map<string, { send: PendingSend; seen?: ReadonlySet<string> }>();
-/** The person's messages a conversation showed when its next send started (`Outgoing.seen`). */
-const seenAtSend = new Map<string, ReadonlySet<string>>();
-
-/**
- * One feed's view of the kept sends. A feed clears only the send it wrote itself, so a request of
- * an earlier visit that ends late cannot clear a newer send of the same conversation.
- */
-function sendsOfFeed(): PendingSends {
-  let mine: string | undefined;
-  return {
-    read: (key) => keptSends.get(key)?.send,
-    write: (key, send) => {
-      mine = send.id;
-      const kept = keptSends.get(key);
-      // The same send again keeps the boundary it started with.
-      const seen = kept?.send.id === send.id ? kept.seen : seenAtSend.get(key);
-      keptSends.set(key, seen ? { send, seen } : { send });
-    },
-    clear: (key) => {
-      if (mine !== undefined && keptSends.get(key)?.send.id === mine) keptSends.delete(key);
-    },
-  };
-}
+const secureStore = { get: readSecure, set: writeSecure, remove: removeSecure };
 
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
@@ -646,22 +635,21 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
   const feed = useMemo(
-    () => new ConversationFeed(client, conversationId, undefined, sendsOfFeed()),
+    () =>
+      new ConversationFeed(
+        client,
+        conversationId,
+        undefined,
+        storageOutbox(secureStore, client.outboxScope()),
+      ),
     [client, conversationId],
   );
   // The stream runs only while this tab is in front and the app is in the foreground.
   useFocusEffect(useCallback(() => keepLive(feed, AppState), [feed]));
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
-  const { state, status, error, busy, noPause } = snapshot;
+  const { state, status, connection, outgoing, error, busy, noPause } = snapshot;
   const { tasks, questions, openQuestions } = conversationSummary(snapshot);
   const [draft, setDraft] = useState('');
-  const [outgoing, setOutgoing] = useState<Outgoing | undefined>(() => {
-    const kept = keptSends.get(conversationId);
-    if (!kept || !reusable(kept.send, kept.send.text, Date.now())) return undefined;
-    return kept.seen
-      ? { text: kept.send.text, state: 'failed', seen: kept.seen }
-      : { text: kept.send.text, state: 'failed' };
-  });
   const [detail, setDetail] = useState<TaskView | undefined>();
   /** The task pills opened to show their row (the step, the cost and the controls). */
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -738,24 +726,10 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       scroll.current?.scrollToEnd({ animated: !reduce });
     }
   }, [needsYou, reduce]);
-  // Once the conversation shows the message that was on its way, it is in the list itself. That
-  // holds for one whose send looked failed too: the server may have taken it before the answer
-  // was lost.
-  const sentByPerson = state.messages.filter((message) => message.role === 'user');
-  // (The server names a message by an id of its own, not the send's, so it is known by its words.)
-  const arrivedOutgoing =
-    outgoing !== undefined &&
-    sentByPerson.some(
-      (message) => !outgoing.seen?.has(message.id) && message.text.trim() === outgoing.text,
-    );
-  useEffect(() => {
-    if (!arrivedOutgoing) return;
-    // It is done with: the next message is a new one, with an id of its own.
-    feed.draftEdited();
-    keptSends.delete(conversationId);
-    setOutgoing(undefined);
-  }, [arrivedOutgoing, feed, conversationId]);
-  const pending = arrivedOutgoing ? undefined : outgoing;
+  // The feed keeps a message here until the conversation shows it (one that looked failed too: the
+  // server may have taken it before the answer was lost). One is settled (sent again or deleted)
+  // before the next, so there is at most one, unless more were kept from before.
+  const pending = outgoing.at(-1);
 
   // Talking to a running task. The chip is on whenever a task here is still going, unless the
   // person turned it off for that task.
@@ -882,17 +856,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       ...questions.map((question) => question.questionId),
       ...waiting.map((item) => item.itemId),
     ],
-    status === 'Live' || state.messages.length > 0,
+    connection.state === 'live' || state.messages.length > 0,
   );
-  const post = (text: string) => {
-    void feed
-      .send(text)
-      .then((sent) =>
-        setOutgoing((now) =>
-          now && now.text === text ? { ...now, state: sent ? 'sent' : 'failed' } : now,
-        ),
-      );
-  };
   // The words move into the list at once: the person sees them taken before the server answers.
   const send = () => {
     const text = draft.trim();
@@ -908,23 +873,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       sendToTask(target, text);
       return;
     }
-    const seen = new Set(sentByPerson.map((message) => message.id));
-    // Kept with the send, so a later visit still tells it from older messages with the same words.
-    seenAtSend.set(conversationId, seen);
-    setOutgoing({ text, state: 'sending', seen });
     setDraft('');
-    post(text);
-  };
-  const resend = () => {
-    if (!pending || busy) return;
-    setOutgoing({ ...pending, state: 'sending' });
-    post(pending.text);
-  };
-  const discard = () => {
-    // The next message is a new one: the failed one's id is not used again.
-    feed.draftEdited();
-    keptSends.delete(conversationId);
-    setOutgoing(undefined);
+    void feed.send(text);
   };
   const togglePill = (taskId: string) =>
     setOpened((now) => {
@@ -1056,10 +1006,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               <Opening
                 ideas={startersFor(projects, conversations, conversationId, say)}
                 busy={busy === 'message'}
-                onIdea={(words) => {
-                  setDraft(words);
-                  feed.draftEdited();
-                }}
+                onIdea={setDraft}
               />
             )
           }
@@ -1070,18 +1017,20 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               style={{ gap: 14 }}
               onLayout={(event) => measure({ footer: event.nativeEvent.layout.height })}
             >
-              {pending && (
-                <View>
+              {outgoing.map((message) => (
+                <View key={message.id}>
                   <OutgoingBubble
-                    outgoing={pending}
+                    outgoing={message}
                     busy={Boolean(busy)}
-                    onResend={resend}
-                    onDiscard={discard}
+                    onResend={() => void feed.retry(message.id)}
+                    onDiscard={() => feed.discard(message.id)}
                   />
                   {/* Taken: the agent is on it before the conversation shows the message. */}
-                  {pending.state === 'sent' && <WorkBlock tasks={[]} working />}
+                  {message === pending && message.status.state === 'sent' && (
+                    <WorkBlock tasks={[]} working />
+                  )}
                 </View>
-              )}
+              ))}
               {questions.map((question) => {
                 const answered = state.answers[question.questionId];
                 const block = (
@@ -1143,7 +1092,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         <Dock height={dock} onHeight={setDock}>
           {/* Nothing to say while connected; a dropped connection, and the task as last seen, are
               each their own line. */}
-          <StatusLines status={status} task={target} stopping={stopping} />
+          <StatusLines
+            status={status}
+            connection={connection}
+            task={target}
+            stopping={stopping}
+            onRetry={() => feed.retryNow()}
+          />
           {steerLine && (
             <SteerState
               steer={steerLine.steer}
@@ -1178,12 +1133,9 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           )}
           <Composer
             draft={draft}
-            onDraft={(text) => {
-              setDraft(text);
-              // While a send is unsettled its id is kept for "Send again", whatever is typed
-              // meanwhile: the new words cannot be sent until it is sent again or deleted.
-              if (!pending) feed.draftEdited();
-            }}
+            // While a send is unsettled, words typed meanwhile wait: they cannot be sent until it
+            // is sent again or deleted.
+            onDraft={setDraft}
             sending={busy === 'message' || lastSteer?.request === 'send'}
             // A message on its way, or one that failed, is settled first (sent again or deleted),
             // so a new one never takes its id.

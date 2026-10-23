@@ -22,6 +22,7 @@ import {
   CloudClient,
   type Conversation,
   ConversationFeed,
+  connectionAction,
   conversationSummary,
   displayText,
   dollars,
@@ -40,6 +41,7 @@ import {
   totalCost,
   openWorkspace,
   questionCardModel,
+  sendFailureText,
   visibleInbox,
   Unsupported,
 } from '@maka-cloud/client';
@@ -51,7 +53,7 @@ import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
 import { MemoryPanel } from './Memory';
 import { ModePicker } from './ModePicker';
-import { pendingSends } from './pending';
+import { outboxFor } from './pending';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
@@ -413,7 +415,13 @@ export function ConversationView({
 }) {
   const { t, shared } = useT();
   const feed = useMemo(
-    () => new ConversationFeed(client, conversation.conversationId, undefined, pendingSends),
+    () =>
+      new ConversationFeed(
+        client,
+        conversation.conversationId,
+        undefined,
+        outboxFor(client, conversation.conversationId),
+      ),
     [client, conversation.conversationId],
   );
   useEffect(() => {
@@ -421,7 +429,7 @@ export function ConversationView({
     return () => feed.stop();
   }, [feed]);
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
-  const { state, status, error, busy, artifacts, noPause } = snapshot;
+  const { state, status, connection, outgoing, error, busy, artifacts, noPause } = snapshot;
   const [draft, updateDraft] = useState(
     () => conversationDrafts.get(conversation.conversationId) ?? '',
   );
@@ -488,7 +496,7 @@ export function ConversationView({
           {picker}
         </div>
         <div className="messages" role="log" aria-label={t('Messages')}>
-          {state.messages.length === 0 && (
+          {state.messages.length === 0 && outgoing.length === 0 && (
             <div className="empty">
               <h2>{t('What would you like to get done?')}</h2>
               <p>
@@ -508,6 +516,50 @@ export function ConversationView({
                     : BRAND.name}
               </span>
               <p>{displayText(message.text)}</p>
+            </article>
+          ))}
+          {/* Sent, not shown by the conversation yet: where each stands, under its words. */}
+          {outgoing.map((message) => (
+            <article key={message.id} className="message user outgoing">
+              <span className="sr-only">{t('You')}</span>
+              <p>{displayText(message.text)}</p>
+              <span className="message-status" role="status">
+                {message.status.state === 'failed' ? (
+                  <>
+                    <span className="status-mark attention" />
+                    {t('Not sent')}{' '}
+                    {/* A limit says which one, when it resets and what to do, in this language. */}
+                    <span className="message-reason">
+                      {shared(
+                        message.status.quota
+                          ? { quota: message.status.quota }
+                          : sendFailureText(message.status.reason),
+                      )}
+                    </span>
+                    {message.status.retryable && (
+                      <button
+                        type="button"
+                        className="quiet-action"
+                        disabled={Boolean(busy)}
+                        onClick={() => void feed.retry(message.id)}
+                      >
+                        {t('Send again')}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="quiet-action"
+                      onClick={() => feed.discard(message.id)}
+                    >
+                      {t('Delete')}
+                    </button>
+                  </>
+                ) : message.status.state === 'sent' ? (
+                  t('Sent')
+                ) : (
+                  t('Sending…')
+                )}
+              </span>
             </article>
           ))}
         </div>
@@ -604,8 +656,13 @@ export function ConversationView({
             <>
               <span className="status-mark attention" />
               {shared(status)}{' '}
-              {['Reconnecting…', 'Disconnected', 'Offline'].includes(status) &&
+              {(connection.state === 'reconnecting' || connection.state === 'offline') &&
                 t('Work keeps going on the server. Nothing needs resending.')}
+              {connectionAction(connection) === 'retry' && (
+                <button type="button" className="quiet-action" onClick={() => feed.retryNow()}>
+                  {t('Retry now')}
+                </button>
+              )}
             </>
           )}
         </span>
@@ -623,7 +680,11 @@ export function ConversationView({
             className="composer-fields"
             onSubmit={(e) => {
               e.preventDefault();
-              void feed.send(draft, workMode).then((sent) => sent && setDraft(''));
+              // The words move into the conversation at once; a failed send stays there to send
+              // again.
+              if (busy || !draft.trim()) return;
+              void feed.send(draft, workMode);
+              setDraft('');
             }}
           >
             <label htmlFor="message" className="sr-only">
@@ -637,7 +698,6 @@ export function ConversationView({
                 value={draft}
                 onChange={(e) => {
                   setDraft(displayText(e.target.value));
-                  feed.draftEdited();
                 }}
                 placeholder={t('What would you like to do next?')}
                 onKeyDown={submitOnEnter}
