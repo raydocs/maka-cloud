@@ -371,3 +371,24 @@ test('a request of an earlier visit that ends late does not clear a newer send',
   expect(posts[2]).toBe(posts[1]);
   expect(posts[1]).not.toBe(posts[0]);
 });
+
+test('a send the server did not confirm is kept on the device and says why; a refused one is not offered again', async () => {
+  const secure = (globalThis as unknown as { __secure: Map<string, string> }).__secure;
+  let answer = () => new Response('{}', { status: 503 });
+  await openChat(finished(), async () => answer());
+  await screen.findByText('Fixed.');
+  const field = () => screen.getByTestId('field-Keep the conversation going');
+  await fireEvent.changeText(field(), 'Also update the docs');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  expect(screen.getByText('The server did not answer. Send it again.')).toBeTruthy();
+  // In the secure store, so a killed app still has it.
+  expect(secure.get('maka.outbox.c1')).toContain('Also update the docs');
+  await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
+  answer = () => Response.json({ error: 'text_too_long' }, { status: 400 });
+  await fireEvent.changeText(field(), 'Thanks');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByText('The server refused this message.')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Send again' })).toBeNull();
+  expect(secure.has('maka.outbox.c1')).toBe(false);
+});

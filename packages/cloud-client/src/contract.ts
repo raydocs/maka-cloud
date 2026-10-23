@@ -121,7 +121,14 @@ export interface Question {
 /** The payloads of `GET /v1/events`. The server adds `conversationId` to every one. */
 export type Events = {
   'conversation.created': { title: string | null; at: number };
-  'message.posted': { messageId: string; role: 'user' | 'assistant'; text: string; at: number };
+  'message.posted': {
+    messageId: string;
+    role: 'user' | 'assistant';
+    text: string;
+    at: number;
+    /** On the person's own message: the id their client sent it under (older servers omit it). */
+    clientMessageId?: string;
+  };
   'task.event': {
     seq: number;
     at: number;

@@ -189,6 +189,7 @@ export const ZH_HANT: Record<Key, string> = {
   'chat.saidStatus': '{who}：{text}（{status}）',
   'chat.resend': '重新傳送',
   'chat.discard': '刪除',
+  'chat.retryNow': '立即重試',
   'work.label': '這則訊息帶來的工作',
   'work.underMinute': '用時不到 1 分鐘',
   'work.minutes': '用時 {count} 分鐘',
@@ -332,6 +333,17 @@ export const PHRASES_HANT: Record<string, string> = {
   Disconnected: '已中斷連線',
   'Invite expired. Reconnect with a valid invite.': '邀請已過期，請用有效的邀請重新連線。',
   'This conversation is not available.': '這個對話無法使用。',
+  'Offline. Check your connection.': '已離線，請檢查網路連線。',
+  'You are signed out. Sign in again to continue.': '你已登出，請重新登入後繼續。',
+  'The server sent something this app cannot read.': '伺服器傳回了這個應用程式無法讀取的內容。',
+
+  'Check your connection and send it again.': '請檢查網路連線後重新傳送。',
+  'The server did not answer. Send it again.': '伺服器沒有回應，請重新傳送。',
+  'The server refused this message.': '伺服器拒絕了這則訊息。',
+  'A different message was already sent under this id.': '這個編號下已經傳送過另一則訊息。',
+  'Sign in again to send it.': '請重新登入後再傳送。',
+  'The app closed before the server confirmed it. It may have arrived.':
+    '伺服器確認之前應用程式已關閉，訊息可能已經送達。',
   'The event stream went silent.': '連線中斷了。',
 
   'This task cannot be paused.': '這個任務無法暫停。',

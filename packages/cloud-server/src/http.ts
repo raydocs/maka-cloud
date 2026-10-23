@@ -676,6 +676,8 @@ export class PublicApi {
       body.data.mode === undefined ? undefined : { external: false, mode: body.data.mode },
     );
     if (!result.found) throw new HttpError(404, 'not_found');
+    // The same id with other words is not a retry: nothing is posted and the client is told.
+    if (result.conflict) throw new HttpError(409, 'client_message_id_conflict');
     respond(res, 202, { messageId: result.messageId });
     // A retry with the same client id asks again: the first delivery may have failed.
     this.deps.onMessage({
