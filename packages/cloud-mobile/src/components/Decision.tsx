@@ -90,7 +90,7 @@ export function DecisionCard({
   onAnswer: (optionId: string, text?: string) => void;
 }) {
   const [note, setNote] = useState('');
-  const { t: say, tx } = useT();
+  const { t: say, tx, choice } = useT();
   const card = inboxCardModel(item);
   // A finished task reads as a title, how far it was checked, and the outcome; any other wording is
   // shown whole, as the supervisor sent it.
@@ -138,7 +138,8 @@ export function DecisionCard({
             {card.options.map((option) => (
               <PillButton
                 key={option.id}
-                label={displayText(option.label)}
+                label={choice(option.id, displayText(option.label))}
+                id={displayText(option.label)}
                 primary={option.recommended}
                 disabled={disabled}
                 onPress={() => onAnswer(option.id, note.trim() || undefined)}
@@ -165,10 +166,11 @@ export function QuestionBlock({
 }) {
   const card = questionCardModel(question, answered);
   const [note, setNote] = useState('');
-  const { t: say, tx } = useT();
-  // The option's own label is shown as sent; only the stand-in for a missing one is the app's.
+  const { t: say, tx, choice } = useT();
+  // A server's fixed choice is in the app's words; any other label is shown as sent, and only the
+  // stand-in for a missing one is the app's.
   const answeredLabel = question.options.some((option) => option.id === answered)
-    ? card.answeredLabel
+    ? card.answeredLabel && choice(answered ?? '', card.answeredLabel)
     : card.answeredLabel && tx(card.answeredLabel);
   return (
     <View style={{ gap: 8 }}>
@@ -198,7 +200,8 @@ export function QuestionBlock({
             {card.options.map((option) => (
               <PillButton
                 key={option.id}
-                label={option.label}
+                label={choice(option.id, option.label)}
+                id={option.label}
                 primary={option.recommended}
                 disabled={disabled}
                 onPress={() => onAnswer(option.id, note.trim() || undefined)}

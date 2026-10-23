@@ -1,7 +1,7 @@
 import Constants from 'expo-constants';
 import { getLocales } from 'expo-localization';
 import { createContext, type ReactNode, useContext, useMemo } from 'react';
-import { EN, type Key, PATTERNS_ZH, PHRASES_ZH, ZH } from './strings';
+import { EN, type Key, PATTERNS_ZH, PHRASES_ZH, SERVER_CHOICES, ZH } from './strings';
 
 /** Simplified Chinese is the app's main language and its fallback; English is the one alternative. */
 export type Language = 'zh-Hans' | 'en';
@@ -50,7 +50,11 @@ export interface Translator {
   t(key: Key, params?: Params): string;
   /** Finished English from the shared client logic or the app's non-screen code, translated if known. */
   tx(text: string): string;
+  /** A decision's choice: the app's words for one of the server's fixed choices, else its label as sent. */
+  choice(id: string, label: string): string;
 }
+
+const CHOICE_KEYS = new Map(SERVER_CHOICES.map(([id, label, key]) => [`${id}\n${label}`, key]));
 
 export function translator(lang: Language): Translator {
   const table = lang === 'en' ? EN : ZH;
@@ -58,6 +62,10 @@ export function translator(lang: Language): Translator {
     lang,
     t: (key, params) => fill(table[key], params),
     tx: (text) => (lang === 'en' ? text : phraseZh(text)),
+    choice: (id, label) => {
+      const key = lang === 'en' ? undefined : CHOICE_KEYS.get(`${id}\n${label}`);
+      return key ? fill(table[key]) : label;
+    },
   };
 }
 

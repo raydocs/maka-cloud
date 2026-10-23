@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { render, screen } from '@testing-library/react-native';
 import { Text } from 'react-native';
 import { languageFor, LanguageProvider, translator, useT } from '@/lib/i18n';
-import { EN, PATTERNS_ZH, PHRASES_ZH, ZH } from '@/lib/strings';
+import { EN, PATTERNS_ZH, PHRASES_ZH, SERVER_CHOICES, ZH } from '@/lib/strings';
 
 const placeholders = (text: string) => [...text.matchAll(/\{(\w+)\}/gu)].map((m) => m[1]).sort();
 
@@ -55,4 +57,24 @@ test('the provider picks the language for everything under it', async () => {
     </LanguageProvider>,
   );
   expect(screen.getByText('zh-Hans: 对话')).toBeTruthy();
+});
+
+// The fixed choices are the server's own: each must still be offered there, word for word.
+test('every translated server choice is one the server offers, with that label', () => {
+  const read = (path: string) => readFileSync(join(__dirname, '../..', path), 'utf8');
+  const source = read('cloud-supervisor/src/rules.ts') + read('cloud-conductor/src/tools.ts');
+  const constants: Record<string, string> = {
+    approve_task: 'APPROVE_TASK_OPTION',
+    approve_repository: 'APPROVE_REPOSITORY_OPTION',
+  };
+  for (const [id, label] of SERVER_CHOICES) {
+    const quoted = label.includes("'") ? `"${label}"` : `'${label}'`;
+    expect([id, label, source.includes(`label: ${quoted}`)]).toEqual([id, label, true]);
+    expect([id, source.includes(constants[id] ?? `id: '${id}'`)]).toEqual([id, true]);
+  }
+  const zh = translator('zh-Hans');
+  expect(zh.choice('ok', 'Got it')).toBe('知道了');
+  expect(zh.choice('ok', 'Sure')).toBe('Sure');
+  expect(zh.choice('maybe', 'Got it')).toBe('Got it');
+  expect(translator('en').choice('reject', "Don't do it")).toBe("Don't do it");
 });

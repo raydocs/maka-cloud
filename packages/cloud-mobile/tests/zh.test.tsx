@@ -1,5 +1,5 @@
 import type { CloudClient, DeliveryModel, InboxItem, TaskView } from '@maka-cloud/client';
-import { act, render, screen } from '@testing-library/react-native';
+import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
 import { Text } from 'react-native';
 import Chat from '@/app/(tabs)/chat';
@@ -161,4 +161,40 @@ test('a task and its result card in Chinese', async () => {
   expect(screen.getByText('Finished.')).toBeTruthy();
   expect(screen.getByRole('button', { name: '打开拉取请求 · github.com' })).toBeTruthy();
   expect(screen.getByTestId('button-Open pull request · github.com')).toBeTruthy();
+});
+
+test('a decision card’s fixed server choices are in Chinese; any other choice stays as sent', async () => {
+  const answers: string[] = [];
+  const item: InboxItem = {
+    itemId: 'i2',
+    kind: 'finished',
+    conversationId: 'c1',
+    taskId: 't1',
+    ask: 'Weekly report is ready.',
+    options: [
+      { id: 'ok', label: 'Got it', recommended: true },
+      { id: 'later', label: 'Not now', recommended: false },
+      { id: 'later2', label: 'Later, after lunch', recommended: false },
+    ],
+    allowText: false,
+    evidence: [],
+    state: 'open',
+    closeReason: null,
+    preconditionHash: 'h',
+    version: 1,
+    interrupts: false,
+    delivery: 'none',
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  await render(
+    zh(<DecisionCard item={item} disabled={false} onAnswer={(id) => answers.push(id)} />),
+  );
+  expect(screen.getByRole('button', { name: '知道了' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '以后再说' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Later, after lunch' })).toBeTruthy();
+  expect(screen.queryByText('Got it')).toBeNull();
+  // The device tests still find the button by the server's label.
+  await fireEvent.press(screen.getByTestId('button-Got it'));
+  expect(answers).toEqual(['ok']);
 });

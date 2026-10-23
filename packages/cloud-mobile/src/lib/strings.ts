@@ -186,6 +186,28 @@ export const EN = {
   'signin.email': 'Email',
   'signin.emailMe': 'Email me a code',
   'signin.noWays': 'This server has no sign-in set up yet. Use your invite token.',
+
+  'choice.check': 'Ask the agent to check on it',
+  'choice.cancel': 'Cancel it',
+  'choice.wait': 'Keep waiting',
+  'choice.retry': 'Ask the agent to try a different approach',
+  'choice.stop': 'Stop this work',
+  'choice.leave': 'Leave it',
+  'choice.redo': 'Ask the agent to redo it',
+  'choice.acceptAsIs': 'Accept it as is',
+  'choice.ok': 'Got it',
+  'choice.do': 'Do it',
+  'choice.later': 'Not now',
+  'choice.turnOff': 'Turn off',
+  'choice.keep': 'Keep',
+  'choice.fix': 'Ask the agent to fix it',
+  'choice.acceptAnyway': 'Accept it anyway',
+  'choice.again': 'Check again',
+  'choice.approve': 'Go ahead',
+  'choice.reject': 'Don’t do it',
+  'choice.approveOnce': 'Go ahead, just this once',
+  'choice.approveTask': 'Go ahead, and don’t ask again for this repository in this task',
+  'choice.approveRepository': 'Go ahead, and don’t ask again for this repository',
 } as const;
 
 export type Key = keyof typeof EN;
@@ -372,7 +394,68 @@ export const ZH: Record<Key, string> = {
   'signin.email': '邮箱',
   'signin.emailMe': '发送验证码到邮箱',
   'signin.noWays': '这个服务器还没有设置登录方式，请使用邀请令牌。',
+
+  'choice.check': '让智能体查看一下',
+  'choice.cancel': '取消',
+  'choice.wait': '继续等待',
+  'choice.retry': '让智能体换个方法再试',
+  'choice.stop': '停止这项工作',
+  'choice.leave': '先不管',
+  'choice.redo': '让智能体重做',
+  'choice.acceptAsIs': '就这样接受',
+  'choice.ok': '知道了',
+  'choice.do': '去做吧',
+  'choice.later': '以后再说',
+  'choice.turnOff': '关闭',
+  'choice.keep': '保留',
+  'choice.fix': '让智能体修复',
+  'choice.acceptAnyway': '仍然接受',
+  'choice.again': '再检查一次',
+  'choice.approve': '可以执行',
+  'choice.reject': '不要执行',
+  'choice.approveOnce': '可以，仅这一次',
+  'choice.approveTask': '可以，本任务中这个仓库不再询问',
+  'choice.approveRepository': '可以，这个仓库以后不再询问',
 };
+
+/**
+ * The fixed choices the server's own rules offer (packages/cloud-supervisor/src/rules.ts and the
+ * approval card in packages/cloud-conductor/src/tools.ts): product words, not the agent's, so the
+ * app shows them in its language. A choice matches only on both its id and its exact English
+ * label; any other choice (one the agent wrote, or a wording this list does not know) is shown as
+ * sent.
+ */
+export const SERVER_CHOICES: ReadonlyArray<readonly [id: string, label: string, key: Key]> = [
+  ['check', 'Ask the agent to check on it', 'choice.check'],
+  ['cancel', 'Cancel it', 'choice.cancel'],
+  ['wait', 'Keep waiting', 'choice.wait'],
+  ['retry', 'Ask the agent to try a different approach', 'choice.retry'],
+  ['stop', 'Stop this work', 'choice.stop'],
+  ['leave', 'Leave it', 'choice.leave'],
+  ['redo', 'Ask the agent to redo it', 'choice.redo'],
+  ['accept', 'Accept it as is', 'choice.acceptAsIs'],
+  ['ok', 'Got it', 'choice.ok'],
+  ['do', 'Do it', 'choice.do'],
+  ['later', 'Not now', 'choice.later'],
+  ['turn-off', 'Turn off', 'choice.turnOff'],
+  ['keep', 'Keep', 'choice.keep'],
+  ['fix', 'Ask the agent to fix it', 'choice.fix'],
+  ['accept', 'Accept it anyway', 'choice.acceptAnyway'],
+  ['again', 'Check again', 'choice.again'],
+  ['approve', 'Go ahead', 'choice.approve'],
+  ['reject', "Don't do it", 'choice.reject'],
+  ['approve', 'Go ahead, just this once', 'choice.approveOnce'],
+  [
+    'approve_task',
+    "Go ahead, and don't ask again for this repository in this task",
+    'choice.approveTask',
+  ],
+  [
+    'approve_repository',
+    "Go ahead, and don't ask again for this repository",
+    'choice.approveRepository',
+  ],
+];
 
 /**
  * Words that reach the screen as finished English text: from the shared client logic
