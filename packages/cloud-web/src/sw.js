@@ -1,32 +1,34 @@
 import { en, zhHans, zhHant } from './strings';
 
-/* No server-derived content or URLs enter notification surfaces. */
-
-/*
- * The only thing read from a push is its `type`, and only to pick one of these fixed texts. Anything
- * else in a payload, and a payload that is missing, is not shown; an unknown type shows the default.
- */
+// Notification copy is fixed; payload identifiers are used only in same-origin links and tags.
 const NOTIFICATIONS = {
-  'task.finished': {
-    title: 'Your background task has finished',
-    body: 'Open Maka to review the result.',
-    tag: 'maka-task-complete',
-  },
-  'spend.alert': {
-    title: 'Spending is high today',
-    body: 'Open Maka to see where it went.',
-    tag: 'maka-spend-alert',
-  },
+  'task.finished': { title: 'Your background task has finished', body: 'Open Maka to review the result.', tag: 'maka-task-complete' },
+  'task.failed': { title: 'Task failed', body: 'Open Maka to review the result.', tag: 'maka-task' },
+  'task.stopped': { title: 'Task stopped', body: 'Open Maka to review the result.', tag: 'maka-task' },
+  'task.running': { title: 'Task running', body: 'Open Maka to review the result.', tag: 'maka-task' },
+  'approval.required': { title: 'Your decision is needed', body: 'Open Maka to review the request.', tag: 'maka-approval', approval: true },
+  'spend.alert': { title: 'Spending is high today', body: 'Open Maka to see where it went.', tag: 'maka-spend-alert' },
 };
+const NEUTRAL = { title: 'Something needs a look', body: 'Open Maka to check your inbox.', tag: 'maka-inbox' };
 
-function typeOf(event) {
+function payloadOf(event) {
   try {
-    const payload = event.data ? event.data.json() : undefined;
-    const type = payload && typeof payload === 'object' ? payload.type : undefined;
-    return typeof type === 'string' && Object.hasOwn(NOTIFICATIONS, type) ? type : 'task.finished';
+    const value = event.data?.json();
+    return value && typeof value === 'object' ? value : {};
   } catch {
-    return 'task.finished';
+    return {};
   }
+}
+const identifier = (value) => typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : undefined;
+function pathOf(payload, known) {
+  if (!known) return '/?inbox=1';
+  const query = new URLSearchParams();
+  const conversation = identifier(payload.conversationId);
+  const task = identifier(payload.taskId);
+  if (conversation) query.set('conversation', conversation);
+  if (task) query.set('task', task);
+  if (payload.type === 'approval.required') query.set('decision', '1');
+  return query.size ? '/?' + query.toString() : '/';
 }
 
 const LANGUAGE_CACHE = 'maka-language';
@@ -61,21 +63,25 @@ async function language() {
   } catch {
     // Storage can be unavailable. The browser's first language is still a useful default.
   }
-  if (/^zh-(?:hant|tw|hk|mo)(?:-|$)/iu.test(self.navigator?.languages?.[0] ?? '')) {
+  if (/^zh-(?:hant|tw|hk|mo)(?:-|$)/iu.test(self.navigator?.language ?? self.navigator?.languages?.[0] ?? '')) {
     return 'zh-Hant';
   }
-  return /^en(?:-|$)/iu.test(self.navigator?.languages?.[0] ?? '') ? 'en' : 'zh-Hans';
+  return /^en(?:-|$)/iu.test(self.navigator?.language ?? self.navigator?.languages?.[0] ?? '') ? 'en' : 'zh-Hans';
 }
 
 self.addEventListener('push', (event) => {
-  const shown = NOTIFICATIONS[typeOf(event)];
+  const payload = payloadOf(event);
+  const known = typeof payload.type === 'string' && Object.hasOwn(NOTIFICATIONS, payload.type);
+  const terminal = payload.type === 'task.finished' && (payload.state === 'failed' ? 'task.failed' : ['stopped', 'cancelled'].includes(payload.state) ? 'task.stopped' : undefined);
+  const shown = known ? NOTIFICATIONS[terminal || payload.type] : NEUTRAL;
   event.waitUntil(
     (async () => {
       const table = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[await language()];
       await self.registration.showNotification(table[shown.title], {
         body: table[shown.body],
-        tag: shown.tag,
-        data: { path: '/' },
+        tag: identifier(payload.taskId) ? 'maka-task:' + encodeURIComponent(payload.taskId) : shown.tag,
+        data: { path: pathOf(payload, known) },
+        ...(shown.approval ? { actions: [{ action: 'open', title: table.Open }] } : {}),
       });
     })(),
   );
@@ -87,8 +93,14 @@ self.addEventListener('notificationclick', (event) => {
     (async () => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       const own = windows.find((client) => new URL(client.url).origin === self.location.origin);
-      if (own) return own.focus();
-      return self.clients.openWindow('/');
+      const raw = event.notification.data?.path;
+      const target = new URL(typeof raw === 'string' ? raw : '/', self.location.origin);
+      const path = target.origin === self.location.origin ? target.pathname + target.search : '/';
+      if (own) {
+        await own.navigate(path);
+        return own.focus();
+      }
+      return self.clients.openWindow(path);
     })(),
   );
 });

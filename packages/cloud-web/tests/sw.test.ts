@@ -17,6 +17,7 @@ function load(language = 'en-US', saved = new Map<string, string>()) {
   };
   const listeners = new Map<string, Listener>();
   const shown: Array<{ title: string; options: Record<string, unknown> }> = [];
+  const opened: string[] = [];
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
@@ -26,13 +27,14 @@ function load(language = 'en-US', saved = new Map<string, string>()) {
     },
     location: { origin: 'https://maka.example.test' },
     navigator: { languages: [language] },
-    clients: { matchAll: async () => [], openWindow: async () => undefined },
+    clients: { matchAll: async () => [], openWindow: async (path: string) => { opened.push(path); } },
   };
   vm.runInNewContext(readFileSync(join(__dirname, '../dist/sw.js'), 'utf8'), {
     caches,
     Response,
     self: scope,
     URL,
+    URLSearchParams,
     Object,
   });
   const push = async (data: unknown) => {
@@ -53,7 +55,15 @@ function load(language = 'en-US', saved = new Map<string, string>()) {
     });
     await Promise.all(waits);
   };
-  return { push, shown, message };
+  const click = async (path: string) => {
+    const waits: Promise<unknown>[] = [];
+    listeners.get('notificationclick')?.({
+      notification: { close() {}, data: { path } },
+      waitUntil: (work: Promise<unknown>) => waits.push(work),
+    });
+    await Promise.all(waits);
+  };
+  return { push, shown, message, click, opened };
 }
 
 function raise(error: Error): never {
@@ -81,10 +91,10 @@ test('a task message and a spend alert each show their own fixed text', async ()
   });
   await worker.push({ type: 'spend.alert' });
   expect(worker.shown.map((n) => [n.title, n.options.body, n.options.tag])).toEqual([
-    [TASK.title, TASK.body, TASK.tag],
+    [TASK.title, TASK.body, "maka-task:tsk_1"],
     [SPEND.title, SPEND.body, SPEND.tag],
   ]);
-  expect(worker.shown.every((n) => (n.options.data as { path: string }).path === '/')).toBe(true);
+  expect(worker.shown[0]?.options.data).toEqual({ path: '/?conversation=cnv_1&task=tsk_1' });
 });
 
 test('nothing a payload carries reaches the notification', async () => {
@@ -122,9 +132,9 @@ test('an unknown, malformed, missing or inherited type shows the default text, n
   expect(worker.shown).toHaveLength(10);
   for (const shown of worker.shown) {
     expect([shown.title, shown.options.body, shown.options.tag]).toEqual([
-      TASK.title,
-      TASK.body,
-      TASK.tag,
+      'Something needs a look',
+      'Open Maka to check your inbox.',
+      'maka-inbox',
     ]);
   }
 });
@@ -180,3 +190,35 @@ test.each(['zh-Hant', 'zh-TW', 'zh-HK', 'zh-MO'])(
     expect(restarted.shown[0]?.title).toBe('你的背景任務已完成');
   },
 );
+
+test('task states replace one tag; approval only offers opening the in-app decision', async () => {
+  const worker = load();
+  for (const type of ['task.running', 'approval.required', 'task.finished', 'task.failed', 'task.stopped'])
+    await worker.push({ type, taskId: 'one', conversationId: 'chat' });
+  expect(new Set(worker.shown.map((n) => n.options.tag))).toEqual(new Set(['maka-task:one']));
+  expect(worker.shown[1]?.options.actions).toEqual([{ action: 'open', title: 'Open' }]);
+  expect(worker.shown[2]?.options.actions).toBeUndefined();
+});
+test.each([['zh-TW', '有件事需要查看'], ['zh-HK', '有件事需要查看'], ['zh-MO', '有件事需要查看'], ['zh-CN', '有件事需要查看'], ['zh-SG', '有件事需要查看'], ['en-GB', 'Something needs a look'], ['fr', '有件事需要查看']])('neutral notification in %s opens inbox', async (locale, title) => {
+  const worker = load(locale);
+  await worker.push({ type: 'future.type', taskId: 'one' });
+  expect(worker.shown[0]?.title).toBe(title);
+  expect(worker.shown[0]?.options.data).toEqual({ path: '/?inbox=1' });
+});
+
+test('click opens the payload target and refuses external destinations', async () => {
+  const worker = load();
+  await worker.click('/?conversation=chat&task=one');
+  await worker.click('https://evil.example/');
+  expect(worker.opened).toEqual(['/?conversation=chat&task=one', '/']);
+});
+
+test('the server terminal envelope preserves failed and stopped outcomes', async () => {
+  const worker = load();
+  for (const state of ['failed', 'stopped', '__proto__'])
+    await worker.push({ type: 'task.finished', taskId: 'same', state });
+  expect(worker.shown.map((n) => n.title)).toEqual(['Task failed', 'Task stopped', TASK.title]);
+  expect(new Set(worker.shown.map((n) => n.options.tag)).size).toBe(1);
+  await worker.push({ type: 'approval.required', taskId: 'same', conversationId: 'chat' });
+  expect(worker.shown.at(-1)?.options.data).toEqual({ path: '/?conversation=chat&task=same&decision=1' });
+});

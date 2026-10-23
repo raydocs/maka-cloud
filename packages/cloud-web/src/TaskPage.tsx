@@ -18,6 +18,7 @@ import {
   taskLabel,
   verdictOf,
   type TaskView,
+  type TimelineStep,
   Unsupported,
 } from '@maka-cloud/client';
 import { DiffLines, SourcesStack, useSources } from './Delivery';
@@ -66,6 +67,32 @@ export function TaskPage({
   const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
   const [error, setError] = useState('');
+  const [timeline, setTimeline] = useState<TimelineStep[]>([]);
+  const [next, setNext] = useState<number>();
+  const [timelineError, setTimelineError] = useState(false);
+  const [loadingSteps, setLoadingSteps] = useState(false);
+  useEffect(() => {
+    let current = true;
+    setTimeline([]);
+    setNext(undefined);
+    setTimelineError(false);
+    client.timeline(task.taskId).then(({ timeline }) => {
+      if (!current) return;
+      setTimeline(timeline.steps);
+      setNext(timeline.stepsNext);
+    }).catch(() => { if (current) setTimelineError(true); });
+    return () => { current = false; };
+  }, [client, task.taskId, task.state, task.progress]);
+  const moreSteps = async () => {
+    setLoadingSteps(true);
+    try {
+      const page = await client.timeline(task.taskId, { after: next });
+      setTimeline((steps) => [...steps, ...page.timeline.steps]);
+      setNext(page.timeline.stepsNext);
+      setTimelineError(false);
+    } catch { setTimelineError(true); }
+    finally { setLoadingSteps(false); }
+  };
   const sources = useSources(client, task.taskId, task.state);
 
   useEffect(() => {
@@ -155,16 +182,23 @@ export function TaskPage({
           ))}
         </section>
       )}
-      {steps.length > 0 && (
-        <section aria-label={t('Steps')}>
-          <h2>{t('Steps')}</h2>
-          <ol className="plain-list">
-            {steps.map((step, i) => (
-              <li key={i}>{displayText(step)}</li>
-            ))}
-          </ol>
-        </section>
-      )}
+      {(timeline.length > 0 || steps.length > 0 || timelineError) && <section aria-label={t('Steps')}>
+        <h2>{t('Steps')}</h2>
+        {timelineError && <p role="alert">{t('Timeline could not be loaded.')}</p>}
+        <ol className="plain-list">
+          {timeline.map((step) => (
+            <li key={step.stepId} data-state={step.state}>
+              <strong>{displayText(step.kind)}</strong>{' · '}
+              {t(({ running: 'Running', done: 'Done', failed: 'Failed', interrupted: 'Interrupted' } as const)[step.state])}
+              {step.label && <p>{displayText(step.label)}</p>}
+              {step.durationMs !== undefined && <span> · {t('Duration: {ms} ms', { ms: step.durationMs })}</span>}
+              {step.state === 'interrupted' && <p>{t('May or may not have happened — check before redoing it')}</p>}
+            </li>
+          ))}
+          {timeline.length === 0 && steps.map((step, i) => <li key={i}>{displayText(step)}</li>)}
+        </ol>
+        {next !== undefined && <button type="button" disabled={loadingSteps} onClick={() => void moreSteps()}>{t('Load more steps')}</button>}
+      </section>}
       <section aria-label={t('Results')}>
         <h2>{t('Results')}</h2>
         {error && (

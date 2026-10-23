@@ -904,6 +904,38 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   useEffect(() => {
     if (initialToken) void connect(initialToken);
   }, [initialToken]);
+  useEffect(() => {
+    if (!session) return;
+    let current = true;
+    const openLink = async () => {
+      const query = new URLSearchParams(window.location.search);
+      setTaskPage(undefined);
+      if (query.has('inbox')) { setView('home'); return; }
+      const conversation = query.get('conversation');
+      const taskId = query.get('task');
+      const candidates = conversation
+        ? session.conversations.filter((c) => c.conversationId === conversation)
+        : session.conversations;
+      if (conversation && candidates.length) { setChosen(conversation); setView('chat'); }
+      if (!taskId) return;
+      try {
+        for (const candidate of candidates) {
+          const tasks = await session.client.listTasks(candidate.conversationId);
+          if (!current) return;
+          const task = tasks.find((task) => task.taskId === taskId);
+          if (task) {
+            setChosen(candidate.conversationId);
+            setView('chat');
+            if (!query.has('decision')) setTaskPage({ task, from: 'chat' });
+            return;
+          }
+        }
+      } catch (e) { if (current) setError(errorText(e)); }
+    };
+    void openLink();
+    window.addEventListener('popstate', openLink);
+    return () => { current = false; window.removeEventListener('popstate', openLink); };
+  }, [session]);
   const disconnect = () => {
     setSession(null);
     setInvite('');

@@ -1,6 +1,20 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  Open: 'Open',
+  'Something needs a look': 'Something needs a look',
+  'Open Maka to check your inbox.': 'Open Maka to check your inbox.',
+  'Task failed': 'Task failed',
+  'Task stopped': 'Task stopped',
+  'Task running': 'Task running',
+  'Your decision is needed': 'Your decision is needed',
+  'Open Maka to review the request.': 'Open Maka to review the request.',
+  'Interrupted': 'Interrupted',
+  'May or may not have happened — check before redoing it': 'May or may not have happened — check before redoing it',
+  'Duration: {ms} ms': 'Duration: {ms} ms',
+  'Timeline could not be loaded.': 'Timeline could not be loaded.',
+  'Load more steps': 'Load more steps',
+
   Me: 'Me',
   Search: 'Search',
   'Search conversations': 'Search conversations',
@@ -507,6 +521,20 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  Open: '打开',
+  'Something needs a look': '有件事需要查看',
+  'Open Maka to check your inbox.': '打开 Maka 查看收件箱。',
+  'Task failed': '任务失败',
+  'Task stopped': '任务已停止',
+  'Task running': '任务进行中',
+  'Your decision is needed': '需要你的决定',
+  'Open Maka to review the request.': '打开 Maka 查看请求。',
+  'Interrupted': '已中断',
+  'May or may not have happened — check before redoing it': '可能已执行，也可能未执行——重试前请先检查',
+  'Duration: {ms} ms': '耗时：{ms} 毫秒',
+  'Timeline could not be loaded.': '无法加载步骤记录。',
+  'Load more steps': '加载更多步骤',
+
   Me: '我的',
   Search: '搜索',
   'Search conversations': '搜索对话',
@@ -979,6 +1007,20 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  Open: '開啟',
+  'Something needs a look': '有件事需要查看',
+  'Open Maka to check your inbox.': '開啟 Maka 查看收件匣。',
+  'Task failed': '任務失敗',
+  'Task stopped': '任務已停止',
+  'Task running': '任務執行中',
+  'Your decision is needed': '需要你的決定',
+  'Open Maka to review the request.': '開啟 Maka 查看請求。',
+  'Interrupted': '已中斷',
+  'May or may not have happened — check before redoing it': '可能已執行，也可能未執行——重試前請先檢查',
+  'Duration: {ms} ms': '耗時：{ms} 毫秒',
+  'Timeline could not be loaded.': '無法載入步驟紀錄。',
+  'Load more steps': '載入更多步驟',
+
   Me: '我的',
   Search: '搜尋',
   'Search conversations': '搜尋對話',
