@@ -216,9 +216,14 @@ test('the scope is chosen above one "Go ahead" pill, which answers with it', asy
   expect(screen.getAllByText('Go ahead')).toHaveLength(1);
   expect(screen.getByRole('button', { name: "Don't do it" })).toBeTruthy();
   expect(screen.getByTestId('scope-approve').props.accessibilityState.selected).toBe(true);
+  expect(screen.queryByTestId('scope-meaning')).toBeNull();
   await fireEvent.press(screen.getByRole('radio', { name: 'This repository' }));
   expect(screen.getByTestId('scope-approve_repository').props.accessibilityState.selected).toBe(
     true,
+  );
+  // A kept approval says what it means in full.
+  expect(screen.getByTestId('scope-meaning').props.children).toBe(
+    "Go ahead, and don't ask again for this repository",
   );
   await fireEvent.press(
     screen.getByRole('button', { name: "Go ahead, and don't ask again for this repository" }),
@@ -236,7 +241,7 @@ test('without scopes on offer there is no scope control, and only the recommende
   expect(fill('Deny')).not.toBe(DARK.pillOn);
 });
 
-test('an answered approval shrinks to a one-line receipt', async () => {
+test('an answered approval shrinks to a one-line receipt that still opens what was approved', async () => {
   await render(
     wrap(
       <QuestionBlock
@@ -254,7 +259,33 @@ test('an answered approval shrinks to a one-line receipt', async () => {
     ),
   ).toBeTruthy();
   expect(screen.queryByTestId('decision-exact')).toBeNull();
-  expect(screen.queryByRole('button')).toBeNull();
+  // Only "Details" is left to press: no answer can be given twice.
+  expect(screen.getAllByRole('button').map((button) => button.props.accessibilityLabel)).toEqual([
+    'Details',
+  ]);
+  await fireEvent.press(screen.getByRole('button', { name: 'Details' }));
+  expect(screen.getByTestId('decision-exact').props.children).toBe(prCard);
+  expect(screen.getByText('{"taskId":"t1","title":"Fix the login loop"}')).toBeTruthy();
+});
+
+test('an approving answer in other words than the server’s own keeps its own pill', async () => {
+  const answers: string[] = [];
+  const odd: Question = {
+    ...scopedQuestion,
+    options: [
+      { id: 'approve', label: 'Go ahead, just this once' },
+      { id: 'approve_task', label: 'Go ahead for this task, and push to main as well' },
+      { id: 'reject', label: "Don't do it" },
+    ],
+  };
+  await render(
+    wrap(<QuestionBlock question={odd} disabled={false} onAnswer={(id) => answers.push(id)} />),
+  );
+  expect(screen.queryByTestId('scope-approve')).toBeNull();
+  await fireEvent.press(
+    screen.getByRole('button', { name: 'Go ahead for this task, and push to main as well' }),
+  );
+  expect(answers).toEqual(['approve_task']);
 });
 
 test('a card about a task shows what its checks reported as evidence badges', async () => {

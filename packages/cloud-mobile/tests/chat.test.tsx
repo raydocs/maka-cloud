@@ -30,11 +30,16 @@ const frame = (kind: string, data: Record<string, unknown>) =>
 const task = (at: number, event: Record<string, unknown>) =>
   frame('task.event', { seq: frameId + 1, at, event: { taskId: 't1', ...event } });
 
+/** Sends more frames down the latest open stream of conversation c1. */
+let push: (frames: string) => void = () => {};
+
 /** An event stream that sends `frames` and then stays open, as the server's does. */
-function stream(frames: string[]): Response {
+function stream(frames: string[], live = false): Response {
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(new TextEncoder().encode(`: open\n\n${frames.join('')}`));
+      const send = (more: string) => controller.enqueue(new TextEncoder().encode(more));
+      if (live) push = send;
+      send(`: open\n\n${frames.join('')}`);
     },
   });
   return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
@@ -66,15 +71,21 @@ const working = () => [
 
 type Post = (body: { text: string; clientMessageId: string }) => Promise<Response>;
 
+// Frame ids only grow, across tests too, so a frame pushed later is never taken as one already seen.
 async function openChat(frames: string[], post: Post = async () => Response.json({})) {
-  frameId = 0;
   fetchMock().mockImplementation(async (url: string, init: RequestInit = {}) => {
     const path = new URL(url).pathname;
     if (path === '/v1/conversations')
       return Response.json({
-        conversations: [{ conversationId: 'c1', title: 'Login', createdAt: 1 }],
+        conversations: [
+          { conversationId: 'c1', title: 'Login', createdAt: 1 },
+          { conversationId: 'c2', title: 'Docs', createdAt: 2 },
+        ],
       });
-    if (path === '/v1/events') return stream(frames);
+    if (path === '/v1/events')
+      return new URL(url).searchParams.get('conversation') === 'c1'
+        ? stream(frames, true)
+        : stream([]);
     if (path === '/v1/conversations/c1/messages' && init.method === 'POST')
       return post(JSON.parse(String(init.body)));
     if (path === '/v1/conversations/c1/tasks') return Response.json({ tasks: [] });
@@ -96,9 +107,12 @@ async function openChat(frames: string[], post: Post = async () => Response.json
   await act(async () => {
     await api?.signIn('maka.example.com', 'invite-token');
   });
-  await act(async () => {
-    if (api?.session.status === 'in') api.open('c1');
-  });
+  const open = (conversationId: string) =>
+    act(async () => {
+      if (api?.session.status === 'in') api.open(conversationId);
+    });
+  await open('c1');
+  return { open };
 }
 
 test('a message’s work shows under it: the live line, a row per step, and a pill for its task', async () => {
@@ -178,11 +192,80 @@ test('a send is taken at once; a failed one says so and is sent again as the sam
   expect(field.props.value).toBe('');
   await act(async () => answer(new Response('{}', { status: 500 })));
   expect(await screen.findByText('Not sent')).toBeTruthy();
+  // Words typed meanwhile wait: they cannot be sent, and they do not take the failed one's id.
+  await fireEvent.changeText(field, 'and the changelog');
+  expect(screen.getByTestId('button-Send message').props.accessibilityState.disabled).toBe(true);
   await fireEvent.press(screen.getByRole('button', { name: 'Send again' }));
   await act(async () => answer(Response.json({})));
   expect(posts).toHaveLength(2);
   expect(posts[1]).toBe(posts[0]);
   // Taken: the agent is on it before the conversation shows the message.
   expect(await screen.findByText('Maka is working…')).toBeTruthy();
+  expect(screen.queryByText('Not sent')).toBeNull();
+});
+
+const finished = () => [
+  ...working(),
+  task(1006, {
+    type: 'task_succeeded',
+    manifest: { summary: 'Done.', done: [], notDone: [], confidence: 'high', knownIssues: [] },
+  }),
+  frame('message.posted', { messageId: 'm2', role: 'assistant', text: 'Fixed.', at: 2000 }),
+];
+
+test('a send that looked failed but reached the server is taken off once it shows', async () => {
+  const posts: string[] = [];
+  let fail = true;
+  await openChat(finished(), async (body) => {
+    posts.push(body.clientMessageId);
+    return fail ? new Response('{}', { status: 502 }) : Response.json({});
+  });
+  await screen.findByText('Fixed.');
+  const field = screen.getByTestId('field-Keep the conversation going');
+  await fireEvent.changeText(field, 'Also update the docs');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  // The server had taken it: the stream brings it.
+  await act(async () =>
+    push(
+      frame('message.posted', {
+        messageId: 'm3',
+        role: 'user',
+        text: 'Also update the docs',
+        at: 3000,
+      }),
+    ),
+  );
+  expect(await screen.findByText('Maka is working…')).toBeTruthy();
+  expect(screen.queryByText('Not sent')).toBeNull();
+  expect(screen.getAllByText('Also update the docs')).toHaveLength(1);
+  // The next message is a new one, with an id of its own.
+  fail = false;
+  await fireEvent.changeText(field, 'Thanks');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(posts).toHaveLength(2);
+  expect(posts[1]).not.toBe(posts[0]);
+});
+
+test('a failed send is still there after leaving the conversation and coming back', async () => {
+  const { open } = await openChat(finished(), async () => new Response('{}', { status: 500 }));
+  await screen.findByText('Fixed.');
+  await fireEvent.changeText(
+    screen.getByTestId('field-Keep the conversation going'),
+    'Also update the docs',
+  );
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  await open('c2');
+  expect(await screen.findByText('Docs')).toBeTruthy();
+  expect(screen.queryByText('Not sent')).toBeNull();
+  await open('c1');
+  expect(await screen.findByText('Not sent')).toBeTruthy();
+  expect(screen.getByText('Also update the docs')).toBeTruthy();
+  // Deleting it ends it for good.
+  await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
+  await open('c2');
+  await open('c1');
+  await screen.findByText('Fixed.');
   expect(screen.queryByText('Not sent')).toBeNull();
 });

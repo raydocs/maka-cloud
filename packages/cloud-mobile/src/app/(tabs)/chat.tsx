@@ -297,6 +297,12 @@ function OutgoingBubble({
   );
 }
 
+/**
+ * A send that failed, per conversation, so leaving the conversation and coming back still offers
+ * "Send again" and "Delete". In memory only: the app closing ends it, as it ended the draft before.
+ */
+const UNSENT = new Map<string, Outgoing>();
+
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
 function ConversationScreen({ conversationId }: { conversationId: string }) {
@@ -316,7 +322,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { state, status, error, busy, noPause } = snapshot;
   const { tasks, questions, openQuestions } = conversationSummary(snapshot);
   const [draft, setDraft] = useState('');
-  const [outgoing, setOutgoing] = useState<Outgoing | undefined>();
+  const [outgoing, setOutgoing] = useState<Outgoing | undefined>(() => UNSENT.get(conversationId));
+  useEffect(() => {
+    if (outgoing?.state === 'failed') UNSENT.set(conversationId, outgoing);
+    else UNSENT.delete(conversationId);
+  }, [conversationId, outgoing]);
   const [detail, setDetail] = useState<TaskView | undefined>();
   /** The task pills opened to show their row (the step, the cost and the controls). */
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -354,15 +364,19 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       scroll.current?.scrollToEnd({ animated: true });
     }
   }, [needsYou]);
-  // Once the conversation shows the message that was on its way, it is in the list itself.
+  // Once the conversation shows the message that was on its way, it is in the list itself. That
+  // holds for one whose send looked failed too: the server may have taken it before the answer
+  // was lost.
   const sentByPerson = state.messages.filter((message) => message.role === 'user');
   const arrivedOutgoing =
     outgoing !== undefined &&
-    outgoing.state !== 'failed' &&
     sentByPerson.slice(outgoing.before).some((message) => message.text.trim() === outgoing.text);
   useEffect(() => {
-    if (arrivedOutgoing) setOutgoing(undefined);
-  }, [arrivedOutgoing]);
+    if (!arrivedOutgoing) return;
+    // It is done with: the next message is a new one, with an id of its own.
+    feed.draftEdited();
+    setOutgoing(undefined);
+  }, [arrivedOutgoing, feed]);
   const pending = arrivedOutgoing ? undefined : outgoing;
   // A question or decision waiting on the person is not work; a reply still owed is.
   const nothingWaits = openQuestions.size === 0 && waiting.length === 0;
@@ -602,7 +616,9 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             draft={draft}
             onDraft={(text) => {
               setDraft(text);
-              feed.draftEdited();
+              // While a send is unsettled its id is kept for "Send again", whatever is typed
+              // meanwhile: the new words cannot be sent until it is sent again or deleted.
+              if (!pending) feed.draftEdited();
             }}
             sending={busy === 'message'}
             // A message on its way, or one that failed, is settled first (sent again or deleted),

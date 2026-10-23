@@ -10,11 +10,11 @@ import {
   type TaskView,
 } from '@maka-cloud/client';
 import * as Haptics from 'expo-haptics';
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { Linking, Pressable, View } from 'react-native';
 import { ButtonRow, Chip, Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
 import { useT } from '@/lib/i18n';
-import type { Key } from '@/lib/strings';
+import { type Key, SERVER_CHOICES } from '@/lib/strings';
 import { mono, radius, useTheme } from '@/lib/theme';
 import { heldToolOf, panelSummary, touchesOf } from '@/lib/work';
 import { Icon } from './Icon';
@@ -33,6 +33,7 @@ const SCOPES: ReadonlyArray<readonly [id: string, key: Key]> = [
   ['approve_repository', 'decision.scope.repository'],
 ];
 const SCOPED = new Set(SCOPES.map(([id]) => id));
+const KNOWN_CHOICES = new Set(SERVER_CHOICES.map(([id, label]) => `${id}\n${label}`));
 
 const PANEL_WORDS = {
   shell: 'task.panel.shell',
@@ -256,7 +257,11 @@ function Answers({
 }) {
   const { t: say, choice } = useT();
   const scopes = options.filter((option) => SCOPED.has(option.id));
-  const scoped = scopes.some((option) => option.id !== 'approve');
+  // The scope control stands in for the server's own scoped answers only: an approving answer in
+  // any other words keeps its own pill, so nothing it says is hidden.
+  const scoped =
+    scopes.some((option) => option.id !== 'approve') &&
+    scopes.every((option) => KNOWN_CHOICES.has(`${option.id}\n${option.label}`));
   const [chosen, setChosen] = useState(
     scopes.find((option) => option.id === 'approve')?.id ?? scopes[0]?.id ?? '',
   );
@@ -274,6 +279,12 @@ function Answers({
     <>
       {scoped && (
         <ScopeChoice scopes={scopes} chosen={chosen} onChoose={setChosen} disabled={disabled} />
+      )}
+      {/* A wider scope keeps the approval: its whole meaning is said, not only "this task". */}
+      {scoped && approve && approve.id !== 'approve' && (
+        <T kind="small" testID="scope-meaning">
+          {choice(approve.id, displayText(approve.label))}
+        </T>
       )}
       <ButtonRow>
         {shown.map((option) => {
@@ -343,19 +354,29 @@ function Header({ text, open }: { text: string; open: boolean }) {
 }
 
 /** An answered card, shrunk to one line. */
-export function Receipt({ text, testID }: { text: string; testID?: string }) {
+/**
+ * An answered card, shrunk to one line. An approval keeps what was approved: "Details" opens its
+ * exact text again.
+ */
+export function Receipt({ text, details }: { text: string; details?: ReactNode }) {
+  const { t: say } = useT();
+  const [open, setOpen] = useState(false);
   return (
-    <View
-      testID={testID ?? 'decision-receipt'}
-      accessible
-      accessibilityRole="text"
-      accessibilityLabel={text}
-      style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 28 }}
-    >
-      <StatusMark tone="ok" />
-      <T kind="muted" style={{ flex: 1 }} numberOfLines={1}>
-        {text}
-      </T>
+    <View testID="decision-receipt" style={{ gap: 6 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 28 }}>
+        <StatusMark tone="ok" />
+        <T kind="muted" style={{ flex: 1 }} numberOfLines={1} accessibilityRole="text">
+          {text}
+        </T>
+        {details ? (
+          <QuietButton
+            label={say(open ? 'common.hideDetails' : 'common.details')}
+            accessibilityLabel={say('common.details')}
+            onPress={() => setOpen(!open)}
+          />
+        ) : null}
+      </View>
+      {open && details}
     </View>
   );
 }
@@ -381,12 +402,18 @@ export function DecisionCard({
   const [note, setNote] = useState('');
   const { t: say, tx } = useT();
   const card = inboxCardModel(item);
-  if (card.answering) return <Receipt text={tx(card.answering)} />;
+  const held = card.evidence.find((line) => line.kind === 'action');
+  const exact = item.kind === 'approval' && !card.cannotApproveHere;
+  if (card.answering)
+    return (
+      <Receipt
+        text={tx(card.answering)}
+        details={exact ? <Exact text={card.text} held={held} /> : undefined}
+      />
+    );
   // A finished task reads as a title, how far it was checked, and the outcome; any other wording is
   // shown whole, as the supervisor sent it.
   const finished = finishedParts(item);
-  const held = card.evidence.find((line) => line.kind === 'action');
-  const exact = item.kind === 'approval' && !card.cannotApproveHere;
   const answer = (optionId: string) => onAnswer(optionId, note.trim() || undefined);
   return (
     <View style={{ gap: 10 }} accessible={false}>
@@ -460,7 +487,18 @@ export function QuestionBlock({
     const answeredLabel = question.options.some((option) => option.id === answered)
       ? card.answeredLabel && choice(answered, card.answeredLabel)
       : card.answeredLabel && tx(card.answeredLabel);
-    return <Receipt text={say('decision.recorded', { label: answeredLabel ?? '' })} />;
+    // The exact text stays, and so does the held call it bound (the answered model drops it).
+    const asked = questionCardModel(question);
+    return (
+      <Receipt
+        text={say('decision.recorded', { label: answeredLabel ?? '' })}
+        details={
+          question.reason === 'irreversible' && !asked.cannotApproveHere ? (
+            <Exact text={asked.text} held={asked.held} />
+          ) : undefined
+        }
+      />
+    );
   }
   const exact = question.reason === 'irreversible' && !card.cannotApproveHere;
   const answer = (optionId: string) => onAnswer(optionId, note.trim() || undefined);
