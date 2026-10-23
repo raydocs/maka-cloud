@@ -60,6 +60,7 @@ import { type Idea, startersFor, useProjects } from '@/lib/ideas';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
 import {
+  STEER_MAX_CHARS,
   type Steer,
   type SteerPhase,
   steerPhase,
@@ -759,7 +760,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   // person turned it off for that task.
   const target = steerTarget(roots);
   const [steerOff, setSteerOff] = useState<string | undefined>();
-  const [refusedNote, setRefusedNote] = useState(false);
+  const [refusedNote, setRefusedNote] = useState<false | 'refused' | 'tooLong'>(false);
   const steerOn = target !== undefined && steerOff !== target.taskId;
   const phaseOf = (steer: Steer) => steerPhase(steer, state.tasks[steer.taskId]);
   const lastSteer = steering.steers.at(-1);
@@ -843,7 +844,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       // conversation.
       setDraft((now) => (now.trim() === '' ? text : now));
       setSteerOff(task.taskId);
-      setRefusedNote(true);
+      setRefusedNote('refused');
     });
   };
   /** Open decisions, as the cards below show them; a card answered since is no longer placed. */
@@ -897,6 +898,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     if (!text || busy || pending || steerHolds) return;
     setRefusedNote(false);
     if (steerOn && target) {
+      // Over the server's limit for a message to a task: the words stay in the box to shorten.
+      if (text.length > STEER_MAX_CHARS) {
+        setRefusedNote('tooLong');
+        return;
+      }
       setDraft('');
       sendToTask(target, text);
       return;
@@ -1148,7 +1154,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           )}
           {refusedNote && (
             <T kind="small" testID="steer-refused" style={{ paddingHorizontal: 8 }}>
-              {say('steer.refused')}
+              {say(refusedNote === 'tooLong' ? 'steer.tooLong' : 'steer.refused')}
             </T>
           )}
           {(target || hiddenCards.length > 0) && (

@@ -296,6 +296,23 @@ test('a task that takes no messages gives the words back, and the next send goes
   expect(calls.some((call) => call.path === '/v1/conversations/c1/messages')).toBe(true);
 });
 
+test('a message over the limit for a task stays in the box to shorten', async () => {
+  const { calls } = await openChat(running());
+  await screen.findByTestId('steer-chip');
+  const field = screen.getByTestId('field-Keep the conversation going');
+  const long = 'x'.repeat(4_001);
+  await fireEvent.changeText(field, long);
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(screen.getByTestId('steer-refused')).toBeTruthy();
+  expect(field.props.value).toBe(long);
+  expect(posts(calls)).toHaveLength(0);
+  expect(screen.queryByTestId('steer-bubble')).toBeNull();
+  // At the limit it goes to the task.
+  await fireEvent.changeText(field, 'x'.repeat(4_000));
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  expect(posts(calls)).toHaveLength(1);
+});
+
 test('a message that did not reach the server is sent again as the same message, or deleted', async () => {
   let fail = true;
   const { calls } = await openChat(running(), (call) =>

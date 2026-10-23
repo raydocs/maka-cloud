@@ -71,6 +71,9 @@ export function steerPhase(steer: Steer, task: TaskView | undefined): SteerPhase
   }
 }
 
+/** The server's limit on one message to a running task (`MAX_STEER_CHARS` in cloud-orchestrator). */
+export const STEER_MAX_CHARS = 4_000;
+
 /** Only a message the server holds and the agent has not read can be taken back. */
 export const withdrawable = (phase: SteerPhase) => phase === 'received' || phase === 'queued';
 

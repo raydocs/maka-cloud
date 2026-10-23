@@ -340,6 +340,7 @@ export const ZH_HANT: Record<Key, string> = {
   'steer.withdrawOne': '收回「{text}」',
   'steer.withdrawing': '正在收回…',
   'steer.refused': '這個任務現在無法接收訊息，你的話已放回輸入框。現在傳送會傳到對話裡。',
+  'steer.tooLong': '傳給執行中任務的訊息最多 4000 字。請縮短，或關掉上方標籤改傳到對話裡。',
   'status.task': '任務',
   'status.connection': '連線',
   'status.machine': '機器',

@@ -344,6 +344,8 @@ export const EN = {
   'steer.withdrawing': 'Taking back…',
   'steer.refused':
     'This task can’t take messages now, so your words are back in the box. Sending goes to the conversation.',
+  'steer.tooLong':
+    'A message to a running task can be up to 4,000 characters. Shorten it, or turn off the chip to send it to the conversation.',
   'status.task': 'Task',
   'status.connection': 'Connection',
   'status.machine': 'Machine',
@@ -717,6 +719,7 @@ export const ZH: Record<Key, string> = {
   'steer.withdrawOne': '撤回“{text}”',
   'steer.withdrawing': '正在撤回…',
   'steer.refused': '这个任务现在收不了消息，你的话已放回输入框。现在发送会发到对话里。',
+  'steer.tooLong': '发给运行中任务的消息最多 4000 字。请缩短，或关掉上方标签改发到对话里。',
   'status.task': '任务',
   'status.connection': '连接',
   'status.machine': '机器',
