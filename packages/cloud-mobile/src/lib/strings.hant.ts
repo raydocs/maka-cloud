@@ -51,6 +51,7 @@ export const ZH_HANT: Record<Key, string> = {
   'search.field': '搜尋對話和任務',
   'search.hint': '在這支手機已載入的對話和任務裡尋找。',
   'search.none': '沒有與「{query}」相關的內容。',
+  'search.incomplete': '有些任務無法載入，結果可能不完整。',
   'search.conversations': '對話',
   'search.tasks': '任務',
   'projects.title': '專案',

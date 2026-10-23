@@ -8,7 +8,7 @@ import Me from '@/app/me';
 import Search from '@/app/search';
 import { Composer, ConversationSheet } from '@/components/Composer';
 import { TaskRow } from '@/components/TaskRow';
-import { Screen, StatusMark, Thinking } from '@/components/ui';
+import { Screen, StatusMark, Thinking, Tile } from '@/components/ui';
 import { ReduceMotion } from '@/lib/appearance';
 import { SessionProvider, useSession } from '@/lib/session';
 import { DARK, LIGHT, type Palette, ThemeContext } from '@/lib/theme';
@@ -22,7 +22,7 @@ jest.mock('expo-router', () => ({
 const fetchMock = () => (globalThis as unknown as { __fetch: jest.Mock }).__fetch;
 const flat = (style: unknown) => Object.assign({}, ...[style].flat(Number.POSITIVE_INFINITY));
 
-type Route = (method: string, body: unknown) => Response;
+type Route = (method: string, body: unknown) => Response | Promise<Response>;
 let calls: Array<{ method: string; path: string }> = [];
 let api: ReturnType<typeof useSession> | undefined;
 
@@ -228,6 +228,85 @@ test('every screen keeps clear of the bottom edge', async () => {
   expect(screen.getByTestId('screen').props.edges).toEqual(
     expect.objectContaining({ top: 'additive', bottom: 'additive' }),
   );
+});
+
+test('while the first message is on its way, an idea cannot replace it', async () => {
+  let land: (response: Response) => void = () => {};
+  await signedIn(<Chat />, {
+    '/v1/conversations': (method) =>
+      method === 'POST'
+        ? new Promise<Response>((resolve) => {
+            land = resolve;
+          })
+        : Response.json({ conversations: [] }),
+    '/v1/conversations/c-new/messages': () => Response.json({ messageId: 'm1' }),
+  });
+  const field = await screen.findByTestId('field-Keep the conversation going');
+  await fireEvent.changeText(field, 'Write the release notes');
+  await act(async () => {
+    fireEvent.press(screen.getByTestId('button-Send message'));
+  });
+  const idea = screen.getByTestId('button-home.idea.1');
+  expect(idea.props.accessibilityState).toMatchObject({ disabled: true });
+  await fireEvent.press(idea);
+  expect(screen.getByTestId('field-Keep the conversation going').props.value).toBe(
+    'Write the release notes',
+  );
+  await act(async () => {
+    land(Response.json({ conversationId: 'c-new' }));
+  });
+  expect(calls.filter((c) => c.path === '/v1/conversations/c-new/messages')).toHaveLength(1);
+});
+
+test("a disabled tile (Home's ideas while a conversation starts) cannot be pressed", async () => {
+  const onPress = jest.fn();
+  await render(
+    <ThemeContext.Provider value={LIGHT}>
+      <Tile title="Plan a trip" disabled onPress={onPress} />
+    </ThemeContext.Provider>,
+  );
+  const tile = screen.getByRole('button', { name: 'Plan a trip' });
+  expect(tile.props.accessibilityState).toMatchObject({ disabled: true });
+  await fireEvent.press(tile);
+  expect(onPress).not.toHaveBeenCalled();
+});
+
+test('Search says when some tasks could not be read, never "nothing matches", and retries those', async () => {
+  let down = true;
+  await signedIn(<Search />, {
+    '/v1/conversations': () =>
+      Response.json({
+        conversations: [{ conversationId: 'c1', title: 'Release notes', createdAt: 1 }],
+      }),
+    '/v1/conversations/c1/tasks': () =>
+      down
+        ? Response.json({ error: 'internal' }, { status: 500 })
+        : Response.json({
+            tasks: [
+              {
+                taskId: 't1',
+                title: 'Fix the login loop',
+                state: 'succeeded',
+                createdAt: 1,
+                progress: [],
+                cancelRequested: false,
+                pauseRequested: false,
+              },
+            ],
+          }),
+  });
+  await fireEvent.changeText(await screen.findByTestId('field-Search'), 'login');
+  expect(
+    await screen.findByText('Some tasks could not be loaded, so results may be missing.'),
+  ).toBeTruthy();
+  expect(screen.queryByText('Nothing matches “login”.')).toBeNull();
+  down = false;
+  await fireEvent.press(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByText('Fix the login loop')).toBeTruthy();
+  expect(
+    screen.queryByText('Some tasks could not be loaded, so results may be missing.'),
+  ).toBeNull();
+  expect(calls.filter((c) => c.path === '/v1/conversations/c1/tasks')).toHaveLength(2);
 });
 
 test('Search filters the conversations and tasks already on the phone, and opens a hit in Chat', async () => {

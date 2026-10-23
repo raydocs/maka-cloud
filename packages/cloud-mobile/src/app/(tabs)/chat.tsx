@@ -75,7 +75,7 @@ export default function Chat() {
 }
 
 /** An opening line and three ideas: what an empty chat says before anything has been said. */
-function Opening({ onIdea }: { onIdea: (words: string) => void }) {
+function Opening({ onIdea, busy }: { onIdea: (words: string) => void; busy: boolean }) {
   const { t: say } = useT();
   return (
     <View style={{ gap: 12 }} accessibilityLabel={say('home.ideas.label')}>
@@ -88,6 +88,7 @@ function Opening({ onIdea }: { onIdea: (words: string) => void }) {
             label={say(idea)}
             id={idea}
             compact
+            disabled={busy}
             onPress={() => onIdea(say(idea))}
           />
         ))}
@@ -137,6 +138,8 @@ function NewConversation() {
         }}
       >
         <Opening
+          // While the conversation starts, the draft is what is being sent.
+          busy={sending}
           onIdea={(words) => {
             setDraft(words);
             starter.draftEdited();
@@ -274,6 +277,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           }
           ListEmptyComponent={
             <Opening
+              busy={busy === 'message'}
               onIdea={(words) => {
                 setDraft(words);
                 feed.draftEdited();

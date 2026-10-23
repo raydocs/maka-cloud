@@ -595,12 +595,14 @@ export function Tile({
   title,
   titleStyle,
   onPress,
+  disabled = false,
   accessibilityLabel,
 }: {
   over?: string;
   title: string;
   titleStyle?: StyleProp<TextStyle>;
   onPress?: () => void;
+  disabled?: boolean;
   accessibilityLabel?: string;
 }) {
   const t = useTheme();
@@ -631,8 +633,10 @@ export function Tile({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? title}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [...shape, { opacity: pressed ? 0.75 : 1 }]}
+      style={({ pressed }) => [...shape, { opacity: pressed && !disabled ? 0.75 : 1 }]}
     >
       {body}
     </Pressable>

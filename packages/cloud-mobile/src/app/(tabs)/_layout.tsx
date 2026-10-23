@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
 import { TabList, TabSlot, Tabs, TabTrigger, type TabTriggerSlotProps } from 'expo-router/ui';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Glass, GlassButton, GlassGroup, TOP_BAR } from '@/components/ui';
 import { useT } from '@/lib/i18n';
@@ -85,6 +85,7 @@ function Segment({
   ...props
 }: Omit<TabTriggerSlotProps, 'ref'> & { label: string; testID?: string }) {
   const t = useTheme();
+  const { width } = useWindowDimensions();
   return (
     <Pressable
       {...props}
@@ -95,13 +96,19 @@ function Segment({
       hitSlop={{ top: 6, bottom: 6 }}
       style={({ pressed }) => [
         styles.segment,
+        { paddingHorizontal: width < 375 ? 10 : 14 },
         isFocused && { backgroundColor: t.chip },
         { opacity: pressed ? 0.7 : 1 },
       ]}
     >
+      {/* One line that fits: on a narrow phone or with large text the words shrink a little
+          rather than being cut off by the pill. */}
       <Text
         allowFontScaling
         maxFontSizeMultiplier={1.4}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.7}
         style={[
           styles.segmentText,
           { color: isFocused ? t.ink : t.inkMuted },
@@ -123,12 +130,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 8,
   },
-  pillWrap: { flexShrink: 1 },
-  pill: { borderRadius: radius.pill, padding: 4 },
-  segments: { flexDirection: 'row', gap: 2 },
+  // Only the pill gives way on a narrow screen; the round buttons keep their size.
+  pillWrap: { flexShrink: 1, minWidth: 0 },
+  pill: { borderRadius: radius.pill, padding: 4, flexShrink: 1 },
+  segments: { flexDirection: 'row', gap: 2, flexShrink: 1 },
   segment: {
     minHeight: 36,
-    paddingHorizontal: 14,
+    flexShrink: 1,
+    minWidth: 0,
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',

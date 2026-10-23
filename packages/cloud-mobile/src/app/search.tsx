@@ -1,8 +1,8 @@
 import { displayText, type TaskView } from '@maka-cloud/client';
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
-import { Card, Field, PillButton, Screen, StatusMark, T } from '@/components/ui';
+import { Card, Field, PillButton, QuietButton, Screen, StatusMark, T } from '@/components/ui';
 import { useT } from '@/lib/i18n';
 import { useWorkspace } from '@/lib/session';
 import { TOUCH } from '@/lib/theme';
@@ -25,22 +25,45 @@ export default function Search() {
   const router = useRouter();
   const { t: say } = useT();
   const [query, setQuery] = useState('');
-  const [tasks, setTasks] = useState<Array<{ conversationId: string; task: TaskView }>>([]);
+  // Each conversation's tasks as read; a conversation whose read failed is listed, so "nothing
+  // matches" is said only when every read succeeded, and a retry reads just those again.
+  const [read, setRead] = useState<Record<string, TaskView[]>>({});
+  const [failed, setFailed] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const recent = useMemo(
+    () => conversations.slice(-TASK_CONVERSATIONS).map((c) => c.conversationId),
+    [conversations],
+  );
+  // A retry of the failed reads, for the conversations it was asked for (new ones read afresh).
+  const [attempt, setAttempt] = useState<{ of: string[]; ids: string[] } | undefined>();
   useEffect(() => {
     let current = true;
-    const recent = conversations.slice(-TASK_CONVERSATIONS);
+    const ids = attempt?.of === recent ? attempt.ids : recent;
+    setLoading(true);
     void Promise.all(
-      recent.map((c) =>
-        client.listTasks(c.conversationId).then(
-          (list) => list.map((task) => ({ conversationId: c.conversationId, task })),
-          () => [],
+      ids.map((id) =>
+        client.listTasks(id).then(
+          (list) => ({ id, list }),
+          () => ({ id, list: undefined }),
         ),
       ),
-    ).then((lists) => current && setTasks(lists.flat()));
+    ).then((results) => {
+      if (!current) return;
+      setRead((before) => {
+        const after = { ...before };
+        for (const { id, list } of results) if (list) after[id] = list;
+        return after;
+      });
+      setFailed(results.filter((r) => !r.list).map((r) => r.id));
+      setLoading(false);
+    });
     return () => {
       current = false;
     };
-  }, [client, conversations]);
+  }, [client, recent, attempt]);
+  const tasks = recent.flatMap((conversationId) =>
+    (read[conversationId] ?? []).map((task) => ({ conversationId, task })),
+  );
 
   const close = () => (router.canGoBack() ? router.back() : router.replace('/'));
   const show = (conversationId: string) => {
@@ -81,8 +104,24 @@ export default function Search() {
           <PillButton label={say('common.close')} id="Close search" compact onPress={close} />
         </View>
         {!words && <T kind="muted">{say('search.hint')}</T>}
-        {words !== '' && conversationHits.length === 0 && taskHits.length === 0 && (
-          <T kind="muted">{say('search.none', { query: query.trim() })}</T>
+        {words !== '' &&
+          !loading &&
+          failed.length === 0 &&
+          conversationHits.length === 0 &&
+          taskHits.length === 0 && (
+            <T kind="muted">{say('search.none', { query: query.trim() })}</T>
+          )}
+        {words !== '' && loading && <T kind="muted">{say('common.loading')}</T>}
+        {!loading && failed.length > 0 && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <T kind="error" style={{ flex: 1 }}>
+              {say('search.incomplete')}
+            </T>
+            <QuietButton
+              label={say('common.tryAgain')}
+              onPress={() => setAttempt({ of: recent, ids: failed })}
+            />
+          </View>
         )}
         {conversationHits.length > 0 && (
           <Card label={say('search.conversations')}>

@@ -181,6 +181,8 @@ export default function Home() {
                   <Tile
                     key={example}
                     title={say(example)}
+                    // While a conversation starts, the draft is what is being sent.
+                    disabled={starting}
                     onPress={() => {
                       setDraft(say(example));
                       starter.draftEdited();

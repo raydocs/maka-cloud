@@ -57,3 +57,18 @@ test('search sits at the top left and Me at the top right; each opens its own sc
   expect(await screen.findByText('Me screen')).toBeTruthy();
   expect(view.getPathname()).toBe('/me');
 });
+
+// Three words between two round buttons: on a narrow phone or with large text the pill's
+// sections give way and their words shrink to one line, rather than being cut off.
+test('the pill fits a narrow screen: its sections shrink and keep one line each', async () => {
+  await app();
+  await screen.findByText('Home screen');
+  for (const id of ['tab-home', 'tab-chat', 'tab-projects']) {
+    const segment = screen.getByTestId(id);
+    const style = Object.assign({}, ...[segment.props.style].flat(Number.POSITIVE_INFINITY));
+    expect([id, style.flexShrink]).toEqual([id, 1]);
+  }
+  const words = screen.getByText('Projects');
+  expect(words.props.numberOfLines).toBe(1);
+  expect(words.props.adjustsFontSizeToFit).toBe(true);
+});
