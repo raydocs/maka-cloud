@@ -241,9 +241,14 @@ export default function Home() {
                   </View>
                   <View style={{ flex: 1 }}>
                     <T kind="body" style={{ fontWeight: '600' }}>
-                      {displayText(entry.title)}
+                      {entry.task.title ? displayText(entry.task.title) : say('task.title')}
                     </T>
-                    <T kind="muted">{tx(displayText(entry.outcome))}</T>
+                    {/* A finished task's summary is its own words; any other outcome is the app's. */}
+                    <T kind="muted">
+                      {entry.state === 'succeeded' && entry.task.manifest
+                        ? displayText(entry.outcome)
+                        : tx(displayText(entry.outcome))}
+                    </T>
                   </View>
                   {entry.costUsd !== undefined && (
                     <T kind="muted" style={mono}>

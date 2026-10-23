@@ -35,8 +35,8 @@ const fill = (text: string, params?: Params) =>
 
 /** English text from the shared logic, in Chinese when it is known; otherwise exactly as sent. */
 function phraseZh(text: string): string {
-  const known = PHRASES_ZH[text];
-  if (known !== undefined) return known;
+  // Own entries only: server text such as "constructor" is not a phrase.
+  if (Object.prototype.hasOwnProperty.call(PHRASES_ZH, text)) return PHRASES_ZH[text] as string;
   for (const [pattern, render] of PATTERNS_ZH) {
     const match = pattern.exec(text);
     if (match) return render(match);

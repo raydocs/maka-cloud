@@ -54,6 +54,9 @@ function ImageResult({ name, blob }: { name: string; blob: Blob }) {
 
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;
 
+/** The review lines the shared logic words itself; the others are the runner's or the reviewer's. */
+const CHECK_WORDS = new Set(['Not independently checked.', 'Independently checked.']);
+
 /**
  * One task in full, on a dense opaque page: what it did and did not do, how sure it is, the review,
  * the steps, the changes, the reports and pictures it left, the pages it opened and what it cost.
@@ -165,7 +168,7 @@ export function TaskDetails({
                 <T kind="heading">{say('details.review')}</T>
                 {review.map((line) => (
                   <T key={line} kind="body">
-                    {tx(line)}
+                    {CHECK_WORDS.has(line) ? tx(line) : line}
                   </T>
                 ))}
               </View>

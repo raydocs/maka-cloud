@@ -279,9 +279,10 @@ export function DeliveryCard({
 }) {
   const t = useTheme();
   const { t: say, tx } = useT();
-  const { diff, outcome } = model;
-  const caption = model.caption ? tx(model.caption) : model.caption;
-  const { actions, views } = model;
+  // The outcome is the task's own words, and so is a single picture's caption; the viewport list
+  // and "The changes" are the shared logic's.
+  const { diff, outcome, actions, views } = model;
+  const caption = views || !model.shot ? tx(model.caption) : model.caption;
   // With views each screenshot loads itself; the single picture is not loaded a second time.
   const shot = views ? undefined : model.shot;
   const [proof, setProof] = useState<Blob | undefined>();
@@ -353,7 +354,7 @@ export function DeliveryCard({
           </Pressable>
         )}
       </View>
-      <T kind="heading">{tx(outcome)}</T>
+      <T kind="heading">{outcome}</T>
       {views ? (
         <View
           accessibilityLabel={caption}

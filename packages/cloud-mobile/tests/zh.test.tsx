@@ -136,7 +136,8 @@ test('a task and its result card in Chinese', async () => {
     pauseRequested: false,
   };
   const model: DeliveryModel = {
-    outcome: 'The tag is out.',
+    // A task's own summary can be a word the app also uses; it still stays as the task wrote it.
+    outcome: 'Finished.',
     caption: 'The changes',
     actions: [
       { label: 'Open pull request', url: 'https://github.com/o/r/pull/1', host: 'github.com' },
@@ -157,7 +158,7 @@ test('a task and its result card in Chinese', async () => {
   expect(screen.getByText('当前步骤')).toBeTruthy();
   expect(screen.getByRole('button', { name: '暂停任务' })).toBeTruthy();
   expect(screen.getByText('已完成')).toBeTruthy();
-  expect(screen.getByText('The tag is out.')).toBeTruthy();
+  expect(screen.getByText('Finished.')).toBeTruthy();
   expect(screen.getByRole('button', { name: '打开拉取请求 · github.com' })).toBeTruthy();
   expect(screen.getByTestId('button-Open pull request · github.com')).toBeTruthy();
 });

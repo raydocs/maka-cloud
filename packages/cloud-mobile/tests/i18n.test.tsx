@@ -39,6 +39,8 @@ test('values are filled in, and the shared logic’s English is translated only 
   // Anything else, such as what the server or the agent wrote, is shown exactly as sent.
   expect(zh.tx('Fixed the login redirect')).toBe('Fixed the login redirect');
   expect(en.tx('Reconnecting…')).toBe('Reconnecting…');
+  expect(zh.tx('constructor')).toBe('constructor');
+  expect(zh.tx('toString')).toBe('toString');
   expect(PATTERNS_ZH.length).toBeGreaterThan(0);
 });
 
