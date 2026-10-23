@@ -10,8 +10,17 @@ const START_KEY = 'start';
  * Starts a conversation from one sentence. A retry after a failed post reuses the conversation and
  * the message id (so it is one message, never two); editing the sentence makes it a new message.
  */
+/** A conversation's name: its first sentence's first line, cut at a word near 60 characters. */
+export function titleFrom(text: string): string {
+  const line = (text.trim().split('\n')[0] ?? '').replace(/\s+/gu, ' ').trim();
+  if (line.length <= 60) return line;
+  const cut = line.slice(0, 60);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > 30 ? cut.slice(0, space) : cut).replace(/[\s,.;:–-]+$/u, '')}…`;
+}
+
 export class ConversationStarter {
-  private attempt: { conversationId: string; clientMessageId: string } | null = null;
+  private attempt: { conversationId: string; clientMessageId: string; title: string } | null = null;
   /** Bumped by every edit: a lookup that finishes after an edit was for other words. */
   private revision = 0;
 
@@ -24,6 +33,7 @@ export class ConversationStarter {
 
   async start(text: string, mode?: Mode): Promise<Conversation> {
     const body = text.trim();
+    const title = titleFrom(body);
     // After a reload, the same sentence whose post was never acknowledged reuses its conversation
     // and its id: one conversation and one message, never two.
     const revision = this.revision;
@@ -38,17 +48,18 @@ export class ConversationStarter {
         )
         .catch(() => true);
       if (known) {
-        this.attempt = { conversationId: kept.conversationId, clientMessageId: kept.id };
+        this.attempt = { conversationId: kept.conversationId, clientMessageId: kept.id, title };
       } else {
         this.sends?.clear(START_KEY);
         kept = undefined;
       }
     }
     this.attempt ??= {
-      conversationId: (await this.client.createConversation()).conversationId,
+      conversationId: (await this.client.createConversation(title)).conversationId,
       clientMessageId: randomId(),
+      title,
     };
-    const { conversationId, clientMessageId } = this.attempt;
+    const { conversationId, clientMessageId, title: name } = this.attempt;
     this.sends?.write(START_KEY, {
       id: clientMessageId,
       text: body,
@@ -65,7 +76,7 @@ export class ConversationStarter {
     }
     this.attempt = null;
     this.sends?.clear(START_KEY);
-    return { conversationId, title: null, createdAt: this.now() };
+    return { conversationId, title: name, createdAt: this.now() };
   }
 
   /** Call when the sentence changes. */

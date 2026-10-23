@@ -324,6 +324,19 @@ function endOfValue(text: string, start: number, slashes: number): number {
   return i;
 }
 
+/**
+ * Where the value of each JSON field with a secret name starts in `text`, with how many backslashes
+ * the quotes of its text carry: for a reader that gets text a line at a time and must know when
+ * such a value runs on past the line (`InstallOutput` in cloud-runners).
+ */
+export function secretFieldValueStarts(text: string): Array<{ start: number; slashes: number }> {
+  const field = new RegExp(SECRET_JSON_FIELD.source, 'giu');
+  return [...text.matchAll(field)].map((match) => ({
+    start: match.index + match[0].length,
+    slashes: (match[1] ?? '').length,
+  }));
+}
+
 /** Every JSON field with a secret name loses its whole value, whatever shape the value has. */
 function scrubJsonFields(text: string): string {
   let out = '';

@@ -315,6 +315,7 @@ export async function restoreTranscript(input: {
   store: TranscriptStore;
   taskId: TaskId;
   sessionId: string;
+  agentGroup?: string;
   signal?: AbortSignal;
 }): Promise<RestoreResult> {
   const { machine, store, taskId, sessionId } = input;
@@ -328,6 +329,7 @@ export async function restoreTranscript(input: {
     dirName: taskId,
     projectKey: info.projectKey,
     sessionId,
+    ...(input.agentGroup === undefined ? {} : { agentGroup: input.agentGroup }),
     bytes: transcriptBytes(store, taskId, sessionId),
     ...(input.signal ? { signal: input.signal } : {}),
   });

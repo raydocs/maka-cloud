@@ -526,3 +526,52 @@ test('cards and counts survive a restart', async () => {
   });
   r.cleanup();
 });
+
+test('propose and refresh scrub secrets at the write boundary and validate the scrubbed length', async () => {
+  const r = await rig();
+  const secret = `ghp_${'a'.repeat(36)}`;
+  const text = `Check ${secret}`;
+  const made = r.engine.cards.propose(
+    OWNER,
+    r.projectId,
+    card({ title: text, detail: text, brief: text }),
+  );
+  assert.ok(made.ok);
+  for (const field of ['title', 'detail', 'brief'] as const) {
+    assert.equal(made.card[field], 'Check [secret]');
+    assert.equal(r.engine.cards.get(OWNER, made.card.cardId)?.[field], 'Check [secret]');
+  }
+  const fresh = r.engine.cards.refresh(
+    OWNER,
+    made.card.cardId,
+    card({
+      title: `Again ${secret}`,
+      detail: text,
+      brief: text,
+      preconditionHash: stableHash({ run: 2 }),
+    }),
+  );
+  assert.ok(fresh.ok);
+  assert.equal(fresh.card.title, 'Again [secret]');
+  assert.equal(fresh.card.detail, 'Check [secret]');
+  assert.equal(fresh.card.brief, 'Check [secret]');
+  for (const [field, limit] of [
+    ['title', 120],
+    ['detail', 400],
+    ['brief', 12000],
+  ] as const) {
+    const value = `${'x'.repeat(limit - 17)} authorization: a`;
+    assert.equal(value.length, limit);
+    const input = card({ [field]: value, subjectKey: `limit-${field}` });
+    assert.deepEqual(r.engine.cards.propose(OWNER, r.projectId, input), {
+      ok: false,
+      reason: 'invalid',
+    });
+    assert.deepEqual(r.engine.cards.refresh(OWNER, fresh.card.cardId, card({ [field]: value })), {
+      ok: false,
+      reason: 'invalid',
+    });
+  }
+  assert.equal(r.engine.cards.get(OWNER, fresh.card.cardId)?.state, 'open');
+  r.cleanup();
+});

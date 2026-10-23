@@ -160,6 +160,7 @@ export class CardScanner {
           : { ok: false, reason: 'closed' };
       }
       const verdict = this.reconcile(owner, open, all);
+      if (verdict.state === 'failed') return { ok: false, reason: verdict.reason };
       if (verdict.state === 'refreshed') {
         return { ok: true, state: 'refreshed', card: verdict.card };
       }
@@ -219,6 +220,7 @@ export class CardScanner {
     open: Card,
     all: readonly Candidate[],
   ):
+    | { state: 'failed'; reason: 'not_found' | 'closed' | 'read_failed' }
     | { state: 'kept' }
     | { state: 'refreshed'; card: Card }
     | { state: 'gone'; card: Card; retired: boolean } {
@@ -232,7 +234,9 @@ export class CardScanner {
     }
     if (now.card.preconditionHash === open.preconditionHash) return { state: 'kept' };
     const fresh = cards.refresh(owner, open.cardId, now.card);
-    return fresh.ok ? { state: 'refreshed', card: fresh.card } : { state: 'kept' };
+    return fresh.ok
+      ? { state: 'refreshed', card: fresh.card }
+      : { state: 'failed', reason: fresh.reason === 'invalid' ? 'read_failed' : fresh.reason };
   }
 
   private async run(owner: string, projectId: string, outer?: AbortSignal): Promise<ScanResult> {
@@ -269,7 +273,7 @@ export class CardScanner {
         created: [],
         refreshed: [],
         retired: [],
-        expired: cards.expire(),
+        expired: cards.expire({ owner, projectId }),
         skipped: [],
         ranked: 'fixed',
       };

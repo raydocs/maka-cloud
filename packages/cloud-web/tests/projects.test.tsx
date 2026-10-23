@@ -122,7 +122,7 @@ test('a duty that is not approved has no switch, and one turned off by failures 
 test('a server without duties says so instead of failing', async () => {
   const api = serveProjects({ projects: 404 });
   render(<Projects client={api.client} />);
-  expect(await screen.findByText(/not available on this server/u)).toBeTruthy();
+  expect(await screen.findByText(/aren’t turned on for this workspace/u)).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
@@ -226,13 +226,13 @@ test('a task page shows outcome, review, steps, the diff, the report, the pictur
   const back = vi.fn();
   render(<TaskPage client={api.client} task={finished()} onBack={back} />);
   const page = screen.getByRole('article', { name: 'Task: Fix the login loop' });
-  expect(within(page).getByText(/Cost \$1\.25 of \$5\.00/u)).toBeTruthy();
+  expect(page.textContent).toMatch(/Cost \$1\.25 of \$5\.00/u);
   const outcome = within(page).getByRole('region', { name: 'Outcome' });
   expect(within(outcome).getByText('The login page no longer loops.')).toBeTruthy();
   expect(within(outcome).getByText('Patched the redirect')).toBeTruthy();
   expect(within(outcome).getByText('Did not touch the mobile app')).toBeTruthy();
   expect(within(outcome).getByText('One flaky test')).toBeTruthy();
-  expect(within(outcome).getByText(/medium/u)).toBeTruthy();
+  expect(within(outcome).getByText('Maka is fairly confident in this result.')).toBeTruthy();
   const steps = within(page).getByRole('region', { name: 'Steps' });
   expect(
     within(steps)
@@ -251,7 +251,7 @@ test('a task page shows outcome, review, steps, the diff, the report, the pictur
   expect(within(results).getByRole('img', { name: 'after.png' })).toBeTruthy();
   const pull = within(page).getAllByRole('link', { name: /Pull request|pull\/12/u })[0];
   expect(pull?.getAttribute('href')).toBe('https://github.com/example/repo/pull/12');
-  fireEvent.click(screen.getByRole('button', { name: '← Back' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }));
   expect(back).toHaveBeenCalled();
 });
 
@@ -281,7 +281,7 @@ test('a failed task page says why and shows no outcome it never reported', async
   expect(screen.queryByRole('region', { name: 'Steps' })).toBeNull();
 });
 
-test('the second agent’s review is shown on its own, in the runner’s words, and not twice', async () => {
+test('the second agent’s review is shown once, under Review, in the runner’s words', async () => {
   const api = serveTask();
   const base = finished();
   const line =
@@ -298,19 +298,24 @@ test('the second agent’s review is shown on its own, in the runner’s words, 
       onBack={() => {}}
     />,
   );
-  const review = screen.getByRole('region', { name: 'Independent review' });
-  expect(within(review).getByText(line.slice('review: '.length))).toBeTruthy();
+  const review = await screen.findByRole('region', { name: 'Review' });
+  expect(
+    within(review).getByText(
+      'An independent agent reviewed the change; 1 finding(s) remain: P2 1 (see review.md).',
+    ),
+  ).toBeTruthy();
+  expect(screen.getAllByRole('region', { name: /review/iu })).toHaveLength(1);
   const outcome = screen.getByRole('region', { name: 'Outcome' });
   expect(within(outcome).getByText('Patched the redirect')).toBeTruthy();
   expect(within(outcome).queryByText(line)).toBeNull();
   await screen.findByText('12 passed');
 });
 
-test('a task with no review line shows no independent review section', async () => {
+test('a task with no review line and no verdict shows no review section', async () => {
   const api = serveTask();
   render(<TaskPage client={api.client} task={finished()} onBack={() => {}} />);
   await screen.findByText('12 passed');
-  expect(screen.queryByRole('region', { name: 'Independent review' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Review' })).toBeNull();
 });
 
 function serveSuggestions(kinds: Array<Record<string, unknown>> | 404) {

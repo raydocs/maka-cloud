@@ -253,3 +253,71 @@ describe('creating a box after a restart', () => {
     assert.equal(new Set(keys).size, keys.length, 'every attempt has its own key');
   });
 });
+
+describe('refused and lost boxes over time', () => {
+  it('gives the slot of a refused box back once the box is gone, and deletes nothing itself', async () => {
+    const t = setup();
+    const first = await t.pool.acquire({ tenantId: A, taskId: 't1' });
+    await first.release();
+    const machine = t.fleet.machines.get(first.machineId);
+    assert.ok(machine);
+    machine.metadata = { ...machine.metadata, [LABEL.invite]: 'inv_bbbbbbbbbbbb' };
+    const second = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.equal(t.pool.state().find((box) => box.machineId === first.machineId)?.state, 'refused');
+    // Still there: cleanup leaves it alone.
+    await t.pool.cleanup();
+    assert.ok(t.pool.state().some((box) => box.machineId === first.machineId));
+    // The operator removes it: the slot comes back and it is no longer listed.
+    machine.state = 'deleted';
+    await t.pool.cleanup();
+    assert.equal(t.fleet.callsTo('deleteMachine').length, 0);
+    assert.equal(
+      t.pool.state().some((box) => box.machineId === first.machineId),
+      false,
+    );
+    assert.deepEqual(t.pool.refusedBoxes(), []);
+    const third = await t.pool.acquire({ tenantId: A, taskId: 't3' });
+    assert.equal(t.pool.state().find((box) => box.machineId === third.machineId)?.slot, 0);
+    void second;
+  });
+
+  it('deletes a box a restore left lost while the restored task is still live', async () => {
+    const t = setup({ maxPerInvite: 2 });
+    const old = await t.pool.acquire({ tenantId: A, taskId: 't1' });
+    t.live.add('t1');
+    const machine = t.fleet.machines.get(old.machineId);
+    assert.ok(machine);
+    machine.state = 'error';
+    const lease = await t.pool.restoreFromSnapshot({
+      tenantId: A,
+      taskId: 't1',
+      snapshotId: 'sn_9',
+    });
+    await flush();
+    assert.equal(
+      labelsOf(t.fleet, old.machineId)?.[LABEL.task],
+      undefined,
+      'the lost box no longer names the task, which goes on elsewhere',
+    );
+    t.clock.now += 25 * HOUR;
+    const result = await t.pool.cleanup();
+    assert.deepEqual(result.deleted, [old.machineId]);
+    assert.equal(t.pool.state().find((box) => box.machineId === lease.machineId)?.taskId, 't1');
+  });
+
+  it('hands a recovered lost box to the next task, though the task that lost it is still live', async () => {
+    const t = setup();
+    const old = await t.pool.acquire({ tenantId: A, taskId: 't1' });
+    t.live.add('t1');
+    const machine = t.fleet.machines.get(old.machineId);
+    assert.ok(machine);
+    machine.state = 'error';
+    await t.pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' });
+    // Instabox brings the box back; the next cleanup recovers it.
+    t.clock.now += 31 * MIN;
+    assert.deepEqual((await t.pool.cleanup()).recovered, [old.machineId]);
+    const next = await t.pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.equal(next.machineId, old.machineId, 'the recovered box is used, not refused');
+    assert.deepEqual(t.pool.refusedBoxes(), []);
+  });
+});

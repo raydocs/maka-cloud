@@ -2,13 +2,19 @@ import { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { Devices } from '@/components/Devices';
 import { Card, PillButton, Screen, T } from '@/components/ui';
-import { useAppearance } from '@/lib/appearance';
+import { type ModeChoice, useAppearance } from '@/lib/appearance';
 import { useSession, useWorkspace } from '@/lib/session';
+
+const CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+];
 
 export default function Settings() {
   const { signOut } = useSession();
   const { client } = useWorkspace();
-  const { mode, setMode } = useAppearance();
+  const { mode, choice, setMode } = useAppearance();
   const [signOutError, setSignOutError] = useState('');
   return (
     <Screen>
@@ -16,18 +22,23 @@ export default function Settings() {
         <T kind="title">Settings</T>
         <Card label="Appearance">
           <T kind="heading">Appearance</T>
-          <T kind="muted">{mode === 'dark' ? 'Dark is on.' : 'Light is on.'}</T>
+          <T kind="muted">
+            {choice === 'system'
+              ? `Follows this phone: ${mode === 'dark' ? 'dark' : 'light'} now.`
+              : mode === 'dark'
+                ? 'Dark is on.'
+                : 'Light is on.'}
+          </T>
           <View style={{ flexDirection: 'row', gap: 8 }}>
-            <View style={{ flex: 1 }}>
-              <PillButton label="Dark" primary={mode === 'dark'} onPress={() => setMode('dark')} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <PillButton
-                label="Light"
-                primary={mode === 'light'}
-                onPress={() => setMode('light')}
-              />
-            </View>
+            {CHOICES.map(({ value, label }) => (
+              <View key={value} style={{ flex: 1 }}>
+                <PillButton
+                  label={label}
+                  primary={choice === value}
+                  onPress={() => setMode(value)}
+                />
+              </View>
+            ))}
           </View>
         </Card>
         <Devices client={client} />

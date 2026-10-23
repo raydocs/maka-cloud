@@ -9,7 +9,7 @@ import {
   RemoteMachine,
   type StageLimits,
 } from './machine.js';
-import { MachinePoller, type PollBackoff } from './poller.js';
+import { MachinePoller, type PollBackoff, type Watch } from './poller.js';
 import { type AgentChannel, assertAgentChannel, checkAgentIsolation } from './agent-user.js';
 import { InstallOutput } from './install-output.js';
 import type { AgentSdk } from './sdk-turn.js';
@@ -146,6 +146,14 @@ const SETUP_TIMEOUT_MS = 15 * 60_000;
 const TOOL_NAME = /^[a-z][a-z0-9-]{0,40}$/u;
 const MAX_TOOL_BYTES = 8 * 1024 * 1024;
 
+/** One install of a CLI on a machine, shared by the callers that want it. */
+interface CliInstall {
+  done: Promise<void>;
+  /** Callers that still want it. At zero it is stopped (`stop`). */
+  wanted: number;
+  stop: AbortController;
+}
+
 interface PreparedTool {
   name: string;
   content: Buffer;
@@ -169,6 +177,7 @@ export class Fleet {
   private readonly machines = new Map<string, RemoteMachine>();
   private readonly isolationChecks = new Map<string, Promise<void>>();
   private readonly setups = new Map<string, Promise<void>>();
+  private readonly cliInstalls = new Map<string, CliInstall>();
   private readonly tools: PreparedTool[];
   private recordChain: Promise<unknown> = Promise.resolve();
   private lastCaptureStamp = 0;
@@ -234,29 +243,75 @@ export class Fleet {
 
   // -- CLI install ---------------------------------------------------------------------------
 
-  /** Installs the pinned CLI once per machine. Concurrent callers share one install. */
-  ensureCli(machine: RemoteMachine, vendor: VendorAdapter): Promise<void> {
+  /**
+   * Installs the pinned CLI once per machine. Concurrent callers share one install. A caller with
+   * a `signal` stops waiting when it aborts, and once no caller waits any more (one without a
+   * signal always does) the install is stopped: its processes are killed and its lock removed. A
+   * call while that stop is under way waits for it, then installs again.
+   */
+  ensureCli(machine: RemoteMachine, vendor: VendorAdapter, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const key = `${machine.machineId}|${vendor.name}`;
-    let pending = this.setups.get(key);
-    if (!pending) {
-      pending = this.installCli(machine, vendor).finally(() => this.setups.delete(key));
-      this.setups.set(key, pending);
+    const current = this.cliInstalls.get(key);
+    if (current?.stop.signal.aborted) {
+      const again = (): Promise<void> => this.ensureCli(machine, vendor, signal);
+      return current.done.then(again, again);
     }
-    return pending;
+    return this.waitForCli(current ?? this.startCliInstall(key, machine, vendor), signal);
   }
 
   /**
    * Starts installing the CLI of runner `name` on the machine and does not wait for it, for a run
    * that will need it later. A failure is dropped here: the run that needs the CLI calls
    * `ensureCli`, which shares an install still going or tries again, and fails there as it would.
+   * When `signal` aborts (the later run will not come) this call no longer wants the install.
    */
-  prepareCli(machine: RemoteMachine, name: string): void {
+  prepareCli(machine: RemoteMachine, name: string, signal?: AbortSignal): void {
     const vendor = [claudeAdapter, codexAdapter].find((adapter) => adapter.name === name);
     if (vendor === undefined) return;
-    this.ensureCli(machine, vendor).catch(() => undefined);
+    this.ensureCli(machine, vendor, signal).catch(() => undefined);
   }
 
-  private async installCli(machine: RemoteMachine, vendor: VendorAdapter): Promise<void> {
+  private startCliInstall(key: string, machine: RemoteMachine, vendor: VendorAdapter): CliInstall {
+    const stop = new AbortController();
+    const install: CliInstall = { done: Promise.resolve(), wanted: 0, stop };
+    install.done = this.installCli(machine, vendor, stop.signal).finally(() => {
+      if (this.cliInstalls.get(key) === install) this.cliInstalls.delete(key);
+    });
+    // Each caller sees the failure on its own promise; one nobody waits for is not unhandled.
+    install.done.catch(() => undefined);
+    this.cliInstalls.set(key, install);
+    return install;
+  }
+
+  private waitForCli(install: CliInstall, signal?: AbortSignal): Promise<void> {
+    install.wanted++;
+    if (signal === undefined) return install.done;
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        install.wanted--;
+        if (install.wanted === 0) install.stop.abort(new Error('no run needs it any more'));
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      install.done.then(
+        () => {
+          signal.removeEventListener('abort', onAbort);
+          resolve();
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private async installCli(
+    machine: RemoteMachine,
+    vendor: VendorAdapter,
+    stop: AbortSignal,
+  ): Promise<void> {
     // Driven by the SDK, the CLI is the one the SDK was built for: it passes flags older ones lack.
     const sdkVersion =
       vendor.name === 'claude-agent-sdk' ? this.options.agentSdk?.cliVersion : undefined;
@@ -268,6 +323,7 @@ export class Fleet {
     const check = await machine.exec(cliCheckScript(vendor.binary, account.user), {
       taskCode: true,
       envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
+      signal: stop,
     });
     if (check.exitCode === 0) return;
 
@@ -277,23 +333,29 @@ export class Fleet {
 npm install -g --prefix "$HOME/.maka-cli" --no-audit --no-fund ${shq(`${vendor.npmPackage}@${version}`)}`;
     const dirName = `.setup-${vendor.binary}`;
     const run = `i-${version}`;
-    await machine.launchInstall({
-      dirName,
-      run,
-      install: `( set -e
-${install}
-mkdir -p "$(dirname ${shq(marker)})"
-: > ${shq(marker)}
-)`,
-      runToken: randomUUID(),
-    });
-
-    const watch = this.poller.watch(machine, { dir: dirName, run });
+    let watch: Watch | undefined;
+    const onStop = (): void => watch?.stop();
+    stop.addEventListener('abort', onStop, { once: true });
     const deadline = this.now() + (this.options.setupTimeoutMs ?? SETUP_TIMEOUT_MS);
     const output = new InstallOutput();
     let consumed = 0;
     try {
+      // The marker goes first: an install stopped half way leaves no marker a later check trusts.
+      // The launch is not cut short by `stop`: one let go of half way could start after the kill.
+      await machine.launchInstall({
+        dirName,
+        run,
+        install: `( set -e
+rm -f -- ${shq(marker)}
+${install}
+mkdir -p "$(dirname ${shq(marker)})"
+: > ${shq(marker)}
+)`,
+        runToken: randomUUID(),
+      });
+      watch = this.poller.watch(machine, { dir: dirName, run });
       for (;;) {
+        if (stop.aborted) throw stop.reason;
         if (this.now() > deadline) throw new Error('timed out');
         const update = await watch.next();
         output.push(update.data.toString('utf8'));
@@ -306,6 +368,7 @@ mkdir -p "$(dirname ${shq(marker)})"
           const again = await machine.exec(cliCheckScript(vendor.binary, account.user), {
             taskCode: true,
             envs: { MAKA_MARKER: marker, MAKA_VERSION: version },
+            signal: stop,
           });
           if (again.exitCode !== 0) {
             throw new Error(
@@ -318,13 +381,20 @@ mkdir -p "$(dirname ${shq(marker)})"
           throw new Error(`the install was killed: ${output.tail()}`);
       }
     } catch (error) {
-      // Drop the lock so the next task tries again instead of waiting on a finished failure.
-      await machine.removeDir(dirName).catch(() => undefined);
+      // Whatever the install still runs (one that timed out, or that no run needs) is killed before
+      // its lock goes, so the next try never runs beside it; the lock stays if the kill failed.
+      // Then the lock is dropped, so the next task tries again instead of waiting on a failure.
+      const killed = await machine.kill(dirName, { cancelRuns: [run] }).then(
+        () => true,
+        () => false,
+      );
+      if (killed) await machine.removeDir(dirName).catch(() => undefined);
       throw new Error(
-        `installing ${vendor.binary}@${version} in the sandbox failed (${errorMessage(error)})`,
+        `installing ${vendor.binary}@${version} in the sandbox failed (${errorMessage(stop.aborted ? stop.reason : error)})`,
       );
     } finally {
-      watch.stop();
+      stop.removeEventListener('abort', onStop);
+      watch?.stop();
     }
   }
 

@@ -1,4 +1,4 @@
-import { type AuthState, errorText } from '@maka-cloud/client';
+import { type AuthState, BRAND, errorText } from '@maka-cloud/client';
 import Constants from 'expo-constants';
 import { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
@@ -32,7 +32,7 @@ export default function SignIn() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={{ gap: 8 }}>
-            <T kind="small">maka</T>
+            <T kind="small">{BRAND.wordmark}</T>
             {deep ? null : <T kind="title">Your next big thing, one conversation away.</T>}
             {deep ? null : <T kind="muted">A place to plan, follow the work, and bring it home.</T>}
           </View>

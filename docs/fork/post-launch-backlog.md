@@ -16,18 +16,16 @@ finding came from. Keep the order within a section as the order to do them in.
 
 From the T27 review rounds. The pool is unreachable while `MAKA_CLOUD_BOXES` is unset.
 
-1. R17 #1 to #3: `acquire` can return a refused box; a refused box is not swept; sleep and restore
-   ignore another task's label.
-2. R14 #2: a task owns its box across phases; sub-runs only borrow it.
-3. R18 #6: a deleted leftover box blocks builds.
-4. A6: quota race and acquire abort; shutdown waits for in-flight creates.
-5. Scrub A1 to A4: git run as the control user (fsmonitor), the scrub list and content check,
+Items 1 to 4 and Snapshots 1 and 2 were fixed in #411, each with a test that fails on
+the main it started from; what is left is below.
+
+1. Pool 4, not done: `SandboxProvider.acquire` takes no abort signal, so a task cancelled while it
+   waits for a box still waits out `waitMs`; passing one needs a change in `packages/cloud-runners`.
+2. Pool 2, not done: a task a running task delegates is its own task and gets its own box; whether it
+   should borrow its parent's box (to read its files) is a design question. A task between runs keeps
+   its box awake only as long as instabox lets it (the sweep sleeps only free boxes).
+3. Scrub A1 to A4: git run as the control user (fsmonitor), the scrub list and content check,
    unreadable directories, setup descendants.
-
-## Snapshots
-
-1. R16 #3: parse snapshot ownership strictly.
-2. R16 #4: recheck the box state before deleting a recovered lost box.
 
 ## Plan tokens and the plan vault (T27, not wired)
 
@@ -39,14 +37,13 @@ From the T27 review rounds. The pool is unreachable while `MAKA_CLOUD_BOXES` is 
 
 In the order to do them when cards come next, or before `MAKA_CLOUD_CARDS` is turned on anywhere:
 
-1. P1: scrub card text at the `CardStore` write boundary (propose and refresh, re-check the length
-   after), and before cutting in `candidates.ts` `outside()` and in `toCard` facts.
+1. (Done: `CardStore` scrubs proposed and refreshed text with the shared secret scrubber and
+   re-checks lengths; `outside()` and `toCard` facts scrub before cutting.)
 2. P1: recovery (`maintain()`, the supervisor's retry of `decide`) must re-check project access, the
    kind switch and the full precondition before starting an accepted card that has not started; look
    up the idempotent start first; changed content needs a new tap.
-3. P1: a failed refresh in `reconcile` (`scan.ts`) must fail verification, not count as fresh. P2: the
-   hash covers the title and the head SHA. P2: `cards.expire()` is scoped to the owner and project in
-   a project scan (a tenant leak in `ScanOutcome.expired`).
+3. (Done: failed refreshes fail verification; the precondition hash covers the full title and
+   head SHA; project scans expire cards only for their owner and project.)
 4. P2: `refresh()` obeys the kind switch, keeps the chain's first-shown time and is idempotent for
    the same precondition.
 5. P1: the scheduler scans repositories whose authorisation was withdrawn and uses the host token
@@ -106,7 +103,9 @@ Still missing before it can merge:
 
 ## Install output (`cloud-runners`)
 
-1. P2: the install-output window drops a field's parent key before the scrub when a certificate
+1. (Done: the value of a secret field that runs past its line is held back as the lines come, before
+   the window, so a certificate line over 24 KB no longer lets the key after it out.) P2: the
+   install-output window drops a field's parent key before the scrub when a certificate
    line is over 24 KB, so a key can reach the output. A first user's `npm install` may print that
    line, so this is on the first-user path; the owner's coordinator may want it in a lane instead.
    Fix: stream-scrub with object and field state kept before windowing (`install-output.ts`). Test:
@@ -120,9 +119,10 @@ Still missing before it can merge:
    refuse to start.
 2. P3: the smoke should request `limit=200` per page, so an invite with a long history needs fewer
    pages. Test: the request carries `limit=200`.
-3. P3, possibly user-visible: the server's `listTasks` can drop a task from a page, so the task list
-   may miss one. Check the lane's cursor logic first. Test: a page boundary that falls inside a run
-   of tasks returns each task exactly once. Source: the #328 review.
+3. Not a bug (checked in #410): `listTasks` pages by the unique `n > after ORDER BY n` cursor, so a
+   full listing never skips or repeats a task; a test now pins that with equal creation times. A page
+   is short only for an index row without a creation log, which no code path writes (both are in one
+   transaction, and the log cannot change). Source: the #328 review.
 
 ## Kept changes and the handoff listing (from #336 and #341)
 
@@ -152,13 +152,27 @@ Still missing before it can merge:
    leader exited normally`. Make each wait on an explicit handshake instead of a time. (The
    stop-obligations tests that raced the fast retry are fixed: the retry that would confirm the
    stop now waits for the test to open a gate.)
-5. P3: `GET /v1/inbox/settings` hands every invite the operator's figures (`maxInterruptsPerHour`,
-   `verifierDailyCapUsd`, stall times, `digestAt`). The design says an owner may read them, but the
-   verifier cap is a budget figure and the first user is not the operator. Return only the owner's
-   own choices plus the operator's mutes and quiet-hour defaults. Source: #352.
+5. Fixed: inbox settings replies allow only `mutedKinds`, `quietHours` and `timeZone`: the owner's
+   own choices with the operator's mutes and quiet-hour defaults. Operator caps, stall times and
+   `digestAt` stay private on GET, settings updates and mute changes. Tests cover both invites and
+   every settings reply; web, phone and shared clients read none of the removed fields. Source: #352.
 
 ## Reviews merged without an outside review
 
 Codex hit its usage limit on 2026-10-21 and reviews failed from about 17:25 UTC. The list of pull
 requests merged since then, with the outside review each one had, is in
 `docs/fork/unreviewed-prs.md`. Recheck them once Codex is back.
+
+## LayerFS workspaces (phase 2, C6)
+
+From the owner's review of LayerFS (2026-10-21). The proposal and its gates are in
+`docs/fork/design/layerfs.md`.
+
+1. Gate 1, isolation: a LayerFS FUSE workspace on instabox, run by the unprivileged agent account,
+   breaks no invariant of `docs/fork/isolation-model.md`. Test: every invariant check passes with a
+   LayerFS mount in place.
+2. Gate 2, measured gain: mounting beats clone plus install by at least 3x to the first test run on
+   two real repositories. Test: the benchmark harness records both.
+3. Only then: a `WorkspaceStore` interface (clone stays the default), kept-change checkpoints as
+   immutable commits (closes the P2-2 class), parallel tasks on one repository, and blame lines in
+   the PR evidence block.

@@ -44,7 +44,10 @@ export interface BoxServiceOptions {
 
 export interface BoxService {
   pool: BoxPool;
-  /** Stops the loops, waits for a sweep that is running, and refuses new tasks. Boxes are left as they are. */
+  /**
+   * Stops the loops, waits for a sweep that is running and for creates under way, and refuses new
+   * tasks. Boxes are left as they are.
+   */
   close(): Promise<void>;
 }
 
@@ -96,7 +99,11 @@ export function startBoxService(options: BoxServiceOptions): BoxService {
     loops.push(state);
     schedule();
   };
-  loop('sweep', options.sweepEveryMs ?? DEFAULT_SWEEP_EVERY_MS, () => pool.sweepIdle());
+  loop('sweep', options.sweepEveryMs ?? DEFAULT_SWEEP_EVERY_MS, async () => {
+    // A task keeps its box across its runs; once it has ended the box is free for the next task.
+    await pool.reconcile();
+    return await pool.sweepIdle();
+  });
   loop('cleanup', options.cleanupEveryMs ?? DEFAULT_CLEANUP_EVERY_MS, async () => {
     // A box claimed by a task that ended while the server was down is freed first.
     await pool.reconcile();
@@ -112,7 +119,7 @@ export function startBoxService(options: BoxServiceOptions): BoxService {
         state.handle = undefined;
       }
       pool.dispose();
-      await Promise.all(loops.map((state) => state.running));
+      await Promise.all([...loops.map((state) => state.running), pool.settled()]);
     },
   };
 }

@@ -95,11 +95,27 @@ Not here: `.agents/resume` after a wake (with the setup snapshots).
   doubt puts the box back as it was and waits 30 minutes. A box already gone leaves the registry without a
   delete call.
 - Boxes the pool refused (wrong name, slot out of range, duplicates) are listed by `refusedBoxes()` and are
-  never deleted: whose they are is for the operator to say, and a label alone is not proof.
+  never deleted: whose they are is for the operator to say, and a label alone is not proof. Cleanup looks
+  at a refused box only to see whether it is gone; once it is, its slot comes back and it is no longer listed.
+- A box marked lost has its task label cleared: the task that lost it goes on elsewhere and may stay live,
+  and its name on the box would keep cleanup from deleting it and get a recovered box refused.
 - Not decided: deleting an idle box of one invite to make room for another when the account is at its
   limit. It would lose that box's files, so it is not done.
 
 ## Leases and claims
+
+A task owns its box across its runs; a run only borrows it. When a run gives its lease back while the task
+is still live, the box stays claimed by the task (no lease object holds it), so another task cannot take
+it, or its files, between the runs; the task's next run gets the same box. The claim is freed once the task
+has ended: by `reconcile()` (the service runs it before every sweep and every cleanup) or by the next ask
+for a box of that invite.
+
+An ask under way when the pool is shut down hands out nothing: it fails, and a box its create made is kept,
+free (a live task keeps its claim). The service's `close()` waits for hand-outs and builder leases under way,
+their guard, give-back write and failure delete included, so a stopping process does not leave a box it was
+making unrecorded or a builder undeleted. A builder whose guard ends after the shutdown is deleted, not handed
+out. A repeat ask of a task that fails puts back the claim of the run it replaced, unless that run has given
+its lease back since; then a live task keeps the box, as after a run's release.
 
 Every `acquire` gets its own claim token. A task that asks again (a repeat, a resume) gets a new token and
 the older call's lease stops matching, so releasing it frees nothing; only the lease whose token is the
@@ -109,7 +125,9 @@ that is still being set up.
 
 Identity is read again, not remembered: before a cached box is handed out the pool fetches it and checks
 the pool label, invite, slot, name and machine id (and that no other live task holds it); the sleep sweep and
-a restore check the same, without the task label. A box that fails is `refused`: it keeps its slot, is listed by
+a restore check the same, and a task label that names another live task (for a restore: other than the
+restoring task) is a mismatch too. An older ask of a task hands out nothing that a newer ask refused, lost or
+dropped meanwhile; it takes the task's box again. A box that fails is `refused`: it keeps its slot, is listed by
 `refusedBoxes()`, is never used, relabelled, slept or deleted by the pool, and the task takes another box.
 
 Repository scripts never run as the sandbox user. `.agents/resume` and a builder's `.agents/setup` run through

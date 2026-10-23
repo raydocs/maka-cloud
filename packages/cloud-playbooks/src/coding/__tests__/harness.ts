@@ -60,6 +60,8 @@ export type AgentScript = (turn: AgentTurn) => Promise<'ok' | { failed: string }
 export interface ExecCall {
   script: string;
   envs: Record<string, string>;
+  /** Which sandbox call made it: `exec` runs as the sandbox user, `execCheck` as the agent's account. */
+  via: 'exec' | 'execCheck' | 'execCheckStop';
 }
 
 /** Intercepts the coding runner's sandbox calls, so tests can hold one at a known point. */
@@ -288,11 +290,12 @@ class RecordingSandbox implements CodingSandbox {
     this.h.leases.acquired++;
     const { h, samples } = this;
     const record = async (
+      via: ExecCall['via'],
       script: string,
       options: ExecOptions,
       run: () => Promise<ExecResult>,
     ): Promise<ExecResult> => {
-      const call = { script, envs: options.envs ?? {} };
+      const call: ExecCall = { script, envs: options.envs ?? {}, via };
       h.calls.push(call);
       await h.hook?.(call, 'before');
       const result = (await h.replace?.(call, run)) ?? (await run());
@@ -303,13 +306,13 @@ class RecordingSandbox implements CodingSandbox {
     return {
       dir: ws.dir,
       async exec(script, options = {}) {
-        return record(script, options, () => ws.exec(script, options));
+        return record('exec', script, options, () => ws.exec(script, options));
       },
       async execCheck(script, options = {}) {
-        return record(script, options, () => ws.execCheck(script, options));
+        return record('execCheck', script, options, () => ws.execCheck(script, options));
       },
       async execCheckStop(script, options = {}) {
-        return record(script, options, () => ws.execCheckStop(script, options));
+        return record('execCheckStop', script, options, () => ws.execCheckStop(script, options));
       },
       stopAll: (s) => ws.stopAll(s),
       agentOnSameMachine: () => ws.agentOnSameMachine(),

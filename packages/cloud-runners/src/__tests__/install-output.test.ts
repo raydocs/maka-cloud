@@ -66,3 +66,54 @@ test('a token cut in two by the chunks is scrubbed, and ordinary output is left 
   assert.ok(!tail.includes('abcdefghijklmnop'), tail);
   assert.match(tail, /added 12 packages in 2s/u);
 });
+
+test('a secret field whose value runs past a line longer than the window keeps its value out', () => {
+  // The certificate line alone is more than the window, so the lines in front of it (the secret
+  // field's name among them) are gone by the time the tail is scrubbed, and the key after it is not.
+  const certificate = `MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJ${'RTESMBAGA1UEChMJQmFsdGltb3Jl'.repeat(1_100)}`;
+  const text = [
+    'npm ERR! the client settings were',
+    'npm ERR! {',
+    'npm ERR!   "credentials": {',
+    `npm ERR!     "certificate": "${certificate}",`,
+    'npm ERR!     "key": "kq7-held-back-value-0193"',
+    'npm ERR!   },',
+    'npm ERR!   "registry": "https://registry.npmjs.org/"',
+    'npm ERR! }',
+    'npm ERR! install failed',
+    '',
+  ].join('\n');
+  assert.ok(certificate.length > 24_000);
+  for (const size of [37, 4_096, text.length]) {
+    const out = new InstallOutput();
+    for (let at = 0; at < text.length; at += size) out.push(text.slice(at, at + size));
+    const tail = out.tail();
+    assert.ok(!tail.includes('kq7-held-back-value'), `${size}: ${tail.slice(-300)}`);
+    assert.match(tail, /install failed/u);
+    assert.match(tail, /registry\.npmjs\.org/u);
+  }
+});
+
+test('a secret field whose value starts on the next line is held back the same way', () => {
+  const certificate = 'QmFsdGltb3JlQ3liZXJUcnVzdFJvb3Q'.repeat(1_000);
+  const out = new InstallOutput();
+  out.push('{"secret":\n');
+  out.push(`  {"cert": "${certificate}",\n`);
+  out.push('   "key": "kq7-held-back-value-0194"}}\n');
+  out.push('npm ERR! install failed\n');
+  const tail = out.tail();
+  assert.ok(!tail.includes('kq7-held-back-value'), tail.slice(-300));
+  assert.match(tail, /install failed/u);
+});
+
+test('a secret value that starts on the next line after the log prefix is held back too', () => {
+  const certificate = 'QmFsdGltb3JlQ3liZXJUcnVzdFJvb3Q'.repeat(1_000);
+  const out = new InstallOutput();
+  out.push('npm ERR! {"credentials":\n');
+  out.push(`npm ERR! {"certificate": "${certificate}",\n`);
+  out.push('npm ERR! "key": "kq7-held-back-value-0195"}}\n');
+  out.push('npm ERR! install failed\n');
+  const tail = out.tail();
+  assert.ok(!tail.includes('kq7-held-back-value'), tail.slice(-300));
+  assert.match(tail, /install failed/u);
+});

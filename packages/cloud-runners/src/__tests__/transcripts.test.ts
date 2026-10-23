@@ -310,6 +310,61 @@ test('an empty transcript is written as an empty file; a missing one counts as n
   assert.equal(await fs.readFile(r.file, 'utf8'), '');
 });
 
+test('a restored transcript takes the configured group, never the destination directory’s group', async (t) => {
+  const group = process.getgid?.();
+  const otherGroup =
+    process.getgroups?.().find((value) => value !== group) ??
+    (process.getuid?.() === 0 ? (group ?? 0) + 1 : undefined);
+  if (group === undefined || otherGroup === undefined) {
+    t.skip('needs a second group for the destination directory');
+    return;
+  }
+  const r = await rig(t, 'tsk_up_group');
+  const dir = join(r.machine.configDir('tsk_up_group'), 'projects', KEY.projectKey);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.chown(dir, -1, otherGroup);
+  assert.notEqual((await fs.stat(dir)).gid, group);
+  const store = new MemoryTranscriptStore();
+  await store.append('tsk_up_group', KEY, [line(1)]);
+  const input = {
+    machine: r.machine,
+    store,
+    taskId: 'tsk_up_group',
+    sessionId: SESSION,
+    agentGroup: String(group),
+  };
+  assert.equal((await restoreTranscript(input)).status, 'restored');
+  assert.equal((await fs.stat(r.file)).gid, group);
+});
+
+test('a transcript replaced after rename is refused even when its bytes match', async (t) => {
+  const r = await rig(t, 'tsk_up_inode');
+  const text = '{"n":1}\n';
+  // Substitute a new inode at the exact rename boundary, while keeping the same bytes and mode.
+  const script = `mv() {
+    command mv "$@" || return
+    command cp -p -- "$file" "$MAKA_DIR/replacement" || return
+    command mv -fT -- "$MAKA_DIR/replacement" "$file"
+  }
+${TRANSCRIPT_CHUNK_SCRIPT}`;
+  await assert.rejects(
+    r.machine.execOk(script, {
+      envs: {
+        MAKA_DIR: r.machine.taskDir('tsk_up_inode'),
+        MAKA_KEY: KEY.projectKey,
+        MAKA_SESSION: SESSION,
+        MAKA_OFFSET: '0',
+        MAKA_LEN: String(Buffer.byteLength(text)),
+        MAKA_LAST: '1',
+        MAKA_HASH: createHash('sha256').update(text).digest('hex'),
+      },
+      stdin: Buffer.from(text).toString('base64'),
+    }),
+    /the transcript file changed during rename/,
+  );
+  assert.equal(await fs.readFile(r.file, 'utf8'), text);
+});
+
 test('an upload that fails halfway leaves no file behind and the earlier transcript stays', async (t) => {
   const r = await rig(t, 'tsk_up_fail');
   await r.machine.installTranscript({

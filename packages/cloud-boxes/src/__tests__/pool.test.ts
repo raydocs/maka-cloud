@@ -586,3 +586,297 @@ describe('BoxPool', () => {
     });
   });
 });
+
+describe('review fixes before the pool goes on', () => {
+  it('never hands out a box that a newer ask of the same task refused while the older one looked', async () => {
+    const { pool, fleet } = setup();
+    const first = await pool.acquire({ tenantId: A, taskId: 't1' });
+    const machine = fleet.machines.get(first.machineId);
+    assert.ok(machine);
+    machine.metadata = { ...machine.metadata, [LABEL.invite]: B };
+    const looking = fleet.hold('getMachine');
+    const older = pool.acquire({ tenantId: A, taskId: 't1' });
+    await looking.reached;
+    // The newer ask reads the box, refuses it and takes another slot.
+    const newer = await pool.acquire({ tenantId: A, taskId: 't1' });
+    assert.notEqual(newer.machineId, first.machineId);
+    looking.release();
+    const lease = await older;
+    assert.notEqual(lease.machineId, first.machineId, 'the refused box is not handed out');
+    assert.equal(lease.machineId, newer.machineId, 'the task stays on one box');
+    assert.equal(pool.state().find((row) => row.machineId === first.machineId)?.state, 'refused');
+  });
+
+  it('a restore refuses, and does not mark lost, a box whose label names another live task', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 2 });
+    const old = await pool.acquire({ tenantId: A, taskId: 't1' });
+    live.add('t1');
+    live.add('elsewhere');
+    const machine = fleet.machines.get(old.machineId);
+    assert.ok(machine);
+    machine.state = 'error';
+    machine.metadata = { ...machine.metadata, [LABEL.task]: 'elsewhere' };
+    const lease = await pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' });
+    assert.notEqual(lease.machineId, old.machineId);
+    assert.equal(pool.state().find((row) => row.machineId === old.machineId)?.state, 'refused');
+    assert.equal(labelsOf(fleet, old.machineId)?.[LABEL.task], 'elsewhere', 'left as it was');
+
+    // The restoring task's own label is not a reason to refuse: that box is lost, as before.
+    const own = setup({ maxPerInvite: 2 });
+    const mine = await own.pool.acquire({ tenantId: A, taskId: 't1' });
+    own.live.add('t1');
+    const broken = own.fleet.machines.get(mine.machineId);
+    assert.ok(broken);
+    broken.state = 'error';
+    await own.pool.restoreFromSnapshot({ tenantId: A, taskId: 't1', snapshotId: 'sn_9' });
+    assert.equal(own.pool.state().find((row) => row.machineId === mine.machineId)?.state, 'lost');
+  });
+
+  it('a task keeps its box across its runs: a run that ends while the task is live frees nothing', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const run1 = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await run1.release();
+    assert.equal(pool.state()[0]?.taskId, 't1', 'the task still holds its box between runs');
+    assert.equal(labelsOf(fleet, run1.machineId)?.[LABEL.task], 't1');
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    let otherGot = false;
+    void other.then(
+      () => {
+        otherGot = true;
+      },
+      () => undefined,
+    );
+    await flush();
+    assert.equal(otherGot, false, 'another task does not get the box between the runs');
+    // The next run borrows the same box, and its end frees nothing either.
+    const run2 = await pool.acquire({ tenantId: A, taskId: 't1' });
+    assert.equal(run2.machineId, run1.machineId);
+    await run2.release();
+    await flush();
+    assert.equal(otherGot, false);
+    // Once the task has ended the box is free for the next one.
+    live.delete('t1');
+    await pool.reconcile();
+    assert.equal((await other).machineId, run1.machineId);
+    assert.equal(labelsOf(fleet, run1.machineId)?.[LABEL.task], 't2');
+  });
+
+  it('frees the box of a task that ended for the next ask, without waiting for reconcile', async () => {
+    const { pool, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const run = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await run.release();
+    live.delete('t1');
+    const next = await pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.equal(next.machineId, run.machineId);
+  });
+
+  it('gives a task of another invite that waits at the account limit the room a deleted box leaves', async () => {
+    const { pool, fleet, clock } = setup({ cleanup: { idleDeleteMs: 60_000 } });
+    fleet.accountLimit = 1;
+    const a = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await assert.rejects(pool.acquire({ tenantId: B, taskId: 't2' }), NoFreeBoxError);
+    const waiting = pool.acquire({ tenantId: B, taskId: 't3' });
+    await flush();
+    assert.equal(pool.waiting(B), 1, 'the limit is known, so it waits');
+    await a.release();
+    clock.now += 61_000;
+    assert.deepEqual((await pool.cleanup()).deleted, [a.machineId]);
+    await flush();
+    assert.equal(pool.waiting(B), 0, 'the room went to the waiting invite');
+    const lease = await waiting;
+    assert.notEqual(lease.machineId, a.machineId);
+  });
+
+  it('makes nothing for an ask that was under way when the pool shut down', async () => {
+    const { pool, fleet } = setup();
+    const listing = fleet.hold('listMachines');
+    const asking = pool.acquire({ tenantId: A, taskId: 't1' });
+    await listing.reached;
+    pool.dispose();
+    listing.release();
+    await assert.rejects(asking, /shut down/);
+    assert.equal(fleet.callsTo('createMachine').length, 0);
+  });
+
+  it('hands out no box whose create ended after the shutdown, and keeps the box, free', async () => {
+    const { pool, fleet } = setup();
+    const creating = fleet.hold('createMachine');
+    const asking = pool.acquire({ tenantId: A, taskId: 't1' });
+    await creating.reached;
+    pool.dispose();
+    let settled = false;
+    const waiting = pool.settled().then(() => {
+      settled = true;
+    });
+    await flush();
+    assert.equal(settled, false, 'the shutdown waits for the create');
+    creating.release();
+    await assert.rejects(asking, /shut down/);
+    await waiting;
+    const [box] = pool.state();
+    assert.equal(box?.state, 'ready');
+    assert.equal(box?.taskId, undefined);
+    assert.equal(labelsOf(fleet, box?.machineId as string)?.[LABEL.task], undefined);
+  });
+
+  it('keeps a live task’s box when its next ask fails on the way, so no other task gets it', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const run1 = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await run1.release();
+    const real = fleet.getMachine.bind(fleet);
+    let failures = 1;
+    fleet.getMachine = async (id: string) => {
+      if (failures-- > 0) throw new Error('instabox is unreachable');
+      return await real(id);
+    };
+    await assert.rejects(pool.acquire({ tenantId: A, taskId: 't1' }), /unreachable/);
+    assert.equal(pool.state()[0]?.taskId, 't1', 'the task still holds its box');
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(pool.waiting(A), 1, 'another task waits instead of taking it');
+    const again = await pool.acquire({ tenantId: A, taskId: 't1' });
+    assert.equal(again.machineId, run1.machineId);
+    void other.catch(() => undefined);
+  });
+
+  it('queues no waiter for a create the account refused after the shutdown', async () => {
+    const { pool, fleet } = setup();
+    await pool.acquire({ tenantId: A, taskId: 't1' });
+    fleet.accountLimit = 1;
+    const creating = fleet.hold('createMachine');
+    const asking = pool.acquire({ tenantId: A, taskId: 't2' });
+    await creating.reached;
+    pool.dispose();
+    const refused = assert.rejects(asking, /shut down/);
+    creating.release();
+    await flush();
+    assert.equal(pool.waiting(), 0, 'nothing waits after the shutdown');
+    await refused;
+    await pool.settled();
+  });
+
+  it('waits on shutdown for the label write that gives back a box made after it', async () => {
+    const { pool, fleet } = setup();
+    const creating = fleet.hold('createMachine');
+    const asking = pool.acquire({ tenantId: A, taskId: 't1' });
+    await creating.reached;
+    pool.dispose();
+    const clearing = fleet.hold('patchMachineMetadata');
+    let settled = false;
+    const waiting = pool.settled().then(() => {
+      settled = true;
+    });
+    creating.release();
+    await clearing.reached;
+    await flush();
+    assert.equal(settled, false, 'the give-back write is still under way');
+    clearing.release();
+    await assert.rejects(asking, /shut down/);
+    await waiting;
+  });
+
+  it('puts back the claim of a run still under way when a newer ask of its task fails', async () => {
+    const { pool, fleet, live } = setup({ maxPerInvite: 1 });
+    live.add('t1');
+    const running = await pool.acquire({ tenantId: A, taskId: 't1' });
+    const real = fleet.getMachine.bind(fleet);
+    let failures = 1;
+    fleet.getMachine = async (id: string) => {
+      if (failures-- > 0) throw new Error('instabox is unreachable');
+      return await real(id);
+    };
+    await assert.rejects(pool.acquire({ tenantId: A, taskId: 't1' }), /unreachable/);
+    // The task ends while its run still unwinds: the box is the run's until it gives it back.
+    live.delete('t1');
+    await pool.reconcile();
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(pool.waiting(A), 1, 'the next task waits for the run');
+    await running.release();
+    assert.equal((await other).machineId, running.machineId);
+  });
+
+  it('does not put back the claim of a run that gave its lease back while a newer ask was under way', async () => {
+    const { pool, fleet } = setup({ maxPerInvite: 1 });
+    const running = await pool.acquire({ tenantId: A, taskId: 't1' });
+    let fail!: () => void;
+    const real = fleet.getMachine.bind(fleet);
+    fleet.getMachine = async (id: string) => {
+      await new Promise<void>((resolve) => {
+        fail = resolve;
+      });
+      fleet.getMachine = real;
+      throw new Error('instabox is unreachable');
+    };
+    const repeat = pool.acquire({ tenantId: A, taskId: 't1' });
+    await flush();
+    await running.release();
+    fail();
+    await assert.rejects(repeat, /unreachable/);
+    const next = await pool.acquire({ tenantId: A, taskId: 't2' });
+    assert.equal(next.machineId, running.machineId, 'the box is free, not held for ever');
+  });
+
+  it('waits on shutdown for the give-back write of an ask that failed', async () => {
+    const { pool, fleet } = setup();
+    const first = await pool.acquire({ tenantId: A, taskId: 't1' });
+    await first.release();
+    let fail!: () => void;
+    const real = fleet.getMachine.bind(fleet);
+    fleet.getMachine = async (id: string) => {
+      await new Promise<void>((resolve) => {
+        fail = resolve;
+      });
+      fleet.getMachine = real;
+      throw new Error('instabox is unreachable');
+    };
+    const asking = pool.acquire({ tenantId: A, taskId: 't2' });
+    const refused = assert.rejects(asking, /unreachable/);
+    await flush();
+    pool.dispose();
+    const clearing = fleet.hold('patchMachineMetadata');
+    let settled = false;
+    const waiting = pool.settled().then(() => {
+      settled = true;
+    });
+    fail();
+    await clearing.reached;
+    await flush();
+    assert.equal(settled, false, 'the give-back write is still under way');
+    clearing.release();
+    await refused;
+    await waiting;
+  });
+
+  it('puts back the run’s claim when two newer asks of its task both fail, the older first', async () => {
+    const { pool, fleet } = setup({ maxPerInvite: 1 });
+    const running = await pool.acquire({ tenantId: A, taskId: 't1' });
+    const gates: (() => void)[] = [];
+    const real = fleet.getMachine.bind(fleet);
+    fleet.getMachine = async () => {
+      await new Promise<void>((resolve) => gates.push(resolve));
+      throw new Error('instabox is unreachable');
+    };
+    const b = pool.acquire({ tenantId: A, taskId: 't1' });
+    const c = pool.acquire({ tenantId: A, taskId: 't1' });
+    const bFails = assert.rejects(b, /unreachable/);
+    const cFails = assert.rejects(c, /unreachable/);
+    await flush();
+    assert.equal(gates.length, 2);
+    gates[0]?.();
+    await bFails;
+    gates[1]?.();
+    await cFails;
+    fleet.getMachine = real;
+    const other = pool.acquire({ tenantId: A, taskId: 't2' });
+    await flush();
+    assert.equal(pool.waiting(A), 1, 'the run still holds the box');
+    await running.release();
+    await flush();
+    assert.equal(pool.waiting(A), 0, 'its release frees the box');
+    assert.equal((await other).machineId, running.machineId);
+  });
+});

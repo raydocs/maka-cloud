@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { verifyCodingManifest } from '../playbook.js';
+import { BASE_RESTORE_SCRIPT, BASE_REVERT_SCRIPT, BASE_STAGE_SCRIPT } from '../scripts.js';
 import {
   type AgentScript,
   BUGGY_ADD,
@@ -112,7 +113,53 @@ test('a reproduction test that passes without the change is rejected, and the ch
       ['repro-base', 0],
     ],
   );
-  await assert.rejects(fs.stat(join(h.root, 'tsk_notrepro', 'base-check')), { code: 'ENOENT' });
+  assert.deepEqual(
+    await fs.readdir(join(h.root, 'tsk_notrepro', 'base-check')),
+    [],
+    'the backup is emptied',
+  );
+  zeroStats(h.runner);
+});
+
+test('the base check edits the workspace as the agent account, and the sandbox user only stages', async (t) => {
+  const h = await setup(t);
+  h.claude.script = async (turn) => {
+    if (turn.n === 1) {
+      await writeRepro(turn, 'source lib/add.sh\n[ "$(add 2 0)" = 2 ]\n');
+      await fs.writeFile(join(turn.workspace, 'lib', 'add.sh'), FIXED_ADD);
+      return 'ok';
+    }
+    await writeRepro(turn);
+    return 'ok';
+  };
+  const spec = await h.spec('tsk_base_acct');
+  assert.deepEqual(terminal(await collect(await h.runner.start(spec))), { type: 'finished' });
+  const via = (script: string) =>
+    h.calls.filter((call) => call.script === script).map((call) => call.via);
+  // The revert and the restore write in the workspace: only ever as the agent's account.
+  assert.deepEqual(new Set(via(BASE_REVERT_SCRIPT)), new Set(['execCheck']));
+  assert.deepEqual(new Set(via(BASE_RESTORE_SCRIPT)), new Set(['execCheck']));
+  assert.ok(via(BASE_REVERT_SCRIPT).length >= 1);
+  assert.ok(via(BASE_RESTORE_SCRIPT).length >= 2, 'a leftover is put back first, the change after');
+  // The stage runs as the sandbox user, in front of the revert.
+  assert.deepEqual(new Set(via(BASE_STAGE_SCRIPT)), new Set(['exec']));
+  const order = h.calls
+    .map((call) =>
+      call.script === BASE_RESTORE_SCRIPT
+        ? 'restore'
+        : call.script === BASE_STAGE_SCRIPT
+          ? 'stage'
+          : call.script === BASE_REVERT_SCRIPT
+            ? 'revert'
+            : '',
+    )
+    .filter(Boolean)
+    .join(' ');
+  assert.match(order, /^restore stage revert restore/u);
+  // Each of them ran as the agent's account (one sudo run per call).
+  const users = await h.sudoUsers();
+  assert.ok(users.length >= via(BASE_REVERT_SCRIPT).length + via(BASE_RESTORE_SCRIPT).length);
+  assert.ok(users.every((user) => user === 'maka-agent'));
   zeroStats(h.runner);
 });
 
