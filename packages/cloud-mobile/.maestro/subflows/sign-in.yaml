@@ -58,7 +58,8 @@ appId: cloud.maka.app
       platform: iOS
     commands:
       - pressKey: Enter
-# On iOS the keyboard's own dismissal can already have submitted the form.
+# On iOS the keyboard's own dismissal can already have submitted the form, and the button can
+# vanish between the visibility check and the tap; each flow then asserts the signed-in screen.
 - runFlow:
     when:
       visible:
@@ -66,3 +67,4 @@ appId: cloud.maka.app
     commands:
       - tapOn:
           id: "button-Enter your workspace"
+          optional: true
