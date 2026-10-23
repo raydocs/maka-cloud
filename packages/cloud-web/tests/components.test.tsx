@@ -597,6 +597,36 @@ test('decision focus waits for the target inbox item instead of recording an unr
   expect(document.activeElement?.getAttribute('data-task')).toBe('target');
 });
 
+test('once the stream is live, the decision fallback waits one second, not five', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = new CloudClient('test');
+    vi.spyOn(client, 'subscribe').mockImplementation(async (_id, event, status) => {
+      status({ state: 'live' });
+      event({
+        id: 1,
+        kind: 'conductor.question',
+        data: { ...question, conversationId: cnv, at: 0 },
+      });
+    });
+    render(
+      <ConversationView
+        client={client}
+        conversation={conversation}
+        decision={{ task: 'missing' }}
+      />,
+    );
+    await act(async () => {});
+    const unrelated = screen.getByRole('region', { name: 'Your decision' });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(document.activeElement).not.toBe(unrelated);
+    await act(() => vi.advanceTimersByTimeAsync(600));
+    expect(document.activeElement).toBe(unrelated);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('decision fallback waits five seconds and until the stream has finished connecting', async () => {
   vi.useFakeTimers();
   try {

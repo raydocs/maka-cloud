@@ -448,10 +448,16 @@ export function ConversationView({
   const conversationNode = useRef<HTMLElement>(null);
   const focusedDecision = useRef<typeof decision>(undefined);
   const decisionWait = useRef<{ decision: typeof decision; until: number } | undefined>(undefined);
+  const liveAt = useRef<number | undefined>(undefined);
+  if (status !== 'Live') liveAt.current = undefined;
+  else liveAt.current ??= Date.now();
   useEffect(() => {
     if (decision === undefined || focusedDecision.current === decision) return;
     if (decisionWait.current?.decision !== decision)
       decisionWait.current = { decision, until: Date.now() + 5000 };
+    // The target card has a second after the stream goes live to arrive, and at most five in all.
+    if (liveAt.current !== undefined)
+      decisionWait.current.until = Math.min(decisionWait.current.until, liveAt.current + 1000);
     let expired = Date.now() >= decisionWait.current.until;
     const focus = () => {
       const cards = Array.from(
