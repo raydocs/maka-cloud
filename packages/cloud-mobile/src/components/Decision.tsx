@@ -9,17 +9,23 @@ import {
 } from '@maka-cloud/client';
 import { useState } from 'react';
 import { Linking, Pressable, View } from 'react-native';
-import { Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
+import { ButtonRow, Field, PillButton, QuietButton, Solid, StatusMark, T } from './ui';
+import { useT } from '@/lib/i18n';
 import { mono, useTheme } from '@/lib/theme';
 import { Icon } from './Icon';
 
+/** Answers that stop or refuse something: they buzz a warning, every other answer taps lightly. */
+const STOPPING = new Set(['reject', 'deny', 'cancel', 'stop', 'turn-off']);
+const hapticFor = (optionId: string) => (STOPPING.has(optionId) ? 'warning' : 'light');
+
 function Evidence({ line }: { line: EvidenceLine }) {
   const t = useTheme();
-  if (line.kind === 'artifact') return <T kind="small">{line.text}</T>;
+  const { t: say, tx } = useT();
+  if (line.kind === 'artifact') return <T kind="small">{tx(line.text)}</T>;
   if (line.kind === 'action')
     return (
       <Solid>
-        <T kind="small">Held until you answer: {line.tool}</T>
+        <T kind="small">{say('decision.held', { tool: line.tool })}</T>
         <T kind="small" selectable style={mono}>
           {line.args}
         </T>
@@ -36,7 +42,7 @@ function Evidence({ line }: { line: EvidenceLine }) {
       <T kind="small" style={{ textDecorationLine: 'underline' }}>
         {line.label}
       </T>
-      <Icon name="external" size={13} color={t.inkMuted} />
+      <Icon name="external" color={t.inkMuted} />
     </Pressable>
   ) : (
     <T kind="small">{line.label}</T>
@@ -54,10 +60,12 @@ function Note({
   disabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const { t: say } = useT();
   return open ? (
     <Field
-      label="Note"
-      placeholder="Note"
+      label={say('common.note')}
+      id="Note"
+      placeholder={say('common.note')}
       multiline
       maxLength={4000}
       value={value}
@@ -66,7 +74,12 @@ function Note({
       autoFocus
     />
   ) : (
-    <QuietButton label="Add a note" onPress={() => setOpen(true)} disabled={disabled} />
+    <QuietButton
+      label={say('common.addNote')}
+      id="Add a note"
+      onPress={() => setOpen(true)}
+      disabled={disabled}
+    />
   );
 }
 
@@ -81,6 +94,7 @@ export function DecisionCard({
   onAnswer: (optionId: string, text?: string) => void;
 }) {
   const [note, setNote] = useState('');
+  const { t: say, tx, choice } = useT();
   const card = inboxCardModel(item);
   // A finished task reads as a title, how far it was checked, and the outcome; any other wording is
   // shown whole, as the supervisor sent it.
@@ -92,10 +106,12 @@ export function DecisionCard({
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <StatusMark tone="ok" />
             <T kind="heading" selectable style={{ flex: 1 }}>
-              {`${finished.title} finished`}
+              {say('decision.finished', { title: finished.title })}
             </T>
           </View>
-          <T kind="small">{`${finished.check.charAt(0).toUpperCase()}${finished.check.slice(1)}`}</T>
+          <T kind="small">
+            {tx(`${finished.check.charAt(0).toUpperCase()}${finished.check.slice(1)}`)}
+          </T>
           <T kind="body" selectable>
             {finished.outcome}
           </T>
@@ -104,37 +120,38 @@ export function DecisionCard({
         <>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <StatusMark tone={item.state === 'open' ? 'attention' : 'ok'} />
-            <T kind="small">{card.heading}</T>
+            <T kind="small">{tx(card.heading)}</T>
           </View>
           <T kind="heading" selectable>
             {card.text}
           </T>
         </>
       )}
-      {card.cannotApproveHere && (
-        <T kind="muted">This card cannot be shown exactly, so it cannot be approved here.</T>
-      )}
+      {card.cannotApproveHere && <T kind="muted">{say('decision.cannotShow')}</T>}
       {card.evidence.map((line, index) => (
         <Evidence key={`${item.itemId}-${index}`} line={line} />
       ))}
       {card.answering ? (
         <T kind="muted" accessibilityRole="text">
-          {card.answering}
+          {tx(card.answering)}
         </T>
       ) : (
         <>
           {item.allowText && <Note value={note} onChange={setNote} disabled={disabled} />}
-          <View style={{ gap: 8 }}>
+          <ButtonRow>
             {card.options.map((option) => (
               <PillButton
                 key={option.id}
-                label={displayText(option.label)}
+                label={choice(option.id, displayText(option.label))}
+                id={displayText(option.label)}
                 primary={option.recommended}
+                compact
+                haptic={hapticFor(option.id)}
                 disabled={disabled}
                 onPress={() => onAnswer(option.id, note.trim() || undefined)}
               />
             ))}
-          </View>
+          </ButtonRow>
         </>
       )}
     </View>
@@ -155,43 +172,50 @@ export function QuestionBlock({
 }) {
   const card = questionCardModel(question, answered);
   const [note, setNote] = useState('');
+  const { t: say, tx, choice } = useT();
+  // A server's fixed choice is in the app's words; any other label is shown as sent, and only the
+  // stand-in for a missing one is the app's.
+  const answeredLabel = question.options.some((option) => option.id === answered)
+    ? card.answeredLabel && choice(answered ?? '', card.answeredLabel)
+    : card.answeredLabel && tx(card.answeredLabel);
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <StatusMark tone={answered ? 'ok' : 'attention'} />
-        <T kind="small">{card.heading}</T>
+        <T kind="small">{tx(card.heading)}</T>
       </View>
       <T kind="heading" selectable>
         {card.text}
       </T>
-      {card.cannotApproveHere && (
-        <T kind="muted">This card cannot be shown exactly, so it cannot be approved here.</T>
-      )}
+      {card.cannotApproveHere && <T kind="muted">{say('decision.cannotShow')}</T>}
       {card.note && <T kind="muted">{card.note}</T>}
       {card.held && (
         <Solid>
-          <T kind="small">Held until you answer: {card.held.tool}</T>
+          <T kind="small">{say('decision.held', { tool: card.held.tool })}</T>
           <T kind="small" selectable style={mono}>
             {card.held.args}
           </T>
         </Solid>
       )}
       {answered ? (
-        <T kind="muted">Answer recorded: {card.answeredLabel}</T>
+        <T kind="muted">{say('decision.recorded', { label: answeredLabel ?? '' })}</T>
       ) : (
         <>
           <Note value={note} onChange={setNote} disabled={disabled} />
-          <View style={{ gap: 8 }}>
+          <ButtonRow>
             {card.options.map((option) => (
               <PillButton
                 key={option.id}
-                label={option.label}
+                label={choice(option.id, option.label)}
+                id={option.label}
                 primary={option.recommended}
+                compact
+                haptic={hapticFor(option.id)}
                 disabled={disabled}
                 onPress={() => onAnswer(option.id, note.trim() || undefined)}
               />
             ))}
-          </View>
+          </ButtonRow>
         </>
       )}
     </View>

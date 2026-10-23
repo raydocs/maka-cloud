@@ -5,10 +5,14 @@ appId: cloud.maka.app
 - runFlow: subflows/sign-in.yaml
 - assertVisible:
     id: "field-Keep the conversation going"
-- tapOn: "Home"
-- assertVisible: "Waiting on you (1)"
+# The section pill at the top, by its fixed id (the device-test build is fixed to Chinese).
+- tapOn:
+    id: "tab-home"
+- assertVisible:
+    id: "home-waiting-1"
 - takeScreenshot: home-decision
 - tapOn:
     id: "button-Got it"
-- assertNotVisible: "Waiting on you (1)"
+- assertNotVisible:
+    id: "home-waiting-1"
 - takeScreenshot: home-answered

@@ -1,3 +1,4 @@
+import { useT } from '@/lib/i18n';
 import { Card, PillButton, SkeletonLine, T } from './ui';
 
 /**
@@ -13,21 +14,22 @@ export function InboxStatus({
   failed: boolean;
   onRetry: () => void;
 }) {
+  const { t: say } = useT();
   if (failed)
     return (
-      <Card label="Decisions could not be loaded">
-        <T kind="muted">Decisions could not be loaded.</T>
-        <PillButton label="Try again" onPress={onRetry} />
+      <Card label={say('inbox.failed')}>
+        <T kind="muted">{say('inbox.failed')}</T>
+        <PillButton label={say('common.tryAgain')} id="Try again" onPress={onRetry} />
       </Card>
     );
   if (loaded)
     return (
-      <Card label="Nothing needs you">
-        <T kind="muted">Nothing needs you. Start something below.</T>
+      <Card label={say('inbox.none.label')}>
+        <T kind="muted">{say('inbox.none')}</T>
       </Card>
     );
   return (
-    <Card label="Loading">
+    <Card label={say('common.loading')}>
       <SkeletonLine width="60%" />
       <SkeletonLine />
       <SkeletonLine width="80%" />

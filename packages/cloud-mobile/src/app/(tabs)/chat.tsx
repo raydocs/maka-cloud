@@ -1,40 +1,61 @@
 import {
   BRAND,
+  type Conversation,
   ConversationFeed,
-  type TaskView,
+  type ConversationState,
+  ConversationStarter,
   conversationSummary,
   displayText,
   dollars,
-  type ConversationState,
-  type TaskControl,
+  errorText,
   TERMINAL,
+  type TaskControl,
+  type TaskView,
   totalCost,
 } from '@maka-cloud/client';
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  ActivityIndicator,
   AppState,
   FlatList,
-  KeyboardAvoidingView,
-  Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  Platform,
-  Pressable,
+  ScrollView,
   View,
 } from 'react-native';
+import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { DecisionCard, QuestionBlock } from '@/components/Decision';
 import { TaskDelivery } from '@/components/Delivery';
 import { TaskDetails } from '@/components/TaskDetails';
 import { TaskRow } from '@/components/TaskRow';
-import { Card, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
+import {
+  Appear,
+  ButtonRow,
+  Card,
+  PillButton,
+  Rich,
+  Screen,
+  Shimmer,
+  StatusMark,
+  T,
+  Thinking,
+  TOP_BAR,
+  withoutMarks,
+} from '@/components/ui';
+import { useT } from '@/lib/i18n';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
-import { mono, useTheme } from '@/lib/theme';
+import { mono, radius, useTheme } from '@/lib/theme';
 
 type Message = ConversationState['messages'][number];
 
+/** What an empty chat offers to start with; a tap puts it in the box, the person sends it. */
+const IDEAS = ['home.idea.1', 'home.idea.2', 'home.idea.3'] as const;
+
+/**
+ * Chat, in the person's own appearance (light by day, dark at night) like every section. The
+ * conversation scrolls under the floating top bar and the composer.
+ */
 export default function Chat() {
   const { conversations, chosen } = useWorkspace();
   const selected = conversations.find((c) => c.conversationId === chosen);
@@ -46,20 +67,121 @@ export default function Chat() {
           conversationId={selected.conversationId}
         />
       ) : (
-        <View style={{ padding: 16 }}>
-          <Card label="No conversation">
-            <T kind="heading">No conversation open</T>
-            <T kind="muted">Start one from Home.</T>
-          </Card>
-        </View>
+        <NewConversation />
       )}
     </Screen>
   );
 }
 
+/** An opening line and three ideas: what an empty chat says before anything has been said. */
+function Opening({ onIdea, busy }: { onIdea: (words: string) => void; busy: boolean }) {
+  const { t: say } = useT();
+  return (
+    <View style={{ gap: 12 }} accessibilityLabel={say('home.ideas.label')}>
+      <T kind="heading">{say('chat.empty.title')}</T>
+      <T kind="muted">{say('chat.empty.body', { name: BRAND.name })}</T>
+      <ButtonRow>
+        {IDEAS.map((idea) => (
+          <PillButton
+            key={idea}
+            label={say(idea)}
+            id={idea}
+            compact
+            disabled={busy}
+            onPress={() => onIdea(say(idea))}
+          />
+        ))}
+      </ButtonRow>
+    </View>
+  );
+}
+
+/** The Chat tab with no conversation open: it can still be talked to; the first message starts one. */
+function NewConversation() {
+  const { client, conversations, started } = useWorkspace();
+  const { tx } = useT();
+  const starter = useMemo(() => new ConversationStarter(client), [client]);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [failure, setFailure] = useState('');
+  const [dock, setDock] = useState(76);
+  const { openSheet, sheet } = useConversationSheet();
+  const send = () => {
+    if (!draft.trim() || sending) return;
+    setSending(true);
+    setFailure('');
+    starter.start(draft).then(
+      (conversation: Conversation) => {
+        setSending(false);
+        setDraft('');
+        started(conversation);
+      },
+      (error: unknown) => {
+        setFailure(errorText(error));
+        setSending(false);
+      },
+    );
+  };
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Scrolls, so large text or the keyboard never hides the ideas or a failure under the
+          composer. */}
+      <ScrollView
+        testID="new-conversation"
+        style={{ flex: 1 }}
+        contentContainerStyle={{
+          padding: 20,
+          paddingTop: TOP_BAR + 16,
+          paddingBottom: dock + 16,
+          gap: 12,
+        }}
+        scrollIndicatorInsets={{ top: TOP_BAR, bottom: dock }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Opening
+          // While the conversation starts, the draft is what is being sent.
+          busy={sending}
+          onIdea={(words) => {
+            setDraft(words);
+            starter.draftEdited();
+          }}
+        />
+        {failure ? <T kind="error">{tx(failure)}</T> : null}
+      </ScrollView>
+      <Dock height={dock} onHeight={setDock}>
+        <Composer
+          draft={draft}
+          onDraft={(text) => {
+            setDraft(text);
+            starter.draftEdited();
+          }}
+          sending={sending}
+          disabled={sending}
+          onSend={send}
+          {...(conversations.length > 0 ? { onPlus: openSheet } : {})}
+        />
+      </Dock>
+      {sheet}
+    </View>
+  );
+}
+
+/**
+ * Which items arrived after the screen first showed what it had: only those spring into place.
+ * The first batch (the history) is just there.
+ */
+function useArrivals(ids: readonly string[], ready: boolean): (id: string) => boolean {
+  const first = useRef<Set<string> | null>(null);
+  if (first.current === null && ready) first.current = new Set(ids);
+  return (id) => first.current !== null && !first.current.has(id);
+}
+
 function ConversationScreen({ conversationId }: { conversationId: string }) {
-  const { client, conversations, open } = useWorkspace();
+  const { client, conversations } = useWorkspace();
   const theme = useTheme();
+  const { t: say, tx } = useT();
+  /** The floating composer's height: the list scrolls on under it, by this much more. */
+  const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
   const feed = useMemo(
     () => new ConversationFeed(client, conversationId),
@@ -72,8 +194,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { tasks, questions, running, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
   const [draft, setDraft] = useState('');
-  const [picking, setPicking] = useState(false);
   const [detail, setDetail] = useState<TaskView | undefined>();
+  const { openSheet, sheet } = useConversationSheet();
   const scroll = useRef<FlatList<Message> | null>(null);
   /** The newest messages stay in view only while the person is already reading them. */
   const atEnd = useRef(true);
@@ -107,187 +229,204 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     waiting.length === 0 &&
     (tasks.some((task) => !TERMINAL.has(task.state) && task.state !== 'paused') ||
       state.messages.at(-1)?.role === 'user');
+  // Messages and cards that arrive while the chat is open rise into place; the history does not.
+  const arrived = useArrivals(
+    [
+      ...state.messages.map((message) => message.id),
+      ...roots.map((task) => `task-${task.taskId}-${task.state}`),
+      ...questions.map((question) => question.questionId),
+      ...waiting.map((item) => item.itemId),
+    ],
+    status === 'Live' || state.messages.length > 0,
+  );
+  const send = () => {
+    const sending = draft;
+    // Words typed while it was sending stay in the box.
+    void feed.send(sending).then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
+  };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={{ flex: 1 }}
-    >
-      <View style={{ paddingHorizontal: 16, paddingTop: 8, gap: 4 }}>
-        <T kind="title" numberOfLines={2}>
-          {displayText(conversation?.title ?? 'A fresh start')}
-        </T>
-        <View
-          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
-        >
+    <View style={{ flex: 1 }}>
+      <View style={{ flex: 1 }}>
+        <FlatList
+          ref={scroll}
+          data={state.messages}
+          keyExtractor={(message) => message.id}
+          initialNumToRender={20}
+          windowSize={7}
+          onContentSizeChange={() =>
+            atEnd.current && scroll.current?.scrollToEnd({ animated: false })
+          }
+          onScrollEndDrag={trackEnd}
+          onMomentumScrollEnd={trackEnd}
+          // The list runs on under the top bar and the composer, which float over fades.
+          contentContainerStyle={{
+            paddingHorizontal: 20,
+            paddingTop: TOP_BAR + 16,
+            paddingBottom: dock + 16,
+          }}
+          scrollIndicatorInsets={{ top: TOP_BAR, bottom: dock }}
+          keyboardShouldPersistTaps="handled"
+          accessibilityLabel={say('chat.messages')}
+          ListHeaderComponent={
+            <T kind="heading" numberOfLines={2} style={{ marginBottom: 14 }}>
+              {conversation?.title ? displayText(conversation.title) : say('chat.freshStart')}
+            </T>
+          }
+          ListEmptyComponent={
+            <Opening
+              busy={busy === 'message'}
+              onIdea={(words) => {
+                setDraft(words);
+                feed.draftEdited();
+              }}
+            />
+          }
+          renderItem={({ item: message }) => (
+            <Appear enter={arrived(message.id)}>
+              {/* Who said it is plain from the side it sits on; a screen reader still hears the name. */}
+              <View
+                accessible
+                accessibilityLabel={say('chat.said', {
+                  who:
+                    message.role === 'user'
+                      ? say('chat.you')
+                      : message.role === 'notice'
+                        ? say('chat.update')
+                        : BRAND.name,
+                  text: withoutMarks(displayText(message.text)),
+                })}
+                style={[
+                  { gap: 2, marginBottom: 18 },
+                  message.role === 'user'
+                    ? {
+                        alignSelf: 'flex-end',
+                        maxWidth: '85%',
+                        backgroundColor: theme.chip,
+                        borderRadius: radius.card,
+                        paddingHorizontal: 16,
+                        paddingVertical: 10,
+                      }
+                    : { alignSelf: 'stretch' },
+                ]}
+              >
+                <Rich text={displayText(message.text)} />
+              </View>
+            </Appear>
+          )}
+          ListFooterComponent={
+            <View style={{ gap: 14 }}>
+              {working && (
+                <View
+                  accessible
+                  accessibilityRole="text"
+                  accessibilityLabel={say('chat.workingLabel', { name: BRAND.name })}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                >
+                  <Thinking />
+                  <Shimmer>
+                    <T kind="muted">{say('chat.working', { name: BRAND.name })}</T>
+                  </Shimmer>
+                </View>
+              )}
+              {roots.length > 0 && (
+                <Card label={say('chat.running.label')}>
+                  {/* Only what is known: no "0 running" once all is done, no cost the server never sent. */}
+                  {(running > 0 || total.usd !== undefined) && (
+                    <T kind="small">
+                      {running > 0 && say('chat.running', { count: running })}
+                      {running > 0 && total.usd !== undefined && ' · '}
+                      {total.usd !== undefined && say('chat.totalCost')}
+                      {total.usd !== undefined && (
+                        <T kind="small" style={mono}>
+                          {dollars(total.usd)}
+                        </T>
+                      )}
+                      {total.usd !== undefined && !total.complete && say('chat.notAllReported')}
+                    </T>
+                  )}
+                  {roots.map((task) => (
+                    <TaskRow
+                      key={task.taskId}
+                      task={task}
+                      tasks={tasks}
+                      noPause={noPause}
+                      busy={Boolean(busy)}
+                      resultCard
+                      onControl={(taskId: string, action: TaskControl) =>
+                        void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
+                      }
+                    />
+                  ))}
+                </Card>
+              )}
+              {roots.map((task) => (
+                <Appear key={task.taskId} enter={arrived(`task-${task.taskId}-${task.state}`)}>
+                  <TaskDelivery
+                    client={client}
+                    task={task}
+                    listings={snapshot.artifacts[task.taskId]?.listings ?? []}
+                    onOpenTask={setDetail}
+                  />
+                </Appear>
+              ))}
+              {questions.map((question) => (
+                <Appear key={question.questionId} enter={arrived(question.questionId)}>
+                  <Card label={say('chat.decision.label')}>
+                    <QuestionBlock
+                      question={question}
+                      answered={state.answers[question.questionId]}
+                      disabled={Boolean(busy)}
+                      onAnswer={(optionId, text) =>
+                        void feed.answerQuestion(question, optionId, text)
+                      }
+                    />
+                  </Card>
+                </Appear>
+              ))}
+              {waiting
+                .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
+                .map((item) => (
+                  <Appear key={item.itemId} enter={arrived(item.itemId)}>
+                    <Card label={say('chat.needsYou.label')}>
+                      <DecisionCard
+                        item={item}
+                        disabled={Boolean(busy)}
+                        onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
+                      />
+                    </Card>
+                  </Appear>
+                ))}
+              {error ? <T kind="error">{tx(error)}</T> : null}
+            </View>
+          }
+        />
+        <TopFade />
+        <Dock height={dock} onHeight={setDock}>
           {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
-          {status === 'Live' ? (
-            <View />
-          ) : (
+          {status !== 'Live' && (
             <View
               accessible
               accessibilityRole="text"
-              accessibilityLabel={status}
-              style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}
+              accessibilityLabel={tx(status)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'center' }}
             >
               {status !== 'Connecting…' && <StatusMark tone="attention" />}
-              <T kind="small">{status}</T>
+              <T kind="small">{tx(status)}</T>
             </View>
           )}
-          {conversations.length > 1 && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Select conversation"
-              onPress={() => setPicking(true)}
-              style={{ minHeight: 44, justifyContent: 'center' }}
-            >
-              <T kind="muted" style={{ textDecorationLine: 'underline' }}>
-                Switch
-              </T>
-            </Pressable>
-          )}
-        </View>
-      </View>
-      <FlatList
-        ref={scroll}
-        data={state.messages}
-        keyExtractor={(message) => message.id}
-        initialNumToRender={20}
-        windowSize={7}
-        onContentSizeChange={() =>
-          atEnd.current && scroll.current?.scrollToEnd({ animated: false })
-        }
-        onScrollEndDrag={trackEnd}
-        onMomentumScrollEnd={trackEnd}
-        contentContainerStyle={{ padding: 16, gap: 14 }}
-        keyboardShouldPersistTaps="handled"
-        accessibilityLabel="Messages"
-        ListEmptyComponent={
-          <Card label="Empty conversation">
-            <T kind="heading">What would you like to get done?</T>
-            <T kind="muted">
-              Bring a question, a project, or a plan. {BRAND.name} keeps the work here.
-            </T>
-          </Card>
-        }
-        renderItem={({ item: message }) => (
-          // Who said it is plain from the side it sits on; a screen reader still hears the name.
-          <View
-            accessible
-            accessibilityLabel={`${message.role === 'user' ? 'You' : message.role === 'notice' ? 'Update' : BRAND.name}: ${displayText(message.text)}`}
-            style={[
-              { maxWidth: '88%', gap: 2, marginBottom: 14 },
-              message.role === 'user'
-                ? {
-                    alignSelf: 'flex-end',
-                    backgroundColor: theme.chip,
-                    borderRadius: 16,
-                    padding: 12,
-                  }
-                : { alignSelf: 'flex-start' },
-            ]}
-          >
-            <T kind="body" selectable>
-              {displayText(message.text)}
-            </T>
-          </View>
-        )}
-        ListFooterComponent={
-          <View style={{ gap: 14 }}>
-            {working && (
-              <View
-                accessible
-                accessibilityRole="text"
-                accessibilityLabel="Maka is working"
-                style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
-              >
-                <ActivityIndicator size="small" color={theme.inkMuted} />
-                <T kind="muted">Maka is working…</T>
-              </View>
-            )}
-            {roots.length > 0 && (
-              <Card label="Running">
-                <T kind="small">
-                  {running} running · Total cost so far:{' '}
-                  <T kind="small" style={mono}>
-                    {dollars(total.usd)}
-                  </T>
-                  {total.usd !== undefined && !total.complete && ' (not all reported)'}
-                </T>
-                {roots.map((task) => (
-                  <TaskRow
-                    key={task.taskId}
-                    task={task}
-                    tasks={tasks}
-                    noPause={noPause}
-                    busy={Boolean(busy)}
-                    onControl={(taskId: string, action: TaskControl) =>
-                      void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
-                    }
-                  />
-                ))}
-              </Card>
-            )}
-            {roots.map((task) => (
-              <TaskDelivery
-                key={task.taskId}
-                client={client}
-                task={task}
-                listings={snapshot.artifacts[task.taskId]?.listings ?? []}
-                onOpenTask={setDetail}
-              />
-            ))}
-            {questions.map((question) => (
-              <Card key={question.questionId} label="Your decision">
-                <QuestionBlock
-                  question={question}
-                  answered={state.answers[question.questionId]}
-                  disabled={Boolean(busy)}
-                  onAnswer={(optionId, text) => void feed.answerQuestion(question, optionId, text)}
-                />
-              </Card>
-            ))}
-            {waiting
-              .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
-              .map((item) => (
-                <Card key={item.itemId} label="Needs you">
-                  <DecisionCard
-                    item={item}
-                    disabled={Boolean(busy)}
-                    onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
-                  />
-                </Card>
-              ))}
-            {error ? <T kind="error">{error}</T> : null}
-          </View>
-        }
-      />
-      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end', padding: 12 }}>
-        <View style={{ flex: 1 }}>
-          <Field
-            label="Keep the conversation going"
-            placeholder="What would you like to do next?"
-            multiline
-            maxLength={16000}
-            value={draft}
-            onChangeText={(text) => {
-              setDraft(displayText(text));
+          <Composer
+            draft={draft}
+            onDraft={(text) => {
+              setDraft(text);
               feed.draftEdited();
             }}
+            sending={busy === 'message'}
+            disabled={Boolean(busy)}
+            onSend={send}
+            onPlus={openSheet}
           />
-        </View>
-        <RoundButton
-          label={busy === 'message' ? 'Sending…' : 'Send message'}
-          icon="send"
-          disabled={Boolean(busy) || !draft.trim()}
-          onPress={() => {
-            const sending = draft;
-            // Words typed while it was sending stay in the box.
-            void feed
-              .send(sending)
-              .then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
-          }}
-        />
+        </Dock>
       </View>
       {detail && (
         <TaskDetails
@@ -296,30 +435,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           onClose={() => setDetail(undefined)}
         />
       )}
-      <Modal
-        visible={picking}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setPicking(false)}
-      >
-        <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
-          <Card label="Conversations">
-            <T kind="heading">Conversations</T>
-            {[...conversations].reverse().map((c) => (
-              <PillButton
-                key={c.conversationId}
-                label={displayText(c.title ?? 'Untitled conversation')}
-                primary={c.conversationId === conversationId}
-                onPress={() => {
-                  open(c.conversationId);
-                  setPicking(false);
-                }}
-              />
-            ))}
-            <PillButton label="Close" onPress={() => setPicking(false)} />
-          </Card>
-        </View>
-      </Modal>
-    </KeyboardAvoidingView>
+      {sheet}
+    </View>
   );
 }

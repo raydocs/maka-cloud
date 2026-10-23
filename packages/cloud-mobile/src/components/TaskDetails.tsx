@@ -20,9 +20,10 @@ import {
 import { useEffect, useState } from 'react';
 import { Image, Modal, ScrollView, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { useT } from '@/lib/i18n';
 import { useBlobUri } from '@/lib/picture';
 import { mono, radius, useTheme } from '@/lib/theme';
-import { DiffLines, openLink, SourcesStack, useSources } from './Delivery';
+import { DiffLines, openLink, Report, SourcesStack, useSources } from './Delivery';
 import { FailureNote, PillButton, Solid, StatusMark, T } from './ui';
 
 function List({ title, items }: { title: string; items: readonly string[] }) {
@@ -51,31 +52,10 @@ function ImageResult({ name, blob }: { name: string; blob: Blob }) {
   ) : null;
 }
 
-const REPORT_CHARS = 20_000;
-/** The most characters ever drawn; a report beyond this is read on the web. */
-const REPORT_CHARS_MAX = 200_000;
-
-/** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
-function Report({ text }: { text: string }) {
-  const t = useTheme();
-  const [all, setAll] = useState(false);
-  const shown = text.slice(0, all ? REPORT_CHARS_MAX : REPORT_CHARS);
-  return (
-    <Solid>
-      <T kind="body" selectable style={{ color: t.solidInk }}>
-        {displayText(shown)}
-      </T>
-      {shown.length < text.length && !all && (
-        <PillButton label="Show more" onPress={() => setAll(true)} />
-      )}
-      {all && text.length > REPORT_CHARS_MAX && (
-        <T kind="small">Showing the first part of this report. Read the rest on the web.</T>
-      )}
-    </Solid>
-  );
-}
-
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;
+
+/** The review lines the shared logic words itself; the others are the runner's or the reviewer's. */
+const CHECK_WORDS = new Set(['Not independently checked.', 'Independently checked.']);
 
 /**
  * One task in full, on a dense opaque page: what it did and did not do, how sure it is, the review,
@@ -92,6 +72,7 @@ export function TaskDetails({
   onClose: () => void;
 }) {
   const t = useTheme();
+  const { t: say, tx } = useT();
   const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
   const [error, setError] = useState('');
@@ -127,35 +108,41 @@ export function TaskDetails({
   const review = reviewWords(manifest?.done, verdict);
   const { steps } = stepsOf(task.progress);
   const pull = results ? pullRequestOf(results) : undefined;
-  const title = displayText(task.title ?? 'Task');
+  const title = task.title ? displayText(task.title) : say('task.title');
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       {/* A modal is its own native window: it needs its own insets, or the header sits under the status bar. */}
       <SafeAreaProvider>
         <SafeAreaView style={{ flex: 1, backgroundColor: t.solid }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 }}>
-            <PillButton label="Back" onPress={onClose} />
+            <PillButton label={say('common.back')} id="Back" onPress={onClose} />
           </View>
           <ScrollView
             contentContainerStyle={{ padding: 16, gap: 16 }}
-            accessibilityLabel={`Task: ${title}`}
+            accessibilityLabel={say('details.page', { title })}
           >
             <T kind="title">{title}</T>
             <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
               <StatusMark tone={TONE[task.state as keyof typeof TONE] ?? 'attention'} />
               <T kind="muted" style={{ flex: 1 }}>
-                {taskLabel(task)}
-                {task.costUsd !== undefined && ' · Cost '}
+                {tx(taskLabel(task))}
+                {task.costUsd !== undefined && ` · ${say('task.cost')} `}
                 {task.costUsd !== undefined && (
                   <T kind="muted" style={mono}>
-                    {`${dollars(task.costUsd)}${task.budgetUsd !== undefined ? ` of ${dollars(task.budgetUsd)}` : ''}`}
+                    {task.budgetUsd !== undefined
+                      ? say('task.ofBudget', {
+                          spent: tx(dollars(task.costUsd)),
+                          budget: tx(dollars(task.budgetUsd)),
+                        })
+                      : tx(dollars(task.costUsd))}
                   </T>
                 )}
               </T>
             </View>
             {pull && (
               <PillButton
-                label={`Pull request · ${hostOf(pull)}`}
+                label={say('details.pullRequest', { host: hostOf(pull) })}
+                id={`Pull request · ${hostOf(pull)}`}
                 primary
                 external
                 onPress={() => openLink(pull)}
@@ -164,39 +151,41 @@ export function TaskDetails({
             {task.failureReason ? <FailureNote reason={task.failureReason} /> : null}
             {manifest && (
               <View style={{ gap: 8 }}>
-                <T kind="heading">Outcome</T>
+                <T kind="heading" testID="details-outcome">
+                  {say('details.outcome')}
+                </T>
                 <T kind="body" selectable>
                   {displayText(manifest.summary)}
                 </T>
-                <T kind="muted">{confidenceWords(manifest.confidence)}</T>
-                <List title="Done" items={done} />
-                <List title="Not done" items={manifest.notDone} />
-                <List title="Known issues" items={manifest.knownIssues} />
+                <T kind="muted">{tx(confidenceWords(manifest.confidence))}</T>
+                <List title={say('details.done')} items={done} />
+                <List title={say('details.notDone')} items={manifest.notDone} />
+                <List title={say('details.knownIssues')} items={manifest.knownIssues} />
               </View>
             )}
             {review.length > 0 && (
               <View style={{ gap: 4 }}>
-                <T kind="heading">Review</T>
+                <T kind="heading">{say('details.review')}</T>
                 {review.map((line) => (
                   <T key={line} kind="body">
-                    {line}
+                    {CHECK_WORDS.has(line) ? tx(line) : line}
                   </T>
                 ))}
               </View>
             )}
             {steps.length > 0 && (
               <View style={{ gap: 4 }}>
-                <T kind="heading">Steps</T>
+                <T kind="heading">{say('details.steps')}</T>
                 {steps.map((step, i) => (
                   <T key={i} kind="body">{`${i + 1}. ${displayText(step)}`}</T>
                 ))}
               </View>
             )}
             <View style={{ gap: 10 }}>
-              <T kind="heading">Results</T>
-              {error ? <T kind="error">{error}</T> : null}
-              {results === undefined && <T kind="muted">Loading the results…</T>}
-              {results?.length === 0 && !error && <T kind="muted">This task left no results.</T>}
+              <T kind="heading">{say('details.results')}</T>
+              {error ? <T kind="error">{tx(error)}</T> : null}
+              {results === undefined && <T kind="muted">{say('details.loading')}</T>}
+              {results?.length === 0 && !error && <T kind="muted">{say('details.none')}</T>}
               {results?.map((result, i) => (
                 <View key={i} style={{ gap: 6 }}>
                   <T kind="small">{displayText(result.name)}</T>
@@ -206,7 +195,7 @@ export function TaskDetails({
                   {result.kind === 'link' && (
                     <PillButton label={result.url} external onPress={() => openLink(result.url)} />
                   )}
-                  {result.kind === 'failed' && <T kind="muted">This result could not be loaded.</T>}
+                  {result.kind === 'failed' && <T kind="muted">{say('details.resultFailed')}</T>}
                 </View>
               ))}
             </View>
