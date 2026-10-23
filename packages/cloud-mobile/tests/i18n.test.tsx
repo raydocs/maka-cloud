@@ -29,17 +29,28 @@ test('every string exists in all three languages, with the same values to fill i
     for (const [english, chinese] of Object.entries(phrases))
       expect([english, chinese.trim()]).not.toEqual([english, '']);
   // The web app and the server's messages name duties and kept approvals one way; the phone
-  // must not coin its own words for them.
-  for (const [table, phrases, duty, kept] of [
-    [ZH, PHRASES_ZH, '值守任务', '已记住的授权'],
-    [ZH_HANT, PHRASES_HANT, '常駐任務', '已記住的授權'],
+  // must not coin its own words for them. The web's own catalogue is read, so a change there
+  // without the phone (or here without the web) fails.
+  const web = readFileSync(join(__dirname, '../../cloud-web/src/strings.ts'), 'utf8');
+  for (const [table, phrases, duty, kept, noDuties] of [
+    [ZH, PHRASES_ZH, '常驻任务', '已记住的授权', '还没有'],
+    [ZH_HANT, PHRASES_HANT, '常駐任務', '已記住的授權', '還沒有'],
   ] as const) {
+    expect(web).toContain(`'Kept approvals': '${kept}'`);
+    expect(web).toContain(`'No duties yet.': '${noDuties}${duty}。'`);
     expect(table['me.grants']).toBe(kept);
-    for (const key of ['projects.body', 'projects.duties', 'home.watching.one'] as const)
+    for (const key of [
+      'projects.body',
+      'projects.duties',
+      'home.watching.one',
+      'home.watching.many',
+    ] as const)
       expect(table[key]).toContain(duty);
     expect(Object.values(phrases).some((text) => text.includes(duty))).toBe(true);
-    for (const coined of ['日常任务', '例行任務', '已保留'])
-      expect(Object.values(table).join('\n')).not.toContain(coined);
+    for (const coined of ['日常任务', '例行任務', '值守任务', '值守任務', '已保留'])
+      expect(
+        `${Object.values(table).join('\n')}\n${Object.values(phrases).join('\n')}`,
+      ).not.toContain(coined);
   }
   // No Traditional string is the Simplified one (a few short words are the same in both).
   const same = Object.keys(EN).filter(

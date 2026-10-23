@@ -305,11 +305,11 @@ export const ZH: Record<Key, string> = {
   'search.conversations': '对话',
   'search.tasks': '任务',
   'projects.title': '项目',
-  'projects.body': '{name} 工作过的代码仓库，以及它为每个仓库承担的值守任务。',
+  'projects.body': '{name} 工作过的代码仓库，以及它为每个仓库承担的常驻任务。',
   'projects.none': '还没有项目。{name} 在某个代码仓库里工作后，它就会出现在这里。',
   'projects.unsupported': '这个服务器不提供项目列表。',
   'projects.branch': '默认分支：{branch}',
-  'projects.duties': '值守任务：{count} 个',
+  'projects.duties': '常驻任务：{count} 个',
   'projects.dutyOn': '已开启',
   'projects.dutyOff': '已关闭',
   'projects.dutyProposed': '等你批准',
@@ -334,8 +334,8 @@ export const ZH: Record<Key, string> = {
   'home.done': '已完成',
   'home.spent': '花费',
   'home.next': '接下来要运行的',
-  'home.watching.one': '还有 1 项值守任务会在 GitHub 上有动静时启动。',
-  'home.watching.many': '还有 {count} 项值守任务会在 GitHub 上有动静时启动。',
+  'home.watching.one': '还有 1 项常驻任务会在 GitHub 上有动静时启动。',
+  'home.watching.many': '还有 {count} 项常驻任务会在 GitHub 上有动静时启动。',
   'home.recent.label': '最近的对话',
   'home.recent.title': '接着上次继续',
 
@@ -572,9 +572,9 @@ export const PHRASES_ZH: Record<string, string> = {
   'This item does not take additional context.': '这一项不能添加补充说明。',
   'The inbox is restarting. Try again in a moment.': '收件箱正在重启，请稍后再试。',
   'You have not approved this duty yet. Decide it from Home first.':
-    '你还没有批准这项值守任务，请先在首页做决定。',
+    '你还没有批准这项常驻任务，请先在首页做决定。',
   'You can have up to 20 duties on at once. Turn one off first.':
-    '最多同时开启 20 项值守任务，请先关闭一项。',
+    '最多同时开启 20 项常驻任务，请先关闭一项。',
   'This action is unavailable on this server. No change was made.':
     '这个服务器不支持此操作，没有做任何改动。',
   'Your sign-in is no longer valid. Please sign in again.': '你的登录已失效，请重新登录。',
