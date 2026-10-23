@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { ScrollView, View } from 'react-native';
+import { Devices } from '@/components/Devices';
 import { HEADER_SPACE } from '@/components/TopBar';
 import { Card, PillButton, Screen, T } from '@/components/ui';
 import { type ModeChoice, useAppearance } from '@/lib/appearance';
-import { useSession } from '@/lib/session';
+import { useSession, useWorkspace } from '@/lib/session';
 
 const CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
   { value: 'system', label: 'System' },
@@ -13,6 +14,7 @@ const CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
 
 export default function Settings() {
   const { signOut } = useSession();
+  const { client } = useWorkspace();
   const { mode, choice, setMode } = useAppearance();
   const [signOutError, setSignOutError] = useState('');
   return (
@@ -44,6 +46,7 @@ export default function Settings() {
             ))}
           </View>
         </Card>
+        <Devices client={client} />
         <Card label="Account">
           <T kind="heading">Account</T>
           <T kind="muted">

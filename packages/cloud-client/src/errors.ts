@@ -31,7 +31,7 @@ export function errorText(error: unknown): string {
   if (error instanceof Unsupported)
     return 'This action is unavailable on this server. No change was made.';
   if (error instanceof ApiError) {
-    if (error.status === 401) return 'Your invite is no longer valid. Please reconnect.';
+    if (error.status === 401) return 'Your sign-in is no longer valid. Please sign in again.';
     const known = error.code === undefined ? undefined : ERROR_TEXT[error.code];
     if (known) return known;
     if (error.status === 429) return 'Too many requests. Try again in a moment.';
