@@ -523,9 +523,9 @@ export const zhHans: Record<Key, string> = {
   'This item does not take additional context.': '这一项不能添加补充说明。',
   'The inbox is restarting. Try again in a moment.': '收件箱正在重启，请稍后再试。',
   'You have not approved this duty yet. Decide it from Home first.':
-    '你还没有批准这项值守任务，请先在首页做决定。',
+    '你还没有批准这项常驻任务，请先在首页做决定。',
   'You can have up to 20 duties on at once. Turn one off first.':
-    '最多同时开启 20 项值守任务，请先关闭一项。',
+    '最多同时开启 20 项常驻任务，请先关闭一项。',
   'This action is unavailable on this server. No change was made.':
     '这个服务器不支持此操作，没有做任何改动。',
   'Your sign-in is no longer valid. Please sign in again.': '你的登录已失效，请重新登录。',
@@ -779,9 +779,9 @@ export const zhHans: Record<Key, string> = {
   'Nothing starts until you tap its first word.': '点击建议的第一个词才会开始。',
   'What runs next': '即将运行',
   '1 more duty wakes when something happens on GitHub.':
-    '还有 1 项值守任务会在 GitHub 上有动静时启动。',
+    '还有 1 项常驻任务会在 GitHub 上有动静时启动。',
   '{p0} more duties wake when something happens on GitHub.':
-    '还有 {p0} 项值守任务会在 GitHub 上有动静时启动。',
+    '还有 {p0} 项常驻任务会在 GitHub 上有动静时启动。',
   'Start something': '开始新任务',
   'Make room for your next idea.': '给下一个想法留个位置。',
   'Tell {name} what you’d like done, in a sentence. It takes it from there.':
@@ -865,7 +865,7 @@ export const zhHans: Record<Key, string> = {
   'No projects yet': '还没有项目',
   'A project is a repository {name} looks after.': '项目就是交给 {name} 照看的仓库。',
   'Default branch:': '默认分支：',
-  'No duties yet.': '还没有值守任务。',
+  'No duties yet.': '还没有常驻任务。',
   '{mode} · about {cost}{typical} · {repo}': '{mode} · 约 {cost}{typical} · {repo}',
   ' (typical)': '（通常）',
   'Part of this was written by someone else. The task asks you before it does anything risky.':
