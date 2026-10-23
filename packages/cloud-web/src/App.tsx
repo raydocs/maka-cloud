@@ -1266,6 +1266,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           />
           <ConversationSearch
             client={session.client}
+            known={session.conversations}
             query={query}
             onChoose={(id) => {
               setTaskPage(undefined);

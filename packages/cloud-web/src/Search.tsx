@@ -4,21 +4,26 @@ import { useT } from './i18n';
 
 export function ConversationSearch({
   client,
+  known,
   query,
   onChoose,
 }: {
   client: CloudClient;
+  /** The conversations already on the page: listed at once while a fresh list loads. */
+  known?: Conversation[];
   query: string;
   onChoose: (id: string) => void;
 }) {
   const { t } = useT();
   const sequence = useRef(0);
   const [attempt, retry] = useState(0);
-  const [result, setResult] = useState<{ conversations?: Conversation[]; error?: boolean }>();
+  const [result, setResult] = useState<{ conversations?: Conversation[]; error?: boolean }>(() =>
+    known?.length ? { conversations: known } : {},
+  );
   const words = query.trim();
   useEffect(() => {
     const id = ++sequence.current;
-    setResult({});
+    setResult((shown) => (shown?.conversations ? shown : {}));
     void client.listConversations().then(
       ({ conversations }) => {
         if (sequence.current !== id) return;
@@ -32,7 +37,6 @@ export function ConversationSearch({
       sequence.current++;
     };
   }, [client, attempt]);
-  if (!words) return <p>{t('Search conversation titles.')}</p>;
   if (!result?.conversations && !result?.error) return <p role="status">{t('Loading')}</p>;
   if (result?.error)
     return (
@@ -43,10 +47,18 @@ export function ConversationSearch({
         </button>
       </p>
     );
+  // With nothing typed, every conversation is listed, as before search had states.
   const hits = result?.conversations?.filter((c) =>
     (c.title ?? '').toLocaleLowerCase().includes(words.toLocaleLowerCase()),
   );
-  if (!hits?.length) return <p>{t('No matches for “{query}”.', { query: words })}</p>;
+  if (!hits?.length)
+    return (
+      <p>
+        {words
+          ? t('No matches for “{query}”.', { query: words })
+          : t('Search conversation titles.')}
+      </p>
+    );
   return (
     <>
       {hits.map((c) => (

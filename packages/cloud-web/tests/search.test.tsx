@@ -19,7 +19,7 @@ test('loads once on opening and filters locally without loading between keystrok
   const read = vi.spyOn(client, 'listConversations').mockReturnValue(first.promise);
   const props = { client, onChoose: vi.fn() };
   const view = render(<ConversationSearch {...props} query="" />);
-  expect(screen.getByText('Search conversation titles.')).toBeTruthy();
+  expect(screen.getByRole('status').textContent).toBe('Loading');
   expect(read).toHaveBeenCalledTimes(1);
   view.rerender(<ConversationSearch {...props} query="a" />);
   expect(screen.getByRole('status').textContent).toBe('Loading');
@@ -43,8 +43,36 @@ test('loads once on opening and filters locally without loading between keystrok
   view.rerender(<ConversationSearch {...props} query="missing" />);
   expect(screen.getByText('No matches for “missing”.')).toBeTruthy();
   view.rerender(<ConversationSearch {...props} query="" />);
-  expect(screen.getByText('Search conversation titles.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Alpha' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Beta' })).toBeTruthy();
   expect(read).toHaveBeenCalledTimes(1);
+});
+test('the conversations already on the page show at once, then the fresh list replaces them', async () => {
+  const client = new CloudClient('token');
+  const fresh = deferred();
+  const read = vi.spyOn(client, 'listConversations').mockReturnValue(fresh.promise);
+  render(
+    <ConversationSearch
+      client={client}
+      known={[{ conversationId: 'a', title: 'Alpha', createdAt: 1 }]}
+      onChoose={vi.fn()}
+      query=""
+    />,
+  );
+  expect(screen.queryByRole('status')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Alpha' })).toBeTruthy();
+  expect(read).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    fresh.resolve({ conversations: [{ conversationId: 'b', title: 'Beta', createdAt: 2 }] }),
+  );
+  expect(screen.getByRole('button', { name: 'Beta' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Alpha' })).toBeNull();
+});
+test('with nothing typed and no conversations, the hint shows', async () => {
+  const client = new CloudClient('token');
+  vi.spyOn(client, 'listConversations').mockResolvedValue({ conversations: [] });
+  render(<ConversationSearch client={client} onChoose={vi.fn()} query="" />);
+  await screen.findByText('Search conversation titles.');
 });
 test('an error and Retry make exactly one new load', async () => {
   const client = new CloudClient('token');
