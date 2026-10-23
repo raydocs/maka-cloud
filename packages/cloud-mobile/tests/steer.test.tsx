@@ -103,6 +103,38 @@ test('a take-back refused because the message moved on asks the server where it 
   expect(posts(calls)[1]?.body?.messageId).toBe(posts(calls)[0]?.body?.messageId);
 });
 
+test('a check round asks about one message, however many wait', async () => {
+  const realNow = Date.now;
+  const { calls } = await openChat(running(), (call) =>
+    call.method === 'POST' && call.path === '/v1/tasks/t1/messages'
+      ? Response.json({ message: { messageId: call.body?.messageId, state: 'pending' } })
+      : undefined,
+  );
+  await screen.findByTestId('steer-chip');
+  const field = () => screen.getByTestId('field-Keep the conversation going');
+  for (const words of ['First note', 'Second note', 'Third note']) {
+    await fireEvent.changeText(field(), words);
+    await fireEvent.press(screen.getByTestId('button-Send message'));
+    await screen.findByText(words);
+  }
+  await waitForPosts(calls, 3);
+  const later = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + 9_000);
+  try {
+    await act(async () => push(taskEvent(1005, { type: 'task_progress', note: 'Ran the tests' })));
+  } finally {
+    later.mockRestore();
+  }
+  // One more: the oldest, sent again unchanged.
+  expect(posts(calls)).toHaveLength(4);
+  expect(posts(calls)[3]?.body?.messageId).toBe(posts(calls)[0]?.body?.messageId);
+});
+
+const waitForPosts = async (calls: Call[], count: number) => {
+  for (let i = 0; i < 20 && posts(calls).length < count; i++)
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  expect(posts(calls)).toHaveLength(count);
+};
+
 test('an earlier message the agent has not read keeps its own "Take back"', async () => {
   const { calls } = await openChat(running(), (call) => {
     if (call.method === 'POST' && call.path === '/v1/tasks/t1/messages')

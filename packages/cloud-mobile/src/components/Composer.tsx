@@ -206,12 +206,19 @@ function useSheetData(visible: boolean) {
   const { client, conversations } = useWorkspace();
   const [items, setItems] = useState<InboxItem[]>([]);
   const [tasks, setTasks] = useState<Record<string, TaskView[]>>({});
+  // What an earlier opening read may be out of date: dropped as the sheet opens, before it is drawn,
+  // so nothing is shown as current until it is read again.
+  const [wasVisible, setWasVisible] = useState(visible);
+  if (visible !== wasVisible) {
+    setWasVisible(visible);
+    if (visible) {
+      setItems([]);
+      setTasks({});
+    }
+  }
   useEffect(() => {
     if (!visible) return;
     let current = true;
-    // What an earlier opening read may be out of date: nothing is shown as current until read again.
-    setItems([]);
-    setTasks({});
     client.listInbox('open').then(
       (open) => {
         if (current) setItems(open);

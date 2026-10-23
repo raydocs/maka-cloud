@@ -378,7 +378,7 @@ function SteerBubble({
   onWithdraw?: () => void;
 }) {
   const theme = useTheme();
-  const { t: say } = useT();
+  const { t: say, tx } = useT();
   const status = say(STEER_WORDS[phase]);
   return (
     <View
@@ -416,6 +416,12 @@ function SteerBubble({
           onPress={onWithdraw}
         />
       )}
+      {/* Why its own take-back failed; the latest message says so by the composer instead. */}
+      {onWithdraw && steer.failed && phase !== 'failed' ? (
+        <View accessibilityLiveRegion="polite">
+          <T kind="small">{tx(steer.failed)}</T>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -689,8 +695,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     const padding = dock + 16;
     const hidden = [...tops.current.values()]
       .map(({ y, height }) => ({ top: at.content - padding - at.footer + y, height }))
-      // Below the composer's top edge, or scrolled off above: none of it can be seen.
-      .filter(({ top, height }) => top > at.offset + at.viewport - dock || top + height < at.offset)
+      // Below the composer's top edge, or scrolled up under the top bar: none of it can be seen.
+      .filter(
+        ({ top, height }) =>
+          top > at.offset + at.viewport - dock || top + height < at.offset + TOP_BAR,
+      )
       .map(({ top }) => top)
       .sort((a, b) => a - b);
     setHiddenCards((now) =>
@@ -772,6 +781,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const latest = useRef({ steering, moving });
   latest.current = { steering, moving };
   const checked = useRef(Date.now());
+  const turn = useRef(0);
   /** Checks run only while this screen is in front and the app is in the foreground. */
   const inFront = useRef(false);
   useFocusEffect(
@@ -784,18 +794,21 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   );
   useEffect(() => {
     if (activity === '') return;
-    // One request per task each round: its oldest message the agent may not have read yet (the
-    // server hands them over in order), so a backlog does not use up the shared control budget
-    // that Stop and Take back need.
+    // One request a round, whatever the backlog: the oldest message a task may not have read yet
+    // (the server hands them over in order), taking the tasks in turn. At most about ten a minute,
+    // so Stop and Take back keep most of the shared control budget (30 a minute).
     const check = () => {
-      if (!inFront.current || AppState.currentState === 'background') return;
+      const app = AppState.currentState;
+      // (Before the first report an app's state can read as unknown: that does not hold checks.)
+      if (!inFront.current || app === 'background' || app === 'inactive') return;
       checked.current = Date.now();
-      const asked = new Set<string>();
-      for (const steer of latest.current.moving) {
-        if (asked.has(steer.taskId)) continue;
-        asked.add(steer.taskId);
-        latest.current.steering.check(steer.id);
-      }
+      const oldest = new Map<string, string>();
+      for (const steer of latest.current.moving)
+        if (!oldest.has(steer.taskId)) oldest.set(steer.taskId, steer.id);
+      const ids = [...oldest.values()];
+      if (ids.length === 0) return;
+      const id = ids[turn.current++ % ids.length];
+      if (id) latest.current.steering.check(id);
     };
     if (Date.now() - checked.current >= 8_000) check();
     const timer = setInterval(check, 20_000);
@@ -848,7 +861,10 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     const first = hiddenCards[0];
     if (first === undefined) return;
     atEnd.current = false;
-    scroll.current?.scrollToOffset({ offset: Math.max(0, first - 24), animated: !reduce });
+    scroll.current?.scrollToOffset({
+      offset: Math.max(0, first - TOP_BAR - 16),
+      animated: !reduce,
+    });
   };
   const stopping = roots.some((task) => task.stopPending || task.treeStopPending);
   // A question or decision waiting on the person is not work; a reply still owed is.

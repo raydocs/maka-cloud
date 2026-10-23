@@ -74,8 +74,9 @@ ours, which tokens carry it, how the language works, and what comes next.
   latest message, and on the bubble of each earlier one. A take-back the server refuses (409) does
   not assume the message was read; the phone asks where it stands. The phone asks again by sending
   the same message id and words, which the server answers without applying twice: when the task
-  shows a new step (at most every 8 seconds) and every 20 seconds, one request per task (its oldest
-  unread message), only while Chat is in front and the app is not in the background, and not at all
+  shows a new step (at most every 8 seconds) and every 20 seconds, one request a round (the oldest
+  unread message of one task, the tasks taken in turn), only while Chat is in front and the app is
+  active, and not at all
   for a minute after a 429, so Stop and Take back keep the shared control budget. A refused first
   send gives the words back to the box and turns the chip off; a refused resend keeps the message,
   failed, with "Delete".
@@ -84,7 +85,7 @@ ours, which tokens carry it, how the language works, and what comes next.
   resending." under it, and the running task's state is its own line, as last seen. A stop the
   machine has not confirmed (`stopPending`) is a third line. Nothing in them uses the attention
   colour, so a dropped connection never reads as a failure. Decision cards none of which can be
-  seen (below the composer or scrolled off above) show an "N waiting" chip by the composer, N
+  seen (below the composer, or scrolled up under the top bar) show an "N waiting" chip by the composer, N
   counting only those; a tap scrolls to the first of them.
 - **The working clock.** A work block that is running shows "Working for m:ss" from the earliest
   start of its running tasks, ticking each second. Only the digits change, with or without Reduce

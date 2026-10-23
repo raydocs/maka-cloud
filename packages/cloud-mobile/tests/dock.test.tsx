@@ -93,7 +93,7 @@ test('a decision below the screen shows "N waiting" by the composer; a tap goes 
     const chip = await screen.findByTestId('waiting-chip');
     expect(chip).toHaveTextContent('1 waiting');
     await fireEvent.press(chip);
-    expect(toCard).toHaveBeenCalledWith(expect.objectContaining({ offset: 2524 }));
+    expect(toCard).toHaveBeenCalledWith(expect.objectContaining({ offset: 2472 }));
     // Scrolled down to it: the card is on screen and the chip goes.
     await act(async () =>
       fireEvent.scroll(list, {
@@ -147,7 +147,7 @@ test('"N waiting" counts only the cards that cannot be seen, above or below', as
     await scrollTo(1700);
     expect(await screen.findByTestId('waiting-chip')).toHaveTextContent('1 waiting');
     await fireEvent.press(screen.getByTestId('waiting-chip'));
-    expect(toCard).toHaveBeenCalledWith(expect.objectContaining({ offset: 2544 }));
+    expect(toCard).toHaveBeenCalledWith(expect.objectContaining({ offset: 2492 }));
     // Both in view: no chip.
     await scrollTo(2400);
     expect(screen.queryByTestId('waiting-chip')).toBeNull();
