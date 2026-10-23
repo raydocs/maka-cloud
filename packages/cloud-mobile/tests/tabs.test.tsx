@@ -58,9 +58,10 @@ test('search sits at the top left and Me at the top right; each opens its own sc
   expect(view.getPathname()).toBe('/me');
 });
 
-// Three words between two round buttons: on a narrow phone or with large text the pill's
-// sections give way and their words shrink to one line, rather than being cut off.
-test('the pill fits a narrow screen: its sections shrink and keep one line each', async () => {
+// Three words between two round buttons: the pill is set up so that on a narrow phone or with
+// large text its sections give way and their words shrink to one line rather than being cut off.
+// The test renderer does not lay out, so this checks that set-up; the fit itself is for a device.
+test('the pill is set up to fit a narrow screen: sections that shrink, one line each', async () => {
   await app();
   await screen.findByText('Home screen');
   for (const id of ['tab-home', 'tab-chat', 'tab-projects']) {

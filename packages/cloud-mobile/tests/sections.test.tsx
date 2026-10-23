@@ -1,5 +1,5 @@
 import type { TaskView } from '@maka-cloud/client';
-import { act, fireEvent, render, screen } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, within } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
 import { Text } from 'react-native';
 import Chat from '@/app/(tabs)/chat';
@@ -62,6 +62,13 @@ test.each([
   await signedIn(<Chat />, {}, theme);
   const heading = await screen.findByText('What would you like to get done?');
   expect(flat(heading.props.style).color).toBe(theme.ink);
+});
+
+test('the empty Chat scrolls, so large text or the keyboard never hides its ideas', async () => {
+  await signedIn(<Chat />, {});
+  const scroller = await screen.findByTestId('new-conversation');
+  expect(scroller.props.keyboardShouldPersistTaps).toBe('handled');
+  expect(within(scroller).getByTestId('button-home.idea.1')).toBeTruthy();
 });
 
 test('Projects lists each repository with its branch and duties', async () => {

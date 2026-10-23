@@ -22,6 +22,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
+  ScrollView,
   View,
 } from 'react-native';
 import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
@@ -128,14 +129,19 @@ function NewConversation() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={{ flex: 1 }}
     >
-      <View
-        style={{
-          flex: 1,
+      {/* Scrolls, so large text or the keyboard never hides the ideas or a failure under the
+          composer. */}
+      <ScrollView
+        testID="new-conversation"
+        style={{ flex: 1 }}
+        contentContainerStyle={{
           padding: 20,
           paddingTop: TOP_BAR + 16,
           paddingBottom: dock + 16,
           gap: 12,
         }}
+        scrollIndicatorInsets={{ top: TOP_BAR, bottom: dock }}
+        keyboardShouldPersistTaps="handled"
       >
         <Opening
           // While the conversation starts, the draft is what is being sent.
@@ -146,7 +152,7 @@ function NewConversation() {
           }}
         />
         {failure ? <T kind="error">{tx(failure)}</T> : null}
-      </View>
+      </ScrollView>
       <Dock height={dock} onHeight={setDock}>
         <Composer
           draft={draft}
