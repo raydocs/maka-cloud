@@ -1,3 +1,4 @@
+import { SetupCards } from './SetupCards';
 import { useT } from './i18n';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ArrowUp } from 'lucide-react';
@@ -9,6 +10,7 @@ import {
   displayText,
   doneSince,
   dollars,
+  type ErrorText,
   errorText,
   finishedParts,
   HomeFeed,
@@ -113,6 +115,7 @@ export function Home({
   active = true,
   conversations,
   onStarted,
+  onSetup,
   onOpen,
   onOpenTask,
   now = Date.now,
@@ -123,6 +126,7 @@ export function Home({
   active?: boolean;
   conversations: Conversation[];
   onStarted: (conversation: Conversation) => void;
+  onSetup?: (action: 'settings' | 'projects' | 'chat') => void;
   onOpen: (conversationId: string) => void;
   /** Opens a finished task's own page; without it a finished line opens its conversation. */
   onOpenTask?: (task: TaskView) => void;
@@ -146,7 +150,7 @@ export function Home({
   const [onboarding, setOnboarding] = useState(() => !onboardingSkipped());
   const [workMode, setWorkMode] = useState<Mode | undefined>();
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState('');
+  const [startError, setStartError] = useState<ErrorText>('');
   const starter = useMemo(() => new ConversationStarter(client, Date.now, pendingSends), [client]);
   // `now` may be a new function each render; the feed keeps asking the latest one.
   const clock = useRef(now);
@@ -318,6 +322,13 @@ export function Home({
         )}
       </div>
       <div className="home-main">
+        {!startOnly && onSetup && (
+          <SetupCards
+            client={client}
+            onAction={onSetup}
+            version={active ? conversations.length + 1 : -1}
+          />
+        )}
         {!hideStart && onboarding && conversations.length === 0 && (
           <Onboarding
             onPick={(sentence) => {

@@ -1,3 +1,4 @@
+import { ApiError, errorText, quotaText } from '@maka-cloud/client';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
@@ -206,4 +207,35 @@ test('every translated server choice is one the server offers, with that label',
   expect(zh.choice('ok', 'Sure')).toBe('Sure');
   expect(zh.choice('maybe', 'Got it')).toBe('Got it');
   expect(translator('en').choice('reject', "Don't do it")).toBe("Don't do it");
+});
+
+test.each(LANGUAGES)('quota errors use the phone language (%s)', (lang) => {
+  const NativeFormat = Intl.DateTimeFormat;
+  const format = jest
+    .spyOn(Intl, 'DateTimeFormat')
+    .mockImplementation(
+      (locale, options) => new NativeFormat(locale, { ...options, hour12: false }),
+    );
+  try {
+    const quota = {
+      scope: 'day' as const,
+      usedUsd: 5,
+      limitUsd: 5,
+      resetsAt: Date.UTC(2099, 9, 24),
+      nextStep: 'wait' as const,
+    };
+    expect(translator(lang).tx(errorText(new ApiError(402, 'budget_exceeded', { quota })))).toBe(
+      quotaText(quota, lang),
+    );
+    const service = {
+      scope: 'service' as const,
+      resetsAt: quota.resetsAt,
+      nextStep: 'wait' as const,
+    };
+    expect(
+      translator(lang).tx(errorText(new ApiError(402, 'budget_exceeded', { quota: service }))),
+    ).toBe(quotaText(service, lang));
+  } finally {
+    format.mockRestore();
+  }
 });

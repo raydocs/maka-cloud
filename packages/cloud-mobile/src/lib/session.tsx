@@ -3,6 +3,7 @@ import {
   type Conversation,
   openWorkspace,
   type VisitStore,
+  type ErrorText,
   errorText,
   ApiError,
 } from '@maka-cloud/client';
@@ -52,7 +53,7 @@ export type Session =
   | {
       status: 'out';
       server: string;
-      error: string;
+      error: ErrorText;
       /** An account is still saved on this device (the last try failed for a reason other than a refused invite). */
       saved?: boolean;
     }

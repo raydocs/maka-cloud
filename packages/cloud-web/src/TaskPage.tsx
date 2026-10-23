@@ -7,6 +7,7 @@ import {
   finishedParts,
   displayText,
   dollars,
+  type ErrorText,
   errorText,
   type InboxItem,
   type LoadedResult,
@@ -67,7 +68,7 @@ export function TaskPage({
   const { t, shared, duration } = useT();
   const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [timeline, setTimeline] = useState<TimelineStep[]>([]);
   const [next, setNext] = useState<number>();
   const [timelineError, setTimelineError] = useState(false);

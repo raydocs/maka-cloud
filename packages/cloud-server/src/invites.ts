@@ -199,6 +199,13 @@ export class InviteStore {
    * The language the server speaks to the invite's person, read from the file every time: what they
    * chose, else the default. Also the default for an invite that is unknown or revoked.
    */
+  languageChosen(inviteId: string): boolean {
+    const row = this.db
+      .prepare('SELECT language FROM invites WHERE invite_id = ? AND revoked_at IS NULL')
+      .get(inviteId) as { language: string | null } | undefined;
+    return isLanguage(row?.language);
+  }
+
   language(inviteId: string): Language {
     const row = this.db
       .prepare('SELECT language FROM invites WHERE invite_id = ? AND revoked_at IS NULL')

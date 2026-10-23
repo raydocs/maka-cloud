@@ -2,6 +2,12 @@
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
   "Couldn't find that task.": "Couldn't find that task.",
+  Usage: 'Usage',
+  'Choose your language': 'Choose your language',
+  'Connect a project': 'Connect a project',
+  'Ask the owner for model access': 'Ask the owner for model access',
+  'Send your first message': 'Send your first message',
+  Later: 'Later',
   'Slow down. Try again in a moment.': 'Slow down. Try again in a moment.',
   'Too many open views. Wait a moment, then reconnect.':
     'Too many open views. Wait a moment, then reconnect.',
@@ -574,6 +580,12 @@ export const en = {
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
   "Couldn't find that task.": '找不到该任务。',
+  Usage: '用量',
+  'Choose your language': '选择语言',
+  'Connect a project': '连接项目',
+  'Ask the owner for model access': '请联系所有者配置模型 API 密钥',
+  'Send your first message': '发送第一条消息',
+  Later: '稍后',
   'Slow down. Try again in a moment.': '请放慢操作，稍后再试。',
   'Too many open views. Wait a moment, then reconnect.': '打开的视图过多。请稍候再重新连接。',
   'Delivery not confirmed. Your message is back in the draft.': '尚未确认送达。消息已放回草稿。',
@@ -1105,6 +1117,12 @@ export const zhHans: Record<Key, string> = {
 
 export const zhHant: Record<Key, string> = {
   "Couldn't find that task.": '找不到該任務。',
+  Usage: '用量',
+  'Choose your language': '選擇語言',
+  'Connect a project': '連結專案',
+  'Ask the owner for model access': '請聯絡擁有者設定模型 API 金鑰',
+  'Send your first message': '傳送第一則訊息',
+  Later: '稍後',
   'Slow down. Try again in a moment.': '請放慢操作，稍後再試。',
   'Too many open views. Wait a moment, then reconnect.': '開啟的檢視過多。請稍候再重新連線。',
   'Delivery not confirmed. Your message is back in the draft.': '尚未確認送達。訊息已放回草稿。',

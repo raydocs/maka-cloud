@@ -3,6 +3,7 @@ import {
   type Conversation,
   ConversationStarter,
   displayText,
+  type ErrorText,
   errorText,
   type ProjectView,
   Unsupported,
@@ -19,7 +20,7 @@ type Loaded =
   | { kind: 'loading' }
   | { kind: 'projects'; projects: ProjectView[] }
   | { kind: 'unsupported' }
-  | { kind: 'failed'; message: string };
+  | { kind: 'failed'; message: ErrorText };
 
 /**
  * Projects: the repositories the agent works in (the web's Projects page, from the same
@@ -51,7 +52,7 @@ export default function Projects() {
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [failure, setFailure] = useState('');
+  const [failure, setFailure] = useState<ErrorText>('');
   const [dock, setDock] = useState(76);
   const { openSheet, sheet } = useConversationSheet(() => router.navigate('/chat'));
   const send = () => {
