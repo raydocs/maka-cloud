@@ -10,13 +10,18 @@ function load(
   language = 'en-US',
   saved = new Map<string, string>(),
   windows: Array<{
+    id?: string;
+    visibilityState?: string;
     url: string;
     focus: () => Promise<unknown>;
     postMessage: (data: unknown) => void;
   }> = [],
 ) {
+  if (!saved.has('/.maka-account')) saved.set('/.maka-account', 'account-a');
   const caches = {
     open: async () => ({
+      keys: async () => [...saved.keys()],
+      delete: async (key: string) => saved.delete(key),
       put: async (key: string, value: Response) => {
         saved.set(key, await value.text());
       },
@@ -40,7 +45,7 @@ function load(
     location: { origin: 'https://maka.example.test' },
     navigator: { languages: [language] },
     clients: {
-      matchAll: async () => windows,
+      matchAll: async () => windows.map((client) => ({ id: 'tab', ...client })),
       openWindow: async (path: string) => {
         opened.push(path);
       },
@@ -54,28 +59,38 @@ function load(
     URLSearchParams,
     Object,
   });
-  const push = async (data: unknown) => {
+  const push = async (data: unknown, tagged = true) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('push')?.({
-      data:
-        data === undefined ? null : { json: () => (data instanceof Error ? raise(data) : data) },
+      data: {
+        json: () =>
+          tagged
+            ? {
+                ...(data instanceof Error ? raise(data) : (data as object)),
+                accountTag: (data as { accountTag?: string } | null)?.accountTag ?? 'account-a',
+              }
+            : data,
+      },
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
   };
-  const message = async (language: string, origin = 'https://maka.example.test') => {
+  const message = async (
+    language: string | Record<string, unknown>,
+    origin = 'https://maka.example.test',
+  ) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('message')?.({
-      source: { url: `${origin}/` },
-      data: { type: 'maka.language', language },
+      source: { id: 'tab', url: `${origin}/` },
+      data: typeof language === 'string' ? { type: 'maka.language', language } : language,
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
   };
-  const click = async (path: string) => {
+  const click = async (path: string, accountTag = 'account-a') => {
     const waits: Promise<unknown>[] = [];
     listeners.get('notificationclick')?.({
-      notification: { close() {}, data: { path } },
+      notification: { close() {}, data: { path, accountTag } },
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
@@ -112,6 +127,7 @@ test('a task message and a spend alert each show their own fixed text', async ()
     [SPEND.title, SPEND.body, SPEND.tag],
   ]);
   expect(worker.shown[0]?.options.data).toEqual({
+    accountTag: 'account-a',
     path: '/?conversation=cnv_1&task=tsk_1',
     rank: 2,
   });
@@ -130,10 +146,10 @@ test('nothing a payload carries reaches the notification', async () => {
   const [only] = worker.shown;
   expect(only?.title).toBe(SPEND.title);
   expect(JSON.stringify(only)).not.toMatch(/attacker|500|123|click/u);
-  expect(only?.options.data).toEqual({ path: '/' });
+  expect(only?.options.data).toEqual({ accountTag: 'account-a', path: '/' });
 });
 
-test('an unknown, malformed, missing or inherited type shows the default text, never the payload', async () => {
+test('authenticated unknown types show neutral text; malformed JSON without an account is dropped', async () => {
   const worker = load();
   for (const payload of [
     { type: 'something.new', body: 'x' },
@@ -149,7 +165,7 @@ test('an unknown, malformed, missing or inherited type shows the default text, n
   ]) {
     await worker.push(payload);
   }
-  expect(worker.shown).toHaveLength(10);
+  expect(worker.shown).toHaveLength(9);
   for (const shown of worker.shown) {
     expect([shown.title, shown.options.body, shown.options.tag]).toEqual([
       'Something needs a look',
@@ -239,7 +255,7 @@ test.each([
   const worker = load(locale);
   await worker.push({ type: 'future.type', taskId: 'one' });
   expect(worker.shown[0]?.title).toBe(title);
-  expect(worker.shown[0]?.options.data).toEqual({ path: '/?inbox=1' });
+  expect(worker.shown[0]?.options.data).toEqual({ accountTag: 'account-a', path: '/?inbox=1' });
 });
 
 test('click opens the payload target and refuses external destinations', async () => {
@@ -257,6 +273,7 @@ test('the server terminal envelope preserves failed and stopped outcomes', async
   expect(new Set(worker.shown.map((n) => n.options.tag)).size).toBe(1);
   await worker.push({ type: 'approval.required', taskId: 'same', conversationId: 'chat' });
   expect(worker.shown.at(-1)?.options.data).toEqual({
+    accountTag: 'account-a',
     path: '/?conversation=chat&task=same&decision=1',
   });
 });
@@ -265,6 +282,7 @@ test('existing uncontrolled clients receive in-app links without navigation or r
   const focus = vi.fn(async () => {});
   const postMessage = vi.fn();
   const worker = load('en', new Map(), [{ url: 'https://maka.example.test/', focus, postMessage }]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a' });
   await worker.click('/?task=one');
   expect(focus).toHaveBeenCalledOnce();
   expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/?task=one' });
@@ -281,6 +299,7 @@ test('a client that cannot be messaged falls back to a new window', async () => 
       },
     },
   ]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a' });
   await worker.click('/?task=one');
   expect(worker.opened).toEqual(['/?task=one']);
 });
@@ -302,4 +321,60 @@ test('approval and unknown tags stay separate; terminal replaces ongoing and res
   expect(worker.shown.at(-1)?.options.renotify).toBe(true);
   await worker.push({ type: 'task.running', taskId: 'one' });
   expect(worker.shown).toHaveLength(5);
+});
+
+test('mismatched and signed-out pushes are dropped; old clicks open root after switching accounts', async () => {
+  const saved = new Map<string, string>();
+  const worker = load('en', saved);
+  await worker.push({ type: 'task.finished', accountTag: 'account-b' });
+  await worker.push({ type: 'task.finished' }, false);
+  expect(worker.shown).toHaveLength(0);
+  await worker.push({ type: 'task.finished', taskId: 'one' });
+  expect(worker.shown).toHaveLength(1);
+  await worker.message({ type: 'maka.context', accountTag: 'account-b' });
+  await worker.click('/?conversation=private');
+  expect(worker.opened).toEqual(['/']);
+  await worker.message({ type: 'maka.context', accountTag: null });
+  await worker.push({ type: 'task.finished', accountTag: 'account-b' });
+  expect(worker.shown).toHaveLength(1);
+  const restarted = load('en', saved);
+  await restarted.push({ type: 'spend.alert' });
+  expect(restarted.shown).toHaveLength(0);
+});
+
+test('visible conversations suppress banners but retain terminal ordering across restart', async () => {
+  const saved = new Map<string, string>();
+  const tab = {
+    id: 'tab',
+    visibilityState: 'visible',
+    url: 'https://maka.example.test/',
+    focus: async () => {},
+    postMessage: () => {},
+  };
+  const worker = load('en', saved, [tab]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' });
+  await worker.push({ type: 'task.finished', taskId: 'one', conversationId: 'chat' });
+  expect(worker.shown).toHaveLength(0);
+  const restarted = load('en', saved, [tab]);
+  await restarted.push({ type: 'task.finished', taskId: 'other', conversationId: 'chat' });
+  expect(restarted.shown).toHaveLength(0);
+  await restarted.push({ type: 'task.running', taskId: 'one', conversationId: 'chat' });
+  expect(restarted.shown).toHaveLength(0);
+  tab.visibilityState = 'hidden';
+  await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: null });
+  await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
+  expect(worker.shown).toHaveLength(1);
+});
+
+test('a matching notification cannot deep-link an existing tab of another account', async () => {
+  const postMessage = vi.fn();
+  const saved = new Map([
+    ['/.maka-account', 'account-a'],
+    ['/.maka-context/tab', JSON.stringify({ tag: 'account-b' })],
+  ]);
+  const worker = load('en', saved, [
+    { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
+  ]);
+  await worker.click('/?conversation=private', 'account-a');
+  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/' });
 });

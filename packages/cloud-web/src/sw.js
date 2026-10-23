@@ -61,6 +61,28 @@ function pathOf(payload, known) {
   return query.size ? '/?' + query.toString() : '/';
 }
 
+let pushQueue = Promise.resolve();
+async function contextOf(client) {
+  if (!client.id) return undefined;
+  try {
+    return await (
+      await (
+        await caches.open('maka-context')
+      ).match('/.maka-context/' + encodeURIComponent(client.id))
+    )?.json();
+  } catch {
+    return undefined;
+  }
+}
+const ACCOUNT_URL = '/.maka-account';
+async function accountTag() {
+  try {
+    return await (await (await caches.open('maka-account')).match(ACCOUNT_URL))?.text();
+  } catch {
+    return undefined;
+  }
+}
+
 const LANGUAGE_CACHE = 'maka-language';
 const LANGUAGE_URL = '/.maka-language';
 
@@ -69,6 +91,27 @@ self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim(
 
 self.addEventListener('message', (event) => {
   if (!event.source?.url || new URL(event.source.url).origin !== self.location.origin) return;
+  if (event.data?.type === 'maka.context') {
+    const work = pushQueue.then(async () => {
+      const tag = identifier(event.data.accountTag) || '';
+      await (await caches.open('maka-account')).put(ACCOUNT_URL, new Response(tag));
+      const contexts = await caches.open('maka-context');
+      await contexts.put(
+        '/.maka-context/' + encodeURIComponent(event.source.id),
+        new Response(
+          JSON.stringify({
+            tag,
+            conversation: identifier(event.data.conversationId),
+          }),
+        ),
+      );
+      const keys = await contexts.keys();
+      for (const key of keys.slice(0, Math.max(0, keys.length - 100))) await contexts.delete(key);
+    });
+    pushQueue = work.catch(() => {});
+    event.waitUntil(work);
+    return;
+  }
   const language = event.data?.type === 'maka.language' ? event.data.language : undefined;
   if (
     language !== 'system' &&
@@ -105,7 +148,6 @@ async function language() {
     : 'zh-Hans';
 }
 
-let pushQueue = Promise.resolve();
 self.addEventListener('push', (event) => {
   const payload = payloadOf(event);
   const known = typeof payload.type === 'string' && Object.hasOwn(NOTIFICATIONS, payload.type);
@@ -118,6 +160,8 @@ self.addEventListener('push', (event) => {
         : undefined);
   const shown = known ? NOTIFICATIONS[terminal || payload.type] : NEUTRAL;
   const work = pushQueue.then(async () => {
+    const account = await accountTag();
+    if (!account || payload.accountTag !== account) return;
     const table = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[await language()];
     const task = identifier(payload.taskId);
     const taskState = known && payload.type.startsWith('task.');
@@ -129,6 +173,28 @@ self.addEventListener('push', (event) => {
         : taskState && task
           ? 'maka-task:' + encodeURIComponent(task)
           : shown.tag;
+    const records = await caches.open('maka-task-terminal');
+    const recordKey = '/.maka-terminal/' + account + '/' + encodeURIComponent(task || '');
+    if (rank === 1 && (await records.match(recordKey))) return;
+    if (rank === 2 && task) {
+      await records.put(recordKey, new Response('terminal'));
+      const keys = await records.keys();
+      for (const key of keys.slice(0, Math.max(0, keys.length - 200))) await records.delete(key);
+    }
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const contexts = await Promise.all(windows.map(contextOf));
+    if (
+      identifier(payload.conversationId) &&
+      windows.some((client, index) => {
+        const context = contexts[index];
+        return (
+          client.visibilityState === 'visible' &&
+          context?.tag === account &&
+          context.conversation === payload.conversationId
+        );
+      })
+    )
+      return;
     const previous = taskState ? await self.registration.getNotifications({ tag }) : [];
     if (previous.some((notice) => notice.data?.rank > rank)) return;
     await self.registration.showNotification(table[shown.title], {
@@ -137,7 +203,7 @@ self.addEventListener('push', (event) => {
       ...(rank === 2 && previous.some((notice) => notice.data?.rank === 1)
         ? { renotify: true }
         : {}),
-      data: { path: pathOf(payload, known), ...(rank ? { rank } : {}) },
+      data: { accountTag: account, path: pathOf(payload, known), ...(rank ? { rank } : {}) },
       ...(shown.approval ? { actions: [{ action: 'open', title: table.Open }] } : {}),
     });
   });
@@ -151,7 +217,15 @@ self.addEventListener('notificationclick', (event) => {
     (async () => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       const own = windows.find((client) => new URL(client.url).origin === self.location.origin);
-      const raw = event.notification.data?.path;
+      await pushQueue;
+      const account = await accountTag();
+      const context = own ? await contextOf(own) : undefined;
+      const raw =
+        account &&
+        (!own || context?.tag === account) &&
+        event.notification.data?.accountTag === account
+          ? event.notification.data?.path
+          : '/';
       const target = new URL(typeof raw === 'string' ? raw : '/', self.location.origin);
       const path = target.origin === self.location.origin ? target.pathname + target.search : '/';
       if (own) {

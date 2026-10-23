@@ -36,7 +36,7 @@ import type { InboxRoutes } from './inbox.js';
 import type { AccountStore } from './accounts.js';
 import type { AuthRoutes } from './auth-routes.js';
 import type { InviteInfo, InviteStore } from './invites.js';
-import type { PushApi } from './push.js';
+import { pushAccountTag, type PushApi } from './push.js';
 import type { QuotaSource } from './quota.js';
 import { toPublicView } from './public-view.js';
 import { scrubSecretFields } from './secret-shapes.js';
@@ -519,7 +519,10 @@ export class PublicApi {
       // Who this token signs in as: the same for every session of an account, so a client can key
       // what it keeps on the device (unsent messages) by the account rather than by the token.
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
-      return respond(res, 200, { ownerId: invite.inviteId });
+      return respond(res, 200, {
+        ownerId: invite.inviteId,
+        accountTag: pushAccountTag(invite.inviteId),
+      });
     }
     if (path === '/v1/memory' && method === 'GET') {
       return respond(res, 200, this.deps.memory.profile(invite.inviteId));

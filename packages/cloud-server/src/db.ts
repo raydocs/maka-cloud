@@ -317,6 +317,7 @@ export const MIGRATIONS: readonly string[] = [
   `CREATE TABLE home_setup (owner TEXT NOT NULL, step TEXT NOT NULL, until_at INTEGER NOT NULL,
      PRIMARY KEY (owner, step));
    CREATE TABLE home_permissions (owner TEXT PRIMARY KEY, notifications_allowed INTEGER NOT NULL);`,
+  'ALTER TABLE home_seen ADD COLUMN content_version TEXT;',
 ];
 
 /**

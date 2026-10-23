@@ -1,4 +1,4 @@
-import { createECDH } from 'node:crypto';
+import { createECDH, createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import webpush from 'web-push';
 import { transaction } from './db.js';
@@ -14,6 +14,9 @@ export const DEFAULT_PUSH_HOSTS = [
   '*.push.apple.com',
   '*.notify.windows.com',
 ];
+
+export const pushAccountTag = (owner: string): string =>
+  createHash('sha256').update(`maka-push:${owner}`).digest('hex').slice(0, 32);
 
 const MAX_ENDPOINT_LENGTH = 2048;
 const SUBSCRIPTIONS_PER_INVITE = 10;
@@ -501,9 +504,16 @@ export class PushService {
         { endpoint: item.endpoint, keys: { p256dh: current.p256dh, auth: current.auth } },
         JSON.stringify(
           item.kind === 'alert'
-            ? { type: 'spend.alert', lang, title: words.title, body: words.body }
+            ? {
+                type: 'spend.alert',
+                accountTag: pushAccountTag(inviteId),
+                lang,
+                title: words.title,
+                body: words.body,
+              }
             : {
                 type: 'task.finished',
+                accountTag: pushAccountTag(inviteId),
                 conversationId: item.conversationId,
                 taskId: item.taskId,
                 state: STATE_OF[item.type] ?? item.type,

@@ -7,7 +7,7 @@ import { type TestContext, test } from 'node:test';
 import webpush from 'web-push';
 import { openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
-import { PushService, pushConfigFromEnv } from '../push.js';
+import { PushService, pushAccountTag, pushConfigFromEnv } from '../push.js';
 import { createHttpsTransport, isNonPublicAddress, type PushTransport } from '../push-transport.js';
 import { SqliteTaskStore } from '../sqlite-task-store.js';
 import { type CloudServerOptions, startCloudServer } from '../cloud-server.js';
@@ -207,7 +207,15 @@ test('a finished task sends one encrypted, signed message with ids and a state a
   assert.equal(call.headers['Content-Encoding'], 'aes128gcm');
   assert.ok(Number(call.headers.TTL) > 0);
   assert.ok(!call.body.includes(Buffer.from(taskId)), 'the body is encrypted');
+  const me = await h.api('/v1/me');
+  assert.equal(
+    ((await me.json()) as { accountTag: string }).accountTag,
+    pushAccountTag(h.inviteId),
+  );
+  assert.notEqual(pushAccountTag(h.inviteId), h.inviteId);
+  assert.notEqual(pushAccountTag(h.inviteId), pushAccountTag('another-owner'));
   assert.deepEqual(payloadOf(call, d), {
+    accountTag: pushAccountTag(h.inviteId),
     type: 'task.finished',
     conversationId,
     taskId,
@@ -876,6 +884,7 @@ test('an alert reaches the devices of the invite it is for and nobody else, with
   for (const call of fake.calls) {
     const mine = call.endpoint === a.endpoint ? a : a2;
     assert.deepEqual(payloadOf(call, mine), {
+      accountTag: pushAccountTag('inv_1'),
       type: 'spend.alert',
       lang: 'zh-Hans',
       title: '今天的花费偏高',
@@ -1138,6 +1147,7 @@ test('an alert key is a short plain name, and an alert does not disturb task mes
   const taskId = await finish('ses_1');
   await eventually(() => fake.calls.length === 2, 'the task message');
   assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    accountTag: pushAccountTag('inv_1'),
     type: 'task.finished',
     conversationId: 'cnv_1',
     taskId,
@@ -1177,6 +1187,7 @@ test('a person who reads English gets the push words in English; the ids and sta
   const taskId = await finish();
   await eventually(() => fake.calls.length === 1, 'a push');
   assert.deepEqual(payloadOf(fake.calls[0] as Call, d), {
+    accountTag: pushAccountTag(h.inviteId),
     type: 'task.finished',
     conversationId,
     taskId,
@@ -1187,6 +1198,7 @@ test('a person who reads English gets the push words in English; the ids and sta
   });
   assert.equal(await h.server.pushAlert(h.inviteId, 'spend:2026-10-22'), true);
   assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    accountTag: pushAccountTag(h.inviteId),
     type: 'spend.alert',
     lang: 'en',
     title: 'Spending is high today',
@@ -1206,6 +1218,7 @@ test('a person who reads Traditional Chinese gets the push words in Traditional 
   const taskId = await finish();
   await eventually(() => fake.calls.length === 1, 'a push');
   assert.deepEqual(payloadOf(fake.calls[0] as Call, d), {
+    accountTag: pushAccountTag(h.inviteId),
     type: 'task.finished',
     conversationId,
     taskId,
@@ -1216,6 +1229,7 @@ test('a person who reads Traditional Chinese gets the push words in Traditional 
   });
   assert.equal(await h.server.pushAlert(h.inviteId, 'spend:2026-10-22'), true);
   assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    accountTag: pushAccountTag(h.inviteId),
     type: 'spend.alert',
     lang: 'zh-Hant',
     title: '今天的花費偏高',

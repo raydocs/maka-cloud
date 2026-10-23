@@ -1132,6 +1132,30 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       window.removeEventListener('popstate', openLink);
     };
   }, [session]);
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    let current = true;
+    const send = async () => {
+      const account = session
+        ? await session.client.request<{ accountTag?: string }>('/v1/me').catch(() => undefined)
+        : undefined;
+      const registration = await navigator.serviceWorker.getRegistration();
+      if (!current) return;
+      registration?.active?.postMessage({
+        type: 'maka.context',
+        accountTag: account?.accountTag ?? null,
+        conversationId: document.visibilityState === 'visible' && view === 'chat' ? chosen : null,
+      });
+    };
+    void send();
+    document.addEventListener('visibilitychange', send);
+    navigator.serviceWorker.addEventListener('controllerchange', send);
+    return () => {
+      current = false;
+      document.removeEventListener('visibilitychange', send);
+      navigator.serviceWorker.removeEventListener('controllerchange', send);
+    };
+  }, [session, chosen, view]);
   const disconnect = () => {
     draftGeneration++;
     conversationDrafts.clear();

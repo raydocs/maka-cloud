@@ -467,3 +467,51 @@ test('a note is in the owner’s language: Chinese by default, English once they
     'PR #1 in a/b merged, CI red.',
   );
 });
+
+test('seen follows card content changes', async (t) => {
+  const { h, feed, conversation } = await setup(t);
+  const conversationId = await conversation();
+  const item = {
+    itemId: 'changing',
+    kind: 'approval',
+    conversationId,
+    createdAt: 100,
+    interrupts: false,
+  };
+  feed.items.push(item);
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  assert.ok((await homeOf(h))[0]?.seenAt);
+  item.interrupts = true;
+  assert.equal((await homeOf(h))[0]?.seenAt, null);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  assert.ok((await homeOf(h))[0]?.seenAt);
+});
+
+test('existing seen rows migrate safely and new content versions persist across reopen', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'home-version-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'home.sqlite');
+  let db = openDatabase(file);
+  const version = (db.prepare('PRAGMA user_version').get() as { user_version: number })
+    .user_version;
+  db.exec('ALTER TABLE home_seen DROP COLUMN content_version');
+  db.exec(`PRAGMA user_version = ${version - 1}`);
+  db.prepare('INSERT INTO home_seen VALUES (?, ?, ?)').run('owner', 'waiting:item', 123);
+  db.close();
+  db = openDatabase(file);
+  const store = new HomeStore(db);
+  assert.equal(store.seenAt('owner').get('waiting:item'), 123);
+  assert.equal(store.seenAt('owner', new Map([['waiting:item', 'v1']])).size, 0);
+  store.markSeen('owner', ['waiting:item'], new Map([['waiting:item', 'v1']]));
+  db.close();
+  db = openDatabase(file);
+  try {
+    const reopened = new HomeStore(db);
+    assert.ok(reopened.seenAt('owner', new Map([['waiting:item', 'v1']])).has('waiting:item'));
+    assert.equal(reopened.seenAt('owner', new Map([['waiting:item', 'v2']])).size, 0);
+  } finally {
+    db.close();
+  }
+});

@@ -274,6 +274,8 @@ export interface HomeCard {
   /** Position in the whole list, from 0. */
   rank: number;
   seenAt: number | null;
+  /** Changes when the card content changes. Absent on older servers. */
+  contentVersion?: string;
   /** The time the card is about: raised, finished, or next run. */
   at: number;
   /** On a finished card, how the task ended. */
