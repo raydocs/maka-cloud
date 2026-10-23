@@ -41,7 +41,8 @@ Order after batch 2: T21 and T22 (internal beta), then T15, T23, T24, T25,
 T28, T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are folded into
 T23, T24 and T30. T29 (iOS and Android) runs in a second lane from now on, in
 parallel with the main order. After T25 and T28: T27, T26, T14b, then T30;
-T31 joins the T29 lane. See "Direction (2026-10-21)" below T29.
+T31 joins the T29 lane. See "Direction (2026-10-21)" below T29. T32
+(connect your own computer) starts only after launch.
 
 Borrow before building (2026-10-20). The owner wants to start testing as
 soon as possible, so a task takes a working piece from these projects before
@@ -909,6 +910,124 @@ in T17.
 - Tests with fake providers: a new account without an invite is refused,
   a second provider links to the same account only after a signed-in
   confirmation, a revoked session cannot use its token.
+
+## T32: connect your own computer
+
+Depends on: launch, T28, T26, T31, the kept approvals (#381, #387).
+Scheduled after launch; do not start it before. Design in
+`docs/fork/design/reason-patterns.md` (patterns 1 to 10), learned from
+Reason's desktop worker, principles only.
+
+Goal: the person connects their own Mac (later Windows and Linux) and
+grants it project folders. The employee can then work on those folders
+with the person's own tools, confined by default, while the same
+conversation continues on the phone and the web. A dev server running on
+the Mac can be opened from the phone through our relay, and the work can
+move to a cloud box and back without losing the conversation.
+
+Design:
+
+- Package: `packages/cloud-computer` (`@maka-cloud/computer`), a small
+  worker the person installs, plus the server side in `cloud-server`. The
+  worker implements the `WorkspaceExecutor` from `packages/runtime` for a
+  granted folder, the way `InstaboxWorkspaceExecutor` does for a box, and
+  the computer is one more run target behind `cloud-runners`'
+  `SandboxProvider` seam, so the conductor, playbooks and step log do not
+  change. The interface stays the web and phone apps; the worker shows
+  only pairing, folders, host consent and status.
+- Connection: the worker only dials out. It pairs once from a signed-in
+  web or phone session, keeps its private key on the computer (the
+  keychain where the platform allows), and signs every request over
+  method, path, time, nonce, a server challenge and a body digest. The
+  computer is a device in Settings that can be renamed and removed.
+- Folders: granted only from a native picker on the computer, which
+  returns a one-time token bound to the person and the computer, valid for
+  minutes. The grant stores the resolved real path and a revision. Every
+  operation names a grant; the worker re-checks the real path itself and
+  never trusts a path from the server.
+- Operations: each carries the task epoch (T28), an attempt id, a lease
+  end, the grant revision and the capability it needs. The worker
+  heartbeats the lease, sends sequenced events the server acknowledges,
+  and refuses an operation whose grant revision is older than its own.
+  A lapsed lease lets the server re-issue to a new attempt; the old one is
+  fenced.
+- Confined by default: the platform's own sandbox, the granted folder
+  only (writes only with a write grant), a private temporary directory, no
+  network beyond the task's allowlist, a scrubbed environment, and no
+  home directory, keychains or other tools' configuration and history.
+  Host access (a full shell, background jobs, terminals) is a separate
+  consent per computer, asked in plain words, revocable in one tap, never
+  offered from inside a task. A platform without the sandbox offers no
+  confined mode and never falls back to host.
+- Permissions stay in distinct layers (task authority, kept approvals,
+  taint hold, folder grant, confinement, the operating system's own
+  privacy permissions), and every refusal names its layer and where to
+  change it.
+- Revocation: every operation records the grants it depends on. Revoking
+  a folder, host consent or the device cancels the queued and running work
+  that depends on it, in the same transaction, and the task says why it
+  stopped. The revoke dialog says beforehand how many tasks it will stop.
+- Same conversation everywhere: the computer only executes. The
+  conversation, the step log and the transcript mirror stay on the server
+  (T28), so web and phone show and steer the same task, and "computer
+  online" is shown before the person picks it for a task.
+- Preview: the worker relays HTTP and WebSocket for one port of the task's
+  own running job through an outbound tunnel to our relay, authenticated
+  by the person's session. It proves the listener belongs to the task's
+  process group under a live lease, refuses its own and the relay's
+  ports, and caps body size, streams and lifetime. The preview ends with
+  the task, the lease, the grant or the connection. The same relay serves
+  box previews for T24's "Open preview".
+- Moving: the run target is a field of the task. Moving to a box copies
+  the work as a branch (uncommitted changes as a commit), never the
+  computer's credentials, and resumes the same session there through
+  T28. Moving back applies the branch in a separate worktree, never over
+  uncommitted work. The confirm card says what is copied, what stays and
+  which credentials the target uses.
+- Two stops: after this step, and now (kills the confined process tree
+  and closes any preview).
+- Models: API keys only through our gateway. The worker never reads or
+  imports model credentials or subscriptions stored on the computer.
+
+Risks:
+
+- The person's computer is outside our control: a compromised machine can
+  lie about results. Verification checks that decide delivery still run
+  on a box, from the pushed branch, never on the computer's word.
+- Sandbox gaps: the platform sandbox differs per system and version and
+  may be deprecated. Keep a probe suite per platform, refuse confined mode
+  where it fails, and never fall back to host.
+- Host mode is close to giving a model the person's shell. Keep it opt-in,
+  visible, revocable, and out of reach of any task or prompt; the T15
+  taint hold applies to it as to any write outside the sandbox.
+- Secrets on the computer (shell profiles, cloud credentials, SSH keys)
+  are a short path away; the scrubbed environment and the denied paths
+  must be tested, not assumed.
+- The preview relay is a path from the internet into the person's
+  loopback: wrong port ownership checks or a missing auth check expose
+  the computer. It needs its own security review before it ships.
+- Offline and sleep: a laptop closes mid-task. Leases and fencing must
+  make that an interrupted step with a recovery note, never a lost or
+  doubled side effect.
+- Support load and signing: an installed worker needs code signing,
+  notarisation, updates that never replace a verified build with an
+  unverified one, and a clean uninstall.
+- Scope creep towards a desktop app: the clients stay web and phone.
+
+Check: typecheck and tests of `packages/cloud-computer` and the touched
+server packages, with a fake server and a fake sandbox (no live devices):
+a replayed, re-nonced or altered signed request is refused; a replayed or
+foreign folder token grants nothing; a link out of a granted folder is
+refused at read and write; a confined command cannot read outside the
+folder, write without the grant, reach the network or see a scrubbed
+variable; host mode is refused without consent; revoking a folder cancels
+a queued and a running task that need it and leaves others alone; a
+worker offline during a revoke refuses the stale operation when it comes
+back; a lapsed lease is re-issued and the old attempt's events are
+refused; a preview of a port the task does not own, of a control port or
+of another person's task is refused; a move to a box and back keeps every
+message and the session id and never overwrites a dirty folder; no model
+credential is read from the computer.
 
 ---
 
