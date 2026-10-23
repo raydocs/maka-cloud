@@ -241,3 +241,27 @@ test('the person’s language is read and set on the settings route; an older se
   await expect(old.settings()).rejects.toThrow('not available');
   expect(old.unsupported.has('settings')).toBe(true);
 });
+
+test('throttled requests expose Retry-After seconds and HTTP dates', async () => {
+  for (const [header, delay] of [
+    ['20', 20000],
+    [new Date(Date.now() + 60000).toUTCString(), 60000],
+    ['invalid', undefined],
+  ] as const) {
+    const client = new CloudClient(
+      'fake',
+      async () =>
+        new Response(JSON.stringify({ error: 'rate_limited' }), {
+          status: 429,
+          headers: { 'Retry-After': header },
+        }),
+    );
+    const error = await client
+      .computerInput('task', { type: 'key', key: 'a' })
+      .catch((error) => error);
+    expect(error.status).toBe(429);
+    if (delay === undefined) expect(error.retryAfterMs).toBeUndefined();
+    else expect(error.retryAfterMs).toBeGreaterThan(delay - 2000);
+    if (delay !== undefined) expect(error.retryAfterMs).toBeLessThanOrEqual(delay);
+  }
+});

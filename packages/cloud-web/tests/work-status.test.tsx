@@ -184,11 +184,7 @@ test('finished computer explains how to continue without opening a stream', asyn
 
 test.each([
   [404, 'not_found', 'The computer may be asleep or unavailable. Wait, then reconnect.'],
-  [
-    429,
-    'rate_limited',
-    'This computer is being watched in another tab or device. Close that view first.',
-  ],
+  [429, 'rate_limited', 'Too many open views. Wait a moment, then reconnect.'],
   [401, 'unauthorized', 'This invite was revoked. Sign in with a valid invite.'],
   [503, 'unavailable', 'The connection dropped. Reconnect to continue watching.'],
 ])(
@@ -204,7 +200,9 @@ test.each([
     fireEvent(details, new Event('toggle'));
     await screen.findByText(String(sentence));
     expect((screen.getByLabelText('Terminal input') as HTMLInputElement).disabled).toBe(true);
-    if (status === 401 || status === 429) {
+    if (status === 429) {
+      expect((screen.getByText('Reconnect computer') as HTMLButtonElement).disabled).toBe(true);
+    } else if (status === 401) {
       expect(screen.queryByText('Reconnect computer')).toBeNull();
     } else {
       fireEvent.click(screen.getByText('Reconnect computer'));
@@ -472,4 +470,167 @@ test('a send acknowledged after switching conversations keeps its receipt', asyn
   render(<SteerComposer {...props} draft="" conversationId="receipt-switch" />);
   expect(screen.getByText('Waiting for the next step', { exact: false })).toBeTruthy();
   expect(screen.getByText('Use this')).toBeTruthy();
+});
+
+test('control throttling honors Retry-After and preserves the live human view', async () => {
+  vi.useFakeTimers();
+  const { ApiError } = await import('@maka-cloud/client');
+  const computerInput = vi
+    .fn()
+    .mockRejectedValue(new ApiError(429, 'rate_limited', undefined, 20000));
+  const watchComputer = vi.fn(async (_id, frame) => frame({ controller: 'human' }));
+  render(
+    <Computer
+      client={{ watchComputer, computerInput } as unknown as CloudClient}
+      task={{ ...task, state: 'paused' }}
+    />,
+  );
+  const details = screen.getByText('Open computer').closest('details')!;
+  details.open = true;
+  await act(async () => fireEvent(details, new Event('toggle')));
+  const input = screen.getByLabelText('Terminal input') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'pwd' } });
+  await act(async () => fireEvent.click(screen.getByText('Send input')));
+  expect(screen.getByText('Slow down. Try again in a moment.')).toBeTruthy();
+  expect(screen.getByText('You have control · Task paused')).toBeTruthy();
+  expect(input.disabled).toBe(false);
+  await act(async () => fireEvent.click(screen.getByText('Send input')));
+  expect(computerInput).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTime(20000));
+  await act(async () => fireEvent.click(screen.getByText('Send input')));
+  expect(computerInput).toHaveBeenCalledTimes(2);
+});
+
+test('stream throttling allows reconnect after Retry-After', async () => {
+  vi.useFakeTimers();
+  const { ApiError } = await import('@maka-cloud/client');
+  const watchComputer = vi
+    .fn()
+    .mockRejectedValue(new ApiError(429, 'rate_limited', undefined, 20000));
+  render(<Computer client={{ watchComputer } as unknown as CloudClient} task={task} />);
+  const details = screen.getByText('Open computer').closest('details')!;
+  details.open = true;
+  await act(async () => fireEvent(details, new Event('toggle')));
+  const reconnect = screen.getByText('Reconnect computer') as HTMLButtonElement;
+  expect(reconnect.disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTime(19999));
+  expect(reconnect.disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTime(1));
+  expect(reconnect.disabled).toBe(false);
+  await act(async () => fireEvent.click(reconnect));
+  expect(watchComputer).toHaveBeenCalledTimes(2);
+});
+
+test('unsupported warning clears on the next send and automatic targeting returns after the draft clears', async () => {
+  const { ApiError } = await import('@maka-cloud/client');
+  const props = composerProps(vi.fn().mockRejectedValue(new ApiError(409, 'steer_unsupported')));
+  const view = render(<SteerComposer {...props} />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  expect(screen.getByRole('alert')).toBeTruthy();
+  fireEvent.click(screen.getByText('Send'));
+  expect(screen.queryByRole('alert')).toBeNull();
+  view.rerender(<SteerComposer {...props} draft="" tasks={[{ ...task, taskId: 'next' }]} />);
+  expect((screen.getByLabelText('To the running task') as HTMLSelectElement).value).toBe('next');
+});
+
+test.each(['unseen', undefined])(
+  'restoring %s after task end defaults to a new request',
+  async (state) => {
+    vi.useFakeTimers();
+    const send =
+      state === undefined
+        ? vi.fn().mockRejectedValue(new Error('offline'))
+        : vi
+            .fn()
+            .mockResolvedValueOnce({ message: { state: 'pending' } })
+            .mockResolvedValue({ message: { state } });
+    const props = composerProps(send);
+    const view = render(<SteerComposer {...props} />);
+    await act(async () => fireEvent.click(screen.getByText('Send')));
+    view.rerender(
+      <SteerComposer
+        {...props}
+        draft=""
+        tasks={[
+          { ...task, state: 'succeeded' },
+          { ...task, taskId: 'next' },
+        ]}
+      />,
+    );
+    await act(async () => vi.advanceTimersByTime(10000));
+    expect(props.setDraft).toHaveBeenLastCalledWith('Use this');
+    view.rerender(
+      <SteerComposer
+        {...props}
+        draft="Use this"
+        tasks={[
+          { ...task, state: 'succeeded' },
+          { ...task, taskId: 'next' },
+        ]}
+      />,
+    );
+    expect((screen.getByLabelText('To the running task') as HTMLSelectElement).value).toBe('');
+    if (state === undefined)
+      expect(
+        screen.getByText('Delivery not confirmed. Your message is back in the draft.', {
+          exact: false,
+        }),
+      ).toBeTruthy();
+  },
+);
+
+test.each([401, 404, 429, 503])(
+  'receipt polling handles HTTP %s without repeating every tick',
+  async (status) => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@maka-cloud/client');
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ message: { state: 'pending' } })
+      .mockRejectedValue(new ApiError(status, 'error', undefined, 40000));
+    const props = composerProps(send);
+    render(<SteerComposer {...props} />);
+    await act(async () => fireEvent.click(screen.getByText('Send')));
+    await act(async () => vi.advanceTimersByTime(10000));
+    expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTime(30000));
+    expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTime(10000));
+    expect(send).toHaveBeenCalledTimes(status === 401 || status === 404 ? 2 : 3);
+  },
+);
+
+test('a restored draft stays a new request after leaving and reopening the conversation', async () => {
+  const props = composerProps(vi.fn().mockResolvedValue({ message: { state: 'unseen' } }));
+  const view = render(<SteerComposer {...props} conversationId="restored-target" />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  view.unmount();
+  render(
+    <SteerComposer
+      {...props}
+      conversationId="restored-target"
+      tasks={[{ ...task, taskId: 'replacement' }]}
+    />,
+  );
+  expect((screen.getByLabelText('To the running task') as HTMLSelectElement).value).toBe('');
+});
+
+test('clearing receipts on sign-out also blocks late acknowledgements from refilling the cache', async () => {
+  const { clearSteerReceipts } = await import('../src/WorkStatus');
+  let finish!: (value: unknown) => void;
+  const props = composerProps(
+    vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    ),
+  );
+  const view = render(<SteerComposer {...props} conversationId="sign-out" />);
+  fireEvent.click(screen.getByText('Send'));
+  view.unmount();
+  clearSteerReceipts();
+  await act(async () => finish({ message: { state: 'pending' } }));
+  render(<SteerComposer {...props} conversationId="sign-out" draft="" />);
+  expect(screen.queryByText('Waiting for the next step', { exact: false })).toBeNull();
 });

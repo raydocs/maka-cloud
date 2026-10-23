@@ -33,11 +33,29 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
   const [controller, setController] = useState<'agent' | 'human'>('agent');
   const [live, setLive] = useState(false);
   const [error, setError] = useState('');
-  const [unavailable, setUnavailable] = useState<'asleep' | 'held' | 'dropped' | 'revoked'>();
+  const [unavailable, setUnavailable] = useState<'asleep' | 'crowded' | 'dropped' | 'revoked'>();
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [command, setCommand] = useState('');
+  const [retryAt, setRetryAt] = useState(0);
+  const [controlRetryAt, setControlRetryAt] = useState(0);
   const pending = useRef(false);
+  useEffect(() => {
+    if (!retryAt) return;
+    const timer = setTimeout(() => setRetryAt(0), Math.max(0, retryAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [retryAt]);
+  useEffect(() => {
+    if (!controlRetryAt) return;
+    const timer = setTimeout(
+      () => {
+        setControlRetryAt(0);
+        setError('');
+      },
+      Math.max(0, controlRetryAt - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [controlRetryAt]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -65,6 +83,8 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       )
       .catch((failure: unknown) => {
         if (abort.signal.aborted) return;
+        if (failure instanceof ApiError && failure.status === 429)
+          setRetryAt(Date.now() + (failure.retryAfterMs ?? 10000));
         setLive(false);
         setDesktop(undefined);
         setTerminal('');
@@ -72,7 +92,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
           failure instanceof ApiError && failure.status === 404
             ? 'asleep'
             : failure instanceof ApiError && failure.status === 429
-              ? 'held'
+              ? 'crowded'
               : failure instanceof ApiError && failure.status === 401
                 ? 'revoked'
                 : 'dropped',
@@ -85,7 +105,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
   }, [client, task.taskId, attempt]);
 
   async function act(work: () => Promise<unknown>) {
-    if (pending.current) return;
+    if (pending.current || Date.now() < controlRetryAt) return;
     pending.current = true;
     setBusy(true);
     setError('');
@@ -95,18 +115,22 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       if (!mounted.current) return;
       if (error instanceof ApiError && error.code === 'computer_not_in_control')
         setController('agent');
-      if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
-        setUnavailable(error.status === 401 ? 'revoked' : 'held');
+      if (error instanceof ApiError && error.status === 429)
+        setControlRetryAt(Date.now() + (error.retryAfterMs ?? 10000));
+      if (error instanceof ApiError && error.status === 401) {
+        setUnavailable('revoked');
         setLive(false);
       }
       setError(
-        error instanceof ApiError && error.code === 'pause_unsupported'
-          ? 'This task cannot safely pause. Watching only; no control was granted.'
-          : error instanceof ApiError && error.code === 'computer_busy'
-            ? 'A computer request is still in progress. Wait, then try again.'
-            : error instanceof ApiError && error.code === 'computer_not_in_control'
-              ? 'Your control has ended. You are watching the task.'
-              : 'The action was not confirmed. Check the connection and try again.',
+        error instanceof ApiError && error.status === 429
+          ? 'Slow down. Try again in a moment.'
+          : error instanceof ApiError && error.code === 'pause_unsupported'
+            ? 'This task cannot safely pause. Watching only; no control was granted.'
+            : error instanceof ApiError && error.code === 'computer_busy'
+              ? 'A computer request is still in progress. Wait, then try again.'
+              : error instanceof ApiError && error.code === 'computer_not_in_control'
+                ? 'Your control has ended. You are watching the task.'
+                : 'The action was not confirmed. Check the connection and try again.',
       );
     } finally {
       pending.current = false;
@@ -124,8 +148,8 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
           ? t(
               unavailable === 'asleep'
                 ? 'The computer may be asleep or unavailable. Wait, then reconnect.'
-                : unavailable === 'held'
-                  ? 'This computer is being watched in another tab or device. Close that view first.'
+                : unavailable === 'crowded'
+                  ? 'Too many open views. Wait a moment, then reconnect.'
                   : unavailable === 'revoked'
                     ? 'This invite was revoked. Sign in with a valid invite.'
                     : 'The connection dropped. Reconnect to continue watching.',
@@ -225,8 +249,12 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         </button>
       </form>
       {error && <p role="alert">{shared(error)}</p>}
-      {!live && unavailable && unavailable !== 'held' && unavailable !== 'revoked' && (
-        <button type="button" onClick={() => setAttempt((value) => value + 1)}>
+      {!live && unavailable && unavailable !== 'revoked' && (
+        <button
+          type="button"
+          disabled={retryAt > Date.now()}
+          onClick={() => setAttempt((value) => value + 1)}
+        >
           {t('Reconnect computer')}
         </button>
       )}

@@ -125,3 +125,15 @@ test('an unread message can still be checked after the task ends', async (t) => 
   assert.equal(receipt.status, 200);
   assert.deepEqual(await receipt.json(), { message: { messageId: 'late', state: 'unseen' } });
 });
+
+test('control responses preserve runner steering capability', async (t) => {
+  for (const steerable of [true, false]) {
+    const { h, taskId } = await setup(t, steerable);
+    const response = await h.api(`/v1/tasks/${taskId}/cancel`, {
+      method: 'POST',
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { task: { steerable: boolean } };
+    assert.equal(body.task.steerable, steerable);
+  }
+});

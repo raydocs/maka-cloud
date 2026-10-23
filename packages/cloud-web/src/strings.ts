@@ -1,6 +1,11 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  'Slow down. Try again in a moment.': 'Slow down. Try again in a moment.',
+  'Too many open views. Wait a moment, then reconnect.':
+    'Too many open views. Wait a moment, then reconnect.',
+  'Delivery not confirmed. Your message is back in the draft.':
+    'Delivery not confirmed. Your message is back in the draft.',
   'This task cannot take messages. Your draft is kept; send it as a new request.':
     'This task cannot take messages. Your draft is kept; send it as a new request.',
   'A computer request is still in progress. Wait, then try again.':
@@ -552,6 +557,9 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  'Slow down. Try again in a moment.': '请放慢操作，稍后再试。',
+  'Too many open views. Wait a moment, then reconnect.': '打开的视图过多。请稍候再重新连接。',
+  'Delivery not confirmed. Your message is back in the draft.': '尚未确认送达。消息已放回草稿。',
   'This task cannot take messages. Your draft is kept; send it as a new request.':
     '此任务无法接收消息。草稿已保留，请作为新请求发送。',
   'A computer request is still in progress. Wait, then try again.':
@@ -1064,6 +1072,9 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  'Slow down. Try again in a moment.': '請放慢操作，稍後再試。',
+  'Too many open views. Wait a moment, then reconnect.': '開啟的檢視過多。請稍候再重新連線。',
+  'Delivery not confirmed. Your message is back in the draft.': '尚未確認送達。訊息已放回草稿。',
   'This task cannot take messages. Your draft is kept; send it as a new request.':
     '此任務無法接收訊息。草稿已保留，請作為新請求傳送。',
   'A computer request is still in progress. Wait, then try again.':

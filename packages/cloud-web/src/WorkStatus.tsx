@@ -113,12 +113,18 @@ export function WaitingJump({
 }
 
 const receipts = new Map<string, Steer[]>();
+let receiptGeneration = 0;
+export function clearSteerReceipts() {
+  receiptGeneration++;
+  receipts.clear();
+}
 type Steer = {
   task: string;
   text: string;
   id: string;
   state?: TaskMessageState;
   restored?: boolean;
+  pollingStopped?: boolean;
 };
 export function SteerComposer({
   client,
@@ -151,25 +157,34 @@ export function SteerComposer({
   );
   const [target, setTarget] = useState<string | undefined>();
   const automatic = eligible.length === 1 ? eligible[0]!.taskId : '';
-  const frozen = useRef<string | undefined>(undefined);
-  if (!draft.trim()) frozen.current = undefined;
-  else if (frozen.current === undefined) frozen.current = target ?? automatic;
+  const frozen = useRef<string | undefined>(
+    conversationId && draft.trim() && receipts.get(conversationId)?.some((row) => row.restored)
+      ? ''
+      : undefined,
+  );
+  const previousDraft = useRef(draft);
+  if (!draft.trim() && previousDraft.current.trim()) frozen.current = undefined;
+  else if (draft.trim() && frozen.current === undefined) frozen.current = target ?? automatic;
+  previousDraft.current = draft;
   const selected = target ?? frozen.current ?? automatic;
   const taskId = eligible.some((task) => task.taskId === selected) ? selected : '';
   const [messages, updateMessages] = useState<Steer[]>(() =>
     conversationId ? (receipts.get(conversationId) ?? []) : [],
   );
+  const generation = useRef(receiptGeneration);
   const messageRows = useRef(messages);
   function setMessages(update: (previous: Steer[]) => Steer[]) {
     const rows = update(messageRows.current);
     messageRows.current = rows;
-    if (conversationId) receipts.set(conversationId, rows);
+    if (conversationId && generation.current === receiptGeneration)
+      receipts.set(conversationId, rows);
     updateMessages(rows);
   }
   const [tooLong, setTooLong] = useState(false);
   const sending = useRef(false);
   const polling = useRef(false);
   const [unsupported, setUnsupported] = useState(false);
+  useEffect(() => setUnsupported(false), [automatic]);
   const latestDraft = useRef(draft);
   latestDraft.current = draft;
   // The API has no read-message route. Reusing the same id is its documented idempotent
@@ -179,11 +194,21 @@ export function SteerComposer({
   latest.current = { tasks, messages, busy };
   useEffect(() => {
     let current = true;
+    let retryAt = 0;
+    let failures = 0;
     const refresh = setInterval(() => {
       const { messages, busy } = latest.current;
-      if (document.visibilityState === 'hidden' || busy || sending.current || polling.current)
+      if (
+        Date.now() < retryAt ||
+        document.visibilityState === 'hidden' ||
+        busy ||
+        sending.current ||
+        polling.current
+      )
         return;
-      const pending = messages.filter((message) => message.state === 'pending');
+      const pending = messages.filter(
+        (message) => message.state === 'pending' && !message.pollingStopped,
+      );
       if (!pending.length) return;
       const message = pending[receiptIndex.current++ % pending.length]!;
       polling.current = true;
@@ -191,6 +216,7 @@ export function SteerComposer({
         .sendTaskMessage(message.task, message.text, message.id)
         .then(
           (result) => {
+            failures = 0;
             if (current)
               setMessages((previous) =>
                 previous.map((row) =>
@@ -200,7 +226,29 @@ export function SteerComposer({
                 ),
               );
           },
-          () => {},
+          (error: unknown) => {
+            if (!current) return;
+            if (
+              error instanceof ApiError &&
+              error.status >= 400 &&
+              error.status < 500 &&
+              error.status !== 429
+            ) {
+              setMessages((previous) =>
+                previous.map((row) =>
+                  row.id === message.id ? { ...row, pollingStopped: true } : row,
+                ),
+              );
+            } else {
+              failures++;
+              retryAt =
+                Date.now() +
+                Math.max(
+                  error instanceof ApiError ? (error.retryAfterMs ?? 0) : 0,
+                  Math.min(300000, 10000 * 2 ** Math.min(failures, 5)),
+                );
+            }
+          },
         )
         .finally(() => {
           polling.current = false;
@@ -212,18 +260,28 @@ export function SteerComposer({
     };
   }, [client]);
   useEffect(() => {
-    const unread = messages.filter((message) => message.state === 'unseen' && !message.restored);
+    const unread = messages.filter(
+      (message) =>
+        !message.restored &&
+        (message.state === 'unseen' ||
+          (message.state === undefined &&
+            tasks.some((task) => task.taskId === message.task && TERMINAL.has(task.state)))),
+    );
     if (!unread.length) return;
     setMessages((previous) =>
       previous.map((message) =>
         unread.some((row) => row.id === message.id) ? { ...message, restored: true } : message,
       ),
     );
+    setTarget(undefined);
+    frozen.current = '';
     const text = unread.map((message) => message.text).join('\n\n');
-    setDraft(latestDraft.current ? `${latestDraft.current}\n\n${text}` : text);
-  }, [messages, setDraft]);
+    if (latestDraft.current.trim() !== text)
+      setDraft(latestDraft.current ? `${latestDraft.current}\n\n${text}` : text);
+  }, [messages, tasks, setDraft]);
   async function send(message: Steer) {
     if (sending.current) return;
+    setUnsupported(false);
     sending.current = true;
     try {
       await act('steer', async () => {
@@ -237,7 +295,8 @@ export function SteerComposer({
             error.code === 'steer_unsupported'
           ) {
             setUnsupported(true);
-            setTarget('');
+            setTarget(undefined);
+            frozen.current = '';
             setMessages((previous) => previous.filter((row) => row.id !== message.id));
             return;
           }
@@ -260,6 +319,7 @@ export function SteerComposer({
       className="composer"
       data-steering={Boolean(taskId)}
       onSubmitCapture={(event) => {
+        setUnsupported(false);
         if (!taskId) return;
         event.preventDefault();
         event.stopPropagation();
@@ -290,6 +350,7 @@ export function SteerComposer({
             value={taskId}
             disabled={busy}
             onChange={(event) => {
+              setUnsupported(false);
               setTarget(event.target.value);
               frozen.current = event.target.value;
             }}
@@ -309,7 +370,11 @@ export function SteerComposer({
           <span>
             {t('To the running task')} ·{' '}
             {message.state === undefined
-              ? t('Delivery not confirmed. Try again with the same message.')
+              ? t(
+                  message.restored
+                    ? 'Delivery not confirmed. Your message is back in the draft.'
+                    : 'Delivery not confirmed. Try again with the same message.',
+                )
               : t(
                   (
                     {

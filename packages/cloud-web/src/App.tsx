@@ -55,6 +55,7 @@ import { TaskPage } from './TaskPage';
 import { disablePush, enablePush } from './push';
 import { submitOnEnter } from './keys';
 import {
+  clearSteerReceipts,
   RunningClock,
   SteerComposer,
   WaitingJump,
@@ -386,6 +387,7 @@ function ArtifactList({
 }
 
 const conversationDrafts = new Map<string, string>();
+let draftGeneration = 0;
 
 export function ConversationView({
   client,
@@ -413,8 +415,10 @@ export function ConversationView({
   const [draft, updateDraft] = useState(
     () => conversationDrafts.get(conversation.conversationId) ?? '',
   );
+  const generation = useRef(draftGeneration);
   const setDraft = (text: string) => {
-    conversationDrafts.set(conversation.conversationId, text);
+    if (generation.current === draftGeneration)
+      conversationDrafts.set(conversation.conversationId, text);
     updateDraft(text);
   };
   const [workMode, setWorkMode] = useState<Mode | undefined>();
@@ -944,6 +948,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       const workspace = await openWorkspace(token, {
         onRevoked: () => {
           // The invite is gone: leave the workspace and keep nothing of it.
+          draftGeneration++;
+          conversationDrafts.clear();
+          clearSteerReceipts();
           setSession(null);
           setInvite('');
           setChosen('');
@@ -964,6 +971,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     if (initialToken) void connect(initialToken);
   }, [initialToken]);
   const disconnect = () => {
+    draftGeneration++;
+    conversationDrafts.clear();
+    clearSteerReceipts();
     setSession(null);
     setInvite('');
     setChosen('');
