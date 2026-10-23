@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import {
   activeWords,
+  ApiError,
   AuthFlow,
   type AuthPlatform,
   type AuthState,
@@ -316,7 +317,7 @@ test('going back forgets the step: a late answer is dropped and an old code cann
   expect(calls).toHaveLength(before);
 });
 
-test('a workspace that cannot be opened is said in words and the person stays on the choice', async () => {
+test('a workspace that cannot be opened is said in words, not as a sign-in failure, and the person stays on the choice', async () => {
   const { auth } = flow(
     {
       'POST /v1/auth/nonce': () => ({ body: { nonce: 'n' } }),
@@ -449,6 +450,25 @@ test('a session the device did not take is ended on the server: a late answer, o
   await failed.auth.signInWith('google');
   await until(() => failed.calls.some((c) => c.path === '/v1/auth/sign-out'));
   expect(failed.auths.at(-1)).toBe('Bearer mks_x.y');
+});
+
+test('a server that answers an error while the workspace opens is not described as a failed sign-in', async () => {
+  const { auth } = flow(
+    {
+      'POST /v1/auth/nonce': () => ({ body: { nonce: 'n' } }),
+      'POST /v1/auth/session': () => ({
+        body: { status: 'signed_in', token: 'mks_a.b', sessionId: 's' },
+      }),
+      'POST /v1/auth/sign-out': () => ({ body: {} }),
+    },
+    {},
+    () => {
+      throw new ApiError(503);
+    },
+  );
+  await auth.start();
+  await auth.signInWith('apple');
+  expect(errorOf(auth)).toBe('Signed in, but the workspace could not be opened (503). Try again.');
 });
 
 test('an answer that is not what a Maka server sends is a plain error and nothing is handed on', async () => {

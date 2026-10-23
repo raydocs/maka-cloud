@@ -217,7 +217,14 @@ function Step({
           >
             Send a new code
           </button>
-          <button type="button" className="signin-link" onClick={() => flow.back()}>
+          <button
+            type="button"
+            className="signin-link"
+            onClick={() => {
+              setCode('');
+              flow.back();
+            }}
+          >
             Use another way
           </button>
         </form>
@@ -244,7 +251,14 @@ function Step({
           />
           {error(state.error)}
           <Button label="Continue" type="submit" variant="primary" isDisabled={!invite.trim()} />
-          <button type="button" className="signin-link" onClick={() => flow.back()}>
+          <button
+            type="button"
+            className="signin-link"
+            onClick={() => {
+              setInvite('');
+              flow.back();
+            }}
+          >
             Use another way
           </button>
         </form>

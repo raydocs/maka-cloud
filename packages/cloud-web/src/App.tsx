@@ -754,6 +754,9 @@ export function Shell({
   );
 }
 
+/** How long signing out waits for the server before it leaves anyway. */
+const SIGN_OUT_WAIT_MS = 5_000;
+
 export function App({ initialToken = '' }: { initialToken?: string }) {
   const [session, setSession] = useState<{
     client: CloudClient;
@@ -803,9 +806,19 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   useEffect(() => {
     if (initialToken) void connect(initialToken);
   }, [initialToken]);
-  const disconnect = () => {
+  const disconnect = async () => {
     // A signed-in device ends its own session on the server too; an invite token has none to end.
-    if (session?.device) void session.client.endSession().catch(() => {});
+    // The wait is short: a server that cannot be reached must not hold the person on the page.
+    if (session?.device) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        session.client.endSession().catch(() => {}),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SIGN_OUT_WAIT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
     setSession(null);
     setChosen('');
     setView('home');
@@ -893,7 +906,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       {!taskPage && view === 'settings' && (
         <Settings
           client={session.client}
-          onDisconnect={disconnect}
+          onDisconnect={() => void disconnect()}
           deviceSession={session.device}
         />
       )}

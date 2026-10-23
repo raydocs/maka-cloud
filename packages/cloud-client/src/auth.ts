@@ -315,6 +315,9 @@ type Step = 'options' | 'provider' | 'email-request' | 'email-verify' | 'claim' 
 /** What went wrong, in words for the person. The server's reasons are deliberately few. */
 function failure(error: unknown, step: Step): string {
   if (error instanceof ApiError) {
+    // The sign-in worked; it is the workspace that did not open, so the sign-in's words do not fit.
+    if (step === 'open')
+      return `Signed in, but the workspace could not be opened (${error.status}). Try again.`;
     if (error.status === 429)
       return step === 'email-request'
         ? 'Wait a few seconds before asking for another code.'

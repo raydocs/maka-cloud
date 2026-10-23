@@ -257,3 +257,51 @@ test('the device label names the browser and the system', () => {
   ).toBe('Firefox on Windows');
   expect(browserLabel('')).toBe('Browser');
 });
+
+test('leaving the code step forgets what was typed in it', async () => {
+  serve({
+    'GET /v1/auth/options': () => json(WAYS),
+    'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
+  });
+  mount();
+  fireEvent.change(await screen.findByLabelText('Email'), { target: { value: 'ada@example.com' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Email me a code' }));
+  await screen.findByText('Check your email');
+  fireEvent.change(screen.getByLabelText('Code'), { target: { value: '111111' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Use another way' }));
+  fireEvent.change(await screen.findByLabelText('Email'), { target: { value: 'ada@example.com' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Email me a code' }));
+  await screen.findByText('Check your email');
+  expect((screen.getByLabelText('Code') as HTMLInputElement).value).toBe('');
+});
+
+test('signing out does not wait for a server that never answers', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    serve({
+      'GET /v1/auth/options': () => json(WAYS),
+      'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
+      'POST /v1/auth/email/verify': () =>
+        json({ status: 'signed_in', token: 'mks_abc.def', sessionId: 's1' }),
+      'GET /v1/conversations': conversations,
+      'POST /v1/auth/sign-out': () => new Promise<Response>(() => {}),
+    });
+    mount();
+    fireEvent.change(await screen.findByLabelText('Email'), {
+      target: { value: 'ada@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Email me a code' }));
+    await screen.findByText('Check your email');
+    fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByLabelText('What would you like to get done?');
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    await screen.findByLabelText('Email');
+  } finally {
+    vi.useRealTimers();
+  }
+});
