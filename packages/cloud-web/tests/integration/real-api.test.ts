@@ -433,9 +433,10 @@ test('a finished task reaches the inbox with the supervisor’s own words, and o
   const view = watch(client, conversationId);
   const item = await finishedItem(view, conversationId, 'Weekly report');
   if (!item) throw new Error('no item');
-  // The label is the supervisor's: with no verification configured it says so itself.
-  expect(item.ask).toContain('(not independently checked)');
-  expect(item.ask).not.toContain('(independently checked)');
+  // The label is the supervisor's: with no verification configured it says so itself, in the
+  // account's language (Simplified Chinese by default).
+  expect(item.ask).toContain('（未经独立核查）');
+  expect(item.ask).not.toContain('（已独立核查）');
   expect(item.state).toBe('open');
   expect(item.options.map((o) => [o.id, o.recommended])).toEqual([['ok', true]]);
   expect(JSON.stringify(view.frames)).not.toMatch(NAMES);
