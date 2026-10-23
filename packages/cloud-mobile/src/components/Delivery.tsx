@@ -284,6 +284,7 @@ export function DeliveryCard({
   model,
   files = [],
   onOpenTask,
+  onFromTask,
 }: {
   client: CloudClient;
   task: TaskView;
@@ -291,6 +292,8 @@ export function DeliveryCard({
   /** The other files the task made, each shown as one quiet line. */
   files?: readonly ArtifactListing[];
   onOpenTask?: (task: TaskView) => void;
+  /** Where the chat shows the task this result came from: a small "from task" link goes back to it. */
+  onFromTask?: () => void;
 }) {
   const t = useTheme();
   const { t: say, tx } = useT();
@@ -344,12 +347,9 @@ export function DeliveryCard({
     }
   }
 
+  const taskTitle = task.title ? displayText(task.title) : say('task.title');
   return (
-    <Card
-      label={say('delivery.result', {
-        title: task.title ? displayText(task.title) : say('task.title'),
-      })}
-    >
+    <Card label={say('delivery.result', { title: taskTitle })}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <StatusMark tone="ok" />
         <T kind="small" style={{ flex: 1 }}>
@@ -462,6 +462,25 @@ export function DeliveryCard({
             />
           ))}
         </ButtonRow>
+      )}
+      {onFromTask && (
+        <Pressable
+          testID="button-From task"
+          accessibilityRole="link"
+          accessibilityLabel={say('result.fromTaskLabel', { title: taskTitle })}
+          onPress={onFromTask}
+          hitSlop={4}
+          style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6 }}
+        >
+          <Icon name="conversations" color={t.inkMuted} />
+          <T
+            kind="small"
+            style={{ flexShrink: 1, textDecorationLine: 'underline' }}
+            numberOfLines={1}
+          >
+            {say('result.fromTask', { title: taskTitle })}
+          </T>
+        </Pressable>
       )}
       {opened && (
         <Viewer title={opened.title} onClose={() => setOpened(undefined)}>
@@ -618,11 +637,13 @@ export function TaskDelivery({
   task,
   listings,
   onOpenTask,
+  onFromTask,
 }: {
   client: CloudClient;
   task: TaskView;
   listings: readonly ArtifactListing[];
   onOpenTask?: (task: TaskView) => void;
+  onFromTask?: () => void;
 }) {
   const sources = useSources(client, task.taskId, task.state);
   const model = deliveryModel(task, listings, sources);
@@ -641,6 +662,7 @@ export function TaskDelivery({
           model={model}
           files={files}
           onOpenTask={onOpenTask}
+          onFromTask={onFromTask}
         />
       )}
       <SourcesStack client={client} taskId={task.taskId} sources={sources} />

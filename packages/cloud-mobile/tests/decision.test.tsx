@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react-native';
-import type { InboxItem, Question } from '@maka-cloud/client';
+import type { InboxItem, Question, TaskView } from '@maka-cloud/client';
 import { DecisionCard, QuestionBlock } from '@/components/Decision';
 import { DARK } from '@/lib/theme';
 import { ThemeContext } from '@/lib/theme';
@@ -153,4 +153,141 @@ test('a finished card in another shape is shown exactly as sent', async () => {
   expect(
     screen.getByText('Finished (independently checked): the login loop is fixed.'),
   ).toBeTruthy();
+});
+
+// The pull request tool's card, as the conductor builds it (`approvalCard`): the call, then its details.
+const prCard = [
+  'Allow open_pull_request(taskId: t1, title: "Fix the login loop")? It cannot be undone.',
+  '',
+  'Repository: example/site',
+  'Branch: maka/t1',
+  'Title: "Fix the login loop"',
+  'Base branch: main',
+].join('\n');
+
+const scopedQuestion: Question = {
+  questionId: 'q2',
+  reason: 'irreversible',
+  question: prCard,
+  note: 'The fix is reviewed and the tests pass.',
+  action: { tool: 'open_pull_request', args: { taskId: 't1', title: 'Fix the login loop' } },
+  options: [
+    { id: 'approve', label: 'Go ahead, just this once' },
+    { id: 'approve_task', label: "Go ahead, and don't ask again for this repository in this task" },
+    { id: 'approve_repository', label: "Go ahead, and don't ask again for this repository" },
+    { id: 'reject', label: "Don't do it" },
+  ],
+  recommended: 'approve',
+};
+
+test('an approval fills its slots in order: what will happen, what it touches, the exact details, the scope', async () => {
+  await render(
+    wrap(<QuestionBlock question={scopedQuestion} disabled={false} onAnswer={() => {}} />),
+  );
+  // Found in the order they are drawn.
+  const slots = screen.getAllByTestId(
+    /^(decision-will|decision-touches|decision-exact|scope-approve)$/u,
+  );
+  expect(slots.map((node) => node.props.testID)).toEqual([
+    'decision-will',
+    'decision-touches',
+    'decision-exact',
+    'scope-approve',
+  ]);
+  expect(screen.getByText('Maka will open a pull request.')).toBeTruthy();
+  expect(screen.getByText('The fix is reviewed and the tests pass.')).toBeTruthy();
+  expect(screen.getByText('example/site · branch maka/t1 · into main')).toBeTruthy();
+  // The exact text is shown whole, as sent: never paraphrased.
+  expect(screen.getByTestId('decision-exact').props.children).toBe(prCard);
+});
+
+test('the scope is chosen above one "Go ahead" pill, which answers with it', async () => {
+  const answers: string[] = [];
+  await render(
+    wrap(
+      <QuestionBlock
+        question={scopedQuestion}
+        disabled={false}
+        onAnswer={(optionId) => answers.push(optionId)}
+      />,
+    ),
+  );
+  // One approving pill, not three; refusing stays its own pill.
+  expect(screen.getAllByText('Go ahead')).toHaveLength(1);
+  expect(screen.getByRole('button', { name: "Don't do it" })).toBeTruthy();
+  expect(screen.getByTestId('scope-approve').props.accessibilityState.selected).toBe(true);
+  await fireEvent.press(screen.getByRole('radio', { name: 'This repository' }));
+  expect(screen.getByTestId('scope-approve_repository').props.accessibilityState.selected).toBe(
+    true,
+  );
+  await fireEvent.press(
+    screen.getByRole('button', { name: "Go ahead, and don't ask again for this repository" }),
+  );
+  expect(answers).toEqual(['approve_repository']);
+});
+
+test('without scopes on offer there is no scope control, and only the recommended answer is filled', async () => {
+  await render(wrap(<DecisionCard item={item()} disabled={false} onAnswer={() => {}} />));
+  expect(screen.queryByTestId('scope-approve')).toBeNull();
+  const fill = (name: string) =>
+    Object.assign({}, ...[screen.getByRole('button', { name }).props.style].flat(9))
+      .backgroundColor;
+  expect(fill('Approve')).toBe(DARK.pillOn);
+  expect(fill('Deny')).not.toBe(DARK.pillOn);
+});
+
+test('an answered approval shrinks to a one-line receipt', async () => {
+  await render(
+    wrap(
+      <QuestionBlock
+        question={scopedQuestion}
+        answered="approve_task"
+        disabled={false}
+        onAnswer={() => {}}
+      />,
+    ),
+  );
+  expect(screen.getByTestId('decision-receipt')).toBeTruthy();
+  expect(
+    screen.getByText(
+      "Answer recorded: Go ahead, and don't ask again for this repository in this task",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByTestId('decision-exact')).toBeNull();
+  expect(screen.queryByRole('button')).toBeNull();
+});
+
+test('a card about a task shows what its checks reported as evidence badges', async () => {
+  const task: TaskView = {
+    taskId: 't1',
+    state: 'running',
+    createdAt: 1,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+    panels: [
+      {
+        panelId: 'tests',
+        kind: 'tests',
+        state: 'passed',
+        title: 'Repository tests',
+        summary: '41 passed',
+      },
+      {
+        panelId: 'review',
+        kind: 'review',
+        state: 'passed',
+        title: 'Second review',
+        summary: '0 P1, 1 P2, 0 P3',
+      },
+    ],
+  };
+  await render(
+    wrap(<DecisionCard item={item()} task={task} disabled={false} onAnswer={() => {}} />),
+  );
+  expect(screen.getByText('Tests · 41 passed')).toBeTruthy();
+  expect(screen.getByText('Review · 0 P1, 1 P2, 0 P3')).toBeTruthy();
+  // No task and no files or links: no evidence slot at all.
+  await screen.rerender(wrap(<DecisionCard item={item()} disabled={false} onAnswer={() => {}} />));
+  expect(screen.queryByTestId('decision-evidence')).toBeNull();
 });

@@ -6,15 +6,21 @@ import {
   ConversationStarter,
   conversationSummary,
   displayText,
-  dollars,
   errorText,
   TERMINAL,
   type TaskControl,
   type TaskView,
-  totalCost,
 } from '@maka-cloud/client';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import {
   AppState,
   FlatList,
@@ -33,19 +39,21 @@ import {
   ButtonRow,
   Card,
   PillButton,
+  QuietButton,
   Rich,
   Screen,
-  Shimmer,
   StatusMark,
   T,
-  Thinking,
   TOP_BAR,
   withoutMarks,
 } from '@/components/ui';
+import { TaskPill, WorkBlock } from '@/components/Work';
+import { useReduceMotion } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
-import { mono, radius, useTheme } from '@/lib/theme';
+import { radius, useTheme } from '@/lib/theme';
+import { type ChatItem, chatTimeline } from '@/lib/work';
 
 type Message = ConversationState['messages'][number];
 
@@ -176,10 +184,125 @@ function useArrivals(ids: readonly string[], ready: boolean): (id: string) => bo
   return (id) => first.current !== null && !first.current.has(id);
 }
 
+/** One message as the chat shows it: the person's on the right in a bubble, the rest full width. */
+function Bubble({ message, children }: { message: Message; children?: ReactNode }) {
+  const theme = useTheme();
+  const { t: say } = useT();
+  return (
+    // Who said it is plain from the side it sits on; a screen reader still hears the name.
+    <View
+      accessible
+      accessibilityLabel={say('chat.said', {
+        who:
+          message.role === 'user'
+            ? say('chat.you')
+            : message.role === 'notice'
+              ? say('chat.update')
+              : BRAND.name,
+        text: withoutMarks(displayText(message.text)),
+      })}
+      style={[
+        { gap: 2, marginBottom: 18 },
+        message.role === 'user'
+          ? {
+              alignSelf: 'flex-end',
+              maxWidth: '85%',
+              backgroundColor: theme.chip,
+              borderRadius: radius.card,
+              paddingHorizontal: 16,
+              paddingVertical: 10,
+            }
+          : { alignSelf: 'stretch' },
+      ]}
+    >
+      <Rich text={displayText(message.text)} />
+      {children}
+    </View>
+  );
+}
+
+/** A message the person sent that the conversation has not shown yet. */
+interface Outgoing {
+  text: string;
+  state: 'sending' | 'sent' | 'failed';
+  /** How many of the person's messages the conversation had when this one was sent. */
+  before: number;
+}
+
+/**
+ * The person's message from the moment they send it, before the conversation shows it: in its
+ * place at once, "Sending…" under it, dimmed only if that takes more than two seconds (a fast send
+ * never flickers). A send that failed says so, with "Send again" (the same message, so the server
+ * runs it once) and "Delete".
+ */
+function OutgoingBubble({
+  outgoing,
+  onResend,
+  onDiscard,
+  busy,
+}: {
+  outgoing: Outgoing;
+  onResend: () => void;
+  onDiscard: () => void;
+  busy: boolean;
+}) {
+  const { t: say } = useT();
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (outgoing.state !== 'sending') return;
+    const timer = setTimeout(() => setSlow(true), 2000);
+    return () => clearTimeout(timer);
+  }, [outgoing.state]);
+  return (
+    <View testID="outgoing" style={{ opacity: outgoing.state === 'sending' && slow ? 0.6 : 1 }}>
+      <Bubble message={{ id: 'outgoing', role: 'user', text: outgoing.text }}>
+        {outgoing.state === 'sending' && (
+          <T kind="small" testID="outgoing-sending">
+            {say('chat.sending')}
+          </T>
+        )}
+      </Bubble>
+      {outgoing.state === 'failed' && (
+        <View
+          testID="outgoing-failed"
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            alignSelf: 'flex-end',
+            gap: 16,
+            marginTop: -12,
+            marginBottom: 6,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusMark tone="attention" />
+            <T kind="small">{say('chat.notSent')}</T>
+          </View>
+          <QuietButton
+            label={say('chat.resend')}
+            id="Send again"
+            disabled={busy}
+            onPress={onResend}
+          />
+          <QuietButton
+            label={say('chat.discard')}
+            id="Delete"
+            disabled={busy}
+            onPress={onDiscard}
+          />
+        </View>
+      )}
+    </View>
+  );
+}
+
+const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
+
 function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { client, conversations } = useWorkspace();
-  const theme = useTheme();
   const { t: say, tx } = useT();
+  const reduce = useReduceMotion();
   /** The floating composer's height: the list scrolls on under it, by this much more. */
   const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
@@ -191,12 +314,14 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   useFocusEffect(useCallback(() => keepLive(feed, AppState), [feed]));
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   const { state, status, error, busy, noPause } = snapshot;
-  const { tasks, questions, running, openQuestions } = conversationSummary(snapshot);
-  const total = totalCost(tasks);
+  const { tasks, questions, openQuestions } = conversationSummary(snapshot);
   const [draft, setDraft] = useState('');
+  const [outgoing, setOutgoing] = useState<Outgoing | undefined>();
   const [detail, setDetail] = useState<TaskView | undefined>();
+  /** The task pills opened to show their row (the step, the cost and the controls). */
+  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   const { openSheet, sheet } = useConversationSheet();
-  const scroll = useRef<FlatList<Message> | null>(null);
+  const scroll = useRef<FlatList<ChatItem> | null>(null);
   /** The newest messages stay in view only while the person is already reading them. */
   const atEnd = useRef(true);
   // Only the person's own scrolling decides this; a scroll the list makes while measuring does not.
@@ -205,6 +330,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
   };
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
+  const timeline = chatTimeline(state.messages, roots);
   const inbox = Object.values(state.inbox);
   // As on the web: a finished task whose row already shows its outcome is not announced again here;
   // its card waits on Home.
@@ -214,6 +340,12 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       item.state !== 'closed' &&
       !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
   );
+  /** Tasks a card is waiting on the person for. */
+  const waitsOn = new Set(
+    waiting
+      .filter((item) => item.state === 'open')
+      .flatMap((item) => (item.taskId ? [item.taskId] : [])),
+  );
   // Something that waits on the person is always brought into view.
   const needsYou = openQuestions.size + waiting.length;
   useEffect(() => {
@@ -222,27 +354,129 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       scroll.current?.scrollToEnd({ animated: true });
     }
   }, [needsYou]);
-  // The employee is at work while a task runs, or while the person's last message has no reply yet;
-  // a question or decision waiting on them is not work.
-  const working =
-    openQuestions.size === 0 &&
-    waiting.length === 0 &&
-    (tasks.some((task) => !TERMINAL.has(task.state) && task.state !== 'paused') ||
-      state.messages.at(-1)?.role === 'user');
+  // Once the conversation shows the message that was on its way, it is in the list itself.
+  const sentByPerson = state.messages.filter((message) => message.role === 'user');
+  const arrivedOutgoing =
+    outgoing !== undefined &&
+    outgoing.state !== 'failed' &&
+    sentByPerson.slice(outgoing.before).some((message) => message.text.trim() === outgoing.text);
+  useEffect(() => {
+    if (arrivedOutgoing) setOutgoing(undefined);
+  }, [arrivedOutgoing]);
+  const pending = arrivedOutgoing ? undefined : outgoing;
+  // A question or decision waiting on the person is not work; a reply still owed is.
+  const nothingWaits = openQuestions.size === 0 && waiting.length === 0;
+  const owed = nothingWaits && !pending && state.messages.at(-1)?.role === 'user';
+  const workingOn = (blockTasks: readonly TaskView[], last: boolean) =>
+    !blockTasks.some((task) => waitsOn.has(task.taskId)) &&
+    (blockTasks.some(quietlyLive) || (last && owed));
   // Messages and cards that arrive while the chat is open rise into place; the history does not.
   const arrived = useArrivals(
     [
-      ...state.messages.map((message) => message.id),
-      ...roots.map((task) => `task-${task.taskId}-${task.state}`),
+      ...timeline.map((item) => item.key),
       ...questions.map((question) => question.questionId),
       ...waiting.map((item) => item.itemId),
     ],
     status === 'Live' || state.messages.length > 0,
   );
+  const post = (text: string) => {
+    void feed
+      .send(text)
+      .then((sent) =>
+        setOutgoing((now) =>
+          now && now.text === text ? { ...now, state: sent ? 'sent' : 'failed' } : now,
+        ),
+      );
+  };
+  // The words move into the list at once: the person sees them taken before the server answers.
   const send = () => {
-    const sending = draft;
-    // Words typed while it was sending stay in the box.
-    void feed.send(sending).then((sent) => sent && setDraft((now) => (now === sending ? '' : now)));
+    const text = draft.trim();
+    if (!text || busy || pending) return;
+    setOutgoing({ text, state: 'sending', before: sentByPerson.length });
+    setDraft('');
+    post(text);
+  };
+  const resend = () => {
+    if (!pending || busy) return;
+    setOutgoing({ ...pending, state: 'sending' });
+    post(pending.text);
+  };
+  const discard = () => {
+    // The next message is a new one: the failed one's id is not used again.
+    feed.draftEdited();
+    setOutgoing(undefined);
+  };
+  const togglePill = (taskId: string) =>
+    setOpened((now) => {
+      const next = new Set(now);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  // "From task": back up to the task's pill, opened.
+  const goToTask = (taskId: string) => {
+    const index = timeline.findIndex((item) => item.key === `task-${taskId}`);
+    if (index < 0) return;
+    setOpened((now) => new Set(now).add(taskId));
+    atEnd.current = false;
+    scroll.current?.scrollToIndex({ index, animated: !reduce, viewPosition: 0.3 });
+  };
+
+  const renderItem = ({ item }: { item: ChatItem }) => {
+    switch (item.type) {
+      case 'message':
+        return (
+          <Appear enter={arrived(item.key)}>
+            <Bubble message={item.message} />
+          </Appear>
+        );
+      case 'work':
+        return <WorkBlock tasks={item.tasks} working={workingOn(item.tasks, item.last)} />;
+      case 'task': {
+        const task = item.task;
+        const open = opened.has(task.taskId);
+        return (
+          <Appear enter={arrived(item.key)}>
+            <View style={{ gap: 10, marginBottom: 18 }}>
+              <TaskPill
+                task={task}
+                waiting={waitsOn.has(task.taskId)}
+                open={open}
+                onToggle={() => togglePill(task.taskId)}
+              />
+              {open && (
+                <Card label={say('chat.running.label')}>
+                  <TaskRow
+                    task={task}
+                    tasks={tasks}
+                    noPause={noPause}
+                    busy={Boolean(busy)}
+                    resultCard
+                    onControl={(taskId: string, action: TaskControl) =>
+                      void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
+                    }
+                  />
+                </Card>
+              )}
+            </View>
+          </Appear>
+        );
+      }
+      case 'result':
+        return (
+          <Appear enter={arrived(item.key)}>
+            <View style={{ gap: 14, marginBottom: 18 }}>
+              <TaskDelivery
+                client={client}
+                task={item.task}
+                listings={snapshot.artifacts[item.task.taskId]?.listings ?? []}
+                onOpenTask={setDetail}
+                onFromTask={() => goToTask(item.task.taskId)}
+              />
+            </View>
+          </Appear>
+        );
+    }
   };
 
   return (
@@ -250,8 +484,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
       <View style={{ flex: 1 }}>
         <FlatList
           ref={scroll}
-          data={state.messages}
-          keyExtractor={(message) => message.id}
+          data={timeline}
+          keyExtractor={(item) => item.key}
           initialNumToRender={20}
           windowSize={7}
           onContentSizeChange={() =>
@@ -259,6 +493,14 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           }
           onScrollEndDrag={trackEnd}
           onMomentumScrollEnd={trackEnd}
+          // An item far up the list may not be measured yet: go near it first, then to it.
+          onScrollToIndexFailed={({ index, averageItemLength }) => {
+            scroll.current?.scrollToOffset({ offset: averageItemLength * index, animated: false });
+            setTimeout(
+              () => scroll.current?.scrollToIndex({ index, animated: !reduce, viewPosition: 0.3 }),
+              100,
+            );
+          }}
           // The list runs on under the top bar and the composer, which float over fades.
           contentContainerStyle={{
             paddingHorizontal: 20,
@@ -274,129 +516,70 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             </T>
           }
           ListEmptyComponent={
-            <Opening
-              busy={busy === 'message'}
-              onIdea={(words) => {
-                setDraft(words);
-                feed.draftEdited();
-              }}
-            />
+            pending ? undefined : (
+              <Opening
+                busy={busy === 'message'}
+                onIdea={(words) => {
+                  setDraft(words);
+                  feed.draftEdited();
+                }}
+              />
+            )
           }
-          renderItem={({ item: message }) => (
-            <Appear enter={arrived(message.id)}>
-              {/* Who said it is plain from the side it sits on; a screen reader still hears the name. */}
-              <View
-                accessible
-                accessibilityLabel={say('chat.said', {
-                  who:
-                    message.role === 'user'
-                      ? say('chat.you')
-                      : message.role === 'notice'
-                        ? say('chat.update')
-                        : BRAND.name,
-                  text: withoutMarks(displayText(message.text)),
-                })}
-                style={[
-                  { gap: 2, marginBottom: 18 },
-                  message.role === 'user'
-                    ? {
-                        alignSelf: 'flex-end',
-                        maxWidth: '85%',
-                        backgroundColor: theme.chip,
-                        borderRadius: radius.card,
-                        paddingHorizontal: 16,
-                        paddingVertical: 10,
-                      }
-                    : { alignSelf: 'stretch' },
-                ]}
-              >
-                <Rich text={displayText(message.text)} />
-              </View>
-            </Appear>
-          )}
+          renderItem={renderItem}
           ListFooterComponent={
             <View style={{ gap: 14 }}>
-              {working && (
-                <View
-                  accessible
-                  accessibilityRole="text"
-                  accessibilityLabel={say('chat.workingLabel', { name: BRAND.name })}
-                  style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
-                >
-                  <Thinking />
-                  <Shimmer>
-                    <T kind="muted">{say('chat.working', { name: BRAND.name })}</T>
-                  </Shimmer>
+              {pending && (
+                <View>
+                  <OutgoingBubble
+                    outgoing={pending}
+                    busy={Boolean(busy)}
+                    onResend={resend}
+                    onDiscard={discard}
+                  />
+                  {/* Taken: the agent is on it before the conversation shows the message. */}
+                  {pending.state === 'sent' && <WorkBlock tasks={[]} working />}
                 </View>
               )}
-              {roots.length > 0 && (
-                <Card label={say('chat.running.label')}>
-                  {/* Only what is known: no "0 running" once all is done, no cost the server never sent. */}
-                  {(running > 0 || total.usd !== undefined) && (
-                    <T kind="small">
-                      {running > 0 && say('chat.running', { count: running })}
-                      {running > 0 && total.usd !== undefined && ' · '}
-                      {total.usd !== undefined && say('chat.totalCost')}
-                      {total.usd !== undefined && (
-                        <T kind="small" style={mono}>
-                          {dollars(total.usd)}
-                        </T>
-                      )}
-                      {total.usd !== undefined && !total.complete && say('chat.notAllReported')}
-                    </T>
-                  )}
-                  {roots.map((task) => (
-                    <TaskRow
-                      key={task.taskId}
-                      task={task}
-                      tasks={tasks}
-                      noPause={noPause}
-                      busy={Boolean(busy)}
-                      resultCard
-                      onControl={(taskId: string, action: TaskControl) =>
-                        void feed.act(`${action}-${taskId}`, () => feed.control(taskId, action))
-                      }
-                    />
-                  ))}
-                </Card>
-              )}
-              {roots.map((task) => (
-                <Appear key={task.taskId} enter={arrived(`task-${task.taskId}-${task.state}`)}>
-                  <TaskDelivery
-                    client={client}
-                    task={task}
-                    listings={snapshot.artifacts[task.taskId]?.listings ?? []}
-                    onOpenTask={setDetail}
+              {questions.map((question) => {
+                const answered = state.answers[question.questionId];
+                const block = (
+                  <QuestionBlock
+                    question={question}
+                    answered={answered}
+                    disabled={Boolean(busy)}
+                    onAnswer={(optionId, text) =>
+                      void feed.answerQuestion(question, optionId, text)
+                    }
                   />
-                </Appear>
-              ))}
-              {questions.map((question) => (
-                <Appear key={question.questionId} enter={arrived(question.questionId)}>
-                  <Card label={say('chat.decision.label')}>
-                    <QuestionBlock
-                      question={question}
-                      answered={state.answers[question.questionId]}
-                      disabled={Boolean(busy)}
-                      onAnswer={(optionId, text) =>
-                        void feed.answerQuestion(question, optionId, text)
-                      }
-                    />
-                  </Card>
-                </Appear>
-              ))}
+                );
+                return (
+                  <Appear key={question.questionId} enter={arrived(question.questionId)}>
+                    {answered ? block : <Card label={say('chat.decision.label')}>{block}</Card>}
+                  </Appear>
+                );
+              })}
               {waiting
                 .filter((item) => !openQuestions.has(displayText(item.ask).trim()))
-                .map((item) => (
-                  <Appear key={item.itemId} enter={arrived(item.itemId)}>
-                    <Card label={say('chat.needsYou.label')}>
-                      <DecisionCard
-                        item={item}
-                        disabled={Boolean(busy)}
-                        onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
-                      />
-                    </Card>
-                  </Appear>
-                ))}
+                .map((item) => {
+                  const card = (
+                    <DecisionCard
+                      item={item}
+                      task={item.taskId ? state.tasks[item.taskId] : undefined}
+                      disabled={Boolean(busy)}
+                      onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
+                    />
+                  );
+                  return (
+                    <Appear key={item.itemId} enter={arrived(item.itemId)}>
+                      {item.state === 'answering' ? (
+                        card
+                      ) : (
+                        <Card label={say('chat.needsYou.label')}>{card}</Card>
+                      )}
+                    </Appear>
+                  );
+                })}
               {error ? <T kind="error">{tx(error)}</T> : null}
             </View>
           }
@@ -422,7 +605,9 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               feed.draftEdited();
             }}
             sending={busy === 'message'}
-            disabled={Boolean(busy)}
+            // A message on its way, or one that failed, is settled first (sent again or deleted),
+            // so a new one never takes its id.
+            disabled={Boolean(busy) || pending !== undefined}
             onSend={send}
             onPlus={openSheet}
           />
