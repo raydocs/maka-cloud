@@ -684,7 +684,7 @@ no package implements yet. What "preview" means today:
   local names (`safe-fetch.ts:111`), every resolved address public, 169.254/16, 100.64/10, loopback,
   private and NAT64/6to4 forms refused (`public-address.ts:14`, `:133`), the socket pinned to the
   checked address, each redirect hop checked again (`safe-fetch.ts:185`), 512 KiB page, 1 MiB image,
-  6 s, 4 fetches at once, 60 a minute per invite (`previews.ts:121`, `http.ts:79`).
+  6 s, 4 fetches at once, 60 a minute per invite (`previews.ts:121`, `http.ts:98`).
 - The "Open preview" action on a delivery (`cloud-client/src/delivery.ts:77`): a link the user's
   own browser opens, shown only for a plain https URL with its host beside it. No server fetches it,
   and nothing records the `preview` label in production yet (the host records `source` only).
