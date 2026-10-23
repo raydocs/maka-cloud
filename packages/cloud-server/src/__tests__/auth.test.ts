@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import type { Mailer } from '../challenges.js';
 import { clientAddress, proxyList } from '../auth-routes.js';
@@ -699,4 +700,35 @@ test('the sign-in mail is in Chinese by default, in English when asked, and in t
     'accept-language': 'zh-CN',
   });
   assert.equal(r.mail.at(-1)?.subject, 'Your sign-in code');
+});
+
+test('an account whose language was never set gets the default in its mail, whatever the browser asks', async (t) => {
+  const r = await rig(t);
+  const asked = await r.call('POST', '/v1/auth/email', { address: 'dan@example.com' });
+  const challenge = (await asked.json()) as { challengeId: string; deviceSecret: string };
+  const verified = (await (
+    await r.call('POST', '/v1/auth/email/verify', {
+      challengeId: challenge.challengeId,
+      deviceSecret: challenge.deviceSecret,
+      code: r.codeOf(),
+    })
+  ).json()) as NeedsInvite;
+  assert.equal(
+    (
+      await r.call('POST', '/v1/auth/claim', {
+        pendingToken: verified.pendingToken,
+        inviteToken: r.h.token,
+      })
+    ).status,
+    200,
+  );
+  // As an account from before languages were kept: its invite has none stored.
+  const raw = new DatabaseSync(r.h.options.invitesPath);
+  raw.prepare('UPDATE invites SET language = NULL WHERE invite_id = ?').run(r.h.inviteId);
+  raw.close();
+  r.advance(31_000);
+  await r.call('POST', '/v1/auth/email', { address: 'dan@example.com' }, null, {
+    'accept-language': 'en-US',
+  });
+  assert.equal(r.mail.at(-1)?.subject, '你的登录验证码');
 });

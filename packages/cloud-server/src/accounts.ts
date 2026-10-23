@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { isLanguage, type Language } from './i18n.js';
+import { DEFAULT_LANGUAGE, isLanguage, type Language } from './i18n.js';
 import { migrateInvites } from './invites.js';
 
 const PREFIX = 'mks_';
@@ -129,8 +129,9 @@ export class AccountStore {
   }
 
   /**
-   * The language the person behind an identity has, when the identity belongs to an account of an
-   * active invite that has one; nothing otherwise.
+   * The language the person behind an identity reads, when the identity belongs to an account of an
+   * active invite: what it chose, else the default (as everywhere else). Nothing when there is no
+   * such account.
    */
   languageOf(identity: Pick<Identity, 'provider' | 'subject'>): Language | undefined {
     const row = this.db
@@ -141,7 +142,8 @@ export class AccountStore {
          WHERE d.provider = ? AND d.subject = ? AND i.revoked_at IS NULL`,
       )
       .get(identity.provider, identity.subject) as { language: string | null } | undefined;
-    return isLanguage(row?.language) ? row.language : undefined;
+    if (row === undefined) return undefined;
+    return isLanguage(row.language) ? row.language : DEFAULT_LANGUAGE;
   }
 
   /** The ways to sign in to an account, for its owner to see. */
