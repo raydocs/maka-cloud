@@ -13,6 +13,7 @@ import {
   finishedParts,
   HomeFeed,
   type Mode,
+  type ProjectView,
   nextRuns,
   recentConversations,
   relativeTime,
@@ -28,7 +29,7 @@ import { ModePicker } from './ModePicker';
 import { pendingSends } from './pending';
 import { SuggestionCard } from './Suggestion';
 import { submitOnEnter } from './keys';
-import { Onboarding, onboardingSkipped } from './Onboarding';
+import { starters, Onboarding, onboardingSkipped } from './Onboarding';
 
 /** What the browser remembers about when this invite last looked at Home. Never the token. */
 function visitKey(fingerprint: string) {
@@ -129,6 +130,19 @@ export function Home({
 }) {
   const { t, shared } = useT();
   const [draft, setDraft] = useState('');
+  const [ownProjects, setOwnProjects] = useState<ProjectView[]>([]);
+  useEffect(() => {
+    let current = true;
+    void client.listProjects().then(
+      (list) => {
+        if (current) setOwnProjects(list);
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  }, [client]);
   const [onboarding, setOnboarding] = useState(() => !onboardingSkipped());
   const [workMode, setWorkMode] = useState<Mode | undefined>();
   const [starting, setStarting] = useState(false);
@@ -184,6 +198,19 @@ export function Home({
         t('Untitled conversation'),
     );
   const recent = recentConversations(conversations);
+  const ideas = [
+    ...ownProjects.slice(0, 1).flatMap((project) =>
+      starters(displayText(project.repo), { t })
+        .slice(0, 2)
+        .map((idea) => idea.sentence),
+    ),
+    ...recent
+      .slice(0, 1)
+      .filter((c) => c.title)
+      .map((c) => t('Continue “{title}”', { title: displayText(c.title!) })),
+  ];
+  if (ideas.length === 0)
+    ideas.push(t('Plan my next project'), t('Review my recent work'), t('Explore an idea'));
 
   return (
     <div className="page home">
@@ -354,6 +381,22 @@ export function Home({
                 disabled={starting}
               />
             </form>
+            <div className="starter-ideas">
+              {ideas.map((idea) => (
+                <button
+                  key={idea}
+                  type="button"
+                  className="chip"
+                  onClick={() => {
+                    setDraft(idea);
+                    starter.draftEdited();
+                    document.getElementById('first-message')?.focus();
+                  }}
+                >
+                  {idea}
+                </button>
+              ))}
+            </div>
             {startError && (
               <p role="alert" className="error">
                 {shared(startError)}

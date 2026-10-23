@@ -2327,3 +2327,51 @@ strong {
     white-space: nowrap;
   }
 }
+
+.steer-target {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+}
+.steer-target select {
+  max-width: 100%;
+}
+.steer-receipt {
+  font-size: 0.8rem;
+  padding: 0.4rem 0;
+}
+.steer-receipt p {
+  margin: 0;
+}
+.steer-receipt button {
+  margin-inline-start: 0.5rem;
+}
+.approval-receipt {
+  display: block;
+}
+.starter-ideas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.composer-choices button span,
+.composer-choices button small {
+  display: block;
+}
+.composer-choices button small {
+  color: var(--ink-muted);
+}
+.waiting-chip {
+  align-self: flex-start;
+}
+
+.composer[data-steering="true"] .mode-menu {
+  display: none;
+}
+.composer-fields {
+  display: grid;
+  gap: 8px;
+}
