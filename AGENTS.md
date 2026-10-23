@@ -46,9 +46,12 @@ so every change here has to keep the next upstream merge cheap.
 
 ## Product constraints
 
-- Models are reached with API keys only. Never use or extend the Claude
-  subscription provider (`subscription-cloaked-request.ts`), and never offer a
-  claude.ai login in the product.
+- Models are reached with API keys, plus the user's own ChatGPT plan for
+  coding runners through OpenAI's own Codex sign-in (T27). Claude is reached
+  with API keys only, until Anthropic approves us in writing: never use or
+  extend the Claude subscription provider (`subscription-cloaked-request.ts`),
+  never offer a claude.ai login in the product, and never run Claude Code on a
+  user's Claude plan token.
 - Claude conversation history is append-only. Do not prune, rewrite or reorder
   earlier turns: Claude Opus 5.5 checks preserved thinking against the history.
 - Do not brand anything "Claude Code". "Claude Agent" or "<name> Powered by
