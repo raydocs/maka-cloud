@@ -12,9 +12,10 @@ import {
   type PendingSend,
   type PendingSends,
   reusable,
+  taskLabel,
   type TaskView,
 } from '@maka-cloud/client';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import {
   type ReactNode,
   useCallback,
@@ -28,7 +29,9 @@ import {
   AppState,
   FlatList,
   type NativeScrollEvent,
+  type LayoutChangeEvent,
   type NativeSyntheticEvent,
+  Pressable,
   ScrollView,
   View,
 } from 'react-native';
@@ -53,15 +56,23 @@ import {
 import { TaskPill, WorkBlock } from '@/components/Work';
 import { useReduceMotion } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
+import { type Idea, startersFor, useProjects } from '@/lib/ideas';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
+import {
+  type Steer,
+  type SteerPhase,
+  steerPhase,
+  steerTarget,
+  unsettled,
+  useSteers,
+  withdrawable,
+} from '@/lib/steer';
+import type { Key } from '@/lib/strings';
 import { radius, useTheme } from '@/lib/theme';
 import { type ChatItem, chatTimeline } from '@/lib/work';
 
 type Message = ConversationState['messages'][number];
-
-/** What an empty chat offers to start with; a tap puts it in the box, the person sends it. */
-const IDEAS = ['home.idea.1', 'home.idea.2', 'home.idea.3'] as const;
 
 /**
  * Chat, in the person's own appearance (light by day, dark at night) like every section. The
@@ -84,22 +95,35 @@ export default function Chat() {
   );
 }
 
-/** An opening line and three ideas: what an empty chat says before anything has been said. */
-function Opening({ onIdea, busy }: { onIdea: (words: string) => void; busy: boolean }) {
+/**
+ * An opening line and ideas: what an empty chat says before anything has been said. The ideas come
+ * from the person's own projects and conversations (`startersFor`); one fills the box, or opens a
+ * conversation they already have, and never sends anything.
+ */
+function Opening({
+  ideas,
+  onIdea,
+  busy,
+}: {
+  ideas: readonly Idea[];
+  onIdea: (words: string) => void;
+  busy: boolean;
+}) {
   const { t: say } = useT();
+  const { open } = useWorkspace();
   return (
     <View style={{ gap: 12 }} accessibilityLabel={say('home.ideas.label')}>
       <T kind="heading">{say('chat.empty.title')}</T>
       <T kind="muted">{say('chat.empty.body', { name: BRAND.name })}</T>
       <ButtonRow>
-        {IDEAS.map((idea) => (
+        {ideas.map((idea) => (
           <PillButton
-            key={idea}
-            label={say(idea)}
-            id={idea}
+            key={idea.id}
+            label={idea.label}
+            id={idea.id}
             compact
             disabled={busy}
-            onPress={() => onIdea(say(idea))}
+            onPress={() => (idea.open !== undefined ? open(idea.open) : onIdea(idea.fill))}
           />
         ))}
       </ButtonRow>
@@ -110,7 +134,8 @@ function Opening({ onIdea, busy }: { onIdea: (words: string) => void; busy: bool
 /** The Chat tab with no conversation open: it can still be talked to; the first message starts one. */
 function NewConversation() {
   const { client, conversations, started } = useWorkspace();
-  const { tx } = useT();
+  const { t: say, tx } = useT();
+  const projects = useProjects(client);
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -150,6 +175,7 @@ function NewConversation() {
         keyboardShouldPersistTaps="handled"
       >
         <Opening
+          ideas={startersFor(projects, conversations, undefined, say)}
           // While the conversation starts, the draft is what is being sent.
           busy={sending}
           onIdea={(words) => {
@@ -324,6 +350,229 @@ function OutgoingBubble({
   );
 }
 
+/** Where a message to a running task stands, in words. */
+const STEER_WORDS: Record<SteerPhase, Key> = {
+  sent: 'steer.sent',
+  failed: 'chat.notSent',
+  received: 'steer.received',
+  queued: 'steer.queued',
+  applying: 'steer.applying',
+  read: 'steer.read',
+  withdrawn: 'steer.withdrawn',
+  unread: 'steer.unread',
+  unknown: 'steer.unknown',
+};
+
+/**
+ * What the person told a running task, on their side like their messages, marked as going to the
+ * task, with where it stands under it. One taken back is faint.
+ */
+function SteerBubble({ steer, phase }: { steer: Steer; phase: SteerPhase }) {
+  const theme = useTheme();
+  const { t: say } = useT();
+  const status = say(STEER_WORDS[phase]);
+  return (
+    <View
+      testID="steer-bubble"
+      accessible
+      accessibilityLabel={say('steer.said', { text: withoutMarks(steer.text), status })}
+      style={{
+        alignSelf: 'flex-end',
+        maxWidth: '85%',
+        gap: 4,
+        marginBottom: 18,
+        backgroundColor: theme.chip,
+        borderRadius: radius.card,
+        paddingHorizontal: 16,
+        paddingVertical: 10,
+        opacity: phase === 'withdrawn' ? 0.6 : 1,
+      }}
+    >
+      <T kind="small">{say('steer.marker')}</T>
+      <Rich text={steer.text} />
+      <T kind="small" testID={`steer-phase-${phase}`}>
+        {status}
+      </T>
+    </View>
+  );
+}
+
+/**
+ * Under the latest message to a running task, by the composer: where it stands while it moves,
+ * with "Take back" while the agent has not read it, or "Send again" and "Delete" when it did not
+ * reach the server.
+ */
+function SteerState({
+  steer,
+  phase,
+  onWithdraw,
+  onResend,
+  onDiscard,
+}: {
+  steer: Steer;
+  phase: SteerPhase;
+  onWithdraw: () => void;
+  onResend: () => void;
+  onDiscard: () => void;
+}) {
+  const { t: say, tx } = useT();
+  const words = steer.request === 'withdraw' ? say('steer.withdrawing') : say(STEER_WORDS[phase]);
+  return (
+    <View
+      testID="steer-state"
+      accessibilityLiveRegion="polite"
+      style={{ gap: 2, alignSelf: 'stretch', paddingHorizontal: 8 }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <T kind="small" style={{ flexShrink: 1 }}>
+          {words}
+        </T>
+        {withdrawable(phase) && (
+          <QuietButton
+            label={say('steer.withdraw')}
+            id="Take back"
+            disabled={steer.request !== undefined}
+            onPress={onWithdraw}
+          />
+        )}
+        {phase === 'failed' && (
+          <>
+            <QuietButton label={say('chat.resend')} id="Send again" onPress={onResend} />
+            <QuietButton label={say('chat.discard')} id="Delete" onPress={onDiscard} />
+          </>
+        )}
+      </View>
+      {steer.failed && phase !== 'applying' ? <T kind="small">{tx(steer.failed)}</T> : null}
+    </View>
+  );
+}
+
+/**
+ * "To the running task": on while a task in this conversation is still going, so what is sent
+ * goes to that task; one tap turns it off, and what is sent goes to the conversation again.
+ */
+function SteerChip({ task, on, onToggle }: { task: TaskView; on: boolean; onToggle: () => void }) {
+  const theme = useTheme();
+  const { t: say } = useT();
+  const title = task.title ? displayText(task.title) : say('task.title');
+  return (
+    <Pressable
+      testID="steer-chip"
+      accessibilityRole="switch"
+      accessibilityLabel={say('steer.chipLabel', { title })}
+      accessibilityState={{ checked: on }}
+      onPress={onToggle}
+      hitSlop={6}
+      style={({ pressed }) => ({
+        flexShrink: 1,
+        minHeight: 32,
+        justifyContent: 'center',
+        paddingHorizontal: 12,
+        borderRadius: radius.pill,
+        borderWidth: 1,
+        borderColor: on ? theme.pillOn : theme.cardEdge,
+        backgroundColor: on ? theme.pillOn : theme.chip,
+        opacity: pressed ? 0.8 : 1,
+      })}
+    >
+      <T kind="small" numberOfLines={1} style={{ color: on ? theme.onPillOn : theme.ink }}>
+        {say('steer.chip', { title })}
+      </T>
+    </Pressable>
+  );
+}
+
+/**
+ * The state of things, each on its own line, only while the stream is not live: the connection
+ * (with the reassurance that the work goes on and nothing needs sending again), the task as last
+ * seen, and the machine when its stop is not confirmed. Being offline never reads as the task failing.
+ */
+function StatusLines({
+  status,
+  task,
+  stopping,
+}: {
+  status: string;
+  task: TaskView | undefined;
+  stopping: boolean;
+}) {
+  const { t: say, tx } = useT();
+  const live = status === 'Live';
+  if (live && !stopping) return null;
+  const dropped = status === 'Reconnecting…' || status === 'Disconnected';
+  const connection = status === 'Disconnected' ? say('status.offline') : tx(status);
+  const line = (label: Key, value: string) => say('status.line', { label: say(label), value });
+  return (
+    <View testID="status-lines" style={{ gap: 2, alignItems: 'center' }}>
+      {!live && (
+        <View
+          testID="status-connection"
+          accessible
+          accessibilityRole="text"
+          accessibilityLabel={
+            dropped
+              ? `${line('status.connection', connection)}${say('work.join')}${say('status.keepsGoing')}`
+              : line('status.connection', connection)
+          }
+          style={{ alignItems: 'center', gap: 2 }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            {status !== 'Connecting…' && <StatusMark tone="idle" />}
+            <T kind="small">{line('status.connection', connection)}</T>
+          </View>
+          {dropped && (
+            <T kind="small" testID="status-keeps-going" style={{ textAlign: 'center' }}>
+              {say('status.keepsGoing')}
+            </T>
+          )}
+        </View>
+      )}
+      {!live && task && (
+        <T kind="small" testID="status-task">
+          {line('status.task', say('status.lastSeen', { state: tx(taskLabel(task)) }))}
+        </T>
+      )}
+      {stopping && (
+        <T kind="small" testID="status-machine">
+          {line('status.machine', say('status.stopping'))}
+        </T>
+      )}
+    </View>
+  );
+}
+
+/** How many decisions wait below the screen; a tap goes to them. Only the attention colour's dot. */
+function WaitingChip({ count, onPress }: { count: number; onPress: () => void }) {
+  const theme = useTheme();
+  const { t: say } = useT();
+  return (
+    <Pressable
+      testID="waiting-chip"
+      accessibilityRole="button"
+      accessibilityLabel={say('chat.waitingChipLabel', { count })}
+      onPress={onPress}
+      hitSlop={6}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        minHeight: 32,
+        paddingHorizontal: 12,
+        borderRadius: radius.pill,
+        borderWidth: 1,
+        borderColor: theme.cardEdge,
+        backgroundColor: theme.solid,
+        opacity: pressed ? 0.8 : 1,
+      })}
+    >
+      <StatusMark tone="attention" />
+      <T kind="small" style={{ color: theme.ink }}>
+        {say('chat.waitingChip', { count })}
+      </T>
+    </Pressable>
+  );
+}
+
 /**
  * Each conversation's send that the server has not acknowledged, kept by the feed from before it
  * posts until the server answers (`PendingSends`), for as long as the app runs. Coming back to a
@@ -386,6 +635,10 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   /** The task pills opened to show their row (the step, the cost and the controls). */
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   const { openSheet, sheet } = useConversationSheet();
+  const router = useRouter();
+  const openGrants = () => router.push('/me');
+  const steering = useSteers(client, conversationId);
+  const projects = useProjects(client);
   const scroll = useRef<FlatList<ChatItem> | null>(null);
   /** The newest messages stay in view only while the person is already reading them. */
   const atEnd = useRef(true);
@@ -394,8 +647,33 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     const { contentOffset, layoutMeasurement, contentSize } = nativeEvent;
     atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
   };
+  /**
+   * Where the decision cards sit against what is on screen. The cards are the end of the list's
+   * footer, so their top is the content's height less the bottom padding, less the footer, plus
+   * where they start in it.
+   */
+  const where = useRef({ offset: 0, viewport: 0, content: 0, footer: 0 });
+  /** Where each open card starts in the footer, by its id. */
+  const tops = useRef(new Map<string, number>());
+  const [cardsBelow, setCardsBelow] = useState(false);
+  const measure = (change: Partial<typeof where.current> = {}) => {
+    const at = Object.assign(where.current, change);
+    const first = Math.min(...tops.current.values());
+    if (at.viewport === 0 || at.content === 0 || !Number.isFinite(first)) {
+      setCardsBelow(false);
+      return;
+    }
+    const padding = dock + 16;
+    const top = at.content - padding - at.footer + first;
+    // Below the composer's top edge: none of it can be seen.
+    setCardsBelow(top > at.offset + at.viewport - dock);
+  };
+  const placeCard = (key: string) => (event: LayoutChangeEvent) => {
+    tops.current.set(key, event.nativeEvent.layout.y);
+    measure();
+  };
   const roots = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
-  const timeline = chatTimeline(state.messages, roots);
+  const timeline = chatTimeline(state.messages, roots, steering.steers);
   const inbox = Object.values(state.inbox);
   // As on the web: a finished task whose row already shows its outcome is not announced again here;
   // its card waits on Home.
@@ -437,6 +715,84 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     setOutgoing(undefined);
   }, [arrivedOutgoing, feed, conversationId]);
   const pending = arrivedOutgoing ? undefined : outgoing;
+
+  // Talking to a running task. The chip is on whenever a task here is still going, unless the
+  // person turned it off for that task.
+  const target = steerTarget(roots);
+  const [steerOff, setSteerOff] = useState<string | undefined>();
+  const [refusedNote, setRefusedNote] = useState(false);
+  const steerOn = target !== undefined && steerOff !== target.taskId;
+  const phaseOf = (steer: Steer) => steerPhase(steer, state.tasks[steer.taskId]);
+  const lastSteer = steering.steers.at(-1);
+  const lastPhase = lastSteer && phaseOf(lastSteer);
+  // A message to a task on its way, or one that did not get there, is settled first.
+  const steerHolds = lastSteer?.request === 'send' || lastPhase === 'failed';
+  // Messages the agent may not have read yet: asked about again when the task shows it took a
+  // step (at most every 8 seconds) and every 20 seconds, by sending each again unchanged.
+  const moving = steering.steers.filter((steer) => {
+    const phase = phaseOf(steer);
+    return phase === 'received' || phase === 'queued';
+  });
+  const activity = moving
+    .map((steer) => {
+      const task = state.tasks[steer.taskId];
+      return `${steer.id}:${task?.state}:${task?.progress.length}:${task?.narration}:${task?.panels?.length}`;
+    })
+    .join('|');
+  const latest = useRef({ steering, moving });
+  latest.current = { steering, moving };
+  const checked = useRef(Date.now());
+  useEffect(() => {
+    if (activity === '') return;
+    const check = () => {
+      checked.current = Date.now();
+      for (const steer of latest.current.moving) latest.current.steering.check(steer.id);
+    };
+    if (Date.now() - checked.current >= 8_000) check();
+    const timer = setInterval(check, 20_000);
+    return () => clearInterval(timer);
+  }, [activity]);
+  // A task that ended with a message still pending: its log says whether the agent read it.
+  const toSettle = steering.steers
+    .filter((steer) => steer.server === 'pending' && !steer.settled && phaseOf(steer) === 'unknown')
+    .map((steer) => steer.id)
+    .join(',');
+  useEffect(() => {
+    for (const id of toSettle.split(',').filter(Boolean)) latest.current.steering.settle(id);
+  }, [toSettle]);
+  /** The latest message to a task, by the composer while it moves or did not get there. */
+  const steerLine =
+    lastSteer &&
+    lastPhase &&
+    (unsettled(lastPhase) || lastPhase === 'failed' || lastPhase === 'applying')
+      ? { steer: lastSteer, phase: lastPhase }
+      : undefined;
+  const sendToTask = (task: TaskView, text: string) => {
+    checked.current = Date.now();
+    void steering.send(task.taskId, text).then((taken) => {
+      if (taken) return;
+      // This task takes no messages now: the words go back, and the next send goes to the
+      // conversation.
+      setDraft((now) => (now.trim() === '' ? text : now));
+      setSteerOff(task.taskId);
+      setRefusedNote(true);
+    });
+  };
+  /** Open decisions, as the cards below show them; a card answered since is no longer placed. */
+  const openCards = new Set([
+    ...questions
+      .filter((question) => !state.answers[question.questionId])
+      .map((question) => question.questionId),
+    ...waiting
+      .filter((item) => item.state === 'open' && !openQuestions.has(displayText(item.ask).trim()))
+      .map((item) => item.itemId),
+  ]);
+  for (const key of [...tops.current.keys()]) if (!openCards.has(key)) tops.current.delete(key);
+  const toCards = () => {
+    atEnd.current = true;
+    scroll.current?.scrollToEnd({ animated: !reduce });
+  };
+  const stopping = roots.some((task) => task.stopPending || task.treeStopPending);
   // A question or decision waiting on the person is not work; a reply still owed is.
   const nothingWaits = openQuestions.size === 0 && waiting.length === 0;
   const owed = nothingWaits && !pending && state.messages.at(-1)?.role === 'user';
@@ -464,7 +820,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   // The words move into the list at once: the person sees them taken before the server answers.
   const send = () => {
     const text = draft.trim();
-    if (!text || busy || pending) return;
+    if (!text || busy || pending || steerHolds) return;
+    setRefusedNote(false);
+    if (steerOn && target) {
+      setDraft('');
+      sendToTask(target, text);
+      return;
+    }
     const seen = new Set(sentByPerson.map((message) => message.id));
     // Kept with the send, so a later visit still tells it from older messages with the same words.
     seenAtSend.set(conversationId, seen);
@@ -509,6 +871,12 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         );
       case 'work':
         return <WorkBlock tasks={item.tasks} working={workingOn(item.tasks, item.last)} />;
+      case 'steer':
+        return (
+          <Appear enter={arrived(item.key)}>
+            <SteerBubble steer={item.steer} phase={phaseOf(item.steer)} />
+          </Appear>
+        );
       case 'task': {
         const task = item.task;
         const open = opened.has(task.taskId);
@@ -565,9 +933,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           keyExtractor={(item) => item.key}
           initialNumToRender={20}
           windowSize={7}
-          onContentSizeChange={() =>
-            atEnd.current && scroll.current?.scrollToEnd({ animated: false })
-          }
+          onContentSizeChange={(_, height) => {
+            measure({ content: height });
+            if (atEnd.current) scroll.current?.scrollToEnd({ animated: false });
+          }}
+          onLayout={(event) => measure({ viewport: event.nativeEvent.layout.height })}
+          onScroll={(event) => measure({ offset: event.nativeEvent.contentOffset.y })}
+          scrollEventThrottle={100}
           onScrollEndDrag={trackEnd}
           onMomentumScrollEnd={trackEnd}
           // An item far up the list may not be measured yet: go near it first, then to it.
@@ -595,6 +967,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           ListEmptyComponent={
             pending ? undefined : (
               <Opening
+                ideas={startersFor(projects, conversations, conversationId, say)}
                 busy={busy === 'message'}
                 onIdea={(words) => {
                   setDraft(words);
@@ -605,7 +978,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           }
           renderItem={renderItem}
           ListFooterComponent={
-            <View style={{ gap: 14 }}>
+            <View
+              testID="chat-footer"
+              style={{ gap: 14 }}
+              onLayout={(event) => measure({ footer: event.nativeEvent.layout.height })}
+            >
               {pending && (
                 <View>
                   <OutgoingBubble
@@ -628,12 +1005,19 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                     onAnswer={(optionId, text) =>
                       void feed.answerQuestion(question, optionId, text)
                     }
+                    onOpenGrants={openGrants}
                   />
                 );
                 return (
-                  <Appear key={question.questionId} enter={arrived(question.questionId)}>
-                    {answered ? block : <Card label={say('chat.decision.label')}>{block}</Card>}
-                  </Appear>
+                  <View
+                    key={question.questionId}
+                    testID={`decision-slot-${question.questionId}`}
+                    {...(answered ? {} : { onLayout: placeCard(question.questionId) })}
+                  >
+                    <Appear enter={arrived(question.questionId)}>
+                      {answered ? block : <Card label={say('chat.decision.label')}>{block}</Card>}
+                    </Appear>
+                  </View>
                 );
               })}
               {waiting
@@ -645,16 +1029,23 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                       task={item.taskId ? state.tasks[item.taskId] : undefined}
                       disabled={Boolean(busy)}
                       onAnswer={(optionId, text) => void feed.answerItem(item, optionId, text)}
+                      onOpenGrants={openGrants}
                     />
                   );
                   return (
-                    <Appear key={item.itemId} enter={arrived(item.itemId)}>
-                      {item.state === 'answering' ? (
-                        card
-                      ) : (
-                        <Card label={say('chat.needsYou.label')}>{card}</Card>
-                      )}
-                    </Appear>
+                    <View
+                      key={item.itemId}
+                      testID={`decision-slot-${item.itemId}`}
+                      {...(item.state === 'open' ? { onLayout: placeCard(item.itemId) } : {})}
+                    >
+                      <Appear enter={arrived(item.itemId)}>
+                        {item.state === 'answering' ? (
+                          card
+                        ) : (
+                          <Card label={say('chat.needsYou.label')}>{card}</Card>
+                        )}
+                      </Appear>
+                    </View>
                   );
                 })}
               {error ? <T kind="error">{tx(error)}</T> : null}
@@ -663,16 +1054,39 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
         />
         <TopFade />
         <Dock height={dock} onHeight={setDock}>
-          {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
-          {status !== 'Live' && (
-            <View
-              accessible
-              accessibilityRole="text"
-              accessibilityLabel={tx(status)}
-              style={{ flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'center' }}
-            >
-              {status !== 'Connecting…' && <StatusMark tone="attention" />}
-              <T kind="small">{tx(status)}</T>
+          {/* Nothing to say while connected; a dropped connection, and the task as last seen, are
+              each their own line. */}
+          <StatusLines status={status} task={target} stopping={stopping} />
+          {steerLine && (
+            <SteerState
+              steer={steerLine.steer}
+              phase={steerLine.phase}
+              onWithdraw={() => steering.withdraw(steerLine.steer.id)}
+              onResend={() => steering.resend(steerLine.steer.id)}
+              onDiscard={() => steering.discard(steerLine.steer.id)}
+            />
+          )}
+          {refusedNote && (
+            <T kind="small" testID="steer-refused" style={{ paddingHorizontal: 8 }}>
+              {say('steer.refused')}
+            </T>
+          )}
+          {(target || (openCards.size > 0 && cardsBelow)) && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              {target && (
+                <SteerChip
+                  task={target}
+                  on={steerOn}
+                  onToggle={() => {
+                    setRefusedNote(false);
+                    setSteerOff(steerOn ? target.taskId : undefined);
+                  }}
+                />
+              )}
+              <View style={{ flex: 1 }} />
+              {openCards.size > 0 && cardsBelow && (
+                <WaitingChip count={openCards.size} onPress={toCards} />
+              )}
             </View>
           )}
           <Composer
@@ -683,12 +1097,15 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
               // meanwhile: the new words cannot be sent until it is sent again or deleted.
               if (!pending) feed.draftEdited();
             }}
-            sending={busy === 'message'}
+            sending={busy === 'message' || lastSteer?.request === 'send'}
             // A message on its way, or one that failed, is settled first (sent again or deleted),
             // so a new one never takes its id.
-            disabled={Boolean(busy) || pending !== undefined}
+            disabled={Boolean(busy) || pending !== undefined || steerHolds}
             onSend={send}
             onPlus={openSheet}
+            {...(steerOn
+              ? { placeholder: say('steer.placeholder'), sendLabel: say('steer.send') }
+              : {})}
           />
         </Dock>
       </View>
