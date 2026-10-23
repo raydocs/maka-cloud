@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { test } from 'node:test';
 import {
   APPLE,
@@ -34,6 +34,24 @@ test('a token signed by the provider’s key for our client with our nonce is an
     email: 'ada@example.com',
     emailVerified: true,
   });
+});
+
+test('a token whose nonce is the SHA-256 of ours, in hex, is an identity; the hash of another is not', async () => {
+  const k = signer('k1');
+  const { verifier } = setup([k]);
+  const hashOf = (text: string) => createHash('sha256').update(text).digest('hex');
+  assert.ok(await verifier.verify(token(k, { nonce: hashOf(NONCE) }), NONCE), 'lower-case hex');
+  assert.ok(
+    await verifier.verify(token(k, { nonce: hashOf(NONCE).toUpperCase() }), NONCE),
+    'upper-case hex',
+  );
+  assert.equal(await verifier.verify(token(k, { nonce: hashOf('another') }), NONCE), undefined);
+  assert.equal(
+    await verifier.verify(token(k, { nonce: hashOf(NONCE).slice(1) }), NONCE),
+    undefined,
+  );
+  // The hash is not a way around the nonce itself: a token that carries ours hashed twice is refused.
+  assert.equal(await verifier.verify(token(k, { nonce: hashOf(hashOf(NONCE)) }), NONCE), undefined);
 });
 
 test('Apple’s string flag, an audience list and the other issuer form are understood', async () => {

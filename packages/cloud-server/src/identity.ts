@@ -1,4 +1,4 @@
-import { createPublicKey, timingSafeEqual, verify } from 'node:crypto';
+import { createHash, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
 
 /** Who a provider says someone is. `subject` is the provider's own stable id, never the email. */
 export interface VerifiedIdentity {
@@ -134,13 +134,26 @@ function sameText(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/**
+ * The token's nonce is the server's nonce, or its SHA-256 in hex. Some sign-in libraries hand the
+ * provider a hash of the nonce (Apple's sheet on a phone is the usual case), and the provider
+ * signs back what it was given. Either way the token is tied to the one nonce this server issued
+ * and has since spent; the hash does not let anyone who only saw a token try another nonce.
+ */
+function nonceMatches(claim: string, nonce: string): boolean {
+  const hashed = createHash('sha256').update(nonce).digest('hex');
+  const plain = sameText(claim, nonce);
+  const hashedToo = sameText(claim.toLowerCase(), hashed);
+  return plain || hashedToo;
+}
+
 export interface IdentityVerifier {
   readonly provider: 'apple' | 'google';
   /**
    * The identity in an ID token, when and only when the token is signed by the provider's key,
    * was issued by the provider for one of the owner's client ids, has not expired, and carries
-   * exactly the nonce this server gave out for the sign-in. Anything else is nothing: no reason is
-   * returned, so a caller cannot tell a caller which check failed.
+   * exactly the nonce this server gave out for the sign-in (or its SHA-256 in hex). Anything else
+   * is nothing: no reason is returned, so a caller cannot tell a caller which check failed.
    */
   verify(idToken: string, nonce: string): Promise<VerifiedIdentity | undefined>;
 }
@@ -203,7 +216,7 @@ export function createOidcVerifier(
       if (typeof claim !== 'number' || !Number.isFinite(claim)) return undefined;
       if (claim * 1000 > at + CLOCK_SKEW_MS) return undefined;
     }
-    if (typeof claims.nonce !== 'string' || !sameText(claims.nonce, nonce)) return undefined;
+    if (typeof claims.nonce !== 'string' || !nonceMatches(claims.nonce, nonce)) return undefined;
     if (typeof claims.sub !== 'string' || claims.sub.length === 0 || claims.sub.length > 255) {
       return undefined;
     }
