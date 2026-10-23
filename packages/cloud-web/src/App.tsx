@@ -1,4 +1,3 @@
-import { ConversationSearch } from './Search';
 import { useT } from './i18n';
 import type { Key } from './strings';
 import { ArrowUp, ArrowUpRight, FileText, Search, UserRound, Plus } from 'lucide-react';
@@ -56,6 +55,7 @@ import { MemoryPanel } from './Memory';
 import { ModePicker } from './ModePicker';
 import { outboxFor } from './pending';
 import { Projects } from './Projects';
+import { ConversationSearch } from './Search';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush, postPushContext, restorePush } from './push';
 import { submitOnEnter } from './keys';

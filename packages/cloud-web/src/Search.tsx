@@ -14,34 +14,27 @@ export function ConversationSearch({
   const { t } = useT();
   const sequence = useRef(0);
   const [attempt, retry] = useState(0);
-  const [result, setResult] = useState<{ query: string; hits?: Conversation[]; error?: boolean }>();
+  const [result, setResult] = useState<{ conversations?: Conversation[]; error?: boolean }>();
   const words = query.trim();
   useEffect(() => {
     const id = ++sequence.current;
-    if (!words) return;
-    setResult({ query: words });
+    setResult({});
     void client.listConversations().then(
       ({ conversations }) => {
         if (sequence.current !== id) return;
-        setResult({
-          query: words,
-          hits: conversations.filter((c) =>
-            (c.title ?? '').toLocaleLowerCase().includes(words.toLocaleLowerCase()),
-          ),
-        });
+        setResult({ conversations });
       },
       () => {
-        if (sequence.current === id) setResult({ query: words, error: true });
+        if (sequence.current === id) setResult({ error: true });
       },
     );
     return () => {
       sequence.current++;
     };
-  }, [client, words, attempt]);
+  }, [client, attempt]);
   if (!words) return <p>{t('Search conversation titles.')}</p>;
-  if (result?.query !== words || (!result.hits && !result.error))
-    return <p role="status">{t('Loading')}</p>;
-  if (result.error)
+  if (!result?.conversations && !result?.error) return <p role="status">{t('Loading')}</p>;
+  if (result?.error)
     return (
       <p>
         {t('Search could not be loaded.')}{' '}
@@ -50,10 +43,13 @@ export function ConversationSearch({
         </button>
       </p>
     );
-  if (!result.hits?.length) return <p>{t('No matches for “{query}”.', { query: words })}</p>;
+  const hits = result?.conversations?.filter((c) =>
+    (c.title ?? '').toLocaleLowerCase().includes(words.toLocaleLowerCase()),
+  );
+  if (!hits?.length) return <p>{t('No matches for “{query}”.', { query: words })}</p>;
   return (
     <>
-      {result.hits.map((c) => (
+      {hits.map((c) => (
         <button
           className="quiet-action"
           type="button"
