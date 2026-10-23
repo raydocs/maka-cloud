@@ -8,6 +8,8 @@ import { mergeInboxItem } from './state';
 import { Store } from './store';
 
 export const RECENT_CONVERSATIONS = 5;
+/** The most card ids `POST /v1/home/seen` takes at once. */
+export const HOME_SEEN_MAX = 100;
 
 /** The newest conversations first: what Home lists and reads results from. */
 export function recentConversations(conversations: readonly Conversation[]): Conversation[] {
@@ -57,6 +59,8 @@ export class HomeFeed extends Store<HomeSnapshot> {
   private recentIds = '';
   private fingerprint: string | undefined;
   private pending = false;
+  /** This visit was already told; a second leave before the next read tells nothing. */
+  private left = false;
   private readonly answerItem: ReturnType<typeof inboxAnswerer>;
 
   constructor(
@@ -116,12 +120,18 @@ export class HomeFeed extends Store<HomeSnapshot> {
   /**
    * Remembers this visit. Called when the person leaves (a page hide, a screen going away). The
    * server is told too, with the cards that were shown, so the next device agrees on what is new.
+   * `shown` names the cards the screen showed (in its order); without it, every card counts. A
+   * visit is told once: leaving again before Home is read again does nothing.
    */
-  leave(): void {
+  leave(shown?: readonly string[]): void {
+    if (this.left) return;
+    this.left = true;
     if (this.fingerprint !== undefined) void this.visits.write(this.fingerprint, this.now());
     const cards = this.getSnapshot().cards;
-    if (cards !== undefined)
-      void this.client.homeSeen(cards.map((card) => card.cardId)).catch(() => undefined);
+    if (cards !== undefined) {
+      const ids = shown ?? cards.map((card) => card.cardId);
+      void this.client.homeSeen(ids.slice(0, HOME_SEEN_MAX)).catch(() => undefined);
+    }
   }
 
   /** Moves a card to just after `after` (first when null) inside its kind. Home keeps the server's answer. */
@@ -133,12 +143,13 @@ export class HomeFeed extends Store<HomeSnapshot> {
     }
   }
 
-  stop(): void {
-    this.leave();
+  stop(shown?: readonly string[]): void {
+    this.leave(shown);
     this.generation += 1;
   }
 
   private load(generation: number): void {
+    this.left = false;
     const current = () => generation === this.generation;
     this.client
       .listInbox('open')
@@ -177,7 +188,8 @@ export class HomeFeed extends Store<HomeSnapshot> {
         this.client
           .listTasks(id)
           .then((tasks) => [id, tasks] as const)
-          .catch(() => [id, [] as TaskView[]] as const),
+          // A read that failed keeps what was last read, so a blip does not empty Home.
+          .catch(() => [id, this.getSnapshot().done?.get(id) ?? ([] as TaskView[])] as const),
       ),
     ).then(
       (pairs) =>

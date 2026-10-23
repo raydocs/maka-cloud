@@ -414,6 +414,81 @@ test('Home takes the server’s cards and order, tells the server what was seen,
   expect(seen).toEqual([{ cardIds: ['waiting:b', 'waiting:a'] }]);
 });
 
+test('Home tells the server only the cards the screen showed, at most 100, once per visit', async () => {
+  const cards = Array.from({ length: 120 }, (_, i) => ({
+    cardId: `waiting:i${i}`,
+    kind: 'waiting',
+    ref: { type: 'inbox', id: `i${i}` },
+    rank: i,
+    seenAt: null,
+    at: i,
+  }));
+  const seen: Array<{ cardIds: string[] }> = [];
+  const { client } = served({
+    '/v1/home/seen': (_url, init) => {
+      seen.push(JSON.parse(String(init.body)));
+      return Response.json({ seen: [], visitedAt: 1 });
+    },
+    '/v1/home': () => Response.json({ cards }),
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  feed.start([]);
+  await until(() => feed.getSnapshot().cards !== undefined, 'the cards');
+
+  feed.leave(['waiting:i3', 'waiting:i1']);
+  // Leaving again (the screen goes away after the app went to the background) tells nothing new.
+  feed.leave(['waiting:i3']);
+  await until(() => seen.length === 1, 'the visit');
+  await new Promise((r) => setTimeout(r, 20));
+  expect(seen).toEqual([{ cardIds: ['waiting:i3', 'waiting:i1'] }]);
+
+  // Back on Home, it is read again: leaving now is a new visit. Left with every card, the server
+  // is told 100 at most.
+  const shown = feed.getSnapshot().cards;
+  feed.refresh();
+  await until(() => feed.getSnapshot().cards !== shown, 'the cards read again');
+  feed.stop();
+  await until(() => seen.length === 2, 'the second visit');
+  expect(seen[1]?.cardIds).toHaveLength(100);
+  expect(seen[1]?.cardIds[0]).toBe('waiting:i0');
+  await new Promise((r) => setTimeout(r, 20));
+  expect(seen).toHaveLength(2);
+});
+
+test("a failed read of a conversation's tasks keeps what Home last read of them", async () => {
+  let down = false;
+  const running = {
+    taskId: 't1',
+    state: 'running',
+    createdAt: 1,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+  };
+  const { client } = served({
+    '/v1/conversations/c1/tasks': () =>
+      down ? new Response('{}', { status: 500 }) : Response.json({ tasks: [running] }),
+    '/v1/inbox/items': () => Response.json({ items: [] }),
+    '/v1/projects': () => new Response('{}', { status: 404 }),
+  });
+  const feed = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
+  feed.start([{ conversationId: 'c1', title: 'Release', createdAt: 1 }]);
+  await until(() => feed.getSnapshot().done?.get('c1')?.length === 1, 'the tasks');
+  const first = feed.getSnapshot().done;
+  down = true;
+  feed.refresh();
+  await until(() => feed.getSnapshot().done !== first, 'the second read');
+  expect(
+    feed
+      .getSnapshot()
+      .done?.get('c1')
+      ?.map((t) => t.taskId),
+  ).toEqual(['t1']);
+  feed.stop();
+});
+
 test('Home without a server Home stays on its own parts and tells the server nothing', async () => {
   const { client, calls } = served({
     '/v1/inbox/items': () => Response.json({ items: [] }),

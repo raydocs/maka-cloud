@@ -73,15 +73,17 @@ async function homeWithFinished(over: Partial<TaskView>) {
 
 test('Home shows no spend tile, dash or "not reported" line when no spend was reported', async () => {
   await homeWithFinished({});
-  expect(screen.getByLabelText('Done: 1')).toBeTruthy();
+  expect(screen.getByText('Tag the release')).toBeTruthy();
+  expect(screen.getByText('Tagged v1.2.0.')).toBeTruthy();
   expect(screen.queryByText('Spent')).toBeNull();
+  expect(screen.queryByLabelText(/^Cost/u)).toBeNull();
   expect(screen.queryByText('—')).toBeNull();
   expect(screen.queryByText(/not reported/iu)).toBeNull();
 });
 
 test('Home shows the spend once the server reports one', async () => {
   await homeWithFinished({ costUsd: 0.5 });
-  expect(screen.getByLabelText('Spent: $0.50')).toBeTruthy();
+  expect(screen.getByLabelText('Cost: $0.50')).toBeTruthy();
 });
 
 /** The typesetting slips a Chinese line can have, each with the text around it. */

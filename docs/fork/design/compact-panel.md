@@ -20,6 +20,24 @@ ours, which tokens carry it, how the language works, and what comes next.
   it keeps (each can be revoked), from the client's `memory()` and `listGrants()`. A card is left out
   where the server has no such feature. There is no "connections" card: the client has no API for
   connectors yet.
+- **Home** (`src/app/(tabs)/index.tsx`, built by `todayOf` in `src/lib/today.ts`) is the day's
+  page, from the cards the server keeps (`/v1/home`, #385) in the server's order. From the top:
+  - the date and a greeting by the phone's clock (`home-today-title`);
+  - what needs the person (`home-waiting-N`), the only place for the attention colour;
+  - what is working now: running, queued or paused top-level tasks, with the live line. These come
+    from the five most recent conversations (the same tasks the feed reads for results; the server
+    has no list of running work), read again every 15 seconds while Home is on screen and something
+    works;
+  - since you were last here: finished tasks and the server's notes;
+  - what runs next;
+  - on a quiet day, three idea chips that fill the composer.
+
+  A part with nothing in it is left out. A card whose item, task or duty the phone has not read is
+  left out too, and is not reported as seen. On a server without `/v1/home`, the same page is built
+  from the feed's own parts. There is no pitch text: the composer starts work.
+  - **Seen.** Leaving Home (another section, or the app going to the background while Home is on
+    screen) sends `POST /v1/home/seen` with the cards shown, at most 100, once per visit. An
+    `inactive` blip (a system sheet) does not count.
 - **Projects** (`src/app/(tabs)/projects.tsx`) lists the repositories from `listProjects()`, the
   same call as the web's Projects page, each with its default branch and its standing duties (on, off,
   or waiting for approval). Read-only here; duties are switched on the web. A server without projects
@@ -175,9 +193,8 @@ are for the iOS simulator run in CI and a look on a phone:
 2. **Voice mode with a caption pill.** While the agent speaks, one glass pill near the bottom shows
    the current sentence. It needs the dictation and speech stream first, and must respect reduced
    motion (no caption animation then).
-3. **A notes-style Home.** Home as a grid of rounded cards (date, title, two-line preview) for
-   decisions, results and runs, once the server sends a short preview per item. Today a
-   conversation has only a title and a start time.
+3. **Richer Home cards.** A short preview per result and a thumbnail when there is a picture,
+   once the server sends them. Moving a card (`moveHomeCard`) is not offered on the phone yet.
 4. **Connections in Me,** once the client has a connectors API.
 5. **The web app in Chinese.** The web shows the shared logic's English today. Moving those
    sentences into a shared catalogue would let both apps drop `PHRASES_ZH`.

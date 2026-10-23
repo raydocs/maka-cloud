@@ -54,9 +54,14 @@ async function signedIn(screenNode: ReactElement) {
   });
 }
 
-test('Home in Chinese: the start sentence, its field and its ideas', async () => {
+test("Home in Chinese: the greeting, a first visit's line, its field and its ideas", async () => {
   await signedIn(<Home />);
-  expect(await screen.findByText('给下一个想法留个位置。')).toBeTruthy();
+  expect(
+    await screen.findByText('需要你的、正在做的和已经做完的事，都会出现在这里。'),
+  ).toBeTruthy();
+  expect(['早上好。', '下午好。', '晚上好。']).toContain(
+    screen.getByTestId('home-today-title').props.children,
+  );
   expect(screen.getByLabelText('想完成什么？')).toBeTruthy();
   expect(screen.getByText('不知道从哪开始？')).toBeTruthy();
   // The device tests still find the field by its fixed name.
