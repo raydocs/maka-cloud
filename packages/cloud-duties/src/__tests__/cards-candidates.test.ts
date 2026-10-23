@@ -270,3 +270,39 @@ test('outside() always gives one short printable line', () => {
   assert.equal(outside('  a   b  ', 10), 'a b');
   assert.equal(outside('abcdefghij', 5), 'abcd…');
 });
+
+test('outside text and quoted facts are scrubbed before clipping can hide a secret shape', () => {
+  const secret = `ghp_${'a'.repeat(36)}`;
+  assert.ok(!outside(`${'x'.repeat(30)} ${secret}`, 40).includes('ghp_'));
+  const found = buildCandidates(
+    input({
+      signals: { ...EMPTY, newIssues: [{ number: 1, title: `${'x'.repeat(490)} ${secret}` }] },
+    }),
+  );
+  assert.ok(found[0]);
+  assert.ok(!found[0].card.brief.includes('ghp_'));
+  assert.match(found[0].card.brief, /\[secret\]/u);
+});
+
+test('a changed issue title or review pull title or head changes the full precondition', async () => {
+  const signals = await busySignals();
+  const hashes = (value: RepoSignals) =>
+    new Map(
+      buildCandidates(input({ signals: value })).map(({ card }) => [
+        card.subjectKey,
+        card.preconditionHash,
+      ]),
+    );
+  const before = hashes(signals);
+  const changedIssue = structuredClone(signals);
+  assert.ok(changedIssue.newIssues[0]);
+  changedIssue.newIssues[0].title = 'Different issue';
+  assert.notEqual(hashes(changedIssue).get('issue:31'), before.get('issue:31'));
+  for (const field of ['title', 'headSha'] as const) {
+    const changedPull = structuredClone(signals);
+    const pull = changedPull.ownPulls.find((p) => p.number === 15);
+    assert.ok(pull);
+    pull[field] = field === 'title' ? 'Different review task' : '9'.repeat(40);
+    assert.notEqual(hashes(changedPull).get('pr:15'), before.get('pr:15'), field);
+  }
+});
