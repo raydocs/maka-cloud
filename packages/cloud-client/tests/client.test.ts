@@ -229,7 +229,12 @@ test('the person’s language is read and set on the settings route; an older se
   const client = new CloudClient('mks_a.b', { fetcher });
   expect(await client.settings()).toEqual({ language: 'zh-Hans' });
   expect(await client.setLanguage('en')).toEqual({ language: 'en' });
-  expect(calls).toEqual(['GET /v1/settings', 'PATCH /v1/settings {"language":"en"}']);
+  expect(await client.setLanguage('zh-Hant')).toEqual({ language: 'zh-Hant' });
+  expect(calls).toEqual([
+    'GET /v1/settings',
+    'PATCH /v1/settings {"language":"en"}',
+    'PATCH /v1/settings {"language":"zh-Hant"}',
+  ]);
   const old = new CloudClient('mks_a.b', {
     fetcher: (async () => new Response('{}', { status: 404 })) as typeof fetch,
   });

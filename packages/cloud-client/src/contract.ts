@@ -432,7 +432,7 @@ export const routes = {
 } as const;
 
 /** The languages the server speaks to a person. A person who never chose reads `zh-Hans`. */
-export type Language = 'zh-Hans' | 'en';
+export type Language = 'zh-Hans' | 'zh-Hant' | 'en';
 
 /** `GET /v1/settings`, and the answer to `PATCH /v1/settings`. */
 export interface PersonSettings {

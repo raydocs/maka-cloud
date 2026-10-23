@@ -437,8 +437,24 @@ test('a note is in the owner’s language: Chinese by default, English once they
   );
   const noteOf = async () => (await homeOf(h)).find((card) => card.kind === 'note')?.text;
   assert.equal(await noteOf(), 'acme/api 的 PR #7 检查未通过。');
+  await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language: 'zh-Hant' }) });
+  assert.equal(await noteOf(), 'acme/api 的 PR #7 檢查未通過。');
   await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language: 'en' }) });
   assert.equal(await noteOf(), 'Checks failed on PR #7 in acme/api.');
+  assert.equal(
+    noteText(
+      { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'pending' },
+      'zh-Hant',
+    ),
+    'a/b 的 PR #1 已合併，CI 仍在執行。',
+  );
+  assert.equal(
+    noteText(
+      { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'none' },
+      'zh-Hant',
+    ),
+    'a/b 的 PR #1 已合併。',
+  );
   assert.equal(
     noteText(
       { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'pending' },
