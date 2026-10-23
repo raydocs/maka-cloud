@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react-n
 import { AppState, type AppStateStatus, Text } from 'react-native';
 import Home from '@/app/(tabs)/index';
 import { SessionProvider, useSession } from '@/lib/session';
-import { partOfDay, todayOf } from '@/lib/today';
+import { partOfDay, todayOf, WORKING_REFRESH_MS } from '@/lib/today';
 
 // Home runs outside a navigator here; a test focuses and blurs it by hand.
 const mockFocus: { effect?: () => undefined | (() => void) } = {};
@@ -316,6 +316,58 @@ test('leaving Home tells the server the cards it showed, once; an inactive blip 
     // React Native's own test mock of AppState stays a mock; it gets its behaviour back.
     if (before) listen.mockImplementation(before);
     else listen.mockRestore();
+  }
+});
+
+test('coming back to Home reads it again, so leaving again is a new visit', async () => {
+  await home(busyServer);
+  await screen.findByText('Tag the release');
+  let blur: undefined | (() => void);
+  await act(async () => {
+    blur = mockFocus.effect?.() ?? undefined;
+  });
+  await act(async () => blur?.());
+  await act(async () => {
+    blur = mockFocus.effect?.() ?? undefined;
+  });
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  await act(async () => blur?.());
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  expect(seen).toHaveLength(2);
+});
+
+test('while something works and Home is on screen, Home is read again', async () => {
+  const timers: Array<{ run: () => void; ms: number | undefined }> = [];
+  const every = jest.spyOn(globalThis, 'setInterval').mockImplementation(((
+    run: () => void,
+    ms?: number,
+  ) => {
+    timers.push({ run, ms });
+    return 0 as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval);
+  try {
+    let reads = 0;
+    await home({
+      ...busyServer,
+      '/v1/conversations/c1/tasks': () => {
+        reads += 1;
+        return Response.json({ tasks: TASKS });
+      },
+    });
+    await screen.findByText('Update the changelog');
+    // Not on screen yet: nothing is scheduled.
+    expect(timers.filter((t) => t.ms === WORKING_REFRESH_MS)).toEqual([]);
+    await act(async () => {
+      mockFocus.effect?.();
+    });
+    const tick = timers.find((t) => t.ms === WORKING_REFRESH_MS);
+    expect(tick).toBeDefined();
+    const before = reads;
+    await act(async () => tick?.run());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    expect(reads).toBeGreaterThan(before);
+  } finally {
+    every.mockRestore();
   }
 });
 

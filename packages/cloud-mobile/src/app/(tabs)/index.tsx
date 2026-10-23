@@ -28,7 +28,13 @@ import {
 } from '@/components/ui';
 import { type Language, useT } from '@/lib/i18n';
 import { useWorkspace } from '@/lib/session';
-import { partOfDay, type SinceRow, todayOf, type WorkingRow } from '@/lib/today';
+import {
+  partOfDay,
+  type SinceRow,
+  todayOf,
+  WORKING_REFRESH_MS,
+  type WorkingRow,
+} from '@/lib/today';
 
 /** What a quiet day can start with; one tap puts it in the box, the person sends it. */
 const IDEAS = ['home.idea.1', 'home.idea.2', 'home.idea.3'] as const;
@@ -76,17 +82,27 @@ export default function Home() {
   // Coming back to this section reads Home again (the first focus is the load `start` began);
   // going to another section is leaving Home.
   const firstFocus = useRef(true);
+  const [onScreen, setOnScreen] = useState(false);
   useFocusEffect(
     useCallback(() => {
       focused.current = true;
+      setOnScreen(true);
       if (firstFocus.current) firstFocus.current = false;
       else feed.refresh();
       return () => {
         focused.current = false;
+        setOnScreen(false);
         feed.leave(shown.current);
       };
     }, [feed]),
   );
+  // Work that is running changes while the person looks: its line, and when it ends.
+  const working = today.working.length > 0;
+  useEffect(() => {
+    if (!onScreen || !working) return;
+    const timer = setInterval(() => feed.refresh(), WORKING_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [feed, onScreen, working]);
 
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
@@ -120,8 +136,8 @@ export default function Home() {
     );
   };
 
-  const { needs, working, since, next, watching } = today;
-  const quiet = needs.length === 0 && working.length === 0 && since.length === 0;
+  const { needs, since, next, watching } = today;
+  const quiet = needs.length === 0 && !working && since.length === 0;
   const firstVisit = conversations.length === 0;
   // Until the decisions are read (or when they could not be), the page does not say nothing needs
   // the person. A first visit's line and the ideas wait only for the read to settle.
@@ -193,12 +209,12 @@ export default function Home() {
             <InboxStatus loaded={inboxLoaded} failed={inboxFailed} onRetry={() => feed.refresh()} />
           )}
 
-          {working.length > 0 && (
+          {working && (
             <Card label={say('home.working')}>
               <T kind="heading" testID="home-working">
                 {say('home.working')}
               </T>
-              {working.map((row) => (
+              {today.working.map((row) => (
                 <Working
                   key={row.task.taskId}
                   row={row}

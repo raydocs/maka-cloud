@@ -439,19 +439,22 @@ test('Home tells the server only the cards the screen showed, at most 100, once 
 
   feed.leave(['waiting:i3', 'waiting:i1']);
   // Leaving again (the screen goes away after the app went to the background) tells nothing new.
-  feed.stop(['waiting:i3']);
+  feed.leave(['waiting:i3']);
   await until(() => seen.length === 1, 'the visit');
   await new Promise((r) => setTimeout(r, 20));
   expect(seen).toEqual([{ cardIds: ['waiting:i3', 'waiting:i1'] }]);
 
-  // Read again, then left with every card: the server takes 100 at most.
-  const again = new HomeFeed(client, memoryVisits().store, () => 1_700_000_000_000);
-  again.start([]);
-  await until(() => again.getSnapshot().cards !== undefined, 'the cards again');
-  again.stop();
+  // Back on Home, it is read again: leaving now is a new visit. Left with every card, the server
+  // is told 100 at most.
+  const shown = feed.getSnapshot().cards;
+  feed.refresh();
+  await until(() => feed.getSnapshot().cards !== shown, 'the cards read again');
+  feed.stop();
   await until(() => seen.length === 2, 'the second visit');
   expect(seen[1]?.cardIds).toHaveLength(100);
   expect(seen[1]?.cardIds[0]).toBe('waiting:i0');
+  await new Promise((r) => setTimeout(r, 20));
+  expect(seen).toHaveLength(2);
 });
 
 test('Home without a server Home stays on its own parts and tells the server nothing', async () => {

@@ -24,7 +24,10 @@ ours, which tokens carry it, how the language works, and what comes next.
   page, from the cards the server keeps (`/v1/home`, #385) in the server's order. From the top:
   - the date and a greeting by the phone's clock (`home-today-title`);
   - what needs the person (`home-waiting-N`), the only place for the attention colour;
-  - what is working now: running, queued or paused top-level tasks, with the live line;
+  - what is working now: running, queued or paused top-level tasks, with the live line. These come
+    from the five most recent conversations (the same tasks the feed reads for results; the server
+    has no list of running work), read again every 15 seconds while Home is on screen and something
+    works;
   - since you were last here: finished tasks and the server's notes;
   - what runs next;
   - on a quiet day, three idea chips that fill the composer.

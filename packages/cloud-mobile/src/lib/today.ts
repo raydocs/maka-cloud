@@ -11,6 +11,9 @@ import {
   type TaskView,
 } from '@maka-cloud/client';
 
+/** While something works and Home is on screen, Home is read again this often (ms). */
+export const WORKING_REFRESH_MS = 15_000;
+
 /** A task that is running, waiting to start or paused, and the conversation it belongs to. */
 export interface WorkingRow {
   conversationId: string;
