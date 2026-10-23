@@ -12,6 +12,7 @@ function load(
   windows: Array<{
     id?: string;
     visibilityState?: string;
+    focused?: boolean;
     url: string;
     focus: () => Promise<unknown>;
     postMessage: (data: unknown) => void;
@@ -31,13 +32,17 @@ function load(
   const listeners = new Map<string, Listener>();
   const shown: Array<{ title: string; options: Record<string, unknown> }> = [];
   const opened: string[] = [];
+  const closed: unknown[] = [];
   const scope = {
     addEventListener: (name: string, listener: Listener) => listeners.set(name, listener),
     registration: {
       getNotifications: async ({ tag }: { tag: string }) =>
         shown
           .filter((notice) => notice.options.tag === tag)
-          .map((notice) => ({ data: notice.options.data })),
+          .map((notice) => ({
+            data: notice.options.data,
+            close: () => closed.push(notice.options.tag),
+          })),
       showNotification: async (title: string, options: Record<string, unknown>) => {
         shown.push({ title, options });
       },
@@ -62,15 +67,19 @@ function load(
   const push = async (data: unknown, tagged = true) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('push')?.({
-      data: {
-        json: () =>
-          tagged
-            ? {
-                ...(data instanceof Error ? raise(data) : (data as object)),
-                accountTag: (data as { accountTag?: string } | null)?.accountTag ?? 'account-a',
-              }
-            : data,
-      },
+      data:
+        data === undefined && !tagged
+          ? undefined
+          : {
+              json: () =>
+                tagged
+                  ? {
+                      ...(data instanceof Error ? raise(data) : (data as object)),
+                      accountTag:
+                        (data as { accountTag?: string } | null)?.accountTag ?? 'account-a',
+                    }
+                  : data,
+            },
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
     await Promise.all(waits);
@@ -78,10 +87,11 @@ function load(
   const message = async (
     language: string | Record<string, unknown>,
     origin = 'https://maka.example.test',
+    clientId = 'tab',
   ) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('message')?.({
-      source: { id: 'tab', url: `${origin}/` },
+      source: { id: clientId, url: `${origin}/` },
       data: typeof language === 'string' ? { type: 'maka.language', language } : language,
       waitUntil: (work: Promise<unknown>) => waits.push(work),
     });
@@ -95,7 +105,7 @@ function load(
     });
     await Promise.all(waits);
   };
-  return { push, shown, message, click, opened };
+  return { push, shown, message, click, opened, closed };
 }
 
 function raise(error: Error): never {
@@ -149,7 +159,7 @@ test('nothing a payload carries reaches the notification', async () => {
   expect(only?.options.data).toEqual({ accountTag: 'account-a', path: '/' });
 });
 
-test('authenticated unknown types show neutral text; malformed JSON without an account is dropped', async () => {
+test('unknown and malformed payloads always show neutral text', async () => {
   const worker = load();
   for (const payload of [
     { type: 'something.new', body: 'x' },
@@ -165,7 +175,7 @@ test('authenticated unknown types show neutral text; malformed JSON without an a
   ]) {
     await worker.push(payload);
   }
-  expect(worker.shown).toHaveLength(9);
+  expect(worker.shown).toHaveLength(10);
   for (const shown of worker.shown) {
     expect([shown.title, shown.options.body, shown.options.tag]).toEqual([
       'Something needs a look',
@@ -320,26 +330,51 @@ test('approval and unknown tags stay separate; terminal replaces ongoing and res
   ]);
   expect(worker.shown.at(-1)?.options.renotify).toBe(true);
   await worker.push({ type: 'task.running', taskId: 'one' });
-  expect(worker.shown).toHaveLength(5);
+  expect(worker.shown).toHaveLength(6);
+  expect(worker.shown.at(-1)?.options.silent).toBe(true);
+  expect(worker.closed).toContain('maka-quiet');
 });
 
-test('mismatched and signed-out pushes are dropped; old clicks open root after switching accounts', async () => {
+test('mismatched, missing, and pre-upgrade tags show neutral root-only notices', async () => {
   const saved = new Map<string, string>();
   const worker = load('en', saved);
-  await worker.push({ type: 'task.finished', accountTag: 'account-b' });
+  await worker.push({ type: 'task.finished', accountTag: 'account-b', conversationId: 'private' });
   await worker.push({ type: 'task.finished' }, false);
-  expect(worker.shown).toHaveLength(0);
-  await worker.push({ type: 'task.finished', taskId: 'one' });
-  expect(worker.shown).toHaveLength(1);
-  await worker.message({ type: 'maka.context', accountTag: 'account-b' });
+  saved.delete('/.maka-account');
+  await worker.push({ type: 'task.finished' });
+  expect(worker.shown).toHaveLength(3);
+  for (const notice of worker.shown) {
+    expect(notice.title).toBe('Something needs a look');
+    expect(notice.options.data).toEqual({ path: '/' });
+  }
   await worker.click('/?conversation=private');
   expect(worker.opened).toEqual(['/']);
-  await worker.message({ type: 'maka.context', accountTag: null });
-  await worker.push({ type: 'task.finished', accountTag: 'account-b' });
-  expect(worker.shown).toHaveLength(1);
-  const restarted = load('en', saved);
-  await restarted.push({ type: 'spend.alert' });
-  expect(restarted.shown).toHaveLength(0);
+});
+
+test('tab contexts cannot overwrite the subscription owner, including sign-out', async () => {
+  const saved = new Map<string, string>();
+  const worker = load('en', saved);
+  await worker.message({ type: 'maka.subscription', accountTag: 'account-b' });
+  await worker.message(
+    { type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' },
+    undefined,
+    'tab-a',
+  );
+  await worker.message(
+    { type: 'maka.context', accountTag: 'account-b', conversationId: 'other' },
+    undefined,
+    'tab-b',
+  );
+  await worker.message({ type: 'maka.context', accountTag: null }, undefined, 'tab-a');
+  expect(JSON.parse(saved.get('/.maka-context/tab-b') ?? '{}').tag).toBe('account-b');
+  expect(saved.get('/.maka-account')).toBe('account-b');
+  await worker.push({ type: 'task.finished', accountTag: 'account-b', taskId: 'one' });
+  expect(worker.shown[0]?.title).toBe(TASK.title);
+  await worker.push({ type: 'task.finished', accountTag: 'account-a', taskId: 'two' });
+  expect(worker.shown[1]?.options.data).toEqual({ path: '/' });
+  await worker.message({ type: 'maka.subscription', accountTag: 'account-a' });
+  await worker.push({ type: 'spend.alert' });
+  expect(worker.shown[2]?.title).toBe(SPEND.title);
 });
 
 test('visible conversations suppress banners but retain terminal ordering across restart', async () => {
@@ -347,23 +382,30 @@ test('visible conversations suppress banners but retain terminal ordering across
   const tab = {
     id: 'tab',
     visibilityState: 'visible',
+    focused: true,
     url: 'https://maka.example.test/',
     focus: async () => {},
-    postMessage: () => {},
+    postMessage: vi.fn(),
   };
   const worker = load('en', saved, [tab]);
   await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' });
   await worker.push({ type: 'task.finished', taskId: 'one', conversationId: 'chat' });
-  expect(worker.shown).toHaveLength(0);
+  expect(worker.shown).toHaveLength(1);
+  expect(worker.shown[0]?.options.silent).toBe(true);
+  expect(worker.closed).toContain('maka-quiet');
+  expect(tab.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'maka.push' }));
   const restarted = load('en', saved, [tab]);
   await restarted.push({ type: 'task.finished', taskId: 'other', conversationId: 'chat' });
-  expect(restarted.shown).toHaveLength(0);
+  expect(restarted.shown.at(-1)?.options.silent).toBe(true);
+  expect(restarted.closed).toContain('maka-quiet');
   await restarted.push({ type: 'task.running', taskId: 'one', conversationId: 'chat' });
-  expect(restarted.shown).toHaveLength(0);
+  expect(restarted.shown.at(-1)?.options.silent).toBe(true);
+  expect(restarted.closed).toContain('maka-quiet');
   tab.visibilityState = 'hidden';
   await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: null });
   await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
-  expect(worker.shown).toHaveLength(1);
+  expect(worker.shown).toHaveLength(2);
+  expect(worker.shown[1]?.title).toBe(TASK.title);
 });
 
 test('a matching notification cannot deep-link an existing tab of another account', async () => {
@@ -377,4 +419,30 @@ test('a matching notification cannot deep-link an existing tab of another accoun
   ]);
   await worker.click('/?conversation=private', 'account-a');
   expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open', path: '/' });
+});
+
+test('a push with no data still displays a neutral root-only notification', async () => {
+  const worker = load();
+  await worker.push(undefined, false);
+  expect(worker.shown[0]?.title).toBe('Something needs a look');
+  expect(worker.shown[0]?.options.data).toEqual({ path: '/' });
+});
+
+test('a visible unfocused or unreachable conversation still gets its task notification', async () => {
+  const tab = {
+    id: 'tab',
+    visibilityState: 'visible',
+    focused: false,
+    url: 'https://maka.example.test/',
+    focus: async () => {},
+    postMessage: () => {
+      throw new Error('gone');
+    },
+  };
+  const worker = load('en', new Map(), [tab]);
+  await worker.message({ type: 'maka.context', accountTag: 'account-a', conversationId: 'chat' });
+  await worker.push({ type: 'task.finished', taskId: 'one', conversationId: 'chat' });
+  tab.focused = true;
+  await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
+  expect(worker.shown.map((notice) => notice.title)).toEqual([TASK.title, TASK.title]);
 });

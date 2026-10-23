@@ -216,9 +216,18 @@ export class HomeStore {
         'SELECT card_id AS id, seen_at AS at, content_version AS version FROM home_seen WHERE owner = ?',
       )
       .all(owner) as unknown as Array<{ id: string; at: number; version: string | null }>;
+    if (versions) {
+      const put = this.db.prepare(
+        'UPDATE home_seen SET content_version = ? WHERE owner = ? AND card_id = ? AND content_version IS NULL',
+      );
+      for (const row of rows) {
+        const version = versions.get(row.id);
+        if (row.version === null && version) put.run(version, owner, row.id);
+      }
+    }
     return new Map(
       rows
-        .filter((row) => !versions || versions.get(row.id) === row.version)
+        .filter((row) => !versions || row.version === null || versions.get(row.id) === row.version)
         .map((row) => [row.id, row.at]),
     );
   }
@@ -392,7 +401,12 @@ const ProjectShape = z
   .passthrough();
 
 const cardIdSchema = z.string().min(3).max(200);
-const seenBody = z.object({ cardIds: z.array(cardIdSchema).max(100) }).strict();
+const seenBody = z
+  .object({
+    cardIds: z.array(cardIdSchema).max(100),
+    contentVersions: z.record(cardIdSchema, z.string().min(1).max(128)).optional(),
+  })
+  .strict();
 const orderBody = z.object({ cardId: cardIdSchema, after: cardIdSchema.nullable() }).strict();
 
 /** The `/v1/home` routes. */
@@ -459,7 +473,12 @@ export class HomeRoutes {
         const visitedAt = this.store.markSeen(
           owner,
           seen,
-          new Map(cards.map((card) => [card.cardId, card.contentVersion])),
+          new Map(
+            cards.map((card) => [
+              card.cardId,
+              body.data.contentVersions?.[card.cardId] ?? card.contentVersion,
+            ]),
+          ),
         );
         respond(res, 200, { seen, visitedAt });
         return true;
@@ -565,6 +584,7 @@ export class HomeRoutes {
         ref: { type: 'note', id: noteId },
         at,
         text: noteText(note, this.owners.languageOf?.(owner)),
+        contentVersion: createHash('sha256').update(JSON.stringify(note)).digest('hex'),
         sort: [-at],
       });
     }
@@ -603,7 +623,17 @@ export class HomeRoutes {
         const at = duty.activatedAt + slots * period;
         runs.push({
           cardId: `scheduled:${duty.dutyId}`,
-          contentVersion: createHash('sha256').update(JSON.stringify({ duty, at })).digest('hex'),
+          contentVersion: createHash('sha256')
+            .update(
+              JSON.stringify({
+                dutyId: duty.dutyId,
+                projectId: project.data.projectId,
+                name: duty.name,
+                repo: project.data.repo,
+                trigger: duty.trigger,
+              }),
+            )
+            .digest('hex'),
           kind: 'scheduled',
           ref: { type: 'duty', id: duty.dutyId, projectId: project.data.projectId },
           at,

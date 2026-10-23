@@ -58,6 +58,7 @@ async function setup(t: TestContext) {
 
 interface Card {
   cardId: string;
+  contentVersion: string;
   kind: string;
   rank: number;
   seenAt: number | null;
@@ -497,13 +498,15 @@ test('existing seen rows migrate safely and new content versions persist across 
   const version = (db.prepare('PRAGMA user_version').get() as { user_version: number })
     .user_version;
   db.exec('ALTER TABLE home_seen DROP COLUMN content_version');
-  db.exec(`PRAGMA user_version = ${version - 1}`);
+  db.exec('DROP TABLE push_account_secret');
+  db.exec(`PRAGMA user_version = ${version - 2}`);
   db.prepare('INSERT INTO home_seen VALUES (?, ?, ?)').run('owner', 'waiting:item', 123);
   db.close();
   db = openDatabase(file);
   const store = new HomeStore(db);
   assert.equal(store.seenAt('owner').get('waiting:item'), 123);
-  assert.equal(store.seenAt('owner', new Map([['waiting:item', 'v1']])).size, 0);
+  assert.equal(store.seenAt('owner', new Map([['waiting:item', 'v1']])).get('waiting:item'), 123);
+  assert.equal(store.seenAt('owner', new Map([['waiting:item', 'v2']])).size, 0);
   store.markSeen('owner', ['waiting:item'], new Map([['waiting:item', 'v1']]));
   db.close();
   db = openDatabase(file);
@@ -514,4 +517,74 @@ test('existing seen rows migrate safely and new content versions persist across 
   } finally {
     db.close();
   }
+});
+
+test('marking the displayed version cannot mark newer content as seen', async (t) => {
+  const { h, feed, conversation } = await setup(t);
+  const conversationId = await conversation();
+  const item = {
+    itemId: 'race',
+    kind: 'approval',
+    conversationId,
+    createdAt: 100,
+    interrupts: false,
+  };
+  feed.items.push(item);
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  item.interrupts = true;
+  const response = await h.api('/v1/home/seen', {
+    method: 'POST',
+    body: JSON.stringify({
+      cardIds: [first.cardId],
+      contentVersions: { [first.cardId]: first.contentVersion },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const changed = (await homeOf(h))[0];
+  assert.notEqual(changed?.contentVersion, first.contentVersion);
+  assert.equal(changed?.seenAt, null);
+});
+
+test('changing note language preserves its seen version in all three languages', async (t) => {
+  const { h } = await setup(t);
+  h.server.addHomeNote(h.inviteId, { template: 'checks_failed', repo: 'acme/api', number: 7 });
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  const texts = new Set();
+  for (const language of ['en', 'zh-Hans', 'zh-Hant']) {
+    await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language }) });
+    const card = (await homeOf(h))[0];
+    assert.equal(card?.contentVersion, first.contentVersion);
+    assert.ok(card?.seenAt);
+    texts.add(card?.text);
+  }
+  assert.equal(texts.size, 3);
+});
+
+test('scheduled cards stay seen across runs and reset for displayed content changes', async (t) => {
+  const now = 1_700_000_000_000;
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const { h, projects } = await setup(t);
+  const duty = {
+    dutyId: 'periodic',
+    name: 'Check dependencies',
+    state: 'active',
+    activatedAt: now - 60_000,
+    trigger: { kind: 'schedule', everyMinutes: 60 },
+    consecutiveFailures: 0,
+  };
+  projects.set(h.inviteId, [{ projectId: 'prj_1', repo: 'acme/api', duties: [duty] }]);
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  t.mock.timers.setTime(now + 3_600_000);
+  duty.consecutiveFailures++;
+  const next = (await homeOf(h))[0];
+  assert.notEqual(next?.at, first.at);
+  assert.equal(next?.contentVersion, first.contentVersion);
+  assert.ok(next?.seenAt);
+  duty.name = 'Review dependencies';
+  assert.equal((await homeOf(h))[0]?.seenAt, null);
 });

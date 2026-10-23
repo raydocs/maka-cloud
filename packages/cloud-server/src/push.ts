@@ -1,4 +1,4 @@
-import { createECDH, createHash } from 'node:crypto';
+import { createECDH, createHmac } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import webpush from 'web-push';
 import { transaction } from './db.js';
@@ -15,8 +15,12 @@ export const DEFAULT_PUSH_HOSTS = [
   '*.notify.windows.com',
 ];
 
-export const pushAccountTag = (owner: string): string =>
-  createHash('sha256').update(`maka-push:${owner}`).digest('hex').slice(0, 32);
+export function pushAccountTag(db: DatabaseSync, owner: string): string {
+  const { secret } = db.prepare('SELECT secret FROM push_account_secret WHERE id = 1').get() as {
+    secret: Uint8Array;
+  };
+  return createHmac('sha256', secret).update(`maka-push:${owner}`).digest('hex').slice(0, 32);
+}
 
 const MAX_ENDPOINT_LENGTH = 2048;
 const SUBSCRIPTIONS_PER_INVITE = 10;
@@ -506,14 +510,14 @@ export class PushService {
           item.kind === 'alert'
             ? {
                 type: 'spend.alert',
-                accountTag: pushAccountTag(inviteId),
+                accountTag: pushAccountTag(this.db, inviteId),
                 lang,
                 title: words.title,
                 body: words.body,
               }
             : {
                 type: 'task.finished',
-                accountTag: pushAccountTag(inviteId),
+                accountTag: pushAccountTag(this.db, inviteId),
                 conversationId: item.conversationId,
                 taskId: item.taskId,
                 state: STATE_OF[item.type] ?? item.type,

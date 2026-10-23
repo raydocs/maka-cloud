@@ -318,6 +318,8 @@ export const MIGRATIONS: readonly string[] = [
      PRIMARY KEY (owner, step));
    CREATE TABLE home_permissions (owner TEXT PRIMARY KEY, notifications_allowed INTEGER NOT NULL);`,
   'ALTER TABLE home_seen ADD COLUMN content_version TEXT;',
+  `CREATE TABLE push_account_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL);
+   INSERT INTO push_account_secret VALUES (1, randomblob(32));`,
 ];
 
 /**

@@ -521,7 +521,7 @@ export class PublicApi {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
       return respond(res, 200, {
         ownerId: invite.inviteId,
-        accountTag: pushAccountTag(invite.inviteId),
+        accountTag: pushAccountTag(this.deps.db, invite.inviteId),
       });
     }
     if (path === '/v1/memory' && method === 'GET') {

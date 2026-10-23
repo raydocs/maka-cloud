@@ -91,10 +91,19 @@ self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim(
 
 self.addEventListener('message', (event) => {
   if (!event.source?.url || new URL(event.source.url).origin !== self.location.origin) return;
+  if (event.data?.type === 'maka.subscription') {
+    const tag = identifier(event.data.accountTag);
+    if (!tag) return;
+    const work = pushQueue.then(async () => {
+      await (await caches.open('maka-account')).put(ACCOUNT_URL, new Response(tag));
+    });
+    pushQueue = work.catch(() => {});
+    event.waitUntil(work);
+    return;
+  }
   if (event.data?.type === 'maka.context') {
     const work = pushQueue.then(async () => {
       const tag = identifier(event.data.accountTag) || '';
-      await (await caches.open('maka-account')).put(ACCOUNT_URL, new Response(tag));
       const contexts = await caches.open('maka-context');
       await contexts.put(
         '/.maka-context/' + encodeURIComponent(event.source.id),
@@ -161,8 +170,20 @@ self.addEventListener('push', (event) => {
   const shown = known ? NOTIFICATIONS[terminal || payload.type] : NEUTRAL;
   const work = pushQueue.then(async () => {
     const account = await accountTag();
-    if (!account || payload.accountTag !== account) return;
     const table = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[await language()];
+    const neutral = async (quiet = false) => {
+      const tag = quiet ? 'maka-quiet' : NEUTRAL.tag;
+      await self.registration.showNotification(table[NEUTRAL.title], {
+        body: table[NEUTRAL.body],
+        tag,
+        silent: quiet,
+        data: { path: '/' },
+      });
+      if (quiet) {
+        for (const notice of await self.registration.getNotifications({ tag })) notice.close();
+      }
+    };
+    if (!account || payload.accountTag !== account) return neutral();
     const task = identifier(payload.taskId);
     const taskState = known && payload.type.startsWith('task.');
     const rank = taskState ? (payload.type === 'task.running' ? 1 : 2) : 0;
@@ -175,7 +196,7 @@ self.addEventListener('push', (event) => {
           : shown.tag;
     const records = await caches.open('maka-task-terminal');
     const recordKey = '/.maka-terminal/' + account + '/' + encodeURIComponent(task || '');
-    if (rank === 1 && (await records.match(recordKey))) return;
+    if (rank === 1 && (await records.match(recordKey))) return neutral(true);
     if (rank === 2 && task) {
       await records.put(recordKey, new Response('terminal'));
       const keys = await records.keys();
@@ -183,20 +204,26 @@ self.addEventListener('push', (event) => {
     }
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const contexts = await Promise.all(windows.map(contextOf));
-    if (
-      identifier(payload.conversationId) &&
-      windows.some((client, index) => {
+    if (identifier(payload.conversationId)) {
+      for (const [index, client] of windows.entries()) {
         const context = contexts[index];
-        return (
+        if (
           client.visibilityState === 'visible' &&
+          client.focused &&
           context?.tag === account &&
           context.conversation === payload.conversationId
-        );
-      })
-    )
-      return;
+        ) {
+          try {
+            client.postMessage({ ...payload, type: 'maka.push' });
+            return neutral(true);
+          } catch {
+            // A disappearing client still needs the usual notification.
+          }
+        }
+      }
+    }
     const previous = taskState ? await self.registration.getNotifications({ tag }) : [];
-    if (previous.some((notice) => notice.data?.rank > rank)) return;
+    if (previous.some((notice) => notice.data?.rank > rank)) return neutral(true);
     await self.registration.showNotification(table[shown.title], {
       body: table[shown.body],
       tag,

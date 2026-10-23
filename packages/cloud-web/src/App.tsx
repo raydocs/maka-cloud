@@ -56,7 +56,7 @@ import { ModePicker } from './ModePicker';
 import { outboxFor } from './pending';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
-import { disablePush, enablePush } from './push';
+import { disablePush, enablePush, postPushContext } from './push';
 import { submitOnEnter } from './keys';
 import {
   clearSteerReceipts,
@@ -1135,18 +1135,12 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
     let current = true;
-    const send = async () => {
-      const account = session
-        ? await session.client.request<{ accountTag?: string }>('/v1/me').catch(() => undefined)
-        : undefined;
-      const registration = await navigator.serviceWorker.getRegistration();
-      if (!current) return;
-      registration?.active?.postMessage({
-        type: 'maka.context',
-        accountTag: account?.accountTag ?? null,
-        conversationId: document.visibilityState === 'visible' && view === 'chat' ? chosen : null,
-      });
-    };
+    const send = () =>
+      postPushContext(
+        session?.client ?? null,
+        document.visibilityState === 'visible' && view === 'chat' ? chosen : null,
+        () => current,
+      );
     void send();
     document.addEventListener('visibilitychange', send);
     navigator.serviceWorker.addEventListener('controllerchange', send);
