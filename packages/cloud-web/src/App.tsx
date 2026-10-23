@@ -694,7 +694,7 @@ function LanguageChoice() {
     <section className="card section-card" aria-label={t('Language')}>
       <h2>{t('Language')}</h2>
       <div className="mode-choice" role="group" aria-label={t('Language')}>
-        {(['system', 'zh-Hans', 'en'] as const).map((value) => (
+        {(['system', 'zh-Hans', 'zh-Hant', 'en'] as const).map((value) => (
           <button
             key={value}
             type="button"
@@ -705,7 +705,9 @@ function LanguageChoice() {
               ? t('Follow system')
               : value === 'zh-Hans'
                 ? t('简体中文')
-                : t('English')}
+                : value === 'zh-Hant'
+                  ? t('繁體中文')
+                  : t('English')}
           </button>
         ))}
       </div>

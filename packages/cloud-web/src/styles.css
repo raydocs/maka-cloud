@@ -1831,19 +1831,25 @@ a.evidence-chip:hover {
     ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-html:lang(zh-Hans) body {
+html:lang(zh-Hant) {
+  --font-sans:
+    "Inter Variable", Inter, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", ui-sans-serif,
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+html:lang(zh) body {
   line-height: 1.6;
 }
 
-html:lang(zh-Hans) body * {
+html:lang(zh) body * {
   letter-spacing: normal;
 }
 
-html:lang(zh-Hans) :is(p, textarea, .message, .muted, .mode-hint) {
+html:lang(zh) :is(p, textarea, .message, .muted, .mode-hint) {
   line-height: 1.6;
 }
 
-html:lang(zh-Hans) .verb-chip {
+html:lang(zh) .verb-chip {
   white-space: normal;
   overflow-wrap: anywhere;
   min-width: 0;

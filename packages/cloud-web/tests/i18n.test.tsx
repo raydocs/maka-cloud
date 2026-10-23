@@ -5,7 +5,7 @@ import { ConversationView, QuestionCard, Settings } from '../src/App';
 import { Home } from '../src/Home';
 import { FailureNote } from '../src/Failure';
 import { LANGUAGE_KEY, LanguageProvider, languageFor, translator, useT } from '../src/i18n';
-import { en, serverChoices, zhHans } from '../src/strings';
+import { en, serverChoices, zhHans, zhHant } from '../src/strings';
 
 beforeEach(() => localStorage.clear());
 afterEach(() => {
@@ -13,22 +13,34 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('both catalogues contain every key and preserve interpolation parameters', () => {
-  expect(Object.keys(zhHans).sort()).toEqual(Object.keys(en).sort());
-  for (const key of Object.keys(en) as Array<keyof typeof en>) {
-    expect(zhHans[key], key).not.toBe('');
-    expect((zhHans[key].match(/\{\w+\}/gu) ?? []).sort(), key).toEqual(
-      (en[key].match(/\{\w+\}/gu) ?? []).sort(),
-    );
+test('all three catalogues contain every key and preserve interpolation parameters', () => {
+  for (const catalogue of [zhHans, zhHant]) {
+    expect(Object.keys(catalogue).sort()).toEqual(Object.keys(en).sort());
+    for (const key of Object.keys(en) as Array<keyof typeof en>) {
+      expect(catalogue[key], key).not.toBe('');
+      expect((catalogue[key].match(/\{\w+\}/gu) ?? []).sort(), key).toEqual(
+        (en[key].match(/\{\w+\}/gu) ?? []).sort(),
+      );
+    }
   }
 });
 
-test('English requires the first preferred language to be English; otherwise Chinese', () => {
-  expect(languageFor([])).toBe('zh-Hans');
-  expect(languageFor(['zh-TW', 'en-US'])).toBe('zh-Hans');
-  expect(languageFor(['fr', 'en'])).toBe('zh-Hans');
-  expect(languageFor(['EN-gb', 'zh-CN'])).toBe('en');
-  expect(languageFor(['en'])).toBe('en');
+test.each([
+  [[], 'zh-Hans'],
+  [['zh-TW', 'en-US'], 'zh-Hant'],
+  [['zh-HK'], 'zh-Hant'],
+  [['zh-MO'], 'zh-Hant'],
+  [['zh-Hant'], 'zh-Hant'],
+  [['zh-Hant-HK'], 'zh-Hant'],
+  [['zh-Hans'], 'zh-Hans'],
+  [['zh-CN'], 'zh-Hans'],
+  [['zh-SG'], 'zh-Hans'],
+  [['zh'], 'zh-Hans'],
+  [['fr', 'en'], 'zh-Hans'],
+  [['EN-gb', 'zh-CN'], 'en'],
+  [['en'], 'en'],
+])('first preferred languages %j resolve to %s', (tags, expected) => {
+  expect(languageFor(tags)).toBe(expected);
 });
 
 test('fixed choices require both the id and the exact original English label', () => {
@@ -135,12 +147,23 @@ test('Settings switches immediately, persists the choice, follows browser change
     </LanguageProvider>,
   );
   expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '繁體中文' }));
+  expect(screen.getByRole('heading', { name: '設定' })).toBeTruthy();
+  expect(localStorage.getItem(LANGUAGE_KEY)).toBe('zh-Hant');
+  expect(document.documentElement.lang).toBe('zh-Hant');
+  view.unmount();
+  const traditional = render(
+    <LanguageProvider>
+      <Settings client={api} onDisconnect={() => {}} />
+    </LanguageProvider>,
+  );
+  expect(screen.getByRole('heading', { name: '設定' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'English' }));
   expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
   expect(localStorage.getItem(LANGUAGE_KEY)).toBe('en');
   expect(document.documentElement.lang).toBe('en');
   expect(document.title).toBe('Maka — your work, together');
-  view.unmount();
+  traditional.unmount();
   render(
     <LanguageProvider>
       <Settings client={api} onDisconnect={() => {}} />

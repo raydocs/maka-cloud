@@ -154,7 +154,7 @@ test('notification language survives worker restart and ignores messages from ot
   await restarted.message('system');
   const chineseBrowser = load('zh-TW', saved);
   await chineseBrowser.push({ type: 'task.finished' });
-  expect(chineseBrowser.shown[0]?.title).toBe('你的后台任务已完成');
+  expect(chineseBrowser.shown[0]?.title).toBe('你的背景任務已完成');
 });
 
 test('the production worker is a self-contained classic script', () => {
@@ -162,3 +162,21 @@ test('the production worker is a self-contained classic script', () => {
   expect(script).not.toMatch(/\b(?:import|export)\s*(?:[{'"*]|\w)/u);
   expect(() => new vm.Script(script)).not.toThrow();
 });
+
+test.each(['zh-Hant', 'zh-TW', 'zh-HK', 'zh-MO'])(
+  'Traditional notifications for %s',
+  async (locale) => {
+    const worker = load(locale);
+    await worker.push({ type: 'task.finished' });
+    await worker.push({ type: 'spend.alert' });
+    expect(worker.shown.map((notice) => [notice.title, notice.options.body])).toEqual([
+      ['你的背景任務已完成', '開啟 Maka 查看結果。'],
+      ['今天的花費較高', '開啟 Maka 查看花費明細。'],
+    ]);
+    const saved = new Map<string, string>();
+    await load('en', saved).message('zh-Hant');
+    const restarted = load('en', saved);
+    await restarted.push({ type: 'task.finished' });
+    expect(restarted.shown[0]?.title).toBe('你的背景任務已完成');
+  },
+);

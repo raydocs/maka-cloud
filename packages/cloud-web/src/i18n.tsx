@@ -1,14 +1,15 @@
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import { BRAND, displayText } from '@maka-cloud/client';
-import { en, type Key, serverChoices, zhHans } from './strings';
+import { en, type Key, serverChoices, zhHans, zhHant } from './strings';
 
-export type Language = 'zh-Hans' | 'en';
+export type Language = 'zh-Hans' | 'zh-Hant' | 'en';
 export type LanguageChoice = 'system' | Language;
 type Params = Record<string, string | number>;
 export const LANGUAGE_KEY = 'maka.language';
 
 export function languageFor(tags: readonly string[]): Language {
   const first = tags[0]?.toLowerCase() ?? '';
+  if (/^zh-(?:hant|tw|hk|mo)(?:-|$)/u.test(first)) return 'zh-Hant';
   return first === 'en' || first.startsWith('en-') ? 'en' : 'zh-Hans';
 }
 
@@ -19,7 +20,7 @@ function systemLanguage(): Language {
 function savedChoice(): LanguageChoice {
   try {
     const stored = globalThis.localStorage?.getItem(LANGUAGE_KEY);
-    return stored === 'en' || stored === 'zh-Hans' ? stored : 'system';
+    return stored === 'en' || stored === 'zh-Hans' || stored === 'zh-Hant' ? stored : 'system';
   } catch {
     return 'system';
   }
@@ -30,7 +31,7 @@ const hasKey = (key: string): key is Key => Object.prototype.hasOwnProperty.call
 
 export function translator(language: Language) {
   function t(key: Key, params?: Params): string {
-    const template = (language === 'en' ? en[key] : zhHans[key]) ?? zhHans[key];
+    const template = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[language][key] ?? zhHans[key];
     return template.replace(/\{(\w+)\}/gu, (all, name: string) =>
       params?.[name] === undefined ? all : String(params[name]),
     );
