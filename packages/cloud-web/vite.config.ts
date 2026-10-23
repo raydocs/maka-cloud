@@ -3,7 +3,30 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: 'cloud-web-service-worker',
+      configureServer(server) {
+        // Serve the module at the root in dev too, so the worker retains its existing scope.
+        server.middlewares.use((request, _response, next) => {
+          if (request.url === '/sw.js') request.url = '/src/sw.js';
+          next();
+        });
+      },
+    },
+  ],
+  build: {
+    rollupOptions: {
+      input: {
+        index: fileURLToPath(new URL('./index.html', import.meta.url)),
+        sw: fileURLToPath(new URL('./src/sw.js', import.meta.url)),
+      },
+      output: {
+        entryFileNames: (chunk) => (chunk.name === 'sw' ? 'sw.js' : 'assets/[name]-[hash].js'),
+      },
+    },
+  },
   resolve: {
     // Reuse the public ChoicePanel export without building the desktop/UI graph.
     // This is the same implementation exported by packages/ui/src/index.ts.

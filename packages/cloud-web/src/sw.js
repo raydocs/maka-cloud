@@ -1,3 +1,5 @@
+import { en, zhHans } from './strings';
+
 /* No server-derived content or URLs enter notification surfaces. */
 
 /*
@@ -27,14 +29,43 @@ function typeOf(event) {
   }
 }
 
+const LANGUAGE_CACHE = 'maka-language';
+const LANGUAGE_URL = '/.maka-language';
+
+self.addEventListener('message', (event) => {
+  if (!event.source?.url || new URL(event.source.url).origin !== self.location.origin) return;
+  const language = event.data?.type === 'maka.language' ? event.data.language : undefined;
+  if (language !== 'system' && language !== 'en' && language !== 'zh-Hans') return;
+  event.waitUntil(
+    caches
+      .open(LANGUAGE_CACHE)
+      .then((cache) => cache.put(LANGUAGE_URL, new Response(language)))
+      .catch(() => {}),
+  );
+});
+
+async function language() {
+  try {
+    const stored = await (await caches.open(LANGUAGE_CACHE)).match(LANGUAGE_URL);
+    const value = await stored?.text();
+    if (value === 'en' || value === 'zh-Hans') return value;
+  } catch {
+    // Storage can be unavailable. The browser's first language is still a useful default.
+  }
+  return /^en(?:-|$)/iu.test(self.navigator?.languages?.[0] ?? '') ? 'en' : 'zh-Hans';
+}
+
 self.addEventListener('push', (event) => {
   const shown = NOTIFICATIONS[typeOf(event)];
   event.waitUntil(
-    self.registration.showNotification(shown.title, {
-      body: shown.body,
-      tag: shown.tag,
-      data: { path: '/' },
-    }),
+    (async () => {
+      const table = (await language()) === 'en' ? en : zhHans;
+      await self.registration.showNotification(table[shown.title], {
+        body: table[shown.body],
+        tag: shown.tag,
+        data: { path: '/' },
+      });
+    })(),
   );
 });
 

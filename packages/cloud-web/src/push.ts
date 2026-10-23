@@ -1,4 +1,5 @@
 import { ApiError, type CloudClient, type PushRegistration, routes } from '@maka-cloud/client';
+import type { LanguageChoice } from './i18n';
 
 function supported(): boolean {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
@@ -14,14 +15,21 @@ function toKey(base64Url: string): Uint8Array<ArrayBuffer> {
  * Registers this browser with the server. The server only ever sends a generic
  * "task finished" message with ids; the worker ignores whatever it carries.
  */
-export async function enablePush(client: CloudClient): Promise<void> {
+export async function enablePush(
+  client: CloudClient,
+  language: LanguageChoice = 'system',
+): Promise<void> {
   if (!supported()) throw new Error('Background notifications are not supported in this browser.');
   const { publicKey } = await client.request<{ publicKey: string }>(routes.pushKey, {}, 'push');
   const permission = await Notification.requestPermission();
   if (permission !== 'granted')
     throw new Error('Allow notifications in your browser settings to enable them.');
-  await navigator.serviceWorker.register('/sw.js');
+  await navigator.serviceWorker.register('/sw.js', { type: 'module' });
   const registration = await navigator.serviceWorker.ready;
+  registration.active?.postMessage({
+    type: 'maka.language',
+    language,
+  });
   const existing = await registration.pushManager.getSubscription();
   const subscription =
     existing ??

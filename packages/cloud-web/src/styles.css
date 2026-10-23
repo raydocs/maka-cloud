@@ -1823,3 +1823,27 @@ section[aria-label="Decisions waiting"] > h2::before {
   border-radius: 7px;
   background: var(--chip);
 }
+
+/* CJK fallback follows the existing Latin face; token output stays generated. */
+:root {
+  --font-sans:
+    "Inter Variable", Inter, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei",
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+html:lang(zh-Hans) body {
+  line-height: 1.6;
+}
+
+html:lang(zh-Hans) body * {
+  letter-spacing: normal;
+}
+
+html:lang(zh-Hans) :is(p, textarea, .message, .muted, .mode-hint) {
+  line-height: 1.6;
+}
+
+html:lang(zh-Hans) .verb-chip {
+  white-space: nowrap;
+  flex-shrink: 0;
+}

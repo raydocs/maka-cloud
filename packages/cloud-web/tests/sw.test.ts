@@ -2,11 +2,21 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { expect, test } from 'vitest';
+import ts from 'typescript';
+import { en, zhHans } from '../src/strings';
 
 type Listener = (event: unknown) => void;
 
 /** Runs the real service worker script against a stand-in for its global scope. */
-function load() {
+function load(language = 'en-US', saved = new Map<string, string>()) {
+  const caches = {
+    open: async () => ({
+      put: async (key: string, value: Response) => {
+        saved.set(key, await value.text());
+      },
+      match: async (key: string) => (saved.has(key) ? new Response(saved.get(key)) : undefined),
+    }),
+  };
   const listeners = new Map<string, Listener>();
   const shown: Array<{ title: string; options: Record<string, unknown> }> = [];
   const scope = {
@@ -17,13 +27,26 @@ function load() {
       },
     },
     location: { origin: 'https://maka.example.test' },
+    navigator: { languages: [language] },
     clients: { matchAll: async () => [], openWindow: async () => undefined },
   };
-  vm.runInNewContext(readFileSync(join(__dirname, '../public/sw.js'), 'utf8'), {
-    self: scope,
-    URL,
-    Object,
-  });
+  vm.runInNewContext(
+    ts.transpileModule(readFileSync(join(__dirname, '../src/sw.js'), 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText,
+    {
+      exports: {},
+      caches,
+      Response,
+      require: (path: string) => {
+        if (path === './strings') return { en, zhHans };
+        throw new Error(path);
+      },
+      self: scope,
+      URL,
+      Object,
+    },
+  );
   const push = async (data: unknown) => {
     const waits: Promise<unknown>[] = [];
     listeners.get('push')?.({
@@ -33,7 +56,16 @@ function load() {
     });
     await Promise.all(waits);
   };
-  return { push, shown };
+  const message = async (language: string, origin = 'https://maka.example.test') => {
+    const waits: Promise<unknown>[] = [];
+    listeners.get('message')?.({
+      source: { url: `${origin}/` },
+      data: { type: 'maka.language', language },
+      waitUntil: (work: Promise<unknown>) => waits.push(work),
+    });
+    await Promise.all(waits);
+  };
+  return { push, shown, message };
 }
 
 function raise(error: Error): never {
@@ -107,4 +139,32 @@ test('an unknown, malformed, missing or inherited type shows the default text, n
       TASK.tag,
     ]);
   }
+});
+
+test('Chinese is the fallback for notifications, including when no page is open', async () => {
+  const worker = load('fr-FR');
+  await worker.push({ type: 'task.finished', title: 'Untrusted title' });
+  await worker.push({ type: 'spend.alert' });
+  expect(worker.shown.map((notice) => [notice.title, notice.options.body])).toEqual([
+    ['你的后台任务已完成', '打开 Maka 查看结果。'],
+    ['今天的花费较高', '打开 Maka 查看花费明细。'],
+  ]);
+});
+
+test('notification language survives worker restart and ignores messages from other origins', async () => {
+  const saved = new Map<string, string>();
+  const first = load('en-US', saved);
+  await first.message('zh-Hans');
+  const restarted = load('en-US', saved);
+  await restarted.message('en', 'https://untrusted.example');
+  await restarted.message('invalid');
+  await restarted.push({ type: 'task.finished' });
+  expect(restarted.shown[0]?.title).toBe('你的后台任务已完成');
+  await restarted.message('en');
+  await restarted.push({ type: 'task.finished' });
+  expect(restarted.shown[1]?.title).toBe(TASK.title);
+  await restarted.message('system');
+  const chineseBrowser = load('zh-TW', saved);
+  await chineseBrowser.push({ type: 'task.finished' });
+  expect(chineseBrowser.shown[0]?.title).toBe('你的后台任务已完成');
 });

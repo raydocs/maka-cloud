@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const webPort = Number(process.env.CLOUD_WEB_PORT ?? 4173);
+
 // The app talks to the real cloud-server (fake runner, temporary SQLite), started by
 // tests/support/serve.ts. Build the server first: `npm --workspace @maka-cloud/server run build`.
 export default defineConfig({
@@ -9,7 +11,8 @@ export default defineConfig({
   maxFailures: 2,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: `http://127.0.0.1:${webPort}`,
+    locale: 'en-US',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     launchOptions: {
@@ -27,8 +30,8 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: 'CLOUD_WEB_API=http://127.0.0.1:4174 npm run dev -- --port 4173 --host 127.0.0.1',
-      url: 'http://127.0.0.1:4173',
+      command: `CLOUD_WEB_API=http://127.0.0.1:4174 npm run dev -- --port ${webPort} --host 127.0.0.1`,
+      url: `http://127.0.0.1:${webPort}`,
       reuseExistingServer: !process.env.CI,
     },
   ],

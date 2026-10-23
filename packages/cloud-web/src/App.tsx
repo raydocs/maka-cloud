@@ -1,3 +1,5 @@
+import { useT } from './i18n';
+import type { Key } from './strings';
 import { ArrowUp, ArrowUpRight, FileText, Settings as SettingsIcon } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Button } from '@astryxdesign/core';
@@ -55,39 +57,48 @@ export function QuestionCard({
   disabled: boolean;
   onAnswer: (option: string, text?: string) => void;
 }) {
+  const { t, shared, choiceLabel } = useT();
   const card = questionCardModel(question, answered);
   const [note, setNote] = useState('');
   const [noting, setNoting] = useState(false);
   // The same shape as the card on Home: the answers are the buttons, the recommended one first and
   // filled, and a note only when asked for. One tap answers.
   return (
-    <section className="question" aria-label="Your decision">
+    <section className="question" aria-label={t('Your decision')}>
       <div className="section-heading">
         <span className={`status-mark ${answered ? 'succeeded' : 'attention'}`} />
-        {card.heading}
+        {shared(card.heading)}
       </div>
       <h3>{card.text}</h3>
       {card.cannotApproveHere && (
-        <p className="muted">This card cannot be shown exactly, so it cannot be approved here.</p>
+        <p className="muted">
+          {t('This card cannot be shown exactly, so it cannot be approved here.')}
+        </p>
       )}
       {card.note && <p className="muted">{card.note}</p>}
       {card.held && (
         <p className="muted held-action">
-          Held until you answer: {card.held.tool} <code>{card.held.args}</code>
+          {t('Held until you answer:')} {card.held.tool} <code>{card.held.args}</code>
         </p>
       )}
       {answered ? (
-        <p className="acknowledged">Answer recorded: {card.answeredLabel}</p>
+        <p className="acknowledged">
+          {t('Answer recorded:')}{' '}
+          {choiceLabel(
+            answered,
+            question.options.find((raw) => raw.id === answered)?.label ?? t('Selected option'),
+          )}
+        </p>
       ) : (
         <>
           {!noting && (
             <button type="button" className="quiet-action" onClick={() => setNoting(true)}>
-              Add a note
+              {t('Add a note')}
             </button>
           )}
           {noting && (
             <label className="note-label">
-              Note
+              {t('Note')}
               <textarea
                 rows={2}
                 maxLength={4000}
@@ -103,7 +114,10 @@ export function QuestionCard({
             {card.options.map((option) => (
               <Button
                 key={option.id}
-                label={option.label}
+                label={choiceLabel(
+                  option.id,
+                  question.options.find((raw) => raw.id === option.id)?.label ?? option.label,
+                )}
                 variant={option.recommended ? 'primary' : 'secondary'}
                 isDisabled={disabled}
                 onClick={() => onAnswer(option.id, note.trim() || undefined)}
@@ -118,12 +132,13 @@ export function QuestionCard({
 
 /** The one updating line of a running task, and the steps behind it when it is opened. */
 function StepLine({ notes }: { notes: readonly string[] }) {
+  const { t } = useT();
   const { current, steps } = stepsOf(notes);
   if (current === undefined) return null;
   return (
     <details className="current-step">
       <summary>
-        <span>Current step</span>
+        <span>{t('Current step')}</span>
         {displayText(current)}
       </summary>
       {steps.length > 1 && (
@@ -156,6 +171,7 @@ function TaskBranch({
   control: (task: string, action: 'cancel' | 'pause' | 'resume') => Promise<void>;
   ancestors?: string[];
 }) {
+  const { t, shared } = useT();
   // A bad parent reference cannot make rendering loop forever.
   if (ancestors.includes(task.taskId)) return null;
   const children = tasks.filter((child) => child.parentTaskId === task.taskId);
@@ -163,28 +179,28 @@ function TaskBranch({
   const stopping = task.stopPending || task.treeStopPending;
   return (
     <li>
-      <article className="task" aria-label={displayText(task.title ?? 'Task')}>
+      <article className="task" aria-label={displayText(task.title ?? t('Task'))}>
         <div className="task-title">
           <span className={`status-mark ${task.state}`} />
-          <h3>{displayText(task.title ?? 'Task')}</h3>
+          <h3>{displayText(task.title ?? t('Task'))}</h3>
         </div>
         <div className="task-meta">
-          <span>{taskLabel(task)}</span>
+          <span>{shared(taskLabel(task))}</span>
           {task.parentTaskId === undefined && (
             <span>
-              {live ? 'Cost so far' : 'Cost'}:{' '}
+              {live ? t('Cost so far') : t('Cost')}:{' '}
               <span className={task.costUsd === undefined ? undefined : 'mono'}>
-                {dollars(task.costUsd)}
-                {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+                {shared(dollars(task.costUsd))}
+                {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
               </span>
             </span>
           )}
         </div>
         {task.budgetExceeded && (
-          <p className="failure">The budget was reached, so the work was stopped.</p>
+          <p className="failure">{t('The budget was reached, so the work was stopped.')}</p>
         )}
         {stopping && (
-          <p className="muted">Still stopping. The cost may change until it has stopped.</p>
+          <p className="muted">{t('Still stopping. The cost may change until it has stopped.')}</p>
         )}
         {/* A finished task has no "current step", and a top-level result is on its own card. */}
         {task.progress.length > 0 && live && <StepLine notes={task.progress} />}
@@ -200,38 +216,38 @@ function TaskBranch({
               <button
                 type="button"
                 className="quiet-action"
-                aria-label="Pause task"
+                aria-label={t('Pause task')}
                 disabled={busy}
                 onClick={() =>
                   void act(`pause-${task.taskId}`, () => control(task.taskId, 'pause'))
                 }
               >
-                Pause
+                {t('Pause')}
               </button>
             )}
             {task.state === 'paused' && (
               <button
                 type="button"
                 className="quiet-action"
-                aria-label="Resume task"
+                aria-label={t('Resume task')}
                 disabled={busy}
                 onClick={() =>
                   void act(`resume-${task.taskId}`, () => control(task.taskId, 'resume'))
                 }
               >
-                Resume
+                {t('Resume')}
               </button>
             )}
             <button
               type="button"
               className="quiet-action"
-              aria-label="Cancel task"
+              aria-label={t('Cancel task')}
               disabled={busy}
               onClick={() =>
                 void act(`cancel-${task.taskId}`, () => control(task.taskId, 'cancel'))
               }
             >
-              Cancel
+              {t('Cancel')}
             </button>
           </div>
         )}
@@ -252,7 +268,7 @@ function TaskBranch({
 }
 
 /** Where a result link points, said in the user's words; nothing here claims the result was checked. */
-function artifactKind(listing: ArtifactListing, url: string | undefined): string {
+function artifactKind(listing: ArtifactListing, url: string | undefined): Key {
   if (url && /\/pull\/\d+/u.test(url)) return 'Pull request';
   if (/\.(diff|patch)$/iu.test(listing.name)) return 'Changes';
   if (listing.kind === 'link') return 'Link';
@@ -285,6 +301,7 @@ function ArtifactList({
   busy: boolean;
   act: (key: string, work: () => Promise<unknown>) => Promise<boolean>;
 }) {
+  const { t, shared } = useT();
   const [content, setContent] = useState<Record<number, ArtifactContent>>({});
   return (
     <>
@@ -296,20 +313,22 @@ function ArtifactList({
           <article className="artifact card" key={`${taskId}-${listing.index}`}>
             <div className="artifact-heading">
               <FileText aria-hidden="true" size={18} strokeWidth={1.8} className="file-symbol" />
-              <h3>{displayText(pullRequestName(link) ?? listing.name)}</h3>
+              <h3>
+                {pullRequestName(link) ? shared(pullRequestName(link)!) : displayText(listing.name)}
+              </h3>
             </div>
             <span className="artifact-kind">
-              {kind} · {displayText(title)}
+              {t(kind)} · {displayText(title)}
             </span>
             {link && (
               <a href={link} target="_blank" rel="noreferrer noopener">
-                {kind === 'Pull request' ? 'Open pull request' : 'Open link'}{' '}
+                {kind === 'Pull request' ? t('Open pull request') : t('Open link')}{' '}
                 <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
               </a>
             )}
             {listing.kind === 'file' && !loaded && (
               <Button
-                label={`Review ${displayText(listing.name)}`}
+                label={t('Review {p0}', { p0: displayText(listing.name) })}
                 variant="secondary"
                 isDisabled={busy}
                 onClick={() =>
@@ -330,13 +349,15 @@ function ArtifactList({
               </pre>
             )}
             {listing.kind === 'link' && !link && (
-              <p className="muted">This link cannot be shown safely.</p>
+              <p className="muted">{t('This link cannot be shown safely.')}</p>
             )}
           </article>
         );
       })}
       {entry.failed && (
-        <p className="muted">The results of “{displayText(title)}” could not be listed.</p>
+        <p className="muted">
+          {t('The results of “{title}” could not be listed.', { title: displayText(title) })}
+        </p>
       )}
     </>
   );
@@ -354,6 +375,7 @@ export function ConversationView({
   /** The conversation chooser, shown in the heading (the app owns which conversation is open). */
   picker?: ReactNode;
 }) {
+  const { t, shared } = useT();
   const feed = useMemo(
     () => new ConversationFeed(client, conversation.conversationId, undefined, pendingSends),
     [client, conversation.conversationId],
@@ -385,35 +407,39 @@ export function ConversationView({
 
   return (
     <div className="chat">
-      <section className="conversation card" aria-label="Conversation">
+      <section className="conversation card" aria-label={t('Conversation')}>
         <div className="conversation-heading">
-          <h1>{displayText(conversation.title ?? 'A fresh start')}</h1>
+          <h1>{displayText(conversation.title ?? t('A fresh start'))}</h1>
           {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
           <span className="connection" role="status">
-            {status === 'Connecting…' && <span className="muted">{status}</span>}
+            {status === 'Connecting…' && <span className="muted">{shared(status)}</span>}
             {status !== 'Live' && status !== 'Connecting…' && (
               <>
                 <span className="status-mark attention" />
-                {status}
+                {shared(status)}
               </>
             )}
           </span>
           {picker}
         </div>
-        <div className="messages" role="log" aria-label="Messages">
+        <div className="messages" role="log" aria-label={t('Messages')}>
           {state.messages.length === 0 && (
             <div className="empty">
-              <h2>What would you like to get done?</h2>
-              <p>Bring a question, a project, or a plan. {BRAND.name} keeps the work here.</p>
+              <h2>{t('What would you like to get done?')}</h2>
+              <p>
+                {t('Bring a question, a project, or a plan. {name} keeps the work here.', {
+                  name: BRAND.name,
+                })}
+              </p>
             </div>
           )}
           {state.messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
               <span className="sr-only">
                 {message.role === 'user'
-                  ? 'You'
+                  ? t('You')
                   : message.role === 'notice'
-                    ? 'Update'
+                    ? t('Update')
                     : BRAND.name}
               </span>
               <p>{displayText(message.text)}</p>
@@ -453,7 +479,7 @@ export function ConversationView({
         />
         {error && (
           <p role="alert" className="error">
-            {error}
+            {shared(error)}
           </p>
         )}
         <form
@@ -464,7 +490,7 @@ export function ConversationView({
           }}
         >
           <label htmlFor="message" className="sr-only">
-            Keep the conversation going
+            {t('Keep the conversation going')}
           </label>
           <div className="pill-field">
             <textarea
@@ -476,13 +502,13 @@ export function ConversationView({
                 setDraft(displayText(e.target.value));
                 feed.draftEdited();
               }}
-              placeholder="What would you like to do next?"
+              placeholder={t('What would you like to do next?')}
               onKeyDown={submitOnEnter}
             />
             <button
               type="submit"
               className="round-button"
-              aria-label={busy === 'message' ? 'Sending…' : 'Send message'}
+              aria-label={busy === 'message' ? t('Sending…') : t('Send message')}
               disabled={Boolean(busy) || !draft.trim()}
             >
               <ArrowUp aria-hidden="true" size={18} strokeWidth={2.2} />
@@ -496,22 +522,22 @@ export function ConversationView({
           />
         </form>
       </section>
-      <aside className="work-panel" aria-label="Work and results">
-        <section className="card section-card work-summary" aria-label="Running">
+      <aside className="work-panel" aria-label={t('Work and results')}>
+        <section className="card section-card work-summary" aria-label={t('Running')}>
           <div className="section-heading">
-            <h2>Running</h2>
-            <span className="count">{running} running</span>
+            <h2>{t('Running')}</h2>
+            <span className="count">{t('{count} running', { count: running })}</span>
           </div>
           <div className="spend">
-            <span>Total cost so far</span>
-            <strong className="mono">{dollars(total.usd)}</strong>
+            <span>{t('Total cost so far')}</span>
+            <strong className="mono">{shared(dollars(total.usd))}</strong>
             {total.usd !== undefined && !total.complete && (
-              <span className="muted">Not all reported</span>
+              <span className="muted">{t('Not all reported')}</span>
             )}
           </div>
         </section>
-        <section className="card section-card" aria-label="Task tree">
-          <h2 className="panel-heading">Tasks</h2>
+        <section className="card section-card" aria-label={t('Task tree')}>
+          <h2 className="panel-heading">{t('Tasks')}</h2>
           {tasks.length ? (
             <ul className="task-tree">
               {topLevel.map((task) => (
@@ -523,22 +549,22 @@ export function ConversationView({
               ))}
             </ul>
           ) : (
-            <p className="muted">Tasks will appear as the plan takes shape.</p>
+            <p className="muted">{t('Tasks will appear as the plan takes shape.')}</p>
           )}
         </section>
         {/* A result with its own card in the conversation is not listed again here. */}
         {(withResults.length === 0 || unshown.length > 0) && (
-          <section className="artifacts" aria-label="Artifacts">
-            <h2 className="panel-heading">Review</h2>
+          <section className="artifacts" aria-label={t('Artifacts')}>
+            <h2 className="panel-heading">{t('Review')}</h2>
             {!unshown.some((task) => artifacts[task.taskId]?.listings.length) && (
-              <p className="muted">Reports, changes, and pull requests will collect here.</p>
+              <p className="muted">{t('Reports, changes, and pull requests will collect here.')}</p>
             )}
             {unshown.map((task) => (
               <ArtifactList
                 key={task.taskId}
                 client={client}
                 taskId={task.taskId}
-                title={task.title ?? 'Task'}
+                title={task.title ?? t('Task')}
                 entry={artifacts[task.taskId] as TaskArtifacts}
                 busy={Boolean(busy)}
                 act={act}
@@ -553,6 +579,7 @@ export function ConversationView({
 
 /** Step away, stay in the loop: the device's own notifications, one switch per browser. */
 export function NotificationsPanel({ client }: { client: CloudClient }) {
+  const { t, shared, languageChoice } = useT();
   const [on, setOn] = useState(false);
   const [hint, setHint] = useState('');
   const [error, setError] = useState('');
@@ -573,20 +600,20 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
     }
   }
   return (
-    <section className="card section-card notifications" aria-label="Notifications">
-      <h2>Step away. Stay in the loop.</h2>
+    <section className="card section-card notifications" aria-label={t('Notifications')}>
+      <h2>{t('Step away. Stay in the loop.')}</h2>
       <p className="muted">
-        Get a notification when background work finishes, even after you close this page.
+        {t('Get a notification when background work finishes, even after you close this page.')}
       </p>
       {!client.unsupported.has('push') && !on && (
         <Button
-          label="Enable notifications"
+          label={t('Enable notifications')}
           variant="secondary"
           isDisabled={busy}
           onClick={() =>
             void act(async () => {
               try {
-                await enablePush(client);
+                await enablePush(client, languageChoice);
                 setOn(true);
                 setHint('');
               } catch (e) {
@@ -604,9 +631,9 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
       )}
       {on && (
         <>
-          <p role="status">Background notifications enabled</p>
+          <p role="status">{t('Background notifications enabled')}</p>
           <Button
-            label="Turn off notifications"
+            label={t('Turn off notifications')}
             variant="secondary"
             isDisabled={busy}
             onClick={() =>
@@ -620,19 +647,19 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
         </>
       )}
       {client.unsupported.has('push') && (
-        <p className="muted">Background notifications are unavailable on this server.</p>
+        <p className="muted">{t('Background notifications are unavailable on this server.')}</p>
       )}
-      {hint && <p role="status">{hint}</p>}
+      {hint && <p role="status">{shared(hint)}</p>}
       {error && (
         <p role="alert" className="error">
-          {error}
+          {shared(error)}
         </p>
       )}
     </section>
   );
 }
 
-const MODE_CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
+const MODE_CHOICES: ReadonlyArray<{ value: ModeChoice; label: Key }> = [
   { value: 'system', label: 'System' },
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
@@ -640,11 +667,12 @@ const MODE_CHOICES: ReadonlyArray<{ value: ModeChoice; label: string }> = [
 
 /** System, light or dark, kept in this browser. */
 function AppearanceChoice() {
+  const { t } = useT();
   const { choice, setMode } = useMode();
   return (
-    <section className="card section-card" aria-label="Appearance">
-      <h2>Appearance</h2>
-      <div className="mode-choice" role="group" aria-label="Color mode">
+    <section className="card section-card" aria-label={t('Appearance')}>
+      <h2>{t('Appearance')}</h2>
+      <div className="mode-choice" role="group" aria-label={t('Color mode')}>
         {MODE_CHOICES.map(({ value, label }) => (
           <button
             key={value}
@@ -652,7 +680,32 @@ function AppearanceChoice() {
             aria-pressed={choice === value}
             onClick={() => setMode(value)}
           >
-            {label}
+            {t(label)}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LanguageChoice() {
+  const { t, languageChoice, setLanguage } = useT();
+  return (
+    <section className="card section-card" aria-label={t('Language')}>
+      <h2>{t('Language')}</h2>
+      <div className="mode-choice" role="group" aria-label={t('Language')}>
+        {(['system', 'zh-Hans', 'en'] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={languageChoice === value}
+            onClick={() => setLanguage(value)}
+          >
+            {value === 'system'
+              ? t('Follow system')
+              : value === 'zh-Hans'
+                ? t('简体中文')
+                : t('English')}
           </button>
         ))}
       </div>
@@ -667,26 +720,30 @@ export function Settings({
   client: CloudClient;
   onDisconnect: () => void;
 }) {
+  const { t } = useT();
   return (
     <div className="page">
-      <h1>Settings</h1>
+      <h1>{t('Settings')}</h1>
       <AppearanceChoice />
+      <LanguageChoice />
       <section className="card section-card">
         <MemoryPanel client={client} errorText={errorText} />
       </section>
       <NotificationsPanel client={client} />
       <GrantsPanel client={client} />
-      <section className="card section-card" aria-label="Connection">
-        <h2>This device</h2>
-        <p className="muted">Disconnecting forgets the invite on this device and nothing else.</p>
-        <Button label="Disconnect" variant="secondary" onClick={onDisconnect} />
+      <section className="card section-card" aria-label={t('Connection')}>
+        <h2>{t('This device')}</h2>
+        <p className="muted">
+          {t('Disconnecting forgets the invite on this device and nothing else.')}
+        </p>
+        <Button label={t('Disconnect')} variant="secondary" onClick={onDisconnect} />
       </section>
     </div>
   );
 }
 
 type View = 'home' | 'chat' | 'projects' | 'settings';
-const VIEWS: ReadonlyArray<{ view: View; label: string }> = [
+const VIEWS: ReadonlyArray<{ view: View; label: Key }> = [
   { view: 'home', label: 'Home' },
   { view: 'chat', label: 'Chat' },
   { view: 'projects', label: 'Projects' },
@@ -703,6 +760,7 @@ export function Shell({
   onView: (view: View) => void;
   children: ReactNode;
 }) {
+  const { t } = useT();
   return (
     <div className="shell">
       <header className="shell-top">
@@ -710,7 +768,7 @@ export function Shell({
           {BRAND.wordmark}
         </a>
         {/* One row on a phone, as Hark's: the sections in a pill, Settings a round icon beside it. */}
-        <nav className="seg-nav" aria-label="Sections">
+        <nav className="seg-nav" aria-label={t('Sections')}>
           <div className="seg">
             {VIEWS.filter((item) => item.view !== 'settings').map((item) => (
               <button
@@ -720,7 +778,7 @@ export function Shell({
                 aria-current={view === item.view ? 'page' : undefined}
                 onClick={() => onView(item.view)}
               >
-                {item.label}
+                {t(item.label)}
               </button>
             ))}
           </div>
@@ -731,7 +789,7 @@ export function Shell({
             onClick={() => onView('settings')}
           >
             <SettingsIcon aria-hidden="true" size={19} strokeWidth={1.8} />
-            <span className="sr-only">Settings</span>
+            <span className="sr-only">{t('Settings')}</span>
           </button>
         </nav>
       </header>
@@ -741,6 +799,7 @@ export function Shell({
 }
 
 export function App({ initialToken = '' }: { initialToken?: string }) {
+  const { t, shared } = useT();
   const [invite, setInvite] = useState(initialToken);
   const [session, setSession] = useState<{
     client: CloudClient;
@@ -795,7 +854,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     >
       {error && (
         <p className="error" role="alert">
-          {error}
+          {shared(error)}
         </p>
       )}
       {taskPage && (
@@ -838,16 +897,16 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               picker={
                 session.conversations.length > 1 && (
                   <select
-                    aria-label="Switch conversation"
+                    aria-label={t('Switch conversation')}
                     value=""
                     onChange={(e) => e.target.value && setChosen(e.target.value)}
                   >
-                    <option value="">Switch conversation</option>
+                    <option value="">{t('Switch conversation')}</option>
                     {session.conversations
                       .filter((c) => c.conversationId !== chosen)
                       .map((c) => (
                         <option key={c.conversationId} value={c.conversationId}>
-                          {displayText(c.title ?? 'Untitled conversation')}
+                          {displayText(c.title ?? t('Untitled conversation'))}
                         </option>
                       ))}
                   </select>
@@ -855,10 +914,10 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
               }
             />
           ) : (
-            <section className="card section-card" aria-label="No conversation">
-              <h2>No conversation open</h2>
-              <p className="muted">Start one from Home.</p>
-              <Button label="Go to Home" variant="secondary" onClick={() => setView('home')} />
+            <section className="card section-card" aria-label={t('No conversation')}>
+              <h2>{t('No conversation open')}</h2>
+              <p className="muted">{t('Start one from Home.')}</p>
+              <Button label={t('Go to Home')} variant="secondary" onClick={() => setView('home')} />
             </section>
           )}
         </div>
@@ -872,18 +931,18 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     <main className="welcome">
       <span className="brand">{BRAND.wordmark}</span>
       <h1>
-        Your next big thing,
+        {t('Your next big thing,')}
         <br />
-        one conversation away.
+        {t('one conversation away.')}
       </h1>
-      <p>A place to plan, follow the work, and bring it home.</p>
+      <p>{t('A place to plan, follow the work, and bring it home.')}</p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
           void connect(invite);
         }}
       >
-        <label htmlFor="invite">Invite token</label>
+        <label htmlFor="invite">{t('Invite token')}</label>
         <input
           id="invite"
           type="password"
@@ -893,7 +952,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
           required
         />
         <Button
-          label={busy ? 'Connecting…' : 'Enter your workspace'}
+          label={busy ? t('Connecting…') : t('Enter your workspace')}
           type="submit"
           variant="primary"
           isDisabled={busy}
@@ -901,7 +960,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       </form>
       {error && (
         <p role="alert" className="error">
-          {error}
+          {shared(error)}
         </p>
       )}
     </main>
