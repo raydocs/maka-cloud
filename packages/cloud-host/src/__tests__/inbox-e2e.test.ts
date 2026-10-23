@@ -220,7 +220,10 @@ async function startStack(
     await rm(dir, { recursive: true, force: true });
     throw error;
   }
-  stack.token = stack.cloud.server.invites.create('test').token;
+  const invite = stack.cloud.server.invites.create('test');
+  // These tests read the inbox's English words; the language tests cover the Chinese ones.
+  stack.cloud.server.invites.setLanguage(invite.inviteId, 'en');
+  stack.token = invite.token;
   stack.api = (path, init = {}) =>
     fetch(`${stack.cloud.server.url}${path}`, {
       method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),

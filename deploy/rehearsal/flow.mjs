@@ -378,6 +378,18 @@ const steps = [
         signedIn.status === 200 && Array.isArray(signedIn.json?.conversations),
         `the invite's token answered ${signedIn.status}`,
       );
+      // A new invite reads Simplified Chinese. This flow reads the server's English words, so it
+      // chooses English, as a person does in Settings.
+      const settings = await api('GET', '/v1/settings');
+      assert(
+        settings.status === 200 && settings.json?.language === 'zh-Hans',
+        `the settings answered ${settings.status} ${JSON.stringify(settings.json)}`,
+      );
+      const chosen = await api('PATCH', '/v1/settings', { language: 'en' });
+      assert(
+        chosen.status === 200 && chosen.json?.language === 'en',
+        `choosing English answered ${chosen.status} ${JSON.stringify(chosen.json)}`,
+      );
     },
   ],
   [

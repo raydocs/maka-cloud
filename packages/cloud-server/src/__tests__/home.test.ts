@@ -190,7 +190,7 @@ test('the server ranks waiting first, then suggestions, finished work, notes and
     cards.map((_, i) => i),
   );
   const note = cards.find((card) => card.kind === 'note');
-  assert.equal(note?.text, 'PR #42 in acme/api merged, CI green.');
+  assert.equal(note?.text, 'acme/api 的 PR #42 已合并，CI 已通过。');
   const done = cards.find((card) => card.kind === 'finished');
   assert.deepEqual(
     [done?.state, done?.ref],
@@ -362,7 +362,7 @@ test('a note is a template with typed parameters: nothing else is accepted, and 
   const notes = (await homeOf(h)).filter((card) => card.kind === 'note');
   assert.deepEqual(
     notes.map((card) => card.text),
-    ['PR #42 in acme/api merged, CI green.'],
+    ['acme/api 的 PR #42 已合并，CI 已通过。'],
   );
   assert.equal(
     noteText({ template: 'checks_failed', repo: 'acme/api', number: 7 }),
@@ -426,5 +426,28 @@ test('a note row that is not JSON, or no longer fits the schema, is left out and
   assert.deepEqual(
     store.notes('o').map((note) => note.noteId),
     ['n3'],
+  );
+});
+
+test('a note is in the owner’s language: Chinese by default, English once they choose it', async (t) => {
+  const { h } = await setup(t);
+  assert.equal(
+    h.server.addHomeNote(h.inviteId, { template: 'checks_failed', repo: 'acme/api', number: 7 }),
+    'added',
+  );
+  const noteOf = async () => (await homeOf(h)).find((card) => card.kind === 'note')?.text;
+  assert.equal(await noteOf(), 'acme/api 的 PR #7 检查未通过。');
+  await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language: 'en' }) });
+  assert.equal(await noteOf(), 'Checks failed on PR #7 in acme/api.');
+  assert.equal(
+    noteText(
+      { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'pending' },
+      'zh-Hans',
+    ),
+    'a/b 的 PR #1 已合并，CI 仍在运行。',
+  );
+  assert.equal(
+    noteText({ template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'red' }, 'en'),
+    'PR #1 in a/b merged, CI red.',
   );
 });

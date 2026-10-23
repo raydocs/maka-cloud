@@ -212,6 +212,9 @@ test('a finished task sends one encrypted, signed message with ids and a state a
     conversationId,
     taskId,
     state: 'succeeded',
+    lang: 'zh-Hans',
+    title: '后台任务已完成',
+    body: '打开 Maka 查看结果。',
   });
 });
 
@@ -872,7 +875,12 @@ test('an alert reaches the devices of the invite it is for and nobody else, with
   );
   for (const call of fake.calls) {
     const mine = call.endpoint === a.endpoint ? a : a2;
-    assert.deepEqual(payloadOf(call, mine), { type: 'spend.alert' });
+    assert.deepEqual(payloadOf(call, mine), {
+      type: 'spend.alert',
+      lang: 'zh-Hans',
+      title: '今天的花费偏高',
+      body: '打开 Maka 查看明细。',
+    });
     assert.match(call.headers.Authorization ?? '', /^vapid /u);
     assert.equal(call.headers.Urgency, 'high');
     assert.ok(!call.body.includes(Buffer.from('spend')), 'the body is encrypted');
@@ -1134,6 +1142,9 @@ test('an alert key is a short plain name, and an alert does not disturb task mes
     conversationId: 'cnv_1',
     taskId,
     state: 'succeeded',
+    lang: 'zh-Hans',
+    title: '后台任务已完成',
+    body: '打开 Maka 查看结果。',
   });
 });
 
@@ -1152,4 +1163,33 @@ test('closing the service while an alert is being sent lets whoever asked for it
   await asked;
   await service.alert('inv_1', 'spend:2026-10-21');
   assert.equal(fake.calls.length, 1, 'nothing is sent once closed');
+});
+
+test('a person who reads English gets the push words in English; the ids and state are the same', async (t) => {
+  const { h, fake, conversationId, finish } = await setup(t);
+  const d = device();
+  await subscribe(h, d);
+  const set = await h.api('/v1/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ language: 'en' }),
+  });
+  assert.equal(set.status, 200);
+  const taskId = await finish();
+  await eventually(() => fake.calls.length === 1, 'a push');
+  assert.deepEqual(payloadOf(fake.calls[0] as Call, d), {
+    type: 'task.finished',
+    conversationId,
+    taskId,
+    state: 'succeeded',
+    lang: 'en',
+    title: 'Your background task has finished',
+    body: 'Open Maka to review the result.',
+  });
+  assert.equal(await h.server.pushAlert(h.inviteId, 'spend:2026-10-22'), true);
+  assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    type: 'spend.alert',
+    lang: 'en',
+    title: 'Spending is high today',
+    body: 'Open Maka to see where it went.',
+  });
 });

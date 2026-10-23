@@ -14,7 +14,9 @@ import {
   type InboxAnswerRequest,
   type InboxAnswerResult,
   type InboxItem,
+  type Language,
   type MemoryProfile,
+  type PersonSettings,
   type Mode,
   type ProjectView,
   type SuggestionsView,
@@ -355,6 +357,18 @@ export class CloudClient {
       `${routes.projects}/${encodeURIComponent(projectId)}/suggestions`,
       { method: 'PATCH', body: JSON.stringify({ kind, enabled }) },
       'suggestions',
+    );
+  }
+  /** The person's settings: the language the server speaks to them in. Unsupported on a server without them. */
+  settings() {
+    return this.request<PersonSettings>(routes.settings, {}, 'settings');
+  }
+  /** Sets the language the server speaks to the person in; new conversations take it up. */
+  setLanguage(language: Language) {
+    return this.request<PersonSettings>(
+      routes.settings,
+      { method: 'PATCH', body: JSON.stringify({ language }) },
+      'settings',
     );
   }
   /** The devices signed in to this account, and the ways it signs in. Hidden where the server has no sign-in. */

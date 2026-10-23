@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { transaction } from './db.js';
 import { HttpError, readJson, respond, take } from './http.js';
+import { type Language, messages } from './i18n.js';
 import type { InboxOwners, InboxService } from './inbox.js';
 import type { InviteInfo } from './invites.js';
 import type { RateLimiter } from './rate-limit.js';
@@ -83,14 +84,14 @@ const NoteSchema = z.discriminatedUnion('template', [
 ]);
 export type HomeNote = z.infer<typeof NoteSchema>;
 
-const CHECKS_WORDS = { green: 'CI green', red: 'CI red', pending: 'CI still running' } as const;
-
-export function noteText(note: HomeNote): string {
+/** A note's words, in the owner's language. */
+export function noteText(note: HomeNote, language: Language = 'en'): string {
+  const words = messages(language).note;
   switch (note.template) {
     case 'pull_request_merged':
-      return `PR #${note.number} in ${note.repo} merged${note.checks === 'none' ? '' : `, ${CHECKS_WORDS[note.checks]}`}.`;
+      return words.pullRequestMerged(note.repo, note.number, note.checks);
     case 'checks_failed':
-      return `Checks failed on PR #${note.number} in ${note.repo}.`;
+      return words.checksFailed(note.repo, note.number);
   }
 }
 
@@ -469,7 +470,7 @@ export class HomeRoutes {
         kind: 'note',
         ref: { type: 'note', id: noteId },
         at,
-        text: noteText(note),
+        text: noteText(note, this.owners.languageOf?.(owner)),
         sort: [-at],
       });
     }

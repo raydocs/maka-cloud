@@ -101,7 +101,31 @@ export interface ItemContext {
   checked?: 'passed' | 'not_checked';
   /** For `suggestion` items (`detail` is the card's id): what the card shows besides its title. */
   suggestion?: SuggestionFacts;
+  /** The fixed sentence the ask was built from, so a reader can say it in another language. */
+  askTemplate?: AskTemplate;
 }
+
+/**
+ * Which fixed sentence a rule built an ask from, and its parts. Agent-written parts are already
+ * clipped and quote-safe (`quotable`); an empty title means the task has none. The server says the
+ * sentence in the owner's language; the ask stays the English one.
+ */
+export type AskTemplate =
+  | { id: 'stall'; title: string; minutes: number }
+  | { id: 'failed_twice'; title: string; count: number; reason: string }
+  | { id: 'low_confidence'; title: string; summary: string }
+  | {
+      id: 'finished';
+      title: string;
+      outcome: 'succeeded' | 'failed';
+      checked?: 'passed' | 'not_checked';
+      detail: string;
+    }
+  | { id: 'verification_failed'; title: string; count: number; detail: string; more: number }
+  /** `code` says why the check could not finish; `detail` is the English reason, which can quote agent text. */
+  | { id: 'verification_incomplete'; title: string; detail: string; code: string }
+  /** `label` is the kind's own English words, lower case; another language says "this kind" instead. */
+  | { id: 'suggestion_offer'; count: number; label: string; repo: string };
 
 /** What a proposed card shows beside its verb-first title. Cost and mode are the kind's, not words. */
 export interface SuggestionFacts {
@@ -135,6 +159,8 @@ export interface ItemView {
   interrupts: boolean;
   /** For a proposed card: what it will do besides its title. */
   suggestion?: SuggestionFacts;
+  /** The fixed sentence the ask was built from; the server turns it into the owner's language and drops it. */
+  askTemplate?: AskTemplate;
   /** The answer is chosen and being delivered. */
   delivery: 'none' | 'sending' | 'retrying';
   createdAt: number;

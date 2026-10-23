@@ -45,8 +45,13 @@ export function exactText(text: string): string {
   return text.replaceAll('\n', '').search(CONTROL) === -1 ? text : clip(text, 600);
 }
 
+/** What `quoted` puts between its quotes: one clipped line that cannot seem to close them. */
+export function quotable(text: string | undefined | null, max = 80): string {
+  return clip(text ?? '', max).replace(QUOTES, "'");
+}
+
 export function quoted(text: string | undefined | null, max = 80): string {
-  const flat = clip(text ?? '', max).replace(QUOTES, "'");
+  const flat = quotable(text, max);
   return flat === '' ? '(untitled)' : `“${flat}”`;
 }
 

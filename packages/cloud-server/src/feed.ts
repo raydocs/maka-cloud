@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
+import type { Language } from './i18n.js';
 import {
   scrubSecretText,
   toPublicConductorData,
@@ -104,6 +105,8 @@ export interface ReadFeedOptions {
    * inside the server process; what they publish is still their own to keep clean.
    */
   internal?: boolean;
+  /** The reader's language, for the words the server puts in what it shows (an inbox item's ask). */
+  language?: Language;
 }
 
 /** Feed entries after `after`, in order, at most `limit`, optionally of one conversation. */
@@ -130,14 +133,23 @@ export function readOwnFeed(
   after: number,
   limit: number,
   conversationId?: string,
+  options: Pick<ReadFeedOptions, 'language'> = {},
 ): { entries: FeedEntry[]; scannedTo: number } {
   if (conversationId !== undefined) {
-    const entries = readRows(db, after, Number.MAX_SAFE_INTEGER, limit, conversationId, owner);
+    const entries = readRows(
+      db,
+      after,
+      Number.MAX_SAFE_INTEGER,
+      limit,
+      conversationId,
+      owner,
+      options,
+    );
     return { entries, scannedTo: entries.at(-1)?.id ?? after };
   }
   const { last } = db.prepare(WINDOW_SQL).get(after, limit) as { last: number | null };
   if (last === null) return { entries: [], scannedTo: after };
-  return { entries: readRows(db, after, last, limit, null, owner), scannedTo: last };
+  return { entries: readRows(db, after, last, limit, null, owner, options), scannedTo: last };
 }
 
 function readRows(
@@ -157,7 +169,7 @@ function readRows(
     kind: row.kind,
     conversationId: row.conversation_id,
     at: row.at,
-    data: payload(db, row, options.internal === true),
+    data: payload(db, row, options.internal === true, options.language),
   }));
 }
 
@@ -176,7 +188,12 @@ function costSoFar(db: DatabaseSync, taskId: string, seq: number): number {
   return Math.round(rows.reduce((sum, row) => sum + row.usd, 0) * 1e9) / 1e9;
 }
 
-function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
+function payload(
+  db: DatabaseSync,
+  row: FeedRow,
+  internal: boolean,
+  language: Language | undefined,
+): unknown {
   switch (row.kind) {
     case 'task.event': {
       const event = JSON.parse(row.t_event ?? 'null') as TaskEvent;
@@ -212,7 +229,7 @@ function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
     }
     case 'inbox.item': {
       const item = JSON.parse(row.x_data ?? 'null') as unknown;
-      return internal ? item : toPublicItem(item);
+      return internal ? item : toPublicItem(item, language);
     }
     case 'inbox.digest':
       return JSON.parse(row.x_data ?? 'null') as unknown;

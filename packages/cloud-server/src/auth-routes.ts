@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AccountStore, Identity } from './accounts.js';
 import type { EmailCodes, NonceStore } from './challenges.js';
 import { HttpError, readJson, respond } from './http.js';
+import { type Language, languageFromAcceptLanguage } from './i18n.js';
 import type { IdentityVerifier } from './identity.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import { RateLimiter } from './rate-limit.js';
@@ -167,7 +168,12 @@ export class AuthRoutes {
       if (!emailCodes) throw new HttpError(404, 'not_found');
       const body = emailRequest.safeParse(await readJson(req, false));
       if (!body.success) throw new HttpError(400, 'invalid_request');
-      const result = await emailCodes.request(body.data.address);
+      // The account's language when the address has one, else what this request asks for.
+      const result = await emailCodes.request(
+        body.data.address,
+        languageFromAcceptLanguage(req.headers['accept-language']),
+        (address) => this.deps.accounts.languageOf({ provider: 'email', subject: address }),
+      );
       if (!result.ok) {
         if (result.reason === 'invalid') throw new HttpError(400, 'invalid_request');
         if (result.reason === 'slow_down')
@@ -189,7 +195,10 @@ export class AuthRoutes {
       allow(method, 'POST');
       const body = claimBody.safeParse(await readJson(req, false));
       if (!body.success) throw new HttpError(400, 'invalid_request');
-      return answer(200, this.claim(body.data));
+      return answer(
+        200,
+        this.claim(body.data, languageFromAcceptLanguage(req.headers['accept-language'])),
+      );
     }
     throw new HttpError(404, 'not_found');
   }
@@ -275,6 +284,10 @@ export class AuthRoutes {
         // The first identity of an account that so far signs in only with its invite token.
         const created = accounts.createAccountWithIdentity(invite.inviteId, identity);
         outcome = created === undefined ? 'taken' : 'linked';
+        if (created !== undefined) {
+          const language = languageFromAcceptLanguage(req.headers['accept-language']);
+          this.deps.invites.setLanguage(invite.inviteId, language, true);
+        }
       } else {
         outcome = accounts.linkIdentity(accountId, identity);
       }
@@ -371,7 +384,10 @@ export class AuthRoutes {
   }
 
   /** Turns a pending identity into an account on an invite that is active and has no account yet. */
-  private claim(body: { pendingToken: string; inviteToken: string; device?: string | undefined }) {
+  private claim(
+    body: { pendingToken: string; inviteToken: string; device?: string | undefined },
+    language: Language,
+  ) {
     const entry = this.pending.get(body.pendingToken);
     if (!entry || entry.expiresAt <= this.now()) {
       this.pending.delete(body.pendingToken);
@@ -384,8 +400,10 @@ export class AuthRoutes {
     const accountId = invite
       ? this.deps.accounts.createAccountWithIdentity(invite.inviteId, entry.identity)
       : undefined;
-    if (accountId === undefined) throw new HttpError(403, 'invite_unavailable');
+    if (accountId === undefined || !invite) throw new HttpError(403, 'invite_unavailable');
     this.pending.delete(body.pendingToken);
+    // A new account speaks the language its sign-up asked for, unless its person already chose one.
+    this.deps.invites.setLanguage(invite.inviteId, language, true);
     const session = this.deps.accounts.issueSession(accountId, body.device ?? '');
     if (!session) throw new HttpError(403, 'invite_unavailable');
     return { status: 'signed_in', token: session.token, sessionId: session.sessionId };

@@ -154,8 +154,20 @@ export const previewFetch: PreviewFetch = async (url) => {
 };
 
 export async function startStack(
-  options: { pausable?: boolean; port?: number; push?: boolean; inbox?: boolean } = {},
+  options: {
+    pausable?: boolean;
+    port?: number;
+    push?: boolean;
+    inbox?: boolean;
+    /**
+     * What the stack's invites read. English by default: the web app reads the server's English
+     * words (its own Chinese comes with its translation), so its people choose English, as one does
+     * with `PATCH /v1/settings`. The server's own default is Simplified Chinese.
+     */
+    language?: 'zh-Hans' | 'en';
+  } = {},
 ): Promise<Stack> {
+  const language = options.language ?? 'en';
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
   const fake = new FakeRunner({ pausable: options.pausable ?? true });
   const computer = await fakeComputer();
@@ -312,6 +324,7 @@ export async function startStack(
         }),
   });
   const invite = server.invites.create('test');
+  server.invites.setLanguage(invite.inviteId, language);
 
   const sessionOf = (conversationId: string): SessionInfo => {
     const token = access(conversationId)?.rotateToken();
@@ -341,6 +354,7 @@ export async function startStack(
     },
     newInvite: () => {
       const created = server.invites.create('other');
+      server.invites.setLanguage(created.inviteId, language);
       return { token: created.token, inviteId: created.inviteId };
     },
     say: (conversationId, text) => {

@@ -120,6 +120,8 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `GET /v1/home` | The caller's Home as the server keeps it: `{cards: [{cardId, kind, ref, rank, seenAt, at, state?, text?}]}` (see "Home cards"). |
 | `POST /v1/home/seen` | `{cardIds}` (at most 100): the person saw these cards and left Home. Records the ones that are on this Home and moves the caller's visit to now. 200 `{seen, visitedAt}`. |
 | `POST /v1/home/order` | `{cardId, after}`: moves a card to just after `after` (first when null) inside its kind. 200 `{cards}`; 404 a card that is not on this Home; 400 `after` in another kind, itself, or not there. |
+| `GET /v1/settings` | `{language}`: what the server writes to the caller's invite in, `zh-Hans` (the default) or `en` (see "Language"). |
+| `PATCH /v1/settings` | `{language}` -> 200 `{language}`. 400 for any other value or field; 429 over the control limit. |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
 Unknown or malformed ids are 404. Bodies over 64 KiB are 413; message text is
@@ -216,10 +218,12 @@ itself.
 
 When a top-level task (no parent) ends, every device registered by the invite
 that owns its conversation gets one message, while that invite is active:
-`{type: "task.finished", conversationId, taskId, state}`. A conversation another
-invite owns, or one nobody owns yet (before `conversation adopt`), reaches no
-device. Nothing a task or a model wrote goes in it, and there is no title, model
-name or vendor name.
+`{type: "task.finished", conversationId, taskId, state, lang, title, body}`. A
+conversation another invite owns, or one nobody owns yet (before `conversation
+adopt`), reaches no device. Nothing a task or a model wrote goes in it, and there
+is no model name or vendor name: `title` and `body` are fixed words from the
+server's catalogue in the invite's language (`lang`), and a client may show its
+own words for `type` instead. A spend alert is `{type: "spend.alert", lang, title, body}`.
 
 What is left to send is computed from the database: a terminal event of a
 top-level task that came after the subscription (`since_feed_id`) and has no
@@ -236,6 +240,30 @@ The server fetches a URL a client chose, so: the endpoint must be `https`, on po
 Apple, Windows by default); no redirect is followed; the address is checked when
 the socket connects (non-public addresses are refused, and so are IP literals); a
 send ends after 10 s or when the server closes; and the response is read to 4 KiB.
+
+### Language
+
+`i18n.ts`. Each invite has a language, `zh-Hans` or `en`, in the invites file
+(`invites.language`, null until set, which reads as `zh-Hans`). An account made
+by `/v1/auth/claim`, or by linking the first identity, gets `en` when the first
+entry of the request's `Accept-Language` is English and `zh-Hans` otherwise; a
+language already set is kept. `/v1/settings` reads and changes it.
+
+What the server says in it, from one typed catalogue with an English fallback:
+the sign-in mail (the account's language when the address has one, else the
+request's), the words of a push, Home note cards, the asks the supervisor's rules
+build (each carries `askTemplate`, its fixed sentence and parts, which the server
+says in the reader's language and never sends on), and the "Needs you" notice. An
+approval's card, the conductor's own words and every option label and id stay as
+they are; the apps translate known option ids.
+
+The conversational agent gets one paragraph at the end of its system prompt for a
+`zh-Hans` reader (`languageInstruction`): reply in Simplified Chinese unless the
+person writes in another language, keep code, commands, file names and quoted
+text as they are, and keep delegated briefs, commit messages, pull request titles
+and code in English. It is read when a conversation's conductor session is made
+and kept with it, so a conversation's prompt never changes and its history is
+never edited; a language changed later applies to new conversations.
 
 ### Control and cost
 
