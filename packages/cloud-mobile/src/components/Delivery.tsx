@@ -186,7 +186,7 @@ function FileRow({
         opacity: pressed ? 0.6 : 1,
       })}
     >
-      <Icon name="file" size={16} color={t.inkMuted} />
+      <Icon name="file" color={t.inkMuted} />
       <T kind="muted" numberOfLines={1} style={{ flex: 1 }}>
         {name}
       </T>
@@ -589,7 +589,7 @@ export function SourcesStack({
         <T kind="muted" style={{ flex: 1 }}>
           {say('delivery.sourcesCount', { count: shown.length })}
         </T>
-        <Icon name={open ? 'chevronUp' : 'chevronDown'} size={16} color={t.inkMuted} />
+        <Icon name={open ? 'chevronUp' : 'chevronDown'} color={t.inkMuted} />
       </Pressable>
       {open &&
         shown.map((source) => (

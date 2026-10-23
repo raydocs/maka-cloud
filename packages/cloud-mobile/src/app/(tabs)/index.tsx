@@ -22,20 +22,11 @@ import {
   ScrollView,
   View,
 } from 'react-native';
+import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { DecisionCard } from '@/components/Decision';
 import { InboxStatus } from '@/components/InboxStatus';
 
-import {
-  Card,
-  Chip,
-  Field,
-  RoundButton,
-  Screen,
-  StatusMark,
-  T,
-  Tile,
-  Tiles,
-} from '@/components/ui';
+import { Card, Chip, Screen, StatusMark, T, Tile, Tiles, TOP_BAR } from '@/components/ui';
 import { type Language, useT } from '@/lib/i18n';
 import { useWorkspace } from '@/lib/session';
 import { mono } from '@/lib/theme';
@@ -84,6 +75,8 @@ export default function Home() {
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
+  const [dock, setDock] = useState(76);
+  const { openSheet, sheet } = useConversationSheet(() => router.navigate('/chat'));
 
   const now = Date.now();
   const waiting = Object.values(items)
@@ -126,7 +119,13 @@ export default function Home() {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: 16, gap: 14 }}
+          contentContainerStyle={{
+            padding: 16,
+            paddingTop: TOP_BAR + 12,
+            paddingBottom: dock + 16,
+            gap: 14,
+          }}
+          scrollIndicatorInsets={{ top: TOP_BAR, bottom: dock }}
           keyboardShouldPersistTaps="handled"
           contentInsetAdjustmentBehavior="automatic"
         >
@@ -165,36 +164,14 @@ export default function Home() {
             <InboxStatus loaded={inboxLoaded} failed={inboxFailed} onRetry={() => feed.refresh()} />
           )}
 
-          <Card label={say('home.start.label')}>
+          {/* The start sentence; the box it asks for is the composer at the bottom. */}
+          <View style={{ gap: 6, paddingHorizontal: 4 }}>
             <T kind={waiting.length > 0 ? 'heading' : 'title'} testID="home-start-title">
               {say('home.start.title')}
             </T>
             <T kind="muted">{say('home.start.body', { name: BRAND.name })}</T>
-            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
-              <View style={{ flex: 1 }}>
-                <Field
-                  label={say('home.start.field')}
-                  id="What would you like to get done?"
-                  placeholder={say('home.start.field')}
-                  multiline
-                  maxLength={16000}
-                  value={draft}
-                  onChangeText={(text) => {
-                    setDraft(displayText(text));
-                    starter.draftEdited();
-                  }}
-                />
-              </View>
-              <RoundButton
-                label={say(starting ? 'home.start.going' : 'home.start.go')}
-                id={starting ? 'Starting…' : 'Start'}
-                icon="send"
-                disabled={starting || !draft.trim()}
-                onPress={begin}
-              />
-            </View>
             {startError ? <T kind="error">{tx(startError)}</T> : null}
-          </Card>
+          </View>
 
           {conversations.length === 0 && waiting.length === 0 && (
             <Card label={say('home.ideas.label')}>
@@ -296,6 +273,28 @@ export default function Home() {
             </Card>
           )}
         </ScrollView>
+        <TopFade />
+        <Dock height={dock} onHeight={setDock}>
+          <Composer
+            draft={draft}
+            onDraft={(text) => {
+              setDraft(text);
+              starter.draftEdited();
+            }}
+            sending={starting}
+            disabled={starting}
+            onSend={begin}
+            {...(conversations.length > 0 ? { onPlus: openSheet } : {})}
+            fieldId="What would you like to get done?"
+            fieldLabel={say('home.start.field')}
+            placeholder={say('home.start.field')}
+            sendId="Start"
+            sendLabel={say('home.start.go')}
+            sendingId="Starting…"
+            sendingLabel={say('home.start.going')}
+          />
+        </Dock>
+        {sheet}
       </KeyboardAvoidingView>
     </Screen>
   );

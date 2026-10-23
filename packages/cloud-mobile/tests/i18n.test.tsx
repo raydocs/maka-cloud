@@ -57,7 +57,7 @@ test('a language picked in the app is kept on the device and wins over the phone
     const { lang, chosen, choose, t } = useT();
     return (
       <>
-        <Text>{`${lang} ${chosen ?? 'phone'} ${t('tab.settings')}`}</Text>
+        <Text>{`${lang} ${chosen ?? 'phone'} ${t('tab.projects')}`}</Text>
         {LANGUAGES.map((language) => (
           <Pressable key={language} accessibilityRole="button" onPress={() => choose(language)}>
             <Text>{`pick ${language}`}</Text>
@@ -72,9 +72,9 @@ test('a language picked in the app is kept on the device and wins over the phone
       <Picker />
     </LanguageProvider>,
   );
-  expect(await screen.findByText('en phone Settings')).toBeTruthy();
+  expect(await screen.findByText('en phone Projects')).toBeTruthy();
   await fireEvent.press(screen.getByText('pick zh-Hant'));
-  expect(screen.getByText('zh-Hant zh-Hant 設定')).toBeTruthy();
+  expect(screen.getByText('zh-Hant zh-Hant 專案')).toBeTruthy();
   expect(secure().get('maka.language')).toBe('zh-Hant');
   await act(async () => first.unmount());
   // A new start reads the choice back.
@@ -83,9 +83,9 @@ test('a language picked in the app is kept on the device and wins over the phone
       <Picker />
     </LanguageProvider>,
   );
-  expect(await screen.findByText('zh-Hant zh-Hant 設定')).toBeTruthy();
+  expect(await screen.findByText('zh-Hant zh-Hant 專案')).toBeTruthy();
   await fireEvent.press(screen.getByText('pick zh-Hans'));
-  expect(screen.getByText('zh-Hans zh-Hans 设置')).toBeTruthy();
+  expect(screen.getByText('zh-Hans zh-Hans 项目')).toBeTruthy();
   expect(secure().get('maka.language')).toBe('zh-Hans');
 });
 
@@ -94,7 +94,7 @@ test('"use phone language" clears a saved choice, and the phone decides again', 
     const { lang, chosen, choose, t } = useT();
     return (
       <>
-        <Text>{`${lang} ${chosen ?? 'phone'} ${t('tab.settings')}`}</Text>
+        <Text>{`${lang} ${chosen ?? 'phone'} ${t('tab.projects')}`}</Text>
         <Pressable accessibilityRole="button" onPress={() => choose(undefined)}>
           <Text>use phone</Text>
         </Pressable>
@@ -107,10 +107,10 @@ test('"use phone language" clears a saved choice, and the phone decides again', 
       <Phone />
     </LanguageProvider>,
   );
-  expect(await screen.findByText('zh-Hant zh-Hant 設定')).toBeTruthy();
+  expect(await screen.findByText('zh-Hant zh-Hant 專案')).toBeTruthy();
   await fireEvent.press(screen.getByText('use phone'));
   // The test phone is set to English.
-  expect(screen.getByText('en phone Settings')).toBeTruthy();
+  expect(screen.getByText('en phone Projects')).toBeTruthy();
   expect(secure().has('maka.language')).toBe(false);
   await act(async () => first.unmount());
   await render(
@@ -118,7 +118,7 @@ test('"use phone language" clears a saved choice, and the phone decides again', 
       <Phone />
     </LanguageProvider>,
   );
-  expect(await screen.findByText('en phone Settings')).toBeTruthy();
+  expect(await screen.findByText('en phone Projects')).toBeTruthy();
 });
 
 test('values are filled in, and the shared logic’s English is translated only when known', () => {

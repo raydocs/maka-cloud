@@ -1,4 +1,4 @@
-import { DARK, type Palette, LIGHT, PANEL } from '@/lib/theme';
+import { clearOf, DARK, LIGHT, type Palette } from '@/lib/theme';
 
 /**
  * The palette is the web's (cloud-web/src/tokens.css); this checks the pairs the app shows
@@ -34,10 +34,9 @@ const ratio = (a: string, b: string) => {
   return (hi + 0.05) / (lo + 0.05);
 };
 
-// The panel palette's ground is the slab itself (bgTop and bgBottom are the panel), so the same
-// checks cover the conversation's cards and chips; its glass controls are checked below.
-describe.each([DARK, LIGHT, PANEL])('%#', (p: Palette) => {
-  const name = p.surface ?? p.scheme;
+// The conversation follows the appearance like every section, so these cover its cards and chips.
+describe.each([DARK, LIGHT])('%#', (p: Palette) => {
+  const name = p.scheme;
   const surfaces = [p.bgTop, p.bgBottom].flatMap((bg) => {
     const card = over(p.card, bg);
     return [card, over(p.chip, card), over(p.glass, bg)];
@@ -61,21 +60,21 @@ describe.each([DARK, LIGHT, PANEL])('%#', (p: Palette) => {
   });
 });
 
-test('the panel is the same opaque slab in both schemes, and its glass reads well', () => {
-  expect(LIGHT.panel).toBe(DARK.panel);
-  expect(PANEL.panel.startsWith('#')).toBe(true);
-  expect(ratio(PANEL.ink, over(PANEL.panelGlass, PANEL.panel))).toBeGreaterThanOrEqual(7);
-  // With Reduce Transparency on, a glass control on the panel is the solid raised fill.
-  expect(PANEL.panelRaised.startsWith('#')).toBe(true);
-  expect(ratio(PANEL.ink, PANEL.panelRaised)).toBeGreaterThanOrEqual(7);
-  expect(ratio(PANEL.inkMuted, PANEL.panelRaised)).toBeGreaterThanOrEqual(4.5);
-  expect(ratio(PANEL.inkMuted, PANEL.panel)).toBeGreaterThanOrEqual(4.5);
-  // Off the panel, Reduce Transparency puts glass and cards on the opaque `solid` fill.
+test('Reduce Transparency puts glass and cards on an opaque fill that reads well', () => {
   for (const p of [LIGHT, DARK]) {
     expect(ratio(p.ink, p.solid)).toBeGreaterThanOrEqual(7);
     expect(ratio(p.inkMuted, p.solid)).toBeGreaterThanOrEqual(4.5);
   }
-  // A fade ends in the colour it starts from, at no opacity.
-  expect(over(PANEL.panelClear, '#ffffff')).toBe('#ffffff');
+});
+
+test('a fade ends in the colour it starts from, at no opacity', () => {
+  for (const p of [LIGHT, DARK])
+    for (const color of [p.bgTop, p.bgBottom]) {
+      const clear = clearOf(color);
+      expect(clear).toMatch(/^rgba\(\d+, \d+, \d+, 0\)$/u);
+      expect(over(clear, '#ffffff')).toBe('#ffffff');
+      // The same hue: at full opacity it is the colour itself.
+      expect(over(clear.replace(/, 0\)$/u, ', 1)'), '#000000')).toBe(color.toLowerCase());
+    }
   expect(over(LIGHT.bgTopClear, '#000000')).toBe('#000000');
 });

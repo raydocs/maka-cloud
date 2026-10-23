@@ -4,7 +4,7 @@ import type { ReactElement } from 'react';
 import { Text } from 'react-native';
 import Chat from '@/app/(tabs)/chat';
 import Home from '@/app/(tabs)/index';
-import Settings from '@/app/(tabs)/settings';
+import Me from '@/app/me';
 import SignIn from '@/app/sign-in';
 import { DecisionCard } from '@/components/Decision';
 import { DeliveryCard } from '@/components/Delivery';
@@ -103,9 +103,10 @@ test('an empty Chat can be talked to: an opening line, three ideas and the compo
   expect(api.session.status === 'in' && api.session.chosen).toBe('c-new');
 });
 
-test('Settings in Chinese', async () => {
-  await signedIn(<Settings />);
+test('Me in Chinese: its title, appearance, language and account', async () => {
+  await signedIn(<Me />);
   expect(await screen.findByText('外观')).toBeTruthy();
+  expect(screen.getByText('我的')).toBeTruthy();
   expect(screen.getByRole('button', { name: '退出登录' })).toBeTruthy();
   expect(screen.getByRole('button', { name: '深色' })).toBeTruthy();
   // The language picker names each language in its own words.

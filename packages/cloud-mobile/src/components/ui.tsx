@@ -25,7 +25,7 @@ import {
 import { type Edge, SafeAreaView } from 'react-native-safe-area-context';
 import { useReduceMotion, useReduceTransparency } from '@/lib/appearance';
 import { type Language, useT } from '@/lib/i18n';
-import { mono, PANEL, radius, ThemeContext, TOUCH, useTheme } from '@/lib/theme';
+import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
 import { Icon, type IconName } from './Icon';
 
 /**
@@ -54,19 +54,8 @@ function useGlass(): boolean {
   return glass && !useReduceTransparency();
 }
 
-/**
- * The compact panel: one near-black rounded slab the conversation sits on, in either appearance.
- * Everything inside it reads the panel palette (`PANEL`), so cards, buttons and text follow it.
- */
-export function Panel({ children }: { children: ReactNode }) {
-  return (
-    <ThemeContext.Provider value={PANEL}>
-      <View style={[styles.panel, { backgroundColor: PANEL.panel, borderColor: PANEL.cardEdge }]}>
-        {children}
-      </View>
-    </ThemeContext.Provider>
-  );
-}
+/** The height of the floating top bar (search, the section pill, Me); content scrolls under it. */
+export const TOP_BAR = 60;
 
 /**
  * A translucent glass surface for controls that float over content (the round buttons, the message
@@ -93,9 +82,7 @@ export function Glass({
         style={[
           styles.glass,
           styles.edge,
-          t.surface === 'panel'
-            ? { backgroundColor: t.panelRaised, borderColor: t.panelMuted }
-            : { backgroundColor: t.solid, borderColor: t.solidLine },
+          { backgroundColor: t.solid, borderColor: t.solidLine },
           style,
         ]}
       >
@@ -164,7 +151,7 @@ export function Fade({
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       colors={edge === 'top' ? [color, color, clear] : [clear, color, color]}
-      locations={edge === 'top' ? [0, 0.55, 1] : [0, 0.5, 1]}
+      locations={edge === 'top' ? [0, 0.65, 1] : [0, 0.5, 1]}
       style={[styles.fade, edge === 'top' ? { top: 0 } : { bottom: 0 }, { height }]}
     />
   );
@@ -172,8 +159,8 @@ export function Fade({
 
 /**
  * A frosted card: the system's Liquid Glass on iOS 26 and later, a blur with a translucent fill
- * elsewhere, and a flat fill inside the panel; with Reduce Transparency on, a solid fill. Anything
- * that holds code or a diff uses `Solid` instead and is never blurred.
+ * elsewhere; with Reduce Transparency on, a solid fill. Anything that holds code or a diff uses
+ * `Solid` instead and is never blurred.
  * The label names the card for tests and the web preview; the card is never one accessibility
  * element itself, or iOS would fold the fields and buttons inside it into it.
  */
@@ -190,16 +177,10 @@ export function Card({
   const liquid = useGlass();
   const reduce = useReduceTransparency();
   const body = [styles.cardBody, { borderColor: t.cardEdge }, style];
-  if (t.surface === 'panel' || reduce)
+  if (reduce)
     return (
       <View
-        style={[
-          styles.cardBody,
-          reduce && t.surface !== 'panel'
-            ? { borderColor: t.solidLine, backgroundColor: t.solid }
-            : { borderColor: t.cardEdge, backgroundColor: t.card },
-          style,
-        ]}
+        style={[styles.cardBody, { borderColor: t.solidLine, backgroundColor: t.solid }, style]}
         accessibilityLabel={label}
       >
         {children}
@@ -377,7 +358,7 @@ export function PillButton({
         >
           {label}
         </Text>
-        {external && <Icon name="external" size={compact ? 13 : 15} color={ink} />}
+        {external && <Icon name="external" color={ink} />}
       </View>
     </Pressable>
   );
@@ -520,7 +501,7 @@ export function RoundButton({
           : { backgroundColor: t.pillOn, borderColor: t.pillOn, borderWidth: 1.5 },
       ]}
     >
-      <Icon name={icon} size={20} color={disabled ? t.inkMuted : t.onPillOn} />
+      <Icon name={icon} color={disabled ? t.inkMuted : t.onPillOn} />
     </Pressable>
   );
 }
@@ -548,7 +529,7 @@ export function GlassButton({
       style={({ pressed }) => [styles.round, { opacity: pressed ? 0.7 : 1 }]}
     >
       <Glass interactive style={[StyleSheet.absoluteFill, { borderRadius: TOUCH / 2 }]} />
-      <Icon name={icon} size={20} color={t.ink} />
+      <Icon name={icon} color={t.ink} />
     </Pressable>
   );
 }
@@ -659,16 +640,73 @@ export function Chip({ children }: { children: string }) {
   );
 }
 
+/**
+ * A task's or a card's state as a small mark, in two tones plus one colour: the attention colour
+ * only for what needs the person; done is a filled ink dot, failed an ink ring with a dot, anything
+ * else (stopped, at rest) a faint ring.
+ */
 export function StatusMark({ tone }: { tone: 'ok' | 'attention' | 'bad' | 'idle' }) {
   const t = useTheme();
-  const color =
-    tone === 'ok' ? t.ok : tone === 'bad' ? t.bad : tone === 'attention' ? t.warn : t.inkMuted;
+  const shape =
+    tone === 'attention'
+      ? { backgroundColor: t.warn }
+      : tone === 'ok'
+        ? { backgroundColor: t.ink }
+        : tone === 'bad'
+          ? { borderWidth: 3, borderColor: t.ink }
+          : { borderWidth: 1.5, borderColor: t.inkMuted };
   return (
     <View
+      testID={`mark-${tone}`}
       accessibilityElementsHidden
       importantForAccessibility="no"
-      style={[styles.mark, { backgroundColor: color }]}
+      style={[styles.mark, shape]}
     />
+  );
+}
+
+/**
+ * Our own small "thinking" mark while the agent works: a dot whose halo slowly widens and fades, like
+ * a breath. Under Reduce Motion it is the still dot.
+ */
+export function Thinking() {
+  const t = useTheme();
+  const reduce = useReduceMotion();
+  const breath = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (reduce) {
+      breath.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.timing(breath, { toValue: 1, duration: 1600, useNativeDriver: NATIVE }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reduce, breath]);
+  return (
+    <View
+      testID="thinking"
+      accessibilityElementsHidden
+      importantForAccessibility="no"
+      style={styles.thinking}
+    >
+      {!reduce && (
+        <Animated.View
+          style={[
+            styles.thinkingHalo,
+            {
+              borderColor: t.ink,
+              opacity: breath.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] }),
+              transform: [
+                { scale: breath.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1.6] }) },
+              ],
+            },
+          ]}
+        />
+      )}
+      <View style={[styles.thinkingDot, { backgroundColor: t.ink }]} />
+    </View>
   );
 }
 
@@ -723,9 +761,7 @@ export function Field(props: TextInputProps & { label: string; showLabel?: boole
   if (!showLabel) return input;
   return (
     <View style={{ gap: 6 }}>
-      <T kind="small" style={{ fontWeight: '600' }}>
-        {label}
-      </T>
+      <T kind="small">{label}</T>
       {input}
     </View>
   );
@@ -745,14 +781,7 @@ export function SkeletonLine({ width = '100%' }: { width?: ViewStyle['width'] })
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  panel: {
-    flex: 1,
-    marginHorizontal: 8,
-    marginBottom: 8,
-    borderRadius: radius.panel,
-    borderWidth: 1,
-    overflow: 'hidden',
-  },
+
   glass: { overflow: 'hidden', borderRadius: radius.pill },
   edge: { borderWidth: 1 },
   fade: { position: 'absolute', left: 0, right: 0 },
@@ -785,7 +814,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
   },
-  pillText: { fontSize: 16, fontWeight: '600', textAlign: 'center', flexShrink: 1 },
+  pillText: { fontSize: 16, fontWeight: '500', textAlign: 'center', flexShrink: 1 },
   pillTextCompact: { fontSize: 15 },
   buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   pillRow: {
@@ -810,6 +839,15 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   mark: { width: 10, height: 10, borderRadius: 5 },
+  thinking: { width: 18, height: 18, alignItems: 'center', justifyContent: 'center' },
+  thinkingHalo: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1,
+  },
+  thinkingDot: { width: 7, height: 7, borderRadius: 3.5 },
   quiet: { minHeight: TOUCH, justifyContent: 'center', alignSelf: 'flex-start' },
   field: {
     minHeight: TOUCH,

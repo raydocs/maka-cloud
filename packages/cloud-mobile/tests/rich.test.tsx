@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react-native';
 import { AccessibilityInfo, Text } from 'react-native';
 import { boldRuns, Card, Glass, Rich, withoutMarks } from '@/components/ui';
 import { AppearanceProvider, ReduceTransparency } from '@/lib/appearance';
-import { LIGHT, PANEL, ThemeContext } from '@/lib/theme';
+import { DARK, LIGHT, ThemeContext } from '@/lib/theme';
 
 const flat = (style: unknown) => Object.assign({}, ...[style].flat(3).filter(Boolean));
 
@@ -30,16 +30,16 @@ test('with Reduce Transparency on, glass and cards are solid fills', async () =>
           <Text>Card</Text>
         </Card>
       </ThemeContext.Provider>
-      <ThemeContext.Provider value={PANEL}>
+      <ThemeContext.Provider value={DARK}>
         <Glass>
-          <Text>On the panel</Text>
+          <Text>At night</Text>
         </Glass>
       </ThemeContext.Provider>
     </ReduceTransparency.Provider>,
   );
-  const [sky, panel] = screen.getAllByTestId('glass-solid');
-  expect(flat(sky?.props.style).backgroundColor).toBe(LIGHT.solid);
-  expect(flat(panel?.props.style).backgroundColor).toBe(PANEL.panelRaised);
+  const [day, night] = screen.getAllByTestId('glass-solid');
+  expect(flat(day?.props.style).backgroundColor).toBe(LIGHT.solid);
+  expect(flat(night?.props.style).backgroundColor).toBe(DARK.solid);
   expect(flat(screen.getByLabelText('A card').props.style).backgroundColor).toBe(LIGHT.solid);
 });
 

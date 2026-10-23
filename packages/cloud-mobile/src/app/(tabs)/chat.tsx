@@ -2,30 +2,29 @@ import {
   BRAND,
   type Conversation,
   ConversationFeed,
+  type ConversationState,
   ConversationStarter,
-  errorText,
-  type TaskView,
   conversationSummary,
   displayText,
   dollars,
-  type ConversationState,
-  type TaskControl,
+  errorText,
   TERMINAL,
+  type TaskControl,
+  type TaskView,
   totalCost,
 } from '@maka-cloud/client';
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  ActivityIndicator,
   AppState,
   FlatList,
   KeyboardAvoidingView,
-  Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
   View,
 } from 'react-native';
+import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { DecisionCard, QuestionBlock } from '@/components/Decision';
 import { TaskDelivery } from '@/components/Delivery';
 import { TaskDetails } from '@/components/TaskDetails';
@@ -34,47 +33,43 @@ import {
   Appear,
   ButtonRow,
   Card,
-  Fade,
-  Field,
-  Glass,
-  GlassButton,
-  GlassGroup,
-  Panel,
   PillButton,
   Rich,
-  RoundButton,
   Screen,
   Shimmer,
   StatusMark,
   T,
+  Thinking,
+  TOP_BAR,
   withoutMarks,
 } from '@/components/ui';
-import { useAppearance } from '@/lib/appearance';
 import { useT } from '@/lib/i18n';
 import { keepLive } from '@/lib/live';
 import { useWorkspace } from '@/lib/session';
-import { DARK, LIGHT, mono, radius, ThemeContext, useTheme } from '@/lib/theme';
+import { mono, radius, useTheme } from '@/lib/theme';
 
 type Message = ConversationState['messages'][number];
 
 /** What an empty chat offers to start with; a tap puts it in the box, the person sends it. */
 const IDEAS = ['home.idea.1', 'home.idea.2', 'home.idea.3'] as const;
 
+/**
+ * Chat, in the person's own appearance (light by day, dark at night) like every section. The
+ * conversation scrolls under the floating top bar and the composer.
+ */
 export default function Chat() {
   const { conversations, chosen } = useWorkspace();
   const selected = conversations.find((c) => c.conversationId === chosen);
   return (
     <Screen>
-      <Panel>
-        {selected ? (
-          <ConversationScreen
-            key={selected.conversationId}
-            conversationId={selected.conversationId}
-          />
-        ) : (
-          <NewConversation />
-        )}
-      </Panel>
+      {selected ? (
+        <ConversationScreen
+          key={selected.conversationId}
+          conversationId={selected.conversationId}
+        />
+      ) : (
+        <NewConversation />
+      )}
     </Screen>
   );
 }
@@ -101,80 +96,16 @@ function Opening({ onIdea }: { onIdea: (words: string) => void }) {
   );
 }
 
-/**
- * The floating composer: the field and the send button blend as one glass control, with the
- * conversation picker beside them when there is more than one conversation.
- */
-function Composer({
-  draft,
-  onDraft,
-  sending,
-  disabled,
-  onSend,
-  onPick,
-}: {
-  draft: string;
-  onDraft: (text: string) => void;
-  sending: boolean;
-  disabled: boolean;
-  onSend: () => void;
-  onPick?: () => void;
-}) {
-  const { t: say } = useT();
-  return (
-    <GlassGroup style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
-      {onPick && (
-        <GlassButton
-          label={say('chat.select')}
-          id="Select conversation"
-          icon="conversations"
-          onPress={onPick}
-        />
-      )}
-      <Glass
-        interactive
-        style={{
-          flex: 1,
-          flexDirection: 'row',
-          alignItems: 'flex-end',
-          borderRadius: radius.card,
-        }}
-      >
-        <View style={{ flex: 1 }}>
-          <Field
-            label={say('chat.field')}
-            id="Keep the conversation going"
-            placeholder={say('chat.placeholder')}
-            multiline
-            maxLength={16000}
-            value={draft}
-            onChangeText={(text) => onDraft(displayText(text))}
-            style={{ backgroundColor: 'transparent', borderWidth: 0, maxHeight: 140 }}
-          />
-        </View>
-        <RoundButton
-          label={say(sending ? 'chat.sending' : 'chat.send')}
-          id={sending ? 'Sending…' : 'Send message'}
-          icon="send"
-          disabled={disabled || !draft.trim()}
-          onPress={onSend}
-        />
-      </Glass>
-    </GlassGroup>
-  );
-}
-
 /** The Chat tab with no conversation open: it can still be talked to; the first message starts one. */
 function NewConversation() {
   const { client, conversations, started } = useWorkspace();
-  const theme = useTheme();
   const { tx } = useT();
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState('');
-  const [picking, setPicking] = useState(false);
-  const [composer, setComposer] = useState(76);
+  const [dock, setDock] = useState(76);
+  const { openSheet, sheet } = useConversationSheet();
   const send = () => {
     if (!draft.trim() || sending) return;
     setSending(true);
@@ -196,7 +127,15 @@ function NewConversation() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={{ flex: 1 }}
     >
-      <View style={{ flex: 1, padding: 20, paddingBottom: composer + 16, gap: 12 }}>
+      <View
+        style={{
+          flex: 1,
+          padding: 20,
+          paddingTop: TOP_BAR + 16,
+          paddingBottom: dock + 16,
+          gap: 12,
+        }}
+      >
         <Opening
           onIdea={(words) => {
             setDraft(words);
@@ -205,11 +144,7 @@ function NewConversation() {
         />
         {failure ? <T kind="error">{tx(failure)}</T> : null}
       </View>
-      <Fade edge="bottom" height={composer + 36} color={theme.panel} clear={theme.panelClear} />
-      <View
-        onLayout={(event) => setComposer(Math.ceil(event.nativeEvent.layout.height))}
-        style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 12 }}
-      >
+      <Dock height={dock} onHeight={setDock}>
         <Composer
           draft={draft}
           onDraft={(text) => {
@@ -219,56 +154,11 @@ function NewConversation() {
           sending={sending}
           disabled={sending}
           onSend={send}
-          {...(conversations.length > 0 ? { onPick: () => setPicking(true) } : {})}
+          {...(conversations.length > 0 ? { onPlus: openSheet } : {})}
         />
-      </View>
-      <ConversationPicker visible={picking} onClose={() => setPicking(false)} />
+      </Dock>
+      {sheet}
     </KeyboardAvoidingView>
-  );
-}
-
-/** The conversations, newest first, on an opaque sheet; the open one is filled. */
-function ConversationPicker({
-  visible,
-  current,
-  onClose,
-}: {
-  visible: boolean;
-  current?: string;
-  onClose: () => void;
-}) {
-  const { conversations, open } = useWorkspace();
-  const theme = useTheme();
-  const { t: say } = useT();
-  return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' }}>
-        {/* An opaque slab of its own: the panel's translucent cards would vanish on the dimmed screen. */}
-        <Card
-          label={say('chat.conversations')}
-          style={{
-            backgroundColor: theme.panel,
-            margin: 8,
-            marginBottom: 24,
-            borderRadius: radius.panel,
-          }}
-        >
-          <T kind="heading">{say('chat.conversations')}</T>
-          {[...conversations].reverse().map((c) => (
-            <PillButton
-              key={c.conversationId}
-              label={c.title ? displayText(c.title) : say('common.untitled')}
-              primary={c.conversationId === current}
-              onPress={() => {
-                open(c.conversationId);
-                onClose();
-              }}
-            />
-          ))}
-          <PillButton label={say('common.close')} id="Close" onPress={onClose} />
-        </Card>
-      </View>
-    </Modal>
   );
 }
 
@@ -286,10 +176,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { client, conversations } = useWorkspace();
   const theme = useTheme();
   const { t: say, tx } = useT();
-  // The task page opens over the whole screen, in the person's own appearance, not the panel's.
-  const { mode } = useAppearance();
   /** The floating composer's height: the list scrolls on under it, by this much more. */
-  const [composer, setComposer] = useState(76);
+  const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
   const feed = useMemo(
     () => new ConversationFeed(client, conversationId),
@@ -302,8 +190,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { tasks, questions, running, openQuestions } = conversationSummary(snapshot);
   const total = totalCost(tasks);
   const [draft, setDraft] = useState('');
-  const [picking, setPicking] = useState(false);
   const [detail, setDetail] = useState<TaskView | undefined>();
+  const { openSheet, sheet } = useConversationSheet();
   const scroll = useRef<FlatList<Message> | null>(null);
   /** The newest messages stay in view only while the person is already reading them. */
   const atEnd = useRef(true);
@@ -370,13 +258,13 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
           }
           onScrollEndDrag={trackEnd}
           onMomentumScrollEnd={trackEnd}
-          // The list runs on under the composer, which floats over a fade.
+          // The list runs on under the top bar and the composer, which float over fades.
           contentContainerStyle={{
             paddingHorizontal: 20,
-            paddingTop: 20,
-            paddingBottom: composer + 16,
+            paddingTop: TOP_BAR + 16,
+            paddingBottom: dock + 16,
           }}
-          scrollIndicatorInsets={{ top: 12, bottom: composer }}
+          scrollIndicatorInsets={{ top: TOP_BAR, bottom: dock }}
           keyboardShouldPersistTaps="handled"
           accessibilityLabel={say('chat.messages')}
           ListHeaderComponent={
@@ -433,7 +321,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
                   accessibilityLabel={say('chat.workingLabel', { name: BRAND.name })}
                   style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
                 >
-                  <ActivityIndicator size="small" color={theme.inkMuted} />
+                  <Thinking />
                   <Shimmer>
                     <T kind="muted">{say('chat.working', { name: BRAND.name })}</T>
                   </Shimmer>
@@ -511,12 +399,8 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             </View>
           }
         />
-        <Fade edge="top" height={20} color={theme.panel} clear={theme.panelClear} />
-        <Fade edge="bottom" height={composer + 36} color={theme.panel} clear={theme.panelClear} />
-        <View
-          onLayout={(event) => setComposer(Math.ceil(event.nativeEvent.layout.height))}
-          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 12, gap: 8 }}
-        >
+        <TopFade />
+        <Dock height={dock} onHeight={setDock}>
           {/* Nothing to say while connected; only a dropped connection is worth a glance. */}
           {status !== 'Live' && (
             <View
@@ -538,24 +422,18 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
             sending={busy === 'message'}
             disabled={Boolean(busy)}
             onSend={send}
-            {...(conversations.length > 1 ? { onPick: () => setPicking(true) } : {})}
+            onPlus={openSheet}
           />
-        </View>
+        </Dock>
       </View>
       {detail && (
-        <ThemeContext.Provider value={mode === 'dark' ? DARK : LIGHT}>
-          <TaskDetails
-            client={client}
-            task={state.tasks[detail.taskId] ?? detail}
-            onClose={() => setDetail(undefined)}
-          />
-        </ThemeContext.Provider>
+        <TaskDetails
+          client={client}
+          task={state.tasks[detail.taskId] ?? detail}
+          onClose={() => setDetail(undefined)}
+        />
       )}
-      <ConversationPicker
-        visible={picking}
-        current={conversationId}
-        onClose={() => setPicking(false)}
-      />
+      {sheet}
     </KeyboardAvoidingView>
   );
 }

@@ -42,7 +42,7 @@ function Evidence({ line }: { line: EvidenceLine }) {
       <T kind="small" style={{ textDecorationLine: 'underline' }}>
         {line.label}
       </T>
-      <Icon name="external" size={13} color={t.inkMuted} />
+      <Icon name="external" color={t.inkMuted} />
     </Pressable>
   ) : (
     <T kind="small">{line.label}</T>

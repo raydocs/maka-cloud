@@ -7,28 +7,25 @@ import { DARK_COLORS, LIGHT_COLORS, RADIUS } from './tokens.generated';
  * web's tokens.css, one value per scheme. Frosted cards sit on a soft sky; whatever holds code or a
  * diff is opaque (`solid`).
  */
-export type Palette = { scheme: 'dark' | 'light'; surface?: 'panel' } & {
+export type Palette = { scheme: 'dark' | 'light' } & {
   [K in keyof typeof LIGHT_COLORS]: string;
 };
 
+/**
+ * Two tones, ink on a surface, swapped at night; every screen, the conversation included, follows
+ * the appearance. The one colour beyond them (`warn`) marks what needs the person.
+ */
 export const DARK: Palette = { scheme: 'dark', ...DARK_COLORS };
 
 export const LIGHT: Palette = { scheme: 'light', ...LIGHT_COLORS };
 
-/**
- * Inside the compact panel (the conversation's near-black slab), in either appearance: the dark
- * palette with the panel's own ink, its glass, and the slab itself as the ground every card and
- * chip is laid over. Cards in it are flat fills, not blurred glass.
- */
-export const PANEL: Palette = {
-  ...DARK,
-  surface: 'panel',
-  ink: DARK_COLORS.panelInk,
-  inkMuted: DARK_COLORS.panelMuted,
-  bgTop: DARK_COLORS.panel,
-  bgBottom: DARK_COLORS.panel,
-  glass: DARK_COLORS.panelGlass,
-};
+/** A `#rrggbb` colour with no opacity, for a fade that ends in the same hue rather than grey. */
+export function clearOf(color: string): string {
+  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/iu.exec(color);
+  if (!hex) return 'transparent';
+  const [r, g, b] = hex.slice(1).map((part) => Number.parseInt(part, 16));
+  return `rgba(${r}, ${g}, ${b}, 0)`;
+}
 
 export const radius = RADIUS;
 /** At least 44 pt, the smallest comfortable touch target. */

@@ -5,8 +5,9 @@ appId: cloud.maka.app
 - runFlow: subflows/sign-in.yaml
 - assertVisible:
     id: "field-Keep the conversation going"
-# The system tab bar's label, in either language (the device-test build is fixed to Chinese).
-- tapOn: "首页|Home"
+# The section pill at the top, by its fixed id (the device-test build is fixed to Chinese).
+- tapOn:
+    id: "tab-home"
 - assertVisible:
     id: "home-waiting-1"
 - takeScreenshot: home-decision

@@ -1,4 +1,5 @@
 import {
+  BRAND,
   displayText,
   dollars,
   stepsOf,
@@ -14,6 +15,32 @@ import { mono } from '@/lib/theme';
 import { FailureNote, QuietButton, Shimmer, StatusMark, T } from './ui';
 
 const TONE = { succeeded: 'ok', failed: 'bad', cancelled: 'idle', paused: 'attention' } as const;
+
+const PANEL_WORDS = {
+  shell: 'task.panel.shell',
+  tests: 'task.panel.tests',
+  diff: 'task.panel.diff',
+  review: 'task.panel.review',
+  search: 'task.panel.search',
+} as const;
+
+/**
+ * The work item's small metadata line, in tabular figures: when it started, who is doing it and,
+ * once the run shows its tools, the latest one ("14:05 · Maka · Tests").
+ */
+function MetaLine({ task }: { task: TaskView }) {
+  const { t: say, lang } = useT();
+  const at = new Date(task.startedAt ?? task.createdAt).toLocaleTimeString(lang, {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const tool = task.panels?.at(-1)?.kind;
+  return (
+    <T kind="small" testID="task-meta" style={{ fontVariant: ['tabular-nums'] }}>
+      {[at, BRAND.name, ...(tool ? [say(PANEL_WORDS[tool])] : [])].join(' · ')}
+    </T>
+  );
+}
 
 /** The one updating line of a running task, and the steps behind it when it is opened. */
 function StepLine({ notes }: { notes: readonly string[] }) {
@@ -83,6 +110,7 @@ export function TaskRow({
           {title}
         </T>
       </View>
+      <MetaLine task={task} />
       <T kind="muted">
         {tx(taskLabel(task))}
         {showCost && ` · ${say(live ? 'task.costSoFar' : 'task.cost')}${say('common.colon')}`}

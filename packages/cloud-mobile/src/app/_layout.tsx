@@ -25,6 +25,9 @@ function Routes() {
       >
         <Stack.Protected guard={session.status === 'in'}>
           <Stack.Screen name="(tabs)" />
+          {/* Me and Search open over the sections as sheets. */}
+          <Stack.Screen name="me" options={{ presentation: 'modal' }} />
+          <Stack.Screen name="search" options={{ presentation: 'modal' }} />
         </Stack.Protected>
         <Stack.Protected guard={session.status === 'out'}>
           <Stack.Screen name="sign-in" />

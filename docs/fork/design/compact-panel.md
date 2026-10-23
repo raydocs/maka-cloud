@@ -1,58 +1,90 @@
 # The compact panel
 
-The phone app's conversation sits on one dark rounded slab over the sky, with Liquid Glass controls
-floating on it and the system's own tab bar below. Home and Settings stay on the light sky with
-glass cards. The app speaks Simplified Chinese first, with Traditional Chinese and English. This note says what the look is, where its
-ideas came from, what is ours, which tokens carry it, how the language works, and what comes next.
+The phone app is three sections (Home, Chat, Projects) under a floating glass top bar, with the
+same floating glass composer at the bottom of each. Every screen, the chat included, follows the
+person's appearance: light by day, dark at night. The app speaks Simplified Chinese first, with
+Traditional Chinese and English. This note says what the look is, where its ideas came from, what is
+ours, which tokens carry it, how the language works, and what comes next.
 
 ## The look
 
-- **Liquid Glass first.** Every glass surface is the system's Liquid Glass on iOS 26 and later
-  (`expo-glass-effect`, gated by `isLiquidGlassAvailable()` and `isGlassEffectAPIAvailable()`):
-  - the tab bar is expo-router's `NativeTabs`, the system's own bar (Liquid Glass on iOS, Material
-    on Android);
-  - the composer's field pill and its conversation-list button are `GlassView`s with
-    `isInteractive`, grouped in a `GlassContainer` so they blend as one floating control;
-  - the round glass buttons (`GlassButton`) are interactive glass;
-  - Home's and Settings' cards are glass.
-  On Android, older iOS and the web preview the same shapes are an `expo-blur` blur under the
-  `glass` fill. Chips stay plain fills: they sit inside glass cards, and glass on glass is what
-  Apple's guidance says to avoid.
-- **Reduce Transparency.** When the system setting is on (`AccessibilityInfo`), glass and cards
-  become opaque: `solid` with a `solid-line` edge on the sky, `panel-raised` on the panel. Tested
-  in `tests/rich.test.tsx` and `tests/contrast.test.ts`.
-- **The panel: a dark slab, not tinted glass.** The chat is a near-black slab (`panel`,
-  `#0b0b0c`), inset 8 pt from the sides and bottom, 36 pt radius (`radius.panel`), faint rim.
-  We tried a dark-tinted Liquid Glass slab and kept the opaque one:
-  - Liquid Glass takes its colour from whatever is behind it and adds its own highlights, so its
-    final colour cannot be pinned, and a contrast test cannot hold it to 4.5:1.
-  - Worked out at a 90% tint over the lightest sky, body text passes only before the glass's own
-    highlight is counted, and muted text on the chips inside the cards fails first.
-  - The fades need one known solid colour to fade into.
-  So the slab stays opaque and the glass is on the controls floating over it.
-  Everything inside reads the panel palette (`PANEL` in `packages/cloud-mobile/src/lib/theme.ts`):
-  white ink (`panel-ink`), a muted grey (`panel-muted`), and the dark scheme's status colours and
-  buttons. An answer's `**bold**` lead-ins are drawn bold.
-- **Fades, no edges.** Content scrolls under the composer and fades out (`Fade`, a gradient from
-  the ground colour to the same colour at no opacity: `panel-clear` in the panel). No divider
-  lines.
-- **The floating composer.** A round glass button opens the conversation list (when there is more
-  than one conversation) and a glass field pill holds the message and the send button. A dropped
-  connection shows as one small line above it.
-- **Quiet results.** Any file a finished task made, other than its pictures and the diff the card
-  already offers, is one line under the result: a small file icon and the name. A tap opens it
-  as inert text (or the picture, or the diff) in the viewer. The pages a task opened are plain
-  rows.
-- **Tiles on Home.** The first-visit ideas, the "since you were last here" numbers and the recent
-  conversations are rounded tiles two to a row (`Tiles`, `Tile`, `radius.tile` 28 pt). Cards are
-  28 pt round too.
+- **No bottom tab bar.** A floating top bar (`src/app/(tabs)/_layout.tsx`, expo-router's headless
+  tabs from `expo-router/ui`):
+  - in the middle, a glass pill with the three sections (首页 / 对话 / 项目, 首頁 / 對話 / 專案,
+    Home / Chat / Projects); the chosen one sits on a filled capsule;
+  - at the top left, a round glass Search button; at the top right, a round glass Me button.
+  - Each segment has a fixed test id (`tab-home`, `tab-chat`, `tab-projects`), as do the corner
+    buttons (`button-search`, `button-me`).
+- **Me** (`src/app/me.tsx`, a sheet) holds what Settings held: appearance, language, devices and
+  signing out. It also lists what the agent remembers (each fact can be forgotten) and the approvals
+  it keeps (each can be revoked), from the client's `memory()` and `listGrants()`. A card is left out
+  where the server has no such feature. There is no "connections" card: the client has no API for
+  connectors yet.
+- **Projects** (`src/app/(tabs)/projects.tsx`) lists the repositories from `listProjects()`, the
+  same call as the web's Projects page, each with its default branch and its standing duties (on, off,
+  or waiting for approval). Read-only here; duties are switched on the web. A server without projects
+  says so.
+- **Search** (`src/app/search.tsx`, a sheet) filters what the phone already has: conversation titles,
+  and the titles and outcomes of the tasks in the 20 most recent conversations (read with the same
+  `listTasks` call Home makes). There is no search endpoint. A hit opens its conversation in Chat.
+- **The floating composer** (`src/components/Composer.tsx`): a round glass "+" and a glass message
+  field with the send button, grouped in a `GlassContainer` so they blend as one control. "+" opens
+  a sheet with "New conversation" and the conversation list. In Chat the composer continues the open
+  conversation. On Home and Projects it starts a new one and shows it in Chat. With no
+  conversation open, Chat shows one opening line and three ideas above it, and the first message
+  starts a conversation.
+- **Content scrolls under both bars** and fades out into the sky's colour at each end (`TopFade`,
+  `Dock` and `clearOf` in `theme.ts`). There are no divider lines.
+- **Liquid Glass on the floating controls.** The top pill, the corner buttons, "+" and the field
+  are the system's Liquid Glass on iOS 26 and later (`expo-glass-effect`, gated by
+  `isLiquidGlassAvailable()` and `isGlassEffectAPIAvailable()`). Cards are glass too. On Android,
+  older iOS and the web preview the same shapes use an `expo-blur` blur under the `glass` fill.
+  Chips stay plain fills, because glass on glass is what Apple's guidance says to avoid.
+- **Reduce Transparency.** When the system setting is on, glass and cards become the opaque
+  `solid` fill with a `solid-line` edge (`tests/rich.test.tsx`, `tests/contrast.test.ts`).
+- **The chat follows the appearance.** The always-black chat slab is gone. An earlier version of
+  this note kept the chat on an opaque dark slab in both appearances, for one fixed contrast and one
+  colour for the fades to end in. The owner reversed that: the chat now reads the same two tones as
+  every other screen. Contrast is checked for both schemes, and each fade ends in the sky colour at
+  its own edge.
 
-### Light and dark
+### Hark's principles, in our own shapes
 
-The panel is the same dark slab in both appearances. It is the point of the look, its contrast is
-checked once, and a light slab would make the chat read like the rest of Home. In light mode the
-sky around it stays light; in dark mode the slab sits on the night sky with its rim. Settings says
-so under Appearance. The task page opened from a result keeps the person's own appearance.
+From `docs/fork/design/hark-patterns.md`, principles only (no Hark fonts, icons, shapes or colours):
+
+- **Two tones.** Ink on a surface, swapped at night (`LIGHT`, `DARK`).
+- **One attention colour,** `warn`, used only for what needs the person: a waiting decision, a
+  dropped connection, a duty waiting for approval. Done is a filled ink dot, failed an ink ring, and
+  anything at rest a faint ring (`StatusMark`).
+- **Weights.** Body text is regular; titles and headings are semibold. Each card has one semibold
+  line. Buttons are medium.
+- **A metadata line on work items.** A small line in tabular figures under each task: when it
+  started, who is doing it, and the latest tool its run shows (`14:05 · Maka · 测试`).
+- **One icon family.** Thin line symbols (SF Symbols at the light weight, Material Symbols on
+  Android and the web) at one size, `ICON` (18 pt).
+- **A living "thinking" mark of our own.** While the agent works, a dot whose halo slowly widens and
+  fades (`Thinking`). Under Reduce Motion it is a still dot.
+
+### From the Today study (`/tmp/today-ux-study.md`, principles only)
+
+- **Only what is known.** No "spend not reported" tile or dash, no "0 running", no cost line until
+  one is reported, and a finished task's summary is not repeated under its result card.
+- **Five type sizes**: title 22, heading 17, body 16, secondary 14 and caption 12. Chinese gets
+  line heights of about 1.6 times the size. Lines break with `lineBreakStrategyIOS="push-out"` and
+  `textBreakStrategy="balanced"`, so a paragraph does not end on one lone character.
+- **Chinese punctuation and spacing.** The zh-Hans and zh-Hant catalogues use full-width
+  punctuation after Chinese (？！：，；) and a space between Chinese and Latin letters or digits. A
+  test catches both (`tests/polish.test.tsx`).
+- **A smaller result card.** The picture is a thumbnail beside its caption, and the diff and files
+  are quiet rows. There are at most two buttons, each as wide as its label; a link's host is in its
+  spoken name, not its label. The pages the task opened fold into one "Sources (N)" line.
+- **Card answers** are label-sized pills in a wrapping row. Approving taps lightly; refusing or
+  stopping buzzes a warning (`expo-haptics`).
+- **Sign-in.** The server address and "Use another server" wait behind "Advanced". The invite token
+  is a small link, and a disabled main button is a faint outline, not a grey slab.
+- **Motion.** A slow shimmer on the working line and the current step, and a soft spring for
+  messages and cards that arrive while the chat is open (not for the history). Both are off under
+  Reduce Motion.
 
 ## Language
 
@@ -65,101 +97,86 @@ fallback.
   - `zh-Hans`, `zh-CN`, `zh-SG` and plain `zh` get Simplified Chinese;
   - `en-*` gets English;
   - anything else gets Simplified Chinese.
-- **The picker.** Settings has a Language card. Its first option, the default, is to use the phone's
-  language (跟随系统 / 跟隨系統 / Use phone language); then come the three languages, each named in
-  its own words. A language picked is kept on the device (the secure store, `maka.language`) and wins
-  over detection; picking the phone's language removes it, and detection decides again.
+- **The picker.** Me has a Language card. Its first option, the default, is to use the phone's
+  language (跟随系统 / 跟隨系統 / Use phone language). Then come the three languages, each named in
+  its own words. A language picked is kept on the device (the secure store, `maka.language`) and
+  wins over detection. Picking the phone's language removes it, and detection decides again.
 - **Catalogues.** `src/lib/strings.ts` holds every string the app shows in English (`EN`) and
   Simplified Chinese (`ZH`); `src/lib/strings.hant.ts` holds the Traditional Chinese (`ZH_HANT`).
   That covers sign-in, errors, empty states and accessibility labels, keyed and with `{name}` values.
   - Traditional Chinese uses Taiwan's words (軟體, 訊息, 帳號, 設定, 檔案, 網路, 登入, 連結, 資料,
-    伺服器, 存放庫), which Hong Kong and Macau read as well. It is a translation, not a character
+    伺服器, 儲存庫), which Hong Kong and Macau read as well. It is a translation, not a character
     conversion, and nothing falls back to Simplified.
-  - `useT().t(key, values)` reads the catalogues. A test checks all three have the same keys, no
-    empty value and the same values to fill in.
+  - `useT().t(key, values)` reads the catalogues. A test checks that all three have the same keys,
+    no empty value and the same values to fill in.
 - **Words from the shared logic.** `packages/cloud-client` is shared with the web app and returns
   finished English (connection states, error sentences, inbox headings, "in 5 min"). The phone
   does not change it: `useT().tx(text)` looks such text up in `PHRASES_ZH` and `PATTERNS_ZH`
   (`PHRASES_HANT` and `PATTERNS_HANT` for Traditional). Anything not listed, which is everything the
   server or the agent wrote, is shown exactly as sent.
 - **Decision choices.** The server's fixed choices (the supervisor's rules and the conductor's
-  approval card) are product words: matched on id and exact label, they come from the catalogue in
+  approval card) are product words. Matched on id and exact label, they come from the catalogue in
   both Chinese languages. Any other choice is shown as sent.
-- **Type.** The system face in every language (PingFang SC or TC on iOS). Chinese text gets
-  line heights of about 1.5 to 1.6 times the size (`CJK` in `ui.tsx`); no language
-  sets letter spacing. Text scales with the system size.
-- **Device tests.** Buttons and fields carry fixed English test ids (`button-Continue`,
+- **Device tests.** Buttons, fields and sections carry fixed English test ids (`button-Continue`,
   `field-Code`, `home-waiting-1`, `details-outcome`, `tab-home`), so the Maestro flows do not read
   the labels. Builds made with `MAKA_E2E=1` are also fixed to Chinese (`extra.language`;
-  `MAKA_LANG` overrides it), and the one text the flows still tap, the Home tab, is `首页`.
+  `MAKA_LANG` overrides it).
 - **iOS.** `CFBundleDevelopmentRegion` is `zh-Hans` and `CFBundleLocalizations` lists `zh-Hans`,
   `zh-Hant` and `en`, so the system's own words (the share sheet, the keyboard's buttons) follow.
 
 ## Where it came from
 
-The reference is Telos, cellier's desktop agent app, seen in screen recordings the owner shared.
-It is a proprietary product: we took principles only, listed in `docs/fork/THIRD_PARTY.md`. No
-assets, mascot, icons, copy, screenshots or exact layouts are used, and the recordings are not in
-this repository.
+The reference is Telos, cellier's desktop agent app, seen in screen recordings the owner shared
+(the latest shows its top bar). It is a proprietary product, so we took principles only, listed in
+`docs/fork/THIRD_PARTY.md`. No assets, mascot, icons, copy, screenshots or exact layouts are used,
+and the recordings are not in this repository.
 
 | Principle | From the reference | Ours |
 |---|---|---|
-| A dark compact panel with large radii | yes | the values, the panel palette, how it sits on our sky |
-| Fades instead of hard edges | yes | the fade component and its tokens |
-| A floating composer: round glass button and pill field | yes | the button opens the conversation list; the send button sits in the field |
+| A glass pill of sections at the top | yes | our three sections, the filled capsule, the test ids |
+| A round button per corner | yes | Search and Me |
+| A floating composer: round "+" and a pill field | yes | "+" opens new conversation and the list; the send button sits in the field |
+| Fades instead of hard edges | yes | the fade components, ending in the sky's own colour |
 | A made file as one line, icon and name | yes | which files are listed, and opening them inert |
 | Rounded two-column cards | yes (its notes app) | tiles for ideas, numbers and recent conversations |
-| A glass pill of sections at the top | yes | not taken: the system tab bar has the real Liquid Glass |
-| A round button per corner | yes | not taken: a corner button over the chat would cover the result card's Details button |
+| A dark compact panel | yes | no longer taken: the chat follows the appearance |
 
 The rest is the Hark look we already had (`docs/fork/design/hark-patterns.md`,
-`packages/cloud-design/README.md`): the sky gradient, frosted cards, one dark pill for the
-selected item, few type sizes.
+`packages/cloud-design/README.md`): the sky gradient, frosted cards, one filled pill for the
+selected item, few type sizes. The Today study adds the principles listed above.
 
 ## Tokens
 
-Added in `packages/cloud-design/src/tokens.ts`; no existing token changed, so the web app looks
-the same (its `tokens.css` gains the new custom properties, unused there).
-
-| Token | Light | Dark | Use |
-|---|---|---|---|
-| `panel` | `#0b0b0c` | `#0b0b0c` | the slab |
-| `panel-ink` | `#f4f4f6` | `#f4f4f6` | text on the slab |
-| `panel-muted` | `#a6a6ae` | `#a6a6ae` | muted text on the slab |
-| `panel-glass` | white at 10% | white at 10% | the blur fallback's fill on the slab |
-| `panel-raised` | `#2c2c30` | `#2c2c30` | a glass control on the slab with Reduce Transparency on |
-| `panel-clear` | `#0b0b0c` at 0% | same | where a fade on the slab ends |
-| `glass` | white at 55% | white at 10% | the blur fallback's fill on the sky |
-| `bg-top-clear` | `bg-top` at 0% | same | where a fade on the sky ends |
-| `radius.tile` | 28 | | cards and tiles |
-| `radius.panel` | 36 | | the slab |
-
-`tests/contrast.test.ts` in cloud-mobile checks the panel palette like the other two (text 7:1,
-muted and status colours 4.5:1 on its cards, chips and glass fills) and the Reduce Transparency
-fills (`panel-raised`, `solid`).
+Unchanged in `packages/cloud-design/src/tokens.ts`. The `panel-*` tokens remain for the web, but
+the phone no longer reads them. The phone uses `glass` (the blur fallback's fill), `bg-top-clear`
+and `clearOf` (where a fade ends), `radius.tile` (28, cards and tiles) and `radius.panel` (36, the
+sheets). `tests/contrast.test.ts` checks both schemes: text 7:1, muted and status colours 4.5:1 on
+cards, chips and glass fills, and the Reduce Transparency fill.
 
 ## Dependencies
 
 `expo-localization` 58.0.5 (MIT, a native module of the Expo SDK) is new, for the phone's
-preferred languages. `expo-blur`, `expo-linear-gradient`, `expo-glass-effect` and `expo-symbols`
-were already dependencies.
+preferred languages. `expo-blur`, `expo-linear-gradient`, `expo-glass-effect`, `expo-haptics`,
+`expo-symbols` and expo-router's headless tabs (`expo-router/ui`) were already dependencies.
 
 ## Not checked here
 
-The web preview cannot draw Liquid Glass; its screenshots show the blur fallback and a plain bottom
-bar. The glass itself, the `GlassContainer` blending and Reduce Transparency on a device are for the
-iOS simulator run in CI and a look on a phone.
+The web preview cannot draw Liquid Glass, so its screenshots show the blur fallback. Three things
+are for the iOS simulator run in CI and a look on a phone:
+- the glass itself and the `GlassContainer` blending;
+- Reduce Transparency and Reduce Motion on a device;
+- the haptics.
 
 ## Next (planned, not built)
 
-1. **The web panel.** The same slab for the web chat at narrow widths, and as a docked panel
-   beside Home on wide screens, from the same tokens (`--panel`, `--panel-glass`, `--radius-panel`
-   already exist in `tokens.css`).
-2. **Voice mode with a caption pill.** While the agent speaks, one dark glass pill near the bottom
-   shows the current sentence; the panel dims behind it. It needs the dictation and speech stream
-   first, and must respect reduced motion (no caption animation then).
-3. **A notes-style Home.** Home as a grid of rounded cards (date, bold title, two-line preview)
-   for decisions, results and runs, once the server sends a short preview per item; today a
+1. **The web.** The same top pill and corner buttons for the web at narrow widths, from the same
+   tokens.
+2. **Voice mode with a caption pill.** While the agent speaks, one glass pill near the bottom shows
+   the current sentence. It needs the dictation and speech stream first, and must respect reduced
+   motion (no caption animation then).
+3. **A notes-style Home.** Home as a grid of rounded cards (date, title, two-line preview) for
+   decisions, results and runs, once the server sends a short preview per item. Today a
    conversation has only a title and a start time.
-4. **The web app in Chinese.** The web shows the shared logic's English today; moving those
+4. **Connections in Me,** once the client has a connectors API.
+5. **The web app in Chinese.** The web shows the shared logic's English today. Moving those
    sentences into a shared catalogue would let both apps drop `PHRASES_ZH`.
