@@ -2,13 +2,18 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest';
 import { ApiError, type CloudClient, type ComputerFrame, type TaskView } from '@maka-cloud/client';
 import { Computer } from '../src/Computer';
+import { type Language, LanguageProvider, translator } from '../src/i18n';
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
 
-async function setup(computerInput = vi.fn().mockResolvedValue({})) {
+async function setup(
+  computerInput = vi.fn().mockResolvedValue({}),
+  computerControl = vi.fn().mockResolvedValue({ controller: 'agent' }),
+  language: Language = 'en',
+) {
   let receive!: (frame: ComputerFrame) => void;
   let disconnect!: (error: Error) => void;
   const watchComputer = vi.fn((_id, frame) => {
@@ -18,14 +23,15 @@ async function setup(computerInput = vi.fn().mockResolvedValue({})) {
       disconnect = reject;
     });
   });
-  const computerControl = vi.fn().mockResolvedValue({ controller: 'agent' });
   const view = render(
-    <Computer
-      client={{ watchComputer, computerInput, computerControl } as unknown as CloudClient}
-      task={{ taskId: 'queue-task', state: 'paused' } as TaskView}
-    />,
+    <LanguageProvider language={language}>
+      <Computer
+        client={{ watchComputer, computerInput, computerControl } as unknown as CloudClient}
+        task={{ taskId: 'queue-task', state: 'paused' } as TaskView}
+      />
+    </LanguageProvider>,
   );
-  const details = screen.getByText('Open computer').closest('details')!;
+  const details = screen.getByText(translator(language).t('Open computer')).closest('details')!;
   details.open = true;
   await act(async () => fireEvent(details, new Event('toggle')));
   const desktop = screen.getByRole('application');
@@ -208,4 +214,85 @@ test('input throttling does not delay hand back and overflow shows only one slow
   expect(computerControl).toHaveBeenCalledExactlyOnceWith('queue-task', 'handback');
   await act(async () => vi.advanceTimersByTimeAsync(20000));
   expect(computerInput).toHaveBeenCalledTimes(1);
+});
+
+test.each(['en', 'zh-Hans', 'zh-Hant'] as const)(
+  'input failure omits an empty queue and uses singular copy for one unsent input in %s',
+  async (language) => {
+    const { t, shared } = translator(language);
+    for (const count of [0, 1]) {
+      let reject!: (error: Error) => void;
+      const computerInput = vi.fn(
+        () =>
+          new Promise<void>((_resolve, fail) => {
+            reject = fail;
+          }),
+      );
+      const { key, unmount } = await setup(computerInput, undefined, language);
+      key('a');
+      if (count) key('b');
+      await act(async () => reject(new Error('offline')));
+      expect(screen.getByRole('alert').textContent).toBe(
+        shared('The action was not confirmed. Check the connection and try again.') +
+          (count ? ` ${t('{count} queued input was not sent.', { count })}` : ''),
+      );
+      unmount();
+    }
+  },
+);
+
+test.each(['en', 'zh-Hans', 'zh-Hant'] as const)(
+  'hand back stays pending and ignores duplicate clicks while queued and in flight in %s',
+  async (language) => {
+    const held = heldInput();
+    let finish!: (result: { controller: string }) => void;
+    const computerControl = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { key } = await setup(held.computerInput, computerControl, language);
+    const { t } = translator(language);
+    key('a');
+    const button = screen.getByRole('button', { name: t('Hand back control') });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(screen.getByRole('button', { name: t('Handing back…') })).toBe(button);
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(computerControl).not.toHaveBeenCalled();
+    await act(async () => held.finish());
+    fireEvent.click(button);
+    key('b');
+    expect(computerControl).toHaveBeenCalledExactlyOnceWith('queue-task', 'handback');
+    expect(screen.getByRole('button', { name: t('Handing back…') })).toBe(button);
+    expect(held.computerInput).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ controller: 'agent' }));
+    expect(computerControl).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: t('Handing back…') })).toBeNull();
+  },
+);
+
+test('hand back shows pending feedback while waiting for a control 429 cooldown', async () => {
+  vi.useFakeTimers();
+  const computerControl = vi
+    .fn()
+    .mockRejectedValueOnce(new ApiError(429, 'rate_limited', undefined, 20000))
+    .mockResolvedValue({ controller: 'agent' });
+  await setup(undefined, computerControl);
+  const button = screen.getByRole('button', { name: 'Hand back control' });
+  await act(async () => fireEvent.click(button));
+  expect(computerControl).toHaveBeenCalledTimes(1);
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(button);
+  fireEvent.click(button);
+  expect(screen.getByRole('button', { name: 'Handing back…' })).toBe(button);
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(19999));
+  expect(computerControl).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(computerControl).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', { name: 'Handing back…' })).toBeNull();
 });

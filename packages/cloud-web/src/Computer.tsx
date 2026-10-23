@@ -192,8 +192,13 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
     if (control.current) {
       if (controlRetryAt > Date.now()) return;
       const work = control.current;
-      control.current = undefined;
-      void act(work);
+      void act(async () => {
+        try {
+          await work();
+        } finally {
+          control.current = undefined;
+        }
+      });
       return;
     }
     if (!human) {
@@ -251,8 +256,11 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       <div className="computer-actions">
         <button
           type="button"
-          disabled={!live || (controller === 'agent' && task.state !== 'running')}
+          disabled={
+            !!control.current || !live || (controller === 'agent' && task.state !== 'running')
+          }
           onClick={() => {
+            if (control.current) return;
             inputs.current = [];
             terminalQueued.current = false;
             control.current = async () => {
@@ -271,7 +279,11 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
             setQueueVersion((value) => value + 1);
           }}
         >
-          {controller === 'human' ? t('Hand back control') : t('Take control')}
+          {controller === 'human'
+            ? control.current
+              ? t('Handing back…')
+              : t('Hand back control')
+            : t('Take control')}
         </button>
       </div>
       <p className="computer-hint">
@@ -352,8 +364,16 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
       {error && (
         <p role="alert">
           {shared(error)}
-          {unsent !== undefined && (
-            <> {t('{count} queued inputs were not sent.', { count: unsent })}</>
+          {unsent !== undefined && unsent > 0 && (
+            <>
+              {' '}
+              {t(
+                unsent === 1
+                  ? '{count} queued input was not sent.'
+                  : '{count} queued inputs were not sent.',
+                { count: unsent },
+              )}
+            </>
           )}
         </p>
       )}
