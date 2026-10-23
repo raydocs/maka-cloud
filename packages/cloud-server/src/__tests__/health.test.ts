@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
-import { PublicApi, type PublicApiDeps } from '../http.js';
+import { DEFAULT_HTTP_LIMITS, PublicApi, type PublicApiDeps } from '../http.js';
 import { startHarness } from './harness.js';
 
 test('the health route answers without a token and says only that the server is ok', async (t) => {
@@ -32,7 +32,11 @@ test('the health route is GET and HEAD only, and nothing under it is public', as
 });
 
 async function bareApi(t: TestContext, db: DatabaseSync, active: () => boolean) {
-  const api = new PublicApi({ db, invites: { active } } as unknown as PublicApiDeps);
+  const api = new PublicApi({
+    db,
+    invites: { active },
+    limits: DEFAULT_HTTP_LIMITS,
+  } as unknown as PublicApiDeps);
   const server = createServer((req, res) => void api.handle(req, res));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));

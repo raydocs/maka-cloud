@@ -72,6 +72,10 @@ export interface HttpLimits {
   messagesPerMinute: number;
   /** Cancel, pause and resume requests per minute per invite. */
   controlPerMinute: number;
+  /** Computer inputs per minute per invite, independent of control actions. */
+  inputPerMinute: number;
+  /** Computer inputs accepted in a burst per invite. */
+  inputBurst: number;
   /** Artifact downloads per minute per invite. */
   artifactsPerMinute: number;
   /** Artifact reads running at once, over all invites. */
@@ -94,6 +98,8 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = {
   streamsTotal: 256,
   messagesPerMinute: 30,
   controlPerMinute: 30,
+  inputPerMinute: 600,
+  inputBurst: 20,
   artifactsPerMinute: 60,
   artifactReadsInFlight: 8,
   previewsPerMinute: 60,
@@ -278,10 +284,16 @@ export class PublicApi {
   private readonly humanComputers = new Map<string, { inviteId: string; abort: AbortController }>();
   private readonly busyComputers = new Set<string>();
 
-  // Ten inputs/second sustained, with a 20-input burst, independent of control actions.
-  private readonly computerInputLimiter = new RateLimiter(600, Date.now, 1024, 20);
+  private readonly computerInputLimiter: RateLimiter;
 
-  constructor(private readonly deps: PublicApiDeps) {}
+  constructor(private readonly deps: PublicApiDeps) {
+    this.computerInputLimiter = new RateLimiter(
+      deps.limits.inputPerMinute,
+      Date.now,
+      1024,
+      deps.limits.inputBurst,
+    );
+  }
 
   get openStreams(): number {
     return this.streams;

@@ -10,6 +10,7 @@ export const en = {
   Later: 'Later',
   'Not sure the last input arrived; check the screen.':
     'Not sure the last input arrived; check the screen.',
+  '{count} queued input was not sent.': '{count} queued input was not sent.',
   '{count} queued inputs were not sent.': '{count} queued inputs were not sent.',
   'Terminal input queued. Waiting for confirmation…':
     'Terminal input queued. Waiting for confirmation…',
@@ -362,6 +363,7 @@ export const en = {
   'Watching · Task has control': 'Watching · Task has control',
   'Working…': 'Working…',
   'Hand back control': 'Hand back control',
+  'Handing back…': 'Handing back…',
   'Take control': 'Take control',
   'Take control pauses the task first. Closing this view leaves it paused; reopen to hand back.':
     'Take control pauses the task first. Closing this view leaves it paused; reopen to hand back.',
@@ -613,6 +615,7 @@ export const zhHans: Record<Key, string> = {
   Later: '稍后',
   'Not sure the last input arrived; check the screen.':
     '无法确定上一次输入是否已送达；请检查屏幕。',
+  '{count} queued input was not sent.': '有 {count} 个排队的输入未发送。',
   '{count} queued inputs were not sent.': '有 {count} 个排队的输入未发送。',
   'Terminal input queued. Waiting for confirmation…': '终端输入已排队，正在等待确认…',
   'Slow down. Try again in a moment.': '请放慢操作，稍后再试。',
@@ -933,6 +936,7 @@ export const zhHans: Record<Key, string> = {
   'Watching · Task has control': '正在查看 · 任务正在控制',
   'Working…': '正在处理…',
   'Hand back control': '交还控制权',
+  'Handing back…': '正在交还…',
   'Take control': '接管控制',
   'Take control pauses the task first. Closing this view leaves it paused; reopen to hand back.':
     '接管控制会先暂停任务。关闭此视图后任务仍会暂停，重新打开即可交还控制权。',
@@ -1171,6 +1175,7 @@ export const zhHant: Record<Key, string> = {
   Later: '稍後',
   'Not sure the last input arrived; check the screen.':
     '無法確定上一次輸入是否已送達；請檢查螢幕。',
+  '{count} queued input was not sent.': '有 {count} 個排隊的輸入未傳送。',
   '{count} queued inputs were not sent.': '有 {count} 個排隊的輸入未傳送。',
   'Terminal input queued. Waiting for confirmation…': '終端輸入已排隊，正在等待確認…',
   'Slow down. Try again in a moment.': '請放慢操作，稍後再試。',
@@ -1491,6 +1496,7 @@ export const zhHant: Record<Key, string> = {
   'Watching · Task has control': '正在查看 · 任務正在控制',
   'Working…': '正在處理…',
   'Hand back control': '交還控制權',
+  'Handing back…': '正在交還…',
   'Take control': '接管控制',
   'Take control pauses the task first. Closing this view leaves it paused; reopen to hand back.':
     '接管控制會先暫停任務。關閉此查看後任務仍會暫停，重新開啟即可交還控制權。',

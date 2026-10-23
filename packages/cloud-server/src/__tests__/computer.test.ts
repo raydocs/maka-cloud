@@ -337,3 +337,33 @@ test('computer inputs have a separate typing budget and cannot exhaust control a
   assert.equal((await postJson(h, `${path}/handback`, {})).status, 200);
   assert.equal((await postJson(h, `/v1/tasks/${task.taskId}/cancel`, {})).status, 200);
 });
+
+test('computer input burst and refill rate follow the configured HTTP limits', async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const computer = fakeComputer();
+  const handler = recordingHandler();
+  const h = await startHarness(t, {
+    computer: computer.source,
+    fake: { pausable: true },
+    handler: handler.handler,
+    http: { inputPerMinute: 60, inputBurst: 2 },
+  });
+  const conversation = await newConversation(h);
+  const { session } = await conductorSession(h, handler.seen, conversation);
+  const task = await h.server.orchestrator.delegate(session, { runner: 'fake', brief: 'Type' });
+  await h.server.orchestrator.settled();
+  const path = `/v1/tasks/${task.taskId}/computer`;
+  assert.equal((await postJson(h, `${path}/takeover`, {})).status, 200);
+  const input = () => postJson(h, `${path}/input`, { type: 'key', key: 'a' });
+  assert.equal((await input()).status, 200);
+  assert.equal((await input()).status, 200);
+  assert.equal((await input()).status, 429, 'the configured two-input burst is exhausted');
+  now += 999;
+  assert.equal((await input()).status, 429, 'the configured rate refills one token per second');
+  now += 1;
+  assert.equal((await input()).status, 200);
+  assert.equal((await input()).status, 429, 'only one token was replenished');
+  assert.equal(computer.inputs.length, 3);
+  assert.equal((await postJson(h, `${path}/handback`, {})).status, 200);
+});
