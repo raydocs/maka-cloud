@@ -187,11 +187,8 @@ self.addEventListener('notificationclick', (event) => {
       const path = target.origin === self.location.origin ? target.pathname + target.search : '/';
       if (own) {
         try {
-          const focused = await own.focus().then(
-            () => true,
-            () => false,
-          );
-          if (!focused) return self.clients.openWindow(path);
+          // A refused focus still leaves the open app able to route; only no answer opens a window.
+          await own.focus().catch(() => undefined);
           const id = ++openId;
           const acknowledged = await new Promise((resolve) => {
             const channel = new MessageChannel();

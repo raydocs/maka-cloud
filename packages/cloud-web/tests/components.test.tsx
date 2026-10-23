@@ -3,6 +3,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { ConversationView, Picture, QuestionCard } from '../src/App';
 import {
   CloudClient,
+  type ConnectionState,
   type Conversation,
   type FeedEvent,
   type InboxItem,
@@ -571,7 +572,7 @@ test('decision focus waits for the target inbox item instead of recording an unr
   let emit!: (event: FeedEvent) => void;
   vi.spyOn(client, 'subscribe').mockImplementation(async (_id, event, status) => {
     emit = event;
-    status('Live');
+    status({ state: 'live' });
     event({ id: 1, kind: 'conductor.question', data: { ...question, conversationId: cnv, at: 0 } });
   });
   render(
@@ -600,7 +601,7 @@ test('decision fallback waits five seconds and until the stream has finished con
   vi.useFakeTimers();
   try {
     const client = new CloudClient('test');
-    let reportStatus!: (status: string) => void;
+    let reportStatus!: (status: ConnectionState) => void;
     vi.spyOn(client, 'subscribe').mockImplementation(async (_id, event, status) => {
       reportStatus = status;
       event({
@@ -620,7 +621,7 @@ test('decision fallback waits five seconds and until the stream has finished con
     const unrelated = screen.getByRole('region', { name: 'Your decision' });
     await act(() => vi.advanceTimersByTimeAsync(5000));
     expect(document.activeElement).not.toBe(unrelated);
-    await act(async () => reportStatus('Live'));
+    await act(async () => reportStatus({ state: 'live' }));
     expect(document.activeElement).toBe(unrelated);
   } finally {
     vi.useRealTimers();

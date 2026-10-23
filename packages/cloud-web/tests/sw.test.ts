@@ -392,20 +392,27 @@ test.each([100, 600])(
   },
 );
 
-test('focus failure opens immediately without messaging the app', async () => {
-  const postMessage = vi.fn();
-  const worker = load('en', new Map(), [
-    {
-      url: 'https://maka.example.test/',
-      focus: async () => {
-        throw new Error('unavailable');
-      },
-      postMessage,
-    },
+test('a refused focus still lets the open app route; no answer opens a window', async () => {
+  const refused = async () => {
+    throw new Error('unavailable');
+  };
+  const answering = vi.fn((data, ports) =>
+    ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+  );
+  const routed = load('en', new Map(), [
+    { url: 'https://maka.example.test/', focus: refused, postMessage: answering },
   ]);
-  await worker.click('/?task=one');
-  expect(postMessage).not.toHaveBeenCalled();
-  expect(worker.opened).toEqual(['/?task=one']);
+  await routed.click('/?task=one');
+  expect(answering).toHaveBeenCalledOnce();
+  expect(routed.opened).toEqual([]);
+
+  const silent = vi.fn();
+  const opened = load('en', new Map(), [
+    { url: 'https://maka.example.test/', focus: refused, postMessage: silent },
+  ]);
+  await opened.click('/?task=one');
+  expect(silent).toHaveBeenCalledOnce();
+  expect(opened.opened).toEqual(['/?task=one']);
 });
 
 test('clients outside the worker registration scope are skipped', async () => {
