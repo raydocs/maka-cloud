@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { useEffect, useState } from 'react';
 import {
   type CloudClient,
@@ -20,6 +21,7 @@ export function GrantsPanel({
   client: CloudClient;
   now?: () => number;
 }) {
+  const { t, shared } = useT();
   const [grants, setGrants] = useState<Grant[] | undefined>();
   const [hidden, setHidden] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -63,14 +65,18 @@ export function GrantsPanel({
   }
 
   return (
-    <section className="card section-card" aria-label="Kept approvals">
-      <h2>Kept approvals</h2>
+    <section className="card section-card" aria-label={t('Kept approvals')}>
+      <h2>{t('Kept approvals')}</h2>
       <p className="muted">
-        What the agent may do again without asking. Revoke one and the next such step asks you.
+        {t(
+          'What the agent may do again without asking. Revoke one and the next such step asks you.',
+        )}
       </p>
       {grants && grants.length === 0 && (
         <p className="muted">
-          Nothing kept. When you approve a step for a task or for a repository, it shows here.
+          {t(
+            'Nothing kept. When you approve a step for a task or for a repository, it shows here.',
+          )}
         </p>
       )}
       {[...byRepository].map(([repository, list]) => (
@@ -91,7 +97,7 @@ export function GrantsPanel({
                   })
                 }
               >
-                Revoke all
+                {t('Revoke all')}
               </button>
             )}
           </div>
@@ -103,13 +109,16 @@ export function GrantsPanel({
                   <div className="grant-text">
                     <span className="mono">{displayText(grant.tool)}</span>
                     <span className="muted">
-                      {facts.scope} · {facts.uses} · {facts.ends}
+                      {shared(facts.scope)} · {shared(facts.uses)} · {shared(facts.ends)}
                     </span>
                   </div>
                   <button
                     type="button"
                     className="quiet-action"
-                    aria-label={`Revoke ${displayText(grant.tool)} in ${displayText(repository)}`}
+                    aria-label={t('Revoke {p0} in {p1}', {
+                      p0: displayText(grant.tool),
+                      p1: displayText(repository),
+                    })}
                     disabled={busy}
                     onClick={() =>
                       void act(
@@ -118,7 +127,7 @@ export function GrantsPanel({
                       )
                     }
                   >
-                    Revoke
+                    {t('Revoke')}
                   </button>
                 </li>
               );
@@ -128,7 +137,7 @@ export function GrantsPanel({
       ))}
       {error && (
         <p role="alert" className="error">
-          {error}
+          {shared(error)}
         </p>
       )}
     </section>

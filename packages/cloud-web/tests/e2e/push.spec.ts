@@ -171,7 +171,7 @@ test('the service worker shows one generic notification and ignores whatever the
 }) => {
   await page.goto('/');
   const worker = await page.evaluate(async () => {
-    await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.register('/sw.js', { type: 'module' });
     await navigator.serviceWorker.ready;
     return true;
   });
