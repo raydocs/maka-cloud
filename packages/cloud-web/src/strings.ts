@@ -602,6 +602,11 @@ export const en = {
   'Allow notifications in your browser settings to enable them.':
     'Allow notifications in your browser settings to enable them.',
   'This browser gave no notification keys.': 'This browser gave no notification keys.',
+  "This device can't keep unsent messages; they'll be lost if you close the app before they send.":
+    "This device can't keep unsent messages; they'll be lost if you close the app before they send.",
+  'Search conversation titles.': 'Search conversation titles.',
+  'No matches for “{query}”.': 'No matches for “{query}”.',
+  'Search could not be loaded.': 'Search could not be loaded.',
 } as const;
 
 export type Key = keyof typeof en;
@@ -1163,6 +1168,11 @@ export const zhHans: Record<Key, string> = {
   'Background notifications are not supported in this browser.': '这个浏览器不支持后台通知。',
   'Allow notifications in your browser settings to enable them.': '请在浏览器设置中允许通知。',
   'This browser gave no notification keys.': '浏览器没有提供通知密钥。',
+  "This device can't keep unsent messages; they'll be lost if you close the app before they send.":
+    '此设备无法保存未发送的消息；如果在发送前关闭应用，这些消息将会丢失。',
+  'Search conversation titles.': '搜索对话标题。',
+  'No matches for “{query}”.': '没有与“{query}”匹配的结果。',
+  'Search could not be loaded.': '无法加载搜索结果。',
 };
 
 export const zhHant: Record<Key, string> = {
@@ -1723,6 +1733,11 @@ export const zhHant: Record<Key, string> = {
   'Background notifications are not supported in this browser.': '這個瀏覽器不支援背景通知。',
   'Allow notifications in your browser settings to enable them.': '請在瀏覽器設定中允許通知。',
   'This browser gave no notification keys.': '瀏覽器沒有提供通知金鑰。',
+  "This device can't keep unsent messages; they'll be lost if you close the app before they send.":
+    '這台裝置無法儲存尚未傳送的訊息；如果在傳送前關閉 App，這些訊息就會遺失。',
+  'Search conversation titles.': '搜尋對話標題。',
+  'No matches for “{query}”.': '沒有符合「{query}」的結果。',
+  'Search could not be loaded.': '無法載入搜尋結果。',
 };
 
 export const serverChoices: ReadonlyArray<readonly [string, string, Key]> = [

@@ -1,3 +1,4 @@
+import * as secure from 'expo-secure-store';
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { quotaText, type QuotaReason } from '@maka-cloud/client';
 import { Text } from 'react-native';
@@ -418,3 +419,33 @@ test('a message a spending limit refuses says which limit, when it resets and wh
   await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
   expect(screen.queryByText(quotaText(quota, 'en'))).toBeNull();
 });
+
+test.each([false, true])(
+  'storage failure %s shows one quiet notice and still sends',
+  async (fails) => {
+    const original = secure.setItemAsync;
+    const spy = jest.spyOn(secure, 'setItemAsync').mockImplementation(async (...args) => {
+      if (fails && args[0].startsWith('maka.outbox.')) throw new Error('quota');
+      return original(...args);
+    });
+    try {
+      await openChat(finished());
+      await screen.findByText('Fixed.');
+      const notice =
+        "This device can't keep unsent messages; they'll be lost if you close the app before they send.";
+      expect(screen.queryByText(notice)).toBeNull();
+      for (const text of ['First extra', 'Second extra']) {
+        await fireEvent.changeText(screen.getByTestId('field-Keep the conversation going'), text);
+        await fireEvent.press(screen.getByTestId('button-Send message'));
+        if (fails) expect(await screen.findAllByText(notice)).toHaveLength(1);
+        else expect(screen.queryByText(notice)).toBeNull();
+        // The server accepted it; its event frees the composer for the next send.
+        await act(async () =>
+          push(frame('message.posted', { messageId: text, role: 'user', text, at: Date.now() })),
+        );
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);

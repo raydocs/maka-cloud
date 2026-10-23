@@ -49,6 +49,7 @@ export const ZH_HANT: Record<Key, string> = {
   'chat.new': '新對話',
   'chat.more': '對話列表',
   'search.field': '搜尋對話和任務',
+  'chat.storageNotice': '這台裝置無法儲存尚未傳送的訊息；如果在傳送前關閉 App，這些訊息就會遺失。',
   'search.hint': '在這支手機已載入的對話和任務裡尋找。',
   'search.none': '沒有與「{query}」相關的內容。',
   'search.incomplete': '有些任務無法載入，結果可能不完整。',

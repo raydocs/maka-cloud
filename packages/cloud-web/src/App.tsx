@@ -55,6 +55,7 @@ import { MemoryPanel } from './Memory';
 import { ModePicker } from './ModePicker';
 import { outboxFor } from './pending';
 import { Projects } from './Projects';
+import { ConversationSearch } from './Search';
 import { TaskPage } from './TaskPage';
 import { disablePush, enablePush, postPushContext, restorePush } from './push';
 import { submitOnEnter } from './keys';
@@ -688,6 +689,13 @@ export function ConversationView({
             </>
           )}
         </span>
+        {snapshot.unsentStorageFailed && (
+          <p className="muted">
+            {t(
+              "This device can't keep unsent messages; they'll be lost if you close the app before they send.",
+            )}
+          </p>
+        )}
         <SteerComposer
           client={client}
           conversationId={conversation.conversationId}
@@ -1256,26 +1264,18 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          {session.conversations
-            .filter((c) => (c.title ?? '').toLocaleLowerCase().includes(query.toLocaleLowerCase()))
-            .map((c) => (
-              <button
-                className="quiet-action"
-                type="button"
-                key={c.conversationId}
-                onClick={() => {
-                  setTaskPage(undefined);
-                  setChosen(c.conversationId);
-                  setView('chat');
-                  setSearching(false);
-                  document
-                    .querySelector<HTMLButtonElement>('[data-testid="button-search"]')
-                    ?.focus();
-                }}
-              >
-                {displayText(c.title ?? t('Untitled conversation'))}
-              </button>
-            ))}
+          <ConversationSearch
+            client={session.client}
+            known={session.conversations}
+            query={query}
+            onChoose={(id) => {
+              setTaskPage(undefined);
+              setChosen(id);
+              setView('chat');
+              setSearching(false);
+              document.querySelector<HTMLButtonElement>('[data-testid="button-search"]')?.focus();
+            }}
+          />
           <button
             type="button"
             className="quiet-action"
