@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { CloudClient } from '@maka-cloud/client';
-import { enablePush, postPushContext } from '../src/push';
+import { enablePush, postPushContext, restorePush } from '../src/push';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -23,7 +23,7 @@ function browser() {
   });
   vi.stubGlobal('PushManager', class {});
   vi.stubGlobal('Notification', { requestPermission: async () => 'granted' });
-  return { postMessage };
+  return { postMessage, registration, subscription };
 }
 
 test('failed account reads post nothing; success is reused until the session changes', async () => {
@@ -65,7 +65,8 @@ test('only successful push registrations publish the subscription owner', async 
   let fail = false;
   const client = new CloudClient('token', async (input, init) => {
     if (String(input) === '/v1/me') return Response.json({ accountTag: 'account-a' });
-    if (init?.method === 'POST') return Response.json({}, { status: fail ? 500 : 201 });
+    if (init?.method === 'POST')
+      return Response.json({ accountTag: 'account-a' }, { status: fail ? 500 : 201 });
     return Response.json({ publicKey: 'a2V5' });
   });
   await enablePush(client);
@@ -76,4 +77,44 @@ test('only successful push registrations publish the subscription owner', async 
   expect(postMessage.mock.calls.some(([message]) => message.type === 'maka.subscription')).toBe(
     false,
   );
+});
+
+test('app-load recovery re-registers the same subscription and uses the returned current tag', async () => {
+  const { postMessage, subscription } = browser();
+  const permission = vi.spyOn(Notification, 'requestPermission');
+  const fetcher = vi.fn(async () => Response.json({ accountTag: 'restored-account-tag' }));
+  const client = new CloudClient('token', fetcher);
+  for (let i = 0; i < 2; i++) await restorePush(client);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  for (const [path, init] of fetcher.mock.calls as unknown as Array<[string, RequestInit]>) {
+    expect(path).toBe('/v1/push/subscriptions');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual(subscription.toJSON());
+  }
+  expect(postMessage).toHaveBeenLastCalledWith({
+    type: 'maka.subscription',
+    accountTag: 'restored-account-tag',
+  });
+  expect(permission).not.toHaveBeenCalled();
+  expect(subscription.unsubscribe).not.toHaveBeenCalled();
+});
+
+test('recovery does nothing without a subscription and never publishes failed or stale ownership', async () => {
+  const { postMessage, registration, subscription } = browser();
+  const get = vi.spyOn(registration.pushManager, 'getSubscription');
+  get.mockResolvedValueOnce(null as unknown as typeof subscription);
+  const fetcher = vi.fn(async () => Response.json({}, { status: 500 }));
+  const client = new CloudClient('token', fetcher);
+  await restorePush(client);
+  expect(fetcher).not.toHaveBeenCalled();
+  await expect(restorePush(client)).rejects.toThrow();
+  expect(postMessage).not.toHaveBeenCalled();
+  expect(subscription.unsubscribe).not.toHaveBeenCalled();
+  let current = true;
+  const other = new CloudClient('other', async () => {
+    current = false;
+    return Response.json({ accountTag: 'other-account' });
+  });
+  await restorePush(other, () => current);
+  expect(postMessage).not.toHaveBeenCalled();
 });

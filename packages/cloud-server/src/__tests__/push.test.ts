@@ -179,8 +179,13 @@ test('a subscription must point at a known push service and carry real keys', as
 test('registering twice keeps one subscription, removing needs the same invite, and each invite has a cap', async (t) => {
   const { h } = await setup(t);
   const d = device();
-  assert.equal((await subscribe(h, d)).status, 201);
-  assert.equal((await subscribe(h, d)).status, 200);
+  const first = await subscribe(h, d);
+  assert.equal(first.status, 201);
+  const me = await (await h.api('/v1/me')).json();
+  assert.deepEqual(await first.json(), { accountTag: me.accountTag });
+  const again = await subscribe(h, d);
+  assert.equal(again.status, 200);
+  assert.deepEqual(await again.json(), { accountTag: me.accountTag });
   const other = h.server.invites.create('other');
   const remove = (token: string, endpoint: string) =>
     h.api('/v1/push/subscriptions', {
@@ -196,6 +201,25 @@ test('registering twice keeps one subscription, removing needs the same invite, 
   assert.equal(over.status, 429);
   assert.deepEqual(await over.json(), { error: 'too_many_subscriptions' });
   assert.equal((await subscribe(h, device(), other.token)).status, 201);
+});
+
+test('re-registering an existing browser confirms and moves ownership to the signed-in account', async (t) => {
+  const { h } = await setup(t);
+  const d = device();
+  await subscribe(h, d);
+  const other = h.server.invites.create('other');
+  const response = await subscribe(h, d, other.token);
+  assert.equal(response.status, 200);
+  const me = await (await h.api('/v1/me', { token: other.token })).json();
+  assert.deepEqual(await response.json(), { accountTag: me.accountTag });
+  const remove = (token: string) =>
+    h.api('/v1/push/subscriptions', {
+      method: 'DELETE',
+      token,
+      body: JSON.stringify({ endpoint: d.endpoint }),
+    });
+  assert.equal((await remove(h.token)).status, 404);
+  assert.equal((await remove(other.token)).status, 204);
 });
 
 test('a finished task sends one encrypted, signed message with ids and a state and nothing else', async (t) => {

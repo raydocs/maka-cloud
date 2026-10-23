@@ -191,7 +191,7 @@ self.addEventListener('push', (event) => {
     const account = await accountTag();
     const table = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }[await language()];
     const neutral = async (quiet = false) => {
-      const tag = quiet ? 'maka-quiet' : NEUTRAL.tag;
+      const tag = quiet ? 'maka-quiet' : 'maka-account-mismatch';
       await self.registration.showNotification(table[NEUTRAL.title], {
         body: table[NEUTRAL.body],
         tag,
@@ -228,12 +228,7 @@ self.addEventListener('push', (event) => {
           context?.tag === account &&
           context.conversation === payload.conversationId
         ) {
-          try {
-            client.postMessage({ ...payload, type: 'maka.push' });
-            return neutral(true);
-          } catch {
-            // A disappearing client still needs the usual notification.
-          }
+          return neutral(true);
         }
       }
     }

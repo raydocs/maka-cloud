@@ -813,7 +813,9 @@ export class PublicApi {
     if (result === 'invalid_endpoint' || result === 'invalid_keys') {
       throw new HttpError(400, result);
     }
-    respond(res, result === 'created' ? 201 : 200, {});
+    respond(res, result === 'created' ? 201 : 200, {
+      accountTag: pushAccountTag(this.deps.db, invite.inviteId),
+    });
   }
 
   private async unsubscribePush(

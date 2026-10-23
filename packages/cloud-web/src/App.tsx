@@ -56,7 +56,7 @@ import { ModePicker } from './ModePicker';
 import { outboxFor } from './pending';
 import { Projects } from './Projects';
 import { TaskPage } from './TaskPage';
-import { disablePush, enablePush, postPushContext } from './push';
+import { disablePush, enablePush, postPushContext, restorePush } from './push';
 import { submitOnEnter } from './keys';
 import {
   clearSteerReceipts,
@@ -1152,6 +1152,17 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       window.removeEventListener('popstate', openLink);
     };
   }, [session]);
+  const pushClient = session?.client;
+  useEffect(() => {
+    if (!pushClient) return;
+    let current = true;
+    void restorePush(pushClient, () => current).catch(() => {
+      // An offline load leaves the subscription available for the next load.
+    });
+    return () => {
+      current = false;
+    };
+  }, [pushClient]);
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
     let current = true;

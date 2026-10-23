@@ -45,10 +45,39 @@ function toKey(base64Url: string): Uint8Array<ArrayBuffer> {
   );
 }
 
-/**
- * Registers this browser with the server. The server only ever sends a generic
- * "task finished" message with ids; the worker ignores whatever it carries.
- */
+async function registerSubscription(
+  client: CloudClient,
+  registration: ServiceWorkerRegistration,
+  subscription: PushSubscription,
+  current: () => boolean = () => true,
+): Promise<void> {
+  const { endpoint, keys } = subscription.toJSON();
+  if (!endpoint || !keys?.p256dh || !keys.auth)
+    throw new Error('This browser gave no notification keys.');
+  const body: PushRegistration = { endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } };
+  if (!current()) return;
+  const account = await client.request<{ accountTag?: string }>(
+    routes.pushSubscriptions,
+    { method: 'POST', body: JSON.stringify(body) },
+    'push',
+  );
+  if (current() && account.accountTag)
+    registration.active?.postMessage({ type: 'maka.subscription', accountTag: account.accountTag });
+}
+
+/** Recover pre-upgrade ownership and tags changed by a restored server, without asking permission. */
+export async function restorePush(
+  client: CloudClient,
+  current: () => boolean = () => true,
+): Promise<void> {
+  if (!supported()) return;
+  const registration = await navigator.serviceWorker.getRegistration('/sw.js');
+  const subscription = await registration?.pushManager.getSubscription();
+  if (registration && subscription)
+    await registerSubscription(client, registration, subscription, current);
+}
+
+/** Register this browser and publish only the owner confirmed by the server. */
 export async function enablePush(
   client: CloudClient,
   language: LanguageChoice = 'system',
@@ -71,18 +100,8 @@ export async function enablePush(
       userVisibleOnly: true,
       applicationServerKey: toKey(publicKey),
     }));
-  const { endpoint, keys } = subscription.toJSON();
   try {
-    if (!endpoint || !keys?.p256dh || !keys.auth)
-      throw new Error('This browser gave no notification keys.');
-    const body: PushRegistration = { endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } };
-    const account = await pushAccount(client);
-    await client.request<unknown>(
-      routes.pushSubscriptions,
-      { method: 'POST', body: JSON.stringify(body) },
-      'push',
-    );
-    registration.active?.postMessage({ type: 'maka.subscription', accountTag: account.accountTag });
+    await registerSubscription(client, registration, subscription);
   } catch (error) {
     if (!existing) await subscription.unsubscribe().catch(() => false);
     throw error;

@@ -1,3 +1,5 @@
+import { CloudClient } from '@maka-cloud/client';
+import { restorePush } from '../src/push';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -186,11 +188,10 @@ test('unknown and malformed payloads always show neutral text', async () => {
     null,
     42,
     undefined,
-    new Error('not json'),
   ]) {
     await worker.push(payload);
   }
-  expect(worker.shown).toHaveLength(10);
+  expect(worker.shown).toHaveLength(9);
   for (const shown of worker.shown) {
     expect([shown.title, shown.options.body, shown.options.tag]).toEqual([
       'Something needs a look',
@@ -353,7 +354,7 @@ test('approval and unknown tags stay separate; terminal replaces ongoing and res
   expect(worker.closed).toContain('maka-quiet');
 });
 
-test('mismatched, missing, and pre-upgrade tags show neutral root-only notices', async () => {
+test('mismatched, missing, and pre-upgrade tags stay neutral until app-load recovery', async () => {
   const saved = new Map<string, string>();
   const worker = load('en', saved);
   await worker.push({ type: 'task.finished', accountTag: 'account-b', conversationId: 'private' });
@@ -367,6 +368,38 @@ test('mismatched, missing, and pre-upgrade tags show neutral root-only notices',
   }
   await worker.click('/?conversation=private');
   expect(worker.opened).toEqual(['/']);
+  vi.stubGlobal('navigator', {
+    serviceWorker: {
+      getRegistration: async () => ({
+        active: { postMessage: (message: Record<string, unknown>) => worker.message(message) },
+        pushManager: {
+          getSubscription: async () => ({
+            toJSON: () => ({
+              endpoint: 'https://push.example/one',
+              keys: { p256dh: 'key', auth: 'auth' },
+            }),
+          }),
+        },
+      }),
+    },
+  });
+  vi.stubGlobal('PushManager', class {});
+  vi.stubGlobal('Notification', {});
+  try {
+    await restorePush(
+      new CloudClient('token', async () => Response.json({ accountTag: 'new-tag' })),
+    );
+    await worker.push({ type: 'task.finished', accountTag: 'new-tag', conversationId: 'chat' });
+    expect(worker.shown.at(-1)?.options.data).toMatchObject({
+      accountTag: 'new-tag',
+      path: '/?conversation=chat',
+    });
+    await worker.push({ type: 'future.type', accountTag: 'new-tag' });
+    expect(worker.shown.at(-1)?.options.tag).toBe('maka-inbox');
+    expect(worker.shown[0]?.options.tag).toBe('maka-account-mismatch');
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test('tab contexts cannot overwrite the subscription owner, including sign-out', async () => {
@@ -411,7 +444,7 @@ test('visible conversations suppress banners but retain terminal ordering across
   expect(worker.shown).toHaveLength(1);
   expect(worker.shown[0]?.options.silent).toBe(true);
   expect(worker.closed).toContain('maka-quiet');
-  expect(tab.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'maka.push' }));
+  expect(tab.postMessage).not.toHaveBeenCalled();
   const restarted = load('en', saved, [tab]);
   await restarted.push({ type: 'task.finished', taskId: 'other', conversationId: 'chat' });
   expect(restarted.shown.at(-1)?.options.silent).toBe(true);
@@ -445,11 +478,14 @@ test('a matching notification cannot deep-link an existing tab of another accoun
 test('a push with no data still displays a neutral root-only notification', async () => {
   const worker = load();
   await worker.push(undefined, false);
+  await worker.push(new Error('not json'));
+  expect(worker.shown).toHaveLength(2);
+  expect(worker.shown[1]?.options.tag).toBe('maka-account-mismatch');
   expect(worker.shown[0]?.title).toBe('Something needs a look');
   expect(worker.shown[0]?.options.data).toEqual({ path: '/' });
 });
 
-test('a visible unfocused or unreachable conversation still gets its task notification', async () => {
+test('only a focused visible conversation suppresses its task notification', async () => {
   const tab = {
     id: 'tab',
     visibilityState: 'visible',
@@ -465,7 +501,11 @@ test('a visible unfocused or unreachable conversation still gets its task notifi
   await worker.push({ type: 'task.finished', taskId: 'one', conversationId: 'chat' });
   tab.focused = true;
   await worker.push({ type: 'task.finished', taskId: 'two', conversationId: 'chat' });
-  expect(worker.shown.map((notice) => notice.title)).toEqual([TASK.title, TASK.title]);
+  expect(worker.shown.map((notice) => notice.title)).toEqual([
+    TASK.title,
+    'Something needs a look',
+  ]);
+  expect(worker.shown[1]?.options.silent).toBe(true);
 });
 
 test('dismissed terminal tasks survive a restart, expire after seven days, and keep only 200 records', async () => {
