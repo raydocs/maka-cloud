@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
@@ -9,16 +10,18 @@ import {
 } from '@maka-cloud/client';
 
 export function Computer({ client, task }: { client: CloudClient; task: TaskView }) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   return (
     <details className="computer" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary>Open computer</summary>
+      <summary>{t('Open computer')}</summary>
       {open && <ComputerViewer client={client} task={task} />}
     </details>
   );
 }
 
 function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView }) {
+  const { t, shared } = useT();
   const [desktop, setDesktop] = useState<ComputerFrame['desktop']>();
   const [terminal, setTerminal] = useState('');
   const [controller, setController] = useState<'agent' | 'human'>('agent');
@@ -89,15 +92,15 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
     if (human) void act(() => client.computerInput(task.taskId, value));
   };
   return (
-    <section className="computer-viewer" aria-label="Task computer">
+    <section className="computer-viewer" aria-label={t('Task computer')}>
       <p role="status">
         {!live
           ? error
-            ? 'Computer unavailable · Input disabled'
-            : 'Connecting to computer…'
+            ? t('Computer unavailable · Input disabled')
+            : t('Connecting to computer…')
           : controller === 'human'
-            ? 'You have control · Task paused'
-            : 'Watching · Task has control'}
+            ? t('You have control · Task paused')
+            : t('Watching · Task has control')}
       </p>
       <div className="computer-actions">
         <button
@@ -113,17 +116,23 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
             })
           }
         >
-          {busy ? 'Working…' : controller === 'human' ? 'Hand back control' : 'Take control'}
+          {busy
+            ? t('Working…')
+            : controller === 'human'
+              ? t('Hand back control')
+              : t('Take control')}
         </button>
       </div>
       <p className="computer-hint">
-        Take control pauses the task first. Closing this view leaves it paused; reopen to hand back.
+        {t(
+          'Take control pauses the task first. Closing this view leaves it paused; reopen to hand back.',
+        )}
       </p>
       {desktop ? (
         <div
           className="computer-screen"
           role="application"
-          aria-label="Desktop controls"
+          aria-label={t('Desktop controls')}
           tabIndex={human ? 0 : -1}
           onKeyDown={(event) => {
             if (!human || event.key === 'Tab') return;
@@ -142,16 +151,18 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
           }}
         >
           <img
-            alt="Task desktop"
+            alt={t('Task desktop')}
             draggable={false}
             src={`data:${desktop.mime};base64,${desktop.base64}`}
           />
         </div>
       ) : (
-        <p className="computer-hint">Waiting for the desktop…</p>
+        <p className="computer-hint">{t('Waiting for the desktop…')}</p>
       )}
-      <h4>Terminal</h4>
-      <pre aria-label="Live terminal output">{displayText(terminal || 'Waiting for output…')}</pre>
+      <h4>{t('Terminal')}</h4>
+      <pre aria-label={t('Live terminal output')}>
+        {displayText(terminal || t('Waiting for output…'))}
+      </pre>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -163,7 +174,7 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
         }}
       >
         <label>
-          Terminal input
+          {t('Terminal input')}
           <input
             value={command}
             maxLength={3999}
@@ -174,13 +185,13 @@ function ComputerViewer({ client, task }: { client: CloudClient; task: TaskView 
           />
         </label>
         <button type="submit" disabled={!human || busy || !command.trim()}>
-          Send input
+          {t('Send input')}
         </button>
       </form>
-      {error && <p role="alert">{error}</p>}
+      {error && <p role="alert">{shared(error)}</p>}
       {!live && error && (
         <button type="button" onClick={() => setAttempt((value) => value + 1)}>
-          Reconnect computer
+          {t('Reconnect computer')}
         </button>
       )}
     </section>

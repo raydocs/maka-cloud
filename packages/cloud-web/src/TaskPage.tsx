@@ -1,8 +1,10 @@
+import { useT } from './i18n';
 import { ArrowLeft, ArrowUpRight } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   type CloudClient,
   confidenceWords,
+  finishedParts,
   displayText,
   dollars,
   errorText,
@@ -60,6 +62,7 @@ export function TaskPage({
   task: TaskView;
   onBack: () => void;
 }) {
+  const { t, shared } = useT();
   const [results, setResults] = useState<LoadedResult[] | undefined>();
   const [verdict, setVerdict] = useState<InboxItem | undefined>();
   const [error, setError] = useState('');
@@ -101,49 +104,54 @@ export function TaskPage({
   return (
     <article
       className="page task-page solid"
-      aria-label={`Task: ${displayText(task.title ?? 'Task')}`}
+      aria-label={t('Task: {p0}', { p0: displayText(task.title ?? t('Task')) })}
     >
       <button type="button" className="back-link" onClick={onBack}>
-        <ArrowLeft aria-hidden="true" size={16} className="icon-inline" /> Back
+        <ArrowLeft aria-hidden="true" size={16} className="icon-inline" /> {t('Back')}
       </button>
-      <h1>{displayText(task.title ?? 'Task')}</h1>
+      <h1>{displayText(task.title ?? t('Task'))}</h1>
       <p className="task-page-meta muted">
-        <span className={`status-mark ${task.state}`} /> {taskLabel(task)} · Cost{' '}
+        <span className={`status-mark ${task.state}`} /> {shared(taskLabel(task))} {t('· Cost')}{' '}
         <span className={task.costUsd === undefined ? undefined : 'mono'}>
-          {dollars(task.costUsd)}
-          {task.budgetUsd !== undefined && ` of ${dollars(task.budgetUsd)}`}
+          {shared(dollars(task.costUsd))}
+          {task.budgetUsd !== undefined && t(' of {p0}', { p0: dollars(task.budgetUsd) })}
         </span>
         {pull && (
           <>
             {' · '}
             <a href={pull} target="_blank" rel="noreferrer noopener">
-              Pull request <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
+              {t('Pull request')}
+              <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
             </a>
           </>
         )}
       </p>
       {task.failureReason && <FailureNote reason={task.failureReason} />}
       {manifest && (
-        <section aria-label="Outcome">
-          <h2>Outcome</h2>
+        <section aria-label={t('Outcome')}>
+          <h2>{t('Outcome')}</h2>
           <p>{displayText(manifest.summary)}</p>
-          <p className="muted">{confidenceWords(manifest.confidence)}</p>
-          <List title="Done" items={done} />
-          <List title="Not done" items={manifest.notDone} />
-          <List title="Known issues" items={manifest.knownIssues} />
+          <p className="muted">{shared(confidenceWords(manifest.confidence))}</p>
+          <List title={t('Done')} items={done} />
+          <List title={t('Not done')} items={manifest.notDone} />
+          <List title={t('Known issues')} items={manifest.knownIssues} />
         </section>
       )}
       {review.length > 0 && (
-        <section aria-label="Review">
-          <h2>Review</h2>
+        <section aria-label={t('Review')}>
+          <h2>{t('Review')}</h2>
           {review.map((line) => (
-            <p key={line}>{line}</p>
+            <p key={line}>
+              {reviewLine === undefined && verdict?.kind === 'finished' && finishedParts(verdict)
+                ? shared(line)
+                : line}
+            </p>
           ))}
         </section>
       )}
       {steps.length > 0 && (
-        <section aria-label="Steps">
-          <h2>Steps</h2>
+        <section aria-label={t('Steps')}>
+          <h2>{t('Steps')}</h2>
           <ol className="plain-list">
             {steps.map((step, i) => (
               <li key={i}>{displayText(step)}</li>
@@ -151,15 +159,17 @@ export function TaskPage({
           </ol>
         </section>
       )}
-      <section aria-label="Results">
-        <h2>Results</h2>
+      <section aria-label={t('Results')}>
+        <h2>{t('Results')}</h2>
         {error && (
           <p role="alert" className="error">
-            {error}
+            {shared(error)}
           </p>
         )}
-        {results === undefined && <p className="muted">Loading the results…</p>}
-        {results?.length === 0 && !error && <p className="muted">This task left no results.</p>}
+        {results === undefined && <p className="muted">{t('Loading the results…')}</p>}
+        {results?.length === 0 && !error && (
+          <p className="muted">{t('This task left no results.')}</p>
+        )}
         {results?.map((result, i) => (
           <div key={i} className="task-result">
             <h3>{displayText(result.name)}</h3>
@@ -171,7 +181,9 @@ export function TaskPage({
                 {result.url} <ArrowUpRight aria-hidden="true" size={14} className="icon-inline" />
               </a>
             )}
-            {result.kind === 'failed' && <p className="muted">This result could not be loaded.</p>}
+            {result.kind === 'failed' && (
+              <p className="muted">{t('This result could not be loaded.')}</p>
+            )}
           </div>
         ))}
       </section>
