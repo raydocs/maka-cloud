@@ -37,7 +37,7 @@ Checked 22 October 2026 against [Anthropic's supported-regions page](https://www
 
 Anything absent is unsupported. Anthropic's page covers the API, and it counts three cases: a person physically in an unlisted place, a company incorporated or headquartered there (and that company's users, wherever they sit), and a company majority-controlled from there. OpenAI says accessing **or offering access** outside the list may suspend the account. A Singapore server does not cure a user in Hong Kong, including a Taiwan user travelling there. A Hong Kong company holding the keys would make every call unsupported.
 
-**Must.** Block sign-up and each later model call for Hong Kong, Macau, and mainland China, by current IP and by account country. Re-check on travel. Do not suggest a VPN. Put the API contract on a company incorporated in a listed country. Taiwan, Singapore, and Malaysia can proceed. **Wait:** a polished travel screen. A one-line block is enough.
+**Owner decision (2026-10-23): no region block at launch.** The research's advice was to block sign-up and each later model call for Hong Kong, Macau and mainland China, by IP and account country. The owner chose to launch first and revisit regions after launch, so this is later work, not a launch blocker. Still worth doing early: put the API contract on a company incorporated in a listed country.
 
 ### 2.2 Privacy policy and terms
 
@@ -80,7 +80,7 @@ One breach note, written to Malaysia's 72 hours for a significant breach and Sin
 
 | Item | Tag |
 | --- | --- |
-| Block Hong Kong, Macau, and mainland China on sign-up and on each model call | Must |
+| Block Hong Kong, Macau, and mainland China on sign-up and on each model call | Later (owner decision: no region block at launch) |
 | API customer incorporated in a listed country | Must |
 | Policy and terms with the shared clauses in section 2.2 | Must |
 | English and Traditional Chinese | Must |
