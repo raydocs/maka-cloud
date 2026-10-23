@@ -9,6 +9,9 @@ import {
   errorText,
   TERMINAL,
   type TaskControl,
+  type PendingSend,
+  type PendingSends,
+  reusable,
   type TaskView,
 } from '@maka-cloud/client';
 import { useFocusEffect } from 'expo-router';
@@ -225,8 +228,11 @@ function Bubble({ message, children }: { message: Message; children?: ReactNode 
 interface Outgoing {
   text: string;
   state: 'sending' | 'sent' | 'failed';
-  /** How many of the person's messages the conversation had when this one was sent. */
-  before: number;
+  /**
+   * The person's messages the conversation already showed when this one was sent: only a message
+   * beyond these can be it. Unknown for a send kept from an earlier visit.
+   */
+  seen?: ReadonlySet<string>;
 }
 
 /**
@@ -298,10 +304,22 @@ function OutgoingBubble({
 }
 
 /**
- * A send that failed, per conversation, so leaving the conversation and coming back still offers
- * "Send again" and "Delete". In memory only: the app closing ends it, as it ended the draft before.
+ * Each conversation's send that the server has not acknowledged, kept by the feed from before it
+ * posts until the server answers (`PendingSends`), for as long as the app runs. Coming back to a
+ * conversation shows it again with "Send again" and "Delete", and "Send again" reuses its id, so
+ * the server runs it once even if it had taken it. A send that finishes after the person left
+ * clears itself.
  */
-const UNSENT = new Map<string, Outgoing>();
+const keptSends = new Map<string, PendingSend>();
+const SENDS: PendingSends = {
+  read: (key) => keptSends.get(key),
+  write: (key, value) => {
+    keptSends.set(key, value);
+  },
+  clear: (key) => {
+    keptSends.delete(key);
+  },
+};
 
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
@@ -313,7 +331,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const [dock, setDock] = useState(76);
   const conversation = conversations.find((c) => c.conversationId === conversationId);
   const feed = useMemo(
-    () => new ConversationFeed(client, conversationId),
+    () => new ConversationFeed(client, conversationId, undefined, SENDS),
     [client, conversationId],
   );
   // The stream runs only while this tab is in front and the app is in the foreground.
@@ -322,11 +340,12 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const { state, status, error, busy, noPause } = snapshot;
   const { tasks, questions, openQuestions } = conversationSummary(snapshot);
   const [draft, setDraft] = useState('');
-  const [outgoing, setOutgoing] = useState<Outgoing | undefined>(() => UNSENT.get(conversationId));
-  useEffect(() => {
-    if (outgoing?.state === 'failed') UNSENT.set(conversationId, outgoing);
-    else UNSENT.delete(conversationId);
-  }, [conversationId, outgoing]);
+  const [outgoing, setOutgoing] = useState<Outgoing | undefined>(() => {
+    const kept = SENDS.read(conversationId);
+    return kept && reusable(kept, kept.text, Date.now())
+      ? { text: kept.text, state: 'failed' }
+      : undefined;
+  });
   const [detail, setDetail] = useState<TaskView | undefined>();
   /** The task pills opened to show their row (the step, the cost and the controls). */
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -361,22 +380,26 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   useEffect(() => {
     if (needsYou > 0) {
       atEnd.current = true;
-      scroll.current?.scrollToEnd({ animated: true });
+      scroll.current?.scrollToEnd({ animated: !reduce });
     }
-  }, [needsYou]);
+  }, [needsYou, reduce]);
   // Once the conversation shows the message that was on its way, it is in the list itself. That
   // holds for one whose send looked failed too: the server may have taken it before the answer
   // was lost.
   const sentByPerson = state.messages.filter((message) => message.role === 'user');
+  // (The server names a message by an id of its own, not the send's, so it is known by its words.)
   const arrivedOutgoing =
     outgoing !== undefined &&
-    sentByPerson.slice(outgoing.before).some((message) => message.text.trim() === outgoing.text);
+    sentByPerson.some(
+      (message) => !outgoing.seen?.has(message.id) && message.text.trim() === outgoing.text,
+    );
   useEffect(() => {
     if (!arrivedOutgoing) return;
     // It is done with: the next message is a new one, with an id of its own.
     feed.draftEdited();
+    SENDS.clear(conversationId);
     setOutgoing(undefined);
-  }, [arrivedOutgoing, feed]);
+  }, [arrivedOutgoing, feed, conversationId]);
   const pending = arrivedOutgoing ? undefined : outgoing;
   // A question or decision waiting on the person is not work; a reply still owed is.
   const nothingWaits = openQuestions.size === 0 && waiting.length === 0;
@@ -406,7 +429,11 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const send = () => {
     const text = draft.trim();
     if (!text || busy || pending) return;
-    setOutgoing({ text, state: 'sending', before: sentByPerson.length });
+    setOutgoing({
+      text,
+      state: 'sending',
+      seen: new Set(sentByPerson.map((message) => message.id)),
+    });
     setDraft('');
     post(text);
   };
@@ -418,6 +445,7 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
   const discard = () => {
     // The next message is a new one: the failed one's id is not used again.
     feed.draftEdited();
+    SENDS.clear(conversationId);
     setOutgoing(undefined);
   };
   const togglePill = (taskId: string) =>

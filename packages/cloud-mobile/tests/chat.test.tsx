@@ -247,8 +247,13 @@ test('a send that looked failed but reached the server is taken off once it show
   expect(posts[1]).not.toBe(posts[0]);
 });
 
-test('a failed send is still there after leaving the conversation and coming back', async () => {
-  const { open } = await openChat(finished(), async () => new Response('{}', { status: 500 }));
+test('a failed send is still there after leaving and coming back, and is sent again as the same message', async () => {
+  const posts: string[] = [];
+  let fail = true;
+  const { open } = await openChat(finished(), async (body) => {
+    posts.push(body.clientMessageId);
+    return fail ? new Response('{}', { status: 500 }) : Response.json({});
+  });
   await screen.findByText('Fixed.');
   await fireEvent.changeText(
     screen.getByTestId('field-Keep the conversation going'),
@@ -262,10 +267,47 @@ test('a failed send is still there after leaving the conversation and coming bac
   await open('c1');
   expect(await screen.findByText('Not sent')).toBeTruthy();
   expect(screen.getByText('Also update the docs')).toBeTruthy();
+  fail = false;
+  await fireEvent.press(screen.getByRole('button', { name: 'Send again' }));
+  await screen.findByText('Maka is working…');
+  expect(posts).toHaveLength(2);
+  expect(posts[1]).toBe(posts[0]);
+});
+
+test('a send still on its way when the person leaves is kept if it fails, and gone if it succeeds', async () => {
+  const posts: string[] = [];
+  const answers: Array<(response: Response) => void> = [];
+  const { open } = await openChat(finished(), (body) => {
+    posts.push(body.clientMessageId);
+    return new Promise((resolve) => {
+      answers.push(resolve);
+    });
+  });
+  await screen.findByText('Fixed.');
+  const field = () => screen.getByTestId('field-Keep the conversation going');
+  await fireEvent.changeText(field(), 'Also update the docs');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  await open('c2');
+  await screen.findByText('Docs');
+  await act(async () => answers[0]?.(new Response('{}', { status: 503 })));
+  await open('c1');
+  expect(await screen.findByText('Not sent')).toBeTruthy();
   // Deleting it ends it for good.
   await fireEvent.press(screen.getByRole('button', { name: 'Delete' }));
   await open('c2');
   await open('c1');
   await screen.findByText('Fixed.');
   expect(screen.queryByText('Not sent')).toBeNull();
+  // One that succeeds while the person is away leaves nothing behind.
+  await fireEvent.changeText(field(), 'Thanks');
+  await fireEvent.press(screen.getByTestId('button-Send message'));
+  await open('c2');
+  await screen.findByText('Docs');
+  await act(async () => answers[1]?.(Response.json({})));
+  await open('c1');
+  await screen.findByText('Fixed.');
+  expect(screen.queryByText('Not sent')).toBeNull();
+  expect(screen.queryByText('Thanks')).toBeNull();
+  expect(posts).toHaveLength(2);
+  expect(posts[1]).not.toBe(posts[0]);
 });
