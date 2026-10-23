@@ -266,10 +266,10 @@ self.addEventListener('notificationclick', (event) => {
       await pushQueue;
       const account = await accountTag();
       const context = own ? await contextOf(own) : undefined;
+      // A notice retains its owner even if the subscription has since moved accounts.
+      const noticeAccount = identifier(event.notification.data?.accountTag);
       const raw =
-        account &&
-        (!own || context?.tag === account) &&
-        event.notification.data?.accountTag === account
+        noticeAccount && noticeAccount === (own ? context?.tag : account)
           ? event.notification.data?.path
           : '/';
 

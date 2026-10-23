@@ -247,7 +247,10 @@ Pushes carry an opaque account tag. The worker uses fixed neutral text in Englis
 Simplified Chinese or Traditional Chinese for missing or mismatched tags, including
 pre-upgrade subscriptions, and opens only the app root. These notices use
 `maka-account-mismatch`, separate from an unknown event's `maka-inbox` notice.
-Click routing also checks the target tab's account before using a deep link.
+Notifications retain their account tag when shown. Click routing compares that tag
+with the target tab's own `/v1/me` context before using a deep link, independently
+of the current subscription owner. A missing or different tab account opens only
+the app root; with no open tab, the stored subscription owner must still match.
 
 On each signed-in app load, an existing browser subscription is POSTed again.
 Registration is idempotent and confirms or moves the endpoint to that account;

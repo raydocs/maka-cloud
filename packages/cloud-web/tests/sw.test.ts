@@ -459,21 +459,48 @@ test('visible conversations suppress banners but retain terminal ordering across
   expect(worker.shown[1]?.title).toBe(TASK.title);
 });
 
-test('a matching notification cannot deep-link an existing tab of another account', async () => {
-  const postMessage = vi.fn();
-  const saved = new Map([
-    ['/.maka-account', 'account-a'],
-    ['/.maka-context/tab', JSON.stringify({ tag: 'account-b' })],
-  ]);
-  const worker = load('en', saved, [
-    { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
-  ]);
-  await worker.click('/?conversation=private', 'account-a');
-  expect(postMessage).toHaveBeenCalledWith(
-    { type: 'maka.open', path: '/', id: expect.any(Number) },
-    expect.anything(),
-  );
-});
+test.each([undefined, 'account-b'])(
+  'a shown notification routes to its own tab with subscription owner %s',
+  async (owner) => {
+    const saved = new Map<string, string>();
+    const postMessage = vi.fn((data, ports) =>
+      ports[0].postMessage({ type: 'maka.open.ack', id: data.id }),
+    );
+    const worker = load('en', saved, [
+      { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
+    ]);
+    await worker.message({ type: 'maka.context', accountTag: 'account-a' });
+    await worker.push({ type: 'task.finished', conversationId: 'chat', taskId: 'one' });
+    const notice = worker.shown[0]?.options.data as { path: string; accountTag: string };
+    if (owner) await worker.message({ type: 'maka.subscription', accountTag: owner });
+    else saved.delete('/.maka-account');
+    await worker.click(notice.path, notice.accountTag);
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: 'maka.open', path: '/?conversation=chat&task=one', id: expect.any(Number) },
+      expect.anything(),
+    );
+    expect(worker.opened).toEqual([]);
+  },
+);
+
+test.each([undefined, '', 'account-b'])(
+  'a notification cannot deep-link a tab with missing or foreign account context %s',
+  async (tag) => {
+    const postMessage = vi.fn();
+    const saved = new Map([
+      ['/.maka-account', 'account-a'],
+      ['/.maka-context/tab', JSON.stringify({ tag })],
+    ]);
+    const worker = load('en', saved, [
+      { url: 'https://maka.example.test/', focus: async () => {}, postMessage },
+    ]);
+    await worker.click('/?conversation=private', 'account-a');
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: 'maka.open', path: '/', id: expect.any(Number) },
+      expect.anything(),
+    );
+  },
+);
 
 test('a push with no data still displays a neutral root-only notification', async () => {
   const worker = load();
