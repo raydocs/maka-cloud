@@ -1,5 +1,7 @@
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from 'react';
 import {
+  ApiError,
+  TERMINAL,
   type CloudClient,
   type Conversation,
   type TaskView,
@@ -110,9 +112,17 @@ export function WaitingJump({
   ) : null;
 }
 
-type Steer = { task: string; text: string; id: string; state?: TaskMessageState };
+const receipts = new Map<string, Steer[]>();
+type Steer = {
+  task: string;
+  text: string;
+  id: string;
+  state?: TaskMessageState;
+  restored?: boolean;
+};
 export function SteerComposer({
   client,
+  conversationId,
   tasks,
   draft,
   setDraft,
@@ -121,6 +131,7 @@ export function SteerComposer({
   children,
 }: {
   client: CloudClient;
+  conversationId?: string;
   tasks: TaskView[];
   draft: string;
   setDraft: (text: string) => void;
@@ -131,6 +142,7 @@ export function SteerComposer({
   const { t } = useT();
   const eligible = tasks.filter(
     (task) =>
+      task.steerable === true &&
       task.state === 'running' &&
       !task.cancelRequested &&
       !task.pauseRequested &&
@@ -138,17 +150,26 @@ export function SteerComposer({
       !task.treeStopPending,
   );
   const [target, setTarget] = useState<string | undefined>();
-  const taskId =
-    target !== undefined && !eligible.some((task) => task.taskId === target)
-      ? ''
-      : eligible.some((task) => task.taskId === target)
-        ? target!
-        : eligible.length === 1
-          ? eligible[0]!.taskId
-          : '';
-  const [messages, setMessages] = useState<Steer[]>([]);
+  const automatic = eligible.length === 1 ? eligible[0]!.taskId : '';
+  const frozen = useRef<string | undefined>(undefined);
+  if (!draft.trim()) frozen.current = undefined;
+  else if (frozen.current === undefined) frozen.current = target ?? automatic;
+  const selected = target ?? frozen.current ?? automatic;
+  const taskId = eligible.some((task) => task.taskId === selected) ? selected : '';
+  const [messages, updateMessages] = useState<Steer[]>(() =>
+    conversationId ? (receipts.get(conversationId) ?? []) : [],
+  );
+  const messageRows = useRef(messages);
+  function setMessages(update: (previous: Steer[]) => Steer[]) {
+    const rows = update(messageRows.current);
+    messageRows.current = rows;
+    if (conversationId) receipts.set(conversationId, rows);
+    updateMessages(rows);
+  }
   const [tooLong, setTooLong] = useState(false);
   const sending = useRef(false);
+  const polling = useRef(false);
+  const [unsupported, setUnsupported] = useState(false);
   const latestDraft = useRef(draft);
   latestDraft.current = draft;
   // The API has no read-message route. Reusing the same id is its documented idempotent
@@ -159,16 +180,13 @@ export function SteerComposer({
   useEffect(() => {
     let current = true;
     const refresh = setInterval(() => {
-      const { tasks, messages, busy } = latest.current;
-      if (document.visibilityState === 'hidden' || busy || sending.current) return;
-      const pending = messages.filter(
-        (message) =>
-          message.state === 'pending' &&
-          tasks.some((task) => task.taskId === message.task && task.state === 'running'),
-      );
+      const { messages, busy } = latest.current;
+      if (document.visibilityState === 'hidden' || busy || sending.current || polling.current)
+        return;
+      const pending = messages.filter((message) => message.state === 'pending');
       if (!pending.length) return;
       const message = pending[receiptIndex.current++ % pending.length]!;
-      sending.current = true;
+      polling.current = true;
       void client
         .sendTaskMessage(message.task, message.text, message.id)
         .then(
@@ -185,7 +203,7 @@ export function SteerComposer({
           () => {},
         )
         .finally(() => {
-          sending.current = false;
+          polling.current = false;
         });
     }, 10000);
     return () => {
@@ -193,12 +211,38 @@ export function SteerComposer({
       clearInterval(refresh);
     };
   }, [client]);
+  useEffect(() => {
+    const unread = messages.filter((message) => message.state === 'unseen' && !message.restored);
+    if (!unread.length) return;
+    setMessages((previous) =>
+      previous.map((message) =>
+        unread.some((row) => row.id === message.id) ? { ...message, restored: true } : message,
+      ),
+    );
+    const text = unread.map((message) => message.text).join('\n\n');
+    setDraft(latestDraft.current ? `${latestDraft.current}\n\n${text}` : text);
+  }, [messages, setDraft]);
   async function send(message: Steer) {
     if (sending.current) return;
     sending.current = true;
     try {
       await act('steer', async () => {
-        const result = await client.sendTaskMessage(message.task, message.text, message.id);
+        let result;
+        try {
+          result = await client.sendTaskMessage(message.task, message.text, message.id);
+        } catch (error) {
+          if (
+            error instanceof ApiError &&
+            error.status === 409 &&
+            error.code === 'steer_unsupported'
+          ) {
+            setUnsupported(true);
+            setTarget('');
+            setMessages((previous) => previous.filter((row) => row.id !== message.id));
+            return;
+          }
+          throw error;
+        }
         setMessages((previous) =>
           previous.map((row) =>
             row.id === message.id ? { ...row, state: result.message.state } : row,
@@ -230,6 +274,11 @@ export function SteerComposer({
         void send(message);
       }}
     >
+      {unsupported && (
+        <p role="alert">
+          {t('This task cannot take messages. Your draft is kept; send it as a new request.')}
+        </p>
+      )}
       {tooLong && (
         <p role="alert">{t('A message to a running task can have up to 4,000 characters.')}</p>
       )}
@@ -240,7 +289,10 @@ export function SteerComposer({
             aria-label={t('To the running task')}
             value={taskId}
             disabled={busy}
-            onChange={(event) => setTarget(event.target.value)}
+            onChange={(event) => {
+              setTarget(event.target.value);
+              frozen.current = event.target.value;
+            }}
           >
             <option value="">{t('Send as a new request')}</option>
             {eligible.map((task) => (
@@ -269,29 +321,42 @@ export function SteerComposer({
                   )[message.state],
                 )}
           </span>
-          {(message.state === undefined || message.state === 'pending') && (
-            <button type="button" disabled={busy} onClick={() => void send(message)}>
-              {t('Check delivery')}
-            </button>
-          )}
-          {message.state === 'pending' && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() =>
-                void act('withdraw', async () => {
-                  const result = await client.withdrawTaskMessage(message.task, message.id);
-                  setMessages((previous) =>
-                    previous.map((row) =>
-                      row.id === message.id ? { ...row, state: result.message.state } : row,
-                    ),
-                  );
-                })
-              }
-            >
-              {t('Take back')}
-            </button>
-          )}
+          {(message.state === undefined || message.state === 'pending') &&
+            tasks.some((task) => task.taskId === message.task && !TERMINAL.has(task.state)) && (
+              <button type="button" disabled={busy} onClick={() => void send(message)}>
+                {t('Check delivery')}
+              </button>
+            )}
+          {message.state === 'pending' &&
+            tasks.some((task) => task.taskId === message.task && !TERMINAL.has(task.state)) && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void act('withdraw', async () => {
+                    let result;
+                    try {
+                      result = await client.withdrawTaskMessage(message.task, message.id);
+                    } catch (error) {
+                      if (
+                        !(error instanceof ApiError) ||
+                        error.status !== 409 ||
+                        error.code !== 'invalid_state'
+                      )
+                        throw error;
+                      result = await client.sendTaskMessage(message.task, message.text, message.id);
+                    }
+                    setMessages((previous) =>
+                      previous.map((row) =>
+                        row.id === message.id ? { ...row, state: result.message.state } : row,
+                      ),
+                    );
+                  })
+                }
+              >
+                {t('Take back')}
+              </button>
+            )}
         </div>
       ))}
       {children}

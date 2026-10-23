@@ -239,6 +239,7 @@ export function mergeViews(state: ConversationState, views: TaskView[]): Convers
     if (!task) continue;
     const merged: TaskView = { ...task };
     for (const key of [
+      'steerable',
       'costUsd',
       'budgetUsd',
       'budgetExceeded',

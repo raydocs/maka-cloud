@@ -76,7 +76,7 @@ export interface Stack {
   /** Starts a task of the conversation (a subtask when `parent` is a task id). */
   delegate(
     conversationId: string,
-    input: { title: string; parent?: string; budgetUsd?: number },
+    input: { title: string; parent?: string; budgetUsd?: number; steerable?: boolean },
   ): Promise<string>;
   /** The fake run of a task, once the orchestrator has started it. */
   run(taskId: string): Promise<FakeRun>;
@@ -171,6 +171,7 @@ export async function startStack(
   const language = options.language ?? 'en';
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
   const fake = new FakeRunner({ pausable: options.pausable ?? true, steerable: true });
+  const plain = new FakeRunner({ name: 'plain', pausable: true });
   const computer = await fakeComputer();
   const questions = new Map<
     string,
@@ -239,7 +240,7 @@ export async function startStack(
     dbPath: join(dir, 'server.sqlite'),
     invitesPath: join(dir, 'invites.sqlite'),
     handoffRoot: join(dir, 'handoff'),
-    runners: new RunnerRegistry([fake]),
+    runners: new RunnerRegistry([fake, plain]),
     previews: { fetch: previewFetch },
     computer: computer.source,
     // Sign-in by emailed code with a mail service that only keeps what it was given.
@@ -402,7 +403,7 @@ export async function startStack(
               return child;
             })();
       const view = await server.orchestrator.delegate(session, {
-        runner: 'fake',
+        runner: input.steerable === false ? 'plain' : 'fake',
         brief: input.title,
         title: input.title,
         ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),

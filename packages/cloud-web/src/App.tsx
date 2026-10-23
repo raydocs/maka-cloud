@@ -1,7 +1,15 @@
 import { useT } from './i18n';
 import type { Key } from './strings';
 import { ArrowUp, ArrowUpRight, FileText, Search, UserRound, Plus } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { Button } from '@astryxdesign/core';
 import { type ModeChoice, useMode } from './theme';
 import { FailureNote } from './Failure';
@@ -377,6 +385,8 @@ function ArtifactList({
   );
 }
 
+const conversationDrafts = new Map<string, string>();
+
 export function ConversationView({
   client,
   conversation,
@@ -400,7 +410,13 @@ export function ConversationView({
   }, [feed]);
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   const { state, status, error, busy, artifacts, noPause } = snapshot;
-  const [draft, setDraft] = useState('');
+  const [draft, updateDraft] = useState(
+    () => conversationDrafts.get(conversation.conversationId) ?? '',
+  );
+  const setDraft = (text: string) => {
+    conversationDrafts.set(conversation.conversationId, text);
+    updateDraft(text);
+  };
   const [workMode, setWorkMode] = useState<Mode | undefined>();
   const act = (key: string, work: () => Promise<unknown>) => feed.act(key, work);
   const control = (taskId: string, action: TaskControl) => feed.control(taskId, action);
@@ -409,12 +425,6 @@ export function ConversationView({
 
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
   const decisions = useRef<HTMLDivElement>(null);
-  const waiting =
-    questions.filter((q) => !state.answers[q.questionId]).length +
-    visibleInbox(
-      Object.values(state.inbox).filter((i) => i.kind !== 'suggestion'),
-      openQuestions,
-    ).live.length;
   const total = totalCost(tasks);
   const topLevel = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
   // A top-level task's result card holds its outcome, so the inbox here does not announce it again.
@@ -424,6 +434,14 @@ export function ConversationView({
       .filter((task) => task.state === 'succeeded' && task.manifest?.summary !== undefined)
       .map((task) => task.taskId),
   );
+  const inboxItems = Object.values(state.inbox).filter(
+    (item) =>
+      item.kind !== 'suggestion' &&
+      !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
+  );
+  const waiting =
+    questions.filter((q) => !state.answers[q.questionId]).length +
+    visibleInbox(inboxItems, openQuestions).live.length;
   const unshown = withResults.filter(
     (task) =>
       !shown.has(task.taskId) &&
@@ -483,11 +501,7 @@ export function ConversationView({
           {/* Proposed cards live on Home. A finished task whose result card is above is not
             announced again here; it is acknowledged on Home. */}
           <InboxPanel
-            items={Object.values(state.inbox).filter(
-              (item) =>
-                item.kind !== 'suggestion' &&
-                !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
-            )}
+            items={inboxItems}
             openQuestions={openQuestions}
             disabled={Boolean(busy)}
             onAnswer={answerItem}
@@ -565,6 +579,7 @@ export function ConversationView({
         </span>
         <SteerComposer
           client={client}
+          conversationId={conversation.conversationId}
           tasks={topLevel}
           draft={draft}
           setDraft={setDraft}
@@ -900,6 +915,9 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   const [chosen, setChosen] = useState('');
   const [searching, setSearching] = useState(false);
   const [choosing, setChoosing] = useState(false);
+  const menuRef = useCallback((node: HTMLDetailsElement | null) => {
+    if (!node) setChoosing(false);
+  }, []);
   const searchInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (searching) searchInput.current?.focus();
@@ -964,6 +982,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     >
       {!taskPage && (wide || view !== 'settings') && (
         <details
+          ref={menuRef}
           className="composer-menu"
           onToggle={(event) => setChoosing(event.currentTarget.open)}
         >

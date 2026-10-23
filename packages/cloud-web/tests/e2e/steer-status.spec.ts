@@ -70,3 +70,20 @@ test('starter ideas fill the draft and offscreen decisions have a jump chip', as
   await page.getByRole('button', { name: '1 waiting', exact: true }).click();
   await expect(page.getByText('Choose a direction')).toBeInViewport();
 });
+
+test('a running task without steering leaves the composer sending normal requests', async ({
+  page,
+  request,
+}) => {
+  const invite = await signIn(page, request);
+  await page.getByLabel('What would you like to get done?').fill('Review the build');
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('Review the build');
+  const [{ conversationId }] = await conversationsOf(request, invite.token);
+  await control(request, 'delegate', { conversationId, title: 'Build work', steerable: false });
+  await expect(page.getByText('Build work', { exact: true }).first()).toBeVisible();
+  await expect(page.getByLabel('To the running task')).toHaveCount(0);
+  await page.getByLabel('Keep the conversation going').fill('A separate request');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('A separate request');
+});

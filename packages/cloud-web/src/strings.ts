@@ -1,6 +1,17 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  'This task cannot take messages. Your draft is kept; send it as a new request.':
+    'This task cannot take messages. Your draft is kept; send it as a new request.',
+  'A computer request is still in progress. Wait, then try again.':
+    'A computer request is still in progress. Wait, then try again.',
+  'Your control has ended. You are watching the task.':
+    'Your control has ended. You are watching the task.',
+  'This computer is being watched in another tab or device. Close that view first.':
+    'This computer is being watched in another tab or device. Close that view first.',
+  'This invite was revoked. Sign in with a valid invite.':
+    'This invite was revoked. Sign in with a valid invite.',
+
   'A message to a running task can have up to 4,000 characters.':
     'A message to a running task can have up to 4,000 characters.',
   Working: 'Working',
@@ -541,6 +552,15 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  'This task cannot take messages. Your draft is kept; send it as a new request.':
+    '此任务无法接收消息。草稿已保留，请作为新请求发送。',
+  'A computer request is still in progress. Wait, then try again.':
+    '电脑请求仍在处理中，请稍后重试。',
+  'Your control has ended. You are watching the task.': '你的控制已结束，现在正在观看任务。',
+  'This computer is being watched in another tab or device. Close that view first.':
+    '另一标签页或设备正在观看此电脑，请先关闭该视图。',
+  'This invite was revoked. Sign in with a valid invite.': '此邀请已撤销，请使用有效邀请登录。',
+
   'A message to a running task can have up to 4,000 characters.':
     '发送到运行中任务的消息最多可包含 4,000 个字符。',
   Working: '工作中',
@@ -1044,6 +1064,15 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  'This task cannot take messages. Your draft is kept; send it as a new request.':
+    '此任務無法接收訊息。草稿已保留，請作為新請求傳送。',
+  'A computer request is still in progress. Wait, then try again.':
+    '電腦請求仍在處理中，請稍後重試。',
+  'Your control has ended. You are watching the task.': '你的控制已結束，現在正在觀看任務。',
+  'This computer is being watched in another tab or device. Close that view first.':
+    '另一分頁或裝置正在觀看此電腦，請先關閉該檢視。',
+  'This invite was revoked. Sign in with a valid invite.': '此邀請已撤銷，請使用有效邀請登入。',
+
   'A message to a running task can have up to 4,000 characters.':
     '傳送至執行中任務的訊息最多可包含 4,000 個字元。',
   Working: '工作中',

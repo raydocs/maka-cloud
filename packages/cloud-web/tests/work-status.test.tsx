@@ -16,6 +16,7 @@ afterEach(() => {
 });
 const task: TaskView = {
   taskId: 'task-1',
+  steerable: true,
   title: 'Repair the build',
   state: 'running',
   createdAt: 0,
@@ -183,7 +184,12 @@ test('finished computer explains how to continue without opening a stream', asyn
 
 test.each([
   [404, 'not_found', 'The computer may be asleep or unavailable. Wait, then reconnect.'],
-  [409, 'computer_busy', 'Control is held elsewhere or changing. Retry after it is returned.'],
+  [
+    429,
+    'rate_limited',
+    'This computer is being watched in another tab or device. Close that view first.',
+  ],
+  [401, 'unauthorized', 'This invite was revoked. Sign in with a valid invite.'],
   [503, 'unavailable', 'The connection dropped. Reconnect to continue watching.'],
 ])(
   'unavailable computer %s explains a next step and disables input',
@@ -198,8 +204,12 @@ test.each([
     fireEvent(details, new Event('toggle'));
     await screen.findByText(String(sentence));
     expect((screen.getByLabelText('Terminal input') as HTMLInputElement).disabled).toBe(true);
-    fireEvent.click(screen.getByText('Reconnect computer'));
-    await vi.waitFor(() => expect(watchComputer).toHaveBeenCalledTimes(2));
+    if (status === 401 || status === 429) {
+      expect(screen.queryByText('Reconnect computer')).toBeNull();
+    } else {
+      fireEvent.click(screen.getByText('Reconnect computer'));
+      await vi.waitFor(() => expect(watchComputer).toHaveBeenCalledTimes(2));
+    }
   },
 );
 
@@ -295,4 +305,171 @@ test('oversized steers keep the draft and do not call the API', () => {
   expect(screen.getByRole('alert').textContent).toContain('4,000');
   expect(sendTaskMessage).not.toHaveBeenCalled();
   expect(clear).not.toHaveBeenCalled();
+});
+
+function composerProps(sendTaskMessage = vi.fn()) {
+  return {
+    client: { sendTaskMessage } as unknown as CloudClient,
+    tasks: [task],
+    draft: 'Use this',
+    setDraft: vi.fn(),
+    act: run,
+    busy: false,
+    children: (
+      <form onSubmit={(event) => event.preventDefault()}>
+        <button type="submit">Send</button>
+      </form>
+    ),
+  };
+}
+
+test('unsupported running tasks use the normal composer', () => {
+  const props = composerProps();
+  const normal = vi.fn((event) => event.preventDefault());
+  render(
+    <SteerComposer {...props} tasks={[{ ...task, steerable: false }]}>
+      <form onSubmit={normal}>
+        <button type="submit">Send</button>
+      </form>
+    </SteerComposer>,
+  );
+  fireEvent.click(screen.getByText('Send'));
+  expect(normal).toHaveBeenCalledOnce();
+  expect(props.client.sendTaskMessage).not.toHaveBeenCalled();
+});
+
+test('a draft never automatically changes its target as tasks change', () => {
+  const props = composerProps();
+  const normal = vi.fn((event) => event.preventDefault());
+  const children = (
+    <form onSubmit={normal}>
+      <button type="submit">Send</button>
+    </form>
+  );
+  const view = render(<SteerComposer {...props}>{children}</SteerComposer>);
+  expect((screen.getByLabelText('To the running task') as HTMLSelectElement).value).toBe(
+    task.taskId,
+  );
+  view.rerender(
+    <SteerComposer {...props} tasks={[{ ...task, taskId: 'replacement' }]}>
+      {children}
+    </SteerComposer>,
+  );
+  expect((screen.getByLabelText('To the running task') as HTMLSelectElement).value).toBe('');
+  fireEvent.click(screen.getByText('Send'));
+  expect(normal).toHaveBeenCalledOnce();
+});
+
+test('unsupported steering keeps the draft and explains how to send normally', async () => {
+  const { ApiError } = await import('@maka-cloud/client');
+  const props = composerProps(vi.fn().mockRejectedValue(new ApiError(409, 'steer_unsupported')));
+  render(<SteerComposer {...props} />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  expect(screen.getByRole('alert').textContent).toContain('Your draft is kept');
+  expect(props.setDraft).not.toHaveBeenCalled();
+  expect((screen.getByLabelText('To the running task') as HTMLSelectElement).value).toBe('');
+});
+
+test('receipts keep polling after task end, restore unread text and hide controls', async () => {
+  vi.useFakeTimers();
+  const send = vi
+    .fn()
+    .mockResolvedValueOnce({ message: { state: 'pending' } })
+    .mockResolvedValue({ message: { state: 'unseen' } });
+  const props = composerProps(send);
+  const view = render(<SteerComposer {...props} />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  view.rerender(
+    <SteerComposer {...props} draft="Another draft" tasks={[{ ...task, state: 'succeeded' }]} />,
+  );
+  expect(screen.queryByText('Check delivery')).toBeNull();
+  expect(screen.queryByText('Take back')).toBeNull();
+  await act(async () => vi.advanceTimersByTime(10000));
+  expect(screen.getByText('Not read before the task ended', { exact: false })).toBeTruthy();
+  expect(props.setDraft).toHaveBeenLastCalledWith('Another draft\n\nUse this');
+});
+
+test('sending during a background receipt check still sends the new message', async () => {
+  vi.useFakeTimers();
+  let finish!: (value: unknown) => void;
+  const send = vi
+    .fn()
+    .mockResolvedValueOnce({ message: { state: 'pending' } })
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValue({ message: { state: 'pending' } });
+  const props = composerProps(send);
+  const view = render(<SteerComposer {...props} />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  await act(async () => vi.advanceTimersByTime(10000));
+  view.rerender(<SteerComposer {...props} draft="Second message" />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  expect(send).toHaveBeenCalledTimes(3);
+  expect(send.mock.calls[2]?.[1]).toBe('Second message');
+  await act(async () => finish({ message: { state: 'pending' } }));
+});
+
+test('take back after the agent reads updates the receipt to read', async () => {
+  const { ApiError } = await import('@maka-cloud/client');
+  const send = vi
+    .fn()
+    .mockResolvedValueOnce({ message: { state: 'pending' } })
+    .mockResolvedValue({ message: { state: 'delivered' } });
+  const props = composerProps(send);
+  props.client.withdrawTaskMessage = vi.fn().mockRejectedValue(new ApiError(409, 'invalid_state'));
+  render(<SteerComposer {...props} />);
+  await act(async () => fireEvent.click(screen.getByText('Send')));
+  await act(async () => fireEvent.click(screen.getByText('Take back')));
+  expect(screen.getByText('Read by the task', { exact: false })).toBeTruthy();
+  expect(screen.queryByText('Take back')).toBeNull();
+});
+
+test.each([
+  ['computer_busy', 'A computer request is still in progress. Wait, then try again.'],
+  ['computer_not_in_control', 'Your control has ended. You are watching the task.'],
+])('computer control %s preserves the live view and explains what happened', async (code, copy) => {
+  const { ApiError } = await import('@maka-cloud/client');
+  const watchComputer = vi.fn(async (_id, frame) => {
+    frame({ controller: 'human' });
+  });
+  const computerControl = vi.fn().mockRejectedValue(new ApiError(409, code));
+  render(
+    <Computer
+      client={{ watchComputer, computerControl } as unknown as CloudClient}
+      task={{ ...task, state: 'paused' }}
+    />,
+  );
+  const details = screen.getByText('Open computer').closest('details')!;
+  details.open = true;
+  fireEvent(details, new Event('toggle'));
+  fireEvent.click(await screen.findByText('Hand back control'));
+  await screen.findByText(copy);
+  expect(screen.queryByText('Reconnect computer')).toBeNull();
+  expect(
+    screen.getByText(
+      code === 'computer_busy' ? 'You have control · Task paused' : 'Watching · Task has control',
+    ),
+  ).toBeTruthy();
+});
+
+test('a send acknowledged after switching conversations keeps its receipt', async () => {
+  let finish!: (value: unknown) => void;
+  const send = vi.fn().mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const props = composerProps(send);
+  const view = render(<SteerComposer {...props} conversationId="receipt-switch" />);
+  fireEvent.click(screen.getByText('Send'));
+  view.unmount();
+  await act(async () => finish({ message: { state: 'pending' } }));
+  render(<SteerComposer {...props} draft="" conversationId="receipt-switch" />);
+  expect(screen.getByText('Waiting for the next step', { exact: false })).toBeTruthy();
+  expect(screen.getByText('Use this')).toBeTruthy();
 });

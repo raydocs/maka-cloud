@@ -46,6 +46,7 @@ export interface TaskPanel {
 
 /** A task as the public API shows it: the runner id never leaves the server. */
 export interface TaskView {
+  steerable?: boolean;
   taskId: string;
   parentTaskId?: string;
   title?: string;
