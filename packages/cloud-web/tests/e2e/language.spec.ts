@@ -9,7 +9,7 @@ test('Traditional Home and Chat preserve server text; Settings remembers an Engl
   request,
 }, info) => {
   // This test stack has no grant ledger; exercise its optional Settings panel with an empty ledger.
-  await page.route('**/v1/grants', (route) => route.fulfill({ json: { grants: [] } }));
+  await page.route('**/v1/inbox/grants', (route) => route.fulfill({ json: { grants: [] } }));
   const invite = await control<{ token: string }>(request, 'invite');
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-Hant');
