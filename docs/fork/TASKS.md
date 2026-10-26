@@ -42,7 +42,8 @@ T28, T26, T27, T14b, then T11 and T14, then T13 and batch 4. T12 and T16 are fol
 T23, T24 and T30. T29 (iOS and Android) runs in a second lane from now on, in
 parallel with the main order. After T25 and T28: T27, T26, T14b, then T30;
 T31 joins the T29 lane. See "Direction (2026-10-21)" below T29. T32
-(connect your own computer) starts only after launch.
+(connect your own computer) starts only after launch. T33 (work like an
+employee) starts after the first live run, ahead of batch 3.
 
 Borrow before building (2026-10-20). The owner wants to start testing as
 soon as possible, so a task takes a working piece from these projects before
@@ -1028,6 +1029,34 @@ refused; a preview of a port the task does not own, of a control port or
 of another person's task is refused; a move to a box and back keeps every
 message and the session id and never overwrites a dirty folder; no model
 credential is read from the computer.
+
+## T33: work like an employee: brief once, then work, never grind
+
+Depends on: T5, T8, T10, T20, T25. Design: `docs/fork/design/employee-loop.md`.
+Owner direction (2026-10-26): the software employee comes first; assistant
+features wait. Starts after the first live run.
+
+- Integrity scan on the host after a change is read out: modified or
+  deleted existing tests, added skip or focus markers, changed snapshots,
+  changed test scripts, runner config or CI, fewer assertions. Recorded
+  in `verification.json`; a flagged change is never hands-off; the
+  reviewer answers "fix or sidestep?" on the flagged hunks, and a
+  sidestep is a P1.
+- At most two unverified delegations per run, in code, for every
+  playbook. `sameFailure` when both vendors fail on the same normalised
+  error.
+- A `stuck` report through `ask_user`: what was tried, where it is stuck,
+  the diagnosis, two to four one-tap options with one recommended. It
+  grants nothing an approval gate guards.
+- A work order before the first delegation: outcome, done means, out of
+  scope, assumptions, at most three questions each with a default. No
+  questions: the run starts at once. "Start with defaults" in one tap.
+  Only new sessions get the prompt change.
+- A progress check on busy runs that do not move, raising the stuck
+  report. "Calls I made" on the result card.
+- Scorecard: integrity-flag share and a shortcut suite of eval tasks
+  built to tempt special-casing.
+- Tests: as listed in the design note.
 
 ---
 
