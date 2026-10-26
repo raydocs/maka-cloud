@@ -45,6 +45,7 @@ const nativeWays = { apple: false, google: false };
  * How a person signs in: an emailed code (and, for a new person, the invite code once), or an invite
  * token made by hand. `open` receives a session token and must either open the workspace or throw, so
  * a session that cannot be opened is ended instead of being left behind. `openInvite` is the old box.
+ * The web app signs in by cookie, so `open` receives '' for the session the server set.
  */
 export function SignIn({
   open,
@@ -136,7 +137,8 @@ function Ways({
   const latest = useRef(open);
   latest.current = open;
   const flow = useMemo(
-    () => new AuthFlow({ platform, onSignedIn: (token) => latest.current(token) }),
+    // The session goes into a cookie no script can read; `open('')` opens the workspace from it.
+    () => new AuthFlow({ platform, cookie: true, onSignedIn: (token) => latest.current(token) }),
     [],
   );
   useEffect(() => {

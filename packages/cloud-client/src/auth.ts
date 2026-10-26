@@ -52,6 +52,12 @@ export interface AuthFlowOptions {
    * with it; if that throws, the flow says so and stays where it is.
    */
   onSignedIn: (token: string) => void | Promise<void>;
+  /**
+   * The server keeps the session in a cookie no script can read (the web app). Every call asks for
+   * it with `X-Maka-Cookie: 1`, the answer carries no token, and `onSignedIn` gets '' and opens the
+   * workspace with `openCookieWorkspace`.
+   */
+  cookie?: boolean;
 }
 
 interface Challenge {
@@ -60,8 +66,8 @@ interface Challenge {
 }
 
 type Outcome =
-  | { status: 'signed_in'; token: string }
-  | { status: 'needs_invite'; pendingToken: string };
+  /** No token when the session went into the cookie. */
+  { status: 'signed_in'; token?: string } | { status: 'needs_invite'; pendingToken: string };
 
 const NO_WAYS: SignInWays = { apple: false, google: false, email: false };
 
@@ -75,6 +81,7 @@ export class AuthFlow extends Store<AuthState> {
   private readonly baseUrl: string;
   private readonly fetcher: typeof fetch;
   private readonly onSignedIn: AuthFlowOptions['onSignedIn'];
+  private readonly cookie: boolean;
   private ways: SignInWays = NO_WAYS;
   private challenge: Challenge | undefined;
   private pendingToken: string | undefined;
@@ -88,6 +95,7 @@ export class AuthFlow extends Store<AuthState> {
     const given = options.fetcher;
     this.fetcher = given ? (input, init) => given(input, init) : globalThis.fetch.bind(globalThis);
     this.onSignedIn = options.onSignedIn;
+    this.cookie = options.cookie === true;
   }
 
   /** Reads which ways in the server offers. Also the retry after `failed`. */
@@ -221,14 +229,14 @@ export class AuthFlow extends Store<AuthState> {
   }
 
   private async finish(mine: number, outcome: Outcome): Promise<void> {
-    if (!validOutcome(outcome)) {
+    if (!validOutcome(outcome, this.cookie)) {
       // Not what a Maka server answers (a proxy's page, another service): a plain error, nothing handed on.
       if (mine === this.turn) this.choose(failure(new ApiError(502), 'provider'));
       return;
     }
     if (mine !== this.turn) {
       // The person left this step, but the server has already issued a session for it: end it.
-      if (outcome.status === 'signed_in') void this.endSession(outcome.token);
+      if (outcome.status === 'signed_in') void this.endSession(outcome.token ?? '');
       return;
     }
     if (outcome.status === 'needs_invite') {
@@ -239,10 +247,10 @@ export class AuthFlow extends Store<AuthState> {
     }
     this.forget();
     try {
-      await this.onSignedIn(outcome.token);
+      await this.onSignedIn(outcome.token ?? '');
     } catch (e) {
       // The device did not take the session (for example the secure store refused it): end it.
-      void this.endSession(outcome.token);
+      void this.endSession(outcome.token ?? '');
       if (mine !== this.turn) return;
       // Our own words (a failed save on the device) are shown as written; anything else is described.
       this.choose(e instanceof Error && e.constructor === Error ? e.message : failure(e, 'open'));
@@ -256,7 +264,8 @@ export class AuthFlow extends Store<AuthState> {
     try {
       await this.fetcher(`${this.baseUrl}/v1/auth/sign-out`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        // In cookie mode the session is the cookie the server just set; the sign-out clears it.
+        headers: this.cookie ? { 'X-Maka-Cookie': '1' } : { Authorization: `Bearer ${token}` },
       });
     } catch {
       // It ends by itself when idle.
@@ -283,7 +292,10 @@ export class AuthFlow extends Store<AuthState> {
   private async call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
     const response = await this.fetcher(`${this.baseUrl}${path}`, {
       method,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(this.cookie ? { 'X-Maka-Cookie': '1' } : {}),
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const parsed = (await response.json().catch(() => undefined)) as
@@ -303,10 +315,15 @@ export class AuthFlow extends Store<AuthState> {
 /** A device session token, as the server issues it. */
 const SESSION_PREFIX = 'mks_';
 
-function validOutcome(outcome: unknown): outcome is Outcome {
+function validOutcome(outcome: unknown, cookie: boolean): outcome is Outcome {
   if (typeof outcome !== 'object' || outcome === null) return false;
-  const { status, token, pendingToken } = outcome as Record<string, unknown>;
-  if (status === 'signed_in') return typeof token === 'string' && token.startsWith(SESSION_PREFIX);
+  const { status, token, sessionId, pendingToken } = outcome as Record<string, unknown>;
+  if (status === 'signed_in') {
+    // In cookie mode the session went into the cookie; a token in the body means it did not.
+    return cookie
+      ? token === undefined && typeof sessionId === 'string' && sessionId !== ''
+      : typeof token === 'string' && token.startsWith(SESSION_PREFIX);
+  }
   return status === 'needs_invite' && typeof pendingToken === 'string' && pendingToken !== '';
 }
 

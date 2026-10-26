@@ -22,20 +22,46 @@ interface Call {
   route: string;
   body: Record<string, unknown> | undefined;
   auth: string | undefined;
+  /** The request asked to be signed in by the session cookie. */
+  cookie: boolean;
 }
+
+/**
+ * The browser's cookie for this site, as the server sets it. The page can neither read nor write
+ * it: only `session` answers set it and a sign-out clears it, as the real server does.
+ */
+const jar: { session?: string } = {};
+beforeEach(() => {
+  delete jar.session;
+});
+
+/** A sign-in answer that puts session `id` into the cookie and carries no token. */
+const session = (id: string) => () => {
+  jar.session = id;
+  return json({ status: 'signed_in', sessionId: id });
+};
 
 /** A server that answers by route and remembers what it was asked. */
 function serve(routes: Record<string, (call: Call) => Response | Promise<Response>>) {
   const calls: Call[] = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const path = new URL(String(input), 'http://localhost').pathname;
+    const headers = (init.headers ?? {}) as Record<string, string>;
     const call: Call = {
       route: `${init.method ?? 'GET'} ${path}`,
       body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined,
-      auth: (init.headers as Record<string, string> | undefined)?.Authorization,
+      auth: headers.Authorization,
+      cookie: headers['X-Maka-Cookie'] === '1',
     };
     calls.push(call);
+    const signedIn = call.cookie && jar.session !== undefined;
+    if (call.route === 'GET /v1/me')
+      return signedIn ? json({ ownerId: 'inv_1' }) : json({ error: 'unauthorized' }, 401);
+    if (call.route === 'POST /v1/auth/sign-out' && signedIn) delete jar.session;
     const handler = routes[call.route];
+    // The workspace's own routes answer a cookie request only while the cookie signs in.
+    if (call.cookie && !call.route.includes('/v1/auth/') && !signedIn)
+      return json({ error: 'unauthorized' }, 401);
     return handler ? handler(call) : json({}, 404);
   });
   return calls;
@@ -81,13 +107,12 @@ test('an invite token still opens the workspace, and a wrong one is said under t
   await screen.findByLabelText('What would you like to get done?');
 });
 
-test('email: a known address signs in with the code and the workspace opens with the session token', async () => {
+test('email: a known address signs in with the code, and the session lives only in the cookie', async () => {
   const calls = serve({
     'GET /v1/auth/options': () => json(WAYS),
     'POST /v1/auth/email': () =>
       json({ challengeId: 'c1', deviceSecret: 'device-secret', expiresAt: 9 }),
-    'POST /v1/auth/email/verify': () =>
-      json({ status: 'signed_in', token: 'mks_abc.def', sessionId: 's1' }),
+    'POST /v1/auth/email/verify': session('s1'),
     'GET /v1/conversations': conversations,
   });
   mount();
@@ -104,7 +129,10 @@ test('email: a known address signs in with the code and the workspace opens with
     code: '123456',
   });
   expect(typeof verify?.body?.device).toBe('string');
-  expect(calls.find((c) => c.route === 'GET /v1/conversations')?.auth).toBe('Bearer mks_abc.def');
+  // every request asks for the cookie, and none carries a token the page could hold
+  expect(calls.every((c) => c.cookie)).toBe(true);
+  expect(calls.some((c) => c.auth !== undefined)).toBe(false);
+  expect(calls.some((c) => c.route === 'GET /v1/conversations')).toBe(true);
 });
 
 test('email: a new person gives the invite code once and is then signed in', async () => {
@@ -112,8 +140,7 @@ test('email: a new person gives the invite code once and is then signed in', asy
     'GET /v1/auth/options': () => json(WAYS),
     'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
     'POST /v1/auth/email/verify': () => json({ status: 'needs_invite', pendingToken: 'pnd_1' }),
-    'POST /v1/auth/claim': () =>
-      json({ status: 'signed_in', token: 'mks_new.tok', sessionId: 's2' }),
+    'POST /v1/auth/claim': session('s2'),
     'GET /v1/conversations': conversations,
   });
   mount();
@@ -136,8 +163,7 @@ test('a session that cannot be opened is ended on the server and the person stay
   const calls = serve({
     'GET /v1/auth/options': () => json(WAYS),
     'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
-    'POST /v1/auth/email/verify': () =>
-      json({ status: 'signed_in', token: 'mks_x.y', sessionId: 's3' }),
+    'POST /v1/auth/email/verify': session('s3'),
     'GET /v1/conversations': () => json({ error: 'unavailable' }, 503),
     'POST /v1/auth/sign-out': () => json({}),
   });
@@ -149,9 +175,10 @@ test('a session that cannot be opened is ended on the server and the person stay
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
   await waitFor(() =>
     expect(
-      calls.some((c) => c.route === 'POST /v1/auth/sign-out' && c.auth === 'Bearer mks_x.y'),
+      calls.some((c) => c.route === 'POST /v1/auth/sign-out' && c.cookie && !c.auth),
     ).toBe(true),
   );
+  expect(jar.session).toBeUndefined();
   await screen.findByLabelText('Email');
   expect(screen.queryByLabelText('What would you like to get done?')).toBeNull();
 });
@@ -160,8 +187,7 @@ test('signing out of a signed-in device ends its session on the server and shows
   const calls = serve({
     'GET /v1/auth/options': () => json(WAYS),
     'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
-    'POST /v1/auth/email/verify': () =>
-      json({ status: 'signed_in', token: 'mks_abc.def', sessionId: 's1' }),
+    'POST /v1/auth/email/verify': session('s1'),
     'GET /v1/conversations': conversations,
     'GET /v1/auth/sessions': () =>
       json({
@@ -198,9 +224,8 @@ test('signing out of a signed-in device ends its session on the server and shows
   expect(within(panel).getByText('iPhone app')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
   await screen.findByLabelText('Email');
-  expect(
-    calls.some((c) => c.route === 'POST /v1/auth/sign-out' && c.auth === 'Bearer mks_abc.def'),
-  ).toBe(true);
+  expect(calls.some((c) => c.route === 'POST /v1/auth/sign-out' && c.cookie && !c.auth)).toBe(true);
+  expect(jar.session).toBeUndefined();
 });
 
 test('the devices of an account: another one is signed out; an unsupported server shows nothing', async () => {
@@ -281,8 +306,7 @@ test('signing out does not wait for a server that never answers', async () => {
     serve({
       'GET /v1/auth/options': () => json(WAYS),
       'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
-      'POST /v1/auth/email/verify': () =>
-        json({ status: 'signed_in', token: 'mks_abc.def', sessionId: 's1' }),
+      'POST /v1/auth/email/verify': session('s1'),
       'GET /v1/conversations': conversations,
       'POST /v1/auth/sign-out': () => new Promise<Response>(() => {}),
     });
@@ -304,4 +328,49 @@ test('signing out does not wait for a server that never answers', async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+test('a reload, or a tap on a notification, opens the workspace from the cookie without signing in again', async () => {
+  jar.session = 's1';
+  const calls = serve({
+    'GET /v1/auth/options': () => json(WAYS),
+    'GET /v1/conversations': conversations,
+  });
+  mount();
+  await screen.findByLabelText('What would you like to get done?');
+  expect(calls.some((c) => c.route.startsWith('POST /v1/auth/'))).toBe(false);
+  expect(calls.every((c) => c.cookie && !c.auth)).toBe(true);
+});
+
+test('a cookie that no longer signs in, or no answer, leads to the sign-in screen', async () => {
+  serve({ 'GET /v1/auth/options': () => json(WAYS) });
+  mount();
+  await screen.findByLabelText('Email');
+  cleanup();
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    if (String(input).endsWith('/v1/auth/options')) return json(WAYS);
+    throw new TypeError('offline');
+  });
+  mount();
+  await screen.findByLabelText('Email');
+  expect(screen.queryByLabelText('What would you like to get done?')).toBeNull();
+});
+
+test('the token the server gives a phone is refused on the web, so no session ever sits in the page', async () => {
+  const calls = serve({
+    'GET /v1/auth/options': () => json(WAYS),
+    'POST /v1/auth/email': () => json({ challengeId: 'c1', deviceSecret: 's', expiresAt: 9 }),
+    'POST /v1/auth/email/verify': () =>
+      json({ status: 'signed_in', token: 'mks_abc.def', sessionId: 's1' }),
+    'GET /v1/conversations': conversations,
+  });
+  mount();
+  fireEvent.change(await screen.findByLabelText('Email'), { target: { value: 'ada@example.com' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Email me a code' }));
+  await screen.findByText('Check your email');
+  fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  await screen.findByLabelText('Email');
+  expect(screen.queryByLabelText('What would you like to get done?')).toBeNull();
+  expect(calls.some((c) => c.auth !== undefined)).toBe(false);
 });

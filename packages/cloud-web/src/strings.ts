@@ -647,6 +647,8 @@ export const en = {
   'Signed in, but the workspace could not be opened ({status}). Try again.':
     'Signed in, but the workspace could not be opened ({status}). Try again.',
   Continue: 'Continue',
+  'This browser did not keep the sign-in. Allow cookies for this site, then try again.':
+    'This browser did not keep the sign-in. Allow cookies for this site, then try again.',
 } as const;
 
 export type Key = keyof typeof en;
@@ -1253,6 +1255,8 @@ export const zhHans: Record<Key, string> = {
   'Signed in, but the workspace could not be opened ({status}). Try again.':
     '已登录，但无法打开工作区（{status}），请重试。',
   Continue: '继续',
+  'This browser did not keep the sign-in. Allow cookies for this site, then try again.':
+    '这个浏览器没有保存登录状态。请允许此网站使用 Cookie，然后重试。',
 };
 
 export const zhHant: Record<Key, string> = {
@@ -1858,6 +1862,8 @@ export const zhHant: Record<Key, string> = {
   'Signed in, but the workspace could not be opened ({status}). Try again.':
     '已登入，但無法開啟工作區（{status}），請重試。',
   Continue: '繼續',
+  'This browser did not keep the sign-in. Allow cookies for this site, then try again.':
+    '這個瀏覽器沒有保存登入狀態。請允許此網站使用 Cookie，然後重試。',
 };
 
 export const serverChoices: ReadonlyArray<readonly [string, string, Key]> = [

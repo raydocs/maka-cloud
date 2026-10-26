@@ -170,6 +170,12 @@ export interface ClientOptions {
   onRevoked?: () => void;
   /** How long the event stream may bring nothing before it is reconnected. Default `STREAM_IDLE_MS`. */
   streamIdleMs?: number;
+  /**
+   * Signed in by the server's session cookie, not a token (the web app). Every request says so
+   * with `X-Maka-Cookie: 1`, and the page never holds the token. `owner` (from `GET /v1/me`) keys
+   * what the browser keeps for the account. See `openCookieWorkspace`.
+   */
+  cookie?: { owner: string };
 }
 
 export class CloudClient {
@@ -179,6 +185,7 @@ export class CloudClient {
   private readonly baseUrl: string;
   private readonly onRevoked: (() => void) | undefined;
   private readonly streamIdleMs: number;
+  private readonly cookie: { owner: string } | undefined;
   constructor(
     private readonly token: string,
     options: ClientOptions | typeof fetch = {},
@@ -190,6 +197,12 @@ export class CloudClient {
     this.baseUrl = resolved.baseUrl ?? '';
     this.onRevoked = resolved.onRevoked;
     this.streamIdleMs = resolved.streamIdleMs ?? STREAM_IDLE_MS;
+    this.cookie = resolved.cookie;
+  }
+
+  /** How this client proves who it is: its token, or the cookie the browser sends by itself. */
+  private credential(): Record<string, string> {
+    return this.cookie ? { 'X-Maka-Cookie': '1' } : { Authorization: `Bearer ${this.token}` };
   }
 
   private async send(path: string, init: RequestInit = {}, feature?: string): Promise<Response> {
@@ -198,7 +211,7 @@ export class CloudClient {
       headers: {
         ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...init.headers,
-        Authorization: `Bearer ${this.token}`,
+        ...this.credential(),
       },
     });
     if (response.ok) return response;
@@ -461,12 +474,15 @@ export class CloudClient {
         const owner = await this.ownerId();
         return owner === undefined ? undefined : outboxScope(this.baseUrl, `owner:${owner}`);
       },
-      token: outboxScope(this.baseUrl, `token:${this.token}`),
+      token: outboxScope(
+        this.baseUrl,
+        this.cookie ? `owner:${this.cookie.owner}` : `token:${this.token}`,
+      ),
     };
   }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {
-    const bytes = new TextEncoder().encode(this.token);
+    const bytes = new TextEncoder().encode(this.cookie ? `owner:${this.cookie.owner}` : this.token);
     const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
     return [...new Uint8Array(digest).slice(0, 8)]
       .map((b) => b.toString(16).padStart(2, '0'))
@@ -564,7 +580,7 @@ export class CloudClient {
         try {
           response = await this.fetcher(`${this.baseUrl}${routes.events(id)}`, {
             headers: {
-              Authorization: `Bearer ${this.token}`,
+              ...this.credential(),
               Accept: 'text/event-stream',
               ...(lastId ? { 'Last-Event-ID': String(lastId) } : {}),
             },
@@ -578,7 +594,10 @@ export class CloudClient {
         if (response.status === 401) {
           this.onRevoked?.();
           status({
-            state: this.token.startsWith(SESSION_TOKEN_PREFIX) ? 'signed_out' : 'invite_expired',
+            state:
+              this.cookie || this.token.startsWith(SESSION_TOKEN_PREFIX)
+                ? 'signed_out'
+                : 'invite_expired',
           });
           return;
         }

@@ -51,6 +51,11 @@ confirmed or the task is cancelled.
 
 ## Sign-in: what to check with the first real token
 
+- The web session is the `__Host-maka-session` cookie (`HttpOnly; Secure; SameSite=Strict`),
+  read only on requests that send `X-Maka-Cookie: 1`. It needs the app and `/v1` on one https
+  origin, which the Caddyfile gives. Check in the browser's storage panel that the cookie is
+  there after signing in, that a reload stays signed in, and that signing out removes it.
+
 - Sign in with Apple: the app passes the server's nonce to Apple unchanged, and the token's nonce
   claim must equal it. Check this form with a real Apple token in the live run. The tests use a
   fake signer, so a mismatch (for example if Apple returns the nonce hashed) would show only then.
