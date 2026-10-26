@@ -27,3 +27,38 @@ export function triggerWords(trigger: DutyView['trigger']): string {
 export function budgetWords(duty: DutyView): string {
   return `Up to ${dollars(duty.runBudgetUsd)} a run, ${dollars(duty.dailyCapUsd)} a day`;
 }
+
+/** A run's calendar day and clock time in the viewer's language and local timezone. */
+export function dutyTime(
+  at: number,
+  language: 'en' | 'zh-Hans' | 'zh-Hant',
+  now = Date.now(),
+  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+): string {
+  const locale = { en: 'en-US', 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW' }[language];
+  // Compare calendar days in the viewer's zone, including across daylight-saving changes.
+  const day = (value: number) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+    }).formatToParts(value);
+    const part = (name: string) => Number(parts.find((item) => item.type === name)?.value);
+    return Date.UTC(part('year'), part('month') - 1, part('day')) / 86_400_000;
+  };
+  const difference = day(at) - day(now);
+  const clock = new Intl.DateTimeFormat(locale, { timeZone, timeStyle: 'short' }).format(at);
+  if (difference === 0 || difference === 1) {
+    const relative = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(
+      difference,
+      'day',
+    );
+    return `${relative} ${clock}`;
+  }
+  return new Intl.DateTimeFormat(locale, {
+    timeZone,
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(at);
+}

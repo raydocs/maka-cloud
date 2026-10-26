@@ -1,6 +1,7 @@
 import { Button } from '@astryxdesign/core';
-import { AuthFlow, type AuthPlatform, type AuthState } from '@maka-cloud/client';
+import { AuthFlow, type AuthPlatform, type AuthState, BRAND } from '@maka-cloud/client';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useT } from './i18n';
 
 /** "Chrome on Mac": what the list of signed-in devices calls this browser. */
 export function browserLabel(userAgent: string): string {
@@ -84,6 +85,7 @@ function InviteToken({
   notice: string;
   onBack: () => void;
 }) {
+  const { t } = useT();
   const [token, setToken] = useState('');
   return (
     <>
@@ -93,7 +95,7 @@ function InviteToken({
           void onSubmit(token);
         }}
       >
-        <label htmlFor="invite">Invite token</label>
+        <label htmlFor="invite">{t('Invite token')}</label>
         <input
           id="invite"
           type="password"
@@ -103,7 +105,7 @@ function InviteToken({
           required
         />
         <Button
-          label={busy ? 'Connecting…' : 'Enter your workspace'}
+          label={busy ? t('Connecting…') : t('Enter your workspace')}
           type="submit"
           variant="primary"
           isDisabled={busy}
@@ -115,7 +117,7 @@ function InviteToken({
         </p>
       )}
       <button type="button" className="signin-link" onClick={onBack}>
-        Other ways to sign in
+        {t('Other ways to sign in')}
       </button>
     </>
   );
@@ -157,29 +159,32 @@ function Step({
   notice: string;
   onToken: () => void;
 }) {
+  const { t, shared } = useT();
   const [address, setAddress] = useState('');
   const [code, setCode] = useState('');
   const [invite, setInvite] = useState('');
   const error = (text: string) =>
     text ? (
       <p role="alert" className="error">
-        {text}
+        {shared(text)}
       </p>
     ) : null;
   switch (state.step) {
     case 'loading':
-      return <p className="muted">Connecting…</p>;
+      return <p className="muted">{t('Connecting…')}</p>;
     case 'working':
-      return <p className="muted">One moment…</p>;
+      return <p className="muted">{t('One moment…')}</p>;
     case 'signedIn':
-      return <p className="muted">Signed in.</p>;
+      return <p className="muted">{t('Signed in.')}</p>;
     case 'failed':
       return (
         <>
+          {/* Why the person is here (a revoked invite) still matters when the ways cannot load. */}
+          {error(notice)}
           {error(state.message)}
-          <Button label="Try again" variant="primary" onClick={() => void flow.start()} />
+          <Button label={t('Try again')} variant="primary" onClick={() => void flow.start()} />
           <button type="button" className="signin-link" onClick={onToken}>
-            I have an invite token
+            {t('I have an invite token')}
           </button>
         </>
       );
@@ -191,11 +196,13 @@ function Step({
             void flow.verifyEmail(code);
           }}
         >
-          <h2 className="signin-heading">Check your email</h2>
+          <h2 className="signin-heading">{t('Check your email')}</h2>
           <p className="muted">
-            We sent a 6-digit code to {state.address}. It works once, for ten minutes.
+            {t('We sent a 6-digit code to {address}. It works once, for ten minutes.', {
+              address: state.address,
+            })}
           </p>
-          <label htmlFor="signin-code">Code</label>
+          <label htmlFor="signin-code">{t('Code')}</label>
           <input
             id="signin-code"
             inputMode="numeric"
@@ -209,13 +216,13 @@ function Step({
             required
           />
           {error(state.error)}
-          <Button label="Sign in" type="submit" variant="primary" isDisabled={!code.trim()} />
+          <Button label={t('Sign in')} type="submit" variant="primary" isDisabled={!code.trim()} />
           <button
             type="button"
             className="signin-link"
             onClick={() => void flow.sendEmail(state.address)}
           >
-            Send a new code
+            {t('Send a new code')}
           </button>
           <button
             type="button"
@@ -225,7 +232,7 @@ function Step({
               flow.back();
             }}
           >
-            Use another way
+            {t('Use another way')}
           </button>
         </form>
       );
@@ -237,9 +244,13 @@ function Step({
             void flow.claim(invite);
           }}
         >
-          <h2 className="signin-heading">Enter your invite code</h2>
-          <p className="muted">Maka is by invitation for now. You only need to do this once.</p>
-          <label htmlFor="signin-invite">Invite code</label>
+          <h2 className="signin-heading">{t('Enter your invite code')}</h2>
+          <p className="muted">
+            {t('{name} is by invitation for now. You only need to do this once.', {
+              name: BRAND.name,
+            })}
+          </p>
+          <label htmlFor="signin-invite">{t('Invite code')}</label>
           <input
             id="signin-invite"
             type="password"
@@ -250,7 +261,12 @@ function Step({
             required
           />
           {error(state.error)}
-          <Button label="Continue" type="submit" variant="primary" isDisabled={!invite.trim()} />
+          <Button
+            label={t('Continue')}
+            type="submit"
+            variant="primary"
+            isDisabled={!invite.trim()}
+          />
           <button
             type="button"
             className="signin-link"
@@ -259,7 +275,7 @@ function Step({
               flow.back();
             }}
           >
-            Use another way
+            {t('Use another way')}
           </button>
         </form>
       );
@@ -270,14 +286,14 @@ function Step({
         <>
           {apple && (
             <Button
-              label="Continue with Apple"
+              label={t('Continue with Apple')}
               variant="primary"
               onClick={() => void flow.signInWith('apple')}
             />
           )}
           {google && (
             <Button
-              label="Continue with Google"
+              label={t('Continue with Google')}
               variant="secondary"
               onClick={() => void flow.signInWith('google')}
             />
@@ -289,7 +305,7 @@ function Step({
                 void flow.sendEmail(address);
               }}
             >
-              <label htmlFor="signin-email">Email</label>
+              <label htmlFor="signin-email">{t('Email')}</label>
               <input
                 id="signin-email"
                 type="email"
@@ -302,7 +318,7 @@ function Step({
                 required
               />
               <Button
-                label="Email me a code"
+                label={t('Email me a code')}
                 type="submit"
                 variant={apple || google ? 'secondary' : 'primary'}
                 isDisabled={!address.trim()}
@@ -310,11 +326,13 @@ function Step({
             </form>
           ) : null}
           {!apple && !google && !state.ways.email ? (
-            <p className="muted">This server has no sign-in set up yet. Use your invite token.</p>
+            <p className="muted">
+              {t('This server has no sign-in set up yet. Use your invite token.')}
+            </p>
           ) : null}
           {error(state.error || notice)}
           <button type="button" className="signin-link" onClick={onToken}>
-            I have an invite token
+            {t('I have an invite token')}
           </button>
         </>
       );

@@ -1,4 +1,7 @@
 import type { ResultManifest, TaskEvent, TaskView } from '@maka-cloud/orchestrator';
+import { taskQuota, type QuotaReason } from './quota.js';
+import { z } from 'zod';
+import { type Language, messages } from './i18n.js';
 import {
   containsSecret,
   scrubSecretFields,
@@ -15,7 +18,7 @@ export { scrubSecretText };
  * orchestrator's `task_cost` events add up there, and it is absent until the
  * first one.
  */
-export type PublicTaskView = Omit<TaskView, 'runner'>;
+export type PublicTaskView = Omit<TaskView, 'runner'> & { quota?: QuotaReason };
 
 /** The names cloud-web hides (packages/cloud-web/src/presentation.ts); error text a runner wrote can carry them. */
 const HIDDEN_NAMES =
@@ -44,15 +47,102 @@ function toPublicManifest(manifest: ResultManifest): ResultManifest {
 }
 
 /**
+ * The fixed sentence the supervisor built an ask from, and its parts (clipped and quote-safe there).
+ * An item with one is said in the reader's language; one without (or with one this server does not
+ * know) keeps the supervisor's English ask.
+ */
+const templateText = z.string().max(1000);
+const templateCount = z.number().int().min(0).max(1_000_000);
+const AskTemplate = z.discriminatedUnion('id', [
+  z.object({ id: z.literal('stall'), title: templateText, minutes: templateCount }),
+  z.object({
+    id: z.literal('failed_twice'),
+    title: templateText,
+    count: templateCount,
+    reason: templateText,
+  }),
+  z.object({ id: z.literal('low_confidence'), title: templateText, summary: templateText }),
+  z.object({
+    id: z.literal('finished'),
+    title: templateText,
+    outcome: z.enum(['succeeded', 'failed']),
+    checked: z.enum(['passed', 'not_checked']).optional(),
+    detail: templateText,
+  }),
+  z.object({
+    id: z.literal('verification_failed'),
+    title: templateText,
+    count: templateCount,
+    detail: templateText,
+    more: templateCount,
+  }),
+  z.object({
+    id: z.literal('verification_incomplete'),
+    title: templateText,
+    detail: templateText,
+    code: z.string().max(40).optional(),
+  }),
+  z.object({
+    id: z.literal('suggestion_offer'),
+    count: templateCount,
+    label: templateText,
+    repo: templateText,
+  }),
+]);
+
+const MAX_ASK = 600;
+
+/** The ask of an item built from a known template, said in `language`; undefined for any other item. */
+export function localizedAsk(template: unknown, language: Language): string | undefined {
+  const parsed = AskTemplate.safeParse(template);
+  if (!parsed.success) return undefined;
+  const ask = messages(language).ask;
+  const t = parsed.data;
+  let said: string;
+  switch (t.id) {
+    case 'stall':
+      said = ask.stall(t.title, t.minutes);
+      break;
+    case 'failed_twice':
+      said = ask.failedTwice(t.title, t.count, t.reason);
+      break;
+    case 'low_confidence':
+      said = ask.lowConfidence(t.title, t.summary);
+      break;
+    case 'finished':
+      said =
+        t.outcome === 'succeeded'
+          ? ask.finished(t.title, t.checked, t.detail)
+          : ask.failed(t.title, t.detail);
+      break;
+    case 'verification_failed':
+      said = ask.verificationFailed(t.title, t.count, t.detail, t.more);
+      break;
+    case 'verification_incomplete':
+      said = ask.verificationIncomplete(t.title, t.detail, t.code);
+      break;
+    case 'suggestion_offer':
+      said = ask.suggestionOffer(t.count, t.label, t.repo);
+      break;
+  }
+  const chars = [...said];
+  return chars.length <= MAX_ASK ? said : `${chars.slice(0, MAX_ASK - 1).join('')}…`;
+}
+
+/**
  * An inbox item as clients see it. The supervisor builds its ask from agent-written
  * text (a failure reason, a summary), so it is scrubbed like error text. An approval's ask is the
  * conductor's card, which the approval binds word for word, so it is shown as it is (T15): the card
- * names no runner, and the rest is the owner's own call.
+ * names no runner, and the rest is the owner's own call. With a `language`, an ask the supervisor
+ * built from a fixed sentence is said in it; the template itself never leaves the server.
  */
-export function toPublicItem(item: unknown): unknown {
+export function toPublicItem(item: unknown, language?: Language): unknown {
   if (typeof item !== 'object' || item === null || !('ask' in item)) return item;
-  if ('kind' in item && item.kind === 'approval') return toPublicApproval(item);
-  const scrubbed = typeof item.ask === 'string' ? { ...item, ask: scrubErrorText(item.ask) } : item;
+  const { askTemplate, ...rest } = item as { askTemplate?: unknown; ask: unknown; kind?: unknown };
+  if (rest.kind === 'approval') return toPublicApproval(rest);
+  const ask =
+    (language === undefined ? undefined : localizedAsk(askTemplate, language)) ?? rest.ask;
+  const scrubbed = typeof ask === 'string' ? { ...rest, ask: scrubErrorText(ask) } : rest;
   return 'suggestion' in scrubbed ? toPublicSuggestion(scrubbed) : scrubbed;
 }
 
@@ -135,6 +225,9 @@ export function toPublicView(view: TaskView): PublicTaskView {
   const { runner: _runner, ...rest } = view;
   return {
     ...rest,
+    ...(rest.budgetExceeded && rest.budgetUsd !== undefined
+      ? { quota: taskQuota(rest.costUsd ?? 0, rest.budgetUsd) }
+      : {}),
     ...(rest.manifest === undefined ? {} : { manifest: toPublicManifest(rest.manifest) }),
     ...(rest.kept === undefined ? {} : { kept: toPublicManifest(rest.kept) }),
     // The runner's progress notes carry whatever its tools printed.

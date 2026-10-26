@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import {
   CloudClient,
+  dutyTime,
   type Conversation,
   inboxAnswerer,
   type InboxItem,
@@ -307,7 +308,7 @@ test('what runs next lists scheduled duties with their time, and counts the ones
   const region = await screen.findByRole('region', { name: 'What runs next' });
   expect(within(region).getByText('Nightly dependency check')).toBeTruthy();
   expect(within(region).getByText('acme/web')).toBeTruthy();
-  expect(within(region).getByText('in 30 min')).toBeTruthy();
+  expect(within(region).getByText(dutyTime(NOW + 30 * MIN, 'en', NOW))).toBeTruthy();
   expect(
     within(region).getByText('1 more duty wakes when something happens on GitHub.'),
   ).toBeTruthy();
@@ -500,4 +501,22 @@ test('where decisions would be: bars while loading, a retry when they could not 
   const calm = await screen.findByRole('region', { name: 'Nothing needs you' });
   expect(calm.textContent).toBe('Nothing needs you.');
   expect(screen.queryByRole('region', { name: 'Loading' })).toBeNull();
+});
+
+test('project and recent-conversation starters fill the composer without sending', async () => {
+  const api = renderHome({
+    projects: [{ projectId: 'p1', repo: 'alice/garden', defaultBranch: 'main', duties: [] }],
+  });
+  const fix = await screen.findByRole('button', {
+    name: 'Fix the failing test in alice/garden and open a pull request.',
+  });
+  fireEvent.click(fix);
+  expect(
+    (screen.getByLabelText('What would you like to get done?') as HTMLTextAreaElement).value,
+  ).toBe('Fix the failing test in alice/garden and open a pull request.');
+  fireEvent.click(screen.getByRole('button', { name: 'Continue “Taxes”' }));
+  expect(
+    (screen.getByLabelText('What would you like to get done?') as HTMLTextAreaElement).value,
+  ).toBe('Continue “Taxes”');
+  expect(api.posted).toEqual([]);
 });

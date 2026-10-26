@@ -76,7 +76,7 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
   const host: SupervisorHost = {
     feed: parts.feed,
     publish: (event) => parts.publish(event),
-    notifier: conductorNotifier(conductor),
+    notifier: conductorNotifier(conductor, parts.languageOf),
     answers: parts.answers,
     messages: parts.messages,
     ...(setup.proposals === undefined ? {} : { proposals: setup.proposals }),

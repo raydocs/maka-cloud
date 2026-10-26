@@ -27,9 +27,17 @@ appId: cloud.maka.app
 # The pull request button sits under the picture; a longer conversation title above can leave it
 # just below the fold, so scroll to it rather than assume it fits.
 - scrollUntilVisible:
-    element: "Open pull request · github.com"
-- assertVisible: "Open pull request · github.com"
+    element:
+      id: "button-Open pull request · github.com"
+- assertVisible:
+    id: "button-Open pull request · github.com"
 - takeScreenshot: delivery-card
+# The result links back to the task it came from, whose pill sits higher up in the chat.
+- scrollUntilVisible:
+    element:
+      id: "button-From task"
+- assertVisible:
+    id: "button-From task"
 - tapOn:
     id: "delivery-picture"
 - assertVisible:
@@ -44,6 +52,7 @@ appId: cloud.maka.app
     direction: UP
 - tapOn:
     id: "button-Details"
-- assertVisible: "Outcome"
+- assertVisible:
+    id: "details-outcome"
 - assertVisible: ".*Redirects once after sign-in"
 - takeScreenshot: delivery-details

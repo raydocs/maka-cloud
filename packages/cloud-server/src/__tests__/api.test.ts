@@ -111,6 +111,33 @@ test('a retried message with the same client id stores once and returns the firs
   );
 });
 
+test('a client id reused for different words is refused with 409 and posts nothing; the same words still return the first message', async (t) => {
+  const h = await startHarness(t);
+  const conversationId = await newConversation(h);
+  const messages = `/v1/conversations/${conversationId}/messages`;
+  const first = await postJson(h, messages, { text: 'book the flight', clientMessageId: 'c-1' });
+  assert.equal(first.status, 202);
+  const { messageId } = (await first.json()) as { messageId: string };
+  const stream = await openStream(t, h);
+  const clash = await postJson(h, messages, { text: 'cancel the flight', clientMessageId: 'c-1' });
+  assert.equal(clash.status, 409);
+  assert.deepEqual(await clash.json(), { error: 'client_message_id_conflict' });
+  const retry = await postJson(h, messages, { text: 'book the flight', clientMessageId: 'c-1' });
+  assert.equal(retry.status, 202);
+  assert.deepEqual(await retry.json(), { messageId });
+  await postJson(h, messages, { text: 'marker', clientMessageId: 'c-marker' });
+  const events = await stream.until(3);
+  // The person's own messages carry the id they were sent under; the refused one never posted.
+  assert.deepEqual(
+    events.map((event) => [event.event, event.data.text, event.data.clientMessageId]),
+    [
+      ['conversation.created', undefined, undefined],
+      ['message.posted', 'book the flight', 'c-1'],
+      ['message.posted', 'marker', 'c-marker'],
+    ],
+  );
+});
+
 test('unknown conversations are 404, bad bodies are 400, big bodies are 413, wrong methods are 405', async (t) => {
   const h = await startHarness(t);
   const conversationId = await newConversation(h);

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { HttpError, parseCount, readJson, respond, take } from './http.js';
+import type { Language } from './i18n.js';
 import type { InviteInfo } from './invites.js';
 import { toPublicDigest, toPublicItem } from './public-view.js';
 import { scrubSecretText } from './secret-shapes.js';
@@ -129,6 +130,8 @@ export interface InboxOwners {
   active(inviteId: string, sessionId?: string): boolean;
   /** The ids of the conversations the invite owns. */
   conversationsOf(inviteId: string): string[];
+  /** The language the invite's person reads; without it, items keep the supervisor's words. */
+  languageOf?(inviteId: string): Language;
 }
 
 /**
@@ -266,7 +269,9 @@ export class InboxRoutes {
       conversations: this.owners.conversationsOf(invite.inviteId),
     });
     respond(res, 200, {
-      items: page.items.map(toPublicItem),
+      items: page.items.map((item) =>
+        toPublicItem(item, this.owners.languageOf?.(invite.inviteId)),
+      ),
       ...(page.next === null ? {} : { next: page.next }),
     });
   }
@@ -299,14 +304,16 @@ export class InboxRoutes {
       if (status === undefined) throw new Error(`Unknown answer failure ${result.reason}`);
       respond(res, status, {
         error: result.reason,
-        ...(result.item === undefined ? {} : { item: toPublicItem(result.item) }),
+        ...(result.item === undefined
+          ? {}
+          : { item: toPublicItem(result.item, this.owners.languageOf?.(invite.inviteId)) }),
       });
       return;
     }
     // 202 while the delivery to the conversation is still being retried.
     respond(res, result.item.state === 'answering' ? 202 : 200, {
       duplicate: result.duplicate,
-      item: toPublicItem(result.item),
+      item: toPublicItem(result.item, this.owners.languageOf?.(invite.inviteId)),
     });
   }
 }

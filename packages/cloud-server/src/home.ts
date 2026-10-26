@@ -2,8 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
+import { accountReadiness, type Readiness } from './readiness.js';
 import { transaction } from './db.js';
 import { HttpError, readJson, respond, take } from './http.js';
+import { type Language, messages } from './i18n.js';
 import type { InboxOwners, InboxService } from './inbox.js';
 import type { InviteInfo } from './invites.js';
 import type { RateLimiter } from './rate-limit.js';
@@ -34,6 +36,7 @@ export interface HomeCard {
   rank: number;
   /** When this owner last saw the card, or null. */
   seenAt: number | null;
+  contentVersion: string;
   /** The time the card is about: when it was raised, when the task finished, when a duty runs next. */
   at: number;
   /** On a `finished` card: how the task ended. */
@@ -42,9 +45,10 @@ export interface HomeCard {
   text?: string;
 }
 
-interface Draft extends Omit<HomeCard, 'rank' | 'seenAt'> {
+interface Draft extends Omit<HomeCard, 'rank' | 'seenAt' | 'contentVersion'> {
   /** The default order inside the kind, lowest first. */
   sort: number[];
+  contentVersion?: string;
 }
 
 /** Cards the page lists per kind beyond the waiting ones, so Home stays a glance. */
@@ -83,14 +87,14 @@ const NoteSchema = z.discriminatedUnion('template', [
 ]);
 export type HomeNote = z.infer<typeof NoteSchema>;
 
-const CHECKS_WORDS = { green: 'CI green', red: 'CI red', pending: 'CI still running' } as const;
-
-export function noteText(note: HomeNote): string {
+/** A note's words, in the owner's language. */
+export function noteText(note: HomeNote, language: Language = 'en'): string {
+  const words = messages(language).note;
   switch (note.template) {
     case 'pull_request_merged':
-      return `PR #${note.number} in ${note.repo} merged${note.checks === 'none' ? '' : `, ${CHECKS_WORDS[note.checks]}`}.`;
+      return words.pullRequestMerged(note.repo, note.number, note.checks);
     case 'checks_failed':
-      return `Checks failed on PR #${note.number} in ${note.repo}.`;
+      return words.checksFailed(note.repo, note.number);
   }
 }
 
@@ -129,6 +133,8 @@ export function rankCards(
   }
   return ordered.map(({ sort: _sort, ...card }, rank) => ({
     ...card,
+    contentVersion:
+      card.contentVersion ?? createHash('sha256').update(JSON.stringify(card)).digest('hex'),
     rank,
     seenAt: seen.get(card.cardId) ?? null,
   }));
@@ -156,6 +162,47 @@ export class HomeStore {
     private readonly now: () => number = Date.now,
   ) {}
 
+  readiness(owner: string, language: boolean, project: boolean, model: boolean): Readiness {
+    const rows = this.db
+      .prepare('SELECT step, until_at AS untilAt FROM home_setup WHERE owner = ?')
+      .all(owner) as unknown as { step: string; untilAt: number }[];
+    const permission = this.db
+      .prepare('SELECT notifications_allowed AS allowed FROM home_permissions WHERE owner = ?')
+      .get(owner) as { allowed: number } | undefined;
+    const message = this.db
+      .prepare(
+        `SELECT 1 FROM messages m JOIN conversations c ON c.conversation_id = m.conversation_id WHERE c.owner = ? AND m.role = 'user' LIMIT 1`,
+      )
+      .get(owner);
+    return accountReadiness(
+      {
+        language,
+        project,
+        model,
+        notifications: permission?.allowed === 1,
+        conversation: !!message,
+      },
+      new Map(rows.map((row) => [row.step, row.untilAt])),
+      this.now(),
+    );
+  }
+
+  setup(owner: string, report: { dismiss?: string; notificationsAllowed?: boolean }): void {
+    if (report.dismiss !== undefined)
+      this.db
+        .prepare(
+          `INSERT INTO home_setup VALUES (?, ?, ?) ON CONFLICT (owner, step) DO UPDATE SET until_at = excluded.until_at`,
+        )
+        .run(owner, report.dismiss, this.now() + DAY_MS);
+    // Readiness only goes up: this is a one-time setup nudge, not live permission state.
+    if (report.notificationsAllowed !== undefined)
+      this.db
+        .prepare(
+          `INSERT INTO home_permissions VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET notifications_allowed = MAX(home_permissions.notifications_allowed, excluded.notifications_allowed)`,
+        )
+        .run(owner, Number(report.notificationsAllowed));
+  }
+
   visitedAt(owner: string): number | undefined {
     const row = this.db
       .prepare('SELECT visited_at AS at FROM home_visits WHERE owner = ?')
@@ -163,11 +210,26 @@ export class HomeStore {
     return row?.at;
   }
 
-  seenAt(owner: string): Map<string, number> {
+  seenAt(owner: string, versions?: ReadonlyMap<string, string>): Map<string, number> {
     const rows = this.db
-      .prepare('SELECT card_id AS id, seen_at AS at FROM home_seen WHERE owner = ?')
-      .all(owner) as unknown as Array<{ id: string; at: number }>;
-    return new Map(rows.map((row) => [row.id, row.at]));
+      .prepare(
+        'SELECT card_id AS id, seen_at AS at, content_version AS version FROM home_seen WHERE owner = ?',
+      )
+      .all(owner) as unknown as Array<{ id: string; at: number; version: string | null }>;
+    if (versions) {
+      const put = this.db.prepare(
+        'UPDATE home_seen SET content_version = ? WHERE owner = ? AND card_id = ? AND content_version IS NULL',
+      );
+      for (const row of rows) {
+        const version = versions.get(row.id);
+        if (row.version === null && version) put.run(version, owner, row.id);
+      }
+    }
+    return new Map(
+      rows
+        .filter((row) => !versions || row.version === null || versions.get(row.id) === row.version)
+        .map((row) => [row.id, row.at]),
+    );
   }
 
   pinned(owner: string): Map<string, number> {
@@ -248,14 +310,18 @@ export class HomeStore {
   }
 
   /** Records that the owner saw these cards and left Home now. */
-  markSeen(owner: string, cardIds: readonly string[]): number {
+  markSeen(
+    owner: string,
+    cardIds: readonly string[],
+    versions: ReadonlyMap<string, string> = new Map(),
+  ): number {
     const at = this.now();
     transaction(this.db, () => {
       const put = this.db.prepare(
-        `INSERT INTO home_seen (owner, card_id, seen_at) VALUES (?, ?, ?)
-         ON CONFLICT (owner, card_id) DO UPDATE SET seen_at = excluded.seen_at`,
+        `INSERT INTO home_seen (owner, card_id, seen_at, content_version) VALUES (?, ?, ?, ?)
+         ON CONFLICT (owner, card_id) DO UPDATE SET seen_at = excluded.seen_at, content_version = excluded.content_version`,
       );
-      for (const id of cardIds) put.run(owner, id, at);
+      for (const id of cardIds) put.run(owner, id, at, versions.get(id) ?? null);
       this.db
         .prepare(
           `INSERT INTO home_visits (owner, visited_at) VALUES (?, ?)
@@ -335,14 +401,24 @@ const ProjectShape = z
   .passthrough();
 
 const cardIdSchema = z.string().min(3).max(200);
-const seenBody = z.object({ cardIds: z.array(cardIdSchema).max(100) }).strict();
+const seenBody = z
+  .object({
+    cardIds: z.array(cardIdSchema).max(100),
+    contentVersions: z.record(cardIdSchema, z.string().min(1).max(128)).optional(),
+  })
+  .strict();
 const orderBody = z.object({ cardId: cardIdSchema, after: cardIdSchema.nullable() }).strict();
 
 /** The `/v1/home` routes. */
 export class HomeRoutes {
   constructor(
     private readonly store: HomeStore,
-    private readonly sources: { inbox?: Pick<InboxService, 'list'>; duties?: HomeDuties },
+    private readonly sources: {
+      inbox?: Pick<InboxService, 'list'>;
+      duties?: HomeDuties;
+      languageChosen?: (owner: string) => boolean;
+      modelAvailable?: () => boolean;
+    },
     private readonly limiter: RateLimiter,
     private readonly owners: InboxOwners,
     private readonly now: () => number = Date.now,
@@ -361,7 +437,26 @@ export class HomeRoutes {
       case '/v1/home': {
         allow(method, 'GET');
         const { cards } = await this.build(owner);
-        respond(res, 200, { cards });
+        respond(res, 200, { cards, readiness: this.readiness(owner) });
+        return true;
+      }
+      case '/v1/home/setup': {
+        allow(method, 'POST');
+        take(this.limiter, invite);
+        const body = z
+          .union([
+            z
+              .object({
+                dismiss: z.enum(['language', 'project', 'model', 'notifications', 'conversation']),
+              })
+              .strict(),
+            z.object({ notificationsAllowed: z.boolean() }).strict(),
+          ])
+          .safeParse(await readJson(req, false));
+        if (!body.success) throw new HttpError(400, 'invalid_request');
+        this.checkActive(invite);
+        this.store.setup(owner, body.data);
+        respond(res, 200, { readiness: this.readiness(owner) });
         return true;
       }
       case '/v1/home/seen': {
@@ -375,7 +470,16 @@ export class HomeRoutes {
         const { cards } = await this.build(owner);
         const live = new Set(cards.map((card) => card.cardId));
         const seen = [...new Set(body.data.cardIds)].filter((id) => live.has(id));
-        const visitedAt = this.store.markSeen(owner, seen);
+        const visitedAt = this.store.markSeen(
+          owner,
+          seen,
+          new Map(
+            cards.map((card) => [
+              card.cardId,
+              body.data.contentVersions?.[card.cardId] ?? card.contentVersion,
+            ]),
+          ),
+        );
         respond(res, 200, { seen, visitedAt });
         return true;
       }
@@ -413,6 +517,15 @@ export class HomeRoutes {
     return false;
   }
 
+  private readiness(owner: string): Readiness {
+    return this.store.readiness(
+      owner,
+      this.sources.languageChosen?.(owner) ?? false,
+      (this.sources.duties?.listProjects(owner).length ?? 0) > 0,
+      this.sources.modelAvailable?.() ?? false,
+    );
+  }
+
   private checkActive(invite: InviteInfo): void {
     if (!this.owners.active(invite.inviteId, invite.sessionId)) {
       throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
@@ -436,6 +549,7 @@ export class HomeRoutes {
         const kind = item.data.kind === 'suggestion' ? 'suggestion' : 'waiting';
         drafts.push({
           cardId: `${kind}:${item.data.itemId}`,
+          contentVersion: createHash('sha256').update(JSON.stringify(item.data)).digest('hex'),
           kind,
           ref: { type: 'inbox', id: item.data.itemId },
           at: item.data.createdAt,
@@ -469,7 +583,8 @@ export class HomeRoutes {
         kind: 'note',
         ref: { type: 'note', id: noteId },
         at,
-        text: noteText(note),
+        text: noteText(note, this.owners.languageOf?.(owner)),
+        contentVersion: createHash('sha256').update(JSON.stringify(note)).digest('hex'),
         sort: [-at],
       });
     }
@@ -477,7 +592,10 @@ export class HomeRoutes {
     drafts.push(...this.scheduled(owner, now));
 
     const pinned = this.store.pinned(owner);
-    const seen = this.store.seenAt(owner);
+    const versions = new Map(
+      rankCards(drafts, pinned, new Map()).map((card) => [card.cardId, card.contentVersion]),
+    );
+    const seen = this.store.seenAt(owner, versions);
     return { drafts, pinned, seen, cards: rankCards(drafts, pinned, seen) };
   }
 
@@ -505,6 +623,17 @@ export class HomeRoutes {
         const at = duty.activatedAt + slots * period;
         runs.push({
           cardId: `scheduled:${duty.dutyId}`,
+          contentVersion: createHash('sha256')
+            .update(
+              JSON.stringify({
+                dutyId: duty.dutyId,
+                projectId: project.data.projectId,
+                name: duty.name,
+                repo: project.data.repo,
+                trigger: duty.trigger,
+              }),
+            )
+            .digest('hex'),
           kind: 'scheduled',
           ref: { type: 'duty', id: duty.dutyId, projectId: project.data.projectId },
           at,

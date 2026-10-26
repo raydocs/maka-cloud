@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { CloudClient, readEvents } from '../src/client';
+import { ApiError, CloudClient, readEvents } from '../src/client';
 import { displayJson, displayText, publicLink } from '../src/presentation';
 import type { FeedEvent } from '../src/contract';
 import { applyEvent, emptyState } from '../src/state';
@@ -216,3 +216,85 @@ test('suggestion switches are read and set on the project, and a server without 
   expect(client.unsupported.has('suggestions')).toBe(true);
   expect(client.unsupported.has('projects')).toBe(false);
 });
+
+test('the person’s language is read and set on the settings route; an older server is unsupported', async () => {
+  const calls: string[] = [];
+  let language = 'zh-Hans';
+  const fetcher = (async (url, init) => {
+    calls.push(`${init?.method ?? 'GET'} ${String(url)} ${String(init?.body ?? '')}`.trim());
+    if (init?.method === 'PATCH')
+      language = (JSON.parse(String(init.body)) as { language: string }).language;
+    return Response.json({ language });
+  }) as typeof fetch;
+  const client = new CloudClient('mks_a.b', { fetcher });
+  expect(await client.settings()).toEqual({ language: 'zh-Hans' });
+  expect(await client.setLanguage('en')).toEqual({ language: 'en' });
+  expect(await client.setLanguage('zh-Hant')).toEqual({ language: 'zh-Hant' });
+  expect(calls).toEqual([
+    'GET /v1/settings',
+    'PATCH /v1/settings {"language":"en"}',
+    'PATCH /v1/settings {"language":"zh-Hant"}',
+  ]);
+  const old = new CloudClient('mks_a.b', {
+    fetcher: (async () => new Response('{}', { status: 404 })) as typeof fetch,
+  });
+  await expect(old.settings()).rejects.toThrow('not available');
+  expect(old.unsupported.has('settings')).toBe(true);
+});
+
+test('task conversation lookup uses the authenticated owner-scoped route and encodes the task id', async () => {
+  const task = { taskId: 'task/a', state: 'running', title: 'Task' };
+  const calls: Array<{ path: string; authorization: string | null }> = [];
+  const client = new CloudClient('owner-token', async (input, init) => {
+    calls.push({
+      path: String(input),
+      authorization: new Headers(init?.headers).get('authorization'),
+    });
+    return Response.json({ conversationId: 'cnv_target', task });
+  });
+  expect(await client.taskConversation('task/a')).toEqual({ conversationId: 'cnv_target', task });
+  expect(calls).toEqual([
+    { path: '/v1/tasks/task%2Fa/conversation', authorization: 'Bearer owner-token' },
+  ]);
+});
+
+test('throttled requests expose Retry-After seconds and HTTP dates', async () => {
+  for (const [header, delay] of [
+    ['20', 20000],
+    [new Date(Date.now() + 60000).toUTCString(), 60000],
+    ['invalid', undefined],
+  ] as const) {
+    const client = new CloudClient(
+      'fake',
+      async () =>
+        new Response(JSON.stringify({ error: 'rate_limited' }), {
+          status: 429,
+          headers: { 'Retry-After': header },
+        }),
+    );
+    const error = await client
+      .computerInput('task', { type: 'key', key: 'a' })
+      .catch((error: unknown) => error);
+    if (!(error instanceof ApiError)) throw new Error('expected an ApiError');
+    expect(error.status).toBe(429);
+    if (delay === undefined) expect(error.retryAfterMs).toBeUndefined();
+    else expect(error.retryAfterMs).toBeGreaterThan(delay - 2000);
+    if (delay !== undefined) expect(error.retryAfterMs).toBeLessThanOrEqual(delay);
+  }
+});
+
+test('computer input aborts after ten seconds without retrying an unknown outcome', async () => {
+  let calls = 0;
+  const client = new CloudClient('fake', async (_url, init) => {
+    calls++;
+    return new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+    });
+  });
+  const start = Date.now();
+  await expect(client.computerInput('task', { type: 'key', key: 'a' })).rejects.toMatchObject({
+    name: 'TimeoutError',
+  });
+  expect(Date.now() - start).toBeGreaterThanOrEqual(9900);
+  expect(calls).toBe(1);
+}, 15000);

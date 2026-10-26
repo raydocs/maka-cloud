@@ -870,6 +870,17 @@ export class DutyEngine {
           this.end(requestId, 'project_not_allowed', 0);
           return undefined;
         }
+        // Turning a duty off cancels only its pending requests. One that was launching then (and
+        // came back to pending after a failed attempt or a restart) is checked here again.
+        const duty = this.db
+          .prepare(
+            'SELECT d.state FROM run_requests r JOIN duties d ON d.duty_id = r.duty_id WHERE r.request_id = ?',
+          )
+          .get(requestId) as { state: string } | undefined;
+        if (duty?.state !== 'active') {
+          this.end(requestId, 'duty_off', 0);
+          return undefined;
+        }
         if (!this.rebookToToday(requestId)) return undefined;
       }
       const changed = this.db

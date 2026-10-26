@@ -5,6 +5,7 @@ import {
   type DeliveryView,
   deliveryModel,
   displayText,
+  isDiffListing,
   LABEL_WORDS,
   loadSources,
   publicLink,
@@ -16,9 +17,11 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { Image, Linking, Modal, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { useT } from '@/lib/i18n';
 import { useBlobUri, usePicture } from '@/lib/picture';
-import { mono, radius, useTheme } from '@/lib/theme';
-import { Card, PillButton, Solid, StatusMark, T } from './ui';
+import { mono, radius, TOUCH, useTheme } from '@/lib/theme';
+import { Icon } from './Icon';
+import { ButtonRow, Card, PillButton, Solid, StatusMark, T } from './ui';
 
 const MONO = Platform.OS === 'ios' ? mono.fontFamily : 'monospace';
 
@@ -29,6 +32,7 @@ const DIFF_LINES_MAX = 5000;
 /** A diff, line by line, on an opaque page: added lines green, removed lines red. A very long one is cut short. */
 export function DiffLines({ text }: { text: string }) {
   const t = useTheme();
+  const { t: say } = useT();
   const [all, setAll] = useState(false);
   const lines = text.split('\n');
   const shown = lines.slice(0, all ? DIFF_LINES_MAX : DIFF_LINES_SHOWN);
@@ -54,13 +58,41 @@ export function DiffLines({ text }: { text: string }) {
       </ScrollView>
       {lines.length > shown.length && !all && (
         <PillButton
-          label={`Show ${Math.min(lines.length, DIFF_LINES_MAX)} of ${lines.length} lines`}
+          label={say('delivery.showLines', {
+            shown: Math.min(lines.length, DIFF_LINES_MAX),
+            total: lines.length,
+          })}
           onPress={() => setAll(true)}
         />
       )}
       {all && lines.length > DIFF_LINES_MAX && (
-        <T kind="small">{`Showing the first ${DIFF_LINES_MAX} of ${lines.length} lines. Read the rest on the web.`}</T>
+        <T kind="small">
+          {say('delivery.firstLines', { shown: DIFF_LINES_MAX, total: lines.length })}
+        </T>
       )}
+    </Solid>
+  );
+}
+
+const REPORT_CHARS = 20_000;
+/** The most characters ever drawn; a report beyond this is read on the web. */
+const REPORT_CHARS_MAX = 200_000;
+
+/** A report left by the task, as inert text on an opaque page; a very long one is cut short. */
+export function Report({ text }: { text: string }) {
+  const t = useTheme();
+  const { t: say } = useT();
+  const [all, setAll] = useState(false);
+  const shown = text.slice(0, all ? REPORT_CHARS_MAX : REPORT_CHARS);
+  return (
+    <Solid>
+      <T kind="body" selectable style={{ color: t.solidInk }}>
+        {displayText(shown)}
+      </T>
+      {shown.length < text.length && !all && (
+        <PillButton label={say('common.showMore')} id="Show more" onPress={() => setAll(true)} />
+      )}
+      {all && text.length > REPORT_CHARS_MAX && <T kind="small">{say('delivery.reportCut')}</T>}
     </Solid>
   );
 }
@@ -81,6 +113,7 @@ export function Viewer({
   children: React.ReactNode;
 }) {
   const t = useTheme();
+  const { t: say } = useT();
   return (
     <Modal visible animationType="fade" onRequestClose={onClose}>
       {/* A modal is its own native window: it needs its own insets, or the header sits under the status bar. */}
@@ -88,12 +121,12 @@ export function Viewer({
         <SafeAreaView style={{ flex: 1, backgroundColor: t.solid }}>
           <View
             style={{ flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 }}
-            accessibilityLabel={`Viewer: ${title}`}
+            accessibilityLabel={say('delivery.viewer', { title })}
           >
             <T kind="heading" style={{ flex: 1 }} numberOfLines={1}>
               {title}
             </T>
-            <PillButton label="Close" onPress={onClose} />
+            <PillButton label={say('common.close')} id="Close" onPress={onClose} />
           </View>
           <ScrollView contentContainerStyle={{ padding: 12 }}>{children}</ScrollView>
         </SafeAreaView>
@@ -116,15 +149,55 @@ function ViewerPicture({ blob, title }: { blob: Blob; title: string }) {
 }
 
 interface Opened {
-  kind: 'image' | 'diff';
+  kind: 'image' | 'diff' | 'text';
   title: string;
   blob?: Blob;
   text?: string;
 }
 
 /**
- * A finished task as one result card: the outcome in one sentence, one visual proof from the box, a
- * caption and at most two one-tap actions. The visual opens large over the screen.
+ * A file the task made, quietly: one line, a small file icon and its name. A tap opens it. The
+ * changes are one of these lines too, named "View the changes".
+ */
+function FileRow({
+  name,
+  onOpen,
+  label,
+  id,
+}: {
+  name: string;
+  onOpen: () => void;
+  label?: string;
+  id?: string;
+}) {
+  const t = useTheme();
+  const { t: say } = useT();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label ?? say('delivery.openFile', { name })}
+      {...(id ? { testID: `button-${id}` } : {})}
+      onPress={onOpen}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        minHeight: TOUCH,
+        opacity: pressed ? 0.6 : 1,
+      })}
+    >
+      <Icon name="file" color={t.inkMuted} />
+      <T kind="muted" numberOfLines={1} style={{ flex: 1 }}>
+        {name}
+      </T>
+    </Pressable>
+  );
+}
+
+/**
+ * A finished task as one result card: the outcome in one sentence, a small proof from the box beside
+ * its caption, the files as quiet lines and at most two one-tap actions, each as wide as its words.
+ * The visual opens large over the screen.
  */
 const VIEW_SHAPE = {
   Desktop: { flex: 5, aspectRatio: 16 / 10, borderRadius: radius.small },
@@ -147,6 +220,8 @@ function ViewShot({
   onFailed: () => void;
 }) {
   const t = useTheme();
+  const { t: say, tx } = useT();
+  const viewport = tx(view.viewport);
   const [blob, setBlob] = useState<Blob | undefined>();
   const { uri, failed } = usePicture(blob);
   const index = view.listing.index;
@@ -168,7 +243,7 @@ function ViewShot({
     <View style={{ flex, gap: 4, alignItems: 'center' }}>
       <Pressable
         accessibilityRole="imagebutton"
-        accessibilityLabel={`Open large: ${view.viewport}`}
+        accessibilityLabel={say('delivery.openLarge', { name: viewport })}
         disabled={!blob}
         onPress={() => blob && onOpen(blob)}
         style={{ width: '100%' }}
@@ -187,7 +262,10 @@ function ViewShot({
           {uri ? (
             <Image
               source={{ uri }}
-              accessibilityLabel={`${view.viewport}: ${displayText(view.listing.name)}`}
+              accessibilityLabel={say('common.labelValue', {
+                label: viewport,
+                value: displayText(view.listing.name),
+              })}
               resizeMode="cover"
               resizeMethod="resize"
               style={{ width: '100%', height: '100%' }}
@@ -195,7 +273,7 @@ function ViewShot({
           ) : null}
         </View>
       </Pressable>
-      <T kind="small">{view.viewport}</T>
+      <T kind="small">{viewport}</T>
     </View>
   );
 }
@@ -204,15 +282,25 @@ export function DeliveryCard({
   client,
   task,
   model,
+  files = [],
   onOpenTask,
+  onFromTask,
 }: {
   client: CloudClient;
   task: TaskView;
   model: DeliveryModel;
+  /** The other files the task made, each shown as one quiet line. */
+  files?: readonly ArtifactListing[];
   onOpenTask?: (task: TaskView) => void;
+  /** Where the chat shows the task this result came from: a small "from task" link goes back to it. */
+  onFromTask?: () => void;
 }) {
   const t = useTheme();
-  const { diff, outcome, caption, actions, views } = model;
+  const { t: say, tx } = useT();
+  // The outcome is the task's own words, and so is a single picture's caption; the viewport list
+  // and "The changes" are the shared logic's.
+  const { diff, outcome, actions, views } = model;
+  const caption = views || !model.shot ? tx(model.caption) : model.caption;
   // With views each screenshot loads itself; the single picture is not loaded a second time.
   const shot = views ? undefined : model.shot;
   const [proof, setProof] = useState<Blob | undefined>();
@@ -238,29 +326,45 @@ export function DeliveryCard({
     try {
       const content = await client.readArtifact(task.taskId, diff.index);
       if (content.kind === 'text')
-        setOpened({ kind: 'diff', title: caption || 'The changes', text: content.text });
+        setOpened({ kind: 'diff', title: caption || tx('The changes'), text: content.text });
     } catch {
       setFailed(true);
     }
   }
 
+  const [fileFailed, setFileFailed] = useState(false);
+  async function openFile(file: ArtifactListing) {
+    setFileFailed(false);
+    const title = displayText(file.name);
+    try {
+      const content = await client.readArtifact(task.taskId, file.index);
+      if (content.kind === 'image') setOpened({ kind: 'image', title, blob: content.blob });
+      else if (content.kind === 'text')
+        setOpened({ kind: isDiffListing(file) ? 'diff' : 'text', title, text: content.text });
+      else setFileFailed(true);
+    } catch {
+      setFileFailed(true);
+    }
+  }
+
+  const taskTitle = task.title ? displayText(task.title) : say('task.title');
   return (
-    <Card label={`Result: ${displayText(task.title ?? 'Task')}`}>
+    <Card label={say('delivery.result', { title: taskTitle })}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
         <StatusMark tone="ok" />
         <T kind="small" style={{ flex: 1 }}>
-          Finished
+          {say('delivery.finished')}
         </T>
         {onOpenTask && (
           <Pressable
             accessibilityRole="button"
             testID="button-Details"
-            accessibilityLabel="Details"
+            accessibilityLabel={say('common.details')}
             onPress={() => onOpenTask(task)}
             style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 4 }}
           >
             <T kind="muted" style={{ textDecorationLine: 'underline' }}>
-              Details
+              {say('common.details')}
             </T>
           </Pressable>
         )}
@@ -269,7 +373,7 @@ export function DeliveryCard({
       {views ? (
         <View
           accessibilityLabel={caption}
-          style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 10 }}
+          style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 10, maxWidth: 300 }}
         >
           {views.map((view) => (
             <ViewShot
@@ -277,53 +381,114 @@ export function DeliveryCard({
               client={client}
               taskId={task.taskId}
               view={view}
-              onOpen={(blob) => setOpened({ kind: 'image', title: view.viewport, blob })}
+              onOpen={(blob) => setOpened({ kind: 'image', title: tx(view.viewport), blob })}
               onFailed={markFailed}
             />
           ))}
         </View>
       ) : shot && proofUri ? (
+        // A thumbnail beside its caption; a tap shows it large.
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+          <Pressable
+            testID="delivery-picture"
+            accessibilityRole="imagebutton"
+            accessibilityLabel={say('delivery.openLarge', {
+              name: caption || say('delivery.picture'),
+            })}
+            onPress={() =>
+              setOpened({ kind: 'image', title: caption || say('delivery.picture'), blob: proof })
+            }
+          >
+            <Image
+              source={{ uri: proofUri }}
+              accessibilityLabel={displayText(shot.name)}
+              resizeMode="cover"
+              resizeMethod="resize"
+              style={{
+                width: 112,
+                aspectRatio: 16 / 10,
+                borderRadius: radius.small,
+                borderWidth: 1,
+                borderColor: t.cardEdge,
+                backgroundColor: t.chip,
+              }}
+            />
+          </Pressable>
+          {caption ? (
+            <T kind="muted" style={{ flex: 1 }}>
+              {caption}
+            </T>
+          ) : null}
+        </View>
+      ) : null}
+      {caption && !views && !(shot && proofUri) ? <T kind="muted">{caption}</T> : null}
+      {(failed || proofFailed) && <T kind="muted">{say('delivery.pictureFailed')}</T>}
+      {(files.length > 0 || (diff && !views && !shot)) && (
+        <View>
+          {diff && !views && !shot && (
+            <FileRow
+              name={say('delivery.viewChanges')}
+              label={say('delivery.viewChanges')}
+              id="View the changes"
+              onOpen={() => void openDiff()}
+            />
+          )}
+          {files.map((file) => (
+            <FileRow
+              key={file.index}
+              name={displayText(file.name)}
+              onOpen={() => void openFile(file)}
+            />
+          ))}
+        </View>
+      )}
+      {fileFailed && <T kind="muted">{say('delivery.fileFailed')}</T>}
+      {actions.length > 0 && (
+        // The button says what it does; where it goes is for the screen reader and the arrow.
+        <ButtonRow>
+          {actions.slice(0, 2).map((action, i) => (
+            <PillButton
+              key={action.label}
+              label={tx(action.label)}
+              accessibilityLabel={say('delivery.action', {
+                label: tx(action.label),
+                host: action.host,
+              })}
+              id={`${action.label} · ${action.host}`}
+              primary={i === 0}
+              compact
+              external
+              onPress={() => openLink(action.url)}
+            />
+          ))}
+        </ButtonRow>
+      )}
+      {onFromTask && (
         <Pressable
-          testID="delivery-picture"
-          accessibilityRole="imagebutton"
-          accessibilityLabel={`Open large: ${caption || 'picture'}`}
-          onPress={() => setOpened({ kind: 'image', title: caption || 'Picture', blob: proof })}
+          testID="button-From task"
+          accessibilityRole="link"
+          accessibilityLabel={say('result.fromTaskLabel', { title: taskTitle })}
+          onPress={onFromTask}
+          hitSlop={4}
+          style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 6 }}
         >
-          <Image
-            source={{ uri: proofUri }}
-            accessibilityLabel={displayText(shot.name)}
-            resizeMode="cover"
-            resizeMethod="resize"
-            style={{
-              width: '100%',
-              aspectRatio: 16 / 10,
-              borderRadius: radius.small,
-              backgroundColor: t.chip,
-            }}
-          />
+          <Icon name="conversations" color={t.inkMuted} />
+          <T
+            kind="small"
+            style={{ flexShrink: 1, textDecorationLine: 'underline' }}
+            numberOfLines={1}
+          >
+            {say('result.fromTask', { title: taskTitle })}
+          </T>
         </Pressable>
-      ) : (
-        diff && <PillButton label="View the changes" onPress={() => void openDiff()} />
       )}
-      {caption && !views ? <T kind="muted">{caption}</T> : null}
-      {(failed || proofFailed) && (
-        <T kind="muted">The picture is too large or could not be loaded.</T>
-      )}
-      {actions.map((action, i) => (
-        <PillButton
-          key={action.label}
-          label={`${action.label} · ${action.host}`}
-          primary={i === 0}
-          external
-          onPress={() => openLink(action.url)}
-        />
-      ))}
       {opened && (
         <Viewer title={opened.title} onClose={() => setOpened(undefined)}>
           {opened.kind === 'image' && opened.blob && (
             <ViewerPicture blob={opened.blob} title={opened.title} />
           )}
           {opened.kind === 'diff' && <DiffLines text={opened.text ?? ''} />}
+          {opened.kind === 'text' && <Report text={opened.text ?? ''} />}
         </Viewer>
       )}
     </Card>
@@ -340,6 +505,7 @@ function SourceCard({
   source: SourceListing;
 }) {
   const t = useTheme();
+  const { t: say, tx } = useT();
   const [preview, setPreview] = useState<SourcePreview | undefined>();
   const [picture, setPicture] = useState<Blob | undefined>();
   const uri = useBlobUri(picture);
@@ -364,10 +530,11 @@ function SourceCard({
   const site = displayText(source.site);
   const title = displayText(preview?.title ?? source.site);
   const href = publicLink(source.url);
+  const kind = tx(LABEL_WORDS[source.label]);
   return (
     <Pressable
       accessibilityRole={href ? 'link' : 'text'}
-      accessibilityLabel={`${title}, ${site}, ${LABEL_WORDS[source.label]}`}
+      accessibilityLabel={say('delivery.source', { title, site, label: kind })}
       disabled={!href}
       onPress={() => href && openLink(href)}
       style={{
@@ -375,20 +542,18 @@ function SourceCard({
         alignItems: 'center',
         gap: 12,
         minHeight: 56,
-        padding: 8,
-        borderRadius: radius.small,
-        backgroundColor: t.chip,
+        paddingVertical: 6,
       }}
     >
       <View
         style={{
           width: 40,
           height: 40,
-          borderRadius: 8,
+          borderRadius: 12,
           overflow: 'hidden',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: t.card,
+          backgroundColor: t.chip,
         }}
       >
         {uri ? (
@@ -402,14 +567,14 @@ function SourceCard({
           {title}
         </T>
         <T kind="small" numberOfLines={1}>
-          {site} · {LABEL_WORDS[source.label]}
+          {site} · {kind}
         </T>
       </View>
     </Pressable>
   );
 }
 
-/** Up to three of the pages the task opened. */
+/** Up to three of the pages the task opened, folded into one line until it is opened. */
 export function SourcesStack({
   client,
   taskId,
@@ -419,14 +584,36 @@ export function SourcesStack({
   taskId: string;
   sources: readonly SourceListing[];
 }) {
+  const t = useTheme();
+  const { t: say } = useT();
+  const [open, setOpen] = useState(false);
   const shown = stackOf(sources);
   if (shown.length === 0) return null;
   return (
-    <Card label="Sources">
-      <T kind="small">Sources</T>
-      {shown.map((source) => (
-        <SourceCard key={source.index} client={client} taskId={taskId} source={source} />
-      ))}
+    <Card label={say('delivery.sources')}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        accessibilityLabel={say('delivery.sourcesCount', { count: shown.length })}
+        testID="delivery-sources"
+        onPress={() => setOpen(!open)}
+        style={({ pressed }) => ({
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 6,
+          minHeight: TOUCH,
+          opacity: pressed ? 0.6 : 1,
+        })}
+      >
+        <T kind="muted" style={{ flex: 1 }}>
+          {say('delivery.sourcesCount', { count: shown.length })}
+        </T>
+        <Icon name={open ? 'chevronUp' : 'chevronDown'} color={t.inkMuted} />
+      </Pressable>
+      {open &&
+        shown.map((source) => (
+          <SourceCard key={source.index} client={client} taskId={taskId} source={source} />
+        ))}
     </Card>
   );
 }
@@ -450,17 +637,34 @@ export function TaskDelivery({
   task,
   listings,
   onOpenTask,
+  onFromTask,
 }: {
   client: CloudClient;
   task: TaskView;
   listings: readonly ArtifactListing[];
   onOpenTask?: (task: TaskView) => void;
+  onFromTask?: () => void;
 }) {
   const sources = useSources(client, task.taskId, task.state);
   const model = deliveryModel(task, listings, sources);
+  // Every other file is one quiet line: not the pictures, and not the diff when the card already
+  // offers it as "View the changes".
+  const diffShown = model && !model.views && !model.shot ? model.diff : undefined;
+  const files = listings.filter(
+    (listing) => listing.kind === 'file' && !listing.image && listing.index !== diffShown?.index,
+  );
   return (
     <>
-      {model && <DeliveryCard client={client} task={task} model={model} onOpenTask={onOpenTask} />}
+      {model && (
+        <DeliveryCard
+          client={client}
+          task={task}
+          model={model}
+          files={files}
+          onOpenTask={onOpenTask}
+          onFromTask={onFromTask}
+        />
+      )}
       <SourcesStack client={client} taskId={task.taskId} sources={sources} />
     </>
   );

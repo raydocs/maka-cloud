@@ -1,3 +1,4 @@
+export type { QuotaReason, QuotaSource, UsageView } from './quota.js';
 export {
   type CloudServer,
   type CloudServerOptions,
@@ -48,7 +49,18 @@ export {
 export { proxyList } from './auth-routes.js';
 export { AccountStore, type IssuedSession, type Session, SESSION_IDLE_MS } from './accounts.js';
 export { type CreatedInvite, type InviteInfo, type InviteLimits, InviteStore } from './invites.js';
-export { scrubErrorText } from './public-view.js';
+export { localizedAsk, scrubErrorText } from './public-view.js';
+export {
+  DEFAULT_LANGUAGE,
+  isLanguage,
+  type Language,
+  LANGUAGES,
+  languageFromAcceptLanguage,
+  languageInstruction,
+  type Messages,
+  MESSAGES,
+  messages,
+} from './i18n.js';
 export {
   linkedSecretKeys,
   linkedSecretPair,

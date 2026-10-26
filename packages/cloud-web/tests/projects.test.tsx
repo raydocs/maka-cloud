@@ -9,6 +9,7 @@ import {
 } from '@maka-cloud/client';
 import { Projects } from '../src/Projects';
 import { TaskPage } from '../src/TaskPage';
+import { LanguageProvider, translator } from '../src/i18n';
 
 beforeEach(() => {
   let n = 0;
@@ -47,7 +48,7 @@ const project = (duties: DutyView[]): ProjectView => ({
 
 function serveProjects(
   state: { projects: ProjectView[] | 404 },
-  patch?: (body: { state: string }) => Response,
+  patch?: (body: { state: string }) => Response | Promise<Response>,
 ) {
   const patches: { path: string; state: string }[] = [];
   const fetcher: typeof fetch = async (input, init) => {
@@ -137,6 +138,72 @@ test('a double tap on a switch sends one change', async () => {
   );
   expect(api.patches).toHaveLength(1);
 });
+
+test.each(['success', 'failure'] as const)(
+  'a pending toggle is optimistic, ignores another tap, and reconciles after %s',
+  async (outcome) => {
+    let finish!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const api = serveProjects({ projects: [project([duty()])] }, () => response);
+    // Keep the reconciliation read pending so rollback must come from the saved state.
+    let refresh!: (projects: ProjectView[]) => void;
+    const refreshed = new Promise<ProjectView[]>((resolve) => {
+      refresh = resolve;
+    });
+    const reads = vi.spyOn(api.client, 'listProjects');
+    reads.mockResolvedValueOnce([project([duty()])]).mockReturnValueOnce(refreshed);
+    render(<Projects client={api.client} />);
+    const toggle = await screen.findByRole('switch', { name: 'Fix red CI is on' });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(toggle);
+    expect(api.patches).toHaveLength(1);
+    finish(
+      outcome === 'success'
+        ? Response.json({ state: 'off' })
+        : Response.json({ error: 'duty_limit' }, { status: 409 }),
+    );
+    await waitFor(() => expect(reads).toHaveBeenCalledTimes(2));
+    expect(toggle.getAttribute('aria-checked')).toBe(outcome === 'success' ? 'false' : 'true');
+    if (outcome === 'failure')
+      expect(screen.getByRole('alert').textContent).toMatch(/up to 20 duties/u);
+    refresh([project([duty({ state: outcome === 'success' ? 'off' : 'active' })])]);
+    await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
+  },
+);
+
+test.each([
+  ['en', 'up to 20 duties'],
+  ['zh-Hans', '20'],
+  ['zh-Hant', '20'],
+] as const)(
+  'a toggle failure uses the selected language (%s), even if re-reading fails',
+  async (language, text) => {
+    const api = serveProjects({ projects: [project([duty()])] }, () =>
+      Response.json({ error: 'duty_limit' }, { status: 409 }),
+    );
+    vi.spyOn(api.client, 'listProjects')
+      .mockResolvedValueOnce([project([duty()])])
+      .mockRejectedValueOnce(new Error('refresh failed'));
+    render(
+      <LanguageProvider language={language}>
+        <Projects client={api.client} />
+      </LanguageProvider>,
+    );
+    const toggle = await screen.findByRole('switch');
+    fireEvent.click(toggle);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(text);
+    expect(alert.textContent).toBe(
+      translator(language).shared('You can have up to 20 duties on at once. Turn one off first.'),
+    );
+    await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+  },
+);
 
 const finished = (over: Partial<TaskView> = {}): TaskView => ({
   taskId: 't1',
@@ -387,4 +454,23 @@ test('a server without suggestions shows no suggestion section and no error', as
   await screen.findByRole('region', { name: 'example/repo' });
   expect(screen.queryByRole('list', { name: 'Suggestions' })).toBeNull();
   expect(screen.queryByRole('alert')).toBeNull();
+});
+
+test.each([
+  ['en', 'Budget:'],
+  ['zh-Hans', '预算：'],
+  ['zh-Hant', '預算：'],
+] as const)('a task page labels a budget without cost in %s', async (language, label) => {
+  const api = serveTask();
+  const { container } = render(
+    <LanguageProvider language={language}>
+      <TaskPage
+        client={api.client}
+        task={finished({ costUsd: undefined, budgetUsd: 7 })}
+        onBack={() => {}}
+      />
+    </LanguageProvider>,
+  );
+  expect(container.querySelector('.task-page-meta')?.textContent).toContain(`${label} $7.00`);
+  await screen.findByRole('region', { name: translator(language).t('Outcome') });
 });

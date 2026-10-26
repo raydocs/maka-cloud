@@ -31,14 +31,16 @@ import { type OpenedPages, type PreviewService, PreviewBusy, siteOf } from './pr
 import { type FeedEntry, type FeedHub, readOwnFeed } from './feed.js';
 import type { DutyRoutes } from './duties.js';
 import type { HomeRoutes } from './home.js';
+import { LANGUAGES } from './i18n.js';
 import type { InboxRoutes } from './inbox.js';
 import type { AccountStore } from './accounts.js';
 import type { AuthRoutes } from './auth-routes.js';
 import type { InviteInfo, InviteStore } from './invites.js';
-import type { PushApi } from './push.js';
+import { pushAccountTag, type PushApi } from './push.js';
+import type { QuotaSource } from './quota.js';
 import { toPublicView } from './public-view.js';
 import { scrubSecretFields } from './secret-shapes.js';
-import type { RateLimiter } from './rate-limit.js';
+import { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -70,6 +72,10 @@ export interface HttpLimits {
   messagesPerMinute: number;
   /** Cancel, pause and resume requests per minute per invite. */
   controlPerMinute: number;
+  /** Computer inputs per minute per invite, independent of control actions. */
+  inputPerMinute: number;
+  /** Computer inputs accepted in a burst per invite. */
+  inputBurst: number;
   /** Artifact downloads per minute per invite. */
   artifactsPerMinute: number;
   /** Artifact reads running at once, over all invites. */
@@ -92,6 +98,8 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = {
   streamsTotal: 256,
   messagesPerMinute: 30,
   controlPerMinute: 30,
+  inputPerMinute: 600,
+  inputBurst: 20,
   artifactsPerMinute: 60,
   artifactReadsInFlight: 8,
   previewsPerMinute: 60,
@@ -152,6 +160,7 @@ export interface PublicApiDeps {
   accounts: AccountStore;
   conversations: ConversationStore;
   tasks: SqliteTaskStore;
+  acceptsMessages?: (runner: string) => boolean;
   hub: FeedHub;
   messageLimiter: RateLimiter;
   controlLimiter: RateLimiter;
@@ -170,6 +179,7 @@ export interface PublicApiDeps {
   previews: PreviewService;
   previewLimiter: RateLimiter;
   limits: HttpLimits;
+  quota?: QuotaSource;
   /** The owner turned content on: a task's timeline includes what each step did, not only its kind. */
   timelineContent?: boolean;
   /** Bounds on one timeline response; tests lower them. */
@@ -203,6 +213,7 @@ const pushSubscription = z
     expirationTime: z.number().nullable().optional(),
   })
   .strict();
+const settingsPatch = z.object({ language: z.enum(LANGUAGES) }).strict();
 const pushRemoval = z.object({ endpoint: z.string().min(1).max(2048) }).strict();
 const postMessage = z
   .object({
@@ -247,6 +258,7 @@ export class HttpError extends Error {
     readonly status: number,
     readonly code: string,
     readonly headers: Record<string, string> = {},
+    readonly detail: Record<string, unknown> = {},
   ) {
     super(code);
   }
@@ -272,7 +284,16 @@ export class PublicApi {
   private readonly humanComputers = new Map<string, { inviteId: string; abort: AbortController }>();
   private readonly busyComputers = new Set<string>();
 
-  constructor(private readonly deps: PublicApiDeps) {}
+  private readonly computerInputLimiter: RateLimiter;
+
+  constructor(private readonly deps: PublicApiDeps) {
+    this.computerInputLimiter = new RateLimiter(
+      deps.limits.inputPerMinute,
+      Date.now,
+      1024,
+      deps.limits.inputBurst,
+    );
+  }
 
   get openStreams(): number {
     return this.streams;
@@ -405,7 +426,7 @@ export class PublicApi {
         return;
       }
       if (error instanceof HttpError) {
-        respond(res, error.status, { error: error.code }, error.headers);
+        respond(res, error.status, { error: error.code, ...error.detail }, error.headers);
         return;
       }
       if (error instanceof MemoryError) {
@@ -488,6 +509,36 @@ export class PublicApi {
     if (this.deps.auth && path.startsWith('/v1/auth/')) {
       if (await this.deps.auth.handleSigned(req, res, url, invite)) return;
     }
+    if (path === '/v1/usage' && method === 'GET') {
+      if (!this.deps.quota) throw new HttpError(404, 'not_found');
+      return respond(res, 200, this.deps.quota.usage(invite.inviteId));
+    }
+    if (path === '/v1/settings') {
+      // The person's own settings. Today that is the language the server speaks to them in.
+      if (method === 'GET') {
+        return respond(res, 200, { language: this.deps.invites.language(invite.inviteId) });
+      }
+      if (method === 'PATCH') {
+        take(this.deps.controlLimiter, invite);
+        const body = settingsPatch.safeParse(await readJson(req, false));
+        if (!body.success) throw new HttpError(400, 'invalid_request');
+        this.reauthenticate(invite);
+        if (!this.deps.invites.setLanguage(invite.inviteId, body.data.language)) {
+          throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+        }
+        return respond(res, 200, { language: this.deps.invites.language(invite.inviteId) });
+      }
+      throw new HttpError(405, 'method_not_allowed', { allow: 'GET, PATCH' });
+    }
+    if (path === '/v1/me') {
+      // Who this token signs in as: the same for every session of an account, so a client can key
+      // what it keeps on the device (unsent messages) by the account rather than by the token.
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      return respond(res, 200, {
+        ownerId: invite.inviteId,
+        accountTag: pushAccountTag(this.deps.db, invite.inviteId),
+      });
+    }
     if (path === '/v1/memory' && method === 'GET') {
       return respond(res, 200, this.deps.memory.profile(invite.inviteId));
     }
@@ -549,6 +600,23 @@ export class PublicApi {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
       const action = control[2] as ControlAction;
       return this.control(req, res, invite, decodeURIComponent(control[1] ?? ''), action);
+    }
+    const taskConversation = /^\/v1\/tasks\/([^/]+)\/conversation$/u.exec(path);
+    if (taskConversation) {
+      if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+      const session = this.ownTaskSession(invite, decodeURIComponent(taskConversation[1] ?? ''));
+      const taskId = decodeURIComponent(taskConversation[1] ?? '');
+      const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
+      if (!record) throw new HttpError(404, 'not_found');
+      return respond(
+        res,
+        200,
+        {
+          conversationId: this.deps.conversations.conversationOf(session),
+          task: toPublicView(toView(record)),
+        },
+        { 'cache-control': 'private, no-store' },
+      );
     }
     const timeline = /^\/v1\/tasks\/([^/]+)\/timeline$/u.exec(path);
     if (timeline) {
@@ -649,6 +717,15 @@ export class PublicApi {
     }
     this.reauthenticate(invite);
     this.ownSession(invite, conversationId);
+    const duplicate =
+      body.data.clientMessageId !== undefined &&
+      this.deps.db
+        .prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND client_message_id = ?')
+        .get(conversationId, body.data.clientMessageId);
+    if (!duplicate) {
+      const refusal = this.deps.quota?.usage(invite.inviteId).refusal;
+      if (refusal) throw new HttpError(402, 'budget_exceeded', {}, { quota: refusal });
+    }
     const result = this.deps.conversations.post(
       conversationId,
       body.data.text,
@@ -657,6 +734,8 @@ export class PublicApi {
       body.data.mode === undefined ? undefined : { external: false, mode: body.data.mode },
     );
     if (!result.found) throw new HttpError(404, 'not_found');
+    // The same id with other words is not a retry: nothing is posted and the client is told.
+    if (result.conflict) throw new HttpError(409, 'client_message_id_conflict');
     respond(res, 202, { messageId: result.messageId });
     // A retry with the same client id asks again: the first delivery may have failed.
     this.deps.onMessage({
@@ -706,7 +785,15 @@ export class PublicApi {
     const page = this.deps.tasks.tasksOfRoot(sessionId, after, limit);
     const tasks = page.flatMap(({ taskId }) => {
       const record = reduce(this.deps.tasks.readTask(taskId)).get(taskId);
-      return record ? [toPublicView(toView(record))] : [];
+      if (!record) return [];
+      const quota = this.deps.quota?.refusal?.(record.taskId);
+      return [
+        {
+          ...toPublicView(toView(record)),
+          steerable: this.deps.acceptsMessages?.(record.runner) === true,
+          ...(quota ? { quota } : {}),
+        },
+      ];
     });
     const last = page.at(-1);
     respond(res, 200, {
@@ -741,7 +828,9 @@ export class PublicApi {
     if (result === 'invalid_endpoint' || result === 'invalid_keys') {
       throw new HttpError(400, result);
     }
-    respond(res, result === 'created' ? 201 : 200, {});
+    respond(res, result === 'created' ? 201 : 200, {
+      accountTag: pushAccountTag(this.deps.db, invite.inviteId),
+    });
   }
 
   private async unsubscribePush(
@@ -941,7 +1030,14 @@ export class PublicApi {
           : action === 'pause'
             ? await orchestrator.pauseAs(access, taskId)
             : await orchestrator.resumeAs(access, taskId);
-      respond(res, 200, { task: toPublicView(view) });
+      const quota = this.deps.quota?.refusal?.(view.taskId);
+      respond(res, 200, {
+        task: {
+          ...toPublicView(view),
+          steerable: this.deps.acceptsMessages?.(view.runner) === true,
+          ...(quota ? { quota } : {}),
+        },
+      });
     } catch (error) {
       throw error instanceof OrchestratorError ? controlError(error) : error;
     }
@@ -1108,7 +1204,7 @@ export class PublicApi {
       this.ownTaskSession(invite, taskId);
       return respond(res, 200, { controller: this.humanComputers.has(taskId) ? 'human' : 'agent' });
     }
-    take(this.deps.controlLimiter, invite);
+    take(action === 'input' ? this.computerInputLimiter : this.deps.controlLimiter, invite);
     const body = await readJson(req, true);
     const authorize = () => {
       this.reauthenticate(invite);
@@ -1365,7 +1461,9 @@ export class PublicApi {
         while (dirty && !closed) {
           dirty = false;
           for (;;) {
-            const page = readOwnFeed(db, invite.inviteId, position, FEED_PAGE, conversationId);
+            const page = readOwnFeed(db, invite.inviteId, position, FEED_PAGE, conversationId, {
+              language: this.deps.invites.language(invite.inviteId),
+            });
             if (page.scannedTo === position) break;
             for (const entry of page.entries) {
               if (closed || !stillValid()) return;

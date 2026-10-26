@@ -19,6 +19,7 @@ export function toView(item: ItemRecord, answer?: AnswerRecord): ItemView {
     ...(item.context.subject === 'suggestion' && item.context.suggestion
       ? { suggestion: item.context.suggestion }
       : {}),
+    ...(item.context.askTemplate ? { askTemplate: item.context.askTemplate } : {}),
     delivery:
       item.state === 'answering' && answer
         ? answer.attempts <= 1 && answer.inFlight

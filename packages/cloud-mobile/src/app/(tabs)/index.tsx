@@ -1,94 +1,126 @@
 import {
-  BRAND,
   type Conversation,
   ConversationStarter,
   displayText,
-  doneSince,
   dollars,
+  type ErrorText,
   errorText,
   HomeFeed,
-  nextRuns,
-  recentConversations,
-  relativeTime,
+  dutyTime,
   verbOf,
 } from '@maka-cloud/client';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import {
-  AppState,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  ScrollView,
-  View,
-} from 'react-native';
+import { AppState, Pressable, ScrollView, View } from 'react-native';
+import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { DecisionCard } from '@/components/Decision';
 import { InboxStatus } from '@/components/InboxStatus';
-import { Card, Chip, Field, PillButton, RoundButton, Screen, StatusMark, T } from '@/components/ui';
-import { useWorkspace } from '@/lib/session';
-import { mono } from '@/lib/theme';
 
-/** What a first visit can start with; one tap puts it in the box, the person sends it. */
-const EXAMPLES = [
-  'Fix the failing test on my main branch',
-  'Review my latest open pull request',
-  'Add a README section that explains setup',
-] as const;
+import {
+  ButtonRow,
+  Card,
+  Chip,
+  PillButton,
+  Screen,
+  StatusMark,
+  T,
+  Thinking,
+  TOP_BAR,
+} from '@/components/ui';
+import { type Language, useT } from '@/lib/i18n';
+import { startersFor } from '@/lib/ideas';
+import { useWorkspace } from '@/lib/session';
+import {
+  partOfDay,
+  type SinceRow,
+  todayOf,
+  WORKING_REFRESH_MS,
+  type WorkingRow,
+} from '@/lib/today';
 
 /**
- * Home: first what waits on the person (one-tap cards), then the start sentence, then what was done
- * since they were last here and what runs next. Each part fills in as its data arrives and stays out
- * of the way when the server has nothing, or no such feature.
+ * Home is the day's page, built from the cards the server keeps for this person (`/v1/home`), in a
+ * fixed order: the date and a greeting, what needs the person (the only place for the attention
+ * colour), what is working now, what happened since the last visit, what runs next, and on a quiet
+ * day ideas from the person's own projects and conversations (the fixed three when there are
+ * none). A part with nothing in it is left out. Starting work is the composer's job.
+ * Leaving Home (another section, or the app going to the background) tells the server which cards
+ * were shown, once per visit.
  */
 export default function Home() {
   const { client, conversations, visits, started, open } = useWorkspace();
   const router = useRouter();
+  const { t: say, tx, lang } = useT();
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const feed = useMemo(() => new HomeFeed(client, visits), [client, visits]);
-  const { items, busy, inboxLoaded, inboxFailed, answerError, since, done, projects } =
-    useSyncExternalStore(feed.subscribe, feed.getSnapshot);
+  const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
+  const { busy, inboxLoaded, inboxFailed, answerError } = snapshot;
+  const now = Date.now();
+  const today = todayOf(snapshot, conversations, now);
+
+  // The cards on the screen right now: the ones the server is told about when the person leaves.
+  const shown = useRef<string[]>([]);
+  shown.current = today.shown;
+  const focused = useRef(false);
   const latest = useRef(conversations);
   latest.current = conversations;
   useEffect(() => {
     feed.start(latest.current);
-    // Coming back to the app reads decisions, results and schedule again; going away is a visit.
+    // Back in the app on Home reads it again; going to the background from Home is leaving it. An
+    // `inactive` blip (a system sheet, the app switcher on its way) is not.
     const subscription = AppState.addEventListener('change', (next) => {
+      if (!focused.current) return;
       if (next === 'active') feed.refresh();
-      else feed.leave();
+      else if (next === 'background') feed.leave(shown.current);
     });
     return () => {
       subscription.remove();
-      feed.stop();
+      feed.stop(shown.current);
     };
   }, [feed]);
   useEffect(() => feed.conversationsChanged(conversations), [feed, conversations]);
-  // Coming back to this tab (not only to the app) reads decisions and results again; the first
-  // focus is the load that `start` already began.
+  // Coming back to this section reads Home again (the first focus is the load `start` began);
+  // going to another section is leaving Home.
   const firstFocus = useRef(true);
+  const [onScreen, setOnScreen] = useState(false);
   useFocusEffect(
     useCallback(() => {
+      focused.current = true;
+      setOnScreen(true);
       if (firstFocus.current) firstFocus.current = false;
       else feed.refresh();
+      return () => {
+        focused.current = false;
+        setOnScreen(false);
+        feed.leave(shown.current);
+      };
     }, [feed]),
   );
+  // Work that is running changes while the person looks: its line, and when it ends.
+  const working = today.working.length > 0;
+  useEffect(() => {
+    if (!onScreen || !working) return;
+    const timer = setInterval(() => feed.refresh(), WORKING_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [feed, onScreen, working]);
+  // When the last work ends on screen, Home is read once more: the cards may have been read just
+  // before it ended, without its result.
+  const wasWorking = useRef(false);
+  useEffect(() => {
+    if (onScreen && wasWorking.current && !working) feed.refresh();
+    wasWorking.current = working;
+  }, [feed, onScreen, working]);
 
   const [draft, setDraft] = useState('');
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState('');
+  const [startError, setStartError] = useState<ErrorText>('');
+  const [dock, setDock] = useState(76);
+  const { openSheet, sheet } = useConversationSheet(() => router.navigate('/chat'));
 
-  const now = Date.now();
-  const waiting = Object.values(items)
-    .filter((item) => item.state !== 'closed')
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  const finished = since === undefined || done === undefined ? [] : doneSince(done, since);
-  const spent = finished.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
-  const anySpend = finished.some((entry) => entry.costUsd !== undefined);
-  const schedule = projects === undefined ? undefined : nextRuns(projects, now);
-  const titleOf = (conversationId: string) =>
-    displayText(
-      conversations.find((c) => c.conversationId === conversationId)?.title ??
-        'Untitled conversation',
-    );
+  const titleOf = (conversationId: string) => {
+    const title = conversations.find((c) => c.conversationId === conversationId)?.title;
+    return title ? displayText(title) : say('common.untitled');
+  };
   const openConversation = (conversationId: string) => {
     open(conversationId);
     router.navigate('/chat');
@@ -111,184 +143,273 @@ export default function Home() {
     );
   };
 
+  const { needs, since, next, watching } = today;
+  const quiet = needs.length === 0 && !working && since.length === 0;
+  const firstVisit = conversations.length === 0;
+  // Until the decisions are read (or when they could not be), the page does not say nothing needs
+  // the person. A first visit's line and the ideas wait only for the read to settle.
+  const known = inboxLoaded && !inboxFailed;
+  const settled = inboxLoaded || inboxFailed;
+
   return (
     <Screen>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={{ flex: 1 }}
-      >
+      <View style={{ flex: 1 }}>
         <ScrollView
-          contentContainerStyle={{ padding: 16, gap: 14 }}
+          contentContainerStyle={{
+            padding: 16,
+            paddingTop: TOP_BAR + 12,
+            paddingBottom: dock + 16,
+            gap: 14,
+          }}
+          scrollIndicatorInsets={{ top: TOP_BAR, bottom: dock }}
           keyboardShouldPersistTaps="handled"
           contentInsetAdjustmentBehavior="automatic"
         >
-          {waiting.length > 0 && (
-            <Card label="Decisions waiting">
-              <T kind="heading">Waiting on you ({waiting.length})</T>
-              {waiting.map((item) => (
+          <View style={{ gap: 2, paddingHorizontal: 4 }}>
+            <T kind="small" testID="home-date">
+              {dateOf(now, lang)}
+            </T>
+            <T kind="title" testID="home-today-title">
+              {say(`home.greeting.${partOfDay(now)}`)}
+            </T>
+            {quiet && firstVisit && settled && <T kind="muted">{say('home.empty')}</T>}
+            {quiet && !firstVisit && known && <T kind="muted">{say('home.quiet')}</T>}
+            {startError ? <T kind="error">{tx(startError)}</T> : null}
+          </View>
+
+          {needs.length > 0 && (
+            <Card label={say('home.waiting.label')}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <StatusMark tone="attention" />
+                <T kind="heading" testID={`home-waiting-${needs.length}`}>
+                  {say('home.waiting', { count: needs.length })}
+                </T>
+              </View>
+              {needs.map((item) => (
                 <View key={item.itemId} style={{ gap: 8 }}>
-                  <Chip>{verbOf(item.kind)}</Chip>
+                  <Chip>{tx(verbOf(item.kind))}</Chip>
                   <DecisionCard
                     item={item}
                     disabled={busy}
-                    onAnswer={(optionId, text) => void feed.answer(item, optionId, text)}
+                    onAnswer={(optionId, text) => feed.answer(item, optionId, text)}
+                    onOpenGrants={() => router.push('/me')}
                   />
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel={`Open conversation: ${titleOf(item.conversationId)}`}
+                    accessibilityLabel={say('home.openLabel', {
+                      title: titleOf(item.conversationId),
+                    })}
                     onPress={() => openConversation(item.conversationId)}
                     style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-end' }}
                   >
                     <T kind="muted" style={{ textDecorationLine: 'underline' }}>
-                      Open conversation
+                      {say('home.open')}
                     </T>
                   </Pressable>
                 </View>
               ))}
-              {answerError ? <T kind="error">{answerError}</T> : null}
+              {answerError ? <T kind="error">{tx(answerError)}</T> : null}
             </Card>
           )}
 
-          {waiting.length === 0 && (
+          {/* Where the decisions would be: bars while they are read, a retry when they could not be. */}
+          {needs.length === 0 && !known && (
             <InboxStatus loaded={inboxLoaded} failed={inboxFailed} onRetry={() => feed.refresh()} />
           )}
 
-          <Card label="Start something">
-            <T kind={waiting.length > 0 ? 'heading' : 'title'}>Make room for your next idea.</T>
-            <T kind="muted">
-              Tell {BRAND.name} what you’d like done, in a sentence. It takes it from there.
-            </T>
-            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
-              <View style={{ flex: 1 }}>
-                <Field
-                  label="What would you like to get done?"
-                  placeholder="What would you like to get done?"
-                  multiline
-                  maxLength={16000}
-                  value={draft}
-                  onChangeText={(text) => {
-                    setDraft(displayText(text));
-                    starter.draftEdited();
-                  }}
-                />
-              </View>
-              <RoundButton
-                label={starting ? 'Starting…' : 'Start'}
-                icon="send"
-                disabled={starting || !draft.trim()}
-                onPress={begin}
-              />
-            </View>
-            {startError ? <T kind="error">{startError}</T> : null}
-          </Card>
-
-          {conversations.length === 0 && waiting.length === 0 && (
-            <Card label="Ideas to start with">
-              <T kind="heading">Not sure where to begin?</T>
-              {EXAMPLES.map((example) => (
-                <PillButton
-                  key={example}
-                  label={example}
-                  onPress={() => {
-                    setDraft(example);
-                    starter.draftEdited();
-                  }}
+          {working && (
+            <Card label={say('home.working')}>
+              <T kind="heading" testID="home-working">
+                {say('home.working')}
+              </T>
+              {today.working.map((row) => (
+                <Working
+                  key={row.task.taskId}
+                  row={row}
+                  title={row.task.title ? displayText(row.task.title) : titleOf(row.conversationId)}
+                  onOpen={() => openConversation(row.conversationId)}
                 />
               ))}
             </Card>
           )}
 
-          {since !== undefined && done !== undefined && finished.length > 0 && (
-            <Card label="Since you were last here">
-              <T kind="heading">Since you were last here</T>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <Stat label="Done" value={String(finished.length)} />
-                <Stat label="Spent" value={anySpend ? dollars(spent) : '—'} />
-              </View>
-              {!anySpend && finished.length > 0 && <T kind="small">Spend not reported.</T>}
-              {finished.map((entry) => (
-                <Pressable
-                  key={entry.taskId}
-                  accessibilityRole="button"
-                  onPress={() => openConversation(entry.conversationId)}
-                  style={{
-                    flexDirection: 'row',
-                    gap: 10,
-                    alignItems: 'flex-start',
-                    minHeight: 44,
-                  }}
-                >
-                  <View style={{ paddingTop: 6 }}>
-                    <StatusMark tone={entry.state === 'succeeded' ? 'ok' : 'bad'} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <T kind="body" style={{ fontWeight: '600' }}>
-                      {displayText(entry.title)}
-                    </T>
-                    <T kind="muted">{displayText(entry.outcome)}</T>
-                  </View>
-                  {entry.costUsd !== undefined && (
-                    <T kind="muted" style={mono}>
-                      {dollars(entry.costUsd)}
-                    </T>
-                  )}
-                </Pressable>
+          {since.length > 0 && (
+            <Card label={say('home.since')}>
+              <T kind="heading" testID="home-since">
+                {say('home.since')}
+              </T>
+              {since.map((row) => (
+                <Since key={row.key} row={row} onOpen={openConversation} />
               ))}
             </Card>
           )}
 
-          {schedule && (schedule.scheduled.length > 0 || schedule.watching > 0) && (
-            <Card label="What runs next">
-              <T kind="heading">What runs next</T>
-              {schedule.scheduled.map((run) => (
+          {(next.length > 0 || watching > 0) && (
+            <Card label={say('home.next')}>
+              <T kind="heading">{say('home.next')}</T>
+              {next.map((run) => (
                 <View key={run.dutyId} style={{ flexDirection: 'row', gap: 10 }}>
                   <View style={{ flex: 1 }}>
-                    <T kind="body" style={{ fontWeight: '600' }}>
-                      {displayText(run.name)}
-                    </T>
+                    <T kind="body">{displayText(run.name)}</T>
                     <T kind="muted">{displayText(run.repo)}</T>
                   </View>
-                  <T kind="muted">{relativeTime(run.at, now)}</T>
+                  <T kind="muted">{dutyTime(run.at, lang, now)}</T>
                 </View>
               ))}
-              {schedule.watching > 0 && (
+              {watching > 0 && (
                 <T kind="muted">
-                  {schedule.watching === 1
-                    ? '1 more duty wakes when something happens on GitHub.'
-                    : `${schedule.watching} more duties wake when something happens on GitHub.`}
+                  {watching === 1
+                    ? say('home.watching.one')
+                    : say('home.watching.many', { count: watching })}
                 </T>
               )}
             </Card>
           )}
 
-          {conversations.length > 0 && (
-            <Card label="Recent conversations">
-              <T kind="heading">Pick up where you left off</T>
-              {recentConversations(conversations).map((c) => (
-                <Pressable
-                  key={c.conversationId}
-                  accessibilityRole="button"
-                  onPress={() => openConversation(c.conversationId)}
-                  style={{ minHeight: 44, justifyContent: 'center' }}
-                >
-                  <T kind="body">{displayText(c.title ?? 'Untitled conversation')}</T>
-                </Pressable>
-              ))}
-            </Card>
+          {quiet && settled && (
+            <View
+              style={{ gap: 10, paddingHorizontal: 4 }}
+              accessibilityLabel={say('home.ideas.label')}
+            >
+              <T kind="heading">{say('home.ideas.title')}</T>
+              <ButtonRow>
+                {startersFor(snapshot.projects, conversations, undefined, say).map((idea) => (
+                  <PillButton
+                    key={idea.id}
+                    label={idea.label}
+                    id={idea.id}
+                    compact
+                    // While a conversation starts, the draft is what is being sent.
+                    disabled={starting}
+                    onPress={() => {
+                      if (idea.open !== undefined) return openConversation(idea.open);
+                      setDraft(idea.fill);
+                      starter.draftEdited();
+                    }}
+                  />
+                ))}
+              </ButtonRow>
+            </View>
           )}
         </ScrollView>
-      </KeyboardAvoidingView>
+        <TopFade />
+        <Dock height={dock} onHeight={setDock}>
+          <Composer
+            draft={draft}
+            onDraft={(text) => {
+              setDraft(text);
+              starter.draftEdited();
+            }}
+            sending={starting}
+            disabled={starting}
+            onSend={begin}
+            {...(conversations.length > 0 ? { onPlus: openSheet } : {})}
+            fieldId="What would you like to get done?"
+            fieldLabel={say('home.start.field')}
+            placeholder={say('home.start.field')}
+            sendId="Start"
+            sendLabel={say('home.start.go')}
+            sendingId="Starting…"
+            sendingLabel={say('home.start.going')}
+          />
+        </Dock>
+        {sheet}
+      </View>
     </Screen>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+/** Today's date in the app's language: "Friday, October 23", "10月23日星期五". */
+function dateOf(at: number, lang: Language): string {
+  return new Date(at).toLocaleDateString(lang, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+/** A task at work: its mark, its title, its latest narration when there is one, and when it began. */
+function Working({ row, title, onOpen }: { row: WorkingRow; title: string; onOpen: () => void }) {
+  const { t: say, lang } = useT();
+  const { task } = row;
+  const at = task.startedAt
+    ? new Date(task.startedAt).toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })
+    : undefined;
+  const state =
+    task.state === 'queued'
+      ? say('home.working.queued')
+      : task.state === 'paused'
+        ? say('home.working.paused')
+        : undefined;
+  const meta = [state, at ? say('home.working.started', { time: at }) : undefined].filter(
+    (part): part is string => part !== undefined,
+  );
   return (
-    <View style={{ flex: 1, gap: 2 }} accessible accessibilityLabel={`${label}: ${value}`}>
-      <T kind="small">{label}</T>
-      <T kind="heading" style={/\d/u.test(value) ? mono : undefined}>
-        {value}
-      </T>
-    </View>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={say('home.openLabel', { title })}
+      onPress={onOpen}
+      style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start', minHeight: 44 }}
+    >
+      <View style={{ paddingTop: 6 }}>
+        {task.state === 'running' ? <Thinking /> : <StatusMark tone="idle" />}
+      </View>
+      <View style={{ flex: 1 }}>
+        <T kind="body">{title}</T>
+        {task.narration ? <T kind="muted">{displayText(task.narration)}</T> : null}
+        {meta.length > 0 && (
+          <T kind="small" style={{ fontVariant: ['tabular-nums'] }}>
+            {meta.join(' · ')}
+          </T>
+        )}
+      </View>
+    </Pressable>
+  );
+}
+
+/** One thing that happened since the last visit: a task that ended, or a note in the server's words. */
+function Since({ row, onOpen }: { row: SinceRow; onOpen: (conversationId: string) => void }) {
+  const { t: say, tx } = useT();
+  if (row.kind === 'note')
+    return (
+      <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+        <View style={{ paddingTop: 6 }}>
+          <StatusMark tone="idle" />
+        </View>
+        <T kind="body" style={{ flex: 1 }}>
+          {displayText(row.text)}
+        </T>
+      </View>
+    );
+  const title = row.title ?? say('task.title');
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={() => onOpen(row.conversationId)}
+      style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start', minHeight: 44 }}
+    >
+      <View style={{ paddingTop: 6 }}>
+        <StatusMark tone={row.tone} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <T kind="body">{title}</T>
+        {/* A finished task's summary is its own words; any other outcome is the app's. */}
+        <T kind="muted">{row.ownWords ? displayText(row.outcome) : tx(displayText(row.outcome))}</T>
+      </View>
+      {/* A spend shows only when the server reported one; there is no "not reported" line. */}
+      {row.costUsd !== undefined && (
+        <View
+          accessible
+          accessibilityLabel={say('common.labelValue', {
+            label: say('task.cost'),
+            value: dollars(row.costUsd),
+          })}
+        >
+          <T kind="muted" style={{ fontVariant: ['tabular-nums'] }}>
+            {dollars(row.costUsd)}
+          </T>
+        </View>
+      )}
+    </Pressable>
   );
 }

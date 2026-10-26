@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEvent } from '@maka-cloud/orchestrator';
+import type { Language } from './i18n.js';
 import {
   scrubSecretText,
   toPublicConductorData,
@@ -70,6 +71,7 @@ interface FeedRow {
   role: string | null;
   text: string | null;
   m_at: number | null;
+  client_message_id: string | null;
   title: string | null;
   c_at: number | null;
   e_data: string | null;
@@ -79,7 +81,7 @@ interface FeedRow {
 const PAGE_SQL = `
 SELECT f.id, f.kind, f.conversation_id, f.at,
   t.seq AS t_seq, t.at AS t_at, t.event AS t_event,
-  m.message_id, m.role, m.text, m.at AS m_at,
+  m.message_id, m.role, m.text, m.at AS m_at, m.client_message_id,
   c.title, c.created_at AS c_at,
   e.data AS e_data,
   x.data AS x_data
@@ -104,6 +106,8 @@ export interface ReadFeedOptions {
    * inside the server process; what they publish is still their own to keep clean.
    */
   internal?: boolean;
+  /** The reader's language, for the words the server puts in what it shows (an inbox item's ask). */
+  language?: Language;
 }
 
 /** Feed entries after `after`, in order, at most `limit`, optionally of one conversation. */
@@ -130,14 +134,23 @@ export function readOwnFeed(
   after: number,
   limit: number,
   conversationId?: string,
+  options: Pick<ReadFeedOptions, 'language'> = {},
 ): { entries: FeedEntry[]; scannedTo: number } {
   if (conversationId !== undefined) {
-    const entries = readRows(db, after, Number.MAX_SAFE_INTEGER, limit, conversationId, owner);
+    const entries = readRows(
+      db,
+      after,
+      Number.MAX_SAFE_INTEGER,
+      limit,
+      conversationId,
+      owner,
+      options,
+    );
     return { entries, scannedTo: entries.at(-1)?.id ?? after };
   }
   const { last } = db.prepare(WINDOW_SQL).get(after, limit) as { last: number | null };
   if (last === null) return { entries: [], scannedTo: after };
-  return { entries: readRows(db, after, last, limit, null, owner), scannedTo: last };
+  return { entries: readRows(db, after, last, limit, null, owner, options), scannedTo: last };
 }
 
 function readRows(
@@ -157,7 +170,7 @@ function readRows(
     kind: row.kind,
     conversationId: row.conversation_id,
     at: row.at,
-    data: payload(db, row, options.internal === true),
+    data: payload(db, row, options.internal === true, options.language),
   }));
 }
 
@@ -176,7 +189,12 @@ function costSoFar(db: DatabaseSync, taskId: string, seq: number): number {
   return Math.round(rows.reduce((sum, row) => sum + row.usd, 0) * 1e9) / 1e9;
 }
 
-function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
+function payload(
+  db: DatabaseSync,
+  row: FeedRow,
+  internal: boolean,
+  language: Language | undefined,
+): unknown {
   switch (row.kind) {
     case 'task.event': {
       const event = JSON.parse(row.t_event ?? 'null') as TaskEvent;
@@ -198,6 +216,11 @@ function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
         text:
           !internal && row.role === 'assistant' && row.text ? scrubSecretText(row.text) : row.text,
         at: row.m_at,
+        // The person's own message names the id their client sent it under, so the client can
+        // replace the copy it showed while sending. Internal readers keep the shape they had.
+        ...(!internal && row.role === 'user' && row.client_message_id
+          ? { clientMessageId: row.client_message_id }
+          : {}),
       };
     case 'conversation.created':
       return { title: row.title, at: row.c_at };
@@ -212,7 +235,7 @@ function payload(db: DatabaseSync, row: FeedRow, internal: boolean): unknown {
     }
     case 'inbox.item': {
       const item = JSON.parse(row.x_data ?? 'null') as unknown;
-      return internal ? item : toPublicItem(item);
+      return internal ? item : toPublicItem(item, language);
     }
     case 'inbox.digest':
       return JSON.parse(row.x_data ?? 'null') as unknown;

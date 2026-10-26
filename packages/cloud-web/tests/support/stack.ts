@@ -20,6 +20,7 @@ import {
   type AnswerOutcome,
   type CloudServer,
   type InboxService,
+  type Language,
   type ConversationHandler,
   type ConversationPublisher,
   type PushTransport,
@@ -75,7 +76,7 @@ export interface Stack {
   /** Starts a task of the conversation (a subtask when `parent` is a task id). */
   delegate(
     conversationId: string,
-    input: { title: string; parent?: string; budgetUsd?: number },
+    input: { title: string; parent?: string; budgetUsd?: number; steerable?: boolean },
   ): Promise<string>;
   /** The fake run of a task, once the orchestrator has started it. */
   run(taskId: string): Promise<FakeRun>;
@@ -154,10 +155,23 @@ export const previewFetch: PreviewFetch = async (url) => {
 };
 
 export async function startStack(
-  options: { pausable?: boolean; port?: number; push?: boolean; inbox?: boolean } = {},
+  options: {
+    pausable?: boolean;
+    port?: number;
+    push?: boolean;
+    inbox?: boolean;
+    /**
+     * What the stack's invites read. English by default: the web app reads the server's English
+     * words (its own Chinese comes with its translation), so its people choose English, as one does
+     * with `PATCH /v1/settings`. The server's own default is Simplified Chinese.
+     */
+    language?: Language;
+  } = {},
 ): Promise<Stack> {
+  const language = options.language ?? 'en';
   const dir = await mkdtemp(join(tmpdir(), 'cloud-web-stack-'));
-  const fake = new FakeRunner({ pausable: options.pausable ?? true });
+  const fake = new FakeRunner({ pausable: options.pausable ?? true, steerable: true });
+  const plain = new FakeRunner({ name: 'plain', pausable: true });
   const computer = await fakeComputer();
   const questions = new Map<
     string,
@@ -226,7 +240,7 @@ export async function startStack(
     dbPath: join(dir, 'server.sqlite'),
     invitesPath: join(dir, 'invites.sqlite'),
     handoffRoot: join(dir, 'handoff'),
-    runners: new RunnerRegistry([fake]),
+    runners: new RunnerRegistry([fake, plain]),
     previews: { fetch: previewFetch },
     computer: computer.source,
     // Sign-in by emailed code with a mail service that only keeps what it was given.
@@ -314,6 +328,7 @@ export async function startStack(
         }),
   });
   const invite = server.invites.create('test');
+  server.invites.setLanguage(invite.inviteId, language);
 
   const sessionOf = (conversationId: string): SessionInfo => {
     const token = access(conversationId)?.rotateToken();
@@ -343,6 +358,7 @@ export async function startStack(
     },
     newInvite: () => {
       const created = server.invites.create('other');
+      server.invites.setLanguage(created.inviteId, language);
       return { token: created.token, inviteId: created.inviteId };
     },
     say: (conversationId, text) => {
@@ -389,7 +405,7 @@ export async function startStack(
               return child;
             })();
       const view = await server.orchestrator.delegate(session, {
-        runner: 'fake',
+        runner: input.steerable === false ? 'plain' : 'fake',
         brief: input.title,
         title: input.title,
         ...(input.budgetUsd === undefined ? {} : { budgetUsd: input.budgetUsd }),

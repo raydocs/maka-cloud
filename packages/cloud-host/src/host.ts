@@ -11,6 +11,7 @@ import {
   type CloudServer,
   type CloudServerOptions,
   type InboxService,
+  languageInstruction,
   startCloudServer,
   type SupervisorParts,
 } from '@maka-cloud/server';
@@ -30,7 +31,12 @@ export interface CloudOptions
   /** Storage, output, memory and orchestrator access are composed here. */
   conductor: Omit<
     ConductorOptions,
-    'root' | 'outbox' | 'orchestratorAccess' | 'onWarning' | 'turnContext'
+    | 'root'
+    | 'outbox'
+    | 'orchestratorAccess'
+    | 'onWarning'
+    | 'turnContext'
+    | 'conversationInstructions'
   >;
   /**
    * Called with the restored orchestrator and the new conductor before the server listens, so no
@@ -97,6 +103,7 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
       memory,
       ownerOfConversation,
       conversationOfTask,
+      languageOf,
     }) => {
       const created = await Conductor.create({
         playbooks: PRODUCT_PLAYBOOKS,
@@ -104,6 +111,9 @@ export async function startCloud(options: CloudOptions): Promise<Cloud> {
         root: conductorRoot,
         outbox: new ServerOutbox(publisher, warn, memory.remember),
         turnContext: memory.context,
+        // The person's language goes into a new conversation's system prompt, never into its history.
+        conversationInstructions: (conversationId) =>
+          languageInstruction(languageOf(conversationId)),
         orchestratorAccess: conductorAccess,
         // An approved irreversible call runs only while its approver's invite is active and owns the conversation.
         approverAuthorized: (approvedBy, conversationId) =>

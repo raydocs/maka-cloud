@@ -131,6 +131,7 @@ test('an invites file from before it had a version is upgraded in place and its 
   const reset = new DatabaseSync(path);
   reset.exec('ALTER TABLE invites DROP COLUMN daily_limit_usd');
   reset.exec('ALTER TABLE invites DROP COLUMN monthly_limit_usd');
+  reset.exec('ALTER TABLE invites DROP COLUMN language');
   reset.exec('PRAGMA user_version = 0');
   reset.close();
 

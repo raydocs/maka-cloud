@@ -4,7 +4,7 @@
  * composition code) passes an object of this shape.
  */
 
-import type { SuggestionFacts } from './types.js';
+import type { AskTemplate, SuggestionFacts } from './types.js';
 
 /** One entry of the server's feed, as `readFeed` returns it. */
 export interface FeedEntry {
@@ -71,6 +71,8 @@ export interface Interrupt {
     conversationId: string;
     kind: string;
     ask: string;
+    /** The fixed sentence the ask was built from, when a rule built it; see `ItemView`. */
+    askTemplate?: AskTemplate;
   }>;
   batch: boolean;
 }

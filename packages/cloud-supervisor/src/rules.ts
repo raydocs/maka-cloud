@@ -3,7 +3,7 @@ import type { Signal, SignalManifest, SignalTaskEvent } from './events.js';
 import { stableHash } from './hash.js';
 import type { Settings } from './settings.js';
 import type { ItemRecord, ItemSpec, Store, TaskRecord, VerificationRecord } from './store.js';
-import { clip, exactText, quoted, shownJson } from './text.js';
+import { clip, exactText, quotable, quoted, shownJson } from './text.js';
 import type {
   CloseReason,
   EvidenceLink,
@@ -332,7 +332,16 @@ export const offerRef = (projectId: string, kind: string): string => `offer:${pr
 /** A non-interrupting item asking whether to keep suggesting a kind: "Turn off" or "Keep". */
 export function suggestionOfferSpec(store: Store, input: SuggestionOfferChoice): ItemSpec {
   const ref = offerRef(input.projectId, input.kind);
-  const context: ItemContext = { subject: 'suggestion', detail: ref };
+  const context: ItemContext = {
+    subject: 'suggestion',
+    detail: ref,
+    askTemplate: {
+      id: 'suggestion_offer',
+      count: input.ignored,
+      label: clip(input.label.toLowerCase(), 120),
+      repo: clip(input.repo, 200),
+    },
+  };
   return {
     kind: 'suggestion',
     conversationId: input.conversationId,
@@ -366,6 +375,11 @@ export function stallSpec(store: Store, task: TaskRecord, at: number): ItemSpec 
     ...(task.title === null ? {} : { taskTitle: task.title }),
     idleMinutes: Math.max(0, Math.floor((at - task.lastActivityAt) / 60_000)),
   };
+  context.askTemplate = {
+    id: 'stall',
+    title: quotable(task.title),
+    minutes: context.idleMinutes ?? 0,
+  };
   return {
     kind: 'blocked',
     conversationId: task.conversationId,
@@ -394,6 +408,12 @@ function failedTwiceSpec(
     count,
     detail: clip(reason, 200),
     ...(task.title === null ? {} : { taskTitle: task.title }),
+    askTemplate: {
+      id: 'failed_twice',
+      title: quotable(task.title),
+      count,
+      reason: quotable(reason, 200),
+    },
   };
   return {
     kind: 'blocked',
@@ -415,6 +435,11 @@ function lowConfidenceSpec(store: Store, task: TaskRecord, manifest: SignalManif
     taskId: task.taskId,
     manifestDigest: digestOf(manifest),
     ...(task.title === null ? {} : { taskTitle: task.title }),
+    askTemplate: {
+      id: 'low_confidence',
+      title: quotable(task.title),
+      summary: quotable(manifest.summary, 240),
+    },
   };
   return {
     kind: 'decision',
@@ -448,6 +473,13 @@ export function finishedSpec(
     manifestDigest: manifest ? digestOf(manifest) : stableHash(detail),
     ...(checked === undefined ? {} : { checked }),
     ...(task.title === null ? {} : { taskTitle: task.title }),
+    askTemplate: {
+      id: 'finished',
+      title: quotable(task.title),
+      outcome,
+      ...(checked === undefined ? {} : { checked }),
+      detail: quotable(detail, 240),
+    },
   };
   const note =
     checked === 'passed'
@@ -843,6 +875,20 @@ export function verificationFailedSpec(
     detail: clip(detail, 300),
     ...(failed ? { count: outcome.mismatches.length } : {}),
     ...(task.title === null ? {} : { taskTitle: task.title }),
+    askTemplate: failed
+      ? {
+          id: 'verification_failed',
+          title: quotable(task.title),
+          count: outcome.mismatches.length,
+          detail: clip(detail, 500),
+          more: Math.max(0, outcome.mismatches.length - 3),
+        }
+      : {
+          id: 'verification_incomplete',
+          title: quotable(task.title),
+          detail: clip(detail, 500),
+          code: outcome.code,
+        },
   };
   return {
     kind: 'verification_failed',

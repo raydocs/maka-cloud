@@ -32,6 +32,7 @@ import {
   PublicApi,
   type TimelineLimits,
 } from './http.js';
+import type { QuotaSource } from './quota.js';
 import { HomeRoutes, HomeStore } from './home.js';
 import { type InboxService, InboxRoutes } from './inbox.js';
 import { AccountStore } from './accounts.js';
@@ -45,6 +46,7 @@ import {
   type JwksSource,
   jwksFromSafeFetch,
 } from './identity.js';
+import { DEFAULT_LANGUAGE, type Language } from './i18n.js';
 import { InviteStore } from './invites.js';
 import { type PushConfig, type PushOptions, PushService } from './push.js';
 import { RateLimiter } from './rate-limit.js';
@@ -147,7 +149,7 @@ export interface SupervisorParts {
     post(
       message: { conversationId: string; text: string; clientMessageId: string; caller?: string },
       signal: AbortSignal,
-    ): Promise<{ messageId: string } | { refused: 'not_found' }>;
+    ): Promise<{ messageId: string } | { refused: 'not_found' | 'client_message_id_conflict' }>;
   };
   /** Reads one artifact of a task of that conversation, with the checks of the artifact route. */
   artifacts: {
@@ -157,6 +159,8 @@ export interface SupervisorParts {
       signal: AbortSignal,
     ): Promise<ArtifactRead>;
   };
+  /** The language the owner of a conversation reads, for words the supervisor's host composes. */
+  languageOf(conversationId: string): Language;
   onWarning(message: string, detail?: unknown): void;
 }
 
@@ -223,6 +227,11 @@ export interface CloudServerOptions {
     ownerOfConversation(conversationId: string): string | undefined;
     /** The conversation a task belongs to, or undefined for an unknown task. */
     conversationOfTask(taskId: string): string | undefined;
+    /**
+     * The language the person who owns the conversation reads, read now; the default for an
+     * unknown or unowned conversation.
+     */
+    languageOf(conversationId: string): Language;
   }) => ConversationHandler | Promise<ConversationHandler>;
   /** Where artifact content comes from. Default: the task's directory under `handoffRoot`. */
   artifacts?: ArtifactSource;
@@ -256,6 +265,9 @@ export interface CloudServerOptions {
    * like any unknown path. The caller owns it and closes it after the server.
    */
   duties?: DutyService;
+  /** Whether the operator has configured API-key model access. */
+  modelAvailable?: () => boolean;
+  quota?: QuotaSource;
   /**
    * Signing in with Apple, Google or an emailed code (T31). `apple` and `google` list the client
    * ids the owner registered; a provider with none is off, and with no `mailer` there is no email
@@ -470,6 +482,11 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       const owner = conversations.ownerOf(conversationId);
       return owner !== undefined && ownInviteStore.active(owner) ? owner : undefined;
     };
+    /** The language the owner of a conversation reads; the default for an unowned one. */
+    const languageOfConversation = (conversationId: string): Language => {
+      const owner = conversations.ownerOf(conversationId);
+      return owner === undefined ? DEFAULT_LANGUAGE : ownInviteStore.language(owner);
+    };
     handler = options.createHandler
       ? await options.createHandler({
           publisher,
@@ -506,6 +523,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           },
           conversationOfTask,
           ownerOfConversation: (conversationId) => conversations.ownerOf(conversationId),
+          languageOf: languageOfConversation,
         })
       : options.handler;
     const ownHandler = handler;
@@ -573,6 +591,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           subscribe: (listener) => hub.subscribe(listener),
         },
         publish: (event) => void extensions.publish(event),
+        languageOf: languageOfConversation,
         answers: {
           deliver: async (answer, signal) => {
             signal.throwIfAborted();
@@ -601,6 +620,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
               message.clientMessageId,
             );
             if (!result.found) throw new Error('The conversation does not exist');
+            if (result.conflict) return { refused: 'client_message_id_conflict' };
             deliverMessage({ messageId: result.messageId });
             return { messageId: result.messageId };
           },
@@ -658,6 +678,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         : undefined;
     const homeStore = new HomeStore(db);
     const api = new PublicApi({
+      ...(options.quota ? { quota: options.quota } : {}),
       db,
       memory,
       invites,
@@ -665,6 +686,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       ...(auth ? { auth } : {}),
       conversations,
       tasks: store,
+      acceptsMessages: (runner) => options.runners.get(runner)?.steerable === true,
       hub,
       messageLimiter: new RateLimiter(limits.messagesPerMinute),
       controlLimiter: new RateLimiter(limits.controlPerMinute),
@@ -694,15 +716,25 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         : {}),
       home: new HomeRoutes(
         homeStore,
-        { ...(inbox ? { inbox } : {}), ...(options.duties ? { duties: options.duties } : {}) },
+        {
+          ...(inbox ? { inbox } : {}),
+          ...(options.duties ? { duties: options.duties } : {}),
+          languageChosen: (owner) => ownInviteStore.languageChosen(owner),
+          ...(options.modelAvailable ? { modelAvailable: options.modelAvailable } : {}),
+        },
         new RateLimiter(limits.controlPerMinute),
-        { active: callerActive, conversationsOf: (inviteId) => conversations.idsOf(inviteId) },
+        {
+          active: callerActive,
+          conversationsOf: (inviteId) => conversations.idsOf(inviteId),
+          languageOf: (inviteId) => ownInviteStore.language(inviteId),
+        },
       ),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
               active: callerActive,
               conversationsOf: (inviteId) => conversations.idsOf(inviteId),
+              languageOf: (inviteId) => ownInviteStore.language(inviteId),
             }),
           }
         : {}),

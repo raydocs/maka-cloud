@@ -7,12 +7,16 @@ import { type TestContext, test } from 'node:test';
 import webpush from 'web-push';
 import { openDatabase } from '../db.js';
 import { FeedHub } from '../feed.js';
-import { PushService, pushConfigFromEnv } from '../push.js';
+import { PushService, pushAccountTag, pushConfigFromEnv } from '../push.js';
 import { createHttpsTransport, isNonPublicAddress, type PushTransport } from '../push-transport.js';
 import { SqliteTaskStore } from '../sqlite-task-store.js';
 import { type CloudServerOptions, startCloudServer } from '../cloud-server.js';
 import { conductorSession, recordingHandler } from './conductor.js';
 import { eventually, type Harness, newConversation, postJson, startHarness } from './harness.js';
+
+async function accountOf(h: Harness): Promise<string> {
+  return ((await (await h.api('/v1/me')).json()) as { accountTag: string }).accountTag;
+}
 
 const vapid = webpush.generateVAPIDKeys();
 const config = { ...vapid, subject: 'mailto:ops@example.com' };
@@ -175,8 +179,13 @@ test('a subscription must point at a known push service and carry real keys', as
 test('registering twice keeps one subscription, removing needs the same invite, and each invite has a cap', async (t) => {
   const { h } = await setup(t);
   const d = device();
-  assert.equal((await subscribe(h, d)).status, 201);
-  assert.equal((await subscribe(h, d)).status, 200);
+  const first = await subscribe(h, d);
+  assert.equal(first.status, 201);
+  const me = await (await h.api('/v1/me')).json();
+  assert.deepEqual(await first.json(), { accountTag: me.accountTag });
+  const again = await subscribe(h, d);
+  assert.equal(again.status, 200);
+  assert.deepEqual(await again.json(), { accountTag: me.accountTag });
   const other = h.server.invites.create('other');
   const remove = (token: string, endpoint: string) =>
     h.api('/v1/push/subscriptions', {
@@ -194,6 +203,25 @@ test('registering twice keeps one subscription, removing needs the same invite, 
   assert.equal((await subscribe(h, device(), other.token)).status, 201);
 });
 
+test('re-registering an existing browser confirms and moves ownership to the signed-in account', async (t) => {
+  const { h } = await setup(t);
+  const d = device();
+  await subscribe(h, d);
+  const other = h.server.invites.create('other');
+  const response = await subscribe(h, d, other.token);
+  assert.equal(response.status, 200);
+  const me = await (await h.api('/v1/me', { token: other.token })).json();
+  assert.deepEqual(await response.json(), { accountTag: me.accountTag });
+  const remove = (token: string) =>
+    h.api('/v1/push/subscriptions', {
+      method: 'DELETE',
+      token,
+      body: JSON.stringify({ endpoint: d.endpoint }),
+    });
+  assert.equal((await remove(h.token)).status, 404);
+  assert.equal((await remove(other.token)).status, 204);
+});
+
 test('a finished task sends one encrypted, signed message with ids and a state and nothing else', async (t) => {
   const { h, fake, conversationId, finish } = await setup(t);
   const d = device();
@@ -207,11 +235,19 @@ test('a finished task sends one encrypted, signed message with ids and a state a
   assert.equal(call.headers['Content-Encoding'], 'aes128gcm');
   assert.ok(Number(call.headers.TTL) > 0);
   assert.ok(!call.body.includes(Buffer.from(taskId)), 'the body is encrypted');
+  const accountTag = await accountOf(h);
+  assert.match(accountTag, /^[a-f0-9]{32}$/u);
+  assert.notEqual(accountTag, h.inviteId);
+
   assert.deepEqual(payloadOf(call, d), {
+    accountTag: await accountOf(h),
     type: 'task.finished',
     conversationId,
     taskId,
     state: 'succeeded',
+    lang: 'zh-Hans',
+    title: '后台任务已完成',
+    body: '打开 Maka 查看结果。',
   });
 });
 
@@ -857,7 +893,7 @@ const alertRows = (db: ReturnType<typeof openDatabase>, endpoint: string): numbe
   ).n;
 
 test('an alert reaches the devices of the invite it is for and nobody else, with the type and nothing more', async (t) => {
-  const { service, fake } = await serviceOnly(t);
+  const { service, fake, db } = await serviceOnly(t);
   const a = device();
   const a2 = device();
   const other = device();
@@ -872,7 +908,13 @@ test('an alert reaches the devices of the invite it is for and nobody else, with
   );
   for (const call of fake.calls) {
     const mine = call.endpoint === a.endpoint ? a : a2;
-    assert.deepEqual(payloadOf(call, mine), { type: 'spend.alert' });
+    assert.deepEqual(payloadOf(call, mine), {
+      accountTag: pushAccountTag(db, 'inv_1'),
+      type: 'spend.alert',
+      lang: 'zh-Hans',
+      title: '今天的花费偏高',
+      body: '打开 Maka 查看明细。',
+    });
     assert.match(call.headers.Authorization ?? '', /^vapid /u);
     assert.equal(call.headers.Urgency, 'high');
     assert.ok(!call.body.includes(Buffer.from('spend')), 'the body is encrypted');
@@ -1118,7 +1160,7 @@ test('a gone subscription is deleted by the alert and the alert still resolves',
 });
 
 test('an alert key is a short plain name, and an alert does not disturb task messages', async (t) => {
-  const { service, fake, finish } = await serviceOnly(t);
+  const { service, fake, finish, db } = await serviceOnly(t);
   const d = device();
   service.register('inv_1', { endpoint: d.endpoint, ...d.keys });
   service.start();
@@ -1130,10 +1172,14 @@ test('an alert key is a short plain name, and an alert does not disturb task mes
   const taskId = await finish('ses_1');
   await eventually(() => fake.calls.length === 2, 'the task message');
   assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    accountTag: pushAccountTag(db, 'inv_1'),
     type: 'task.finished',
     conversationId: 'cnv_1',
     taskId,
     state: 'succeeded',
+    lang: 'zh-Hans',
+    title: '后台任务已完成',
+    body: '打开 Maka 查看结果。',
   });
 });
 
@@ -1152,4 +1198,83 @@ test('closing the service while an alert is being sent lets whoever asked for it
   await asked;
   await service.alert('inv_1', 'spend:2026-10-21');
   assert.equal(fake.calls.length, 1, 'nothing is sent once closed');
+});
+
+test('a person who reads English gets the push words in English; the ids and state are the same', async (t) => {
+  const { h, fake, conversationId, finish } = await setup(t);
+  const d = device();
+  await subscribe(h, d);
+  const set = await h.api('/v1/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ language: 'en' }),
+  });
+  assert.equal(set.status, 200);
+  const taskId = await finish();
+  await eventually(() => fake.calls.length === 1, 'a push');
+  assert.deepEqual(payloadOf(fake.calls[0] as Call, d), {
+    accountTag: await accountOf(h),
+    type: 'task.finished',
+    conversationId,
+    taskId,
+    state: 'succeeded',
+    lang: 'en',
+    title: 'Your background task has finished',
+    body: 'Open Maka to review the result.',
+  });
+  assert.equal(await h.server.pushAlert(h.inviteId, 'spend:2026-10-22'), true);
+  assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    accountTag: await accountOf(h),
+    type: 'spend.alert',
+    lang: 'en',
+    title: 'Spending is high today',
+    body: 'Open Maka to see where it went.',
+  });
+});
+
+test('a person who reads Traditional Chinese gets the push words in Traditional Chinese', async (t) => {
+  const { h, fake, conversationId, finish } = await setup(t);
+  const d = device();
+  await subscribe(h, d);
+  const set = await h.api('/v1/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ language: 'zh-Hant' }),
+  });
+  assert.equal(set.status, 200);
+  const taskId = await finish();
+  await eventually(() => fake.calls.length === 1, 'a push');
+  assert.deepEqual(payloadOf(fake.calls[0] as Call, d), {
+    accountTag: await accountOf(h),
+    type: 'task.finished',
+    conversationId,
+    taskId,
+    state: 'succeeded',
+    lang: 'zh-Hant',
+    title: '背景任務已完成',
+    body: '開啟 Maka 查看結果。',
+  });
+  assert.equal(await h.server.pushAlert(h.inviteId, 'spend:2026-10-22'), true);
+  assert.deepEqual(payloadOf(fake.calls[1] as Call, d), {
+    accountTag: await accountOf(h),
+    type: 'spend.alert',
+    lang: 'zh-Hant',
+    title: '今天的花費偏高',
+    body: '開啟 Maka 查看明細。',
+  });
+});
+
+test('account tags use a persistent server secret and differ across servers and owners', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'push-account-tag-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'server.sqlite');
+  let db = openDatabase(file);
+  const tag = pushAccountTag(db, 'owner');
+  assert.match(tag, /^[a-f0-9]{32}$/u);
+  assert.notEqual(tag, pushAccountTag(db, 'other-owner'));
+  db.close();
+  db = openDatabase(file);
+  assert.equal(pushAccountTag(db, 'owner'), tag);
+  db.close();
+  const other = openDatabase(join(dir, 'other.sqlite'));
+  assert.notEqual(pushAccountTag(other, 'owner'), tag);
+  other.close();
 });

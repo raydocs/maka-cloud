@@ -1,3 +1,4 @@
+export * from './quota';
 export * from './auth';
 export * from './client';
 export * from './conversation';
@@ -7,9 +8,11 @@ export * from './duties';
 export * from './errors';
 export * from './home';
 export * from './homeFeed';
+export * from './connection';
 export * from './ids';
 export * from './inboxAnswer';
 export * from './inbox';
+export * from './outbox';
 export * from './pending';
 export * from './presentation';
 export * from './sources';

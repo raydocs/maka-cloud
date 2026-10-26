@@ -44,8 +44,34 @@ export interface TaskPanel {
   tail?: string;
 }
 
+/** USD includes settled spend and reservations in flight. UTC reset timestamps are milliseconds;
+ * task limits do not reset. No self-service budget editor exists, so operator-owned caps
+ * offer ask_owner; clients must never invent a paid upgrade or top-up.
+ */
+export type QuotaReason =
+  | {
+      scope: 'service';
+      usedUsd?: never;
+      limitUsd?: never;
+      resetsAt: number;
+      nextStep: 'wait';
+    }
+  | {
+      scope: 'task' | 'run' | 'day' | 'month';
+      usedUsd: number;
+      limitUsd: number;
+      resetsAt: number | null;
+      nextStep: 'wait' | 'raise_limit' | 'ask_owner';
+    };
+export interface UsageView {
+  limits: QuotaReason[];
+  refusal?: QuotaReason;
+}
+
 /** A task as the public API shows it: the runner id never leaves the server. */
 export interface TaskView {
+  quota?: QuotaReason;
+  steerable?: boolean;
   taskId: string;
   parentTaskId?: string;
   title?: string;
@@ -121,7 +147,14 @@ export interface Question {
 /** The payloads of `GET /v1/events`. The server adds `conversationId` to every one. */
 export type Events = {
   'conversation.created': { title: string | null; at: number };
-  'message.posted': { messageId: string; role: 'user' | 'assistant'; text: string; at: number };
+  'message.posted': {
+    messageId: string;
+    role: 'user' | 'assistant';
+    text: string;
+    at: number;
+    /** On the person's own message: the id their client sent it under (older servers omit it). */
+    clientMessageId?: string;
+  };
   'task.event': {
     seq: number;
     at: number;
@@ -207,6 +240,20 @@ export interface InboxAnswerResult {
   item: InboxItem;
 }
 
+/** Server-owned first-run facts, shared by web and phone. Missing steps never block chat.
+ * POST /v1/home/setup accepts {dismiss: id} (later, for 24h) or
+ * {notificationsAllowed: boolean}, a client permission report. Completion is recomputed.
+ */
+export type SetupStep = 'language' | 'project' | 'model' | 'notifications' | 'conversation';
+export interface SetupCard {
+  id: SetupStep;
+  action: 'settings' | 'projects' | 'chat';
+}
+export interface Readiness {
+  completed: SetupStep[];
+  cards: SetupCard[];
+}
+
 export type HomeCardKind = 'waiting' | 'suggestion' | 'finished' | 'note' | 'scheduled';
 
 /** What a Home card points at: the client already holds or fetches the thing itself. */
@@ -227,6 +274,8 @@ export interface HomeCard {
   /** Position in the whole list, from 0. */
   rank: number;
   seenAt: number | null;
+  /** Changes when the card content changes. Absent on older servers. */
+  contentVersion?: string;
   /** The time the card is about: raised, finished, or next run. */
   at: number;
   /** On a finished card, how the task ended. */
@@ -427,7 +476,20 @@ export const routes = {
   // Web Push answers 404 until the server is configured with its signing key.
   pushKey: '/v1/push/key',
   pushSubscriptions: '/v1/push/subscriptions',
+  // The person's own settings: `GET`, and `PATCH` with `{language}`.
+  settings: '/v1/settings',
+  // Who the token signs in as: `{ ownerId }`, the same for every session of an account.
+  me: '/v1/me',
 } as const;
+
+/** The languages the server speaks to a person. A person who never chose reads `zh-Hans`. */
+export type Language = 'zh-Hans' | 'zh-Hant' | 'en';
+
+/** `GET /v1/settings`, and the answer to `PATCH /v1/settings`. */
+export interface PersonSettings {
+  /** What the server writes to this person in: mail, push words, Home notes, inbox asks, and the agent's replies in new conversations. */
+  language: Language;
+}
 
 /** One device signed in to an account (`GET /v1/auth/sessions`). It never carries the token. */
 export interface DeviceSession {

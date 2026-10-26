@@ -66,6 +66,8 @@ ${wrap(font.sans)};
   --radius-card: ${radius.card}px;
   --radius-small: ${radius.inner}px;
   --radius-pill: ${radius.pill}px;
+  --radius-tile: ${radius.tile}px;
+  --radius-panel: ${radius.panel}px;
 ${Object.entries(space)
   .map(([step, px]) => `  --space-${step}: ${px}px;`)
   .join('\n')}
@@ -110,7 +112,13 @@ export const DARK_COLORS = {
 ${palette(dark)}
 } satisfies Record<keyof typeof LIGHT_COLORS, string>;
 
-export const RADIUS = { card: ${radius.card}, small: ${radius.inner}, pill: ${radius.pill} } as const;
+export const RADIUS = {
+  card: ${radius.card},
+  small: ${radius.inner},
+  pill: ${radius.pill},
+  tile: ${radius.tile},
+  panel: ${radius.panel},
+} as const;
 
 export const TYPE = { xs: ${type.xs}, sm: ${type.sm}, md: ${type.md}, lg: ${type.lg}, xl: ${type.xl}, hero: ${type.hero} } as const;
 

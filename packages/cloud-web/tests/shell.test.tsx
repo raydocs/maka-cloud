@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App, NotificationsPanel, Settings, Shell } from '../src/App';
+import { LanguageProvider, type Language } from '../src/i18n';
 import { Home } from '../src/Home';
 import { CloudClient, type Conversation } from '@maka-cloud/client';
 import { readMode, ThemeProvider, useMode } from '../src/theme';
@@ -107,12 +108,12 @@ test('the navigation marks the open section and moves between them', () => {
   const names = within(nav)
     .getAllByRole('button')
     .map((button) => button.textContent);
-  expect(names).toEqual(['Home', 'Chat', 'Projects', 'Settings']);
+  expect(names).toEqual(['Search', 'Home', 'Chat', 'Projects', 'Me']);
   expect(within(nav).getByRole('button', { name: 'Chat' }).getAttribute('aria-current')).toBe(
     'page',
   );
   expect(within(nav).getByRole('button', { name: 'Home' }).getAttribute('aria-current')).toBeNull();
-  fireEvent.click(within(nav).getByRole('button', { name: 'Settings' }));
+  fireEvent.click(within(nav).getByRole('button', { name: 'Me' }));
   expect(seen).toEqual(['settings']);
 });
 
@@ -182,7 +183,7 @@ test('Settings holds appearance, memory, notifications and the way out', () => {
       />
     </ThemeProvider>,
   );
-  expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Me' })).toBeTruthy();
   const choice = screen.getByRole('group', { name: 'Color mode' });
   const pressed = (name: string) =>
     within(choice).getByRole('button', { name }).getAttribute('aria-pressed');
@@ -257,3 +258,217 @@ test('someone with conversations lands in the latest one; a first visit lands on
   expect(await screen.findByLabelText('What would you like to get done?')).toBeTruthy();
   expect(screen.queryByRole('region', { name: 'Conversation' })).toBeNull();
 });
+
+test('task-only links resolve conversation 21 and report an unavailable task in all languages', async () => {
+  const conversations = Array.from({ length: 21 }, (_, i) => ({
+    conversationId: `cnv_${i}`,
+    title: `Chat ${i}`,
+    createdAt: i,
+  }));
+  const task = {
+    taskId: 'deep',
+    title: 'Deep task',
+    state: 'succeeded',
+    createdAt: 0,
+    progress: [],
+    cancelRequested: false,
+    pauseRequested: false,
+  };
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations });
+    if (url.endsWith('/v1/tasks/deep/conversation')) return json({ conversationId: 'cnv_0', task });
+    return json({}, 404);
+  });
+  window.history.replaceState(null, '', '/?task=deep');
+  const { unmount } = render(<App initialToken="token" />);
+  expect(await screen.findByRole('article', { name: 'Task: Deep task' })).toBeTruthy();
+  unmount();
+  for (const [language, note] of [
+    ['en', "Couldn't find that task."],
+    ['zh-Hans', '找不到该任务。'],
+    ['zh-Hant', '找不到該任務。'],
+  ]) {
+    localStorage.setItem('maka.language', language);
+    window.history.replaceState(null, '', '/?task=missing');
+    const mounted = render(
+      <LanguageProvider language={language as Language}>
+        <App initialToken="token" />
+      </LanguageProvider>,
+    );
+    expect(await screen.findByText(note)).toBeTruthy();
+    mounted.unmount();
+  }
+  window.history.replaceState(null, '', '/');
+});
+
+test('app acknowledges worker links after accepting their same-origin destination', async () => {
+  const listeners = new Map<string, EventListener>();
+  vi.stubGlobal('navigator', {
+    ...navigator,
+    serviceWorker: {
+      addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+    },
+  });
+  render(<App />);
+  const postMessage = vi.fn(() => {
+    expect(window.location.search).not.toBe('?task=one');
+  });
+  const port = {
+    postMessage,
+    onmessage: undefined as ((event: MessageEvent) => void) | undefined,
+    close: vi.fn(),
+  };
+  act(() =>
+    listeners.get('message')?.({
+      origin: window.location.origin,
+      data: { type: 'maka.open', path: '/?task=one', id: 1 },
+      ports: [port],
+    } as unknown as Event),
+  );
+  expect(postMessage).toHaveBeenCalledWith({ type: 'maka.open.ack', id: 1 });
+  expect(window.location.search).not.toBe('?task=one');
+  act(() => port.onmessage?.({ data: { type: 'maka.open.go', id: 2 } } as MessageEvent));
+  expect(window.location.search).not.toBe('?task=one');
+  act(() => port.onmessage?.({ data: { type: 'maka.open.go', id: 1 } } as MessageEvent));
+  expect(window.location.search).toBe('?task=one');
+  postMessage.mockClear();
+  act(() =>
+    listeners.get('message')?.({
+      origin: window.location.origin,
+      data: { type: 'maka.open', path: 'https://evil.example/' },
+      ports: [{ postMessage }],
+    } as unknown as Event),
+  );
+  expect(postMessage).not.toHaveBeenCalled();
+  window.history.replaceState(null, '', '/');
+});
+
+test.each([
+  [401, 'Your invite is no longer valid. Please reconnect.'],
+  [429, 'Too many requests. Try again in a moment.'],
+  [500, 'Could not complete the request (500). Try again.'],
+  [0, 'Could not complete the request. Check your connection and try again.'],
+])('task link preserves the error for status %s', async (status, note) => {
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+    if (url.endsWith('/v1/tasks/broken/conversation')) {
+      if (!status) throw new TypeError('offline');
+      return json({}, status);
+    }
+    return json({}, 404);
+  });
+  window.history.replaceState(null, '', '/?task=broken');
+  render(
+    <LanguageProvider language="en">
+      <App initialToken="token" />
+    </LanguageProvider>,
+  );
+  expect(await screen.findByText(note)).toBeTruthy();
+  expect(screen.queryByText("Couldn't find that task.")).toBeNull();
+  window.history.replaceState(null, '', '/');
+});
+
+test('a failed readiness report does not turn successfully enabled notifications off', async () => {
+  const subscription = {
+    toJSON: () => ({
+      endpoint: 'https://push.example/device',
+      keys: { p256dh: 'key', auth: 'auth' },
+    }),
+  };
+  vi.stubGlobal('Notification', { requestPermission: async () => 'granted' });
+  vi.stubGlobal('PushManager', class {});
+  Object.defineProperty(navigator, 'serviceWorker', {
+    configurable: true,
+    value: {
+      register: async () => {},
+      ready: Promise.resolve({ pushManager: { getSubscription: async () => subscription } }),
+    },
+  });
+  try {
+    const client = new CloudClient('token', (async (url) => {
+      if (String(url).endsWith('/v1/push/key')) return json({ publicKey: 'AQ' });
+      if (String(url).endsWith('/v1/home/setup')) return json({ error: 'unavailable' }, 503);
+      return json({});
+    }) as typeof fetch);
+    render(<NotificationsPanel client={client} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Enable notifications' }));
+    expect(await screen.findByText('Background notifications enabled')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  } finally {
+    delete (navigator as unknown as { serviceWorker?: unknown }).serviceWorker;
+  }
+});
+
+test('the first-message setup action focuses the visible chat composer', async () => {
+  signedIn([]);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+    if (url.endsWith('/v1/home'))
+      return json({
+        cards: [],
+        readiness: { completed: [], cards: [{ id: 'conversation', action: 'chat' }] },
+      });
+    return json({}, 404);
+  });
+  render(
+    <ThemeProvider>
+      <App initialToken="token" />
+    </ThemeProvider>,
+  );
+  fireEvent.click(await screen.findByRole('button', { name: 'Send your first message' }));
+  await waitFor(() => expect(document.activeElement?.closest('.chat-dock')).toBeTruthy());
+  expect(document.activeElement?.tagName).toBe('TEXTAREA');
+});
+
+test.each(['en', 'zh-Hans', 'zh-Hant'])(
+  'signed-in app load restores an existing push subscription in %s',
+  async (language) => {
+    localStorage.setItem('maka.language', language);
+    const subscription = {
+      endpoint: 'https://push.example/one',
+      keys: { p256dh: 'key', auth: 'auth' },
+    };
+    const postMessage = vi.fn();
+    vi.stubGlobal('PushManager', class {});
+    const requestPermission = vi.fn();
+    vi.stubGlobal('Notification', { permission: 'granted', requestPermission });
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        getRegistration: async () => ({
+          active: { postMessage },
+          pushManager: { getSubscription: async () => ({ toJSON: () => subscription }) },
+        }),
+      },
+    });
+    const register = vi.fn();
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/v1/conversations')) return json({ conversations: [] });
+      if (url.endsWith('/v1/me')) return json({ accountTag: 'restored-tag' });
+      if (url.endsWith('/v1/push/subscriptions') && init?.method === 'POST') {
+        register(JSON.parse(init.body as string));
+        return json({ accountTag: 'restored-tag' });
+      }
+      return json({}, 404);
+    });
+    render(
+      <ThemeProvider>
+        <App initialToken="token" />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith({
+        type: 'maka.subscription',
+        accountTag: 'restored-tag',
+      }),
+    );
+    expect(register).toHaveBeenCalledExactlyOnceWith(subscription);
+    expect(requestPermission).not.toHaveBeenCalled();
+  },
+);

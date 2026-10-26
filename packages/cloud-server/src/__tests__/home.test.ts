@@ -58,6 +58,7 @@ async function setup(t: TestContext) {
 
 interface Card {
   cardId: string;
+  contentVersion: string;
   kind: string;
   rank: number;
   seenAt: number | null;
@@ -190,7 +191,7 @@ test('the server ranks waiting first, then suggestions, finished work, notes and
     cards.map((_, i) => i),
   );
   const note = cards.find((card) => card.kind === 'note');
-  assert.equal(note?.text, 'PR #42 in acme/api merged, CI green.');
+  assert.equal(note?.text, 'acme/api 的 PR #42 已合并，CI 已通过。');
   const done = cards.find((card) => card.kind === 'finished');
   assert.deepEqual(
     [done?.state, done?.ref],
@@ -362,7 +363,7 @@ test('a note is a template with typed parameters: nothing else is accepted, and 
   const notes = (await homeOf(h)).filter((card) => card.kind === 'note');
   assert.deepEqual(
     notes.map((card) => card.text),
-    ['PR #42 in acme/api merged, CI green.'],
+    ['acme/api 的 PR #42 已合并，CI 已通过。'],
   );
   assert.equal(
     noteText({ template: 'checks_failed', repo: 'acme/api', number: 7 }),
@@ -427,4 +428,163 @@ test('a note row that is not JSON, or no longer fits the schema, is left out and
     store.notes('o').map((note) => note.noteId),
     ['n3'],
   );
+});
+
+test('a note is in the owner’s language: Chinese by default, English once they choose it', async (t) => {
+  const { h } = await setup(t);
+  assert.equal(
+    h.server.addHomeNote(h.inviteId, { template: 'checks_failed', repo: 'acme/api', number: 7 }),
+    'added',
+  );
+  const noteOf = async () => (await homeOf(h)).find((card) => card.kind === 'note')?.text;
+  assert.equal(await noteOf(), 'acme/api 的 PR #7 检查未通过。');
+  await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language: 'zh-Hant' }) });
+  assert.equal(await noteOf(), 'acme/api 的拉取要求 #7 檢查未通過。');
+  await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language: 'en' }) });
+  assert.equal(await noteOf(), 'Checks failed on PR #7 in acme/api.');
+  assert.equal(
+    noteText(
+      { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'pending' },
+      'zh-Hant',
+    ),
+    'a/b 的拉取要求 #1 已合併，CI 仍在執行。',
+  );
+  assert.equal(
+    noteText(
+      { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'none' },
+      'zh-Hant',
+    ),
+    'a/b 的拉取要求 #1 已合併。',
+  );
+  assert.equal(
+    noteText(
+      { template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'pending' },
+      'zh-Hans',
+    ),
+    'a/b 的 PR #1 已合并，CI 仍在运行。',
+  );
+  assert.equal(
+    noteText({ template: 'pull_request_merged', repo: 'a/b', number: 1, checks: 'red' }, 'en'),
+    'PR #1 in a/b merged, CI red.',
+  );
+});
+
+test('seen follows card content changes', async (t) => {
+  const { h, feed, conversation } = await setup(t);
+  const conversationId = await conversation();
+  const item = {
+    itemId: 'changing',
+    kind: 'approval',
+    conversationId,
+    createdAt: 100,
+    interrupts: false,
+  };
+  feed.items.push(item);
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  assert.ok((await homeOf(h))[0]?.seenAt);
+  item.interrupts = true;
+  assert.equal((await homeOf(h))[0]?.seenAt, null);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  assert.ok((await homeOf(h))[0]?.seenAt);
+});
+
+test('existing seen rows migrate safely and new content versions persist across reopen', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'home-version-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'home.sqlite');
+  let db = openDatabase(file);
+  const version = (db.prepare('PRAGMA user_version').get() as { user_version: number })
+    .user_version;
+  db.exec('ALTER TABLE home_seen DROP COLUMN content_version');
+  db.exec('DROP TABLE push_account_secret');
+  db.exec(`PRAGMA user_version = ${version - 2}`);
+  db.prepare('INSERT INTO home_seen VALUES (?, ?, ?)').run('owner', 'waiting:item', 123);
+  db.close();
+  db = openDatabase(file);
+  const store = new HomeStore(db);
+  assert.equal(store.seenAt('owner').get('waiting:item'), 123);
+  assert.equal(store.seenAt('owner', new Map([['waiting:item', 'v1']])).get('waiting:item'), 123);
+  assert.equal(store.seenAt('owner', new Map([['waiting:item', 'v2']])).size, 0);
+  store.markSeen('owner', ['waiting:item'], new Map([['waiting:item', 'v1']]));
+  db.close();
+  db = openDatabase(file);
+  try {
+    const reopened = new HomeStore(db);
+    assert.ok(reopened.seenAt('owner', new Map([['waiting:item', 'v1']])).has('waiting:item'));
+    assert.equal(reopened.seenAt('owner', new Map([['waiting:item', 'v2']])).size, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('marking the displayed version cannot mark newer content as seen', async (t) => {
+  const { h, feed, conversation } = await setup(t);
+  const conversationId = await conversation();
+  const item = {
+    itemId: 'race',
+    kind: 'approval',
+    conversationId,
+    createdAt: 100,
+    interrupts: false,
+  };
+  feed.items.push(item);
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  item.interrupts = true;
+  const response = await h.api('/v1/home/seen', {
+    method: 'POST',
+    body: JSON.stringify({
+      cardIds: [first.cardId],
+      contentVersions: { [first.cardId]: first.contentVersion },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const changed = (await homeOf(h))[0];
+  assert.notEqual(changed?.contentVersion, first.contentVersion);
+  assert.equal(changed?.seenAt, null);
+});
+
+test('changing note language preserves its seen version in all three languages', async (t) => {
+  const { h } = await setup(t);
+  h.server.addHomeNote(h.inviteId, { template: 'checks_failed', repo: 'acme/api', number: 7 });
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  const texts = new Set();
+  for (const language of ['en', 'zh-Hans', 'zh-Hant']) {
+    await h.api('/v1/settings', { method: 'PATCH', body: JSON.stringify({ language }) });
+    const card = (await homeOf(h))[0];
+    assert.equal(card?.contentVersion, first.contentVersion);
+    assert.ok(card?.seenAt);
+    texts.add(card?.text);
+  }
+  assert.equal(texts.size, 3);
+});
+
+test('scheduled cards stay seen across runs and reset for displayed content changes', async (t) => {
+  const now = 1_700_000_000_000;
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const { h, projects } = await setup(t);
+  const duty = {
+    dutyId: 'periodic',
+    name: 'Check dependencies',
+    state: 'active',
+    activatedAt: now - 60_000,
+    trigger: { kind: 'schedule', everyMinutes: 60 },
+    consecutiveFailures: 0,
+  };
+  projects.set(h.inviteId, [{ projectId: 'prj_1', repo: 'acme/api', duties: [duty] }]);
+  const first = (await homeOf(h))[0];
+  assert.ok(first);
+  await h.api('/v1/home/seen', seenBody([first.cardId]));
+  t.mock.timers.setTime(now + 3_600_000);
+  duty.consecutiveFailures++;
+  const next = (await homeOf(h))[0];
+  assert.notEqual(next?.at, first.at);
+  assert.equal(next?.contentVersion, first.contentVersion);
+  assert.ok(next?.seenAt);
+  duty.name = 'Review dependencies';
+  assert.equal((await homeOf(h))[0]?.seenAt, null);
 });

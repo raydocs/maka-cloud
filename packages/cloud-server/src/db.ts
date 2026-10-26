@@ -314,6 +314,12 @@ export const MIGRATIONS: readonly string[] = [
   SCHEMA_V10,
   SCHEMA_V11,
   SCHEMA_V12,
+  `CREATE TABLE home_setup (owner TEXT NOT NULL, step TEXT NOT NULL, until_at INTEGER NOT NULL,
+     PRIMARY KEY (owner, step));
+   CREATE TABLE home_permissions (owner TEXT PRIMARY KEY, notifications_allowed INTEGER NOT NULL);`,
+  'ALTER TABLE home_seen ADD COLUMN content_version TEXT;',
+  `CREATE TABLE push_account_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL);
+   INSERT INTO push_account_secret VALUES (1, randomblob(32));`,
 ];
 
 /**

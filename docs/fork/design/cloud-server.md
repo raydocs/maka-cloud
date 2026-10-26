@@ -115,11 +115,13 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `GET /v1/tasks/:taskId/sources/:index/preview` | `{site, title?, image}` for one page of that list, fetched by the server. `image` says whether the next route has bytes. 404 for an index not in the list; 429 over the preview limit (60 a minute per invite) or when the server is already fetching as much as it allows (`retry-after: 2`). |
 | `GET /v1/tasks/:taskId/sources/:index/image` | The page's own preview image (png, jpeg, webp or gif by its first bytes, at most 1 MiB), with `nosniff`, a sandboxing CSP and `private, no-store`. 404 when the page has none. |
 | `GET /v1/push/key` | `{publicKey}`, the VAPID public key. 404 when push is not configured (so are the next two). |
-| `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
+| `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> `{accountTag}` with 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
 | `DELETE /v1/push/subscriptions` | `{endpoint}` -> 204. Only the invite that registered it can remove it; otherwise 404. |
 | `GET /v1/home` | The caller's Home as the server keeps it: `{cards: [{cardId, kind, ref, rank, seenAt, at, state?, text?}]}` (see "Home cards"). |
 | `POST /v1/home/seen` | `{cardIds}` (at most 100): the person saw these cards and left Home. Records the ones that are on this Home and moves the caller's visit to now. 200 `{seen, visitedAt}`. |
 | `POST /v1/home/order` | `{cardId, after}`: moves a card to just after `after` (first when null) inside its kind. 200 `{cards}`; 404 a card that is not on this Home; 400 `after` in another kind, itself, or not there. |
+| `GET /v1/settings` | `{language}`: what the server writes to the caller's invite in, `zh-Hans` (the default), `zh-Hant` or `en` (see "Language"). |
+| `PATCH /v1/settings` | `{language}` -> 200 `{language}`. 400 for any other value or field; 429 over the control limit. |
 | `GET /v1/events?conversation=&after=` | Server-sent events. `id:` is the feed id. |
 
 Unknown or malformed ids are 404. Bodies over 64 KiB are 413; message text is
@@ -216,10 +218,12 @@ itself.
 
 When a top-level task (no parent) ends, every device registered by the invite
 that owns its conversation gets one message, while that invite is active:
-`{type: "task.finished", conversationId, taskId, state}`. A conversation another
-invite owns, or one nobody owns yet (before `conversation adopt`), reaches no
-device. Nothing a task or a model wrote goes in it, and there is no title, model
-name or vendor name.
+`{type: "task.finished", conversationId, taskId, state, lang, title, body}`. A
+conversation another invite owns, or one nobody owns yet (before `conversation
+adopt`), reaches no device. Nothing a task or a model wrote goes in it, and there
+is no model name or vendor name: `title` and `body` are fixed words from the
+server's catalogue in the invite's language (`lang`), and a client may show its
+own words for `type` instead. A spend alert is `{type: "spend.alert", lang, title, body}`.
 
 What is left to send is computed from the database: a terminal event of a
 top-level task that came after the subscription (`since_feed_id`) and has no
@@ -236,6 +240,64 @@ The server fetches a URL a client chose, so: the endpoint must be `https`, on po
 Apple, Windows by default); no redirect is followed; the address is checked when
 the socket connects (non-public addresses are refused, and so are IP literals); a
 send ends after 10 s or when the server closes; and the response is read to 4 KiB.
+
+#### Browser notification choices
+
+Pushes carry an opaque account tag. The worker uses fixed neutral text in English,
+Simplified Chinese or Traditional Chinese for missing or mismatched tags, including
+pre-upgrade subscriptions, and opens only the app root. These notices use
+`maka-account-mismatch`, separate from an unknown event's `maka-inbox` notice.
+Notifications retain their account tag when shown. Click routing compares that tag
+with the target tab's own `/v1/me` context before using a deep link, independently
+of the current subscription owner. A missing or different tab account opens only
+the app root; with no open tab, the stored subscription owner must still match.
+
+On each signed-in app load, an existing browser subscription is POSTed again.
+Registration is idempotent and confirms or moves the endpoint to that account;
+only the returned server tag is posted to the worker as `maka.subscription`.
+This repairs old workers with no stored tag and tags changed by a new or restored
+database. It asks for no permission and creates no browser subscription. Failed
+registration keeps the existing worker tag and can recover on the next load.
+
+For obsolete running/approval updates after a terminal task, or a visible,
+focused tab already viewing the same account and conversation, the worker shows
+a neutral `silent: true` notice under `maka-quiet` and immediately closes it.
+[WebKit requires every push to display a notification](https://webkit.org/blog/12945/meet-web-push/)
+and can revoke subscriptions when pushes show nothing. The quiet notice is intended to satisfy
+that requirement while avoiding a persistent duplicate banner; OS timing may still
+make it briefly visible. No unused push message is sent to the tab. Terminal task
+records are account-scoped, survive worker restarts, expire after seven days, and
+retain at most 200 entries per account. Clicks retain the ack/go handshake so an
+unresponsive tab falls back to a new window without routing twice.
+
+### Language
+
+`i18n.ts`. Each invite has a language, `zh-Hans`, `zh-Hant` (Traditional
+Chinese, Taiwan usage) or `en`, in the invites file (`invites.language`, null
+until set, which reads as `zh-Hans`). An account made by `/v1/auth/claim`, or by
+linking the first identity, takes it from the first entry of the request's
+`Accept-Language`: `en` for English; `zh-Hant` for `zh-Hant` or the Chinese of
+Taiwan, Hong Kong or Macau (`zh-TW`, `zh-HK`, `zh-MO`); `zh-Hans` for `zh-Hans`,
+`zh-CN`, `zh-SG`, plain `zh` and anything else. A script subtag beats a region
+(`zh-Hans-HK` is `zh-Hans`). A language already set is kept. `/v1/settings`
+reads and changes it, and accepts only those three values.
+
+What the server says in it, from one typed catalogue with an English fallback:
+the sign-in mail (the account's language when the address has one, else the
+request's), the words of a push, Home note cards, the asks the supervisor's rules
+build (each carries `askTemplate`, its fixed sentence and parts, which the server
+says in the reader's language and never sends on), and the "Needs you" notice. An
+approval's card, the conductor's own words and every option label and id stay as
+they are; the apps translate known option ids.
+
+The conversational agent gets one paragraph at the end of its system prompt for a
+`zh-Hans` reader (`languageInstruction`): reply in Simplified Chinese (for a
+`zh-Hant` reader, Traditional Chinese in Taiwan usage) unless the person writes
+in another language, keep code, commands, file names and quoted
+text as they are, and keep delegated briefs, commit messages, pull request titles
+and code in English. It is read when a conversation's conductor session is made
+and kept with it, so a conversation's prompt never changes and its history is
+never edited; a language changed later applies to new conversations.
 
 ### Control and cost
 

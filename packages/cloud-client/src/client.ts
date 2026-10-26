@@ -14,9 +14,12 @@ import {
   type InboxAnswerRequest,
   type InboxAnswerResult,
   type InboxItem,
+  type Language,
   type MemoryProfile,
+  type PersonSettings,
   type Mode,
   type ProjectView,
+  type QuotaReason,
   type SuggestionsView,
   type RunTimeline,
   type SourceListing,
@@ -26,7 +29,13 @@ import {
   type TaskMessageState,
   type TaskView,
 } from './contract';
+import type { ConnectionState } from './connection';
+import { quotaReason } from './quota';
 import { randomId } from './ids';
+import { type OutboxScope, outboxScope } from './outbox';
+
+/** A device session's token starts so; any other bearer token is an invite. */
+const SESSION_TOKEN_PREFIX = 'mks_';
 
 const PICTURE_TYPES: ReadonlySet<string> = new Set([
   'image/png',
@@ -37,14 +46,26 @@ const PICTURE_TYPES: ReadonlySet<string> = new Set([
 
 /** A refused request. `code` is the server's error code, when it sent one. */
 export class ApiError extends Error {
+  readonly quota: QuotaReason | undefined;
   constructor(
     readonly status: number,
     readonly code?: string,
     /** The error body, as the server sent it (a refused inbox answer carries the refreshed item). */
     readonly body?: unknown,
+    readonly retryAfterMs?: number,
   ) {
     super(`Request failed (${status}).`);
+    this.quota =
+      code === 'budget_exceeded' && typeof body === 'object' && body !== null
+        ? quotaReason((body as { quota?: unknown }).quota)
+        : undefined;
   }
+}
+function retryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
 }
 /** The server has no such feature: its route answered 404 or 405. */
 export class Unsupported extends Error {}
@@ -191,6 +212,7 @@ export class CloudClient {
       response.status,
       typeof body?.error === 'string' ? body.error : undefined,
       body,
+      retryAfterMs(response.headers.get('Retry-After')),
     );
   }
 
@@ -229,6 +251,11 @@ export class CloudClient {
       body: JSON.stringify({ text, clientMessageId, ...(mode === undefined ? {} : { mode }) }),
     });
   }
+  taskConversation(task: string) {
+    return this.request<{ conversationId: string; task: TaskView }>(
+      `/v1/tasks/${encodeURIComponent(task)}/conversation`,
+    );
+  }
   async listTasks(id: string): Promise<TaskView[]> {
     const result: TaskView[] = [];
     let after = 0;
@@ -254,6 +281,7 @@ export class CloudClient {
   }
   computerInput(task: string, input: ComputerInput) {
     return this.request(`${routes.computer(task)}/input`, {
+      signal: AbortSignal.timeout(10_000),
       method: 'POST',
       body: JSON.stringify(input),
     });
@@ -307,16 +335,33 @@ export class CloudClient {
     );
     return typeof result.revoked === 'number' ? result.revoked : 0;
   }
+  usage() {
+    return this.request<import('./contract').UsageView>('/v1/usage', {}, 'usage');
+  }
+  homeReadiness() {
+    return this.request<{ readiness: import('./contract').Readiness }>(routes.home, {}, 'home');
+  }
+  setup(report: { dismiss: import('./contract').SetupStep } | { notificationsAllowed: boolean }) {
+    return this.request<{ readiness: import('./contract').Readiness }>(
+      '/v1/home/setup',
+      { method: 'POST', body: JSON.stringify(report) },
+      'home',
+    );
+  }
+
   /** Home's cards in the server's order; `Unsupported` on a server without `/v1/home`. */
   async home(): Promise<HomeCard[]> {
     const result = await this.request<{ cards: HomeCard[] }>(routes.home, {}, 'home');
     return Array.isArray(result.cards) ? result.cards : [];
   }
   /** Tells the server the person saw these cards and left Home. */
-  homeSeen(cardIds: readonly string[]) {
+  homeSeen(cardIds: readonly string[], contentVersions?: Record<string, string>) {
     return this.request<{ seen: string[]; visitedAt: number }>(routes.homeSeen, {
       method: 'POST',
-      body: JSON.stringify({ cardIds }),
+      body: JSON.stringify({
+        cardIds,
+        ...(contentVersions && Object.keys(contentVersions).length ? { contentVersions } : {}),
+      }),
     });
   }
   /** Moves a card to just after `after` (first when null) inside its kind; answers the new list. */
@@ -357,6 +402,18 @@ export class CloudClient {
       'suggestions',
     );
   }
+  /** The person's settings: the language the server speaks to them in. Unsupported on a server without them. */
+  settings() {
+    return this.request<PersonSettings>(routes.settings, {}, 'settings');
+  }
+  /** Sets the language the server speaks to the person in; new conversations take it up. */
+  setLanguage(language: Language) {
+    return this.request<PersonSettings>(
+      routes.settings,
+      { method: 'PATCH', body: JSON.stringify({ language }) },
+      'settings',
+    );
+  }
   /** The devices signed in to this account, and the ways it signs in. Hidden where the server has no sign-in. */
   devices() {
     return this.request<SignedInDevices>('/v1/auth/sessions', {}, 'devices');
@@ -372,6 +429,40 @@ export class CloudClient {
   /** Ends this device's own session on the server. Refused (400) for an invite token, which is not a device. */
   endSession() {
     return this.request<void>('/v1/auth/sign-out', { method: 'POST' });
+  }
+  private owner: Promise<string | undefined> | undefined;
+  /**
+   * The account this token signs in as (`GET /v1/me`), the same for every session of it. Undefined
+   * on a server without the route (kept, so it is asked once) or when there is no answer (asked
+   * again next time).
+   */
+  ownerId(): Promise<string | undefined> {
+    if (!this.owner) {
+      const asking = this.request<{ ownerId?: unknown }>(routes.me, {}, 'me').then(
+        (answer) =>
+          typeof answer?.ownerId === 'string' && answer.ownerId ? answer.ownerId : undefined,
+        (error: unknown) => {
+          if (!(error instanceof Unsupported) && this.owner === asking) this.owner = undefined;
+          return undefined;
+        },
+      );
+      this.owner = asking;
+    }
+    return this.owner;
+  }
+  /**
+   * Whose unsent messages these are (`OutboxScope`): the account on this server once the server
+   * names it, so signing in again (a new token) finds them; this token until then. Neither carries
+   * the token or the account id itself, only a hash of it with the server.
+   */
+  outboxScope(): OutboxScope {
+    return {
+      account: async () => {
+        const owner = await this.ownerId();
+        return owner === undefined ? undefined : outboxScope(this.baseUrl, `owner:${owner}`);
+      },
+      token: outboxScope(this.baseUrl, `token:${this.token}`),
+    };
   }
   /** A short non-reversible name for this invite, to key what the browser remembers (never the token). */
   async fingerprint(): Promise<string> {
@@ -449,40 +540,65 @@ export class CloudClient {
     return response.blob();
   }
 
+  /**
+   * Follows a conversation's events, reconnecting with backoff and resuming from the last event id.
+   * `status` hears where the link stands (`ConnectionState`), apart from anything a task does. It
+   * returns when `signal` aborts, or when retrying cannot help: the sign-in or invite is no longer
+   * valid, or the conversation is not available. `onWait` is handed a function that cuts the wait
+   * before the next try short (a "Retry now" button).
+   */
   async subscribe(
     id: string,
     receive: (event: FeedEvent) => void,
-    status: (value: string) => void,
+    status: (value: ConnectionState) => void,
     signal: AbortSignal,
+    options: { onWait?: (wake: () => void) => void } = {},
   ) {
     let lastId = 0;
     let delay = 500;
     while (!signal.aborted) {
+      // What the wait before the next try is called, unless the try below says otherwise.
+      let next: 'reconnecting' | 'offline' | 'protocol_error' = 'reconnecting';
       try {
-        const response = await this.fetcher(`${this.baseUrl}${routes.events(id)}`, {
-          headers: {
-            Authorization: `Bearer ${this.token}`,
-            Accept: 'text/event-stream',
-            ...(lastId ? { 'Last-Event-ID': String(lastId) } : {}),
-          },
-          signal,
-        });
+        let response: Response;
+        try {
+          response = await this.fetcher(`${this.baseUrl}${routes.events(id)}`, {
+            headers: {
+              Authorization: `Bearer ${this.token}`,
+              Accept: 'text/event-stream',
+              ...(lastId ? { 'Last-Event-ID': String(lastId) } : {}),
+            },
+            signal,
+          });
+        } catch (error) {
+          // No answer at all: the network, not the server.
+          next = 'offline';
+          throw error;
+        }
         if (response.status === 401) {
           this.onRevoked?.();
-          status('Invite expired. Reconnect with a valid invite.');
+          status({
+            state: this.token.startsWith(SESSION_TOKEN_PREFIX) ? 'signed_out' : 'invite_expired',
+          });
           return;
         }
         if (response.status === 404) {
-          status('This conversation is not available.');
+          status({ state: 'unavailable' });
           return;
         }
         if (!response.ok) {
           const retry = Number(response.headers.get('Retry-After'));
           if (Number.isFinite(retry) && retry > 0) delay = Math.min(retry * 1000, 60_000);
+          // A server that is busy or briefly down is waited out; any other refusal means the two
+          // sides disagree about the request.
+          if (response.status < 500 && response.status !== 408 && response.status !== 429)
+            next = 'protocol_error';
           throw new ApiError(response.status);
         }
-        if (!response.headers.get('content-type')?.includes('text/event-stream'))
+        if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+          next = 'protocol_error';
           throw new Error('Not an event stream');
+        }
         // Live once bytes arrive (the server opens with a comment), not when the request starts.
         let live = false;
         await readEvents(
@@ -498,15 +614,19 @@ export class CloudClient {
             onBytes: () => {
               if (live) return;
               live = true;
-              status('Live');
+              status({ state: 'live' });
             },
           },
-        );
+        ).catch((error: unknown) => {
+          if (error instanceof Error && error.message === 'Event is too large')
+            next = 'protocol_error';
+          throw error;
+        });
       } catch {
         if (signal.aborted) return;
       }
       if (signal.aborted) return;
-      status('Reconnecting…');
+      status({ state: next, retryAt: Date.now() + delay });
       await new Promise<void>((resolve) => {
         const finish = () => {
           clearTimeout(timer);
@@ -515,6 +635,7 @@ export class CloudClient {
         };
         const timer = setTimeout(finish, delay);
         signal.addEventListener('abort', finish, { once: true });
+        options.onWait?.(finish);
       });
       delay = Math.min(delay * 2, 10_000);
     }

@@ -29,8 +29,11 @@ appId: cloud.maka.app
 - tapOn:
     id: "button-Email me a code"
 - extendedWaitUntil:
-    visible: "Check your email"
+    visible:
+      id: "signin-check-email"
     timeout: 30000
+- assertVisible:
+    id: "field-Code"
 - takeScreenshot: sign-in-email-code
 - runScript:
     file: subflows/mail-code.js
@@ -44,8 +47,11 @@ appId: cloud.maka.app
     id: "button-Sign in"
 # A person with no account yet is asked for the invite code, once.
 - extendedWaitUntil:
-    visible: "Enter your invite code"
+    visible:
+      id: "signin-invite-title"
     timeout: 30000
+- assertVisible:
+    id: "field-Invite code"
 - takeScreenshot: sign-in-email-invite
 - tapOn:
     id: "field-Invite code"
@@ -53,6 +59,7 @@ appId: cloud.maka.app
 - tapOn:
     id: "button-Continue"
 - extendedWaitUntil:
-    visible: "Make room for your next idea."
+    visible:
+      id: "home-today-title"
     timeout: 30000
 - takeScreenshot: sign-in-email-home

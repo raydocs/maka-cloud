@@ -1,13 +1,15 @@
 import type { CloudClient } from './client';
 import { Unsupported } from './client';
 import type { Conversation, HomeCard, InboxItem, ProjectView, TaskView } from './contract';
-import { errorText } from './errors';
+import { type ErrorText, errorText } from './errors';
 import { DAY_MS } from './home';
 import { inboxAnswerer } from './inboxAnswer';
 import { mergeInboxItem } from './state';
 import { Store } from './store';
 
 export const RECENT_CONVERSATIONS = 5;
+/** The most card ids `POST /v1/home/seen` takes at once. */
+export const HOME_SEEN_MAX = 100;
 
 /** The newest conversations first: what Home lists and reads results from. */
 export function recentConversations(conversations: readonly Conversation[]): Conversation[] {
@@ -31,7 +33,7 @@ export interface HomeSnapshot {
   inboxLoaded: boolean;
   /** The last read of the open decisions failed. */
   inboxFailed: boolean;
-  answerError: string;
+  answerError: ErrorText;
   /** When the person last looked, or a day ago on a first visit; unknown until read. */
   since: number | undefined;
   /** Top-level and sub tasks of the recent conversations, by conversation; unknown until read. */
@@ -57,6 +59,8 @@ export class HomeFeed extends Store<HomeSnapshot> {
   private recentIds = '';
   private fingerprint: string | undefined;
   private pending = false;
+  /** This visit was already told; a second leave before the next read tells nothing. */
+  private left = false;
   private readonly answerItem: ReturnType<typeof inboxAnswerer>;
 
   constructor(
@@ -116,12 +120,24 @@ export class HomeFeed extends Store<HomeSnapshot> {
   /**
    * Remembers this visit. Called when the person leaves (a page hide, a screen going away). The
    * server is told too, with the cards that were shown, so the next device agrees on what is new.
+   * `shown` names the cards the screen showed (in its order); without it, every card counts. A
+   * visit is told once: leaving again before Home is read again does nothing.
    */
-  leave(): void {
+  leave(shown?: readonly string[]): void {
+    if (this.left) return;
+    this.left = true;
     if (this.fingerprint !== undefined) void this.visits.write(this.fingerprint, this.now());
     const cards = this.getSnapshot().cards;
-    if (cards !== undefined)
-      void this.client.homeSeen(cards.map((card) => card.cardId)).catch(() => undefined);
+    if (cards !== undefined) {
+      const ids = shown ?? cards.map((card) => card.cardId);
+      const marked = ids.slice(0, HOME_SEEN_MAX);
+      const versions = Object.fromEntries(
+        cards
+          .filter((card) => marked.includes(card.cardId) && card.contentVersion)
+          .map((card) => [card.cardId, card.contentVersion as string]),
+      );
+      void this.client.homeSeen(marked, versions).catch(() => undefined);
+    }
   }
 
   /** Moves a card to just after `after` (first when null) inside its kind. Home keeps the server's answer. */
@@ -133,12 +149,13 @@ export class HomeFeed extends Store<HomeSnapshot> {
     }
   }
 
-  stop(): void {
-    this.leave();
+  stop(shown?: readonly string[]): void {
+    this.leave(shown);
     this.generation += 1;
   }
 
   private load(generation: number): void {
+    this.left = false;
     const current = () => generation === this.generation;
     this.client
       .listInbox('open')
@@ -177,7 +194,8 @@ export class HomeFeed extends Store<HomeSnapshot> {
         this.client
           .listTasks(id)
           .then((tasks) => [id, tasks] as const)
-          .catch(() => [id, [] as TaskView[]] as const),
+          // A read that failed keeps what was last read, so a blip does not empty Home.
+          .catch(() => [id, this.getSnapshot().done?.get(id) ?? ([] as TaskView[])] as const),
       ),
     ).then(
       (pairs) =>
@@ -187,15 +205,20 @@ export class HomeFeed extends Store<HomeSnapshot> {
     );
   }
 
-  /** Answers a card once; a second tap while one is in flight does nothing. */
-  async answer(item: InboxItem, optionId: string, text?: string): Promise<void> {
-    if (this.pending) return;
+  /**
+   * Answers a card once; a second tap while one is in flight does nothing. Resolves `true` only when
+   * the server took this answer.
+   */
+  async answer(item: InboxItem, optionId: string, text?: string): Promise<boolean> {
+    if (this.pending) return false;
     this.pending = true;
     this.patch({ busy: true, answerError: '' });
     try {
       await this.answerItem(item, optionId, text);
+      return true;
     } catch (e) {
       this.patch({ answerError: errorText(e) });
+      return false;
     } finally {
       this.pending = false;
       this.patch({ busy: false });

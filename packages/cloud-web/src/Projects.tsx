@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BRAND,
@@ -6,6 +7,7 @@ import {
   budgetWords,
   displayText,
   type DutyView,
+  type ErrorText,
   errorText,
   type ProjectView,
   type SuggestionKindView,
@@ -22,23 +24,26 @@ function DutyRow({
   busy: boolean;
   onToggle: (state: 'active' | 'off') => void;
 }) {
+  const { t, shared } = useT();
   const on = duty.state === 'active';
   return (
     <li className="duty">
       <div className="duty-text">
         <strong>{displayText(duty.name)}</strong>
-        <span className="muted">{triggerWords(duty.trigger)}</span>
+        <span className="muted">{shared(triggerWords(duty.trigger))}</span>
         <span className="muted">
-          {AUTHORITY_WORDS[duty.authority] ?? 'Limited'} · {budgetWords(duty)}
+          {shared(AUTHORITY_WORDS[duty.authority] ?? 'Limited')} · {shared(budgetWords(duty))}
         </span>
         {duty.state === 'proposed' && (
           <span className="muted">
-            Waiting for your approval. It shows on Home when it is ready.
+            {t('Waiting for your approval. It shows on Home when it is ready.')}
           </span>
         )}
         {duty.state === 'off' && duty.offReason === 'failures' && (
           <span className="failure">
-            Turned off after it failed {duty.consecutiveFailures} times in a row.
+            {t('Turned off after it failed {count} times in a row.', {
+              count: duty.consecutiveFailures,
+            })}
           </span>
         )}
       </div>
@@ -47,7 +52,10 @@ function DutyRow({
           type="button"
           role="switch"
           aria-checked={on}
-          aria-label={`${displayText(duty.name)} is ${on ? 'on' : 'off'}`}
+          aria-label={t('{name} is {state}', {
+            name: displayText(duty.name),
+            state: on ? t('on') : t('off'),
+          })}
           className={`switch${on ? ' on' : ''}`}
           disabled={busy}
           onClick={() => onToggle(on ? 'off' : 'active')}
@@ -68,6 +76,7 @@ function SuggestionRow({
   busy: boolean;
   onToggle: (enabled: boolean) => void;
 }) {
+  const { t } = useT();
   const shown = kind.accepted + kind.dismissed + kind.ignored;
   return (
     <li className="duty">
@@ -75,18 +84,25 @@ function SuggestionRow({
         <strong>{displayText(kind.label)}</strong>
         <span className="muted">
           {shown === 0
-            ? 'Nothing suggested yet.'
-            : `${kind.accepted} done · ${kind.dismissed} not now · ${kind.ignored} unanswered`}
+            ? t('Nothing suggested yet.')
+            : t('{done} done · {later} not now · {unanswered} unanswered', {
+                done: kind.accepted,
+                later: kind.dismissed,
+                unanswered: kind.ignored,
+              })}
         </span>
         {kind.enabled && kind.backedOff && (
-          <span className="muted">Shown less often: the last few went unanswered.</span>
+          <span className="muted">{t('Shown less often: the last few went unanswered.')}</span>
         )}
       </div>
       <button
         type="button"
         role="switch"
         aria-checked={kind.enabled}
-        aria-label={`${displayText(kind.label)} suggestions are ${kind.enabled ? 'on' : 'off'}`}
+        aria-label={t('{name} suggestions are {state}', {
+          name: displayText(kind.label),
+          state: kind.enabled ? t('on') : t('off'),
+        })}
         className={`switch${kind.enabled ? ' on' : ''}`}
         disabled={busy}
         onClick={() => onToggle(!kind.enabled)}
@@ -102,8 +118,9 @@ function SuggestionRow({
  * no suggestions (cards off), so a server without them shows nothing new.
  */
 function Suggestions({ client, projectId }: { client: CloudClient; projectId: string }) {
+  const { t, shared } = useT();
   const [kinds, setKinds] = useState<SuggestionKindView[] | undefined>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const load = useCallback(async () => {
@@ -136,16 +153,16 @@ function Suggestions({ client, projectId }: { client: CloudClient; projectId: st
   if (kinds === undefined || kinds.length === 0) return null;
   return (
     <>
-      <h3>Suggestions</h3>
+      <h3>{t('Suggestions')}</h3>
       <p className="muted">
-        Things it may notice and offer to do. Nothing starts until you tap its first word.
+        {t('Things it may notice and offer to do. Nothing starts until you tap its first word.')}
       </p>
       {error && (
         <p role="alert" className="error">
-          {error}
+          {shared(error)}
         </p>
       )}
-      <ul className="duties" aria-label="Suggestions">
+      <ul className="duties" aria-label={t('Suggestions')}>
         {kinds.map((kind) => (
           <SuggestionRow
             key={kind.kind}
@@ -165,9 +182,10 @@ function Suggestions({ client, projectId }: { client: CloudClient; projectId: st
  * unapproved duty and the limit on duties that are on are refused and said so).
  */
 export function Projects({ client }: { client: CloudClient }) {
+  const { t, shared } = useT();
   const [projects, setProjects] = useState<ProjectView[] | undefined>();
   const [unavailable, setUnavailable] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState('');
   const pending = useRef(false);
 
@@ -177,7 +195,7 @@ export function Projects({ client }: { client: CloudClient }) {
       setUnavailable(false);
     } catch (e) {
       if (e instanceof Unsupported) setUnavailable(true);
-      else setError(errorText(e));
+      else setError((previous) => previous || errorText(e));
     }
   }, [client]);
   useEffect(() => {
@@ -189,9 +207,22 @@ export function Projects({ client }: { client: CloudClient }) {
     pending.current = true;
     setBusy(duty.dutyId);
     setError('');
+    const showDuty = (value: DutyView) =>
+      setProjects((current) =>
+        current?.map((row) =>
+          row.projectId === project.projectId
+            ? {
+                ...row,
+                duties: row.duties.map((item) => (item.dutyId === duty.dutyId ? value : item)),
+              }
+            : row,
+        ),
+      );
+    showDuty({ ...duty, state });
     try {
       await client.setDutyState(project.projectId, duty.dutyId, state);
     } catch (e) {
+      showDuty(duty);
       setError(errorText(e));
     } finally {
       // Whatever the answer was, the page shows what the server holds now.
@@ -203,19 +234,19 @@ export function Projects({ client }: { client: CloudClient }) {
 
   return (
     <div className="page">
-      <h1>Projects</h1>
+      <h1>{t('Projects')}</h1>
       {unavailable && (
         <section className="card section-card">
-          <p className="muted">Projects aren’t turned on for this workspace yet.</p>
+          <p className="muted">{t('Projects aren’t turned on for this workspace yet.')}</p>
         </section>
       )}
       {error && (
         <p role="alert" className="error">
-          {error}
+          {shared(error)}
         </p>
       )}
       {projects === undefined && !unavailable && !error && (
-        <section className="card section-card" aria-label="Loading" aria-busy="true">
+        <section className="card section-card" aria-label={t('Loading')} aria-busy="true">
           <span className="skeleton-line" style={{ width: '40%' }} />
           <span className="skeleton-line" />
           <span className="skeleton-line" style={{ width: '70%' }} />
@@ -223,8 +254,10 @@ export function Projects({ client }: { client: CloudClient }) {
       )}
       {projects?.length === 0 && !unavailable && (
         <section className="card section-card">
-          <h2>No projects yet</h2>
-          <p className="muted">A project is a repository {BRAND.name} looks after.</p>
+          <h2>{t('No projects yet')}</h2>
+          <p className="muted">
+            {t('A project is a repository {name} looks after.', { name: BRAND.name })}
+          </p>
         </section>
       )}
       {projects?.map((project) => (
@@ -234,9 +267,11 @@ export function Projects({ client }: { client: CloudClient }) {
           aria-label={displayText(project.repo)}
         >
           <h2>{displayText(project.repo)}</h2>
-          <p className="muted">Default branch: {displayText(project.defaultBranch)}</p>
+          <p className="muted">
+            {t('Default branch:')} {displayText(project.defaultBranch)}
+          </p>
           {project.duties.length === 0 ? (
-            <p className="muted">No duties yet.</p>
+            <p className="muted">{t('No duties yet.')}</p>
           ) : (
             <ul className="duties">
               {project.duties.map((duty) => (

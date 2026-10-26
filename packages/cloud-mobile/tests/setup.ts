@@ -26,6 +26,12 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
+// The tests run as a phone set to English unless a test picks Chinese (`LanguageProvider`).
+jest.mock('expo-localization', () => ({
+  __esModule: true,
+  getLocales: () => [{ languageTag: 'en-US', languageCode: 'en' }],
+}));
+
 // The real provider renders nothing until the native side reports the window, which never happens here.
 jest.mock(
   'react-native-safe-area-context',

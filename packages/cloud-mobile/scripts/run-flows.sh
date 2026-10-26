@@ -28,7 +28,9 @@ for flow in first-visit:fresh sign-in-email:email decision:decision delivery:del
   name="${flow%%:*}"
   seed="${flow##*:}"
   token="$(node scripts/e2e-seed.mjs "http://127.0.0.1:${CLOUD_WEB_CONTROL_PORT:-4175}" "http://127.0.0.1:${CLOUD_WEB_API_PORT:-4174}" "$seed" | sed -n 's/^TOKEN=//p')"
-  maestro test ".maestro/$name.yaml" \
+  # MAESTRO_DEVICE pins the run to one device; without it Maestro takes whichever it finds first,
+  # and a stray emulator on a self-hosted Mac would win over the simulator.
+  maestro ${MAESTRO_DEVICE:+--device "$MAESTRO_DEVICE"} test ".maestro/$name.yaml" \
     -e "SERVER=$server" -e "TOKEN=$token" -e "CONTROL=$control" -e "EMAIL=maka-$platform@example.com" \
     --format junit --output "e2e-output/$platform-$name.xml" \
     --test-output-dir "e2e-output/$platform-$name" || status=1

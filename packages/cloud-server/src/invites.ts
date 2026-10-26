@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { DEFAULT_LANGUAGE, isLanguage, type Language } from './i18n.js';
 
 export interface InviteInfo {
   inviteId: string;
@@ -69,6 +70,9 @@ export const INVITE_MIGRATIONS: readonly string[] = [
     PRIMARY KEY (provider, subject)
   );
   CREATE INDEX IF NOT EXISTS identities_by_account ON identities (account_id)`,
+  // The language the server speaks to the person: null until they sign up or choose, which reads
+  // as the default.
+  `ALTER TABLE invites ADD COLUMN language TEXT`,
 ];
 
 function digest(token: string): Buffer {
@@ -189,6 +193,40 @@ export class InviteStore {
       | { daily_limit_usd: number | null; monthly_limit_usd: number | null }
       | undefined;
     return row && { dailyUsd: row.daily_limit_usd, monthlyUsd: row.monthly_limit_usd };
+  }
+
+  /**
+   * The language the server speaks to the invite's person, read from the file every time: what they
+   * chose, else the default. Also the default for an invite that is unknown or revoked.
+   */
+  languageChosen(inviteId: string): boolean {
+    const row = this.db
+      .prepare('SELECT language FROM invites WHERE invite_id = ? AND revoked_at IS NULL')
+      .get(inviteId) as { language: string | null } | undefined;
+    return isLanguage(row?.language);
+  }
+
+  language(inviteId: string): Language {
+    const row = this.db
+      .prepare('SELECT language FROM invites WHERE invite_id = ? AND revoked_at IS NULL')
+      .get(inviteId) as { language: string | null } | undefined;
+    return isLanguage(row?.language) ? row.language : DEFAULT_LANGUAGE;
+  }
+
+  /**
+   * Sets the language of an active invite. With `onlyIfUnset`, a language the person already has is
+   * kept (sign-up picks one from the request, a choice made before wins). False for an invite that
+   * is unknown or revoked, or that kept its language.
+   */
+  setLanguage(inviteId: string, language: Language, onlyIfUnset = false): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE invites SET language = ? WHERE invite_id = ? AND revoked_at IS NULL${
+          onlyIfUnset ? ' AND language IS NULL' : ''
+        }`,
+      )
+      .run(language, inviteId);
+    return Number(result.changes) > 0;
   }
 
   /** Called after a revoke through this store. Returns the unsubscribe function. */

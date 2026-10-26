@@ -897,7 +897,6 @@ export class Orchestrator {
       () => {
         access.authorize();
         const task = this.visibleToRoot(access.sessionId, taskId);
-        this.assertControllable(task);
         const known = task.steers.get(input.steerId);
         if (known) {
           if (known.text !== text) {
@@ -908,6 +907,7 @@ export class Orchestrator {
           }
           throw new Superseded();
         }
+        this.assertControllable(task);
         if (!this.runners.get(task.runner)?.steerable) {
           throw new OrchestratorError('unsupported', 'This task cannot be sent messages');
         }

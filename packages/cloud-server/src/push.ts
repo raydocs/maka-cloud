@@ -1,8 +1,9 @@
-import { createECDH } from 'node:crypto';
+import { createECDH, createHmac } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import webpush from 'web-push';
 import { transaction } from './db.js';
 import type { FeedHub } from './feed.js';
+import { DEFAULT_LANGUAGE, type Language, messages } from './i18n.js';
 import { createHttpsTransport, type PushTransport } from './push-transport.js';
 
 /** Push services browsers are known to hand out; `allowedHosts` replaces this list. */
@@ -13,6 +14,13 @@ export const DEFAULT_PUSH_HOSTS = [
   '*.push.apple.com',
   '*.notify.windows.com',
 ];
+
+export function pushAccountTag(db: DatabaseSync, owner: string): string {
+  const { secret } = db.prepare('SELECT secret FROM push_account_secret WHERE id = 1').get() as {
+    secret: Uint8Array;
+  };
+  return createHmac('sha256', secret).update(`maka-push:${owner}`).digest('hex').slice(0, 32);
+}
 
 const MAX_ENDPOINT_LENGTH = 2048;
 const SUBSCRIPTIONS_PER_INVITE = 10;
@@ -142,7 +150,8 @@ LIMIT ?`;
  * still has to be sent is derived from the database: a terminal event of a
  * top-level task that came after the subscription and has no `push_deliveries` row. So
  * a restart sends what was missed, and nothing is sent twice. The payload names
- * the task and its state and nothing the task or a model wrote.
+ * the task and its state and nothing the task or a model wrote; `lang`, `title` and `body` are
+ * fixed words from the server's catalogue in the person's language.
  */
 export class PushService {
   readonly publicKey: string;
@@ -191,6 +200,8 @@ export class PushService {
     private readonly invites: {
       active(inviteId: string): boolean;
       onRevoke?(listener: (inviteId: string) => void): () => void;
+      /** The language the invite's person reads; the default without it. */
+      language?(inviteId: string): Language;
     },
     private readonly options: PushOptions,
   ) {
@@ -488,18 +499,31 @@ export class PushService {
     const { invite_id: inviteId } = current;
     if (inviteId !== item.inviteId || current.owner !== inviteId) return;
     if (!this.invites.active(inviteId)) return this.finish(item, 'revoked');
+    // Fixed words from the catalogue, in the person's language: never anything a task or model wrote.
+    const lang = this.invites.language?.(inviteId) ?? DEFAULT_LANGUAGE;
+    const words = messages(lang).push[item.kind === 'alert' ? 'spendAlert' : 'taskFinished'];
     let request: ReturnType<typeof webpush.generateRequestDetails>;
     try {
       request = webpush.generateRequestDetails(
         { endpoint: item.endpoint, keys: { p256dh: current.p256dh, auth: current.auth } },
         JSON.stringify(
           item.kind === 'alert'
-            ? { type: 'spend.alert' }
+            ? {
+                type: 'spend.alert',
+                accountTag: pushAccountTag(this.db, inviteId),
+                lang,
+                title: words.title,
+                body: words.body,
+              }
             : {
                 type: 'task.finished',
+                accountTag: pushAccountTag(this.db, inviteId),
                 conversationId: item.conversationId,
                 taskId: item.taskId,
                 state: STATE_OF[item.type] ?? item.type,
+                lang,
+                title: words.title,
+                body: words.body,
               },
         ),
         {

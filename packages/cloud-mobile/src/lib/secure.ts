@@ -35,6 +35,12 @@ export async function writeSecure(key: string, value: string): Promise<void> {
   });
 }
 
+/** Writes only when the value can survive closing the app (used by the message outbox). */
+export async function writeDurableSecure(key: string, value: string): Promise<void> {
+  if (!(await hasStore())) throw new Error('Device storage is unavailable.');
+  await writeSecure(key, value);
+}
+
 /**
  * Removes a value, or fails. A value that could not be deleted is overwritten with an empty one (which
  * reads back as absent); only if that fails too does this throw, so a caller never reports access as

@@ -192,7 +192,7 @@ test('signing out of a signed-in device ends its session on the server and shows
   fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
   await screen.findByLabelText('What would you like to get done?');
-  fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Me' }));
   const panel = await screen.findByRole('region', { name: 'Signed-in devices' });
   expect(within(panel).getByText(/Chrome on Mac · this device/u)).toBeTruthy();
   expect(within(panel).getByText('iPhone app')).toBeTruthy();
@@ -295,7 +295,7 @@ test('signing out does not wait for a server that never answers', async () => {
     fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     await screen.findByLabelText('What would you like to get done?');
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Me' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_100);

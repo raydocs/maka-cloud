@@ -2,7 +2,8 @@
 appId: cloud.maka.app
 ---
 - runFlow: subflows/sign-in.yaml
-- assertVisible: "Make room for your next idea."
+- assertVisible:
+    id: "home-today-title"
 - takeScreenshot: home-first-visit
 - tapOn:
     id: "field-What would you like to get done\\?"

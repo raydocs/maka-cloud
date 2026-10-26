@@ -17,6 +17,7 @@ import {
 import { Gateway } from '@maka-cloud/gateway';
 import { FakeRun, FakeRunner, RunnerRegistry } from '@maka-cloud/orchestrator';
 import { formatCiteCheckLine, REPORT_ARTIFACTS, RUNNER_EXPORT_PREFIX } from '@maka-cloud/playbooks';
+import { languageInstruction } from '@maka-cloud/server';
 import { conductorGateway } from '../gateway.js';
 import { type Cloud, type CloudOptions, startCloud } from '../host.js';
 
@@ -277,6 +278,91 @@ test('memory changes reach only the next appended turn, survive restart, and nev
   stack.cloud.server.invites.revoke(other.inviteId);
   assert.equal((await memoryApi(other.token)).status, 401);
   stack.token = firstToken;
+});
+
+test('the conversational agent is told the person’s language in its system prompt, never in its history', async (t) => {
+  const stack = await startStack(t);
+  const instruction = languageInstruction('zh-Hans') ?? '';
+  assert.ok(instruction.includes('Simplified Chinese'));
+  const system = (request: { body: { system?: unknown } }) => JSON.stringify(request.body.system);
+  const zhConversation = await newConversation(stack);
+  for (const n of [1, 2]) {
+    stack.model.script('conductor', text(`回答 ${n}`));
+    await stack.api(`/v1/conversations/${zhConversation}/messages`, { text: `问题 ${n}` });
+    await readFeed(stack, zhConversation, (events) => assistantTexts(events).length === n);
+    await stack.cloud.conductor.idle();
+  }
+  const zh = stack.model.requests.filter((request) => request.lane === 'conductor');
+  assert.equal(zh.length, 2);
+  for (const request of zh) {
+    assert.ok(system(request).includes(JSON.stringify(instruction).slice(1, -1)));
+    assert.ok(!JSON.stringify(request.body.messages).includes('Simplified Chinese'));
+  }
+  const history = checkHistory(zh, stack.model.emittedThinking, {
+    isRequestOnlyBlock: () => false,
+  });
+  assert.deepEqual(history.contentPrefix.breaks, []);
+  assert.deepEqual(history.systemChanges, []);
+
+  // An English reader's new conversation has no instruction; the Chinese one keeps its prompt.
+  const set = await fetch(`${stack.cloud.server.url}/v1/settings`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${stack.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ language: 'en' }),
+  });
+  assert.equal(set.status, 200);
+  const enConversation = await newConversation(stack);
+  stack.model.script('conductor', text('Answer'));
+  await stack.api(`/v1/conversations/${enConversation}/messages`, { text: 'Question' });
+  await readFeed(stack, enConversation, (events) => assistantTexts(events).length === 1);
+  await stack.cloud.conductor.idle();
+  stack.model.script('conductor', text('回答 3'));
+  await stack.api(`/v1/conversations/${zhConversation}/messages`, { text: '问题 3' });
+  await readFeed(stack, zhConversation, (events) => assistantTexts(events).length === 3);
+  await stack.cloud.conductor.idle();
+  const [en, zhLater] = stack.model.requests
+    .filter((request) => request.lane === 'conductor')
+    .slice(2);
+  assert.ok(en && zhLater);
+  assert.ok(!system(en).includes('Simplified Chinese'));
+  assert.equal(system(zhLater), system(zh[0] as (typeof zh)[number]));
+
+  // A Traditional Chinese reader's new conversation gets the zh-Hant paragraph, in its system
+  // prompt only and the same on every turn; the earlier conversations keep theirs.
+  const hantInstruction = languageInstruction('zh-Hant') ?? '';
+  assert.ok(hantInstruction.includes('Traditional Chinese, Taiwan usage'));
+  const setHant = await fetch(`${stack.cloud.server.url}/v1/settings`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${stack.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ language: 'zh-Hant' }),
+  });
+  assert.equal(setHant.status, 200);
+  const hantConversation = await newConversation(stack);
+  for (const n of [1, 2]) {
+    stack.model.script('conductor', text(`回答 ${n}`));
+    await stack.api(`/v1/conversations/${hantConversation}/messages`, { text: `問題 ${n}` });
+    await readFeed(stack, hantConversation, (events) => assistantTexts(events).length === n);
+    await stack.cloud.conductor.idle();
+  }
+  const hant = stack.model.requests.filter((request) => request.lane === 'conductor').slice(4);
+  assert.equal(hant.length, 2);
+  for (const request of hant) {
+    assert.ok(system(request).includes(JSON.stringify(hantInstruction).slice(1, -1)));
+    assert.ok(!system(request).includes('Simplified Chinese'));
+    assert.ok(!JSON.stringify(request.body.messages).includes('Traditional Chinese'));
+  }
+  const hantHistory = checkHistory(hant, stack.model.emittedThinking.slice(-2), {
+    isRequestOnlyBlock: () => false,
+  });
+  assert.deepEqual(hantHistory.contentPrefix.breaks, []);
+  assert.deepEqual(hantHistory.systemChanges, []);
+  stack.model.script('conductor', text('回答 4'));
+  await stack.api(`/v1/conversations/${zhConversation}/messages`, { text: '问题 4' });
+  await readFeed(stack, zhConversation, (events) => assistantTexts(events).length === 4);
+  await stack.cloud.conductor.idle();
+  const zhLatest = stack.model.requests.filter((request) => request.lane === 'conductor').at(-1);
+  assert.ok(zhLatest);
+  assert.equal(system(zhLatest), system(zh[0] as (typeof zh)[number]));
 });
 
 test('a fact in memory taints every new conversation of its invite: its first delegation waits for the user', async (t) => {

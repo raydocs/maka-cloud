@@ -4,6 +4,7 @@ import {
   ApiError,
   applyEvent,
   CloudClient,
+  connectionText,
   type ConversationState,
   emptyState,
   type FeedEvent,
@@ -60,7 +61,7 @@ function watch(client: CloudClient, conversationId: string) {
       watcher.frames.push(event);
       watcher.state = applyEvent(watcher.state, event);
     },
-    (status) => watcher.statuses.push(status),
+    (status) => watcher.statuses.push(connectionText(status)),
     abort.signal,
   );
   return {
@@ -338,7 +339,7 @@ test('another invite sees nothing of a conversation: every route and the stream 
   await other.subscribe(
     mine.conversationId,
     () => {},
-    (s) => statuses.push(s),
+    (s) => statuses.push(connectionText(s)),
     AbortSignal.timeout(2000),
   );
   expect(statuses).toEqual(['This conversation is not available.']);
@@ -395,6 +396,18 @@ test('no runner, model or vendor name reaches the client, even in a failure a ru
     'assistant Code crashed while assistant assistant-5 answered',
   );
   await view.stop();
+});
+
+test('a stack seeded in Traditional Chinese gives its invites zh-Hant, and the client reads it', async () => {
+  const hant = await startStack({ language: 'zh-Hant' });
+  try {
+    const client = new CloudClient(hant.token, { baseUrl: hant.url });
+    expect(await client.settings()).toEqual({ language: 'zh-Hant' });
+    const other = new CloudClient(hant.newInvite().token, { baseUrl: hant.url });
+    expect(await other.settings()).toEqual({ language: 'zh-Hant' });
+  } finally {
+    await hant.close();
+  }
 });
 
 test('a server without Web Push says so with a 404, and the client hides the control instead of guessing', async () => {

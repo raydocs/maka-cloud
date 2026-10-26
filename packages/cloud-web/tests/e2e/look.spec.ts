@@ -8,7 +8,7 @@ import {
   signIn,
 } from './support';
 
-test('Home, Chat and Settings fit the screen, cards are frosted and code is not', async ({
+test('Home, Chat and Settings fit the screen, composer and result cards are frosted while reading surfaces are opaque', async ({
   page,
   request,
 }, info) => {
@@ -17,13 +17,16 @@ test('Home, Chat and Settings fit the screen, cards are frosted and code is not'
   // Home: a first visit, the start sentence and nothing else to scroll sideways.
   await expect(page.getByRole('heading', { name: 'Make room for your next idea.' })).toBeVisible();
   await noHorizontalScroll(page);
-  const frosted = await page.getByRole('region', { name: 'Start something' }).evaluate((el) => {
+  const frosted = await page.locator('.start .pill-field').evaluate((el) => {
     const style = getComputedStyle(el);
     return { blur: style.backdropFilter, bg: style.backgroundColor };
   });
   expect(frosted.blur).toContain('blur');
   // Translucent: the alpha channel of the card's background is below 1.
   expect(frosted.bg).toMatch(/^rgba\(.*,\s*0?\.\d+\)$/u);
+  expect(await page.locator('.start').evaluate((el) => getComputedStyle(el).backdropFilter)).toBe(
+    'none',
+  );
   await page.screenshot({ path: info.outputPath('home.png') });
 
   await page.getByLabel('What would you like to get done?').fill('Write the changelog');
@@ -43,6 +46,20 @@ test('Home, Chat and Settings fit the screen, cards are frosted and code is not'
     content: '+added line\n-removed line\n',
   });
   await control(request, 'complete', { taskId, manifest: { artifacts: ['out/changes.diff'] } });
+  await expect(page.locator('.delivery')).toBeVisible();
+  for (const selector of ['.conversation', '.delivery']) {
+    const surface = await page.locator(selector).evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { blur: style.backdropFilter, bg: style.backgroundColor };
+    });
+    if (selector === '.delivery') {
+      expect(surface.blur).toContain('blur');
+      expect(surface.bg).toMatch(/^rgba\(.*,\s*0?\.\d+\)$/u);
+    } else {
+      expect(surface.blur).toBe('none');
+      expect(surface.bg).toMatch(/^rgb\(/u);
+    }
+  }
   await page.getByRole('button', { name: 'Open large: the changes' }).click();
   const diff = page.locator('pre.diff-content');
   await expect(diff).toContainText('+added line');
@@ -76,7 +93,7 @@ test('on a phone every navigation target is large enough to tap', async ({
 }, info) => {
   test.skip(info.project.name !== 'phone', 'phone only');
   await signIn(page, request);
-  for (const name of ['Home', 'Chat', 'Projects', 'Settings'] as const) {
+  for (const name of ['Search', 'Home', 'Chat', 'Projects', 'Me'] as const) {
     const box = await page
       .getByRole('navigation', { name: 'Sections' })
       .getByRole('button', { name, exact: true })

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import type { Mailer } from '../challenges.js';
 import { clientAddress, proxyList } from '../auth-routes.js';
@@ -10,7 +11,7 @@ const LOOPBACK = ['127.0.0.1', '::1'];
 interface Rig {
   h: Awaited<ReturnType<typeof startHarness>>;
   key: Signer;
-  mail: Array<{ to: string; text: string }>;
+  mail: Array<{ to: string; subject: string; text: string }>;
   codeOf(): string;
   /** An ID token for `sub`, signed by the fake provider, with the nonce the server just gave out. */
   idToken(provider: 'apple' | 'google', sub: string, nonce: string): string;
@@ -170,6 +171,25 @@ test('a new identity gets nothing until it brings an invite, then it is that inv
     inviteToken: r.h.token,
   });
   assert.equal(again.status, 401);
+});
+
+test('/v1/me names the account, the same for every session of it and for its invite', async (t) => {
+  const r = await rig(t);
+  const first = await signUp(r);
+  const again = (await (await r.google('g-ada', 'laptop')).json()) as SignedIn;
+  const other = await signUp(r, 'g-bob', r.h.server.invites.create('bob').token);
+  const owner = async (bearer: string) => {
+    const res = await r.call('GET', '/v1/me', undefined, bearer);
+    assert.equal(res.status, 200);
+    return ((await res.json()) as { ownerId: string }).ownerId;
+  };
+  const ada = await owner(first.token);
+  assert.match(ada, /^inv_/u);
+  assert.equal(await owner(again.token), ada);
+  assert.equal(await owner(r.h.token), ada);
+  assert.notEqual(await owner(other.token), ada);
+  assert.equal((await r.call('POST', '/v1/me', {}, first.token)).status, 405);
+  assert.equal((await r.call('GET', '/v1/me', undefined, null)).status, 401);
 });
 
 test('the same identity signs in again on another device, to the same invite', async (t) => {
@@ -620,4 +640,206 @@ test('sign-in bodies are strict', async (t) => {
   }
   assert.equal((await r.call('POST', '/v1/auth/session', 'nope' as unknown)).status, 400);
   assert.equal((await r.call('GET', '/v1/auth/session')).status, 405);
+});
+
+test('a new account reads Chinese unless its sign-up asked for English, and a language chosen first is kept', async (t) => {
+  const r = await rig(t);
+  const language = async (bearer: string) =>
+    (
+      (await (await r.call('GET', '/v1/settings', undefined, bearer)).json()) as {
+        language: string;
+      }
+    ).language;
+  const claim = async (sub: string, inviteToken: string, headers: Record<string, string> = {}) => {
+    const pending = (await (await r.google(sub)).json()) as NeedsInvite;
+    const claimed = await r.call(
+      'POST',
+      '/v1/auth/claim',
+      { pendingToken: pending.pendingToken, inviteToken },
+      null,
+      headers,
+    );
+    assert.equal(claimed.status, 200);
+    return (await claimed.json()) as SignedIn;
+  };
+  const ada = await claim('g-ada', r.h.token, { 'accept-language': 'zh-CN,en;q=0.8' });
+  assert.equal(await language(ada.token), 'zh-Hans');
+  const bob = await claim('g-bob', r.h.server.invites.create('bob').token, {
+    'accept-language': 'en-GB,en;q=0.9',
+  });
+  assert.equal(await language(bob.token), 'en');
+  const chosen = r.h.server.invites.create('chosen');
+  const set = await r.call('PATCH', '/v1/settings', { language: 'zh-Hans' }, chosen.token);
+  assert.equal(set.status, 200);
+  const cleo = await claim('g-cleo', chosen.token, { 'accept-language': 'en-US' });
+  assert.equal(await language(cleo.token), 'zh-Hans', 'the choice made before sign-up wins');
+});
+
+test('the sign-in mail is in Chinese by default, in English when asked, and in the account’s language once it has one', async (t) => {
+  const r = await rig(t);
+  assert.equal(
+    (await r.call('POST', '/v1/auth/email', { address: 'ada@example.com' })).status,
+    200,
+  );
+  const zh = r.mail.at(-1);
+  assert.equal(zh?.subject, '你的登录验证码');
+  assert.equal(
+    zh?.text,
+    `你的登录验证码是 ${r.codeOf()}。它只能用一次，10 分钟内有效，请在发起请求的应用或网页中输入。如果不是你本人操作，请忽略这封邮件。`,
+  );
+  const en = await r.call('POST', '/v1/auth/email', { address: 'bob@example.com' }, null, {
+    'accept-language': 'en-US,en;q=0.9',
+  });
+  assert.equal(en.status, 200);
+  const challenge = (await en.json()) as { challengeId: string; deviceSecret: string };
+  assert.equal(r.mail.at(-1)?.subject, 'Your sign-in code');
+  assert.equal(
+    r.mail.at(-1)?.text,
+    `Your sign-in code is ${r.codeOf()}. It works once, for ten minutes, in the app or page that asked for it. If you did not ask, ignore this mail.`,
+  );
+  // Bob signs up from an English device: his account reads English, so his next code is English
+  // even when asked for from a device set to Chinese.
+  const verified = (await (
+    await r.call('POST', '/v1/auth/email/verify', {
+      challengeId: challenge.challengeId,
+      deviceSecret: challenge.deviceSecret,
+      code: r.codeOf(),
+    })
+  ).json()) as NeedsInvite;
+  const claimed = await r.call(
+    'POST',
+    '/v1/auth/claim',
+    { pendingToken: verified.pendingToken, inviteToken: r.h.token },
+    null,
+    { 'accept-language': 'en' },
+  );
+  assert.equal(claimed.status, 200);
+  r.advance(31_000);
+  await r.call('POST', '/v1/auth/email', { address: 'bob@example.com' }, null, {
+    'accept-language': 'zh-CN',
+  });
+  assert.equal(r.mail.at(-1)?.subject, 'Your sign-in code');
+});
+
+test('an account whose language was never set gets the default in its mail, whatever the browser asks', async (t) => {
+  const r = await rig(t);
+  const asked = await r.call('POST', '/v1/auth/email', { address: 'dan@example.com' });
+  const challenge = (await asked.json()) as { challengeId: string; deviceSecret: string };
+  const verified = (await (
+    await r.call('POST', '/v1/auth/email/verify', {
+      challengeId: challenge.challengeId,
+      deviceSecret: challenge.deviceSecret,
+      code: r.codeOf(),
+    })
+  ).json()) as NeedsInvite;
+  assert.equal(
+    (
+      await r.call('POST', '/v1/auth/claim', {
+        pendingToken: verified.pendingToken,
+        inviteToken: r.h.token,
+      })
+    ).status,
+    200,
+  );
+  // As an account from before languages were kept: its invite has none stored.
+  const raw = new DatabaseSync(r.h.options.invitesPath);
+  raw.prepare('UPDATE invites SET language = NULL WHERE invite_id = ?').run(r.h.inviteId);
+  raw.close();
+  r.advance(31_000);
+  await r.call('POST', '/v1/auth/email', { address: 'dan@example.com' }, null, {
+    'accept-language': 'en-US',
+  });
+  assert.equal(r.mail.at(-1)?.subject, '你的登录验证码');
+});
+
+test('a sign-up from Taiwan, Hong Kong or Macau reads Traditional Chinese, by claim or by a first linked identity', async (t) => {
+  const r = await rig(t);
+  const language = async (bearer: string) =>
+    (
+      (await (await r.call('GET', '/v1/settings', undefined, bearer)).json()) as {
+        language: string;
+      }
+    ).language;
+  const claim = async (sub: string, inviteToken: string, acceptLanguage: string) => {
+    const pending = (await (await r.google(sub)).json()) as NeedsInvite;
+    const claimed = await r.call(
+      'POST',
+      '/v1/auth/claim',
+      { pendingToken: pending.pendingToken, inviteToken },
+      null,
+      { 'accept-language': acceptLanguage },
+    );
+    assert.equal(claimed.status, 200);
+    return (await claimed.json()) as SignedIn;
+  };
+  const cases: Array<[string, string]> = [
+    ['zh-TW,zh;q=0.9,en;q=0.8', 'zh-Hant'],
+    ['zh-HK', 'zh-Hant'],
+    ['zh-MO', 'zh-Hant'],
+    ['zh-Hant', 'zh-Hant'],
+    ['zh-SG', 'zh-Hans'],
+    ['zh', 'zh-Hans'],
+  ];
+  for (const [index, [header, expected]] of cases.entries()) {
+    const invite = index === 0 ? r.h.token : r.h.server.invites.create(`p${index}`).token;
+    const signedIn = await claim(`g-${index}`, invite, header);
+    assert.equal(await language(signedIn.token), expected, header);
+  }
+  // A person who has only an invite token links their first identity from a Taiwan browser.
+  const dora = r.h.server.invites.create('dora');
+  const n = await r.nonce();
+  const linked = await r.call(
+    'POST',
+    '/v1/auth/link',
+    { provider: 'google', idToken: r.idToken('google', 'g-dora', n), nonce: n },
+    dora.token,
+    { 'accept-language': 'zh-TW' },
+  );
+  assert.equal(linked.status, 200);
+  assert.equal(await language(dora.token), 'zh-Hant');
+  // A choice made before sign-up wins over a Traditional Chinese browser.
+  const chosen = r.h.server.invites.create('chosen');
+  assert.equal(
+    (await r.call('PATCH', '/v1/settings', { language: 'en' }, chosen.token)).status,
+    200,
+  );
+  const eve = await claim('g-eve', chosen.token, 'zh-TW');
+  assert.equal(await language(eve.token), 'en');
+});
+
+test('the sign-in mail is in Traditional Chinese for a Traditional Chinese request, and for an account that reads it', async (t) => {
+  const r = await rig(t);
+  const asked = await r.call('POST', '/v1/auth/email', { address: 'fay@example.com' }, null, {
+    'accept-language': 'zh-HK,en;q=0.5',
+  });
+  assert.equal(asked.status, 200);
+  assert.equal(r.mail.at(-1)?.subject, '你的登入驗證碼');
+  assert.equal(
+    r.mail.at(-1)?.text,
+    `你的登入驗證碼是 ${r.codeOf()}。此驗證碼只能使用一次，10 分鐘內有效，請在提出要求的應用程式或網頁中輸入。如果不是你本人操作，請忽略這封信。`,
+  );
+  const challenge = (await asked.json()) as { challengeId: string; deviceSecret: string };
+  const verified = (await (
+    await r.call('POST', '/v1/auth/email/verify', {
+      challengeId: challenge.challengeId,
+      deviceSecret: challenge.deviceSecret,
+      code: r.codeOf(),
+    })
+  ).json()) as NeedsInvite;
+  const claimed = await r.call(
+    'POST',
+    '/v1/auth/claim',
+    { pendingToken: verified.pendingToken, inviteToken: r.h.token },
+    null,
+    { 'accept-language': 'zh-TW' },
+  );
+  assert.equal(claimed.status, 200);
+  // Her account reads Traditional Chinese, so her next code is too, whatever the browser asks.
+  for (const header of ['en-US', 'zh-CN']) {
+    r.advance(31_000);
+    await r.call('POST', '/v1/auth/email', { address: 'fay@example.com' }, null, {
+      'accept-language': header,
+    });
+    assert.equal(r.mail.at(-1)?.subject, '你的登入驗證碼', header);
+  }
 });

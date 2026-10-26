@@ -406,6 +406,12 @@ test('the offer to turn a kind off is one item however often it is raised, and i
     items[0]?.ask ?? '',
     /3 suggestions in a row to update vulnerable dependencies on acme\/widgets/,
   );
+  assert.deepEqual(items[0]?.askTemplate, {
+    id: 'suggestion_offer',
+    count: 3,
+    label: 'update vulnerable dependencies',
+    repo: 'acme/widgets',
+  });
   assert.equal(items[0]?.interrupts, false);
   assert.equal(r.host.interrupts.length, 0, 'nobody is pushed');
   await r.stop();

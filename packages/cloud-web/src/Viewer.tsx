@@ -1,3 +1,4 @@
+import { useT } from './i18n';
 import { type ReactNode, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Minimize2, X } from 'lucide-react';
@@ -20,6 +21,7 @@ export function Viewer({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const { t } = useT();
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -63,7 +65,7 @@ export function Viewer({
       <button
         type="button"
         className="round-button quiet viewer-close"
-        aria-label="Close"
+        aria-label={t('Close')}
         onClick={onClose}
       >
         <X aria-hidden="true" size={18} strokeWidth={2} />
@@ -89,7 +91,7 @@ export function Viewer({
       <button
         type="button"
         className="round-button quiet viewer-collapse"
-        aria-label="Collapse"
+        aria-label={t('Collapse')}
         onClick={onClose}
       >
         <Minimize2 aria-hidden="true" size={16} strokeWidth={2} />

@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, expect, test } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, expect, test, vi } from 'vitest';
 import { ConversationView, Picture, QuestionCard } from '../src/App';
 import {
   CloudClient,
+  type ConnectionState,
   type Conversation,
+  type FeedEvent,
   type InboxItem,
   type Question,
   type TaskView,
@@ -276,7 +278,7 @@ test('a refused pause says why and hides the pause button for that task only', a
   ).toBeTruthy();
 });
 
-test('cost is only what the server reported: absent stays "Not reported", a partial total says so', async () => {
+test('cost is only what the server reported: absent stays hidden, a partial total says so', async () => {
   const api = fakeApi([
     created(1, 't1', 'Reported job'),
     created(2, 't2', 'Silent job'),
@@ -293,8 +295,8 @@ test('cost is only what the server reported: absent stays "Not reported", a part
   const reported = await screen.findByRole('article', { name: 'Reported job' });
   await waitFor(() => expect(reported.textContent).toMatch(/Cost so far: \$0\.40/u));
   expect(
-    within(screen.getByRole('article', { name: 'Silent job' })).getByText(/Not reported/),
-  ).toBeTruthy();
+    within(screen.getByRole('article', { name: 'Silent job' })).queryByText(/Not reported/),
+  ).toBeNull();
   // A subtask has no cost of its own: the root's figure covers it.
   expect(
     within(screen.getByRole('article', { name: 'Subtask' })).queryByText(/Cost so far/),
@@ -563,4 +565,114 @@ test('a picture is shown from a local object URL that is released when it goes a
   expect(image.getAttribute('src')).toBe('blob:local/9');
   unmount();
   expect(freed).toEqual(['blob:local/9']);
+});
+
+test('decision focus waits for the target inbox item instead of recording an unrelated card', async () => {
+  const client = new CloudClient('test');
+  let emit!: (event: FeedEvent) => void;
+  vi.spyOn(client, 'subscribe').mockImplementation(async (_id, event, status) => {
+    emit = event;
+    status({ state: 'live' });
+    event({ id: 1, kind: 'conductor.question', data: { ...question, conversationId: cnv, at: 0 } });
+  });
+  render(
+    <ConversationView client={client} conversation={conversation} decision={{ task: 'target' }} />,
+  );
+  const unrelated = await screen.findByRole('region', { name: 'Your decision' });
+  expect(document.activeElement).not.toBe(unrelated);
+  await act(async () =>
+    emit({
+      id: 2,
+      kind: 'inbox.item',
+      data: {
+        ...item,
+        itemId: 'target-item',
+        kind: 'decision',
+        conversationId: cnv,
+        taskId: 'target',
+        ask: 'Target decision',
+      },
+    }),
+  );
+  expect(document.activeElement?.getAttribute('data-task')).toBe('target');
+});
+
+test('once the stream is live, the decision fallback waits one second, not five', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = new CloudClient('test');
+    vi.spyOn(client, 'subscribe').mockImplementation(async (_id, event, status) => {
+      status({ state: 'live' });
+      event({
+        id: 1,
+        kind: 'conductor.question',
+        data: { ...question, conversationId: cnv, at: 0 },
+      });
+    });
+    render(
+      <ConversationView
+        client={client}
+        conversation={conversation}
+        decision={{ task: 'missing' }}
+      />,
+    );
+    await act(async () => {});
+    const unrelated = screen.getByRole('region', { name: 'Your decision' });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(document.activeElement).not.toBe(unrelated);
+    await act(() => vi.advanceTimersByTimeAsync(600));
+    expect(document.activeElement).toBe(unrelated);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('decision fallback waits five seconds and until the stream has finished connecting', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = new CloudClient('test');
+    let reportStatus!: (status: ConnectionState) => void;
+    vi.spyOn(client, 'subscribe').mockImplementation(async (_id, event, status) => {
+      reportStatus = status;
+      event({
+        id: 1,
+        kind: 'conductor.question',
+        data: { ...question, conversationId: cnv, at: 0 },
+      });
+    });
+    render(
+      <ConversationView
+        client={client}
+        conversation={conversation}
+        decision={{ task: 'missing' }}
+      />,
+    );
+    await act(async () => {});
+    const unrelated = screen.getByRole('region', { name: 'Your decision' });
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(document.activeElement).not.toBe(unrelated);
+    await act(async () => reportStatus({ state: 'live' }));
+    expect(document.activeElement).toBe(unrelated);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('conversation drafts survive switching away and back', () => {
+  const api = fakeApi([]);
+  const client = new CloudClient('fake', api.fetcher);
+  const first = { ...conversation, conversationId: 'draft-first' };
+  const second = { ...conversation, conversationId: 'draft-second' };
+  const view = render(<ConversationView key="first" client={client} conversation={first} />);
+  fireEvent.change(screen.getByLabelText('Keep the conversation going'), {
+    target: { value: 'Unsent words' },
+  });
+  view.rerender(<ConversationView key="second" client={client} conversation={second} />);
+  expect((screen.getByLabelText('Keep the conversation going') as HTMLTextAreaElement).value).toBe(
+    '',
+  );
+  view.rerender(<ConversationView key="first" client={client} conversation={first} />);
+  expect((screen.getByLabelText('Keep the conversation going') as HTMLTextAreaElement).value).toBe(
+    'Unsent words',
+  );
 });

@@ -78,7 +78,9 @@ test('a disconnected stream removes stale output and disables input without resu
   await task.getByRole('button', { name: 'Take control', exact: true }).click();
   await expect(task.getByLabel('Terminal input')).toBeEnabled();
   await control(request, 'computer-disconnect', { taskId });
-  await expect(task.getByRole('alert')).toContainText('Input is disabled');
+  await expect(task.getByRole('status')).toContainText(
+    'The connection dropped. Reconnect to continue watching.',
+  );
   await expect(task.getByLabel('Terminal input')).toBeDisabled();
   await expect(task.getByRole('img', { name: 'Task desktop' })).toHaveCount(0);
   await expect(task.getByText('Paused', { exact: true })).toBeVisible();
