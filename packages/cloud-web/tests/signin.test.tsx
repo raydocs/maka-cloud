@@ -174,9 +174,9 @@ test('a session that cannot be opened is ended on the server and the person stay
   fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
   await waitFor(() =>
-    expect(
-      calls.some((c) => c.route === 'POST /v1/auth/sign-out' && c.cookie && !c.auth),
-    ).toBe(true),
+    expect(calls.some((c) => c.route === 'POST /v1/auth/sign-out' && c.cookie && !c.auth)).toBe(
+      true,
+    ),
   );
   expect(jar.session).toBeUndefined();
   await screen.findByLabelText('Email');
