@@ -14,7 +14,8 @@ const quota: QuotaReason = {
   scope: 'day',
   usedUsd: 5,
   limitUsd: 5,
-  resetsAt: Date.UTC(2026, 9, 24),
+  // A limit still in force: a fixed date turns into "was limited until" once it has passed.
+  resetsAt: Date.now() + 24 * 60 * 60 * 1000,
   nextStep: 'wait',
 };
 
