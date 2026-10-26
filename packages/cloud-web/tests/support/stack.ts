@@ -245,6 +245,8 @@ export async function startStack(
     computer: computer.source,
     // Sign-in by emailed code with a mail service that only keeps what it was given.
     auth: {
+      // Every test opens the sign-in screen from one address; the real limits would run dry.
+      limits: { perAddress: 1_000_000, guessesPerAddress: 1_000_000, total: 1_000_000 },
       mailer: {
         async send(message) {
           mail.push(message);

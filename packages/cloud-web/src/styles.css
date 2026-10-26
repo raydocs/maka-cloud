@@ -319,6 +319,49 @@ textarea {
   margin-top: 28px;
 }
 
+/* The ways in: buttons, the email form, quiet links. */
+.signin {
+  display: grid;
+  gap: 12px;
+  margin-top: 28px;
+}
+.signin form {
+  margin-top: 0;
+}
+.signin-heading {
+  font-size: var(--t-xl);
+  margin: 0;
+}
+.signin-link {
+  justify-self: start;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-muted);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.device-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.device-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.device-list li > div {
+  display: grid;
+  gap: 2px;
+}
+
 /* Home and the start sentence */
 .start {
   display: grid;

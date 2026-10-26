@@ -84,7 +84,7 @@ test('Home, Chat and Settings fit the screen, composer and result cards are fros
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   // The invite is not kept: a reload is a sign-out, and the chosen scheme is still there.
-  await expect(page.getByLabel('Invite token')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Email me a code' })).toBeVisible();
 });
 
 test('on a phone every navigation target is large enough to tap', async ({

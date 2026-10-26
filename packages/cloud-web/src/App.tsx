@@ -45,6 +45,7 @@ import {
   visibleInbox,
   Unsupported,
 } from '@maka-cloud/client';
+import { DevicesPanel } from './Devices';
 import { GrantsPanel } from './Grants';
 import { QuotaNotice, Usage } from './Quota';
 import { Home } from './Home';
@@ -57,6 +58,7 @@ import { outboxFor } from './pending';
 import { Projects } from './Projects';
 import { ConversationSearch } from './Search';
 import { TaskPage } from './TaskPage';
+import { SignIn } from './SignIn';
 import { disablePush, enablePush, postPushContext, restorePush } from './push';
 import { submitOnEnter } from './keys';
 import {
@@ -896,9 +898,12 @@ function LanguageChoice() {
 export function Settings({
   client,
   onDisconnect,
+  deviceSession = false,
 }: {
   client: CloudClient;
   onDisconnect: () => void;
+  /** Signed in with Apple, Google or an emailed code, not an invite token typed by hand. */
+  deviceSession?: boolean;
 }) {
   const { t } = useT();
   return (
@@ -912,12 +917,19 @@ export function Settings({
       </section>
       <NotificationsPanel client={client} />
       <GrantsPanel client={client} />
+      <DevicesPanel client={client} />
       <section className="card section-card" aria-label={t('Connection')}>
         <h2>{t('This device')}</h2>
         <p className="muted">
-          {t('Disconnecting forgets the invite on this device and nothing else.')}
+          {deviceSession
+            ? t('Signing out ends the sign-in of this device and nothing else.')
+            : t('Disconnecting forgets the invite on this device and nothing else.')}
         </p>
-        <Button label={t('Disconnect')} variant="secondary" onClick={onDisconnect} />
+        <Button
+          label={deviceSession ? t('Sign out') : t('Disconnect')}
+          variant="secondary"
+          onClick={onDisconnect}
+        />
       </section>
     </div>
   );
@@ -1020,12 +1032,16 @@ export function Shell({
   );
 }
 
+/** How long signing out waits for the server before it leaves anyway. */
+const SIGN_OUT_WAIT_MS = 5_000;
+
 export function App({ initialToken = '' }: { initialToken?: string }) {
   const { t, shared } = useT();
-  const [invite, setInvite] = useState(initialToken);
   const [session, setSession] = useState<{
     client: CloudClient;
     conversations: Conversation[];
+    /** Signed in with Apple, Google or an emailed code (a session token), not an invite token. */
+    device: boolean;
   } | null>(null);
   const [wide, setWide] = useState(
     () => globalThis.matchMedia?.('(min-width: 900px)').matches ?? false,
@@ -1062,26 +1078,36 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
   const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
+  /** Opens the workspace for a token, or throws and leaves nothing open. */
+  const open = async (token: string) => {
+    const device = token.startsWith('mks_');
+    const workspace = await openWorkspace(token, {
+      onRevoked: () => {
+        // The invite or sign-in is gone: leave the workspace and keep nothing of it.
+        draftGeneration++;
+        conversationDrafts.clear();
+        clearSteerReceipts();
+        setSession(null);
+        setChosen('');
+        setView('home');
+        setError(
+          device
+            ? 'Your sign-in is no longer valid. Please sign in again.'
+            : 'Your invite is no longer valid. Please reconnect.',
+        );
+      },
+    });
+    setError('');
+    setSession({ client: workspace.client, conversations: workspace.conversations, device });
+    setChosen(workspace.chosen);
+    setView(workspace.landing);
+  };
+  /** The invite token box: a failure is shown under it. */
   const connect = async (token: string) => {
     setBusy(true);
     setError('');
     try {
-      const workspace = await openWorkspace(token, {
-        onRevoked: () => {
-          // The invite is gone: leave the workspace and keep nothing of it.
-          draftGeneration++;
-          conversationDrafts.clear();
-          clearSteerReceipts();
-          setSession(null);
-          setInvite('');
-          setChosen('');
-          setView('home');
-          setError('Your invite is no longer valid. Please reconnect.');
-        },
-      });
-      setSession({ client: workspace.client, conversations: workspace.conversations });
-      setChosen(workspace.chosen);
-      setView(workspace.landing);
+      await open(token);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -1189,12 +1215,23 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       navigator.serviceWorker.removeEventListener('controllerchange', send);
     };
   }, [session, chosen, view]);
-  const disconnect = () => {
+  const disconnect = async () => {
+    // A signed-in device ends its own session on the server too; an invite token has none to end.
+    // The wait is short: a server that cannot be reached must not hold the person on the page.
+    if (session?.device) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        session.client.endSession().catch(() => {}),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SIGN_OUT_WAIT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
     draftGeneration++;
     conversationDrafts.clear();
     clearSteerReceipts();
     setSession(null);
-    setInvite('');
     setChosen('');
     setView('home');
   };
@@ -1399,7 +1436,11 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       )}
       {!taskPage && view === 'settings' && (
         <div className="content-pane">
-          <Settings client={session.client} onDisconnect={disconnect} />
+          <Settings
+            client={session.client}
+            onDisconnect={() => void disconnect()}
+            deviceSession={session.device}
+          />
         </div>
       )}
     </Shell>
@@ -1412,33 +1453,7 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         {t('one conversation away.')}
       </h1>
       <p>{t('A place to plan, follow the work, and bring it home.')}</p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void connect(invite);
-        }}
-      >
-        <label htmlFor="invite">{t('Invite token')}</label>
-        <input
-          id="invite"
-          type="password"
-          autoComplete="off"
-          value={invite}
-          onChange={(e) => setInvite(e.target.value)}
-          required
-        />
-        <Button
-          label={busy ? t('Connecting…') : t('Enter your workspace')}
-          type="submit"
-          variant="primary"
-          isDisabled={busy}
-        />
-      </form>
-      {error && (
-        <p role="alert" className="error">
-          {shared(error)}
-        </p>
-      )}
+      <SignIn open={open} openInvite={connect} busy={busy} notice={error ? shared(error) : ''} />
     </main>
   );
 }
