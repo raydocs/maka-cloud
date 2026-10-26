@@ -121,6 +121,20 @@ their invite code once, after the first sign-in. Nothing here is called until so
 With none of them set the server answers invite tokens only. `check` prints a `sign-in:` line
 saying which ways are on.
 
+The phone app shows the Apple and Google buttons only when the build was given the matching
+settings (set when you build the app, not on the server; none is a secret, and none is in the
+repository):
+
+| Build setting | What you provide |
+| --- | --- |
+| `MAKA_APPLE_SIGN_IN=1` | turns Sign in with Apple on in the iOS app; the app id needs the Sign in with Apple capability in your Apple Developer account |
+| `MAKA_GOOGLE_IOS_CLIENT_ID` | the Google OAuth client id of type iOS for the app's bundle id (`cloud.maka.app` unless you change it) |
+| `MAKA_GOOGLE_ANDROID_CLIENT_ID` | the Google OAuth client id of type Android for the package name and your signing certificate's SHA-1 |
+
+Put the same Google ids in `MAKA_CLOUD_GOOGLE_CLIENT_IDS` on the server, and the bundle id in
+`MAKA_CLOUD_APPLE_CLIENT_IDS`. A build without these settings still signs in with an emailed code
+or an invite token. The web screens come later.
+
 **3. A sandbox machine for each invite**
 
 - Create the machine in the sandbox provider's console, from an image with

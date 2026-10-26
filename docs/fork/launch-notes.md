@@ -51,10 +51,16 @@ confirmed or the task is cancelled.
 
 ## Sign-in: what to check with the first real token
 
-- Sign in with Apple: the app passes the server's nonce to Apple unchanged, and the token's nonce
-  claim must equal it. Check this form with a real Apple token in the live run. The tests use a
-  fake signer, so a mismatch (for example if Apple returns the nonce hashed) would show only then.
-  Until then, email code and Google are the other ways in, and the invite token always works.
+- Sign in with Apple: the app gives Apple's sheet the SHA-256 of the server's nonce (in hex) and the
+  server accepts a token whose nonce claim is that hash (or the nonce itself). A token seen in a log
+  or a crash report then does not hand over the nonce the sign-in call needs. This relies on Apple
+  signing back what it was given, as its own sample flow does; check it with a real Apple token in
+  the live run (the tests use a fake signer). Until then, email code and Google are the other ways
+  in, and the invite token always works.
+- Google on the phone: the app opens Google in the system browser (code with PKCE) and exchanges the
+  code for the ID token itself, sending the same nonce hash. It needs the iOS and Android client ids
+  as build settings (see `deploy.md` 2b); check the return to the app on a real phone, since the
+  tests mock the browser.
 - `MAKA_CLOUD_TRUST_PROXY` names the proxy's address (default loopback; Compose sets Caddy's fixed
   address), so sign-in limits count each client and not the proxy, and a caller that reaches the
   server directly cannot forge its way past them. Check that two phones on different networks do

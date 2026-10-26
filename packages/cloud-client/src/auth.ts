@@ -18,6 +18,9 @@ export class SignInCancelled extends Error {
   }
 }
 
+/** The provider's sheet failed or sent nothing usable (not the person closing it). */
+class SheetFailed extends Error {}
+
 /** What only the platform can do. */
 export interface AuthPlatform {
   /**
@@ -116,7 +119,7 @@ export class AuthFlow extends Store<AuthState> {
     try {
       const { nonce } = await this.call<{ nonce: string }>('POST', '/v1/auth/nonce');
       if (mine !== this.turn) return;
-      const idToken = await this.platform.credential(provider, nonce);
+      const idToken = await this.credential(provider, nonce);
       if (mine !== this.turn) return;
       const outcome = await this.call<Outcome>('POST', '/v1/auth/session', {
         provider,
@@ -128,6 +131,16 @@ export class AuthFlow extends Store<AuthState> {
     } catch (e) {
       if (mine !== this.turn) return;
       this.choose(e instanceof SignInCancelled ? '' : failure(e, 'provider'));
+    }
+  }
+
+  /** The provider's sheet. Whatever goes wrong inside it is the sheet's, not the connection's. */
+  private async credential(provider: Provider, nonce: string): Promise<string> {
+    try {
+      return await this.platform.credential(provider, nonce);
+    } catch (e) {
+      if (e instanceof SignInCancelled) throw e;
+      throw new SheetFailed();
     }
   }
 
@@ -335,6 +348,8 @@ function failure(error: unknown, step: Step): string {
     if (error.status === 503) return 'The code could not be sent. Try again in a moment.';
     return `Could not sign in (${error.status}). Try again.`;
   }
+  if (error instanceof SheetFailed)
+    return 'That sign-in did not finish. Try again, or use another way.';
   return 'Could not reach the server. Check your connection and try again.';
 }
 
