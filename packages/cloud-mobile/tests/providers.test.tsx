@@ -37,10 +37,11 @@ const sha256 = (text: string) =>
 const mockPrompt = jest.fn();
 const mockExchange = jest.fn();
 const mockRequests: Array<Record<string, unknown>> = [];
+const mockVerifier: { value: string | undefined } = { value: 'verifier-1' };
 jest.mock('expo-auth-session', () => ({
   ResponseType: { Code: 'code' },
   AuthRequest: class {
-    codeVerifier = 'verifier-1';
+    codeVerifier = mockVerifier.value;
     constructor(config: Record<string, unknown>) {
       mockRequests.push(config);
     }
@@ -60,6 +61,7 @@ const build = (signIn: Record<string, unknown>) => {
 beforeEach(() => {
   setConfig({});
   mockRequests.length = 0;
+  mockVerifier.value = 'verifier-1';
   for (const mock of [mockApple.isAvailableAsync, mockApple.signInAsync, mockPrompt, mockExchange])
     mock.mockReset();
 });
@@ -105,7 +107,7 @@ test('Google: the code is asked for with PKCE and the nonce, then exchanged for 
   expect(mockRequests[0]).toMatchObject({
     clientId: GOOGLE_IOS,
     redirectUri: 'com.googleusercontent.apps.1234-abcd:/oauthredirect',
-    scopes: ['openid', 'email', 'profile'],
+    scopes: ['openid', 'email'],
     usePKCE: true,
     extraParams: { nonce: sha256('server-nonce') },
   });
@@ -134,6 +136,14 @@ test('Google: closing the browser is a cancel; an error or a missing token is an
   expect(mockExchange).toHaveBeenCalledTimes(1);
   build({});
   await expect(authPlatform.credential('google', 'n')).rejects.toThrow('not built');
+});
+
+test('Google: without a PKCE verifier the code is not exchanged', async () => {
+  build({ google: { ios: GOOGLE_IOS } });
+  mockVerifier.value = undefined;
+  mockPrompt.mockResolvedValue({ type: 'success', params: { code: 'auth-code' } });
+  await expect(authPlatform.credential('google', 'n')).rejects.toThrow('could not be completed');
+  expect(mockExchange).not.toHaveBeenCalled();
 });
 
 test('where Google sends the person back: the client id backwards on iOS, the package on Android', () => {

@@ -90,7 +90,7 @@ async function googleToken(nonce: string): Promise<string> {
   const request = new Auth.AuthRequest({
     clientId,
     redirectUri,
-    scopes: ['openid', 'email', 'profile'],
+    scopes: ['openid', 'email'],
     responseType: Auth.ResponseType.Code,
     usePKCE: true,
     extraParams: { nonce: await nonceForSheet(nonce) },
@@ -99,12 +99,14 @@ async function googleToken(nonce: string): Promise<string> {
   if (result.type === 'cancel' || result.type === 'dismiss') throw new SignInCancelled();
   if (result.type !== 'success' || !result.params.code)
     throw new Error('Google did not send a sign-in.');
+  // Without the verifier the exchange would run without PKCE: stop instead.
+  if (!request.codeVerifier) throw new Error('Google sign-in could not be completed.');
   const tokens = await Auth.exchangeCodeAsync(
     {
       clientId,
       code: result.params.code,
       redirectUri,
-      extraParams: request.codeVerifier ? { code_verifier: request.codeVerifier } : {},
+      extraParams: { code_verifier: request.codeVerifier },
     },
     GOOGLE,
   );
