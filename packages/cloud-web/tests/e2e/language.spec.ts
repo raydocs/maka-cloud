@@ -13,6 +13,7 @@ test('Traditional Home and Chat preserve server text; Settings remembers an Engl
   const invite = await control<{ token: string }>(request, 'invite');
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-Hant');
+  await page.getByRole('button', { name: '我有邀請權杖' }).click();
   await page.getByLabel('邀請權杖').fill(invite.token);
   await page.getByRole('button', { name: '進入工作區' }).click();
   await expect(page.getByRole('heading', { name: '給下一個想法留個位置。' })).toBeVisible();
@@ -58,6 +59,7 @@ test('Traditional Home and Chat preserve server text; Settings remembers an Engl
   await page.getByRole('button', { name: '繁體中文' }).click();
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-Hant');
+  await page.getByRole('button', { name: '我有邀請權杖' }).click();
   await page.getByLabel('邀請權杖').fill(invite.token);
   await page.getByRole('button', { name: '進入工作區' }).click();
   await page.getByRole('navigation').getByRole('button', { name: '我的' }).click();
@@ -65,7 +67,7 @@ test('Traditional Home and Chat preserve server text; Settings remembers an Engl
   await expect(page.getByRole('heading', { name: 'Me', exact: true })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Enter your workspace' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'I have an invite token' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
 });
 
@@ -108,6 +110,7 @@ for (const locale of ['zh-CN', 'zh-TW']) {
       );
       const invite = await control<{ token: string }>(request, 'invite');
       await page.goto('/');
+      await page.getByRole('button', { name: copy('我有邀请令牌', '我有邀請權杖') }).click();
       await page.getByLabel(copy('邀请令牌', '邀請權杖')).fill(invite.token);
       await page.getByRole('button', { name: copy('进入工作区', '進入工作區') }).click();
       await page.getByPlaceholder(copy('想完成什么？', '想完成什麼？')).fill('Layout test');
