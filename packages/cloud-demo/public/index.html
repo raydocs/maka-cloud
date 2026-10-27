@@ -78,6 +78,9 @@ summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .steer .row { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 8px; }
 .steer input { flex: 1; border: 0; outline: 0; background: transparent; padding: 4px 6px; min-width: 0; }
 .err { color: var(--bad); }
+.notes { margin-top: 12px; font-size: 13px; color: var(--muted); }
+.notes summary { cursor: pointer; }
+.notes ul { margin: 8px 0; padding-left: 18px; }
 .keybox { max-width: 420px; margin: 18vh auto; padding: 20px; }
 .mobile-top { display: none; }
 @media (max-width: 760px) {
@@ -148,6 +151,7 @@ function renderHome() {
         <textarea id="goal" placeholder="比如：给登录页加上“记住我”，七天内免登录"></textarea>
         <div class="row"><input class="repo" id="repo" placeholder="仓库，比如 owner/name" value="${esc(repo)}"><button class="go" id="go">交给 Maka</button></div>
         <div class="err" id="err"></div>
+        <div id="notes"></div>
       </div>
     </div>`;
   const go = document.getElementById('go');
@@ -159,7 +163,27 @@ function renderHome() {
     try { const t = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ repo, goal }) }); tasks.set(t.id, t); open(t.id); }
     catch (e) { document.getElementById('err').textContent = e.message; go.disabled = false; }
   };
+  const repoInput = document.getElementById('repo');
+  let pause;
+  repoInput.oninput = () => { clearTimeout(pause); pause = setTimeout(() => showNotes(repoInput.value.trim()), 400); };
+  showNotes(repo);
   document.getElementById('goal').focus();
+}
+
+// What Maka has learned about the repository so far: shown before it starts, and the owner can clear it.
+async function showNotes(repo) {
+  const box = document.getElementById('notes'); if (!box) return;
+  if (!repo) { box.innerHTML = ''; return; }
+  let data; try { data = await api(`/api/notes?repo=${encodeURIComponent(repo)}`); } catch { box.innerHTML = ''; return; }
+  if (document.getElementById('repo')?.value.trim() !== repo) return;
+  if (!data.notes.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<details class="notes"><summary>我记得这个仓库的 ${data.notes.length} 条经验，这次会先参考</summary>
+    <ul>${data.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
+    <button class="ghost" id="forget">全部忘掉</button></details>`;
+  document.getElementById('forget').onclick = async () => {
+    try { await api(`/api/notes?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' }); box.innerHTML = '<p class="label">已经忘掉了，下次从头了解这个仓库。</p>'; }
+    catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  };
 }
 
 function workOrderCard(t) {
@@ -190,6 +214,7 @@ function resultCard(t) {
     ${list('审查发现的问题（已修改）', r.review.items)}
     ${r.flags.length ? list('需要你看一眼', r.flags.map((f) => `${f.file}：${f.why}`)) : ''}
     ${list('备注', r.notes)}
+    ${list('这次记下的仓库经验（下次在这个仓库直接用上）', r.learned)}
     ${r.prUrl ? `<a class="pr" href="${esc(r.prUrl)}" target="_blank" rel="noopener">查看 PR</a>` : `<p class="warn">${esc(r.prError || '')}</p>`}
   </div>`;
 }
@@ -208,7 +233,7 @@ function renderTask() {
     ${active || t.state === 'waiting' ? `<div class="now"><span class="dot ${dotClass(t)}"></span><span class="${active ? 'shimmer' : ''}">${esc(t.now)}</span><span style="flex:1"></span><button class="ghost" id="stop">停止</button></div>` : ''}
     ${workOrderCard(t)}
     ${resultCard(t)}
-    ${t.state === 'failed' ? `<div class="card"><div class="label">没做完</div><p class="err" style="margin:0">${esc(t.error)}</p></div>` : ''}
+    ${t.state === 'failed' ? `<div class="card"><div class="label">没做完</div><p class="err" style="margin:0">${esc(t.error)}</p>${t.learned && t.learned.length ? `<h3>复盘记下的仓库经验（下次直接用上）</h3><ul>${t.learned.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}</div>` : ''}
     ${t.state === 'stopped' ? `<div class="card"><div class="label">已停止</div><p style="margin:0">改动留在云端电脑里，14 天内都能找回。</p></div>` : ''}
     <details id="trace" ${keepOpen ? 'open' : ''}><summary>完整过程（${t.log.length}）</summary><div class="log">${log}</div></details>
     ${active ? `<div class="steer"><div class="row"><input id="steerText" placeholder="想补充什么要求？它会边做边考虑"><button class="go" id="steerGo">发送</button></div></div>` : ''}`;

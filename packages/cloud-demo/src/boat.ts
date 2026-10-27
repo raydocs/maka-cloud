@@ -92,6 +92,20 @@ export async function exec(
   };
 }
 
+/**
+ * A fresh desktop stream URL for an iframe (valid to open for 10 minutes), with boat's viewer
+ * overlay hidden. Never logged: anyone holding it can attach to the desktop.
+ */
+export async function desktopUrl(id: string): Promise<string | undefined> {
+  const result = await run(['desktop', id, '--json'], 120_000);
+  const found = jsonLines(result.stdout).find((l) => typeof l.desktopUrl === 'string');
+  const url = found?.desktopUrl as string | undefined;
+  if (!url) return undefined;
+  const [head, fragment] = url.split('#', 2);
+  const withOverlay = `${head}${head!.includes('?') ? '&' : '?'}overlay=0`;
+  return fragment === undefined ? withOverlay : `${withOverlay}#${fragment}`;
+}
+
 export async function extend(id: string, hours: number): Promise<void> {
   await run(['extend', id, '--hours', String(hours), '--json']);
 }
@@ -138,6 +152,8 @@ export async function prompt(
   text: string,
   options: { provider: string; model?: string; effort?: string; resume?: string },
   onEvent: (event: AgentEvent) => void,
+  /** Ends the local stream when the turn did not stop after an interrupt. */
+  signal?: AbortSignal,
 ): Promise<TurnResult> {
   const args = ['prompt', id, '--json', '--provider', options.provider];
   if (options.model) args.push('--model', options.model);
@@ -146,6 +162,7 @@ export async function prompt(
   args.push('--', text);
 
   const child = spawn(BOAT, [...args, '--no-update'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  signal?.addEventListener('abort', () => child.kill('SIGTERM'), { once: true });
   let stderr = '';
   child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
   const result: TurnResult = { conversationId: options.resume ?? '', text: '', status: 'unknown' };
