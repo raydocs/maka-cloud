@@ -106,9 +106,7 @@ test('Chat renders Chinese while preserving server titles, question text and cus
   expect(screen.getByRole('button', { name: '发送' })).toBeTruthy();
   expect(screen.getByRole('log', { name: '消息' })).toBeTruthy();
   await waitFor(() =>
-    expect(
-      screen.getByText('电脑合上也没关系，我会一直做完，做好了告诉你。'),
-    ).toBeTruthy(),
+    expect(screen.getByText('电脑合上也没关系，我会一直做完，做好了告诉你。')).toBeTruthy(),
   );
   rerender(
     <LanguageProvider language="zh-Hans">
