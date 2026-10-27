@@ -28,7 +28,8 @@ import type {
   WorkspaceWriteLockKeyResult,
 } from '@maka/runtime/workspace-executor';
 import { Minimatch } from 'minimatch';
-import type { InstaboxClient, InstaboxExecRequest, InstaboxExecResult } from './client.js';
+import type { SandboxApi } from './api.js';
+import type { InstaboxExecRequest, InstaboxExecResult } from './client.js';
 import { InstaboxApiError } from './errors.js';
 import { INSTABOX_WORKSPACE_EXECUTOR_FACTS } from './facts.js';
 import {
@@ -62,7 +63,7 @@ const MAX_CMD_CHARS = 60_000;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface InstaboxWorkspaceExecutorOptions {
-  client: InstaboxClient;
+  client: SandboxApi;
   /** Sandbox id (`m_...`) or name. */
   machineId: string;
   /** Overrides the default facts, for example when the sandbox owner enabled Vault items. */
@@ -80,7 +81,7 @@ type ResolveMode = 'existing' | 'writable' | 'entry';
 
 export class InstaboxWorkspaceExecutor implements WorkspaceExecutor {
   readonly facts: WorkspaceExecutorFacts;
-  private readonly client: InstaboxClient;
+  private readonly client: SandboxApi;
   private readonly machineId: string;
 
   constructor(options: InstaboxWorkspaceExecutorOptions) {
