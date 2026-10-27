@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Maka</title>
+<style>
+:root {
+  --bg: #f7f6f3; --panel: #ffffff; --ink: #1c1b19; --muted: #6f6b64; --line: #e7e4de;
+  --accent: #2f5bea; --accent-ink: #ffffff; --ok: #1f8a4c; --warn: #b26a00; --bad: #c2362f;
+  --soft: #f1efe9; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131312; --panel: #1c1c1a; --ink: #f1efe9; --muted: #a29d94; --line: #2c2b28;
+    --accent: #7b9bff; --accent-ink: #0d0d0c; --ok: #4cc584; --warn: #f0a640; --bad: #f2736b;
+    --soft: #242421; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+button, input, textarea { font: inherit; color: inherit; }
+.app { display: grid; grid-template-columns: 280px 1fr; height: 100dvh; }
+aside { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.brand { display: flex; align-items: center; justify-content: space-between; padding: 18px 18px 10px; }
+.brand b { font-size: 18px; letter-spacing: .2px; }
+.new { border: 0; background: var(--ink); color: var(--bg); border-radius: 999px; padding: 6px 14px; cursor: pointer; font-size: 14px; }
+.list { overflow: auto; padding: 6px 10px 20px; }
+.item { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 10px 10px; border-radius: 12px; cursor: pointer; }
+.item:hover { background: var(--soft); }
+.item.on { background: var(--panel); box-shadow: var(--shadow); }
+.item .t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; }
+.item .s { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 3px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.run { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.dot.wait { background: var(--warn); }
+.dot.done { background: var(--ok); }
+.dot.fail { background: var(--bad); }
+@keyframes pulse { 50% { opacity: .35; } }
+main { overflow: auto; min-width: 0; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 28px 20px 140px; }
+.hero { padding-top: 12vh; }
+.hero h1 { font-size: 28px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.3px; }
+.hero p { color: var(--muted); margin: 0 0 22px; }
+.composer { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 14px; box-shadow: var(--shadow); }
+.composer textarea { width: 100%; border: 0; outline: 0; resize: none; background: transparent; min-height: 96px; font-size: 16px; }
+.row { display: flex; gap: 10px; align-items: center; }
+.repo { flex: 1; border: 1px solid var(--line); background: var(--soft); border-radius: 10px; padding: 8px 10px; outline: 0; min-width: 0; }
+.go { border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 12px; padding: 9px 16px; cursor: pointer; font-weight: 600; white-space: nowrap; }
+.go:disabled { opacity: .5; cursor: default; }
+.ghost { border: 1px solid var(--line); background: transparent; border-radius: 12px; padding: 7px 12px; cursor: pointer; color: var(--muted); }
+.bubble { margin-left: auto; max-width: 85%; width: fit-content; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 18px 18px 4px 18px; white-space: pre-wrap; }
+.meta { color: var(--muted); font-size: 12px; text-align: right; margin: 6px 2px 18px; }
+.now { display: flex; gap: 10px; align-items: center; padding: 12px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); margin: 14px 0; }
+.shimmer { background: linear-gradient(90deg, var(--muted) 0%, var(--ink) 40%, var(--muted) 80%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: sh 2.2s linear infinite; }
+@keyframes sh { to { background-position: -200% 0; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin: 14px 0; box-shadow: var(--shadow); }
+.card h2 { font-size: 17px; margin: 0 0 6px; }
+.card h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 14px 0 6px; }
+.card ul { margin: 0; padding-left: 18px; }
+.card li { margin: 2px 0; }
+.label { font-size: 12px; color: var(--muted); letter-spacing: .3px; margin-bottom: 6px; }
+.q { margin: 10px 0; }
+.q div { margin-bottom: 4px; }
+.q input { width: 100%; border: 1px solid var(--line); background: var(--soft); border-radius: 10px; padding: 8px 10px; outline: 0; }
+.ev { display: flex; gap: 8px; margin: 5px 0; }
+.ev b { flex: none; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.pr { display: inline-block; margin-top: 14px; background: var(--ink); color: var(--bg); text-decoration: none; padding: 9px 14px; border-radius: 12px; font-weight: 600; }
+details { margin: 16px 0; }
+summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.log { margin-top: 10px; border-left: 2px solid var(--line); padding-left: 12px; }
+.log .e { margin: 8px 0; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.log .e small { color: var(--muted); margin-right: 6px; }
+.log .agent { color: var(--muted); max-height: 220px; overflow: auto; background: var(--soft); border-radius: 10px; padding: 8px 10px; }
+.steer { position: sticky; bottom: 0; padding: 14px 0 10px; background: linear-gradient(transparent, var(--bg) 30%); }
+.steer .row { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 8px; }
+.steer input { flex: 1; border: 0; outline: 0; background: transparent; padding: 4px 6px; min-width: 0; }
+.err { color: var(--bad); }
+.notes { margin-top: 12px; font-size: 13px; color: var(--muted); }
+.notes summary { cursor: pointer; }
+.notes ul { margin: 8px 0; padding-left: 18px; }
+.keybox { max-width: 420px; margin: 18vh auto; padding: 20px; }
+.mobile-top { display: none; }
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; }
+  aside { display: none; }
+  aside.open { display: flex; position: fixed; inset: 0; background: var(--bg); z-index: 5; }
+  .mobile-top { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+  .wrap { padding: 18px 16px 140px; }
+  .hero { padding-top: 6vh; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside id="side">
+    <div class="brand"><b>Maka</b><button class="new" id="newBtn">新任务</button></div>
+    <div class="list" id="list"></div>
+  </aside>
+  <main>
+    <div class="mobile-top"><b>Maka</b><span><button class="ghost" id="menuBtn">任务</button> <button class="new" id="newBtn2">新任务</button></span></div>
+    <div class="wrap" id="view"></div>
+  </main>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+if (params.get('k')) { try { localStorage.setItem('maka-key', params.get('k')); } catch {} history.replaceState(null, '', '/'); }
+let KEY = ''; try { KEY = localStorage.getItem('maka-key') || ''; } catch {}
+const tasks = new Map();
+let current = null;
+const ACTIVE = new Set(['preparing', 'planning', 'building', 'checking', 'reviewing', 'fixing', 'delivering']);
+const STATE = { preparing: '准备中', planning: '写工作单', waiting: '等你确认', building: '开发中', checking: '复核中', reviewing: '审查中', fixing: '修改中', delivering: '开 PR', done: '完成', failed: '没做完', stopped: '已停止' };
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dotClass = (t) => ACTIVE.has(t.state) ? 'run' : t.state === 'waiting' ? 'wait' : t.state === 'done' ? 'done' : (t.state === 'failed' ? 'fail' : '');
+const ago = (ms) => { const s = Math.round((Date.now() - ms) / 1000); return s < 60 ? '刚刚' : s < 3600 ? `${Math.round(s / 60)} 分钟前` : s < 86400 ? `${Math.round(s / 3600)} 小时前` : `${Math.round(s / 86400)} 天前`; };
+
+async function api(path, init = {}) {
+  const res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', 'x-maka-key': KEY, ...(init.headers || {}) } });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { askKey(); throw new Error('需要访问口令'); }
+  if (!res.ok) throw new Error(data.error || `出错了（${res.status}）`);
+  return data;
+}
+
+function askKey() {
+  document.getElementById('view').innerHTML = `<div class="keybox card"><h2>输入访问口令</h2><p class="label">启动服务时终端里打印的链接里，k= 后面那一串。</p><div class="row"><input class="repo" id="k" placeholder="访问口令"><button class="go" id="kgo">进入</button></div></div>`;
+  document.getElementById('kgo').onclick = () => { KEY = document.getElementById('k').value.trim(); try { localStorage.setItem('maka-key', KEY); } catch {} boot(); };
+}
+
+function renderList() {
+  const list = [...tasks.values()].sort((a, b) => b.createdAt - a.createdAt);
+  document.getElementById('list').innerHTML = list.map((t) => `
+    <button class="item ${current === t.id ? 'on' : ''}" data-id="${t.id}">
+      <div class="t">${esc(t.goal)}</div>
+      <div class="s"><span class="dot ${dotClass(t)}"></span>${esc(STATE[t.state] || t.state)} · ${esc(t.repo)} · ${ago(t.createdAt)}</div>
+    </button>`).join('') || `<div class="label" style="padding:10px">还没有任务</div>`;
+  for (const el of document.querySelectorAll('.item')) el.onclick = () => { open(el.dataset.id); document.getElementById('side').classList.remove('open'); };
+}
+
+function renderHome() {
+  current = null; renderList();
+  let repo = ''; try { repo = localStorage.getItem('maka-repo') || ''; } catch {}
+  document.getElementById('view').innerHTML = `
+    <div class="hero">
+      <h1>今天想交给我做什么？</h1>
+      <p>说清楚想要的结果就行。我会先读代码、列一张工作单，然后在云端做完、自己复核、请独立审查，最后给你一个能直接合并的 PR。电脑可以合上。</p>
+      <div class="composer">
+        <textarea id="goal" placeholder="比如：给登录页加上“记住我”，七天内免登录"></textarea>
+        <div class="row"><input class="repo" id="repo" placeholder="仓库，比如 owner/name" value="${esc(repo)}"><button class="go" id="go">交给 Maka</button></div>
+        <div class="err" id="err"></div>
+        <div id="notes"></div>
+      </div>
+    </div>`;
+  const go = document.getElementById('go');
+  go.onclick = async () => {
+    const goal = document.getElementById('goal').value.trim(); const repo = document.getElementById('repo').value.trim();
+    if (!goal || !repo) { document.getElementById('err').textContent = '请填上仓库和需求'; return; }
+    go.disabled = true;
+    try { localStorage.setItem('maka-repo', repo); } catch {}
+    try { const t = await api('/api/tasks', { method: 'POST', body: JSON.stringify({ repo, goal }) }); tasks.set(t.id, t); open(t.id); }
+    catch (e) { document.getElementById('err').textContent = e.message; go.disabled = false; }
+  };
+  const repoInput = document.getElementById('repo');
+  let pause;
+  repoInput.oninput = () => { clearTimeout(pause); pause = setTimeout(() => showNotes(repoInput.value.trim()), 400); };
+  showNotes(repo);
+  document.getElementById('goal').focus();
+}
+
+// What Maka has learned about the repository so far: shown before it starts, and the owner can clear it.
+async function showNotes(repo) {
+  const box = document.getElementById('notes'); if (!box) return;
+  if (!repo) { box.innerHTML = ''; return; }
+  let data; try { data = await api(`/api/notes?repo=${encodeURIComponent(repo)}`); } catch { box.innerHTML = ''; return; }
+  if (document.getElementById('repo')?.value.trim() !== repo) return;
+  if (!data.notes.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<details class="notes"><summary>我记得这个仓库的 ${data.notes.length} 条经验，这次会先参考</summary>
+    <ul>${data.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>
+    <button class="ghost" id="forget">全部忘掉</button></details>`;
+  document.getElementById('forget').onclick = async () => {
+    try { await api(`/api/notes?repo=${encodeURIComponent(repo)}`, { method: 'DELETE' }); box.innerHTML = '<p class="label">已经忘掉了，下次从头了解这个仓库。</p>'; }
+    catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  };
+}
+
+function workOrderCard(t) {
+  const w = t.workOrder; if (!w) return '';
+  const list = (title, items) => items && items.length ? `<h3>${title}</h3><ul>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '';
+  const waiting = t.state === 'waiting';
+  const qs = (w.questions || []).map((q, i) => `
+    <div class="q"><div>${esc(q.question)}</div>${waiting ? `<input data-q="${i}" value="${esc(q.default)}">` : `<div class="label">→ ${esc((t.answers && t.answers[i]) || q.default)}</div>`}</div>`).join('');
+  return `<div class="card">
+    <div class="label">工作单</div>
+    <h2>${esc(w.outcome)}</h2>
+    ${list('做完的标准', w.done_means)}${list('这次不做', w.out_of_scope)}${list('我的假设', w.assumptions)}
+    ${qs ? `<h3>${waiting ? '有几个问题，已经填好默认答案，改不改都行' : '你的回答'}</h3>${qs}` : ''}
+    ${waiting ? `<div class="row" style="margin-top:12px"><button class="go" id="approve">按这个开工</button></div>` : ''}
+  </div>`;
+}
+
+function resultCard(t) {
+  const r = t.result; if (!r) return '';
+  const icon = (ok) => ok ? '<b class="ok">✓</b>' : '<b class="warn">!</b>';
+  const list = (title, items) => items && items.length ? `<h3>${title}</h3><ul>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '';
+  return `<div class="card">
+    <div class="label">结果</div>
+    <h2>${esc(r.title)}</h2>
+    <p style="margin:6px 0 0">${esc(r.summary)}</p>
+    <h3>证据</h3>${r.evidence.map((e) => `<div class="ev">${icon(e.ok)}<span>${esc(e.text)}</span></div>`).join('')}
+    ${list('改了什么', r.changes)}
+    ${list('审查发现的问题（已修改）', r.review.items)}
+    ${r.flags.length ? list('需要你看一眼', r.flags.map((f) => `${f.file}：${f.why}`)) : ''}
+    ${list('备注', r.notes)}
+    ${list('这次记下的仓库经验（下次在这个仓库直接用上）', r.learned)}
+    ${r.prUrl ? `<a class="pr" href="${esc(r.prUrl)}" target="_blank" rel="noopener">查看 PR</a>` : `<p class="warn">${esc(r.prError || '')}</p>`}
+  </div>`;
+}
+
+function renderTask() {
+  const t = tasks.get(current); if (!t) return renderHome();
+  renderList();
+  const active = ACTIVE.has(t.state);
+  const log = t.log.map((e) => e.kind === 'agent'
+    ? `<div class="e"><small>${esc(e.role || '')}</small><div class="agent">${esc(e.text)}</div></div>`
+    : `<div class="e ${e.kind === 'error' ? 'err' : ''}"><small>${new Date(e.at).toLocaleTimeString()}</small>${esc(e.text)}</div>`).join('');
+  const keepOpen = document.getElementById('trace')?.open;
+  document.getElementById('view').innerHTML = `
+    <div class="bubble">${esc(t.goal)}</div>
+    <div class="meta">${esc(t.repo)} · ${ago(t.createdAt)}</div>
+    ${active || t.state === 'waiting' ? `<div class="now"><span class="dot ${dotClass(t)}"></span><span class="${active ? 'shimmer' : ''}">${esc(t.now)}</span><span style="flex:1"></span><button class="ghost" id="stop">停止</button></div>` : ''}
+    ${workOrderCard(t)}
+    ${resultCard(t)}
+    ${t.state === 'failed' ? `<div class="card"><div class="label">没做完</div><p class="err" style="margin:0">${esc(t.error)}</p>${t.learned && t.learned.length ? `<h3>复盘记下的仓库经验（下次直接用上）</h3><ul>${t.learned.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}</div>` : ''}
+    ${t.state === 'stopped' ? `<div class="card"><div class="label">已停止</div><p style="margin:0">改动留在云端电脑里，14 天内都能找回。</p></div>` : ''}
+    <details id="trace" ${keepOpen ? 'open' : ''}><summary>完整过程（${t.log.length}）</summary><div class="log">${log}</div></details>
+    ${active ? `<div class="steer"><div class="row"><input id="steerText" placeholder="想补充什么要求？它会边做边考虑"><button class="go" id="steerGo">发送</button></div></div>` : ''}`;
+  const approve = document.getElementById('approve');
+  if (approve) approve.onclick = async () => {
+    approve.disabled = true;
+    const answers = [...document.querySelectorAll('[data-q]')].map((el) => el.value);
+    try { await api(`/api/tasks/${t.id}/answers`, { method: 'POST', body: JSON.stringify({ answers }) }); } catch (e) { alertLine(e.message); approve.disabled = false; }
+  };
+  const stopBtn = document.getElementById('stop');
+  if (stopBtn) stopBtn.onclick = async () => { stopBtn.disabled = true; try { await api(`/api/tasks/${t.id}/stop`, { method: 'POST', body: '{}' }); } catch (e) { alertLine(e.message); } };
+  const steerGo = document.getElementById('steerGo');
+  if (steerGo) steerGo.onclick = async () => {
+    const input = document.getElementById('steerText'); const text = input.value.trim(); if (!text) return;
+    steerGo.disabled = true;
+    try { await api(`/api/tasks/${t.id}/steer`, { method: 'POST', body: JSON.stringify({ text }) }); input.value = ''; } catch (e) { alertLine(e.message); }
+    steerGo.disabled = false;
+  };
+}
+
+function alertLine(text) { const el = document.createElement('div'); el.className = 'err'; el.textContent = text; document.getElementById('view').prepend(el); }
+
+function open(id) { current = id; renderTask(); window.scrollTo(0, 0); }
+
+function connect() {
+  const es = new EventSource(`/api/stream?k=${encodeURIComponent(KEY)}`);
+  es.onmessage = (m) => {
+    const t = JSON.parse(m.data); tasks.set(t.id, t);
+    if (current === t.id) {
+      const typing = document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName);
+      const nowLine = document.querySelector('.now .shimmer');
+      // While the owner types, only the status line moves, so the input keeps its text.
+      if (typing && (t.state === 'waiting' || (ACTIVE.has(t.state) && nowLine))) {
+        if (nowLine) nowLine.textContent = t.now;
+        renderList();
+      } else renderTask();
+    } else renderList();
+  };
+  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+}
+
+async function boot() {
+  if (!KEY) return askKey();
+  try { for (const t of await api('/api/tasks')) tasks.set(t.id, t); } catch { return; }
+  renderHome(); connect();
+}
+
+for (const id of ['newBtn', 'newBtn2']) document.getElementById(id).onclick = () => { document.getElementById('side').classList.remove('open'); renderHome(); };
+document.getElementById('menuBtn').onclick = () => { renderList(); document.getElementById('side').classList.add('open'); };
+boot();
+</script>
+</body>
+</html>
