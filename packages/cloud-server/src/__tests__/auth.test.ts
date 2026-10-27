@@ -843,3 +843,107 @@ test('the sign-in mail is in Traditional Chinese for a Traditional Chinese reque
     assert.equal(r.mail.at(-1)?.subject, '你的登入驗證碼', header);
   }
 });
+
+/** The session token a `Set-Cookie` header gives the web app. */
+function sessionCookie(res: Response): string | undefined {
+  return /^__Host-maka-session=([^;]*);/u.exec(res.headers.get('set-cookie') ?? '')?.[1];
+}
+const COOKIE = { 'x-maka-cookie': '1' };
+
+test('the web app gets its session as a cookie no script can read, and the token stays out of the body', async (t) => {
+  const r = await rig(t);
+  await signUp(r, 'g-ada');
+  const n = await r.nonce();
+  const res = await r.call(
+    'POST',
+    '/v1/auth/session',
+    { provider: 'google', idToken: r.idToken('google', 'g-ada', n), nonce: n, device: 'Chrome' },
+    null,
+    COOKIE,
+  );
+  assert.equal(res.status, 200);
+  const header = res.headers.get('set-cookie') ?? '';
+  for (const part of ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'])
+    assert.ok(header.includes(part), part);
+  assert.doesNotMatch(header, /Domain=/iu);
+  const body = (await res.json()) as Record<string, unknown>;
+  assert.equal(body['status'], 'signed_in');
+  assert.equal(typeof body['sessionId'], 'string');
+  assert.equal('token' in body, false);
+  const session = sessionCookie(res);
+  assert.match(session ?? '', /^mks_/u);
+  // a phone (no cookie header) still gets its token in the body and no cookie
+  const phone = await r.google('g-ada', 'phone');
+  assert.equal(phone.headers.get('set-cookie'), null);
+  assert.match(((await phone.json()) as SignedIn).token, /^mks_/u);
+});
+
+test('the cookie signs in only with the web app’s header, only as a device session, and never beside a bearer', async (t) => {
+  const r = await rig(t);
+  await signUp(r, 'g-ada');
+  const n = await r.nonce();
+  const res = await r.call(
+    'POST',
+    '/v1/auth/session',
+    { provider: 'google', idToken: r.idToken('google', 'g-ada', n), nonce: n },
+    null,
+    COOKIE,
+  );
+  const cookie = `__Host-maka-session=${sessionCookie(res)}`;
+  const get = (headers: Record<string, string>, bearer: string | null = null) =>
+    r.call('GET', '/v1/conversations', undefined, bearer, headers);
+  assert.equal((await get({ cookie, ...COOKIE })).status, 200);
+  // a cross-site request cannot add the header, so the cookie alone signs in nothing
+  assert.equal((await get({ cookie })).status, 401);
+  assert.equal((await get({ cookie, 'x-maka-cookie': 'true' })).status, 401);
+  // an invite token is never taken from a cookie
+  assert.equal((await get({ cookie: `__Host-maka-session=${r.h.token}`, ...COOKIE })).status, 401);
+  // a bearer token is what counts when both are sent
+  assert.equal((await get({ cookie, ...COOKIE }, 'mks_made.up')).status, 401);
+  // writes work with the cookie too
+  const created = await r.call('POST', '/v1/conversations', {}, null, { cookie, ...COOKIE });
+  assert.equal(created.status, 201);
+});
+
+test('signing out with the cookie ends the session and clears the cookie; a dead cookie is cleared too', async (t) => {
+  const r = await rig(t);
+  await signUp(r, 'g-ada');
+  const n = await r.nonce();
+  const res = await r.call(
+    'POST',
+    '/v1/auth/session',
+    { provider: 'google', idToken: r.idToken('google', 'g-ada', n), nonce: n },
+    null,
+    COOKIE,
+  );
+  const headers = { cookie: `__Host-maka-session=${sessionCookie(res)}`, ...COOKIE };
+  const out = await r.call('POST', '/v1/auth/sign-out', {}, null, headers);
+  assert.equal(out.status, 204);
+  assert.equal(sessionCookie(out), '');
+  assert.match(out.headers.get('set-cookie') ?? '', /Max-Age=0/u);
+  const after = await r.call('GET', '/v1/conversations', undefined, null, headers);
+  assert.equal(after.status, 401);
+  assert.equal(sessionCookie(after), '', 'the browser is told to drop it');
+  // a bearer caller's 401 says nothing about cookies
+  const bearer = await r.call('GET', '/v1/conversations', undefined, 'mks_made.up');
+  assert.equal(bearer.headers.get('set-cookie'), null);
+});
+
+test('a new person signing up on the web gets the cookie from the invite claim', async (t) => {
+  const r = await rig(t);
+  const first = (await (await r.google('g-new')).json()) as NeedsInvite;
+  const claimed = await r.call(
+    'POST',
+    '/v1/auth/claim',
+    { pendingToken: first.pendingToken, inviteToken: r.h.token, device: 'Safari' },
+    null,
+    COOKIE,
+  );
+  assert.equal(claimed.status, 200);
+  assert.equal('token' in ((await claimed.json()) as object), false);
+  const cookie = `__Host-maka-session=${sessionCookie(claimed)}`;
+  assert.equal(
+    (await r.call('GET', '/v1/conversations', undefined, null, { cookie, ...COOKIE })).status,
+    200,
+  );
+});

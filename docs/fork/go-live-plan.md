@@ -37,7 +37,9 @@ Done when no PR that belongs to the launch is open, and `main`'s own push run is
 2. The client sign-in PR (AuthFlow, the phone sign-in screen, Settings devices, the Maestro email flow).
    It is done locally and held behind #375.
 3. **New: web sign-in screens.** Email code, then Apple and Google, plus a devices list in Settings.
-   The session is kept by the browser (#367), so a reload no longer asks for the token.
+   Email code is in (#417); Apple's and Google's sheets are not on the web yet. #367 only added
+   sessions on the server: the web keeps its session in an HttpOnly `__Host-` cookie
+   (`cloud-server/src/session-cookie.ts`), so a reload and a push tap stay signed in.
 4. O: Apple Services ID and key, Google OAuth client id, and a mail service (any SMTP or API).
    They go into the settings file, never into the repository.
 

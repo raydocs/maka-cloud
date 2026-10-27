@@ -9,6 +9,7 @@ import { type Language, languageFromAcceptLanguage } from './i18n.js';
 import type { IdentityVerifier } from './identity.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import { RateLimiter } from './rate-limit.js';
+import { clearSessionCookie, setSessionCookie, wantsCookie } from './session-cookie.js';
 
 /** How often sign-in routes may be called, per minute. Tests lower or raise them. */
 export interface AuthLimits {
@@ -91,6 +92,11 @@ interface Pending {
   tries: number;
 }
 
+/** What a sign-in answers: a session for this device, or a pending sign-in that needs an invite. */
+type SignInOutcome =
+  | { status: 'signed_in'; token: string; sessionId: string }
+  | { status: 'needs_invite'; pendingToken: string; expiresAt: number };
+
 /**
  * Signing in with Apple, Google or an emailed code, and the account's own devices.
  *
@@ -137,6 +143,17 @@ export class AuthRoutes {
     const method = req.method ?? 'GET';
     const secure = { 'cache-control': 'no-store' };
     const answer = (status: number, body: unknown) => respond(res, status, body, secure);
+    // The web app asks for the session as a cookie: it gets the cookie, and the token stays out of
+    // the body, so no script on the page ever holds it.
+    const signedIn = (outcome: SignInOutcome) =>
+      outcome.status === 'signed_in' && wantsCookie(req)
+        ? respond(
+            res,
+            200,
+            { status: outcome.status, sessionId: outcome.sessionId },
+            { ...secure, 'set-cookie': setSessionCookie(outcome.token) },
+          )
+        : answer(200, outcome);
     const address = this.clientOf(req);
     // The mail route is held to the tight bucket too: every call can send mail through the owner's key.
     const guess = path !== '/v1/auth/options' && path !== '/v1/auth/nonce';
@@ -160,7 +177,7 @@ export class AuthRoutes {
       const body = providerBody.safeParse(await readJson(req, false));
       if (!body.success) throw new HttpError(400, 'invalid_request');
       const identity = await this.verifyProvider(body.data);
-      return answer(200, this.signIn(identity, body.data.device));
+      return signedIn(this.signIn(identity, body.data.device));
     }
     if (path === '/v1/auth/email') {
       allow(method, 'POST');
@@ -189,14 +206,13 @@ export class AuthRoutes {
       const body = emailVerify.safeParse(await readJson(req, false));
       if (!body.success) throw new HttpError(400, 'invalid_request');
       const identity = this.verifyEmail(emailCodes, body.data);
-      return answer(200, this.signIn(identity, body.data.device));
+      return signedIn(this.signIn(identity, body.data.device));
     }
     if (path === '/v1/auth/claim') {
       allow(method, 'POST');
       const body = claimBody.safeParse(await readJson(req, false));
       if (!body.success) throw new HttpError(400, 'invalid_request');
-      return answer(
-        200,
+      return signedIn(
         this.claim(body.data, languageFromAcceptLanguage(req.headers['accept-language'])),
       );
     }
@@ -266,7 +282,7 @@ export class AuthRoutes {
         this.deps.removePush?.(invite.inviteId, body.data.pushEndpoint);
       }
       accounts.revokeSession(accountId, invite.sessionId);
-      respond(res, 204, undefined, secure);
+      respond(res, 204, undefined, { ...secure, 'set-cookie': clearSessionCookie() });
       return true;
     }
     if (path === '/v1/auth/link') {
@@ -358,7 +374,7 @@ export class AuthRoutes {
   }
 
   /** A session when the identity has an account, else a pending token that asks for an invite. */
-  private signIn(identity: Identity, deviceLabel: string | undefined) {
+  private signIn(identity: Identity, deviceLabel: string | undefined): SignInOutcome {
     const { accounts } = this.deps;
     const accountId = accounts.accountOfIdentity(identity);
     if (accountId !== undefined) {
@@ -387,7 +403,7 @@ export class AuthRoutes {
   private claim(
     body: { pendingToken: string; inviteToken: string; device?: string | undefined },
     language: Language,
-  ) {
+  ): SignInOutcome {
     const entry = this.pending.get(body.pendingToken);
     if (!entry || entry.expiresAt <= this.now()) {
       this.pending.delete(body.pendingToken);

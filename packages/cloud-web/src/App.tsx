@@ -39,11 +39,13 @@ import {
   type TaskView,
   TERMINAL,
   totalCost,
+  openCookieWorkspace,
   openWorkspace,
   questionCardModel,
   sendFailureText,
   visibleInbox,
   Unsupported,
+  type Workspace,
 } from '@maka-cloud/client';
 import { DevicesPanel } from './Devices';
 import { GrantsPanel } from './Grants';
@@ -1078,29 +1080,44 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   const [taskPage, setTaskPage] = useState<{ task: TaskView; from: View } | undefined>();
   const [error, setError] = useState<ErrorText>('');
   const [busy, setBusy] = useState(false);
-  /** Opens the workspace for a token, or throws and leaves nothing open. */
-  const open = async (token: string) => {
-    const device = token.startsWith('mks_');
-    const workspace = await openWorkspace(token, {
-      onRevoked: () => {
-        // The invite or sign-in is gone: leave the workspace and keep nothing of it.
-        draftGeneration++;
-        conversationDrafts.clear();
-        clearSteerReceipts();
-        setSession(null);
-        setChosen('');
-        setView('home');
-        setError(
-          device
-            ? 'Your sign-in is no longer valid. Please sign in again.'
-            : 'Your invite is no longer valid. Please reconnect.',
-        );
-      },
-    });
+  /** Until the session cookie has been tried, the page says it is connecting, not "sign in". */
+  const [restoring, setRestoring] = useState(!initialToken);
+  const revoked = (device: boolean) => () => {
+    // The invite or sign-in is gone: leave the workspace and keep nothing of it.
+    draftGeneration++;
+    conversationDrafts.clear();
+    clearSteerReceipts();
+    setSession(null);
+    setChosen('');
+    setView('home');
+    setError(
+      device
+        ? 'Your sign-in is no longer valid. Please sign in again.'
+        : 'Your invite is no longer valid. Please reconnect.',
+    );
+  };
+  const enter = (workspace: Workspace, device: boolean) => {
     setError('');
     setSession({ client: workspace.client, conversations: workspace.conversations, device });
     setChosen(workspace.chosen);
     setView(workspace.landing);
+  };
+  /**
+   * Opens the workspace for a token, or throws and leaves nothing open. '' is the session the
+   * server has just put in this browser's cookie (the sign-in screen), which the page never sees.
+   */
+  const open = async (token: string) => {
+    if (token === '') {
+      const workspace = await openCookieWorkspace({ onRevoked: revoked(true) });
+      if (!workspace)
+        throw new Error(
+          'This browser did not keep the sign-in. Allow cookies for this site, then try again.',
+        );
+      enter(workspace, true);
+      return;
+    }
+    const device = token.startsWith('mks_');
+    enter(await openWorkspace(token, { onRevoked: revoked(device) }), device);
   };
   /** The invite token box: a failure is shown under it. */
   const connect = async (token: string) => {
@@ -1117,6 +1134,23 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
   useEffect(() => {
     if (initialToken) void connect(initialToken);
   }, [initialToken]);
+  useEffect(() => {
+    if (initialToken) return;
+    // A reload or a tap on a notification: the browser's session cookie, if it still signs in.
+    let current = true;
+    openCookieWorkspace({ onRevoked: revoked(true) })
+      .then((workspace) => {
+        if (current && workspace) enter(workspace, true);
+      })
+      // No answer, or an older server: the sign-in screen says what is wrong when it is used.
+      .catch(() => {})
+      .finally(() => {
+        if (current) setRestoring(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
   useEffect(() => {
     const message = (event: MessageEvent) => {
       if (event.origin !== window.location.origin || event.data?.type !== 'maka.open') return;
@@ -1453,7 +1487,11 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
         {t('one conversation away.')}
       </h1>
       <p>{t('A place to plan, follow the work, and bring it home.')}</p>
-      <SignIn open={open} openInvite={connect} busy={busy} notice={error ? shared(error) : ''} />
+      {restoring ? (
+        <p className="muted">{t('Connecting…')}</p>
+      ) : (
+        <SignIn open={open} openInvite={connect} busy={busy} notice={error ? shared(error) : ''} />
+      )}
     </main>
   );
 }

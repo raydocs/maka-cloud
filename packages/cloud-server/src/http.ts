@@ -40,6 +40,7 @@ import { pushAccountTag, type PushApi } from './push.js';
 import type { QuotaSource } from './quota.js';
 import { toPublicView } from './public-view.js';
 import { scrubSecretFields } from './secret-shapes.js';
+import { clearSessionCookie, cookieToken } from './session-cookie.js';
 import { RateLimiter } from './rate-limit.js';
 import type { SqliteTaskStore } from './sqlite-task-store.js';
 
@@ -438,9 +439,16 @@ export class PublicApi {
   }
 
   private authenticate(req: IncomingMessage): InviteInfo {
-    const token = bearerToken(req);
+    const token = requestToken(req);
     const invite = token === undefined ? undefined : this.resolveToken(token);
-    if (!invite) throw new HttpError(401, 'unauthorized', { 'www-authenticate': 'Bearer' });
+    if (!invite) {
+      // A cookie that no longer signs in is dropped, so the browser stops sending it.
+      const stale = cookieToken(req) !== undefined && bearerToken(req) === undefined;
+      throw new HttpError(401, 'unauthorized', {
+        'www-authenticate': 'Bearer',
+        ...(stale ? { 'set-cookie': clearSessionCookie() } : {}),
+      });
+    }
     return invite;
   }
 
@@ -1002,7 +1010,7 @@ export class PublicApi {
     ) {
       throw new HttpError(409, 'computer_in_control');
     }
-    const token = bearerToken(req);
+    const token = requestToken(req);
     const access: OperatorAccess = {
       sessionId,
       authorize: () => {
@@ -1092,7 +1100,7 @@ export class PublicApi {
   private operatorOf(req: IncomingMessage, invite: InviteInfo, taskId: string): OperatorAccess {
     const { conversations } = this.deps;
     const sessionId = this.ownTaskSession(invite, taskId);
-    const token = bearerToken(req);
+    const token = requestToken(req);
     return {
       sessionId,
       authorize: () => {
@@ -1527,6 +1535,11 @@ export function take(limiter: RateLimiter, invite: InviteInfo): void {
 
 function bearerToken(req: IncomingMessage): string | undefined {
   return /^Bearer\s+(\S+)$/iu.exec(req.headers.authorization ?? '')?.[1];
+}
+
+/** The caller's token: a bearer token, else the web app's session cookie (`session-cookie.ts`). */
+function requestToken(req: IncomingMessage): string | undefined {
+  return bearerToken(req) ?? cookieToken(req);
 }
 
 function controlError(error: OrchestratorError, unsupported = 'pause_unsupported'): HttpError {
