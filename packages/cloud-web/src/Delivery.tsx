@@ -355,6 +355,11 @@ export function DeliveryCard({
       {/* The caption names a single picture: the changes tile already says what it is, and with
           views each frame is labelled while the caption names the group instead. */}
       {shot && caption && <p className="delivery-caption muted">{caption}</p>}
+      {model.noPicture && (
+        <p className="delivery-nopicture muted">
+          {t('No screenshots: {p0}', { p0: model.noPicture })}
+        </p>
+      )}
       {failed && <p className="muted">{t('The picture could not be loaded.')}</p>}
       {actions.length > 0 && (
         <div className="delivery-actions">

@@ -201,3 +201,20 @@ test('one viewport, or names that only contain the words, is an ordinary picture
   expect(words?.views).toBeUndefined();
   expect(words?.shot?.name).toBe('telephone.png');
 });
+
+test("a result without a picture says why, in the runner's words, and one with a picture does not", () => {
+  const manifest = {
+    summary: 'Verified change to acme/calc: add() adds.',
+    done: ['verified: …', 'no screenshots: no page was named to look at'],
+    notDone: [],
+    confidence: 'high' as const,
+    knownIssues: [],
+  };
+  const none = deliveryModel(task({ manifest }), [file(0, 'change.patch')], []);
+  expect(none?.noPicture).toBe('no page was named to look at');
+  expect(none?.diff?.name).toBe('change.patch');
+  // The runner's screenshots win over a stale line, and a task that never says so claims nothing.
+  const shot = deliveryModel(task({ manifest }), [file(0, 'viewport-desktop.png', true)], []);
+  expect(shot?.noPicture).toBeUndefined();
+  expect(deliveryModel(task(), [file(0, 'change.patch')], [])?.noPicture).toBeUndefined();
+});

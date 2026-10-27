@@ -73,6 +73,26 @@ import {
   REVIEW_FILE,
   type Vendor,
 } from './task.js';
+import {
+  AGENT_FILE_CHUNK_SCRIPT,
+  AGENT_FILE_SIZE_SCRIPT,
+  captureCommand,
+  isPng,
+  MAX_SHOT_BYTES,
+  parseCaptureReport,
+  PREVIEW_FILE,
+  type Preview,
+  PreviewSchema,
+  type Shot,
+  shotName,
+  VIEWPORT_DIR,
+  VIEWPORT_TIMEOUT_SECONDS,
+  VIEWPORTS,
+  type ViewportPage,
+  type ViewportPass,
+  type ViewportRecord,
+  viewportIssues,
+} from './viewport.js';
 
 /** A vendor runner the coding runner drives: T6's `SandboxCliRunner` fits. */
 export interface AgentRunner {
@@ -339,6 +359,8 @@ interface Verification {
   review?: ReviewSummary;
   attempts: AttemptRecord[];
   changedFiles?: { path: string; status: string }[];
+  /** What the runner saw of the page the change affects, at desktop and phone width. */
+  viewport?: ViewportRecord;
 }
 
 type CheckOutcome = { ok: true; repro: Repro } | ({ ok: false } & CheckProblem);
@@ -621,7 +643,17 @@ class CodingRun implements RunHandle {
           // not delivered: it is kept for the owner to look at, with the reason. The task is not
           // failed, because its work is not lost: the change, its branch and its review are kept.
           const kept = keptReason(reviewed.review);
-          await this.deliver(task, verification, reviewed.outcome, reviewed.review, kept);
+          // The pictures are of the change that is delivered, after any fix; they hold nothing back.
+          const shots = await this.viewportCheck(baseSha, reviewed.outcome.repro, verification);
+          await this.deliver(
+            task,
+            verification,
+            reviewed.outcome,
+            reviewed.review,
+            kept,
+            true,
+            shots,
+          );
           return this.setTerminal({ type: 'finished' });
         }
         attempt.end = outcome.reason;
@@ -1578,10 +1610,20 @@ class CodingRun implements RunHandle {
    * result. When the exec returns normally the namespace is gone, and with it everything the check
    * started; the stop that follows also ends a check whose exec did not return normally.
    */
-  private async runCheck(name: string, command: string): Promise<CheckResult> {
+  private async runCheck(
+    name: string,
+    command: string,
+    limitSeconds?: number,
+  ): Promise<CheckResult> {
     const { stats } = this.runner;
     const tag = `${checkTagPrefix(this.spec.taskId)}${checkAttemptMark(this.spec.epoch)}${++this.checkCount}-${randomBytes(8).toString('hex')}`;
-    const timeoutSeconds = Math.max(1, Math.ceil(this.limits.checkTimeoutMs / 1000));
+    const timeoutSeconds = Math.max(
+      1,
+      Math.min(
+        limitSeconds ?? Number.POSITIVE_INFINITY,
+        Math.ceil(this.limits.checkTimeoutMs / 1000),
+      ),
+    );
     stats.checks++;
     try {
       const startedAt = Date.now();
@@ -1795,6 +1837,7 @@ class CodingRun implements RunHandle {
     review: ReviewRecord,
     kept?: string,
     cancellable = true,
+    shots: readonly Shot[] = [],
   ): Promise<void> {
     const guard = <T>(promise: Promise<T>): Promise<T> =>
       cancellable ? this.guard(promise) : promise;
@@ -1850,6 +1893,9 @@ class CodingRun implements RunHandle {
     await guard(writeHostFile(join(this.hostDir, 'change.patch'), outcome.collected.patch));
     await guard(writeHostFile(join(this.hostDir, 'review.md'), reviewText));
     await guard(writeHostFile(join(this.hostDir, 'verification.json'), verificationText));
+    // The screenshots go under the names the runner chose, before the manifest that lists them.
+    for (const shot of shots) await guard(writeHostFile(join(this.hostDir, shot.name), shot.bytes));
+    const viewport = viewportLines(verification.viewport);
     const agent = outcome.manifest;
     const files = outcome.collected.changeSet.files;
     const vendors = verification.attempts.map((attempt) => attempt.vendor);
@@ -1862,6 +1908,7 @@ class CodingRun implements RunHandle {
         verifiedLine(task, outcome.repro, verification.baseSha),
         reviewLine(review),
         ...(kept === undefined ? [] : [`kept: ${plain(kept, 300)}`]),
+        ...(viewport.done ? [viewport.done] : []),
         `${files.length} file(s) changed: ${clipText(files.map((file) => file.path).join(', '), 500)}`,
         ...(vendors.length > 1
           ? [
@@ -1872,11 +1919,201 @@ class CodingRun implements RunHandle {
       ],
       notDone: agent.notDone,
       confidence: kept === undefined ? agent.confidence : 'low',
-      knownIssues:
-        kept === undefined ? agent.knownIssues : [plain(kept, 300), ...agent.knownIssues],
-      artifacts: ['change.patch', 'changes.json', 'verification.json', 'review.md'],
+      knownIssues: [
+        ...(kept === undefined ? [] : [plain(kept, 300)]),
+        ...viewport.issues,
+        ...agent.knownIssues,
+      ],
+      // The pictures first: a result card shows the first one, and the change after it as the first
+      // picture of each size (the base commit's come last).
+      artifacts: [
+        ...shots.map((shot) => shot.name),
+        'change.patch',
+        'changes.json',
+        'verification.json',
+        'review.md',
+      ],
     };
     await guard(writeHostFile(this.spec.resultPath, JSON.stringify(manifest)));
+  }
+
+  // -- the viewport check --------------------------------------------------------------------------
+
+  /**
+   * Looks at the page the change affects, as the runner and not the agent: with the change, then on
+   * the base commit (the reproduction test's files kept, as in the base check). It never fails the
+   * task or holds back the change; what could not be looked at is recorded with the reason, and a
+   * task whose agent named no page says it has no pictures.
+   */
+  private async viewportCheck(
+    baseSha: string,
+    repro: Repro,
+    verification: Verification,
+  ): Promise<Shot[]> {
+    const preview = await this.readPreview();
+    if (preview === undefined) {
+      verification.viewport = {
+        result: 'not_declared',
+        reason: 'the agent named no page to look at (no preview.json)',
+      };
+      return [];
+    }
+    if ('problem' in preview) {
+      verification.viewport = { result: 'not_run', reason: preview.problem };
+      return [];
+    }
+    const record: ViewportRecord = {
+      result: 'not_run',
+      command: scrubSecretText(preview.command),
+      port: preview.port,
+    };
+    verification.viewport = record;
+    this.progress('looking at the page at desktop and phone width');
+    this.narrate('Looking at the page on a desktop and a phone screen');
+    let taken: Shot[] = [];
+    try {
+      const after = await this.capture(preview, 'after');
+      record.result = after.pass.result;
+      if (after.pass.reason !== undefined) record.reason = after.pass.reason;
+      if (after.pass.pages) record.pages = after.pass.pages;
+      if (after.pass.result !== 'captured') return [];
+      taken = after.shots;
+      this.narrate('Looking at the same page without the change');
+      const before = await this.onBase(baseSha, repro, () => this.capture(preview, 'before'));
+      if ('problem' in before) {
+        record.before = { result: 'not_run', reason: before.problem };
+        return after.shots;
+      }
+      record.before = before.pass;
+      return [...after.shots, ...before.shots];
+    } catch (error) {
+      if (this.signal.aborted || error instanceof CancelledError) throw error;
+      record.result = record.pages ? 'captured' : 'not_run';
+      const reason = clipText(scrubSecretText(errorMessage(error)), 300);
+      if (record.pages) record.before = { result: 'not_run', reason };
+      else record.reason = reason;
+      return taken;
+    }
+  }
+
+  /** `preview.json`, when the agent wrote one; undefined when it did not. */
+  private async readPreview(): Promise<Preview | { problem: string } | undefined> {
+    const out = (
+      await this.exec(READ_SMALL_SCRIPT, {
+        MAKA_FILE: PREVIEW_FILE,
+        MAKA_MAX: String(MAX_REPRO_BYTES),
+      })
+    ).stdout.trim();
+    if (out === 'MISSING') return undefined;
+    if (!out.startsWith('OK ')) return { problem: `preview.json could not be read (${out})` };
+    let value: unknown;
+    try {
+      value = JSON.parse(Buffer.from(out.slice(3), 'base64').toString('utf8'));
+    } catch {
+      return { problem: 'preview.json is not valid JSON' };
+    }
+    const parsed = PreviewSchema.safeParse(value);
+    if (!parsed.success) {
+      return {
+        problem: `preview.json must be {"command": "...", "port": 1024-65535, "paths": ["/..."]} (${parsed.error.issues
+          .map((issue) => `${issue.path.join('.') || 'file'}: ${issue.message}`)
+          .join('; ')})`,
+      };
+    }
+    return parsed.data;
+  }
+
+  /** One pass of the capture in a check of its own, and the screenshots it took, read back. */
+  private async capture(
+    preview: Preview,
+    label: 'after' | 'before',
+  ): Promise<{ pass: ViewportPass; shots: Shot[] }> {
+    const check = await this.runCheck(
+      `viewport-${label}`,
+      captureCommand(preview, label),
+      VIEWPORT_TIMEOUT_SECONDS,
+    );
+    if (check.timedOut) {
+      return {
+        pass: {
+          result: 'not_run',
+          reason: `the viewport check ran past ${VIEWPORT_TIMEOUT_SECONDS} s`,
+        },
+        shots: [],
+      };
+    }
+    const report = parseCaptureReport(check.output);
+    if (report === undefined) {
+      return {
+        pass: {
+          result: 'not_run',
+          reason: `the viewport check printed no report (${describeEnd(check)})`,
+        },
+        shots: [],
+      };
+    }
+    if (!report.ok) {
+      return { pass: { result: 'not_run', reason: scrubSecretText(report.reason) }, shots: [] };
+    }
+    const paths = preview.paths ?? ['/'];
+    const pages: ViewportPage[] = [];
+    const shots: Shot[] = [];
+    for (const seen of report.pages) {
+      const index = paths.indexOf(seen.path);
+      const viewport = VIEWPORTS.find((candidate) => candidate.name === seen.viewport);
+      if (index < 0 || viewport === undefined) continue;
+      const page: ViewportPage = {
+        path: scrubSecretText(seen.path),
+        viewport: viewport.name,
+        width: viewport.width,
+        ...(seen.status === undefined ? {} : { status: seen.status }),
+        ...(seen.error === undefined ? {} : { error: scrubSecretText(seen.error) }),
+        overflowPx: seen.overflowPx,
+        smallControls: seen.smallControls,
+        consoleErrors: seen.consoleErrors.map((text) => scrubSecretText(text)),
+      };
+      // Only the name the runner expects is read: the report's own file name is not followed.
+      const expected = shotName(index, viewport.name);
+      if (seen.file === expected) {
+        const bytes = await this.readAgentFile(`${VIEWPORT_DIR}/${label}/${expected}`);
+        if (bytes && isPng(bytes)) {
+          const name = label === 'after' ? expected : `before-${expected}`;
+          shots.push({ name, bytes });
+          page.file = name;
+          page.sha256 = createHash('sha256').update(bytes).digest('hex');
+        }
+      }
+      pages.push(page);
+    }
+    const taken = pages.some((page) => page.file !== undefined);
+    return {
+      pass: taken
+        ? { result: 'captured', pages }
+        : { result: 'not_run', reason: 'no screenshot could be taken', pages },
+      shots,
+    };
+  }
+
+  /** A file the capture wrote, read as the agent's account; undefined when it is not a small file. */
+  private async readAgentFile(name: string): Promise<Buffer | undefined> {
+    this.refuseEnv({ MAKA_FILE: name });
+    const size = (await this.execCheck(AGENT_FILE_SIZE_SCRIPT, { MAKA_FILE: name })).stdout.trim();
+    const bytes = /^SIZE (\d+)$/u.exec(size);
+    if (!bytes) return undefined;
+    const total = Number(bytes[1]);
+    if (total === 0 || total > MAX_SHOT_BYTES) return undefined;
+    const parts: Buffer[] = [];
+    for (let offset = 0; offset < total; offset += BLOB_CHUNK_BYTES) {
+      const out = await this.execCheck(AGENT_FILE_CHUNK_SCRIPT, {
+        MAKA_FILE: name,
+        MAKA_OFF: String(offset),
+        MAKA_LEN: String(Math.min(BLOB_CHUNK_BYTES, total - offset)),
+      });
+      if (out.exitCode !== 0) return undefined;
+      parts.push(Buffer.from(out.stdout.trim(), 'base64'));
+    }
+    const read = Buffer.concat(parts);
+    return read.length === total ? read : undefined;
   }
 
   /** Both vendors failed: an honest manifest of what was tried. */
@@ -1928,6 +2165,7 @@ class CodingRun implements RunHandle {
     await this.publishForAgent('failure_brief.json');
     await this.publishForAgent('attempt-1.patch');
     await this.removeAgentFile(REPRO_FILE);
+    await this.removeAgentFile(PREVIEW_FILE);
     const sha = await this.clone(task, baseSha);
     if (sha !== baseSha) throw new Error(`the base commit changed from ${baseSha} to ${sha}`);
   }
@@ -2149,6 +2387,30 @@ class CodingRun implements RunHandle {
 }
 
 /** What identifies a collected change: the hash of its change set. */
+/** The manifest's line about the viewport check, and the issues it found, in plain words. */
+function viewportLines(record: ViewportRecord | undefined): { done?: string; issues: string[] } {
+  if (!record) return { issues: [] };
+  if (record.result === 'not_declared')
+    return { done: 'no screenshots: no page was named to look at', issues: [] };
+  if (record.result === 'not_run') {
+    return {
+      done: `no screenshots: ${clipText(record.reason ?? 'the viewport check did not run', 300)}`,
+      issues: [],
+    };
+  }
+  const pages = record.pages ?? [];
+  const paths = [...new Set(pages.map((page) => page.path))].join(', ');
+  const before =
+    record.before?.result === 'captured'
+      ? ', with and without the change'
+      : `; not on the base commit (${clipText(record.before?.reason ?? 'not run', 200)})`;
+  const issues = viewportIssues(pages).map((issue) => `viewport: ${issue}`);
+  return {
+    done: `the runner looked at ${clipText(paths, 300)} at 1280 and 390 px wide${before}: ${issues.length === 0 ? 'no horizontal overflow, console error or control under 44 px' : `${issues.length} issue(s)`}`,
+    issues: issues.slice(0, 10),
+  };
+}
+
 function changeKey(collected: Collected): string {
   return createHash('sha256').update(JSON.stringify(collected.changeSet)).digest('hex');
 }
@@ -2166,7 +2428,7 @@ function verifiedLine(task: CodingTask, repro: Repro, baseSha: string): string {
  */
 const RECORDS_DIR = '.records';
 
-async function writeHostFile(path: string, content: string): Promise<void> {
+async function writeHostFile(path: string, content: string | Buffer): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
   try {
