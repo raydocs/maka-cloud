@@ -1,6 +1,36 @@
 // Product copy uses English keys; server and agent text never goes through this catalogue.
 // Shared wording and fixed choice pairs follow cloud-mobile on design/compact-panel (#416).
 export const en = {
+  'Did not finish: {title}': 'Did not finish: {title}',
+  "Open {name}'s computer": "Open {name}'s computer",
+  "{name}'s computer": "{name}'s computer",
+  'Hi, I am {name}.': 'Hi, I am {name}.',
+  'Tell me the result you want. I work on my own computer in the cloud: I write the code, run the tests, have it reviewed and hand you a pull request.':
+    'Tell me the result you want. I work on my own computer in the cloud: I write the code, run the tests, have it reviewed and hand you a pull request.',
+  'Close your laptop if you like. I keep going and tell you when it is done.':
+    'Close your laptop if you like. I keep going and tell you when it is done.',
+  'Thinking…': 'Thinking…',
+  'Sunrise to sunset': 'Sunrise to sunset',
+  'Last lines': 'Last lines',
+  'Fix the login loop on Safari': 'Fix the login loop on Safari',
+  'Reproduced it with a failing test. Fixing the redirect now.':
+    'Reproduced it with a failing test. Fixing the redirect now.',
+  'Done. 41 tests pass, and an independent review found nothing.':
+    'Done. 41 tests pass, and an independent review found nothing.',
+  'Pull request ready': 'Pull request ready',
+  'Pick the language Maka writes in.': 'Pick the language Maka writes in.',
+  Choose: 'Choose',
+  'Give Maka a GitHub repository to work in.': 'Give Maka a GitHub repository to work in.',
+  Connect: 'Connect',
+  'The owner turns on model access for your account.':
+    'The owner turns on model access for your account.',
+  Ask: 'Ask',
+  'Hear when work finishes or needs you, even with the tab closed.':
+    'Hear when work finishes or needs you, even with the tab closed.',
+  'Turn on': 'Turn on',
+  'Say what you want done. Maka plans it, does it and shows proof.':
+    'Say what you want done. Maka plans it, does it and shows proof.',
+  'Write it': 'Write it',
   "Couldn't find that task.": "Couldn't find that task.",
   Usage: 'Usage',
   'Choose your language': 'Choose your language',
@@ -8,6 +38,7 @@ export const en = {
   'Ask the owner for model access': 'Ask the owner for model access',
   'Send your first message': 'Send your first message',
   Later: 'Later',
+  'Finish setting up': 'Finish setting up',
   'Not sure the last input arrived; check the screen.':
     'Not sure the last input arrived; check the screen.',
   '{count} queued input was not sent.': '{count} queued input was not sent.',
@@ -284,6 +315,9 @@ export const en = {
   'What would you like to do next?': 'What would you like to do next?',
   'Sending…': 'Sending…',
   'Not sent': 'Not sent',
+  'Not confirmed': 'Not confirmed',
+  'It may have arrived. Sending again is safe: it runs only once.':
+    'It may have arrived. Sending again is safe: it runs only once.',
   'Send again': 'Send again',
   Sent: 'Sent',
   'Retry now': 'Retry now',
@@ -420,6 +454,7 @@ export const en = {
   Start: 'Start',
   'Since you were last here': 'Since you were last here',
   Done: 'Done',
+  'Did not finish': 'Did not finish',
   Spent: 'Spent',
   'Recent conversations': 'Recent conversations',
   'Pick up where you left off': 'Pick up where you left off',
@@ -653,6 +688,35 @@ export const en = {
 
 export type Key = keyof typeof en;
 export const zhHans: Record<Key, string> = {
+  'Did not finish: {title}': '没做完：{title}',
+  "Open {name}'s computer": '打开 {name} 的电脑',
+  "{name}'s computer": '{name} 的电脑',
+  'Hi, I am {name}.': '你好，我是 {name}。',
+  'Tell me the result you want. I work on my own computer in the cloud: I write the code, run the tests, have it reviewed and hand you a pull request.':
+    '告诉我你想要的结果。我在自己的云端电脑上写代码、跑测试、找人复查，最后交给你一个 PR。',
+  'Close your laptop if you like. I keep going and tell you when it is done.':
+    '电脑合上也没关系，我会一直做完，做好了告诉你。',
+  'Thinking…': '正在思考…',
+  'Sunrise to sunset': '随日出日落',
+  'Last lines': '最后几行输出',
+  'Fix the login loop on Safari': '修好 Safari 上的登录循环',
+  'Reproduced it with a failing test. Fixing the redirect now.':
+    '已用一个失败的测试复现了问题，正在修跳转。',
+  'Done. 41 tests pass, and an independent review found nothing.':
+    '做完了。41 个测试全部通过，独立复查没有发现问题。',
+  'Pull request ready': 'PR 已就绪',
+  'Pick the language Maka writes in.': '选择 Maka 用来写作的语言。',
+  Choose: '选择',
+  'Give Maka a GitHub repository to work in.': '给 Maka 一个 GitHub 仓库，它就能开工。',
+  Connect: '连接',
+  'The owner turns on model access for your account.': '需要管理员为你的账号开通模型。',
+  Ask: '去申请',
+  'Hear when work finishes or needs you, even with the tab closed.':
+    '工作做完或需要你时提醒你，关掉网页也能收到。',
+  'Turn on': '开启',
+  'Say what you want done. Maka plans it, does it and shows proof.':
+    '说出你想做成的事，Maka 会规划、动手，并拿出证据。',
+  'Write it': '去写',
   "Couldn't find that task.": '找不到该任务。',
   Usage: '用量',
   'Choose your language': '选择语言',
@@ -660,6 +724,7 @@ export const zhHans: Record<Key, string> = {
   'Ask the owner for model access': '请联系所有者配置模型 API 密钥',
   'Send your first message': '发送第一条消息',
   Later: '稍后',
+  'Finish setting up': '完成设置',
   'Not sure the last input arrived; check the screen.':
     '无法确定上一次输入是否已送达；请检查屏幕。',
   '{count} queued input was not sent.': '有 {count} 个排队的输入未发送。',
@@ -911,6 +976,9 @@ export const zhHans: Record<Key, string> = {
   'What would you like to do next?': '接下来想做什么？',
   'Sending…': '正在发送…',
   'Not sent': '未发送',
+  'Not confirmed': '未确认',
+  'It may have arrived. Sending again is safe: it runs only once.':
+    '可能已经送达。再发一次也没关系，只会执行一次。',
   'Send again': '重新发送',
   Sent: '已发送',
   'Retry now': '立即重试',
@@ -1040,6 +1108,7 @@ export const zhHans: Record<Key, string> = {
   Start: '开始',
   'Since you were last here': '你不在时',
   Done: '已完成',
+  'Did not finish': '没做完',
   Spent: '花费',
   'Recent conversations': '最近的对话',
   'Pick up where you left off': '接着上次继续',
@@ -1260,6 +1329,35 @@ export const zhHans: Record<Key, string> = {
 };
 
 export const zhHant: Record<Key, string> = {
+  'Did not finish: {title}': '沒做完：{title}',
+  "Open {name}'s computer": '打開 {name} 的電腦',
+  "{name}'s computer": '{name} 的電腦',
+  'Hi, I am {name}.': '你好，我是 {name}。',
+  'Tell me the result you want. I work on my own computer in the cloud: I write the code, run the tests, have it reviewed and hand you a pull request.':
+    '告訴我你想要的結果。我在自己的雲端電腦上寫程式、跑測試、找人複查，最後交給你一個 PR。',
+  'Close your laptop if you like. I keep going and tell you when it is done.':
+    '電腦闔上也沒關係，我會一直做完，做好了告訴你。',
+  'Thinking…': '正在思考…',
+  'Sunrise to sunset': '隨日出日落',
+  'Last lines': '最後幾行輸出',
+  'Fix the login loop on Safari': '修好 Safari 上的登入迴圈',
+  'Reproduced it with a failing test. Fixing the redirect now.':
+    '已用一個失敗的測試重現問題，正在修跳轉。',
+  'Done. 41 tests pass, and an independent review found nothing.':
+    '完成了。41 個測試全部通過，獨立複查沒有發現問題。',
+  'Pull request ready': 'PR 已就緒',
+  'Pick the language Maka writes in.': '選擇 Maka 用來寫作的語言。',
+  Choose: '選擇',
+  'Give Maka a GitHub repository to work in.': '給 Maka 一個 GitHub 儲存庫，它就能開工。',
+  Connect: '連結',
+  'The owner turns on model access for your account.': '需要管理員為你的帳號開通模型。',
+  Ask: '去申請',
+  'Hear when work finishes or needs you, even with the tab closed.':
+    '工作完成或需要你時提醒你，關掉網頁也收得到。',
+  'Turn on': '開啟',
+  'Say what you want done. Maka plans it, does it and shows proof.':
+    '說出你想完成的事，Maka 會規劃、動手，並拿出證據。',
+  'Write it': '去寫',
   "Couldn't find that task.": '找不到該任務。',
   Usage: '用量',
   'Choose your language': '選擇語言',
@@ -1267,6 +1365,7 @@ export const zhHant: Record<Key, string> = {
   'Ask the owner for model access': '請聯絡擁有者設定模型 API 金鑰',
   'Send your first message': '傳送第一則訊息',
   Later: '稍後',
+  'Finish setting up': '完成設定',
   'Not sure the last input arrived; check the screen.':
     '無法確定上一次輸入是否已送達；請檢查螢幕。',
   '{count} queued input was not sent.': '有 {count} 個排隊的輸入未傳送。',
@@ -1518,6 +1617,9 @@ export const zhHant: Record<Key, string> = {
   'What would you like to do next?': '接下來想做什麼？',
   'Sending…': '正在傳送…',
   'Not sent': '未傳送',
+  'Not confirmed': '未確認',
+  'It may have arrived. Sending again is safe: it runs only once.':
+    '可能已經送達。再傳一次也沒關係，只會執行一次。',
   'Send again': '重新傳送',
   Sent: '已傳送',
   'Retry now': '立即重試',
@@ -1647,6 +1749,7 @@ export const zhHant: Record<Key, string> = {
   Start: '開始',
   'Since you were last here': '你不在時',
   Done: '已完成',
+  'Did not finish': '沒做完',
   Spent: '花費',
   'Recent conversations': '最近的對話',
   'Pick up where you left off': '接著上次繼續',

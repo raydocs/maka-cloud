@@ -63,7 +63,7 @@ export function ConversationSearch({
     <>
       {hits.map((c) => (
         <button
-          className="quiet-action"
+          className="quiet-action search-hit"
           type="button"
           key={c.conversationId}
           onClick={() => onChoose(c.conversationId)}

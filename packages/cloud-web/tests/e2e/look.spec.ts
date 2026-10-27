@@ -56,10 +56,18 @@ test('Home, Chat and Settings fit the screen, composer and result cards are fros
       expect(surface.blur).toContain('blur');
       expect(surface.bg).toMatch(/^rgba\(.*,\s*0?\.\d+\)$/u);
     } else {
+      // The conversation is no slab: it sits on the sky, and its bubbles are the reading surface.
       expect(surface.blur).toBe('none');
-      expect(surface.bg).toMatch(/^rgb\(/u);
+      expect(surface.bg).toBe('rgba(0, 0, 0, 0)');
     }
   }
+  const bubble = await page
+    .locator('.message.assistant')
+    .first()
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  // Nearly opaque: at least 0.9 alpha, so the sky never muddies what it says.
+  const alpha = Number(/,\s*([\d.]+)\)$/u.exec(bubble)?.[1] ?? '1');
+  expect(alpha).toBeGreaterThanOrEqual(0.9);
   await page.getByRole('button', { name: 'Open large: the changes' }).click();
   const diff = page.locator('pre.diff-content');
   await expect(diff).toContainText('+added line');

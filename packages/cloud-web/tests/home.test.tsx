@@ -253,7 +253,11 @@ test('since you were last here: the results since the stored visit, three tiles,
   await within(region).findByText('Fix the login loop');
   expect(within(region).queryByText('Older job')).toBeNull();
   const tiles = region.querySelectorAll('.stat-tile');
-  expect([...tiles].map((t) => t.textContent)).toEqual(['Done2', 'Spent$0.50']);
+  expect([...tiles].map((t) => t.textContent)).toEqual([
+    'Done1',
+    'Did not finish1',
+    'Spent$0.50',
+  ]);
   expect(within(region).getByText('The login page no longer loops.')).toBeTruthy();
   expect(within(region).getByText('The build broke.')).toBeTruthy();
   fireEvent.click(within(region).getByRole('button', { name: /Upgrade deps/u }));

@@ -10,8 +10,11 @@ import {
 import { defineTheme, Theme } from '@astryxdesign/core/theme';
 
 export type Mode = 'light' | 'dark';
-/** The person's choice; "system" follows the device's light or dark setting. */
-export type ModeChoice = 'system' | Mode;
+/**
+ * The person's choice; "system" follows the device's light or dark setting, "sky" follows the sun:
+ * light from sunrise to sunset where the person is, dark after.
+ */
+export type ModeChoice = 'system' | 'sky' | Mode;
 
 const STORAGE_KEY = 'maka.theme';
 
@@ -38,7 +41,7 @@ const makaTheme = defineTheme({
 export function readChoice(): ModeChoice {
   try {
     const stored = globalThis.localStorage?.getItem(STORAGE_KEY);
-    return stored === 'dark' || stored === 'light' ? stored : 'system';
+    return stored === 'dark' || stored === 'light' || stored === 'sky' ? stored : 'system';
   } catch {
     return 'system';
   }
@@ -54,9 +57,31 @@ function systemMode(): Mode {
   }
 }
 
+/**
+ * Whether the sun is up, from the date and the clock alone (no location asked): the time zone puts
+ * solar noon near 12:00 standard time, and the season sets the day's length at a mid latitude.
+ * index.html repeats this rule before the first paint; keep the two the same.
+ */
+export function daylight(now: Date = new Date()): boolean {
+  const year = now.getFullYear();
+  const standard = Math.max(
+    new Date(year, 0, 1).getTimezoneOffset(),
+    new Date(year, 6, 1).getTimezoneOffset(),
+  );
+  const summerShift = (standard - now.getTimezoneOffset()) / 60;
+  const day = Math.floor((now.getTime() - new Date(year, 0, 0).getTime()) / 86_400_000);
+  const declination = ((23.44 * Math.PI) / 180) * Math.sin((2 * Math.PI * (284 + day)) / 365);
+  const latitude = (35 * Math.PI) / 180;
+  const halfDay = (Math.acos(-Math.tan(latitude) * Math.tan(declination)) * 180) / Math.PI / 15;
+  const noon = 12 + summerShift;
+  const hour = now.getHours() + now.getMinutes() / 60;
+  return hour >= noon - halfDay && hour < noon + halfDay;
+}
+
 /** The scheme to draw now: the stored choice, or the device's when there is none. */
 export function readMode(): Mode {
   const choice = readChoice();
+  if (choice === 'sky') return daylight() ? 'light' : 'dark';
   return choice === 'system' ? systemMode() : choice;
 }
 
@@ -100,11 +125,20 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     watched.addEventListener?.('change', follow);
     return () => watched.removeEventListener?.('change', follow);
   }, [choice]);
+  // Following the sky, the scheme turns at sunrise and sunset; a minute is close enough.
+  const [sun, setSun] = useState<Mode>(() => (daylight() ? 'light' : 'dark'));
+  useEffect(() => {
+    if (choice !== 'sky') return;
+    const look = () => setSun(daylight() ? 'light' : 'dark');
+    look();
+    const timer = setInterval(look, 60_000);
+    return () => clearInterval(timer);
+  }, [choice]);
   const setMode = useCallback((next: ModeChoice) => {
     saveChoice(next);
     setChoice(next);
   }, []);
-  const mode = choice === 'system' ? system : choice;
+  const mode = choice === 'system' ? system : choice === 'sky' ? sun : choice;
   const value = useMemo(() => ({ mode, choice, setMode }), [mode, choice, setMode]);
   return (
     <ModeContext.Provider value={value}>

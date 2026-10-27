@@ -4,7 +4,7 @@ import { App, NotificationsPanel, Settings, Shell } from '../src/App';
 import { LanguageProvider, type Language } from '../src/i18n';
 import { Home } from '../src/Home';
 import { CloudClient, type Conversation } from '@maka-cloud/client';
-import { readMode, ThemeProvider, useMode } from '../src/theme';
+import { daylight, readMode, ThemeProvider, useMode } from '../src/theme';
 
 afterEach(() => {
   cleanup();
@@ -90,6 +90,24 @@ test('a browser that refuses storage still gets light and can still switch', asy
   );
   fireEvent.click(screen.getByText('go dark'));
   expect(screen.getByTestId('mode').textContent).toBe('dark');
+});
+
+test('following the sky: light around noon, dark in the middle of the night, in any season', () => {
+  for (const month of [0, 3, 6, 9]) {
+    expect(daylight(new Date(2026, month, 15, 12, 30))).toBe(true);
+    expect(daylight(new Date(2026, month, 15, 2, 0))).toBe(false);
+    expect(daylight(new Date(2026, month, 15, 23, 0))).toBe(false);
+  }
+  vi.useFakeTimers();
+  try {
+    localStorage.setItem('maka.theme', 'sky');
+    vi.setSystemTime(new Date(2026, 9, 26, 13, 0));
+    expect(readMode()).toBe('light');
+    vi.setSystemTime(new Date(2026, 9, 26, 22, 0));
+    expect(readMode()).toBe('dark');
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('a stored value that is not a known mode is light', () => {
