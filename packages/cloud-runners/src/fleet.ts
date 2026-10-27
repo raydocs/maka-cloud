@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { applyEgressGuard, type InstaboxClient } from '@maka-cloud/instabox';
+import { applyEgressGuard, type SandboxApi } from '@maka-cloud/instabox';
 import { scrubSecretShapes, type TaskId } from '@maka-cloud/orchestrator';
 import { DEFAULT_EXPORT_LIMITS, type ExportLimits } from './export.js';
 import type { InputPolicy } from './inputs.js';
@@ -30,7 +30,7 @@ import { claudeAdapter, codexAdapter, type TokenPrices, type VendorAdapter } fro
 export type RunnerName = 'claude-agent-sdk' | 'codex';
 
 export interface CloudRunnersOptions {
-  client: InstaboxClient;
+  client: SandboxApi;
   sandboxes: SandboxProvider;
   /**
    * Where each run gets its model key: the model gateway, with a token per run. Default: none, so
@@ -58,7 +58,7 @@ export interface CloudRunnersOptions {
    * firewall rules from `applyEgressGuard`. A box where it fails is refused and the task fails.
    * A replacement is for a box whose network is closed some other way.
    */
-  egressGuard?: (client: InstaboxClient, machineId: string, signal?: AbortSignal) => Promise<void>;
+  egressGuard?: (client: SandboxApi, machineId: string, signal?: AbortSignal) => Promise<void>;
   /** Maps the orchestrator's MCP URL to one the sandbox can reach. Default: unchanged. */
   mcpUrlForSandbox?: (url: string) => string;
   /** CLI versions to install. Defaults are pinned in the vendor adapters. */
@@ -162,7 +162,7 @@ interface PreparedTool {
 
 /** State shared by the runners of one deployment. */
 export class Fleet {
-  readonly client: InstaboxClient;
+  readonly client: SandboxApi;
   readonly sandboxes: SandboxProvider;
   readonly modelAccess: ModelAccessProvider;
   readonly sessions: RunnerSessionStore;

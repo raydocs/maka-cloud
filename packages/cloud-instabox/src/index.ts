@@ -15,6 +15,7 @@ export {
   type InstaboxOperation,
   type InstaboxSnapshot,
 } from './client.js';
+export type { SandboxApi } from './api.js';
 export {
   InstaboxApiError,
   InstaboxOperationError,

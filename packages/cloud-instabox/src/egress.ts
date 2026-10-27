@@ -1,4 +1,4 @@
-import type { InstaboxClient } from './client.js';
+import type { SandboxApi } from './api.js';
 import { newMarker, parseFramed } from './scripts.js';
 
 /**
@@ -232,7 +232,7 @@ export interface EgressGuardOptions {
  * until `egress.live.test.ts` has run against a real sandbox.
  */
 export async function applyEgressGuard(
-  client: InstaboxClient,
+  client: SandboxApi,
   machineId: string,
   options: EgressGuardOptions = {},
 ): Promise<void> {
