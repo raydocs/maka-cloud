@@ -249,6 +249,86 @@ test('controls follow the task state: pause and cancel while running, resume whi
   expect(within(paused).getByText('Paused')).toBeTruthy();
 });
 
+test('a running task says what it is doing in one line, and its checks are chips that open to their output', async () => {
+  const api = fakeApi([
+    created(1, 't_live', 'Live job'),
+    taskEvent(2, { type: 'task_started', taskId: 't_live' }),
+    taskEvent(3, { type: 'task_progress', taskId: 't_live', note: 'step: Read the code' }),
+    taskEvent(4, { type: 'task_narration', taskId: 't_live', line: 'Running the tests again' }),
+    taskEvent(5, {
+      type: 'task_panel',
+      taskId: 't_live',
+      panelId: 'p_tests',
+      kind: 'tests',
+      state: 'failed',
+      title: 'Tests',
+      summary: '40 passed, 1 failed',
+      tail: 'FAIL keeps the session',
+    }),
+    taskEvent(6, {
+      type: 'task_panel',
+      taskId: 't_live',
+      panelId: 'p_diff',
+      kind: 'diff',
+      state: 'passed',
+      title: 'Changes',
+      summary: '+12 −3 in 2 files',
+    }),
+  ]);
+  render(
+    <ConversationView client={new CloudClient('fake', api.fetcher)} conversation={conversation} />,
+  );
+  const live = await screen.findByRole('article', { name: 'Live job' });
+  // The narration replaces the step line; the step history is not shown twice.
+  expect(within(live).getByText('Running the tests again')).toBeTruthy();
+  expect(within(live).queryByText('Read the code')).toBeNull();
+  const tests = within(live).getByRole('button', { name: /Tests\s*40 passed, 1 failed/u });
+  expect(tests.className).toContain('failed');
+  expect(within(live).getByRole('button', { name: /Changes\s*\+12 −3 in 2 files/u })).toBeTruthy();
+  expect(within(live).queryByText('FAIL keeps the session')).toBeNull();
+  fireEvent.click(tests);
+  expect(tests.getAttribute('aria-expanded')).toBe('true');
+  expect(within(live).getByText('FAIL keeps the session')).toBeTruthy();
+});
+
+test('it shows it is thinking only while your words are the last thing said, and not after a long silence', async () => {
+  const post = (id: number, role: 'user' | 'assistant', at: number) => ({
+    id,
+    kind: 'message.posted',
+    data: { conversationId: cnv, messageId: `m${id}`, role, text: `${role} ${id}`, at },
+  });
+  const waiting = fakeApi([post(1, 'assistant', Date.now() - 5000), post(2, 'user', Date.now())]);
+  const { unmount } = render(
+    <ConversationView
+      client={new CloudClient('fake', waiting.fetcher)}
+      conversation={conversation}
+    />,
+  );
+  expect(await screen.findByRole('status', { name: 'Thinking…' })).toBeTruthy();
+  unmount();
+
+  const answered = fakeApi([post(1, 'user', Date.now() - 5000), post(2, 'assistant', Date.now())]);
+  const second = render(
+    <ConversationView
+      client={new CloudClient('fake', answered.fetcher)}
+      conversation={conversation}
+    />,
+  );
+  await screen.findByText('assistant 2');
+  expect(screen.queryByRole('status', { name: 'Thinking…' })).toBeNull();
+  second.unmount();
+
+  const silent = fakeApi([post(1, 'user', Date.now() - 10 * 60_000)]);
+  render(
+    <ConversationView
+      client={new CloudClient('fake', silent.fetcher)}
+      conversation={conversation}
+    />,
+  );
+  await screen.findByText('user 1');
+  expect(screen.queryByRole('status', { name: 'Thinking…' })).toBeNull();
+});
+
 test('a refused pause says why and hides the pause button for that task only', async () => {
   const api = fakeApi(
     [
@@ -419,6 +499,29 @@ test('the supervisor’s check label is shown as sent, whichever it is, and neve
     expect(screen.queryAllByText(/checked/iu)).toHaveLength(label.includes('checked') ? 1 : 0);
     unmount();
   }
+});
+
+test('a card about a failed task says it did not finish, gives the reason plainly and keeps the raw words behind Details', () => {
+  render(
+    <InboxCard
+      item={{
+        ...item,
+        kind: 'finished',
+        ask: '“Add remember-me” failed: “needs you: The session test still fails; Check the production session limit, then reply here.”',
+        options: [{ id: 'ack', label: 'Got it', recommended: true }],
+      }}
+      disabled={false}
+      onAnswer={() => {}}
+    />,
+  );
+  expect(screen.getByText('Did not finish: Add remember-me')).toBeTruthy();
+  expect(screen.queryByText('Finished')).toBeNull();
+  // The plain sentence and the next step lead; the raw reason waits behind Details.
+  expect(document.querySelector('p.failure')?.textContent).toMatch(
+    /The session test still fails.*Check the production session limit/su,
+  );
+  expect(document.querySelector('details.failure-detail')?.hasAttribute('open')).toBe(false);
+  expect(screen.queryByText(/“Add remember-me” failed/u)).toBeNull();
 });
 
 test('an inbox card puts the recommended answer first, takes context only when allowed, and sends one answer', () => {

@@ -1,9 +1,11 @@
 import { useT } from './i18n';
 import { Button } from '@astryxdesign/core';
 import { ArrowUpRight } from 'lucide-react';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
+import { FailureNote } from './Failure';
 import {
   displayText,
+  failedParts,
   type InboxItem,
   inboxCardModel,
   pullRequestName,
@@ -27,6 +29,8 @@ export function InboxCard({
   const [note, setNote] = useState('');
   const [noting, setNoting] = useState(false);
   const card = inboxCardModel(item);
+  // A task that failed is not "finished": it says so, then why in plain words and what to do.
+  const failed = failedParts(item);
   return (
     <section
       className="question"
@@ -36,11 +40,17 @@ export function InboxCard({
       aria-label={shared(card.heading)}
     >
       <div className="section-heading">
-        <span className={`status-mark ${item.state === 'open' ? 'attention' : 'succeeded'}`} />
-        {shared(card.heading)}
+        <span
+          className={`status-mark ${failed ? 'failed' : item.state === 'open' ? 'attention' : 'succeeded'}`}
+        />
+        {failed ? t('Did not finish: {title}', { title: failed.title }) : shared(card.heading)}
       </div>
-      {/* The supervisor's own sentence, including its check label, as sent. */}
-      <h3>{card.text}</h3>
+      {failed ? (
+        <FailureNote reason={failed.detail} />
+      ) : (
+        // The supervisor's own sentence, including its check label, as sent.
+        <h3>{card.text}</h3>
+      )}
       {card.cannotApproveHere && (
         <p className="muted">
           {t('This card cannot be shown exactly, so it cannot be approved here.')}
@@ -56,7 +66,7 @@ export function InboxCard({
               {line.kind === 'artifact' && shared(line.text)}
               {line.kind === 'action' && (
                 <>
-                  {t('Held until you answer:')} {line.tool} <code>{line.args}</code>
+                  {t('Held until you answer:')} {line.tool} <HeldArgs args={line.args} />
                 </>
               )}
               {line.kind === 'link' &&
@@ -193,6 +203,27 @@ export function ResultCard({
         </div>
       )}
     </article>
+  );
+}
+
+/**
+ * A held call's arguments exactly as they will run, allowed to wrap only after a comma so a value
+ * is never split across lines; copying it still gives the exact text.
+ */
+export function HeldArgs({ args }: { args: string }) {
+  return (
+    <code>
+      {args.split(',').map((part, index) => (
+        <Fragment key={index}>
+          {index > 0 && (
+            <>
+              ,<wbr />
+            </>
+          )}
+          {part}
+        </Fragment>
+      ))}
+    </code>
   );
 }
 

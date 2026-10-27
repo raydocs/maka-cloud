@@ -56,6 +56,10 @@ async function run(body: Body): Promise<unknown> {
       return (await stack.run(text('taskId'))).readWaiting();
     case 'progress':
       return (await stack.run(text('taskId'))).progress(text('note'));
+    case 'narrate':
+      return (await stack.run(text('taskId'))).narration(text('line'));
+    case 'panel':
+      return (await stack.run(text('taskId'))).panel(body.panel as never);
     case 'usage':
       return (await stack.run(text('taskId'))).usage(Number(body.usd));
     case 'complete':

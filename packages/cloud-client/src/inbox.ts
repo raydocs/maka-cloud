@@ -85,6 +85,20 @@ export function finishedParts(
 }
 
 /**
+ * A finished-task card about a task that failed, split the same way (`“Title” failed: “Detail”`):
+ * the detail is the task's own failure reason, so a client can say it plainly, with a next step.
+ */
+export function failedParts(item: InboxItem): { title: string; detail: string } | undefined {
+  if (item.kind !== 'finished') return undefined;
+  const match = /^[“"]([^”"]{1,200})[”"] failed: [“"](.*)[”"]$/su.exec(
+    displayText(item.ask).trim(),
+  );
+  if (!match) return undefined;
+  const [, title, detail] = match;
+  return { title: title ?? '', detail: detail ?? '' };
+}
+
+/**
  * What a decision card shows, worked out once for every client. An approval binds the card's exact
  * text: it is shown as sent, with the held call's arguments, and a card that cannot be shown exactly
  * cannot be approved (the approve option is left out). Other cards are filtered like any server
