@@ -104,6 +104,7 @@ and Compose were not run.
 | `DEEPSEEK_API_KEY` | recommended | web search for research tasks; without it they get no search tool |
 | `OPENAI_API_KEY`, `MAKA_CLOUD_GATEWAY_MODELS`, `MAKA_CLOUD_VERIFIER_MODELS` | recommended | a model of another vendor that checks finished work; without a verifier model only the checks that need none run |
 | `CLOUD_PUSH_VAPID_PUBLIC`, `CLOUD_PUSH_VAPID_PRIVATE`, `CLOUD_PUSH_SUBJECT` | optional | Web Push; make the pair with `node_modules/.bin/web-push generate-vapid-keys` in the checkout (it works offline) |
+| `MAKA_CLOUD_EXPO_PUSH`, `MAKA_CLOUD_EXPO_ACCESS_TOKEN` | optional, off at launch | push to the phone app through Expo; needs the owner's APNs key and FCM project in EAS first (`docs/fork/launch-notes.md`) |
 
 **2b. Sign-in (owner items, none of them set by us)**
 
@@ -496,6 +497,8 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_VAPID_PRIVATE` | Web Push: the VAPID private key, kept in memory only |
 | `CLOUD_PUSH_SUBJECT` | Web Push: the VAPID contact, a mailto: or https: URL |
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
+| `MAKA_CLOUD_EXPO_PUSH` | 1 turns on native push for the phone app through the Expo push service (APNs and FCM credentials live in the EAS project, not here): a phone is told, with fixed words and ids only, when a decision waits or a result is ready. Unset or 0: off |
+| `MAKA_CLOUD_EXPO_ACCESS_TOKEN` | the Expo access token, when the Expo project requires one for push; kept in memory only. Needs MAKA_CLOUD_EXPO_PUSH=1 |
 | `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
 | `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |

@@ -117,6 +117,8 @@ with the server stopped, gives them to an invite. Accounts replace invites in T1
 | `GET /v1/push/key` | `{publicKey}`, the VAPID public key. 404 when push is not configured (so are the next two). |
 | `POST /v1/push/subscriptions` | `{endpoint, keys: {p256dh, auth}}` from `PushSubscription.toJSON()` -> `{accountTag}` with 201, or 200 when the endpoint was already registered. 400 `invalid_endpoint` / `invalid_keys`; 429 `too_many_subscriptions` (10 per invite, 1000 in all). |
 | `DELETE /v1/push/subscriptions` | `{endpoint}` -> 204. Only the invite that registered it can remove it; otherwise 404. |
+| `POST /v1/push/devices` | `{token, platform: "ios" \| "android"}`, the phone's Expo push token -> `{accountTag}` with 201, or 200 when this invite had it already (a token another invite held moves here and starts afresh). 400 `invalid_token`; 429 `too_many_devices` (10 per invite, 1000 in all). 404 while phone push is off (so is the next one). |
+| `DELETE /v1/push/devices` | `{token}` -> 204. Only the invite that registered it can remove it; otherwise 404. Signing out with `pushEndpoint` set to the token removes it too. |
 | `GET /v1/home` | The caller's Home as the server keeps it: `{cards: [{cardId, kind, ref, rank, seenAt, at, state?, text?}]}` (see "Home cards"). |
 | `POST /v1/home/seen` | `{cardIds}` (at most 100): the person saw these cards and left Home. Records the ones that are on this Home and moves the caller's visit to now. 200 `{seen, visitedAt}`. |
 | `POST /v1/home/order` | `{cardId, after}`: moves a card to just after `after` (first when null) inside its kind. 200 `{cards}`; 404 a card that is not on this Home; 400 `after` in another kind, itself, or not there. |
@@ -240,6 +242,34 @@ The server fetches a URL a client chose, so: the endpoint must be `https`, on po
 Apple, Windows by default); no redirect is followed; the address is checked when
 the socket connects (non-public addresses are refused, and so are IP literals); a
 send ends after 10 s or when the server closes; and the response is read to 4 KiB.
+
+### Phone push (Expo)
+
+`native-push.ts`. Off unless `CloudServerOptions.nativePush` is set; the host stack sets it with
+`MAKA_CLOUD_EXPO_PUSH=1`, and passes `MAKA_CLOUD_EXPO_ACCESS_TOKEN` when the Expo project asks for
+one (memory only, never logged). Messages go to the Expo push service at its fixed address, which
+hands them to APNs and FCM with the credentials the owner keeps in EAS; the server holds none.
+
+A token belongs to the invite that registered it, as a Web Push subscription does, and a phone
+hears only about conversations its invite owns, and only about what came after it registered.
+Two things are sent, each once per device:
+
+- An inbox item the supervisor interrupts for (after mutes, quiet hours and the hourly cap):
+  `approval`, `decision`, `budget`, `verification_failed`, `blocked`. The host's notifier hands the
+  items to `SupervisorParts.notifyDevices`. Data `{type: "inbox.needed", accountTag,
+  conversationId, itemId, kind: "approval" | "decision"}`, category `approval` or `decision`,
+  high priority. `finished` and `suggestion` items never interrupt and are not sent.
+- A top-level task that ended, so its result card is ready: data `{type: "task.finished",
+  accountTag, conversationId, taskId, state}`, category `finished`.
+
+The title and body are fixed words from the catalogue in the person's language; nothing a task or
+a model wrote reaches the push service. The categories carry the app's actions: "Got it" on
+`finished`, "Not now" and "Open" on the others, never Approve (an approval binds its exact text,
+which the person must see). What is owed is derived from the database (the feed, the
+`native_push_items` the supervisor named, and `native_push_deliveries`), so a restart sends what it
+missed and nothing twice. A ticket or a later receipt (read 15 minutes after the send) that says
+`DeviceNotRegistered` deletes the token; a network error, an HTTP error or `MessageRateExceeded`
+is retried (3 attempts); any other error drops the message. A backup keeps no phone tokens.
 
 #### Browser notification choices
 

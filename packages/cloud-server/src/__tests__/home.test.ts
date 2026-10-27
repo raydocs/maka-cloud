@@ -499,7 +499,11 @@ test('existing seen rows migrate safely and new content versions persist across 
     .user_version;
   db.exec('ALTER TABLE home_seen DROP COLUMN content_version');
   db.exec('DROP TABLE push_account_secret');
-  db.exec(`PRAGMA user_version = ${version - 2}`);
+  // The migrations after these two (phone push) are undone as well, so they run again too.
+  db.exec(
+    'DROP TABLE native_push_tokens; DROP TABLE native_push_items; DROP TABLE native_push_deliveries; DROP TABLE native_push_receipts;',
+  );
+  db.exec(`PRAGMA user_version = ${version - 3}`);
   db.prepare('INSERT INTO home_seen VALUES (?, ?, ?)').run('owner', 'waiting:item', 123);
   db.close();
   db = openDatabase(file);

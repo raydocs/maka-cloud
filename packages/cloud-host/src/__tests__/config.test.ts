@@ -256,6 +256,39 @@ test('the usage text lists the Web Push variables, and the summary never prints 
   assert.ok(!lines.includes('public-key-value'));
 });
 
+test('phone push is off unless MAKA_CLOUD_EXPO_PUSH=1, and its access token never prints', () => {
+  assert.equal(readStackConfig(ENV).nativePushSet, false);
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_EXPO_PUSH: '0' }).nativePushSet, false);
+  assert.match(describeConfig(readStackConfig(ENV)).join('\n'), /phone push:\s+off/u);
+  const on = {
+    ...ENV,
+    MAKA_CLOUD_EXPO_PUSH: '1',
+    MAKA_CLOUD_EXPO_ACCESS_TOKEN: 'expo-secret-token',
+  };
+  assert.equal(readStackConfig(on).nativePushSet, true);
+  const lines = describeConfig(readStackConfig(on)).join('\n');
+  assert.match(lines, /phone push:\s+on/u);
+  assert.ok(!lines.includes('expo-secret-token'));
+  assert.ok(ENV_VARIABLES.some(([name]) => name === 'MAKA_CLOUD_EXPO_PUSH'));
+  // A token with push off is a mistake, and so is a value that is no key; neither prints the value.
+  const stray = problemsOf({ ...ENV, MAKA_CLOUD_EXPO_ACCESS_TOKEN: 'expo-secret-token' });
+  assert.ok(
+    stray.some((p) => /MAKA_CLOUD_EXPO_ACCESS_TOKEN needs MAKA_CLOUD_EXPO_PUSH=1/u.test(p)),
+  );
+  const short = problemsOf({
+    ...ENV,
+    MAKA_CLOUD_EXPO_PUSH: '1',
+    MAKA_CLOUD_EXPO_ACCESS_TOKEN: 'abc',
+  });
+  assert.ok(short.some((p) => /MAKA_CLOUD_EXPO_ACCESS_TOKEN is too short/u.test(p)));
+  assert.ok(
+    problemsOf({ ...ENV, MAKA_CLOUD_EXPO_PUSH: 'yes' }).includes(
+      'MAKA_CLOUD_EXPO_PUSH must be 1 or 0',
+    ),
+  );
+  assert.ok(![...stray, ...short].join('\n').includes('expo-secret-token'));
+});
+
 test('each invite gets its own machine: a shared, empty, malformed or legacy setting is refused', () => {
   const sandboxes = (value: unknown): readonly string[] =>
     problemsOf({ ...ENV, MAKA_CLOUD_SANDBOXES: JSON.stringify(value) });
