@@ -1,4 +1,4 @@
-# Maka Cloud: plan for go-live and for closing the gap with Hark
+# Maka Cloud: plan for go-live, and for Claude Code without your laptop
 
 Written 2026-10-22. It builds on the "Direction (2026-10-21)" section of `docs/fork/TASKS.md`,
 `docs/fork/pre-launch-audit.md`, `docs/fork/launch-notes.md` and `docs/fork/post-launch-backlog.md`,
@@ -17,8 +17,10 @@ and does not repeat them. Each step names its owner (O = the owner, an agent lan
   - Home cards, scoped approvals, the scorecard and the design tokens
 - Off at launch, but built: the box pool, proposed cards, deep mode and the plan vault (`launch-notes.md`).
 - CI: Linux jobs on GitHub's runners (the repository is public), the phone apps on the owner's Mac mini (#396, `docs/fork/ci.md`).
-- Never run for real: one task on a real instabox with the real model and GitHub. Everything else is
+- Never run for real: one task on a real sandbox with the real model and GitHub. Everything else is
   rehearsed with stand-ins.
+- Sandboxes move from instabox to boat.dev (decided 2026-10-26). The first live run is on boat, so it
+  waits for Phase 3.1 steps 1 to 3.
 
 ## Phase 1: go live (target: about one week)
 
@@ -53,7 +55,7 @@ within one request, and a new account without an invite is refused.
 2. O: DNS for `app.`, `mcp.` and `models.<domain>`.
 3. Run `curl …/deploy/install.sh | sh`, from #390, which is in the queue. The wizard asks for:
    - the domain
-   - the Anthropic, OpenAI and instabox keys
+   - the Anthropic, OpenAI and boat keys
    - the sandbox machine
    - a GitHub token
 4. `maka-cloud check` must print, as `pre-launch-audit.md` §9.1 requires:
@@ -100,9 +102,9 @@ no default changes on a guess.
 
 | # | Change | Where | Speed effect | Trade-off | Size |
 |---|---|---|---|---|---|
-| 1 | Put both pinned CLIs (`claude`, `codex`) in the instabox template image | `cloud-boxes/src/cli-install.ts`, the template | a cold box skips 4 tarball downloads, the checksum checks and an `npm install` | rebuild the image on every CLI bump; the version check still runs | S |
+| 1 | Put both pinned CLIs (`claude`, `codex`) in the sandbox template (a boat saved snapshot) | `cloud-boxes/src/cli-install.ts`, the template | a cold box skips 4 tarball downloads, the checksum checks and an `npm install` | rebuild the image on every CLI bump; the version check still runs | S |
 | 2 | Install Codex in the background while Claude implements | `cloud-runners/src/fleet.ts` `ensureCli` | removes the install from between "verified" and "reviewed" | one wasted install when no review runs | S |
-| 3 | Poll CLI runs with backoff (150 ms to 1 s), as the Claude SDK path already does | `fleet.ts:187` (2 s fixed today) | up to 2 s less per turn end, repair and review | more `exec` calls to instabox | S |
+| 3 | Poll CLI runs with backoff (150 ms to 1 s), as the Claude SDK path already does | `fleet.ts:187` (2 s fixed today) | up to 2 s less per turn end, repair and review | more `exec` calls to the sandbox | S |
 | 4 | Name the Codex model and price it (`gpt-6.1-sol`) | #393 / #390, in the queue | the gateway can price review, which makes a faster model choosable per mode | none | done in queue |
 | 5 | Resume the implementer's own session for the post-review fix, instead of a fresh run | `cloud-playbooks/src/coding/runner.ts` ~1114 | warm prompt cache, no re-reading of the repo | keep one session per vendor; append-only history holds | M |
 | 6 | Setup snapshots per repository (CLIs, checkout, dependencies), when the box pool goes on | `cloud-host/src/stack.ts` passes `setupOf` to the pool (built, not wired) | minutes per cold box on real repositories | snapshot storage; a builder box per setup change | M, Phase 3.1 |
@@ -122,79 +124,110 @@ breakpoints) and OpenAI prompt caching (automatic; `prompt_cache_key` is allowed
 Order: 1, 2 and 3 now (small, no quality risk). Item 4 lands with the queue. Measure 8 and 9 on the
 scorecard before changing defaults. Item 7 waits for a priced decision. Item 6 comes with the pool.
 
-## Phase 3: closing the gap with Hark (after launch, in this order)
+## Direction (2026-10-27): your Claude Code, without your laptop
 
-Hark's experience: one chat, Home with one-tap Action Buttons, Projects, memory, Handoff, a cloud
-computer per user, and apps on web, iOS and Android. Maka Cloud stays a software employee. Errands,
-email and calendar, payments and the vault are out of scope.
+Claude Code is already the best coding agent; Anthropic now also ships Claude Duet and Projects, Amp
+runs Claude Code on the user's own plan, and Coworkers and Grok Bot give each agent its own cloud
+computer. We do not build a better model loop. We make the one people already like easier to live
+with: **your agent can run a hundred subagents; your laptop can't.** One tap in our app, the laptop
+stays closed, and the work comes back as a pull request you can merge.
 
-### 3.1 Boxes that feel like Hark's computer (T27 pool, T26 sleep and Ship) — the biggest gap
+What a user gets from us that `claude` on their own machine does not give them:
 
-1. Close the pool's review items (`post-launch-backlog.md` "Box pool" 1 to 5, "Snapshots" 1 and 2).
-   Each is one PR with a failing test.
-2. Wire setup snapshots (Phase 2 #6) and the resume script after every wake.
-3. Turn on `MAKA_CLOUD_BOXES` for the owner's invite only, with the rest kept on one machine each.
-   Probes behind `MAKA_CLOUD_LIVE=1`: wake time, snapshot restore, exec after sleep, no reach
-   between boxes, the egress rule.
-4. T26 Ship: commit, rebase, test, push, open the PR, follow its CI, fix once on a red CI, then
-   escalate. `merge-when-green` only when granted. This is the merge tool the cards need ("Merge PR #12").
-5. Per-task agent accounts (r19-4). The patch is built. It needs the real-account peer test, host
-   config tests, the deploy text and the `taskOver` release, and O's answer on the decision card.
+| Using Claude Code directly | In Maka Cloud |
+|---|---|
+| The laptop stays open, or the task stops | Runs in the cloud; brief, approve and review from the phone |
+| Permission prompts and "continue?" all along | A work order up front (at most three questions, each with a default), then it runs; only risky actions ask |
+| "Done" you have to check yourself | Done with evidence: the reproduction fails before and passes after, the other vendor reviews, the integrity scan finds no touched tests, CI is green |
+| One task per machine, worktrees and setup by hand | One clean sandbox per task, forked from the repository's snapshot with its dependencies, several at once |
+| The 5-hour limit stops the work | The user's Claude and ChatGPT plans as one employee: Claude writes, Codex reviews; at a limit the task waits and resumes by itself |
+| A diff in a terminal | A pull request, CI followed, fixed once when red, merged in one tap where granted |
+| The project explained again each session | Project memory learned from reviews and from merged and rejected PRs |
 
-Done when the owner runs three tasks at once on three boxes that sleep when idle and wake in under a
-minute, and a green PR merges from one tap where granted.
+How we keep to Anthropic's terms (AGENTS.md "Product constraints"): the `claude` binary is
+unmodified; each user signs in with their own plan through Anthropic's flow inside their own
+sandbox, and the sign-in never leaves it; no task runs on another person's plan; API keys stay the
+default. The host keeps the keys, the money and the verdict; inside the sandbox Claude Code is free
+to work.
 
-### 3.2 Watch and take over: live handoff (T14b)
+How we measure it: the share of pull requests merged without the owner changing code, and the
+owner's minutes per task. Both go on the scorecard (`cloud-evals`) next to the integrity-flag share
+of T33. No score is worth a shortcut.
 
-- Real pause and resume on `SandboxCliRunner` and the coding runner. The same session continues;
-  a restart is not a pause.
-- A trusted adapter from the instabox desktop and terminal to T14's `ComputerSource`. No provider URL
-  ever reaches the browser.
-- Read Cua's driver and Spaces model first, and check each licence.
-- Done when, on the web and the phone, the user watches the employee's screen, takes control (the
-  agent does nothing meanwhile), and hands back to the same session.
+## Phase 3: build it (starts now, in this order)
 
-### 3.3 The employee notices work by itself (T30 cards, built and off)
+### 3.1 boat.dev sandboxes (agent) — the first live run waits for steps 1 to 3
 
-1. The P1 and P2 items in `post-launch-backlog.md` "Proposed cards" 1 to 9: scrub at the write
-   boundary, recovery re-checks, refresh failure, kind switch, owner scoping, the schema version.
-2. A per-owner GitHub credential for scans (item 5), replacing the host token.
-3. The phone card screens (T29).
-4. The cheap ranker behind `CardRanker`, and the employee's own results as a signal.
-5. Turn on `MAKA_CLOUD_CARDS=1` for the owner's projects. Watch accept and dismiss counts for two weeks
-   before anyone else gets them.
+boat gives full-root Ubuntu VMs, per-second billing, stop as a snapshot, fork, environments and an
+embeddable desktop. Checked on a trial box (2026-10-27): `unshare --user --pid`, passwordless sudo
+and `/dev/fuse` work; Claude Code and Codex are preinstalled.
 
-### 3.4 Phone apps to TestFlight and internal testing (T29)
+1. A sandbox provider interface in front of `InstaboxClient` (used directly today by
+   `cloud-boxes`, `cloud-host`, `cloud-runners` and `cloud-playbooks`). No behaviour change.
+2. `packages/cloud-boat`: the boat adapter, with a fake for tests. Design around boat's limits: no
+   pause (a stop ends every process), auto-stop after one hour unless extended, API commands end
+   after 600 s unless detached, EU regions only. The environment is `safe-for-third-parties`, and
+   the model keys stay in our gateway, not in boat's credential proxy.
+3. The rehearsal on the boat fake, then live probes behind `MAKA_CLOUD_LIVE=1`: the agent account,
+   the check namespace, the egress rule, `claude -p` under the `env -i` entry.
+4. One sandbox per task, forked from a per-repository snapshot (replaces the box pool's own
+   snapshots). A task no longer shares a machine, so `MAKA_CLOUD_TASKS_PER_INVITE` can go above 1.
 
-- After the design stack: the polish pass through tokens, and notification actions "Got it" and "Not now"
-  only, never Approve.
-- Apple and Google sign-in on the phone, and the Apple nonce form in the verifier.
-- O's human steps:
-  - an Apple Developer account, bundle id, App Store Connect record and APNs key
-  - a Play Console app and an FCM project
-  - an Expo/EAS project, with the signing keys entered by O
-- Done when the first TestFlight and internal-track builds reach the owner's phone.
+Done when a coding task runs end to end on a boat sandbox and opens its pull request.
 
-### 3.5 Narration, panels and Home (Hark patterns 2 and 4, mostly built)
+### 3.2 The user's own plans (agent, after 3.1 step 2)
 
-- The web and phone UI for `task_narration` and `task_panel`, now that #383 is in. This is the design lane's
-  live work view, which starts after #383.
-- The duties engine calls `addHomeNote` on merges, so note cards exist outside tests.
+- Claude: the user signs in inside their sandbox through Anthropic's own flow (a terminal or desktop
+  link from the app), as the agent account, so the runner finds it. The token stays in the
+  sandbox; boat's credential profiles are not used for users.
+- ChatGPT: the Codex sign-in of T27 (#429), the same way.
+- Plan limits: read `rate_limit_event`; at a 5-hour limit the task waits and says when it resumes,
+  or, with the user's consent, continues on the other vendor or an API key. Headless runs use the
+  5-hour window faster per token today (anthropics/claude-code#97074); we do not work around it
+  with the entrypoint label.
 
-### 3.6 Later
+### 3.3 One session per task, and work like an employee (T33, #444)
 
-- Deep mode on, after the provenance fix (`post-launch-backlog.md` "Deep research").
-- The user's own Claude and ChatGPT plans (T27 vault). A launch gate with Anthropic's and OpenAI's
-  terms comes first; API keys stay the default path.
-- Memory (T11) and schedules (T12) beyond duties.
-- Voice (T19).
+One long Claude Code session runs the whole task: plan, reproduction, implementation and the fix
+after review (`--resume`, so the prompt cache stays warm). The host adds the work order, the
+integrity scan, the stuck report and at most two unverified delegations.
+
+### 3.4 Start where the user already is
+
+1. A Claude Code plugin with `/handoff`: the goal, branch and context of the local session go to a
+   cloud task, and the laptop can close. A push notification brings the result back.
+2. `@maka` in a GitHub issue or PR comment starts a task on that repository.
+
+### 3.5 Watch and take over
+
+The task view streams the sandbox's terminal and desktop (boat's embed). The user can take over,
+the agent waits, and hands back to the same session. The narration and panel UI (`task_narration`,
+`task_panel`, #383) shows what it is doing between results.
+
+### 3.6 Ship (T26)
+
+Commit, rebase, test, push, open the PR, follow CI, fix once on red, then escalate.
+`merge-when-green` only where granted. This is the one-tap merge the cards need.
+
+### 3.7 Phone apps to TestFlight and internal testing (T29)
+
+As before: the polish pass through tokens, Apple and Google sign-in on the phone, notification
+actions "Got it" and "Not now" only. O's steps: Apple Developer account, bundle id, App Store
+Connect record and APNs key; Play Console app and FCM project; Expo/EAS with O's signing keys.
+
+### 3.8 Later
+
+- Proposed cards (T30): the P1 and P2 items in `post-launch-backlog.md`, a per-owner GitHub
+  credential, then `MAKA_CLOUD_CARDS=1` for the owner's projects first.
+- Deep mode after the provenance fix; memory (T11) and schedules (T12) beyond duties; voice (T19).
 
 ## Decisions only O can make
 
 1. Per-task agent accounts: the decision card in the "Isolation and egress design" thread.
 2. #366: the confirm step. #378: the Source section's P2.
-3. Whether one invite may run two tasks at once (#394 makes it one at a time).
+3. Whether one invite may run two tasks at once (#394 makes it one at a time; one boat sandbox per
+   task, Phase 3.1 step 4, removes the shared-machine reason).
 4. Budgets: the first live run (suggested $10), and the first paid scorecard run.
 5. Fast mode and priority tier (Phase 2 #7 and #9): whether faster is worth up to twice the model cost.
 6. Whether to skip cross-review in `quick` mode.
-7. The production server and domain (Phase 1.3).
+7. The production server and domain (Phase 1.3), and the boat plan ($20 a month at least).
