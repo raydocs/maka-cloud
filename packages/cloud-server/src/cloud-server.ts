@@ -49,6 +49,7 @@ import {
 import { DEFAULT_LANGUAGE, type Language } from './i18n.js';
 import { InviteStore } from './invites.js';
 import { type PushConfig, type PushOptions, PushService } from './push.js';
+import { type NativePushOptions, NativePushService } from './native-push.js';
 import { RateLimiter } from './rate-limit.js';
 import { SqliteSessionStore } from './sqlite-session-store.js';
 import { SqliteTaskStore } from './sqlite-task-store.js';
@@ -161,6 +162,13 @@ export interface SupervisorParts {
   };
   /** The language the owner of a conversation reads, for words the supervisor's host composes. */
   languageOf(conversationId: string): Language;
+  /**
+   * The supervisor interrupts for these items: the owner's phones are told that a decision waits
+   * (ids and fixed words only). Does nothing while native push is off.
+   */
+  notifyDevices(
+    items: ReadonlyArray<{ itemId: string; conversationId: string; kind: string }>,
+  ): void;
   onWarning(message: string, detail?: unknown): void;
 }
 
@@ -252,6 +260,14 @@ export interface CloudServerOptions {
   sweepOrphans?: SweepOrphans;
   /** Web Push settings (see `pushConfigFromEnv`). Without them the push routes answer 404. */
   push?: PushConfig & Pick<PushOptions, 'transport' | 'retryDelayMs' | 'maxAttempts' | 'timeoutMs'>;
+  /**
+   * Native push for the phone app through the Expo push service. Without it the
+   * `/v1/push/devices` routes answer 404 and no phone is told anything.
+   */
+  nativePush?: Pick<
+    NativePushOptions,
+    'accessToken' | 'transport' | 'retryDelayMs' | 'maxAttempts' | 'receiptDelayMs' | 'timeoutMs'
+  >;
   /** Retry timing for handing user messages to the handler. */
   delivery?: DeliveryOptions;
   /**
@@ -391,6 +407,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
   let mcp: OrchestratorServer | undefined;
   let http: Server | undefined;
   let push: PushService | undefined;
+  let nativePush: NativePushService | undefined;
   let handler: ConversationHandler | undefined;
   let inbox: InboxService | undefined;
   let deliveries: MessageDeliveries | undefined;
@@ -453,6 +470,13 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         ...(maxAttempts === undefined ? {} : { maxAttempts }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         now: options.orchestrator?.now,
+        onWarning: warn,
+      });
+    }
+    if (options.nativePush) {
+      nativePush = new NativePushService(db, hub, invites, {
+        ...options.nativePush,
+        ...(options.orchestrator?.now ? { now: options.orchestrator.now } : {}),
         onWarning: warn,
       });
     }
@@ -592,6 +616,14 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
         },
         publish: (event) => void extensions.publish(event),
         languageOf: languageOfConversation,
+        notifyDevices: (items) => {
+          try {
+            nativePush?.needed(items);
+          } catch (error) {
+            // The phones are a second channel: a failure here must not hold back the notice.
+            warn('Phone push could not take the items', error);
+          }
+        },
         answers: {
           deliver: async (answer, signal) => {
             signal.throwIfAborted();
@@ -673,7 +705,10 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
             ...(authOptions.trustedProxies ? { trustedProxies: authOptions.trustedProxies } : {}),
             ...(authOptions.limits ? { limits: authOptions.limits } : {}),
             reauthenticate: (invite) => api.reauthenticate(invite),
-            removePush: (inviteId, endpoint) => push?.remove(inviteId, endpoint) ?? false,
+            // The phone signs out with its Expo token, the browser with its endpoint.
+            removePush: (inviteId, endpoint) =>
+              (push?.remove(inviteId, endpoint) ?? false) ||
+              (nativePush?.remove(inviteId, endpoint) ?? false),
           })
         : undefined;
     const homeStore = new HomeStore(db);
@@ -692,6 +727,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       controlLimiter: new RateLimiter(limits.controlPerMinute),
       orchestrator,
       ...(push ? { push } : {}),
+      ...(nativePush ? { nativePush } : {}),
       artifacts,
       computer: options.computer,
       publisher,
@@ -754,6 +790,8 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const ownAccounts = accounts;
     const ownPush = push;
     ownPush?.start();
+    const ownNativePush = nativePush;
+    ownNativePush?.start();
     const ownInbox = inbox;
     let closing: Promise<void> | undefined;
     const shutdown = async (): Promise<void> => {
@@ -765,6 +803,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
       server.closeAllConnections();
       try {
         await ownPush?.close();
+        await ownNativePush?.close();
         await new Promise<void>((resolve) => server.close(() => resolve()));
         try {
           await ownInbox?.stop();
@@ -847,6 +886,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     http?.closeAllConnections();
     http?.close();
     await push?.close().catch(() => undefined);
+    await nativePush?.close().catch(() => undefined);
     await Promise.resolve(inbox?.stop()).catch(() => undefined);
     await Promise.resolve(handler?.close?.()).catch(() => undefined);
     await mcp?.close().catch(() => undefined);

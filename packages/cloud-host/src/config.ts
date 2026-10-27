@@ -130,6 +130,12 @@ export interface StackConfig {
   /** All three VAPID settings are set: the Web Push routes are on. The key itself is read from the environment by the stack. */
   pushSet: boolean;
   /**
+   * Native push for the phone app is on (`MAKA_CLOUD_EXPO_PUSH=1`): the server tells phones through
+   * the Expo push service. Off at launch. The optional Expo access token is read from the
+   * environment by the stack, never kept here.
+   */
+  nativePushSet: boolean;
+  /**
    * Standing duties are on: the GitHub webhook secret is set, so signed deliveries are accepted at
    * `/github/webhook`. The secret itself is read from the environment by the stack.
    */
@@ -228,6 +234,8 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       [cloud]: (copy) => {
         try {
           copy.exec('DELETE FROM push_subscriptions');
+          // A phone's push token lets whoever holds it send that phone notifications.
+          copy.exec('DELETE FROM native_push_tokens');
         } catch (error) {
           if (!/no such table/iu.test(String((error as Error).message))) throw error;
         }
@@ -422,6 +430,7 @@ const KEY_VARIABLES = [
   'DEEPSEEK_API_KEY',
   'INSTABOX_API_KEY',
   'CLOUD_PUSH_VAPID_PRIVATE',
+  'MAKA_CLOUD_EXPO_ACCESS_TOKEN',
   'MAKA_GITHUB_TOKEN',
   'MAKA_CLOUD_MAIL_API_KEY',
 ] as const;
@@ -551,6 +560,14 @@ export const ENV_VARIABLES = [
   [
     'CLOUD_PUSH_ALLOWED_HOSTS',
     'Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows',
+  ],
+  [
+    'MAKA_CLOUD_EXPO_PUSH',
+    '1 turns on native push for the phone app through the Expo push service (APNs and FCM credentials live in the EAS project, not here): a phone is told, with fixed words and ids only, when a decision waits or a result is ready. Unset or 0: off',
+  ],
+  [
+    'MAKA_CLOUD_EXPO_ACCESS_TOKEN',
+    'the Expo access token, when the Expo project requires one for push; kept in memory only. Needs MAKA_CLOUD_EXPO_PUSH=1',
   ],
   [
     'MAKA_GITHUB_TOKEN',
@@ -719,6 +736,7 @@ export function readStackConfig(
     openAiKeySet: value('OPENAI_API_KEY') !== undefined,
     searchKeySet: value('DEEPSEEK_API_KEY') !== undefined,
     pushSet: false,
+    nativePushSet: flag('MAKA_CLOUD_EXPO_PUSH'),
     dutiesSet: false,
     cardsSet: false,
     dutyLinks: [],
@@ -734,6 +752,9 @@ export function readStackConfig(
   } catch (error) {
     // The message names the missing variables and never a value.
     problems.push(error instanceof Error ? error.message : 'the Web Push settings are not valid');
+  }
+  if (value('MAKA_CLOUD_EXPO_ACCESS_TOKEN') !== undefined && !config.nativePushSet) {
+    problems.push('MAKA_CLOUD_EXPO_ACCESS_TOKEN needs MAKA_CLOUD_EXPO_PUSH=1');
   }
   for (const name of KEY_VARIABLES) {
     const key = value(name);
@@ -1069,6 +1090,7 @@ export function describeConfig(config: StackConfig): string[] {
     `modes:               ${describeModes(config.modes)}`,
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
+    `phone push:          ${config.nativePushSet ? 'on, through the Expo push service' : 'off (set MAKA_CLOUD_EXPO_PUSH=1 to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `sign-in:             ${describeSignIn(config.signIn)}`,

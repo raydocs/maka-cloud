@@ -301,6 +301,45 @@ CREATE TABLE home_notes (
 CREATE INDEX home_notes_owner ON home_notes (owner, created_at);
 `;
 
+/**
+ * Native push for the phone app, through the Expo push service (`native-push.ts`). A token belongs
+ * to the invite that registered it, like a Web Push subscription; `since_feed_id` and
+ * `since_item_seq` say where the feed and the needs-you list stood when it registered, so only what
+ * comes after is sent. `native_push_items` are the inbox items the supervisor told the person about;
+ * `native_push_deliveries` records each message once per token; `native_push_receipts` are the
+ * service's tickets, read back later to drop a device that is gone.
+ */
+const SCHEMA_NATIVE_PUSH = `
+CREATE TABLE native_push_tokens (
+  token TEXT PRIMARY KEY,
+  invite_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  since_feed_id INTEGER NOT NULL,
+  since_item_seq INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX native_push_tokens_invite ON native_push_tokens (invite_id);
+CREATE TABLE native_push_items (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL UNIQUE,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE TABLE native_push_deliveries (
+  token TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  state TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (token, ref)
+);
+CREATE TABLE native_push_receipts (
+  ticket_id TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly string[] = [
   SCHEMA_V1,
   SCHEMA_V2,
@@ -320,6 +359,7 @@ export const MIGRATIONS: readonly string[] = [
   'ALTER TABLE home_seen ADD COLUMN content_version TEXT;',
   `CREATE TABLE push_account_secret (id INTEGER PRIMARY KEY CHECK (id = 1), secret BLOB NOT NULL);
    INSERT INTO push_account_secret VALUES (1, randomblob(32));`,
+  SCHEMA_NATIVE_PUSH,
 ];
 
 /**

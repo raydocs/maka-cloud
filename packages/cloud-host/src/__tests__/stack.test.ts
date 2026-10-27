@@ -98,6 +98,7 @@ async function start(
         Object.entries(env).filter(
           ([name]) =>
             name.startsWith('CLOUD_PUSH_') ||
+            name === 'MAKA_CLOUD_EXPO_PUSH' ||
             name === 'MAKA_CLOUD_SANDBOXES' ||
             name === 'MAKA_CLOUD_BOXES' ||
             name === 'MAKA_CLOUD_BOX_TEMPLATE' ||
@@ -511,6 +512,32 @@ test('the Web Push routes answer 404 without CLOUD_PUSH_* and serve the public k
   const answer = await key(on, on.stack.cloud.server.invites.create('on').token);
   assert.equal(answer.status, 200);
   assert.deepEqual(await answer.json(), { publicKey: vapid.publicKey });
+});
+
+test('the phone push route answers 404 without MAKA_CLOUD_EXPO_PUSH and keeps a device with it', async (t) => {
+  const register = (started: Started, token: string) =>
+    fetch(`${started.stack.cloud.server.url}/v1/push/devices`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'ExponentPushToken[stack-test-device]', platform: 'ios' }),
+    });
+  const off = await start(t);
+  assert.equal(
+    (await register(off, off.stack.cloud.server.invites.create('off').token)).status,
+    404,
+  );
+  const sent: unknown[] = [];
+  const on = await start(t, undefined, { MAKA_CLOUD_EXPO_PUSH: '1' }, true, {
+    expoTransport: {
+      send: async (messages) => {
+        sent.push(...messages);
+        return messages.map(() => ({ status: 'ok' as const, id: 'ticket' }));
+      },
+      receipts: async () => ({}),
+    },
+  });
+  assert.equal((await register(on, on.stack.cloud.server.invites.create('on').token)).status, 201);
+  assert.deepEqual(sent, [], 'registering sends nothing');
 });
 
 test('Web Push settings that cannot sign stop the start, without the key in the message', async (t) => {

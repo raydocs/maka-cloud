@@ -37,6 +37,7 @@ import type { AccountStore } from './accounts.js';
 import type { AuthRoutes } from './auth-routes.js';
 import type { InviteInfo, InviteStore } from './invites.js';
 import { pushAccountTag, type PushApi } from './push.js';
+import type { NativePushApi } from './native-push.js';
 import type { QuotaSource } from './quota.js';
 import { toPublicView } from './public-view.js';
 import { scrubSecretFields } from './secret-shapes.js';
@@ -171,6 +172,8 @@ export interface PublicApiDeps {
   >;
   /** Absent when Web Push is not configured; its routes are then 404. */
   push?: PushApi;
+  /** Absent when native push is not configured; `/v1/push/devices` is then 404. */
+  nativePush?: NativePushApi;
   artifacts: ArtifactSource;
   computer?: ComputerSource;
   publisher?: ConversationPublisher;
@@ -216,6 +219,10 @@ const pushSubscription = z
   .strict();
 const settingsPatch = z.object({ language: z.enum(LANGUAGES) }).strict();
 const pushRemoval = z.object({ endpoint: z.string().min(1).max(2048) }).strict();
+const nativeDevice = z
+  .object({ token: z.string().min(1).max(256), platform: z.enum(['ios', 'android']) })
+  .strict();
+const nativeRemoval = z.object({ token: z.string().min(1).max(256) }).strict();
 const postMessage = z
   .object({
     text: z.string().min(1),
@@ -683,6 +690,13 @@ export class PublicApi {
       if (method === 'DELETE') return this.unsubscribePush(req, res, invite, push);
       throw new HttpError(405, 'method_not_allowed', { allow: 'POST, DELETE' });
     }
+    if (path === '/v1/push/devices') {
+      const native = this.deps.nativePush;
+      if (!native) throw new HttpError(404, 'not_found');
+      if (method === 'POST') return this.registerDevice(req, res, invite, native);
+      if (method === 'DELETE') return this.removeDevice(req, res, invite, native);
+      throw new HttpError(405, 'method_not_allowed', { allow: 'POST, DELETE' });
+    }
     if (this.deps.duties && path.startsWith('/v1/projects')) {
       if (await this.deps.duties.handle(req, res, url, invite)) return;
     }
@@ -851,6 +865,36 @@ export class PublicApi {
     if (!body.success) throw new HttpError(400, 'invalid_request');
     this.takeControlToken(invite);
     if (!push.remove(invite.inviteId, body.data.endpoint)) throw new HttpError(404, 'not_found');
+    res.writeHead(204).end();
+  }
+
+  private async registerDevice(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    native: NativePushApi,
+  ): Promise<void> {
+    const body = nativeDevice.safeParse(await readJson(req, false));
+    if (!body.success) throw new HttpError(400, 'invalid_request');
+    this.takeControlToken(invite);
+    const result = native.register(invite.inviteId, body.data.token, body.data.platform);
+    if (result === 'limit') throw new HttpError(429, 'too_many_devices');
+    if (result === 'invalid_token') throw new HttpError(400, 'invalid_token');
+    respond(res, result === 'created' ? 201 : 200, {
+      accountTag: pushAccountTag(this.deps.db, invite.inviteId),
+    });
+  }
+
+  private async removeDevice(
+    req: IncomingMessage,
+    res: ServerResponse,
+    invite: InviteInfo,
+    native: NativePushApi,
+  ): Promise<void> {
+    const body = nativeRemoval.safeParse(await readJson(req, false));
+    if (!body.success) throw new HttpError(400, 'invalid_request');
+    this.takeControlToken(invite);
+    if (!native.remove(invite.inviteId, body.data.token)) throw new HttpError(404, 'not_found');
     res.writeHead(204).end();
   }
 
