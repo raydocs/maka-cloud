@@ -1,5 +1,6 @@
 import { scrubSecretText } from '@maka-cloud/orchestrator';
 import { type ReviewSummary, SEVERITIES } from './review.js';
+import { type ViewportRecord, viewportIssues } from './viewport.js';
 
 /** The product's name as a pull request shows it. One place, so a rename is one edit. */
 export const PRODUCT_NAME = 'Maka Cloud';
@@ -14,6 +15,7 @@ export interface VerificationView {
   kept?: { reason: string };
   changedFiles?: { path: string; status: string }[];
   review?: ReviewSummary;
+  viewport?: ViewportRecord;
 }
 
 /** What the host knows beyond the runner's record. Each is shown only when given. */
@@ -73,6 +75,24 @@ function reviewRow(verification: VerificationView): string {
   return `${total === 0 ? '✅' : '⚠️'} **${reviewHeading(review)}**${other}`;
 }
 
+/** What the runner saw of the page; the screenshots themselves stay on the task page. */
+function viewportRow(record: ViewportRecord | undefined): string | undefined {
+  if (!record) return undefined;
+  if (record.result === 'not_declared') return 'ℹ️ No screenshots: no page was named to look at';
+  if (record.result === 'not_run')
+    return `⚠️ Not looked at: ${code(record.reason ?? 'the check did not run')}`;
+  const pages = record.pages ?? [];
+  const paths = [...new Set(pages.map((page) => page.path))].map(code).join(', ');
+  const before =
+    record.before?.result === 'captured'
+      ? ', with and without this change'
+      : ', with this change only';
+  const issues = viewportIssues(pages);
+  return issues.length === 0
+    ? `✅ ${paths} at 1280 and 390 px wide${before}: no horizontal overflow, console error or control under 44 px`
+    : `⚠️ ${paths} at 1280 and 390 px wide${before}: ${issues.slice(0, 5).map(code).join('; ')}`;
+}
+
 /**
  * The pull request description: a proof table first (what the runner itself checked, the review,
  * the cost and the run), then the changed files and what was not verified. It is built from the
@@ -88,6 +108,8 @@ export function pullRequestBody(verification: VerificationView, extras: ProofExt
     ]);
   }
   rows.push([`Repository tests ${code(verification.testCommand)}`, '✅ Passed']);
+  const viewport = viewportRow(verification.viewport);
+  if (viewport) rows.push(["Desktop and phone (the runner's own screenshots)", viewport]);
   rows.push(['Independent review', reviewRow(verification)]);
   const fix = verification.review?.fix;
   if (fix && fix.sent > 0) {

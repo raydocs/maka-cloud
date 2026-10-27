@@ -206,7 +206,7 @@ is our own decision.
 
 1. **The result at each size (built: #384).** When a finished task leaves screenshots named for
    desktop, tablet or phone, the result card shows them side by side like the devices.
-2. **A viewport check the runner makes itself (next).** Screenshots the agent attaches are only what
+2. **A viewport check the runner makes itself (built, see below).** Screenshots the agent attaches are only what
    it chose to show. For a change to a web page, the coding runner, as trusted code like the other
    checks, starts the preview, screenshots it at 1280 and 390 wide, and records:
    - horizontal overflow
@@ -216,6 +216,40 @@ is our own decision.
    The proof block in the pull request gains a "Fits desktop and phone" row with ✅ or the issues.
    The same rule as the tests applies: nothing the checked page writes is read as the result.
    Owner: playbook, with the instabox lane (a headless browser in the sandbox).
+
+   **Built** (`cloud-playbooks/src/coding/viewport.ts`). How it works:
+   - The agent writes `handoff/preview.json` (`command`, `port`, up to 3 `paths`) when the change
+     shows on a page, as it writes `repro.json`.
+   - After the review, the runner starts that command in a check of its own (the same user and PID
+     namespace as the tests). It waits for the port, and drives the sandbox's Chromium over the
+     DevTools protocol with node 22 or later, with no npm package. It does this once with the change
+     and once on the base commit.
+   - It reads back only the file names it chose, as the agent's account, and keeps only real PNGs of
+     at most 2 MiB:
+     - `viewport-desktop.png` and `viewport-phone.png` with the change;
+     - `before-viewport-*.png` on the base commit.
+
+     They are listed first in the manifest, so the result card shows them side by side.
+
+   It is evidence, not a gate, for two reasons:
+   - The app runs in the same namespace as the browser, so the repository's own code could draw
+     over a screenshot or forge the report line. The check never fails or holds back a task.
+   - Its findings go to the manifest's known issues and to a pull request row, "Desktop and phone
+     (the runner's own screenshots)".
+
+   When there is no picture, the manifest says so on a `no screenshots: <reason>` line, and both
+   result cards show it:
+   - no `preview.json`;
+   - no Chromium or node 22 on the box;
+   - the app never listened.
+
+   **Not yet:**
+   - a Chromium in the instabox template (until then, live tasks record "no headless browser");
+   - video;
+   - a before/after toggle on the card (the base pictures are in the task's files).
+
+   Verified with a real Chromium in `coding/__tests__/viewport.test.ts`. That test skips without a
+   browser and python3 on `PATH`.
 3. **Typed reply blocks, three kinds first:** table, code and summary. The conductor marks a block
    with a typed fence the client recognizes. Anything unknown stays text. The client renders a
    table as a real table and code with copy, never as HTML from the model. Owner: conductor and

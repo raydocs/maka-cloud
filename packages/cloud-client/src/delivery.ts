@@ -45,9 +45,16 @@ export interface DeliveryModel {
    */
   views?: DeliveryView[];
   diff?: ArtifactListing;
+  /**
+   * Why the result has no picture, in the runner's words, when it says so ("no screenshots: …"): a
+   * task without one is shown as such, never as if the diff were its picture.
+   */
+  noPicture?: string;
   caption: string;
   actions: DeliveryAction[];
 }
+
+const NO_PICTURE = /^no screenshots: (.+)$/u;
 
 /**
  * The result card of a task, or nothing while it has not finished with a summary. The two actions a
@@ -75,6 +82,9 @@ export function deliveryModel(
     .map((listing) => publicLink(listing.url))
     .find((url) => url !== undefined && PULL_REQUEST.test(url));
   const preview = publicLink(sources.find((source) => source.label === 'preview')?.url);
+  const noPicture = shot
+    ? undefined
+    : task.manifest?.done?.map((line) => NO_PICTURE.exec(line.trim())?.[1]).find(Boolean);
   const actions: DeliveryAction[] = [];
   if (pull) actions.push({ label: 'Open pull request', url: pull, host: hostOf(pull) });
   if (preview) actions.push({ label: 'Open preview', url: preview, host: hostOf(preview) });
@@ -83,6 +93,7 @@ export function deliveryModel(
     ...(shot ? { shot } : {}),
     ...(multi ? { views } : {}),
     ...(diff ? { diff } : {}),
+    ...(noPicture ? { noPicture: displayText(noPicture) } : {}),
     caption: multi
       ? viewportList(views.map((view) => view.viewport))
       : shot
