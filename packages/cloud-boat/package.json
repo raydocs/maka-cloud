@@ -1,0 +1,28 @@
+{
+  "name": "@maka-cloud/boat",
+  "version": "0.1.0",
+  "description": "boat.dev sandbox client with the methods Maka Cloud's runners use of a sandbox.",
+  "type": "module",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./testing": {
+      "types": "./dist/__tests__/fake-boat.d.ts",
+      "default": "./dist/__tests__/fake-boat.js"
+    }
+  },
+  "scripts": {
+    "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:dist": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@maka-cloud/instabox": "0.1.0"
+  }
+}
