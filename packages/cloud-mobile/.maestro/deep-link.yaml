@@ -1,0 +1,25 @@
+# A makacloud:// link carries only an id and opens what it names: a decision on Home, a task in its
+# conversation, or Home. The decision seed passes its ids as -e TASK=... -e ITEM=...
+appId: cloud.maka.app
+---
+- runFlow: subflows/sign-in.yaml
+- assertVisible:
+    id: "field-Keep the conversation going"
+- openLink: makacloud://decision/${ITEM}
+- extendedWaitUntil:
+    visible:
+      id: "home-linked-decision"
+    timeout: 20000
+- takeScreenshot: link-decision
+- openLink: makacloud://task/${TASK}
+- extendedWaitUntil:
+    visible:
+      id: "task-pill-${TASK}"
+    timeout: 20000
+- takeScreenshot: link-task
+- openLink: makacloud://
+- extendedWaitUntil:
+    visible:
+      id: "home-today-title"
+    timeout: 20000
+- takeScreenshot: link-home

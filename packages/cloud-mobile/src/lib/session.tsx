@@ -18,6 +18,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { forgetPush } from './push';
 import { readSecure, removeSecure, writeSecure } from './secure';
 import { normalizeServer } from './server';
 
@@ -217,13 +218,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           // A device session is ended on the server first, so a lost token is no use. If the server
           // cannot be reached the token is still removed here; the session then ends by itself when
           // it has been idle, or from another device's list.
-          if (session.status === 'in' && session.device) {
+          // This phone's push token goes with the session, so a signed-out phone hears nothing more.
+          const pushToken =
+            session.status === 'in'
+              ? await forgetPush(session.server).catch(() => undefined)
+              : undefined;
+          if (session.status === 'in' && (session.device || pushToken !== undefined)) {
             let timer: ReturnType<typeof setTimeout> | undefined;
             const wait = new Promise<void>((resolve) => {
               timer = setTimeout(resolve, SIGN_OUT_WAIT_MS);
             });
+            const ending = session.device
+              ? session.client.endSession(pushToken)
+              : session.client.removeDevice(pushToken as string);
             try {
-              await Promise.race([session.client.endSession().catch(() => {}), wait]);
+              await Promise.race([ending.catch(() => {}), wait]);
             } finally {
               clearTimeout(timer);
             }

@@ -37,3 +37,28 @@ jest.mock(
   'react-native-safe-area-context',
   () => require('react-native-safe-area-context/jest/mock').default,
 );
+
+// The phone's notifications: nothing native runs in the tests. Each test sets what the phone says.
+const mockNotifications = {
+  DEFAULT_ACTION_IDENTIFIER: 'expo.modules.notifications.actions.DEFAULT',
+  AndroidImportance: { HIGH: 4 },
+  setNotificationHandler: jest.fn(),
+  setNotificationChannelAsync: jest.fn(async () => null),
+  setNotificationCategoryAsync: jest.fn(async () => null),
+  getPermissionsAsync: jest.fn(async () => ({ granted: false })),
+  requestPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  getExpoPushTokenAsync: jest.fn(async () => ({
+    type: 'expo',
+    data: 'ExponentPushToken[test-phone-0001]',
+  })),
+  dismissNotificationAsync: jest.fn(async () => undefined),
+  clearLastNotificationResponse: jest.fn(),
+  useLastNotificationResponse: jest.fn(() => undefined),
+};
+jest.mock('expo-notifications', () => mockNotifications);
+(globalThis as { __notifications?: typeof mockNotifications }).__notifications = mockNotifications;
+beforeEach(() => {
+  for (const value of Object.values(mockNotifications)) {
+    if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
+  }
+});

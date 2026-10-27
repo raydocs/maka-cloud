@@ -15,6 +15,7 @@ import { openChat } from './harness';
 jest.mock('expo-router', () => {
   const { useEffect } = jest.requireActual<typeof import('react')>('react');
   return {
+    useLocalSearchParams: () => ({}),
     useRouter: () => ({ navigate: () => {}, push: () => {}, dismissTo: () => {}, back: () => {} }),
     useFocusEffect: (effect: () => () => void) => useEffect(effect, [effect]),
   };

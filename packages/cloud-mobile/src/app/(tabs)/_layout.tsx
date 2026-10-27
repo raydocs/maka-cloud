@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Glass, GlassButton, GlassGroup, TOP_BAR } from '@/components/ui';
 import { useT } from '@/lib/i18n';
 import { useLanding } from '@/lib/landing';
+import { usePushRouting } from '@/lib/pushRouting';
 import type { Key } from '@/lib/strings';
 import { radius, useTheme } from '@/lib/theme';
 
@@ -28,6 +29,7 @@ const TEST_IDS: Record<string, string> = {
  */
 export default function SectionsLayout() {
   useLanding();
+  usePushRouting();
   return (
     <Tabs style={{ flex: 1 }}>
       <TabSlot style={{ flex: 1 }} />

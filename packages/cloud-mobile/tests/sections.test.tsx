@@ -16,6 +16,7 @@ import { DARK, LIGHT, type Palette, ThemeContext } from '@/lib/theme';
 
 const mockRouter = { navigate: jest.fn(), push: jest.fn(), dismissTo: jest.fn(), back: jest.fn() };
 jest.mock('expo-router', () => ({
+  useLocalSearchParams: () => ({}),
   useRouter: () => ({ ...mockRouter, canGoBack: () => true }),
   useFocusEffect: () => {},
 }));

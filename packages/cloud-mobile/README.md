@@ -20,7 +20,15 @@ the look (`lib/theme.ts`, the web's palette).
   first language or the picker in Me, whose choice is kept on the device. The strings are in
   `lib/strings.ts` and `lib/strings.hant.ts`, read through `lib/i18n.tsx`; what the server or the agent
   wrote is shown as sent. Builds made with `MAKA_E2E=1` default to Simplified Chinese (`MAKA_LANG` overrides).
-- Next (T29 PRs 4 to 6): the task page and the viewer; push, share and deep links; release profiles.
+- **Notifications** (`lib/push.ts`, `lib/pushRouting.ts`): after sign-in, Home offers them once ("Turn on
+  notifications" or "Not now"), and Me can turn them on or off. Nothing is asked of the phone before that tap.
+  The Expo push token goes to the server (`POST /v1/push/devices`) and is removed on sign-out. A notification
+  says only that a decision waits or a result is ready, and carries ids. Its actions are "Got it", "Not now"
+  and "Open"; there is no Approve, because an approval is given only in the app, where its exact text shows.
+  A tap opens the task (in Chat) or the decision (marked on Home); one for another account opens Home only.
+- **Links** (`app/+native-intent.tsx`, `lib/links.ts`): `makacloud://task/<id>`, `makacloud://decision/<id>`
+  and `makacloud://` (Home). A link carries only an id; anything else opens Home.
+- Next (T29): the task page and the viewer; share; release profiles.
 
 ## Run and verify
 
@@ -49,6 +57,11 @@ builds talk to the stack over plain http (`app.config.ts`); store builds never s
 Not done by an agent, and listed for the owner: the Apple Developer account and bundle id (the one in
 `app.config.ts` is provisional), App Store Connect, APNs; Google Play, the package name, FCM; the Expo account and
 EAS project; signing keys and secrets (EAS only, set by the owner).
+
+Notifications need the owner's part too: the EAS project (its id goes in `MAKA_EAS_PROJECT_ID` for the build;
+without it the app says notifications are not available and asks the phone nothing), the APNs key and the FCM
+project in that EAS project, `MAKA_CLOUD_EXPO_PUSH=1` on the server (and `MAKA_CLOUD_EXPO_ACCESS_TOKEN` if the
+project requires one), and universal and App Links once the app's web domain is set.
 
 `expo start --web` renders the same screens in a browser for review. A browser draws the blur fallback, never
 Liquid Glass.
