@@ -46,9 +46,13 @@ so every change here has to keep the next upstream merge cheap.
 
 ## Product constraints
 
-- Models are reached with API keys only. Never use or extend the Claude
-  subscription provider (`subscription-cloaked-request.ts`), and never offer a
-  claude.ai login in the product.
+- Models are reached with API keys by default. For testing, the owner's own
+  Claude subscription may run the unmodified `claude` CLI in a boat sandbox,
+  signed in through Anthropic's own flow (boat's credential profile, or
+  `/login` in the sandbox). Our code never collects, stores or forwards that
+  sign-in, and never runs another user's task on it. Never use or extend the
+  Claude subscription provider (`subscription-cloaked-request.ts`), and never
+  offer a claude.ai login in the product.
 - Claude conversation history is append-only. Do not prune, rewrite or reorder
   earlier turns: Claude Opus 5.5 checks preserved thinking against the history.
 - Do not brand anything "Claude Code". "Claude Agent" or "<name> Powered by
