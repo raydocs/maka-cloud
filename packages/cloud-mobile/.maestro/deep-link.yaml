@@ -5,19 +5,28 @@ appId: cloud.maka.app
 - runFlow: subflows/sign-in.yaml
 - assertVisible:
     id: "field-Keep the conversation going"
-- openLink: makacloud://decision/${ITEM}
+- runFlow:
+    file: subflows/open-link.yaml
+    env:
+      LINK: makacloud://decision/${ITEM}
 - extendedWaitUntil:
     visible:
       id: "home-linked-decision"
     timeout: 20000
 - takeScreenshot: link-decision
-- openLink: makacloud://task/${TASK}
+- runFlow:
+    file: subflows/open-link.yaml
+    env:
+      LINK: makacloud://task/${TASK}
 - extendedWaitUntil:
     visible:
       id: "task-pill-${TASK}"
     timeout: 20000
 - takeScreenshot: link-task
-- openLink: makacloud://
+- runFlow:
+    file: subflows/open-link.yaml
+    env:
+      LINK: makacloud://
 - extendedWaitUntil:
     visible:
       id: "home-today-title"

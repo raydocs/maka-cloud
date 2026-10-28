@@ -1,0 +1,16 @@
+# Opens a link in the app, as -e LINK=... On iOS the simulator first asks "Open in “Maka”?" for a
+# custom scheme (the link reaches the app only after "Open"); Android hands it over directly.
+appId: cloud.maka.app
+---
+- openLink: ${LINK}
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Open"
+          timeout: 10000
+          optional: true
+      - tapOn:
+          text: "Open"
+          optional: true
