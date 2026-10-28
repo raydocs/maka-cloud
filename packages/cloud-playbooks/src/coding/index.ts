@@ -1,5 +1,6 @@
 export * from './briefs.js';
 export * from './deliveries.js';
+export * from './follow-up.js';
 export * from './github.js';
 export * from './loop.js';
 export * from './playbook.js';

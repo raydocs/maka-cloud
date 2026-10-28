@@ -31,7 +31,7 @@ export interface DutiesSetup {
   every?: (fn: () => void, ms: number) => () => void;
   /** Proposed cards are on: the project routes also show and switch the suggestions. */
   cards?: boolean;
-  engine?: Pick<EngineOptions, 'now' | 'proposer'>;
+  engine?: Pick<EngineOptions, 'now' | 'proposer' | 'onWorkflowRun'>;
   onWarning?: (message: string, detail?: unknown) => void;
 }
 

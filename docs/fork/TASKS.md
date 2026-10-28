@@ -628,6 +628,10 @@ Depends on: T6, T8, T23, T28.
   `merge-when-green`.
 - Tests with a fake instabox and a fake GitHub: idle pause, no pause while a
   task runs, resume on a message, the ship path, and the bounded CI fix loop.
+- Status: the CI half is built as the PR follow-up (`design/pr-follow-up.md`): every pull
+  request a coding task opens is followed until its checks pass (a quiet update), one verified
+  and reviewed fix is pushed on red, and a second red is one "needs you" item. Merging, sleep
+  and wake and the one Ship action are still open.
 
 ## T27: the user's own Claude and ChatGPT plans, on many boxes
 

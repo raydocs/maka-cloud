@@ -153,3 +153,30 @@ test('a duty that is off, or only proposed, never matches an event', async () =>
   assert.equal(r.deliver('issues', issueOpened({ number: 2 })).body.started, 1);
   r.cleanup();
 });
+
+test('every new signed CI completion of a project tells the PR follow-up its branch, with no duty needed', async () => {
+  const seen: Array<{ repo: string; branch: string }> = [];
+  const r = await rig({ onWorkflowRun: (event) => seen.push(event) });
+  r.deliver('workflow_run', workflowRun({ id: 1, branch: 'maka/task_1', conclusion: 'success' }), {
+    id: 'd1',
+  });
+  // The same delivery again, a bad signature and a run still in progress tell nothing.
+  r.deliver('workflow_run', workflowRun({ id: 1, branch: 'maka/task_1', conclusion: 'success' }), {
+    id: 'd1',
+  });
+  r.deliver('workflow_run', workflowRun({ id: 2, branch: 'maka/task_1' }), {
+    id: 'd2',
+    secret: 'not-the-secret-of-this-webhook-at-all',
+  });
+  r.deliver('workflow_run', workflowRun({ id: 3, branch: 'maka/task_1', action: 'requested' }), {
+    id: 'd3',
+  });
+  r.deliver('workflow_run', workflowRun({ id: 4, branch: 'maka/task_1', conclusion: 'failure' }), {
+    id: 'd4',
+  });
+  assert.deepEqual(seen, [
+    { repo: 'acme/widgets', branch: 'maka/task_1' },
+    { repo: 'acme/widgets', branch: 'maka/task_1' },
+  ]);
+  r.cleanup();
+});

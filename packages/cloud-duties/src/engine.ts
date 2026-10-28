@@ -40,6 +40,11 @@ export interface EngineOptions {
   cardKinds?: ReadonlySet<CardKind>;
   /** Chooses the duties to propose from what the inspector found. Default: `proposeDuties`. */
   proposer?: (facts: RepoFacts) => DutyProposal;
+  /**
+   * Told of every new, signed CI run completion of a registered project, whatever the duties do
+   * with it: the PR follow-up looks at that branch's checks now instead of at its next poll.
+   */
+  onWorkflowRun?: (event: { repo: string; branch: string }) => void;
   now?: () => number;
   onWarning?: (message: string, detail?: unknown) => void;
 }
@@ -303,6 +308,7 @@ export class DutyEngine {
     if (!parsed) return { status: 400, body: { error: 'invalid_payload' } };
     if (delivery.event === 'ping') return { status: 200, body: { ok: true, pong: true } };
 
+    let ciSeen = false;
     const result = transaction(this.db, (): ReceiveResult => {
       const project = this.projectByRepo(parsed.repo);
       if (!project) return { status: 200, body: { ok: true, ignored: 'unknown_project' } };
@@ -323,8 +329,16 @@ export class DutyEngine {
       if (Number(seen.changes) === 0) {
         return { status: 200, body: { ok: true, duplicate: true } };
       }
+      ciSeen = parsed.ci !== undefined;
       return this.apply(project, parsed.classify(viewOf(project)), at);
     });
+    if (ciSeen && parsed.ci) {
+      try {
+        this.options.onWorkflowRun?.({ repo: parsed.repo, branch: parsed.ci.branch });
+      } catch (error) {
+        this.options.onWarning?.('A CI run listener failed', error);
+      }
+    }
     if (result.body.started !== undefined && Number(result.body.started) > 0) this.notify();
     return result;
   }

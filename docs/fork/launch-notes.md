@@ -12,6 +12,15 @@ each is off unless its setting is present, so the launch environment file simply
 | Deep mode | `MAKA_CLOUD_DEEP_MODE` unset or `0` | the conductor is not told about `deep`, a suggestion of it runs as `standard`, and a user's pick of it runs as `standard` with the notice "Deep mode is not available yet"; `deep` holds `standard`'s values everywhere the modes are read | the provenance gap in `docs/fork/post-launch-backlog.md` (Deep research) is closed |
 | Plan vault | not wired: `packages/cloud-plans` is imported by no server package, so no setting turns it on | the user's own Claude or ChatGPT plan used on the boxes (T27) | T27 is finished and reviewed; it needs the box pool first |
 
+## On at launch: the PR follow-up
+
+Every pull request a coding task opens is followed until its checks have spoken
+(`design/pr-follow-up.md`): green is a quiet line, red gets one verified and reviewed fix pushed
+onto the same pull request, a second red is one "needs you" item. It needs nothing but
+`MAKA_GITHUB_TOKEN`, which must also read checks (Checks or Actions: read). `MAKA_CLOUD_PR_AUTOFIX=0`
+keeps the following and turns the fix off. A fix run is a task like any other, so it waits its
+turn behind the one task per invite.
+
 ## One task at a time per invite
 
 Every task of an invite runs on the invite's machine as the one agent account, so two tasks at once

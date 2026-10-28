@@ -33,6 +33,11 @@ export interface RuleContext {
   historyBefore: number;
   /** Finished top-level tasks are checked independently before they are shown as finished. */
   verification: boolean;
+  /**
+   * Tasks another part reports on itself (the PR follow-up's fix run): their end raises no item and
+   * starts no check here, and they never count as stalled or as a failed step. Default: none.
+   */
+  followed?: (taskId: string) => boolean;
 }
 
 const MAX_ASK = 600;
@@ -130,6 +135,9 @@ export function fingerprint(store: Store, context: ItemContext): unknown {
         taskId: context.taskId,
         manifestDigest: context.manifestDigest ?? null,
       };
+    // A follow-up of a pull request's checks stays true until the human answers it.
+    case 'follow_up':
+      return { subject: 'follow_up', detail: context.detail ?? null };
     // A spending limit that stopped work stays true until the human acknowledges it.
     case 'cap':
       return { subject: 'cap', key: context.detail ?? null };
@@ -239,6 +247,71 @@ export function capSpec(
     options: FINISHED_OPTIONS,
     allowText: false,
     evidence: [],
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
+
+const FOLLOW_UP_OPTIONS: ItemOption[] = [
+  {
+    id: 'retry',
+    label: 'Ask the agent to fix the checks',
+    recommended: true,
+    effect: 'message',
+    messageKey: 'retry_checks',
+  },
+  {
+    id: 'mine',
+    label: "I'll take it from here",
+    recommended: false,
+    effect: 'local',
+    closeReason: 'acknowledged',
+  },
+];
+
+/**
+ * An item of the PR follow-up. A quiet one (the checks passed, an automatic fix passed, the pull
+ * request was merged) is `finished` and never interrupts; it names no task, so a task's own result
+ * card keeps its verdict. One that needs the human (the fix was used up or could not be made, a
+ * check waits for approval) is a `decision` on the task. One open item per key.
+ */
+export function followUpSpec(
+  store: Store,
+  input: {
+    conversationId: string;
+    taskId: string;
+    key: string;
+    needsYou: boolean;
+    ask: string;
+    url?: string;
+  },
+): ItemSpec {
+  const ask = clip(input.ask, MAX_ASK);
+  const context: ItemContext = {
+    subject: 'follow_up',
+    taskId: input.taskId,
+    detail: ask,
+  };
+  const evidence: EvidenceLink[] = [];
+  if (input.url !== undefined) {
+    try {
+      const url = new URL(input.url);
+      if (url.protocol === 'https:' && url.username === '' && url.password === '') {
+        evidence.push({ kind: 'link', url: url.href, label: 'Pull request' });
+      }
+    } catch {
+      // Not a URL; not evidence.
+    }
+  }
+  return {
+    kind: input.needsYou ? 'decision' : 'finished',
+    conversationId: input.conversationId,
+    taskId: input.needsYou ? input.taskId : null,
+    dedupeKey: `followup:${input.key}`,
+    ask,
+    options: input.needsYou ? FOLLOW_UP_OPTIONS : FINISHED_OPTIONS,
+    allowText: input.needsYou,
+    evidence,
     context,
     precondition: preconditionOf(store, context),
   };
@@ -581,7 +654,15 @@ export function applySignal(store: Store, signal: Signal, rule: RuleContext): vo
   const history = signal.at < rule.historyBefore;
   switch (signal.type) {
     case 'task':
-      applyTask(store, signal.conversationId, signal.at, signal.event, history, rule.verification);
+      applyTask(
+        store,
+        signal.conversationId,
+        signal.at,
+        signal.event,
+        history,
+        rule.verification,
+        rule.followed ?? (() => false),
+      );
       return;
     case 'user_message':
       // A message sent instead of an answer dismisses the conductor's open question.
@@ -616,6 +697,7 @@ function applyTask(
   event: SignalTaskEvent,
   history: boolean,
   checking: boolean,
+  followed: (taskId: string) => boolean,
 ): void {
   const settle = (taskId: string) => {
     for (const cleared of store.bumpActivity(taskId, at)) {
@@ -669,9 +751,16 @@ function applyTask(
       if (store.task(event.taskId)) settle(event.taskId);
       return;
     case 'task_succeeded':
-      return endSucceeded(store, event.taskId, event.manifest, at, history, checking);
+      return endSucceeded(
+        store,
+        event.taskId,
+        event.manifest,
+        at,
+        history || followed(event.taskId),
+        checking,
+      );
     case 'task_failed':
-      return endFailed(store, event.taskId, event.reason, at, history);
+      return endFailed(store, event.taskId, event.reason, at, history, followed(event.taskId));
     case 'task_cancelled': {
       if (!store.task(event.taskId)) return;
       store.setTaskState(event.taskId, 'cancelled', at);
@@ -726,11 +815,14 @@ function endFailed(
   reason: string,
   at: number,
   history: boolean,
+  followed: boolean,
 ): void {
   const task = store.task(taskId);
   if (!task || task.state === 'failed') return;
   store.setTaskState(taskId, 'failed', at);
   closeItems(store, `stall:${taskId}`, 'condition_cleared', at);
+  // A followed task's end is reported by what follows it: here it changes only the projection.
+  if (followed) return;
   if (!isOrphan(reason)) {
     const key = task.title ? task.stepKey : `${task.stepKey}:${reasonFingerprint(reason)}`;
     store.recordFailure(key, taskId, at);
@@ -747,11 +839,18 @@ function endFailed(
 // ----------------------------------------------------------------- tick
 
 /** R4: raises one item per stalled task. Paused tasks are not stalled. */
-export function stallPass(store: Store, settings: Settings, at: number): number {
-  const idle = store.idleTasks(
-    at - settings.stallAfterMinutes * 60_000,
-    at - settings.queuedStallAfterMinutes * 60_000,
-  );
+export function stallPass(
+  store: Store,
+  settings: Settings,
+  at: number,
+  followed: (taskId: string) => boolean = () => false,
+): number {
+  const idle = store
+    .idleTasks(
+      at - settings.stallAfterMinutes * 60_000,
+      at - settings.queuedStallAfterMinutes * 60_000,
+    )
+    .filter((task) => !followed(task.taskId));
   for (const task of idle) {
     store.setStallRaised(task.taskId);
     openItem(store, stallSpec(store, task, at), at);
@@ -804,6 +903,7 @@ export function reassess(store: Store, item: ItemRecord, at: number): Reassessme
     }
     case 'result':
     case 'cap':
+    case 'follow_up':
     case 'proposal':
     // Whether the card still holds is read from GitHub, which takes a request: the supervisor asks
     // the host before it takes an answer (`precheckSuggestion`), not here.

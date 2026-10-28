@@ -82,7 +82,8 @@ export interface ItemContext {
     | 'verification'
     | 'cap'
     | 'proposal'
-    | 'suggestion';
+    | 'suggestion'
+    | 'follow_up';
   taskTitle?: string;
   taskId?: string;
   questionId?: string;

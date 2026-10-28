@@ -17,6 +17,7 @@ import {
   type Reassessment,
   reassess,
   stallPass,
+  followUpSpec,
 } from './rules.js';
 import {
   dueDigestSlot,
@@ -58,6 +59,11 @@ export interface SupervisorOptions {
    * task is shown as finished at once, marked as not independently checked.
    */
   verification?: VerificationOptions;
+  /**
+   * Tasks another part reports on itself (the PR follow-up's fix run): their end raises no item
+   * here and starts no check, and they are never stalled. Read on every feed entry and tick.
+   */
+  followedTask?: (taskId: string) => boolean;
   /** Replaces setInterval, so a test can see the timer is released. */
   schedule?: (fn: () => void, ms: number) => () => void;
 }
@@ -305,6 +311,9 @@ export class Supervisor {
               settings,
               historyBefore: this.historyBefore,
               verification: this.options.verification !== undefined,
+              ...(this.options.followedTask === undefined
+                ? {}
+                : { followed: this.options.followedTask }),
             }),
           );
           if (!result.ok) this.warn(`The supervisor skipped feed entry ${entry.id}`, result.error);
@@ -340,7 +349,14 @@ export class Supervisor {
     try {
       this.catchUp();
       const at = this.now();
-      this.store.tx(() => stallPass(this.store, this.store.settings(this.options.settings), at));
+      this.store.tx(() =>
+        stallPass(
+          this.store,
+          this.store.settings(this.options.settings),
+          at,
+          this.options.followedTask,
+        ),
+      );
       this.verifier?.pass();
       await this.flushPushes();
       if (this.stopped) return;
@@ -659,6 +675,25 @@ export class Supervisor {
       if (once && this.store.itemEverRaised(made.dedupeKey)) return;
       openItem(this.store, made, this.now());
     });
+    this.kick();
+    return true;
+  }
+
+  /**
+   * Raises an item of the PR follow-up: a quiet update, or one "needs you" decision with the option
+   * to ask the agent to fix the checks (a message to the conversation) or to take it over. One
+   * open item per key. Returns false, and raises nothing, when the supervisor has stopped.
+   */
+  raiseFollowUp(input: {
+    conversationId: string;
+    taskId: string;
+    key: string;
+    needsYou: boolean;
+    ask: string;
+    url?: string;
+  }): boolean {
+    if (this.stopped) return false;
+    this.store.tx(() => openItem(this.store, followUpSpec(this.store, input), this.now()));
     this.kick();
     return true;
   }

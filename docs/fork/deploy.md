@@ -496,7 +496,8 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `CLOUD_PUSH_VAPID_PRIVATE` | Web Push: the VAPID private key, kept in memory only |
 | `CLOUD_PUSH_SUBJECT` | Web Push: the VAPID contact, a mailto: or https: URL |
 | `CLOUD_PUSH_ALLOWED_HOSTS` | Web Push: comma separated push service hosts, default FCM, Mozilla, Apple, Windows |
-| `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened |
+| `MAKA_GITHUB_TOKEN` | fine-grained GitHub token for opening pull requests, read when one is opened. The PR follow-up reads the checks of those pull requests and pushes its one fix with it too, so give it Checks: read (or Actions: read, which the job logs need anyway) besides Contents and Pull requests read/write |
+| `MAKA_CLOUD_PR_AUTOFIX` | 0 turns off the one automatic fix of a pull request the employee opened whose checks fail: a red check is then a "needs you" item at once. Unset or 1: on (the fix is pushed onto the same pull request only after the same checks and review as the first change) |
 | `MAKA_GITHUB_WEBHOOK_SECRET` | the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties |
 | `MAKA_CLOUD_DEEP_MODE` | 1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off |
 | `MAKA_CLOUD_CARDS` | 1 turns on proposed cards: each project is scanned read-only once a day (and after the employee’s own task on it finishes) and offers up to 3 one-tap cards. Needs MAKA_GITHUB_WEBHOOK_SECRET and MAKA_GITHUB_TOKEN. Unset or 0: off |
