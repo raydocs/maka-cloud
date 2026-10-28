@@ -13,6 +13,7 @@ import { DARK, ThemeContext } from '@/lib/theme';
 
 // Home runs outside a navigator here.
 jest.mock('expo-router', () => ({
+  useLocalSearchParams: () => ({}),
   useRouter: () => ({ navigate: () => {} }),
   useFocusEffect: () => {},
 }));

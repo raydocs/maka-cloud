@@ -17,6 +17,13 @@ const e2e = process.env.MAKA_E2E === '1';
  */
 const language = process.env.MAKA_LANG ?? (e2e ? 'zh-Hans' : undefined);
 
+/**
+ * The EAS project the push tokens are for. The owner creates the project and sets it for their
+ * builds; without it the app says notifications are not available yet and asks the phone nothing.
+ * It is an id, not a credential: the APNs key and the FCM project stay in EAS.
+ */
+const easProjectId = process.env.MAKA_EAS_PROJECT_ID?.trim() || undefined;
+
 const config: ExpoConfig = {
   name: 'Maka',
   slug: 'maka-cloud',
@@ -45,13 +52,20 @@ const config: ExpoConfig = {
   plugins: [
     'expo-router',
     'expo-secure-store',
+    // Push through APNs and FCM; `makacloud://task/<id>` and `makacloud://decision/<id>` open the
+    // task or the decision (`src/app/+native-intent.tsx`).
+    ['expo-notifications', { defaultChannel: 'default' }],
     ['expo-splash-screen', { backgroundColor: '#0b1730' }],
     ...(e2e
       ? [['expo-build-properties', { android: { usesCleartextTraffic: true } }] as [string, object]]
       : []),
   ],
   experiments: { typedRoutes: true },
-  extra: { e2e, ...(language ? { language } : {}) },
+  extra: {
+    e2e,
+    ...(language ? { language } : {}),
+    ...(easProjectId ? { eas: { projectId: easProjectId } } : {}),
+  },
 };
 
 export default config;

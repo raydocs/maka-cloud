@@ -1,8 +1,21 @@
 # Signs in with an invite token: the server address and token passed as -e SERVER=... -e TOKEN=...
 appId: cloud.maka.app
 ---
+# A self-hosted Mac keeps its simulator between runs, and a link prompt ("Open in “Maka”?") left
+# from an earlier run stays over every app, clearState or not. It is cancelled first.
+- runFlow:
+    when:
+      visible: "Open in .Maka.\\?"
+    commands:
+      - tapOn: "Cancel"
 - launchApp:
     clearState: true
+# Again once the app is up, in case the prompt came back with it.
+- runFlow:
+    when:
+      visible: "Open in .Maka.\\?"
+    commands:
+      - tapOn: "Cancel"
 # A slow hosted emulator sometimes shows the launcher's "isn't responding" box over the app.
 - runFlow:
     when:

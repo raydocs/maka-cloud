@@ -3,7 +3,8 @@
 //
 //   node scripts/e2e-seed.mjs <control url> <api url> fresh      a new invite with nothing in it
 //   node scripts/e2e-seed.mjs <control url> <api url> decision   a new invite with a finished task whose
-//                                                                 result waits on one decision
+//                                                                 result waits on one decision (also prints
+//                                                                 TASK= and ITEM=, for the deep-link flow)
 //   node scripts/e2e-seed.mjs <control url> <api url> email      a new invite for a person who signs in by
 //                                                                 emailed code and gives it once
 //   node scripts/e2e-seed.mjs <control url> <api url> delivery   a new invite with a finished task that
@@ -36,6 +37,17 @@ if (kind === 'decision') {
   const { taskId } = await op('delegate', { conversationId, title: 'Weekly report' });
   await op('progress', { taskId, note: 'Working' });
   await op('complete', { taskId, manifest: { summary: 'The weekly report is ready.' } });
+  // The inbox raises its item a moment after the task ends.
+  let itemId;
+  for (let i = 0; i < 50 && itemId === undefined; i++) {
+    const listed = await fetch(`${api}/v1/inbox/items?state=open&limit=200`, { headers });
+    const { items = [] } = listed.ok ? await listed.json() : {};
+    itemId = items.find((item) => item.taskId === taskId)?.itemId;
+    if (itemId === undefined) await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  if (itemId === undefined) throw new Error('decision: the inbox raised no item');
+  console.log(`TASK=${taskId}`);
+  console.log(`ITEM=${itemId}`);
 }
 
 if (kind === 'delivery') {

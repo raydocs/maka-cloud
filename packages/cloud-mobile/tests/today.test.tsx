@@ -15,6 +15,7 @@ import { partOfDay, todayOf, WORKING_REFRESH_MS } from '@/lib/today';
 // Home runs outside a navigator here; a test focuses and blurs it by hand.
 const mockFocus: { effect?: () => undefined | (() => void) } = {};
 jest.mock('expo-router', () => ({
+  useLocalSearchParams: () => ({}),
   useRouter: () => ({ navigate: () => {} }),
   useFocusEffect: (effect: () => undefined | (() => void)) => {
     mockFocus.effect = effect;
