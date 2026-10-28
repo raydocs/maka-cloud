@@ -744,3 +744,34 @@ test('a scoped approval may cover this tool only for the repository its card nam
   await fs.writeFile(changesPath, JSON.stringify({ ...CHANGES, files: [] }));
   assert.equal(await tool.grantScope?.({ taskId: 'tsk_1', title: 'Fix add' }), undefined);
 });
+
+test('an opened pull request is handed to the follow-up once, a kept draft never, and a follow-up that fails does not fail the opening', async (t) => {
+  const seen: Array<{ taskId: string; conversationId: string; repo: string; number: number }> = [];
+  const { deliveries } = await deliveryFiles(t);
+  const fake = await github(t);
+  const tool = openPullRequestTool({
+    deliveries,
+    publisher: publisher(fake),
+    ownsTask: () => true,
+    onPublished: ({ taskId, conversationId, repo, pr }) => {
+      seen.push({ taskId, conversationId, repo, number: pr.number });
+      throw new Error('the follow-up is down');
+    },
+  });
+  await call(tool, { taskId: 'tsk_1', title: 'Fix add' });
+  await call(tool, { taskId: 'tsk_1', title: 'Fix add' });
+  assert.deepEqual(seen, [{ taskId: 'tsk_1', conversationId: 'cnv_1', repo: REPO, number: 1 }]);
+  assert.equal((await deliveries.get('tsk_1'))?.publishedPr?.number, 1);
+
+  const kept = await deliveryFiles(t, {
+    ...VERIFICATION,
+    kept: { reason: 'no independent review' },
+  });
+  const keptTool = openPullRequestTool({
+    deliveries: kept.deliveries,
+    publisher: publisher(await github(t)),
+    ownsTask: () => true,
+    onPublished: () => assert.fail('a kept draft is the owner’s to look at, not followed'),
+  });
+  await call(keptTool, { taskId: 'tsk_1', title: 'Fix add', publishUnreviewed: true });
+});
