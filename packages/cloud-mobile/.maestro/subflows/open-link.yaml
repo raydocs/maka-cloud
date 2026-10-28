@@ -8,9 +8,11 @@ appId: cloud.maka.app
       platform: iOS
     commands:
       - extendedWaitUntil:
-          visible: "Open"
+          visible: "Open in .Maka.\\?"
           timeout: 10000
           optional: true
-      - tapOn:
-          text: "Open"
-          optional: true
+      - runFlow:
+          when:
+            visible: "Open in .Maka.\\?"
+          commands:
+            - tapOn: "Open"
