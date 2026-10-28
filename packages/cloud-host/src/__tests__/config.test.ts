@@ -43,6 +43,21 @@ test('the minimal environment gives the data layout and the defaults', () => {
   assert.match(config.githubTokenProblem ?? '', /MAKA_GITHUB_TOKEN is not set/);
 });
 
+test('the automatic fix of a red pull request is off unless MAKA_CLOUD_PR_AUTOFIX is 1', () => {
+  const off = readStackConfig(ENV);
+  assert.equal(off.prAutoFix, false);
+  assert.ok(
+    describeConfig(off).some((line) =>
+      /PR follow-up: .*it needs you and offers the fix \(set MAKA_CLOUD_PR_AUTOFIX=1/u.test(line),
+    ),
+  );
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_PR_AUTOFIX: '0' }).prAutoFix, false);
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_PR_AUTOFIX: '1' }).prAutoFix, true);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_PR_AUTOFIX: 'yes' }), [
+    'MAKA_CLOUD_PR_AUTOFIX must be 1 or 0',
+  ]);
+});
+
 test('only a fine-grained MAKA_GITHUB_TOKEN can open pull requests, and GITHUB_TOKEN is ignored', () => {
   assert.equal(
     readStackConfig({ ...ENV, MAKA_GITHUB_TOKEN: 'github_pat_secret' }).githubTokenProblem,

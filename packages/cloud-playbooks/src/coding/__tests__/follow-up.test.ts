@@ -197,7 +197,7 @@ test('green checks are one quiet update in the conversation and the inbox, and n
 });
 
 test('red starts one fix run from the pull request head with the scrubbed log, pushes it once it is reviewed, and green after it is quiet', async (t) => {
-  const s = await setup(t);
+  const s = await setup(t, { autoFix: true });
   const firstHead = s.head();
   s.fake.checkRuns.set(firstHead, [run(41, 'unit tests', 'failure'), run(42, 'lint', 'success')]);
   s.fake.logs.set(41, `npm test\nnot ok 3 - add\nexport TOKEN=${LEAKED}\nexit 1\n`);
@@ -251,7 +251,7 @@ test('red starts one fix run from the pull request head with the scrubbed log, p
 });
 
 test('a second failure after the fix is one "needs you" item, never another try', async (t) => {
-  const s = await setup(t);
+  const s = await setup(t, { autoFix: true });
   const firstHead = s.head();
   s.fake.checkRuns.set(firstHead, [run(41, 'unit tests', 'failure')]);
   await s.pass();
@@ -274,7 +274,7 @@ test('a second failure after the fix is one "needs you" item, never another try'
 
 test('a fix that was kept for the owner, failed, or no longer fits the head is not pushed and needs the owner once', async (t) => {
   for (const variant of ['kept', 'failed', 'moved'] as const) {
-    const s = await setup(t);
+    const s = await setup(t, { autoFix: true });
     const firstHead = s.head();
     s.fake.checkRuns.set(firstHead, [run(41, 'unit tests', 'failure')]);
     await s.pass();
@@ -321,7 +321,7 @@ test('the follow-up stops quietly when the pull request is merged or closed, or 
 });
 
 test('without "Checks: read" the workflow runs and their jobs are read instead', async (t) => {
-  const s = await setup(t);
+  const s = await setup(t, { autoFix: true });
   s.fake.checksForbidden = true;
   s.fake.workflowRuns.set(s.head(), [
     {
@@ -339,8 +339,8 @@ test('without "Checks: read" the workflow runs and their jobs are read instead',
   assert.match(s.fixes[0]?.brief ?? '', /AssertionError: expected 3/);
 });
 
-test('with automatic fixes off, red is a "needs you" item at once; a check waiting for approval asks once per head', async (t) => {
-  const s = await setup(t, { autoFix: false });
+test('by default nothing is pushed: red is one "needs you" item that offers the fix; a check waiting for approval asks once per head', async (t) => {
+  const s = await setup(t);
   s.fake.checkRuns.set(s.head(), [run(1, 'deploy preview', 'action_required')]);
   await s.pass();
   await s.pass();
@@ -350,18 +350,26 @@ test('with automatic fixes off, red is a "needs you" item at once; a check waiti
   );
   s.fake.checkRuns.set(s.head(), [run(1, 'unit tests', 'failure')]);
   await s.pass();
-  assert.equal(s.fixes.length, 0);
+  await s.pass();
+  assert.equal(s.fixes.length, 0, 'no fix run starts without the setting');
+  const head = s.head();
+  assert.equal(s.fake.posts('/git/commits').length, 1, 'only the first change was ever committed');
   assert.deepEqual(
     needsYou(s.reports).map((r) => r.key),
-    [`tsk_1:approval:${s.head()}`, 'tsk_1:exhausted'],
+    [`tsk_1:approval:${head}`, 'tsk_1:failed'],
   );
+  assert.match(
+    needsYou(s.reports)[1]?.ask ?? '',
+    /Checks failed on pull request #1 in acme\/calc \(“unit tests”\)\. Nothing was pushed; ask the agent to fix them\?/,
+  );
+  assert.equal(s.followUp.list()[0]?.outcome, 'needs_you');
 });
 
 test('a restart picks the watch up where it was: a fix in flight is not started again', async (t) => {
   const dir = await fs.mkdtemp(join(tmpdir(), 'follow-up-store-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const store = new JsonFileFollowUpStore(join(dir, 'pr-follow-ups.json'));
-  const s = await setup(t, { store });
+  const s = await setup(t, { store, autoFix: true });
   s.fake.checkRuns.set(s.head(), [run(41, 'unit tests', 'failure')]);
   await s.pass();
   await s.followUp.stop();

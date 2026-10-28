@@ -35,7 +35,7 @@ export interface Watch {
   fixTaskId?: string;
   fixStartedAt?: number;
   fixLate?: boolean;
-  /** The head commit a \"waiting for approval\" item was raised for. */
+  /** The head commit a "waiting for approval" item was raised for. */
   approvalFor?: string;
   outcome?: WatchOutcome;
 }
@@ -73,7 +73,7 @@ export interface FollowUpPorts {
     conversationId: string,
     taskId: string,
   ): { state: string; failureReason?: string } | undefined;
-  /** A line in the conversation (quiet updates only: a \"needs you\" item brings its own). */
+  /** A line in the conversation (quiet updates only: a "needs you" item brings its own). */
   notice(conversationId: string, text: string): Promise<void>;
   /** Raises the inbox item. False when the inbox is not running. */
   report(item: FollowUpReport): boolean;
@@ -81,7 +81,11 @@ export interface FollowUpPorts {
 
 export interface FollowUpOptions extends FollowUpPorts {
   store: FollowUpStore;
-  /** Push a verified fix onto the pull request on red. Off: red is a \"needs you\" item at once. */
+  /**
+   * Push one verified fix onto the pull request on red, without asking. Default off: red is a
+   * "needs you" item that offers the fix, because pushing to the pull request unapproved is the
+   * owner's decision.
+   */
   autoFix?: boolean;
   /** How long checks are waited for, from the pull request (or the fix) on. Default 6 hours. */
   timeLimitMs?: number;
@@ -330,14 +334,14 @@ export class PrFollowUp {
       return this.end(watch, watch.round === 0 ? 'passed' : 'fixed');
     }
     if (result.state === 'failed') {
-      if (watch.round === 0 && this.options.autoFix !== false) {
+      if (watch.round === 0 && this.options.autoFix === true) {
         return this.startFix(watch, pr.headSha, result.failing);
       }
       this.needsYou(
         watch,
-        'exhausted',
+        watch.round === 0 ? 'failed' : 'exhausted',
         watch.round === 0
-          ? `Checks failed on ${this.label(watch)} (${names(result.failing)}). Automatic fixes are off, so nothing was tried.`
+          ? `Checks failed on ${this.label(watch)} (${names(result.failing)}). Nothing was pushed; ask the agent to fix them?`
           : `Checks still fail on ${this.label(watch)} after one automatic fix (${names(result.failing)}). It was not tried again.`,
       );
       return this.end(watch, 'needs_you');

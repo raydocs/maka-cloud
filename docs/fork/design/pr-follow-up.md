@@ -25,12 +25,17 @@ open_pull_request opens a reviewed change
         └─────────────────────────────────────────────▶│ one "needs you" item   │
                                                        └───────────────────────┘
 merged / closed / time limit while watching: quiet notice, done
+the fixing branch runs only with MAKA_CLOUD_PR_AUTOFIX=1; by default red goes straight to the item
 ```
 
 - **Green**: the conversation gets "Checks passed on pull request #N in owner/repo." and the
   inbox a `finished` item (never interrupts). The item names no task, so the task's own result
   card keeps its verdict; the line sits in the chat right under the card.
-- **Red, first time**: one fix run of the same task (`ci-fix:<taskId>`, idempotent): a coding
+- **Red, by default** (`MAKA_CLOUD_PR_AUTOFIX` unset or `0`, as at launch): one `decision` item on
+  the task, "Checks failed on pull request #N in owner/repo (…). Nothing was pushed; ask the agent
+  to fix them?", with "Ask the agent to fix the checks" first. Choosing it posts a message into the
+  conversation, so any change it leads to goes through the usual approval gates. Nothing is pushed.
+- **Red, first time, with `MAKA_CLOUD_PR_AUTOFIX=1`**: one fix run of the same task (`ci-fix:<taskId>`, idempotent): a coding
   task in the same conversation, on its root session, with the first task's budget, the same
   repository, test command and first vendor, and `baseRef` set to the pull request's branch. The
   coding runner does to it what it did to the first change: reproduction test, the repository's
@@ -40,7 +45,7 @@ merged / closed / time limit while watching: quiet notice, done
   hashes as recorded, onto a pull request that is still open and whose head is still the commit
   the fix was made on (`GitHubPublisher.update`, not forced). A retry after the push finds the
   same commit. Anything else is the "needs you" item, and nothing is pushed.
-- **Red after the fix, or no fix possible**: one `decision` item on the task, with "Ask the
+- **Red after the fix, or no fix possible** (with the setting on): one `decision` item on the task, with "Ask the
   agent to fix the checks" (a message into the conversation, built by code) and "I'll take it from
   here". It is never tried again.
 - **A check waiting for approval on GitHub** (`action_required`): one `decision` item per head.
@@ -63,7 +68,8 @@ The supervisor's rules were read against this flow:
 | Event | Before | Now |
 | --- | --- | --- |
 | Checks pass | nothing | quiet `finished` item |
-| Automatic fix passes | — | quiet `finished` item |
+| Checks fail (default, nothing pushed) | nothing | one `decision` item that offers the fix (interrupt) |
+| Automatic fix passes | — | quiet `finished` item | (only with `MAKA_CLOUD_PR_AUTOFIX=1`)
 | The fix task ends (either way) | top-level task: independent check (could end "could not check" for budget, an interrupt), `finished`, failed twice | nothing from the supervisor: `followedTask` keeps it to the projection; the follow-up reports |
 | The fix task is slow or queued behind the one task per invite | stall item (interrupt) | none; the follow-up raises one item after 3 hours |
 | Fix used up, or not possible | — | one `decision` item (interrupt) |
@@ -81,10 +87,10 @@ The first task keeps its independent check and its `finished` item as before.
 
 ## Open decisions for the owner
 
-1. **The fix push is not approved card by card.** The owner approved opening the pull request;
-   the one fix commit onto its branch goes without a new card, because the point is that nobody
-   watches. It is gated on the same checks and cross-vendor review. `MAKA_CLOUD_PR_AUTOFIX=0`
-   turns it off (red is then a "needs you" item at once).
+1. **Whether the fix may be pushed without approval.** With `MAKA_CLOUD_PR_AUTOFIX=1` the one fix
+   commit goes onto the pull request's branch without a new card, gated on the same checks and
+   cross-vendor review. That is a new product rule the owner has not decided on, so it is off by
+   default and at launch: red is then a "needs you" item that offers the fix.
 2. **The fix run is not a conductor run.** It is started on the conversation's orchestrator
    session, with the first task's budget as its tree cap; it counts against the invite's and the
    server's caps through the gateway, but not against a conductor run budget.

@@ -1,7 +1,7 @@
 # Launch notes: what stays off
 
 The first launch is the default path of `docs/fork/deploy.md`: one sandbox machine per invite, tasks
-started by users, the model gateway, approvals and the inbox. Four things are built and tested but
+started by users, the model gateway, approvals and the inbox. Five things are built and tested but
 stay off at launch. None of them is needed by a first user, and none is switched on by accident:
 each is off unless its setting is present, so the launch environment file simply leaves them out.
 
@@ -10,16 +10,17 @@ each is off unless its setting is present, so the launch environment file simply
 | Box pool | `MAKA_CLOUD_BOXES` unset (and `MAKA_CLOUD_BOX_TEMPLATE`, `MAKA_CLOUD_BOX_MAX` unset) | the server would make, sleep and delete sandboxes itself, a pool per invite, instead of the fixed `MAKA_CLOUD_SANDBOXES` machine per invite | the pool's own review items are closed and a second invite needs more than one box |
 | Proposed cards | `MAKA_CLOUD_CARDS` unset or `0` | a daily read-only scan of each registered project, with up to 3 one-tap cards in the inbox | the cards' own review items (secrets in GitHub text, rendering as plain text) are closed |
 | Deep mode | `MAKA_CLOUD_DEEP_MODE` unset or `0` | the conductor is not told about `deep`, a suggestion of it runs as `standard`, and a user's pick of it runs as `standard` with the notice "Deep mode is not available yet"; `deep` holds `standard`'s values everywhere the modes are read | the provenance gap in `docs/fork/post-launch-backlog.md` (Deep research) is closed |
+| Automatic fix of a red pull request | `MAKA_CLOUD_PR_AUTOFIX` unset or `0` | on a red check of a pull request the employee opened, one fix run of the same task would be pushed onto that pull request without a new approval (after the same checks and cross-vendor review); off, red is one "needs you" item that offers the fix and nothing is pushed | the owner decides that a verified fix may be pushed to the employee's own pull request without approving it |
 | Plan vault | not wired: `packages/cloud-plans` is imported by no server package, so no setting turns it on | the user's own Claude or ChatGPT plan used on the boxes (T27) | T27 is finished and reviewed; it needs the box pool first |
 
 ## On at launch: the PR follow-up
 
 Every pull request a coding task opens is followed until its checks have spoken
-(`design/pr-follow-up.md`): green is a quiet line, red gets one verified and reviewed fix pushed
-onto the same pull request, a second red is one "needs you" item. It needs nothing but
-`MAKA_GITHUB_TOKEN`, which must also read checks (Checks or Actions: read). `MAKA_CLOUD_PR_AUTOFIX=0`
-keeps the following and turns the fix off. A fix run is a task like any other, so it waits its
-turn behind the one task per invite.
+(`design/pr-follow-up.md`): green is a quiet line in the chat and the inbox, red is one "needs you"
+item that offers the fix, and nothing is pushed to the pull request. It needs nothing but
+`MAKA_GITHUB_TOKEN`, which must also read checks (Checks or Actions: read). The automatic fix
+(`MAKA_CLOUD_PR_AUTOFIX=1`) is off at launch (table above). With it on, a fix run is a task like any
+other, so it waits its turn behind the one task per invite.
 
 ## One task at a time per invite
 

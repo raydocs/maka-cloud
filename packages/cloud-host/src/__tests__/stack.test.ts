@@ -1883,7 +1883,7 @@ test('sign-in limits trust X-Forwarded-For only from the configured proxy', asyn
   assert.ok(!(await tries('127.0.0.1,::1')).includes(429));
 });
 
-test('a pull request a task opened is followed: green is a quiet update in its conversation, red with fixes off needs the owner once', async (t) => {
+test('a pull request a task opened is followed: green is a quiet update in its conversation, red by default needs the owner once and pushes nothing', async (t) => {
   // A GitHub that knows two pull requests: #1 with green checks, #2 with a failing one.
   const heads: Record<string, { sha: string; conclusion: string }> = {
     '1': { sha: '1'.repeat(40), conclusion: 'success' },
@@ -1919,7 +1919,6 @@ test('a pull request a task opened is followed: green is a quiet update in its c
     undefined,
     {
       MAKA_GITHUB_TOKEN: 'github_pat_11TEST_notarealtokennotarealtoken',
-      MAKA_CLOUD_PR_AUTOFIX: '0',
     },
     true,
     { followUp: { githubUrl, pollMs: 3_600_000 } },
@@ -1959,7 +1958,7 @@ test('a pull request a task opened is followed: green is a quiet update in its c
   );
   assert.match(
     items.find((item) => item.kind === 'decision')?.ask ?? '',
-    /Checks failed on pull request #2 .*Automatic fixes are off/,
+    /Checks failed on pull request #2 .*Nothing was pushed; ask the agent to fix them\?/,
   );
   assert.deepEqual(
     stack.followUp.list().map((watch) => watch.outcome),

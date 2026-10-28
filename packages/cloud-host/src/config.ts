@@ -34,8 +34,8 @@ export interface StackConfig {
   prFollowUpsPath: string;
   /**
    * On a red check of a pull request the employee opened, one fix run of the same task is pushed
-   * onto it once it passes the same checks and review (`MAKA_CLOUD_PR_AUTOFIX`, default on). Off:
-   * a red check is a "needs you" item at once.
+   * onto it once it passes the same checks and review (`MAKA_CLOUD_PR_AUTOFIX=1`). Default off: a
+   * red check is a "needs you" item that offers the fix, and nothing is pushed unapproved.
    */
   prAutoFix: boolean;
   /** The supervisor's own database. */
@@ -572,7 +572,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_PR_AUTOFIX',
-    '0 turns off the one automatic fix of a pull request the employee opened whose checks fail: a red check is then a "needs you" item at once. Unset or 1: on (the fix is pushed onto the same pull request only after the same checks and review as the first change)',
+    '1 turns on the one automatic fix of a pull request the employee opened whose checks fail: the fix is pushed onto the same pull request, without a new approval, only after the same checks and review as the first change, and a second red is a "needs you" item. Off at launch. Unset or 0: off, a red check is a "needs you" item that offers the fix and nothing is pushed',
   ],
   [
     'MAKA_GITHUB_WEBHOOK_SECRET',
@@ -739,7 +739,7 @@ export function readStackConfig(
     pushSet: false,
     dutiesSet: false,
     cardsSet: false,
-    prAutoFix: true,
+    prAutoFix: false,
     dutyLinks: [],
     signIn: { appleClientIds: [], googleClientIds: [], trustedProxies: [...DEFAULT_PROXIES] },
   };
@@ -792,7 +792,7 @@ export function readStackConfig(
       problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_TOKEN, which the scan reads with');
     } else config.cardsSet = true;
   }
-  config.prAutoFix = value('MAKA_CLOUD_PR_AUTOFIX') === undefined || flag('MAKA_CLOUD_PR_AUTOFIX');
+  config.prAutoFix = flag('MAKA_CLOUD_PR_AUTOFIX');
   const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
   if (backupDir !== undefined) {
     const problem = backupDirProblem(dataDir, backupDir);
@@ -1090,7 +1090,7 @@ export function describeConfig(config: StackConfig): string[] {
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
-    `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you (MAKA_CLOUD_PR_AUTOFIX=0)'}`,
+    `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (set MAKA_CLOUD_PR_AUTOFIX=1 to push one fix by itself)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `sign-in:             ${describeSignIn(config.signIn)}`,
     `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
