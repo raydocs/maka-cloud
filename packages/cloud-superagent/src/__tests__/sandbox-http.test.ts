@@ -8,12 +8,16 @@ import {
   FakeSandbox,
   HttpSandbox,
   InstaboxCredentialsError,
+  InstaboxHttpError,
+  OPERATION_WAIT,
 } from '../sandbox.js';
 
 interface Recorded {
   method: string;
   path: string;
+  query: string;
   apiKey: string | undefined;
+  confirmDelete: string | undefined;
   body: unknown;
 }
 
@@ -26,10 +30,14 @@ async function mockInstabox(
     req.on('data', (chunk) => chunks.push(chunk as Buffer));
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
+      const url = req.url ?? '';
+      const q = url.indexOf('?');
       const recorded: Recorded = {
         method: req.method ?? '',
-        path: req.url ?? '',
+        path: q === -1 ? url : url.slice(0, q),
+        query: q === -1 ? '' : url.slice(q + 1),
         apiKey: header(req, 'x-api-key'),
+        confirmDelete: header(req, 'x-confirm-delete'),
         body: raw ? JSON.parse(raw) : undefined,
       };
       requests.push(recorded);
@@ -135,7 +143,8 @@ test('HttpSandbox fails clearly on HTTP errors and createSandboxFromEnv uses the
     await assert.rejects(
       box.getMachine('mch_1'),
       (error: unknown) =>
-        error instanceof Error &&
+        error instanceof InstaboxHttpError &&
+        error.status === 401 &&
         /HTTP 401/.test(error.message) &&
         error.message.includes('"message":"no"'),
     );
@@ -157,6 +166,125 @@ test('HttpSandbox 400 includes status and redacted body', async () => {
     await assert.rejects(box.createMachine({ templateId: 'universal', vcpus: 1, memMiB: 512 }), {
       message: /HTTP 400.*spec_not_allowed.*<redacted>/,
     });
+  } finally {
+    await fake.close();
+  }
+});
+
+test('HttpSandbox waitForOperation long-polls with wait=25s until success', async () => {
+  let polls = 0;
+  const fake = await mockInstabox({
+    'GET /v1/operations/op_slow': () => {
+      polls += 1;
+      return {
+        body: {
+          id: 'op_slow',
+          machineId: 'mch_1',
+          type: 'create',
+          state: polls >= 2 ? 'succeeded' : 'pending',
+        },
+      };
+    },
+  });
+  try {
+    const box = new HttpSandbox({
+      apiKey: 'ibx-wait',
+      baseUrl: fake.url,
+      sleep: async () => {},
+    });
+    const done = await box.waitForOperation('op_slow');
+    assert.equal(done.state, 'succeeded');
+    assert.equal(polls, 2);
+    assert.ok(fake.requests.every((row) => row.query === `wait=${OPERATION_WAIT}`));
+    assert.equal(OPERATION_WAIT, '25s');
+  } finally {
+    await fake.close();
+  }
+});
+
+test('HttpSandbox waitForOperation gives up after the deadline', async () => {
+  const fake = await mockInstabox({
+    'GET /v1/operations/op_hang': () => ({
+      body: { id: 'op_hang', type: 'create', state: 'pending' },
+    }),
+  });
+  try {
+    let clock = 0;
+    const box = new HttpSandbox({
+      apiKey: 'ibx-wait',
+      baseUrl: fake.url,
+      now: () => clock,
+      sleep: async () => {
+        clock += 60_000;
+      },
+    });
+    await assert.rejects(box.waitForOperation('op_hang'), /wait deadline/);
+    assert.ok(fake.requests.length >= 2);
+    assert.ok(fake.requests.every((row) => row.query === 'wait=25s'));
+  } finally {
+    await fake.close();
+  }
+});
+
+test('HttpSandbox destroyMachine waits for an in-flight create then retries 409', async () => {
+  let polls = 0;
+  let deletes = 0;
+  const fake = await mockInstabox({
+    'GET /v1/machines/mch_busy': () => ({
+      body: {
+        id: 'mch_busy',
+        state: deletes === 0 ? 'creating' : 'running',
+        operationId: deletes === 0 ? 'op_c' : null,
+      },
+    }),
+    'GET /v1/operations/op_c': () => {
+      polls += 1;
+      return {
+        body: {
+          id: 'op_c',
+          machineId: 'mch_busy',
+          type: 'create',
+          state: polls >= 2 ? 'succeeded' : 'pending',
+        },
+      };
+    },
+    'DELETE /v1/machines/mch_busy': () => {
+      deletes += 1;
+      if (deletes === 1) {
+        return {
+          status: 409,
+          body: {
+            error: {
+              code: 'operation_conflict',
+              message: 'machine has an active create operation',
+              retryable: false,
+            },
+          },
+        };
+      }
+      return { body: { id: 'op_d', machineId: 'mch_busy', type: 'delete', state: 'succeeded' } };
+    },
+  });
+  try {
+    const box = new HttpSandbox({
+      apiKey: 'ibx-wait',
+      baseUrl: fake.url,
+      sleep: async () => {},
+    });
+    const deleted = await box.destroyMachine('mch_busy', { waitFor: 'op_c' });
+    assert.equal(deleted.state, 'succeeded');
+    assert.equal(polls, 2);
+    assert.equal(deletes, 2);
+    assert.ok(
+      fake.requests
+        .filter((row) => row.path === '/v1/operations/op_c')
+        .every((row) => row.query === 'wait=25s'),
+    );
+    assert.ok(
+      fake.requests
+        .filter((row) => row.method === 'DELETE')
+        .every((row) => row.confirmDelete === undefined),
+    );
   } finally {
     await fake.close();
   }

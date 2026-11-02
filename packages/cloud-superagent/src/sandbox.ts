@@ -21,6 +21,7 @@ export interface SandboxExecResult {
 export interface SandboxMachine {
   id: string;
   state: string;
+  operationId?: string | null;
 }
 
 export interface SandboxPort {
@@ -41,6 +42,39 @@ export class InstaboxCredentialsError extends Error {
     super(message);
     this.name = 'InstaboxCredentialsError';
   }
+}
+
+/** HTTP error with the Instabox envelope fields when the body has them. */
+export class InstaboxHttpError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly retryable: boolean | undefined;
+  readonly operationId: string | null | undefined;
+
+  constructor(
+    message: string,
+    extras: {
+      status: number;
+      code?: string;
+      retryable?: boolean;
+      operationId?: string | null;
+    },
+  ) {
+    super(message);
+    this.name = 'InstaboxHttpError';
+    this.status = extras.status;
+    this.code = extras.code;
+    this.retryable = extras.retryable;
+    this.operationId = extras.operationId;
+  }
+}
+
+export function isOperationConflict(error: unknown): error is InstaboxHttpError {
+  return (
+    error instanceof InstaboxHttpError &&
+    error.status === 409 &&
+    error.code === 'operation_conflict'
+  );
 }
 
 export interface InstaboxCredentials {
@@ -69,6 +103,12 @@ export const SMALLEST_SANDBOX = { vcpus: 2, memMiB: 4096 } as const;
 
 /** Usable default. `base` / `dev` are retired; `GET /v1/templates` lists this. */
 export const DEFAULT_LIVE_SMOKE_TEMPLATE = 'universal';
+
+/** Same long-poll as `@maka-cloud/instabox` `InstaboxClient.waitForOperation`. */
+export const OPERATION_WAIT = '25s';
+
+/** Create on Pro is ~4–5s; 24 back-to-back polls finished in ~2.5s. Five minutes is enough. */
+export const OPERATION_DEADLINE_MS = 5 * 60_000;
 
 /** Replace a secret in any string we print. Never log the raw key. */
 export function redactSecret(text: string, secret: string): string {
@@ -133,6 +173,8 @@ export interface HttpSandboxOptions {
   apiKey: string;
   baseUrl?: string;
   fetch?: typeof fetch;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -143,6 +185,8 @@ export class HttpSandbox implements SandboxPort {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly nowFn: () => number;
+  private readonly sleepFn: (ms: number) => Promise<void>;
 
   constructor(options: HttpSandboxOptions) {
     if (!options.apiKey?.trim()) {
@@ -153,6 +197,8 @@ export class HttpSandbox implements SandboxPort {
     this.apiKey = options.apiKey.trim();
     this.baseUrl = (options.baseUrl ?? DEFAULT_INSTABOX_BASE_URL).replace(/\/+$/, '');
     this.fetchImpl = options.fetch ?? fetch;
+    this.nowFn = options.now ?? Date.now;
+    this.sleepFn = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async ensureRunning(machineId: string): Promise<void> {
@@ -183,11 +229,15 @@ export class HttpSandbox implements SandboxPort {
   }
 
   async getMachine(machineId: string): Promise<SandboxMachine> {
-    const body = await this.request<{ id: string; state: string }>(
+    const body = await this.request<{ id: string; state: string; operationId?: string | null }>(
       'GET',
       `/v1/machines/${encodeURIComponent(machineId)}`,
     );
-    return { id: body.id ?? machineId, state: body.state ?? 'unknown' };
+    return {
+      id: body.id ?? machineId,
+      state: body.state ?? 'unknown',
+      operationId: body.operationId,
+    };
   }
 
   async createSnapshot(machineId: string, name: string): Promise<{ id: string }> {
@@ -255,22 +305,103 @@ export class HttpSandbox implements SandboxPort {
       'DELETE',
       `/v1/machines/${encodeURIComponent(machineId)}`,
       undefined,
-      { idempotencyKey: `maka-delete-${Date.now()}` },
+      { idempotencyKey: `maka-delete-${this.nowFn()}` },
     );
   }
 
-  async waitForOperation(operationId: string): Promise<InstaboxOperation> {
-    for (let step = 0; step < 24; step++) {
+  /**
+   * Long-polls `GET /v1/operations/{id}?wait=25s` until succeeded, failed, or the
+   * deadline (default 5 minutes). Same query as InstaboxClient; no client-side
+   * tight loop.
+   */
+  async waitForOperation(
+    operationId: string,
+    options: { deadlineMs?: number } = {},
+  ): Promise<InstaboxOperation> {
+    const deadline = this.nowFn() + (options.deadlineMs ?? OPERATION_DEADLINE_MS);
+    for (;;) {
       const operation = await this.request<InstaboxOperation>(
         'GET',
         `/v1/operations/${encodeURIComponent(operationId)}`,
+        undefined,
+        { query: { wait: OPERATION_WAIT } },
       );
       if (operation.state === 'succeeded') return operation;
       if (operation.state === 'failed') {
         throw new Error(`instabox operation ${operationId} failed`);
       }
+      if (this.nowFn() >= deadline) {
+        throw new Error(
+          `instabox operation ${operationId} still ${operation.state} after the wait deadline.`,
+        );
+      }
+      // Server should hold `wait=25s`. Tests and servers that ignore it still yield.
+      await this.sleepFn(0);
     }
-    throw new Error(`instabox operation ${operationId} did not finish`);
+  }
+
+  /**
+   * Wait for an in-flight create (or other op), then DELETE. Retries HTTP 409
+   * `operation_conflict` until the same deadline. InstaboxClient.deleteMachine
+   * does not send `X-Confirm-Delete`, so this client does not either.
+   */
+  async destroyMachine(
+    machineId: string,
+    options: { waitFor?: string; deadlineMs?: number } = {},
+  ): Promise<InstaboxOperation> {
+    const deadlineAt = this.nowFn() + (options.deadlineMs ?? OPERATION_DEADLINE_MS);
+    const remaining = () => Math.max(0, deadlineAt - this.nowFn());
+    const waitQuietly = async (operationId: string) => {
+      if (remaining() <= 0) return;
+      try {
+        await this.waitForOperation(operationId, { deadlineMs: remaining() });
+      } catch {
+        // Still try DELETE; a running create answers 409 and we retry.
+      }
+    };
+
+    if (options.waitFor) {
+      await waitQuietly(options.waitFor);
+    } else {
+      try {
+        const current = await this.getMachine(machineId);
+        if (current.operationId) await waitQuietly(current.operationId);
+      } catch {
+        // Machine may not be readable while create is pending.
+      }
+    }
+
+    let attempt = 0;
+    let lastError: unknown;
+    while (remaining() > 0) {
+      try {
+        const deleted = await this.deleteMachine(machineId);
+        if (deleted.state !== 'succeeded' && deleted.id) {
+          await this.waitForOperation(deleted.id, { deadlineMs: remaining() });
+        }
+        return deleted;
+      } catch (error) {
+        lastError = error;
+        if (error instanceof InstaboxHttpError && error.status === 404) {
+          return { id: '', machineId, state: 'succeeded' };
+        }
+        if (!isOperationConflict(error)) throw error;
+        if (error.operationId) {
+          await waitQuietly(error.operationId);
+        } else {
+          try {
+            const current = await this.getMachine(machineId);
+            if (current.operationId) await waitQuietly(current.operationId);
+            else await this.sleepFn(Math.min(5_000, 250 * 2 ** attempt++));
+          } catch {
+            await this.sleepFn(Math.min(5_000, 250 * 2 ** attempt++));
+          }
+        }
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`instabox delete ${machineId} did not finish`);
   }
 
   private async mutate(machineId: string, action: 'resume' | 'start' | 'suspend'): Promise<void> {
@@ -281,7 +412,7 @@ export class HttpSandbox implements SandboxPort {
     method: string,
     path: string,
     body?: unknown,
-    extras?: { idempotencyKey?: string },
+    extras?: { idempotencyKey?: string; query?: Record<string, string> },
   ): Promise<T> {
     const headers: Record<string, string> = {
       'X-API-Key': this.apiKey,
@@ -289,14 +420,18 @@ export class HttpSandbox implements SandboxPort {
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (extras?.idempotencyKey) headers['Idempotency-Key'] = extras.idempotencyKey;
-    const response = await this.fetchImpl(this.baseUrl + path, {
+    const url = new URL(this.baseUrl + path);
+    for (const [key, value] of Object.entries(extras?.query ?? {})) {
+      url.searchParams.set(key, value);
+    }
+    const response = await this.fetchImpl(url, {
       method,
       headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(formatHttpError(method, path, response.status, text, this.apiKey));
+      throw instaboxHttpError(method, path, response.status, text, this.apiKey);
     }
     if (!text) return {} as T;
     try {
@@ -380,17 +515,46 @@ export function createInstaboxSandboxFromEnv(
   return new HttpSandbox({ apiKey: creds.apiKey, baseUrl: creds.baseUrl, fetch: fetchImpl });
 }
 
-function formatHttpError(
+function instaboxHttpError(
   method: string,
   path: string,
   status: number,
   body: string,
   apiKey: string,
-): string {
+): InstaboxHttpError {
   const clipped = body.length > 800 ? `${body.slice(0, 800)}…` : body;
   const detail = clipped.replace(/\s+/g, ' ').trim();
-  return redactSecret(
+  const message = redactSecret(
     `instabox ${method} ${path} failed: HTTP ${status}${detail ? ` ${detail}` : ''}`,
     apiKey,
   );
+  const envelope = parseErrorEnvelope(body);
+  return new InstaboxHttpError(message, { status, ...envelope });
+}
+
+function parseErrorEnvelope(body: string): {
+  code?: string;
+  retryable?: boolean;
+  operationId?: string | null;
+} {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const error = (parsed as { error?: unknown }).error;
+    if (typeof error !== 'object' || error === null) return {};
+    const row = error as {
+      code?: unknown;
+      retryable?: unknown;
+      operationId?: unknown;
+    };
+    return {
+      ...(typeof row.code === 'string' ? { code: row.code } : {}),
+      ...(typeof row.retryable === 'boolean' ? { retryable: row.retryable } : {}),
+      ...(typeof row.operationId === 'string' || row.operationId === null
+        ? { operationId: row.operationId }
+        : {}),
+    };
+  } catch {
+    return {};
+  }
 }

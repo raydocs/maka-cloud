@@ -21,7 +21,9 @@ const KEY = 'ibx-live-secret-do-not-print';
 interface Recorded {
   method: string;
   path: string;
+  query: string;
   apiKey: string | undefined;
+  confirmDelete: string | undefined;
   body: unknown;
 }
 
@@ -34,10 +36,14 @@ async function mockInstabox(
     req.on('data', (chunk) => chunks.push(chunk as Buffer));
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
+      const url = req.url ?? '';
+      const q = url.indexOf('?');
       const recorded: Recorded = {
         method: req.method ?? '',
-        path: (req.url ?? '').split('?')[0] ?? '',
+        path: q === -1 ? url : url.slice(0, q),
+        query: q === -1 ? '' : url.slice(q + 1),
         apiKey: header(req, 'x-api-key'),
+        confirmDelete: header(req, 'x-confirm-delete'),
         body: raw ? JSON.parse(raw) : undefined,
       };
       requests.push(recorded);
@@ -251,6 +257,95 @@ test('live-smoke create 400 includes HTTP status and redacted body', async () =>
     assert.match(report.error ?? '', /spec_not_allowed/);
     assert.match(report.error ?? '', /<redacted>/);
     assert.equal((report.error ?? '').includes(KEY), false);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('live-smoke waits for a slow create with wait=25s then deletes', async () => {
+  let polls = 0;
+  const fake = await mockInstabox({
+    'POST /v1/machines': () => ({
+      body: { id: 'op_c', machineId: 'mch_slow', type: 'create', state: 'pending' },
+    }),
+    'GET /v1/operations/op_c': () => {
+      polls += 1;
+      return {
+        body: {
+          id: 'op_c',
+          machineId: 'mch_slow',
+          type: 'create',
+          state: polls >= 3 ? 'succeeded' : 'pending',
+        },
+      };
+    },
+    'GET /v1/machines/mch_slow': () => ({ body: { id: 'mch_slow', state: 'running' } }),
+    'POST /v1/machines/mch_slow/exec': () => ({
+      body: { stdout: 'live-smoke\n', stderr: '', exitCode: 0 },
+    }),
+    'DELETE /v1/machines/mch_slow': () => ({
+      body: { id: 'op_d', machineId: 'mch_slow', type: 'delete', state: 'succeeded' },
+    }),
+  });
+  try {
+    const report = await runLiveSmoke({
+      env: { INSTABOX_API_KEY: KEY, INSTABOX_API_URL: fake.url },
+      sleep: async () => {},
+    });
+    assert.equal(report.ok, true);
+    assert.equal(report.destroyed, true);
+    assert.equal(polls, 3);
+    const waits = fake.requests.filter(
+      (row) => row.method === 'GET' && row.path === '/v1/operations/op_c',
+    );
+    assert.equal(waits.length, 3);
+    assert.ok(waits.every((row) => row.query === 'wait=25s'));
+  } finally {
+    await fake.close();
+  }
+});
+
+test('live-smoke retries DELETE after 409 operation_conflict', async () => {
+  let deletes = 0;
+  const fake = await mockInstabox({
+    'POST /v1/machines': () => ({
+      body: { id: 'op_c', machineId: 'mch_409', type: 'create', state: 'succeeded' },
+    }),
+    'GET /v1/machines/mch_409': () => ({ body: { id: 'mch_409', state: 'running' } }),
+    'POST /v1/machines/mch_409/exec': () => ({
+      body: { stdout: 'live-smoke\n', stderr: '', exitCode: 0 },
+    }),
+    'DELETE /v1/machines/mch_409': () => {
+      deletes += 1;
+      if (deletes === 1) {
+        return {
+          status: 409,
+          body: {
+            error: {
+              code: 'operation_conflict',
+              message: 'machine has an active create operation',
+              retryable: false,
+            },
+          },
+        };
+      }
+      return { body: { id: 'op_d', machineId: 'mch_409', type: 'delete', state: 'succeeded' } };
+    },
+  });
+  try {
+    const report = await runLiveSmoke({
+      env: { INSTABOX_API_KEY: KEY, INSTABOX_API_URL: fake.url },
+      sleep: async () => {},
+    });
+    assert.equal(report.ok, true);
+    assert.equal(report.destroyed, true);
+    assert.equal(deletes, 2);
+    const deleteReqs = fake.requests.filter(
+      (row) => row.method === 'DELETE' && row.path === '/v1/machines/mch_409',
+    );
+    assert.equal(deleteReqs.length, 2);
+    assert.ok(deleteReqs.every((row) => row.confirmDelete === undefined));
+    assert.equal(report.error, undefined);
   } finally {
     await fake.close();
   }

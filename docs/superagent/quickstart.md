@@ -41,7 +41,10 @@ steps: spawn → resume-store → passthrough-comment → passthrough-ci → app
 Creates the smallest Instabox Pro sandbox (2 vCPU / 4096 MiB; the API rejects
 1/512 as `spec_not_allowed`). Allowed sizes: `2/4096`, `4/8192`, `8/16384`.
 Runs `echo live-smoke`, and **always deletes the box**, including when exec
-fails. Prints timings. Never prints the API key.
+fails. Create is long-polled with `GET /v1/operations/{id}?wait=25s` for up to
+five minutes (a 4–5s create used to lose a 24-poll tight loop). Destroy waits
+for an in-flight create, then retries DELETE on HTTP 409 `operation_conflict`.
+Prints timings. Never prints the API key.
 
 When `INSTABOX_TEMPLATE_ID` / `MAKA_CLOUD_BOX_TEMPLATE` are unset, the smoke
 uses template `universal` (`base` / `dev` are retired). Override with

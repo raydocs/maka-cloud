@@ -33,6 +33,7 @@ export interface LiveSmokeOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export async function runLiveSmoke(options: LiveSmokeOptions = {}): Promise<LiveSmokeReport> {
@@ -55,11 +56,14 @@ export async function runLiveSmoke(options: LiveSmokeOptions = {}): Promise<Live
   apiKey = api.apiKey;
   const source = instaboxCreateSourceFromEnv(env);
   let client: HttpSandbox | undefined;
+  let inFlightOp: string | undefined;
   try {
     client = new HttpSandbox({
       apiKey: api.apiKey,
       baseUrl: api.baseUrl,
       fetch: options.fetch ?? fetch,
+      now,
+      ...(options.sleep ? { sleep: options.sleep } : {}),
     });
     const name = `maka-smoke-${started}`;
     const createStarted = now();
@@ -71,12 +75,14 @@ export async function runLiveSmoke(options: LiveSmokeOptions = {}): Promise<Live
       memMiB: SMALLEST_SANDBOX.memMiB,
       metadata: { 'maka.purpose': 'live-smoke' },
     });
+    inFlightOp = created.id;
     if (created.machineId) {
       report.machineId = created.machineId;
       report.created = true;
     }
     const settled =
       created.state === 'succeeded' ? created : await client.waitForOperation(created.id);
+    inFlightOp = undefined;
     timings.createMs = now() - createStarted;
     const machineId = settled.machineId ?? created.machineId;
     if (!machineId) throw new Error('instabox create returned no machineId.');
@@ -99,12 +105,14 @@ export async function runLiveSmoke(options: LiveSmokeOptions = {}): Promise<Live
       apiKey || env.INSTABOX_API_KEY?.trim() || '',
     );
   } finally {
-    if (report.machineId) {
+    if (report.machineId && client) {
       const deleteStarted = now();
       try {
-        const deleted = await client!.deleteMachine(report.machineId);
+        const deleted = await client.destroyMachine(report.machineId, {
+          ...(inFlightOp ? { waitFor: inFlightOp } : {}),
+        });
         if (deleted.state !== 'succeeded' && deleted.id) {
-          await client!.waitForOperation(deleted.id);
+          await client.waitForOperation(deleted.id);
         }
         report.destroyed = true;
       } catch (error) {
