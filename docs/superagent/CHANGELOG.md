@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 13:42 MST — cursor/superagent-bounded-autonomy-51be
+## 2026-11-02 13:42 MST — cursor/superagent-bounded-autonomy-51be — 20b7ba5cc
 
 - **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
 - **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
