@@ -19,6 +19,7 @@ name: Gitoxide helper admission
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/gitoxide-helper-admission.yml'
       - 'native/gitoxide-helper/**'
@@ -49,6 +50,7 @@ concurrency:
 jobs:
   test:
     name: ${{ matrix.os }}
+    if: github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:

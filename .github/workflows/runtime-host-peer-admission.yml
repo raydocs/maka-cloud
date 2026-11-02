@@ -19,6 +19,7 @@ name: Runtime Host peer admission
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/runtime-host-peer-admission.yml'
       - 'deny.toml'
@@ -53,6 +54,7 @@ concurrency:
 jobs:
   test:
     name: quality
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

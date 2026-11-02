@@ -19,6 +19,7 @@ name: CLI package validation
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/cli-package-validation.yml'
       - '.github/workflows/npm-publication.yml'
@@ -95,6 +96,7 @@ concurrency:
 jobs:
   peer-native:
     name: Build direct-peer addon (${{ matrix.target }})
+    if: github.event.pull_request.draft != true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -204,6 +206,7 @@ jobs:
 
   build:
     name: Build immutable tarball
+    if: github.event.pull_request.draft != true
     needs: peer-native
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -250,6 +253,7 @@ jobs:
 
   smoke:
     name: Validate installed CLI ${{ matrix.name }}
+    if: github.event.pull_request.draft != true
     needs: build
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45

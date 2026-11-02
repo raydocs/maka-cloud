@@ -118,6 +118,35 @@ test('comparison precedes planning and every later gate uses plan outputs', () =
   );
 });
 
+test('heavy CI lanes skip draft pull requests and rerun when they are marked ready', () => {
+  const workflow = readWorkflow('ci.yml');
+  assert.match(workflow, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+
+  const planHeader = workflow.slice(
+    workflow.indexOf('\n  plan:\n'),
+    workflow.indexOf('\n    steps:\n', workflow.indexOf('\n  plan:\n')),
+  );
+  assert.doesNotMatch(planHeader, /draft/u);
+
+  const testJob = workflow.slice(workflow.lastIndexOf('\n  test:'));
+  assert.match(testJob, /^ {4}if: always\(\)$/mu);
+  assert.doesNotMatch(testJob, /draft/u);
+
+  for (const job of [
+    'validate',
+    'workspace-tests',
+    'runtime-host',
+    'desktop-e2e',
+    'storybook',
+    'cli-package',
+  ]) {
+    const start = workflow.indexOf(`\n  ${job}:\n`);
+    assert.ok(start >= 0, job);
+    const header = workflow.slice(start, workflow.indexOf('\n    steps:\n', start));
+    assert.match(header, /if: github\.event\.pull_request\.draft != true/u, job);
+  }
+});
+
 test('core CI validates pull requests and the resulting main branch state', () => {
   const workflow = readWorkflow('ci.yml');
 

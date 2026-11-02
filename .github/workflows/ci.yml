@@ -20,6 +20,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
@@ -216,7 +217,7 @@ jobs:
 
   validate:
     needs: plan
-    if: needs.plan.outputs.code == 'true' || needs.plan.outputs.astryx_surface == 'true' || needs.plan.outputs.asf_source == 'true' || needs.plan.outputs.cli_package == 'true' || needs.plan.outputs.release_contract == 'true' || needs.plan.outputs.runtime_sandbox == 'true' || needs.plan.outputs.state_root_compat == 'true' || needs.plan.outputs.app_icons == 'true' || needs.plan.outputs.deepseek_harness_toolchain == 'true' || contains(needs.plan.outputs.standard_workspaces, 'packages/eval')
+    if: github.event.pull_request.draft != true && (needs.plan.outputs.code == 'true' || needs.plan.outputs.astryx_surface == 'true' || needs.plan.outputs.asf_source == 'true' || needs.plan.outputs.cli_package == 'true' || needs.plan.outputs.release_contract == 'true' || needs.plan.outputs.runtime_sandbox == 'true' || needs.plan.outputs.state_root_compat == 'true' || needs.plan.outputs.app_icons == 'true' || needs.plan.outputs.deepseek_harness_toolchain == 'true' || contains(needs.plan.outputs.standard_workspaces, 'packages/eval'))
     runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
@@ -430,7 +431,7 @@ jobs:
 
   workspace-tests:
     needs: plan
-    if: needs.plan.outputs.standard_workspaces != ''
+    if: github.event.pull_request.draft != true && needs.plan.outputs.standard_workspaces != ''
     runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     # A shard can still hold desktop or cloud-playbooks, each of which has a
     # 30-minute per-workspace limit; 45 cut those off under load.
@@ -490,7 +491,7 @@ jobs:
 
   runtime-host:
     needs: plan
-    if: needs.plan.outputs.runtime_host == 'true'
+    if: github.event.pull_request.draft != true && needs.plan.outputs.runtime_host == 'true'
     runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
@@ -515,7 +516,7 @@ jobs:
 
   desktop-e2e:
     needs: plan
-    if: needs.plan.outputs.e2e == 'true'
+    if: github.event.pull_request.draft != true && needs.plan.outputs.e2e == 'true'
     runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
@@ -587,7 +588,7 @@ jobs:
 
   storybook:
     needs: plan
-    if: needs.plan.outputs.storybook == 'true'
+    if: github.event.pull_request.draft != true && needs.plan.outputs.storybook == 'true'
     runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
@@ -641,7 +642,7 @@ jobs:
 
   cli-package:
     needs: plan
-    if: needs.plan.outputs.cli_package == 'true'
+    if: github.event.pull_request.draft != true && needs.plan.outputs.cli_package == 'true'
     runs-on: ${{ (vars.CI_RUNNER_TEST || vars.CI_RUNNER) && !github.event.pull_request.head.repo.fork && fromJSON(vars.CI_RUNNER_TEST || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
