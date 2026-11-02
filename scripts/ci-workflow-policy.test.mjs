@@ -1083,6 +1083,27 @@ test('every CI run validates the real committed source archive without dependenc
   );
 });
 
+test('fork lanes build superagent before the packages that import it', () => {
+  // Host (P2) and runners (P3) import @maka-cloud/superagent. The root `build`
+  // chain already names it; these lists are copied by hand and must stay ahead.
+  for (const name of ['fork-cloud-web.yml', 'fork-cloud-mobile.yml']) {
+    const workflow = readWorkflow(name);
+    const superagent = workflow.search(/npm --workspace @maka-cloud\/superagent run build/u);
+    const runners = workflow.search(/npm --workspace @maka-cloud\/runners run build/u);
+    assert.ok(superagent >= 0, name);
+    assert.ok(superagent < runners, name);
+  }
+
+  const dockerfile = readFileSync(new URL('../deploy/Dockerfile', import.meta.url), 'utf8');
+  const list = dockerfile.split('for workspace in')[1] ?? '';
+  const superagent = list.indexOf('@maka-cloud/superagent');
+  const runners = list.indexOf('@maka-cloud/runners');
+  const host = list.indexOf('@maka-cloud/host');
+  assert.ok(superagent >= 0);
+  assert.ok(superagent < runners);
+  assert.ok(superagent < host);
+});
+
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
 
 /** Plan selections named by any `if:` in `section`, whatever the condition spells. */
