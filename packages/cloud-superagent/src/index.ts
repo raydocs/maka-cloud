@@ -263,6 +263,7 @@ export {
   leaseHolder,
   workerWorkDir,
 } from './box-pool.js';
+export { BoxDaemon, formatMiB, readVmRss, type BoxSession } from './box-daemon.js';
 export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
 export {
   DEFAULT_PHASE_MS,

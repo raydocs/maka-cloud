@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:05 MST — cursor/superagent-shared-box-51be
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** One host process per tenant box (`BoxDaemon`). Each worker is a lightweight in-process session (git worktree cwd, own env, own AbortController) instead of one maka process per worker. Isolation and cancel stay per worker. RSS measured here: idle `node` **43 MiB**; eight daemon sessions added **<1 MiB** total (~0.5 KiB/session at the noise floor). Owner-measured idle maka process is **232–278 MiB**, so N workers in one daemon pay that once instead of N times.
+- **Why:** Factory Droid 1.0: several sessions used to mean several ~350 MB processes; they now share the daemon. User request to fold that into BoxPool.
+- **Tests:** 143 passed in `@maka-cloud/superagent` (`test:dist`). FakeSandbox — two sessions, isolated cwd/env, cancel one leaves the other; per-session RSS is far below a per-process baseline.
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 11:35 MST — cursor/superagent-shared-box-51be — 59924d4af
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)

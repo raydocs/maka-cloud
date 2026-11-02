@@ -1,3 +1,4 @@
+import { BoxDaemon } from './box-daemon.js';
 import type { ProgressPatch } from './progress.js';
 import type { SandboxExecRequest, SandboxExecResult, SandboxPort } from './sandbox.js';
 import { DEFAULT_LIVE_SMOKE_TEMPLATE } from './sandbox.js';
@@ -89,6 +90,7 @@ export class BoxPool {
   private readonly now: () => number;
   private readonly recordUsage?: (entry: UsageEntry) => void;
   private reportProgress?: BoxPoolOptions['reportProgress'];
+  private readonly daemons = new Map<string, BoxDaemon>();
 
   constructor(options: BoxPoolOptions) {
     this.sandbox = options.sandbox;
@@ -107,6 +109,15 @@ export class BoxPool {
 
   setProgressReporter(report: NonNullable<BoxPoolOptions['reportProgress']>): void {
     this.reportProgress = report;
+  }
+
+  daemon(tenantId: string): BoxDaemon {
+    let row = this.daemons.get(tenantId);
+    if (!row) {
+      row = new BoxDaemon({ tenantId, box: this });
+      this.daemons.set(tenantId, row);
+    }
+    return row;
   }
 
   async acquire(input: {
@@ -152,10 +163,12 @@ export class BoxPool {
     await this.prepareWorkspace(box.boxId, input.workerId, input.repoUrl);
     this.save(box);
     result.boxId = box.boxId;
+    this.daemon(input.tenantId).attach(input.workerId, { workDir: result.workDir });
     return result;
   }
 
   async release(tenantId: string, workerId: string): Promise<void> {
+    this.daemon(tenantId).detach(workerId);
     const box = this.store.tenantBox(tenantId);
     if (!box) return;
     box.activeWorkers = box.activeWorkers.filter((id) => id !== workerId);

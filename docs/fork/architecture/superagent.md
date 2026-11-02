@@ -718,6 +718,11 @@ type SandboxPort = Pick<
 >;
 ```
 
+Workers on that box share **one host process** (`BoxDaemon`). Each worker
+is a lightweight session (worktree cwd, env, `AbortController`), not a
+new maka process. Per-session RSS is a small fraction of the ~232–278 MiB
+idle maka process baseline.
+
 `BoxPool` gives each tenant **one** long-lived Instabox box (mandate size,
 default 4/8192) shared by up to N workers (default 4). Admission still
 caps spend. Each worker execs with cwd `/work/<workerId>` (a git worktree
