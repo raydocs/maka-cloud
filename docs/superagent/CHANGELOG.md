@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:20 MST — cursor/superagent-byom-spec-51be
+
+- **PR:** none (this branch)
+- **What:** BYOM execution target (default off) and speculative runs (default off). New `@maka-cloud/superagent-device` daemon dials out; `ByomHub` pairing / HMAC / jail / allow-deny / kill switch / repo opt-in; `ExecutionTarget` picks Instabox or a capability-matched device and waits with `device_offline` when the box is gone. Speculative workers start on watched CI failures / matching issues before the Router, lowest priority, hard daily + concurrency caps, no push/comment/PR until `acceptSpeculative`; discard cleans worktree/box and the ledger records accepted/discarded cost.
+- **Why:** Owner-approved: run iOS / local trees on a paired machine; measure whether pre-decision attempts are worth the spend. Both stay off so P0 Instabox behavior is unchanged.
+- **Tests:** `@maka-cloud/superagent` byom + speculative suites (in-process daemon / fake daemon). `@maka-cloud/superagent-device` loopback daemon test.
+- **Live:** n/a
+- **Migrations / risk:** none. No sqlite `user_version` bump. New fields are worker JSON (`executionTarget`, `speculative`). Cloud never receives device-local secrets. Threat model: [byom.md](byom.md). Speculative: [speculative.md](speculative.md).
+
 ## 2026-11-02 11:06 MST — cursor/superagent-real-loop-51be — 4b2c813e3
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

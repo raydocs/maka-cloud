@@ -57,7 +57,26 @@ import {
 } from './review.js';
 import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
+import {
+  DefaultExecutionResolver,
+  type ExecutionNeed,
+  type ExecutionTargetResolver,
+} from './execution-target.js';
+import { DeviceOfflineError, type ByomHub } from './byom.js';
 import { recallMemory, spillMemory } from './spill.js';
+import {
+  DEFAULT_SPECULATIVE,
+  admitSpeculative,
+  compareWorkerPriority,
+  isSpeculativeShadow,
+  isUnacceptedSpeculative,
+  markSpeculativeReady,
+  matchSpeculativeTrigger,
+  snapshotSpeculativeCost,
+  speculativeMandate,
+  type SpeculativeCleanup,
+  type SpeculativeSettings,
+} from './speculative.js';
 import { type StuckCard, stuckCardOf } from './stuck.js';
 import { runWatchdog } from './watchdog.js';
 
@@ -67,7 +86,8 @@ export type IngestResult =
   | { result: 'ignored'; reason: string; eventId?: string; judgeCalls: number }
   | { result: 'passthrough'; eventId: string; workerIds: string[]; judgeCalls: 0 }
   | { result: 'answered'; eventId: string; text: string; judgeCalls: number }
-  | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number };
+  | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number }
+  | { result: 'speculative'; eventId: string; workerId: string; judgeCalls: 0 };
 
 /** Collapse a worker inbox into one event. Approval wins over the latest row. */
 export function coalesceInbox(events: NormalizedEvent[]): NormalizedEvent {
@@ -136,6 +156,14 @@ export interface SuperagentOptions {
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
   progress?: Partial<ProgressSettings>;
+  /** Speculative attempts. Default off. */
+  speculative?: Partial<SpeculativeSettings>;
+  /** Optional cleanup of worktree/box state when a speculative run is discarded. */
+  speculativeCleanup?: SpeculativeCleanup;
+  /** BYOM hub. Default unset (disabled). */
+  byom?: ByomHub;
+  /** Instabox vs paired device. Default is Instabox only. */
+  targets?: ExecutionTargetResolver;
 }
 
 export class Superagent {
@@ -153,6 +181,10 @@ export class Superagent {
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
   readonly progressSettings: ProgressSettings;
+  readonly speculativeSettings: SpeculativeSettings;
+  readonly byom: ByomHub | undefined;
+  readonly targets: ExecutionTargetResolver;
+  private readonly speculativeCleanup?: SpeculativeCleanup;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
@@ -179,6 +211,15 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
+    this.speculativeSettings = { ...DEFAULT_SPECULATIVE, ...options.speculative };
+    if (options.speculative?.triggers) {
+      this.speculativeSettings.triggers = options.speculative.triggers;
+    }
+    this.speculativeCleanup = options.speculativeCleanup;
+    this.byom = options.byom;
+    this.targets =
+      options.targets ??
+      new DefaultExecutionResolver(this.sandbox, this.defaultSandboxRef, options.byom);
   }
 
   ledger(tenantId: string) {
@@ -240,6 +281,9 @@ export class Superagent {
       return { result: 'passthrough', eventId: event.eventId, workerIds, judgeCalls: 0 };
     }
 
+    const speculated = await this.considerSpeculative(event, at);
+    if (speculated) return speculated;
+
     const meter = this.metering.admit?.(event.tenantId) === 'stop';
     const admission = admit(event, this.admission, meter);
     if (!admission.ok) {
@@ -262,7 +306,7 @@ export class Superagent {
     }
 
     const existing = this.store.liveWorkerBySubject(event.tenantId, event.subject.key);
-    if (existing) {
+    if (existing && !isSpeculativeShadow(existing)) {
       return {
         result: 'ignored',
         reason: 'already_owned',
@@ -290,7 +334,7 @@ export class Superagent {
       };
     }
 
-    const worker = this.spawn(event, decision.mandate, at);
+    const worker = await this.spawn(event, decision.mandate, at);
     this.store.enqueue(worker.workerId, event.eventId, at);
     await this.drain(event.tenantId, worker.workerId);
     this.audit(event.tenantId, worker.workerId, 'spawned', at, { subject: event.subject.key });
@@ -322,7 +366,8 @@ export class Superagent {
 
   async restore(): Promise<{ resumed: number }> {
     let resumed = 0;
-    for (const worker of this.store.allWorkers()) {
+    const live = this.store.allWorkers().sort(compareWorkerPriority);
+    for (const worker of live) {
       if (worker.state === 'spawning' || worker.state === 'running' || worker.state === 'waking') {
         await this.drain(worker.tenantId, worker.workerId);
         resumed += 1;
@@ -534,17 +579,180 @@ export class Superagent {
     return { ok: true, stale: freshness.stale, text };
   }
 
+  async acceptSpeculative(
+    tenantId: string,
+    workerId: string,
+  ): Promise<{ ok: true; workerId: string } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (!isUnacceptedSpeculative(worker) || !worker.speculative) {
+      return { ok: false, reason: 'not_speculative' };
+    }
+    const at = this.now();
+    const cost = snapshotSpeculativeCost(worker);
+    worker.speculative = {
+      ...worker.speculative,
+      status: 'accepted',
+      acceptedAt: at,
+      cost,
+    };
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    const already = this.store
+      .liveSubscribers(tenantId, worker.subject.key)
+      .some((sub) => sub.workerId === worker.workerId);
+    if (!already) {
+      this.store.putSubscription({
+        subscriptionId: this.ids.subscription(),
+        tenantId,
+        subjectKey: worker.subject.key,
+        workerId: worker.workerId,
+        createdAt: at,
+        retiredAt: null,
+      });
+    }
+    this.audit(tenantId, workerId, 'speculative_accepted', at, {
+      trigger: worker.speculative.trigger,
+      tokens: cost.tokens,
+      usdMicros: cost.usdMicros,
+    });
+    return { ok: true, workerId };
+  }
+
+  async discardSpeculative(
+    tenantId: string,
+    workerId: string,
+  ): Promise<{ ok: true; workerId: string } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (!worker.speculative || worker.speculative.status === 'discarded') {
+      return { ok: false, reason: 'not_speculative' };
+    }
+    const at = this.now();
+    const cost = snapshotSpeculativeCost(worker);
+    worker.speculative = {
+      ...worker.speculative,
+      status: 'discarded',
+      discardedAt: at,
+      cost,
+    };
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    if (this.speculativeCleanup) {
+      await this.speculativeCleanup.discard(worker);
+    } else if (worker.workspaceRef) {
+      worker.workspaceRef = null;
+    }
+    worker.sandboxRef = null;
+    await this.retire(worker, at, 'speculative_discarded');
+    this.audit(tenantId, workerId, 'speculative_discarded', at, {
+      trigger: worker.speculative.trigger,
+      tokens: cost.tokens,
+      usdMicros: cost.usdMicros,
+    });
+    return { ok: true, workerId };
+  }
+
   close(): void {
     this.store.close();
   }
 
-  private spawn(
+  private async considerSpeculative(
+    event: NormalizedEvent,
+    at: number,
+  ): Promise<IngestResult | undefined> {
+    if (!event.subject) return undefined;
+    const trigger = matchSpeculativeTrigger(event, this.speculativeSettings);
+    if (!trigger) return undefined;
+    const meter = this.metering.admit?.(event.tenantId) === 'stop';
+    if (event.type === 'ci_failed' || event.type === 'ci_passed') {
+      if (meter) return undefined;
+    } else {
+      const admission = admit(event, this.admission, meter);
+      if (!admission.ok) return undefined;
+    }
+    const existing = this.store
+      .workers(event.tenantId)
+      .find((row) => row.subject.key === event.subject?.key && isUnacceptedSpeculative(row));
+    if (existing) {
+      this.store.enqueue(existing.workerId, event.eventId, at);
+      await this.drain(event.tenantId, existing.workerId);
+      this.audit(event.tenantId, existing.workerId, 'speculative_passthrough', at, {
+        eventId: event.eventId,
+      });
+      return {
+        result: 'speculative',
+        eventId: event.eventId,
+        workerId: existing.workerId,
+        judgeCalls: 0,
+      };
+    }
+    const gate = admitSpeculative(
+      this.store,
+      event.tenantId,
+      event.subject.key,
+      this.speculativeSettings,
+      at,
+    );
+    if (!gate.ok) {
+      this.audit(event.tenantId, null, 'speculative_refused', at, { reason: gate.reason });
+      return undefined;
+    }
+    const repos = event.subject.repo ? [event.subject.repo] : [];
+    const worker = await this.spawn(event, speculativeMandate(repos), at, {
+      subscribe: false,
+      speculative: {
+        status: 'running',
+        trigger: trigger.kind,
+        priority: this.speculativeSettings.priority,
+      },
+    });
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    await this.drain(event.tenantId, worker.workerId);
+    this.audit(event.tenantId, worker.workerId, 'speculative_started', at, {
+      trigger: trigger.kind,
+      subject: event.subject.key,
+    });
+    return {
+      result: 'speculative',
+      eventId: event.eventId,
+      workerId: worker.workerId,
+      judgeCalls: 0,
+    };
+  }
+
+  private async spawn(
     event: NormalizedEvent,
     mandate: WorkerRecord['mandate'],
     at: number,
-  ): WorkerRecord {
+    extras: {
+      subscribe?: boolean;
+      speculative?: WorkerRecord['speculative'];
+      need?: ExecutionNeed;
+    } = {},
+  ): Promise<WorkerRecord> {
     const subject = event.subject;
     if (!subject) throw new Error('Cannot spawn without a subject.');
+    const resolved = await this.targets.resolve({
+      tenantId: event.tenantId,
+      repo: subject.repo,
+      need: extras.need,
+    });
+    let sandboxRef = this.defaultSandboxRef;
+    let executionTarget: WorkerRecord['executionTarget'] = {
+      kind: 'instabox',
+      id: sandboxRef ?? undefined,
+    };
+    if (resolved.ok) {
+      executionTarget = { kind: resolved.target.kind, id: resolved.target.id };
+      if (resolved.target.kind === 'device') sandboxRef = resolved.target.id;
+    } else {
+      executionTarget = {
+        kind: resolved.kind ?? 'device',
+        waitReason: resolved.waitReason ?? resolved.reason,
+      };
+      sandboxRef = null;
+    }
     const worker: WorkerRecord = {
       workerId: this.ids.worker(),
       tenantId: event.tenantId,
@@ -556,7 +764,7 @@ export class Superagent {
       spills: [],
       plan: '',
       transcriptPointer: null,
-      sandboxRef: this.defaultSandboxRef,
+      sandboxRef,
       workspaceRef: null,
       lastEventId: null,
       lastProgressAt: at,
@@ -564,6 +772,8 @@ export class Superagent {
       lastStepSignature: null,
       stepRepeats: 0,
       progress: startProgress(at),
+      executionTarget,
+      speculative: extras.speculative,
       usage: emptyUsage(),
       evidence: [],
       createdAt: at,
@@ -571,14 +781,26 @@ export class Superagent {
       retiredAt: null,
     };
     this.store.putWorker(worker);
-    this.store.putSubscription({
-      subscriptionId: this.ids.subscription(),
-      tenantId: event.tenantId,
-      subjectKey: subject.key,
-      workerId: worker.workerId,
-      createdAt: at,
-      retiredAt: null,
-    });
+    if (extras.subscribe !== false) {
+      this.store.putSubscription({
+        subscriptionId: this.ids.subscription(),
+        tenantId: event.tenantId,
+        subjectKey: subject.key,
+        workerId: worker.workerId,
+        createdAt: at,
+        retiredAt: null,
+      });
+    }
+    if (executionTarget.waitReason) {
+      await this.recordProgress(
+        worker,
+        {
+          waiting: { kind: 'human', detail: executionTarget.waitReason },
+          activity: executionTarget.waitReason,
+        },
+        at,
+      );
+    }
     return worker;
   }
 
@@ -601,7 +823,13 @@ export class Superagent {
       return;
     }
 
-    await this.wakeBox(worker);
+    const woke = await this.wakeBox(worker);
+    if (woke === 'wait') {
+      worker.state = 'waking';
+      worker.updatedAt = this.now();
+      this.store.putWorker(worker);
+      return;
+    }
     setState(worker, 'running');
     const items: typeof pending = [];
     const events: NormalizedEvent[] = [];
@@ -767,6 +995,11 @@ export class Superagent {
           kind: result.action.kind,
           reason: 'review_required',
         });
+      } else if (!gate.allowed && gate.reason === 'speculative_blocked') {
+        this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+          kind: result.action.kind,
+          reason: 'speculative_blocked',
+        });
       } else if (!gate.allowed && gate.reason === 'held') {
         worker.state = 'awaiting_approval';
         this.audit(worker.tenantId, worker.workerId, 'awaiting_approval', at, {
@@ -786,6 +1019,7 @@ export class Superagent {
         return true;
       }
     }
+    markSpeculativeReady(worker);
     worker.lastHeartbeatAt = at;
     return false;
   }
@@ -926,11 +1160,23 @@ export class Superagent {
     return { sha, ci: extra.ci, prMerged, at };
   }
 
+  private sandboxFor(worker: WorkerRecord): SandboxPort {
+    if (worker.executionTarget?.kind === 'device' && worker.executionTarget.id && this.byom) {
+      return this.byom.sandboxFor(
+        worker.executionTarget.id,
+        worker.tenantId,
+        worker.workerId,
+        worker.subject.repo,
+      );
+    }
+    return this.sandbox;
+  }
+
   private context(worker: WorkerRecord, event: NormalizedEvent): WorkerContext {
     return {
       worker: { ...worker },
       event,
-      sandbox: this.sandbox,
+      sandbox: this.sandboxFor(worker),
       orgSecrets: this.orgSecrets,
       recall: () => recallMemory(worker),
       reportProgress: async (patch) => {
@@ -999,15 +1245,69 @@ export class Superagent {
     });
   }
 
-  private async wakeBox(worker: WorkerRecord): Promise<void> {
-    if (!worker.sandboxRef) return;
+  private async wakeBox(worker: WorkerRecord): Promise<'ready' | 'wait'> {
+    if (worker.executionTarget?.waitReason === 'device_offline') {
+      await this.recordProgress(
+        worker,
+        {
+          waiting: { kind: 'human', detail: 'device_offline' },
+          activity: 'waiting for paired device',
+        },
+        this.now(),
+      );
+      return 'wait';
+    }
+    if (!worker.sandboxRef) return 'ready';
+    const box = this.sandboxFor(worker);
     try {
-      await this.sandbox.ensureRunning(worker.sandboxRef);
+      const machine = await box.getMachine(worker.sandboxRef);
+      if (machine.state === 'offline') {
+        worker.executionTarget = {
+          kind: worker.executionTarget?.kind ?? 'device',
+          id: worker.sandboxRef,
+          waitReason: 'device_offline',
+        };
+        await this.recordProgress(
+          worker,
+          {
+            waiting: { kind: 'human', detail: 'device_offline' },
+            activity: 'waiting for paired device',
+          },
+          this.now(),
+        );
+        this.store.putWorker(worker);
+        this.audit(worker.tenantId, worker.workerId, 'device_offline', this.now(), {
+          deviceId: worker.sandboxRef,
+        });
+        return 'wait';
+      }
+      await box.ensureRunning(worker.sandboxRef);
     } catch (error) {
+      if (error instanceof DeviceOfflineError) {
+        worker.executionTarget = {
+          kind: 'device',
+          id: worker.sandboxRef,
+          waitReason: 'device_offline',
+        };
+        await this.recordProgress(
+          worker,
+          {
+            waiting: { kind: 'human', detail: 'device_offline' },
+            activity: 'waiting for paired device',
+          },
+          this.now(),
+        );
+        this.store.putWorker(worker);
+        this.audit(worker.tenantId, worker.workerId, 'device_offline', this.now(), {
+          deviceId: worker.sandboxRef,
+        });
+        return 'wait';
+      }
       this.audit(worker.tenantId, worker.workerId, 'sandbox_wake_failed', this.now(), {
         message: error instanceof Error ? error.message : 'ensureRunning',
       });
     }
+    return 'ready';
   }
 
   private async suspendBox(worker: WorkerRecord): Promise<void> {

@@ -80,6 +80,92 @@ export {
 export { INLINE_MEMORY_CHARS, MAX_SPILLS, recallMemory, spillMemory } from './spill.js';
 export { OffHiDevice, type HiDevicePort, type HiDeviceResult } from './hi-device.js';
 export {
+  BYOM_PROTOCOL_VERSION,
+  authPayload,
+  welcomePayload,
+  type CloudToDevice,
+  type DeviceCapabilities,
+  type DeviceJob,
+  type DeviceToCloud,
+  type DeviceTransport,
+} from './byom-protocol.js';
+export { JailError, jailPath } from './byom-jail.js';
+export {
+  DEFAULT_ALLOWED_BINARIES,
+  DEFAULT_COMMAND_POLICY,
+  DEFAULT_DENIED_COMMANDS,
+  DEFAULT_MAX_RUNTIME_SECONDS,
+  decideCommand,
+  firstBinary,
+  type CommandDecision,
+  type CommandPolicy,
+} from './byom-policy.js';
+export { hmacHex, hmacOk, randomNonce, randomPairingCode, randomSecret } from './byom-crypto.js';
+export {
+  ByomHub,
+  DEFAULT_BYOM,
+  DEFAULT_AUTH_SKEW_MS,
+  DEFAULT_PAIRING_TTL_MS,
+  DeviceDaemon,
+  DeviceOfflineError,
+  DeviceSandbox,
+  FakeDeviceDaemon,
+  LoopbackTransport,
+  byomSettingsFromEnv,
+  handleByomHttpJson,
+  type ByomHubOptions,
+  type ByomRefusal,
+  type ByomRunResult,
+  type ByomSettings,
+  type DeviceCredential,
+  type DeviceDaemonOptions,
+  type DeviceRecord,
+} from './byom.js';
+export {
+  HttpDeviceTransport,
+  capabilitiesFromEnv,
+  loadCredential,
+  runDeviceDaemonCli,
+  saveCredential,
+  type DeviceCliEnv,
+} from './byom-cli.js';
+export {
+  DefaultExecutionResolver,
+  DeviceTarget,
+  InstaboxTarget,
+  matchesNeed,
+  needsDevice,
+  type ExecutionNeed,
+  type ExecutionTarget,
+  type ExecutionTargetKind,
+  type ExecutionTargetRef,
+  type ExecutionTargetResolver,
+  type ResolveResult,
+} from './execution-target.js';
+export {
+  DEFAULT_SPECULATIVE,
+  NORMAL_PRIORITY,
+  RecordingCleanup,
+  SPECULATIVE_PRIORITY,
+  admitSpeculative,
+  compareWorkerPriority,
+  isSpeculativeShadow,
+  isUnacceptedSpeculative,
+  matchSpeculativeTrigger,
+  speculativeBlocksOutbound,
+  speculativeMandate,
+  speculativeSettingsFromEnv,
+  speculativeSpendSince,
+  utcDayStart,
+  workerPriority,
+  type SpeculativeAdmit,
+  type SpeculativeCleanup,
+  type SpeculativeMeta,
+  type SpeculativeSettings,
+  type SpeculativeStatus,
+  type SpeculativeTrigger,
+} from './speculative.js';
+export {
   formatLocalLoopReport,
   listenLoop,
   LOCAL_LOOP_REPO,

@@ -178,3 +178,7 @@ the raw value.
 
 P5 (hi device worker) is not in this repo. The interface is documented in
 [p5-hi-device.md](p5-hi-device.md).
+
+BYOM (paired machine) and speculative runs are **off**. See
+[byom.md](byom.md) and [speculative.md](speculative.md). Do not set
+`MAKA_CLOUD_BYOM` or `MAKA_CLOUD_SPECULATIVE` in CI.
