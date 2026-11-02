@@ -1,24 +1,19 @@
-# Super-agent local loop
+# Super-agent quick start
 
-Run the Router → Worker → watchdog → approval → ledger path on your machine.
-No Instabox account is required. The default sandbox is `FakeSandbox`.
+Two commands after install and build. The default loop never talks to Instabox.
+The live smoke does, using `INSTABOX_API_KEY` from the environment (never argv).
 
-## Replay (CI and first try)
-
-From the repository root, after dependencies are installed:
+## 1. Fake local loop (no secrets)
 
 ```bash
+npm ci
 npm run build -w @maka-cloud/superagent
 npm run local-loop -w @maka-cloud/superagent
 ```
 
-Equivalent:
+Equivalent last line: `node packages/cloud-superagent/scripts/local-loop.mjs`
 
-```bash
-node packages/cloud-superagent/scripts/local-loop.mjs
-```
-
-The script writes a temporary `superagent.db`, then:
+This writes a temporary `superagent.db`, then:
 
 1. Replays a GitHub `pull_request` opened delivery → Router spawn, sandbox `echo spawn`, worker sleeps.
 2. Reopens the sqlite file (process-restart resume).
@@ -28,9 +23,57 @@ The script writes a temporary `superagent.db`, then:
 6. Replays a looping issue → watchdog `looping` finding and a T33 stuck card.
 7. Prints the tenant usage ledger and evidence blocks.
 
-CI runs the same path as `packages/cloud-superagent/src/__tests__/local-loop.test.ts` (`npm run test:dist -w @maka-cloud/superagent`).
+CI runs the same path as `packages/cloud-superagent/src/__tests__/local-loop.test.ts`
+(`npm run test:dist -w @maka-cloud/superagent`).
 
-## Receive a live GitHub webhook
+Expect:
+
+```
+sandbox: fake
+steps: spawn → resume-store → passthrough-comment → passthrough-ci → approval-request → approved → watchdog:looping
+```
+
+## 2. Live Instabox smoke (owner runs this)
+
+Creates the smallest ephemeral sandbox (1 vCPU / 512 MiB), runs `echo live-smoke`,
+and **always deletes the box**, including when exec fails. Prints timings.
+Never prints the API key.
+
+Export the key in the shell. Do not put it on the command line.
+
+```bash
+export INSTABOX_API_KEY='…'          # already in the environment; not on argv
+# optional:
+# export INSTABOX_API_URL='https://api.instabox.sh'
+export INSTABOX_TEMPLATE_ID='…'      # or MAKA_CLOUD_BOX_TEMPLATE
+npm ci
+npm run build -w @maka-cloud/superagent
+npm run live-smoke -w @maka-cloud/superagent
+```
+
+Equivalent last line: `node packages/cloud-superagent/scripts/live-smoke.mjs`
+
+`INSTABOX_MACHINE_ID` is not used. The smoke makes a throwaway box named
+`maka-smoke-<timestamp>` and destroys it.
+
+Expect:
+
+```
+ok: true
+machine: mch_…
+created: true
+destroyed: true
+exec: echo live-smoke exit=0 stdout="live-smoke"
+timings_ms: create=… exec=… delete=… total=…
+size: 1 vCPU / 512 MiB
+```
+
+This repository's agents and CI do **not** run the live smoke against Instabox.
+Tests mock HTTP only.
+
+See [p0-checklist.md](p0-checklist.md) for the rest of the first real run.
+
+## Receive a live GitHub webhook (optional)
 
 ```bash
 npm run build -w @maka-cloud/superagent
@@ -56,25 +99,16 @@ curl -sS http://127.0.0.1:8787/github/webhook \
 Tenant id defaults to `inv_local`. Override with `MAKA_CLOUD_SUPERAGENT_TENANT`.
 Spawn admission defaults to `alice,bob`. Override with `MAKA_CLOUD_SUPERAGENT_ACTORS`.
 
-## Real Instabox instead of FakeSandbox
-
-When both are set, the loop uses `HttpSandbox` against Instabox:
+To drive the **loop** (not the smoke) at a box you already have:
 
 ```bash
-export INSTABOX_API_KEY='…'
+# INSTABOX_API_KEY already exported
 export INSTABOX_MACHINE_ID='mch_…'
-# optional:
-# export INSTABOX_API_URL='https://api.instabox.sh'
 npm run local-loop -w @maka-cloud/superagent
 ```
 
-A key without a machine id fails immediately (`InstaboxCredentialsError`).
-The host product does **not** use `INSTABOX_MACHINE_ID`; it maps one machine
-per invite (`MAKA_CLOUD_SANDBOXES` or `MAKA_CLOUD_BOXES`). The machine id is
-only for this single-box local / P0 path.
-
-See [p0-checklist.md](p0-checklist.md) before the first live Instabox run.
-Do not put the API key on argv or in the repo.
+A key without a machine id fails the loop immediately. Use `live-smoke` instead
+when you want a throwaway box.
 
 ## Optional ModelJudge
 
@@ -101,17 +135,6 @@ export MAKA_CLOUD_ORG_SECRET_GH_TOKEN='…'
 
 `inject` writes into a caller-supplied env/header bag. The port never returns
 the raw value.
-
-## What you should see
-
-```
-sandbox: fake
-steps: spawn → resume-store → passthrough-comment → passthrough-ci → approval-request → approved → watchdog:looping
-states: … sleeping … awaiting_approval …
-router calls after spawn: 1 (comment/CI must stay 0 more: 0)
-ledger: tokens=… events=…
-### Evidence
-```
 
 P5 (hi device worker) is not in this repo. The interface is documented in
 [p5-hi-device.md](p5-hi-device.md).

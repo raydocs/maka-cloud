@@ -18,7 +18,8 @@ spend cap.
 
 | Mode | Config | Notes |
 |---|---|---|
-| Local loop / first single-box try | `INSTABOX_MACHINE_ID` | One existing running-or-startable machine. `HttpSandbox` / `createInstaboxSandboxFromEnv` throw if the key is set and this is missing. |
+| Live smoke (ephemeral) | `INSTABOX_TEMPLATE_ID` or `MAKA_CLOUD_BOX_TEMPLATE` | `npm run live-smoke` creates the smallest box, runs `echo live-smoke`, always deletes it. No `INSTABOX_MACHINE_ID`. |
+| Local loop against an existing box | `INSTABOX_MACHINE_ID` | Only if you want the Router/worker loop on a box you already have. |
 | Host product, fixed machines | `MAKA_CLOUD_SANDBOXES` | JSON `{"<inviteId>":"<machineId>"}`. One machine per invite. **Do not** also set `INSTABOX_MACHINE_ID` on the host (`INSTABOX_MACHINE_ID is no longer used`). |
 | Host product, pool | `MAKA_CLOUD_BOXES=1` and `MAKA_CLOUD_BOX_TEMPLATE` | Server creates/sleeps/deletes boxes. Optional `MAKA_CLOUD_BOX_MAX` (1–32, default 3). |
 
@@ -50,21 +51,23 @@ listener is for laptop replay only.
 
 ## How to verify (owner does this; the agent does not)
 
-1. **Key works.** With the key only in the environment:
+1. **Live smoke (preferred).** Key and template already in the environment,
+   not on argv:
    ```bash
-   curl -sS -H "X-API-Key: $INSTABOX_API_KEY" \
-     "${INSTABOX_API_URL:-https://api.instabox.sh}/v1/machines/$INSTABOX_MACHINE_ID"
+   npm ci
+   npm run build -w @maka-cloud/superagent
+   npm run live-smoke -w @maka-cloud/superagent
    ```
-   Expect JSON with `"id"` and a startable `"state"` (`running`, `stopped`, or
-   `suspended`). `401` = bad key. `404` = wrong machine id or org.
+   Expect `ok: true`, `destroyed: true`, `exec: echo live-smoke exit=0`, and
+   `timings_ms`. `401` in the error line = bad key. A missing template fails
+   before any HTTP call. The box is deleted even if exec fails.
 
-2. **Local loop against that machine.** After `npm run build -w @maka-cloud/superagent`:
+2. **Optional: local loop on an existing machine.**
    ```bash
-   INSTABOX_API_KEY=… INSTABOX_MACHINE_ID=… npm run local-loop -w @maka-cloud/superagent
+   npm run local-loop -w @maka-cloud/superagent
    ```
-   Expect `sandbox: instabox` and the same step list as the fake run. The
-   commands are `echo spawn` / `echo comment` / `echo approved` — cheap, but
-   they prove `ensureRunning` + `exec`.
+   with `INSTABOX_MACHINE_ID` set. Expect `sandbox: instabox` and the same
+   step list as the fake run.
 
 3. **Host stack config.** `maka-cloud` / host setup still requires
    `INSTABOX_API_KEY` and either `MAKA_CLOUD_SANDBOXES` or

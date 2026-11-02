@@ -49,6 +49,21 @@ export interface InstaboxCredentials {
   baseUrl: string;
 }
 
+export interface InstaboxApiConfig {
+  apiKey: string;
+  baseUrl: string;
+}
+
+export interface InstaboxOperation {
+  id: string;
+  machineId?: string;
+  type?: string;
+  state: string;
+}
+
+/** Smallest create the live smoke asks for. The API may raise a floor. */
+export const SMALLEST_SANDBOX = { vcpus: 1, memMiB: 512 } as const;
+
 export class FakeSandbox implements SandboxPort {
   readonly commands: Array<{ machineId: string; cmd: string }> = [];
   readonly machines = new Map<string, SandboxMachine>();
@@ -206,16 +221,62 @@ export class HttpSandbox implements SandboxPort {
     await this.mutate(machineId, 'suspend');
   }
 
+  async createMachine(request: {
+    name?: string;
+    templateId?: string;
+    snapshotId?: string;
+    metadata?: Record<string, string>;
+    desiredState?: 'running' | 'stopped';
+    vcpus?: number;
+    memMiB?: number;
+  }): Promise<InstaboxOperation> {
+    if ((request.templateId === undefined) === (request.snapshotId === undefined)) {
+      throw new Error('createMachine needs exactly one of templateId and snapshotId.');
+    }
+    return await this.request<InstaboxOperation>('POST', '/v1/machines', request, {
+      idempotencyKey: `maka-create-${Date.now()}`,
+    });
+  }
+
+  async deleteMachine(machineId: string): Promise<InstaboxOperation> {
+    return await this.request<InstaboxOperation>(
+      'DELETE',
+      `/v1/machines/${encodeURIComponent(machineId)}`,
+      undefined,
+      { idempotencyKey: `maka-delete-${Date.now()}` },
+    );
+  }
+
+  async waitForOperation(operationId: string): Promise<InstaboxOperation> {
+    for (let step = 0; step < 24; step++) {
+      const operation = await this.request<InstaboxOperation>(
+        'GET',
+        `/v1/operations/${encodeURIComponent(operationId)}`,
+      );
+      if (operation.state === 'succeeded') return operation;
+      if (operation.state === 'failed') {
+        throw new Error(`instabox operation ${operationId} failed`);
+      }
+    }
+    throw new Error(`instabox operation ${operationId} did not finish`);
+  }
+
   private async mutate(machineId: string, action: 'resume' | 'start' | 'suspend'): Promise<void> {
     await this.request('POST', `/v1/machines/${encodeURIComponent(machineId)}/${action}`);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    extras?: { idempotencyKey?: string },
+  ): Promise<T> {
     const headers: Record<string, string> = {
       'X-API-Key': this.apiKey,
       Accept: 'application/json',
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (extras?.idempotencyKey) headers['Idempotency-Key'] = extras.idempotencyKey;
     const response = await this.fetchImpl(this.baseUrl + path, {
       method,
       headers,
@@ -234,23 +295,56 @@ export class HttpSandbox implements SandboxPort {
   }
 }
 
+/** Key + optional base URL. The live smoke does not need a pre-existing machine. */
+export function instaboxApiFromEnv(env: NodeJS.ProcessEnv = process.env): InstaboxApiConfig {
+  const apiKey = env.INSTABOX_API_KEY?.trim() ?? '';
+  if (!apiKey) {
+    throw new InstaboxCredentialsError(
+      'INSTABOX_API_KEY is not set. Export it in the environment; do not put it on argv.',
+    );
+  }
+  const raw = env.INSTABOX_API_URL?.trim() || DEFAULT_INSTABOX_BASE_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('INSTABOX_API_URL is not a valid URL.');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('INSTABOX_API_URL must not carry credentials.');
+  }
+  return { apiKey, baseUrl: raw.replace(/\/+$/, '') };
+}
+
 export function instaboxCredentialsFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): InstaboxCredentials {
-  const apiKey = env.INSTABOX_API_KEY?.trim() ?? '';
+  const api = instaboxApiFromEnv(env);
   const machineId = env.INSTABOX_MACHINE_ID?.trim() ?? '';
-  const baseUrl = (env.INSTABOX_API_URL?.trim() || DEFAULT_INSTABOX_BASE_URL).replace(/\/+$/, '');
-  if (!apiKey) {
-    throw new InstaboxCredentialsError(
-      'INSTABOX_API_KEY is not set. The local loop uses FakeSandbox when the key is absent; a live Instabox run needs the key.',
-    );
-  }
   if (!machineId) {
     throw new InstaboxCredentialsError(
-      'INSTABOX_MACHINE_ID is not set. A local or P0 Super-agent run needs one machine id. The host product uses one machine per invite (MAKA_CLOUD_SANDBOXES or MAKA_CLOUD_BOXES) instead.',
+      'INSTABOX_MACHINE_ID is not set. The local loop can reuse one machine; live-smoke creates an ephemeral box and does not need this.',
     );
   }
-  return { apiKey, machineId, baseUrl };
+  return { apiKey: api.apiKey, machineId, baseUrl: api.baseUrl };
+}
+
+/** Exactly one of template or snapshot, same rule as InstaboxClient.createMachine. */
+export function instaboxCreateSourceFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): { templateId: string } | { snapshotId: string } {
+  const templateId = env.INSTABOX_TEMPLATE_ID?.trim() || env.MAKA_CLOUD_BOX_TEMPLATE?.trim() || '';
+  const snapshotId = env.INSTABOX_SNAPSHOT_ID?.trim() || '';
+  if (templateId && snapshotId) {
+    throw new Error(
+      'Set only one of INSTABOX_TEMPLATE_ID / MAKA_CLOUD_BOX_TEMPLATE and INSTABOX_SNAPSHOT_ID.',
+    );
+  }
+  if (templateId) return { templateId };
+  if (snapshotId) return { snapshotId };
+  throw new Error(
+    'Set INSTABOX_TEMPLATE_ID or MAKA_CLOUD_BOX_TEMPLATE (or INSTABOX_SNAPSHOT_ID) so live-smoke can create the smallest ephemeral sandbox.',
+  );
 }
 
 /**

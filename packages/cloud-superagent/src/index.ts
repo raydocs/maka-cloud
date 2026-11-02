@@ -39,10 +39,24 @@ export {
   FakeSandbox,
   HttpSandbox,
   InstaboxCredentialsError,
+  instaboxApiFromEnv,
+  instaboxCreateSourceFromEnv,
   instaboxCredentialsFromEnv,
+  SMALLEST_SANDBOX,
+  type InstaboxApiConfig,
   type InstaboxCredentials,
+  type InstaboxOperation,
   type SandboxPort,
 } from './sandbox.js';
+export {
+  formatLiveSmokeReport,
+  LIVE_SMOKE_CMD,
+  redactSecret,
+  runLiveSmoke,
+  runLiveSmokeCli,
+  type LiveSmokeOptions,
+  type LiveSmokeReport,
+} from './live-smoke.js';
 export { INLINE_MEMORY_CHARS, MAX_SPILLS, recallMemory, spillMemory } from './spill.js';
 export { OffHiDevice, type HiDevicePort, type HiDeviceResult } from './hi-device.js';
 export {

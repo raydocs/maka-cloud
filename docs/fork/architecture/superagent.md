@@ -822,7 +822,8 @@ Filled in by the implementation PR; kept accurate here:
 | `LayerFsStore` | metadata adapter; live mount throws; gate 3 harness `--local` |
 | `SandboxPort` | interface + `FakeSandbox` + `HttpSandbox` (Instabox HTTP). `createSandboxFromEnv`: fake when no key; throws if key without `INSTABOX_MACHINE_ID`; live when both set. Contract-tested against a mocked HTTP server |
 | Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards. Host passes `instaboxSandboxPort`, `EnvOrgSecrets`, `createJudgeFromEnv` |
-| Local loop | `npm run local-loop -w @maka-cloud/superagent` and `docs/superagent/quickstart.md`. CI smoke: `local-loop.test.ts` with fakes |
+| Local loop | `npm ci` + `npm run build -w @maka-cloud/superagent` + `npm run local-loop -w @maka-cloud/superagent`. CI smoke: `local-loop.test.ts` with fakes |
+| Live Instabox smoke | `npm run live-smoke -w @maka-cloud/superagent` (env `INSTABOX_API_KEY` + template). Creates the smallest box, `echo live-smoke`, always deletes. Not run in CI |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
 | `#452` InstaboxClient adapter | structural; used when host passes a client |
 | Pricing | not implemented (owner must pick a provider) |
