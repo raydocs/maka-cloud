@@ -128,6 +128,19 @@ test('core CI validates pull requests and the resulting main branch state', () =
   assert.doesNotMatch(workflow, /github\.event\.pull_request\.base\.sha/u);
 });
 
+test('workspace tests use one worker per GitHub-hosted core', () => {
+  const workflow = readWorkflow('ci.yml');
+  const step = ciSteps(workflow).find((candidate) =>
+    candidate.includes('name: Run affected standard workspace tests'),
+  );
+  assert.ok(step, 'no workspace test step');
+  // ubuntu-24.04 has 4 cores; 3 left one idle while the long suites ran.
+  assert.match(
+    step,
+    /run-workspace-tests-parallel\.mjs --concurrency=4 --workspace-timeout-minutes=30/u,
+  );
+});
+
 test('the Desktop e2e tier reaches its servers through the tested runner', () => {
   const workflow = readWorkflow('ci.yml');
   const start = workflow.indexOf('      - name: Desktop e2e\n');

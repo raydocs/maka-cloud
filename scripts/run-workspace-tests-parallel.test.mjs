@@ -24,11 +24,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  KNOWN_SLOW_WORKSPACE_MINUTES,
   orderByDescendingWeight,
   parseCliArgs,
   runWorkspaceTests,
   shardWorkspaces,
   testSourceWeight,
+  workspaceScheduleWeight,
 } from './run-workspace-tests-parallel.mjs';
 
 function immediateSuccessSpawn(started) {
@@ -94,6 +96,22 @@ test('a short workspace list stays in one shard', () => {
 
 test('an empty workspace list produces no matrix rows', () => {
   assert.deepEqual(shardWorkspaces([]), []);
+});
+
+test('known-slow workspaces outrank larger but faster test trees', async () => {
+  assert.ok(KNOWN_SLOW_WORKSPACE_MINUTES.has('packages/runtime'));
+  await withWorkspaceTree(
+    {
+      'packages/runtime/src/a.test.ts': 'x',
+      'packages/ui/src/a.test.ts': 'x'.repeat(50_000),
+    },
+    (root) => {
+      assert.ok(
+        workspaceScheduleWeight(root, 'packages/runtime') >
+          workspaceScheduleWeight(root, 'packages/ui'),
+      );
+    },
+  );
 });
 
 test('a long workspace list is packed heaviest-first across shards', () => {

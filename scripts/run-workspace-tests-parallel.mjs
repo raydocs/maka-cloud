@@ -63,6 +63,27 @@ const UNWEIGHED_DIRECTORIES = new Set(['node_modules', 'dist', '.git']);
  * for how long its suite runs. A tree that cannot be read weighs nothing, which
  * leaves the workspace in its declared position rather than failing the run.
  */
+/**
+ * Measured full-suite minutes for the workspaces that dominate CI wall time
+ * (`docs/fork/ci.md`). Used so packing and scheduling follow runtime, not
+ * just test-source bytes.
+ */
+export const KNOWN_SLOW_WORKSPACE_MINUTES = new Map([
+  ['packages/runtime', 15],
+  ['packages/cli', 15],
+  ['packages/cloud-playbooks', 13],
+  ['apps/desktop', 8],
+]);
+
+/** One minute of known runtime outranks any test-source byte count. */
+const KNOWN_SLOW_WEIGHT_SCALE = 1_000_000_000;
+
+export function workspaceScheduleWeight(repoRoot, dir) {
+  const bytes = testSourceWeight(repoRoot, dir);
+  const minutes = KNOWN_SLOW_WORKSPACE_MINUTES.get(dir);
+  return minutes == null ? bytes : minutes * KNOWN_SLOW_WEIGHT_SCALE + bytes;
+}
+
 export function testSourceWeight(repoRoot, dir) {
   let bytes = 0;
   const pending = [join(repoRoot, dir)];
@@ -335,7 +356,7 @@ export async function runWorkspaceTests(options = {}) {
   const spawn = options.spawn ?? defaultSpawn;
   const workspaceDirs = orderByDescendingWeight(
     options.workspaceDirs ?? loadWorkspaceDirs(repoRoot),
-    (dir) => testSourceWeight(repoRoot, dir),
+    (dir) => workspaceScheduleWeight(repoRoot, dir),
   );
   const runOptions = {
     repoRoot,

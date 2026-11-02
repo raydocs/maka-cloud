@@ -86,5 +86,6 @@ run in progress finishes, and the newest push replaces any run still waiting.
   Any other change still tests only what it touches, so a `packages/cloud-*` pull request stays
   on the cheap affected-only path (one workspace shard, no e2e/Storybook unless selected).
 - **Where the time goes on a full run:** upstream's `runtime` and `cli` take about 15 minutes each,
-  and our `cloud-playbooks` about 13. Those land in separate shards so they overlap. Each playbooks
-  test drives several fake agent runs (10 to 27 seconds per test), and its files run one at a time.
+  and our `cloud-playbooks` about 13. Those land in separate shards so they overlap, and each shard
+  runs four workspaces at once (one per GitHub-hosted core). Each playbooks test drives several
+  fake agent runs (10 to 27 seconds per test), and its files run one at a time.
