@@ -41,6 +41,7 @@ export interface SuperagentStore {
   usage(tenantId: string, workerId: string): Usage | undefined;
 
   close(): void;
+  backupTo?(destination: string): Promise<void>;
 }
 
 export function cloneWorker(worker: WorkerRecord): WorkerRecord {

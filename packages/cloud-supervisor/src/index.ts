@@ -12,7 +12,12 @@ export type {
   SummaryModel,
   SupervisorHost,
 } from './host.js';
-export { offerRef, type SuggestionChoice, type SuggestionOfferChoice } from './rules.js';
+export {
+  offerRef,
+  type StuckChoice,
+  type SuggestionChoice,
+  type SuggestionOfferChoice,
+} from './rules.js';
 export {
   DEFAULT_SETTINGS,
   type Settings,

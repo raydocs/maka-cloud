@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { backup as sqliteBackup, DatabaseSync } from 'node:sqlite';
 import { MemorySuperagentStore } from './memory-store.js';
 import type { SuperagentStore } from './store.js';
 import type {
@@ -471,6 +471,10 @@ export class SqliteSuperagentStore implements SuperagentStore {
   close(): void {
     this.memory.close();
     this.db.close();
+  }
+
+  async backupTo(destination: string): Promise<void> {
+    await sqliteBackup(this.db, destination);
   }
 }
 

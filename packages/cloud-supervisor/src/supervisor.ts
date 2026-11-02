@@ -10,6 +10,8 @@ import {
   openItem,
   type ProposalChoice,
   proposalSpec,
+  type StuckChoice,
+  stuckSpec,
   type SuggestionChoice,
   type SuggestionOfferChoice,
   suggestionOfferSpec,
@@ -659,6 +661,17 @@ export class Supervisor {
       if (once && this.store.itemEverRaised(made.dedupeKey)) return;
       openItem(this.store, made, this.now());
     });
+    this.kick();
+    return true;
+  }
+
+  /**
+   * Raises a T33 stuck report as a blocked item. One open item per worker. Local
+   * options only: tapping one grants nothing an approval gate guards.
+   */
+  raiseStuck(input: StuckChoice): boolean {
+    if (this.stopped) return false;
+    this.store.tx(() => openItem(this.store, stuckSpec(this.store, input), this.now()));
     this.kick();
     return true;
   }

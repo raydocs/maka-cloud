@@ -17,6 +17,7 @@
     { "path": "../cloud-playbooks" },
     { "path": "../cloud-runners" },
     { "path": "../cloud-server" },
+    { "path": "../cloud-superagent" },
     { "path": "../cloud-supervisor" }
   ]
 }

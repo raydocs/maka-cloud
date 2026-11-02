@@ -85,4 +85,12 @@ export {
   type RepoInspector,
 } from './propose.js';
 export * from './types.js';
-export { ACCEPTED_EVENTS, MAX_BODY_BYTES, verifySignature } from './webhook.js';
+export {
+  ACCEPTED_EVENTS,
+  type Delivery,
+  type Headers,
+  MAX_BODY_BYTES,
+  readDelivery,
+  type Rejection,
+  verifySignature,
+} from './webhook.js';

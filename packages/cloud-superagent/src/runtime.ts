@@ -27,6 +27,7 @@ import {
   type WatchdogSettings,
   type WorkerHandler,
 } from './types.js';
+import { type StuckCard, stuckCardOf } from './stuck.js';
 import { runWatchdog } from './watchdog.js';
 
 export type IngestResult =
@@ -66,6 +67,8 @@ export interface SuperagentOptions {
   admission?: AdmissionPolicy;
   watchdog?: Partial<WatchdogSettings>;
   metering?: MeteringHooks;
+  /** Host turns escalate/stop findings into a T33 stuck card. */
+  onEscalate?: (card: StuckCard) => void;
 }
 
 export class Superagent {
@@ -77,8 +80,10 @@ export class Superagent {
   readonly watchdogSettings: WatchdogSettings;
   readonly metering: MeteringHooks;
   readonly safety: Safety;
+  readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
   private readonly now: () => number;
+  private readonly onEscalate?: (card: StuckCard) => void;
 
   constructor(options: SuperagentOptions = {}) {
     this.store = options.store ?? new MemorySuperagentStore();
@@ -90,6 +95,7 @@ export class Superagent {
     this.watchdogSettings = { ...DEFAULT_WATCHDOG, ...options.watchdog };
     this.metering = options.metering ?? { record() {} };
     this.safety = new Safety(this.store, this.ids, this.watchdogSettings.approvalTtlMs);
+    this.onEscalate = options.onEscalate;
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
@@ -193,7 +199,7 @@ export class Superagent {
 
   async tick(): Promise<WatchdogFinding[]> {
     const at = this.now();
-    return runWatchdog(
+    const findings = await runWatchdog(
       this.store,
       this.watchdogSettings,
       {
@@ -204,6 +210,15 @@ export class Superagent {
       },
       at,
     );
+    for (const found of findings) {
+      if (found.action !== 'escalate' && found.action !== 'stop') continue;
+      const worker = this.store.worker(found.tenantId, found.workerId);
+      if (!worker) continue;
+      const card = stuckCardOf(worker, found, at);
+      this.escalations.push(card);
+      this.onEscalate?.(card);
+    }
+    return findings;
   }
 
   async approve(

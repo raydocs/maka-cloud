@@ -789,13 +789,13 @@ stays `approval_unavailable`.
 
 Filled in by the implementation PR; kept accurate here:
 
-| Piece | P1 status |
+| Piece | Status |
 |---|---|
 | Event normalization (GitHub, chat, timer) | implemented |
 | Event log + idempotency | implemented |
 | Subscription table + pass-through | implemented |
 | Router admission + `HeuristicJudge` | implemented |
-| `ModelJudge` | stub (throws without a provider) |
+| `ModelJudge` | injectable `JudgeClient`; HeuristicJudge stays default; no API keys in tests |
 | Worker state machine, inbox, sleep/wake/retire | implemented |
 | Durable memory / plan / transcript pointer | implemented |
 | Sqlite restore | implemented |
@@ -806,28 +806,32 @@ Filled in by the implementation PR; kept accurate here:
 | `WorkspaceStore` + `GitCloneStore` | implemented |
 | `LayerFsStore` | metadata adapter; live mount throws |
 | `SandboxPort` | interface + fake; no live Instabox |
-| Host / duties / conductor wiring | stub (ports only) |
+| Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
 | `#452` InstaboxClient adapter | structural; used when host passes a client |
 | Pricing | not implemented |
 | Inline & Spill / Chain of Recall | not implemented (P4) |
 | Speculative silent fix | not implemented (explicit non-goal) |
 
-## 16. Open questions for the owner
+## 16. Open questions — decisions recorded (revisit with the owner)
 
-1. Confirm Instabox (not boat.dev) is the execution environment through
-   launch. This architecture assumes yes.
-2. One live owner per subject: keep, or allow a reviewer worker on the same
-   PR in P2?
-3. After a person **stops** a worker, does a later human comment on that PR
-   start a **new** Mandate (this doc) or resume the old one (DSH)?
-4. Are Instabox Org Secrets on the current plan?
-5. Should unowned `issue_opened` spawn at `observe` automatically, or only
-   when a standing duty says so? P1 heuristic spawns at `observe`.
-6. Host wiring PR: same stack process (recommended, exclusive sqlite next to
-   the server dir) or a side process (needs a different lock story)?
-7. Daily CI runner: GitHub-hosted (as `docs/fork/ci.md` says) remains the
-   default; do not move Super-agent tests to the VPS.
+Taken from the defaults already in this document. Revisit if the owner
+overrides them.
+
+1. **Instabox through launch.** Yes. boat.dev PRs stay parked. P0 still needs
+   the owner's Instabox credentials and DNS.
+2. **One live owner per subject.** Keep. A reviewer worker on the same PR is
+   not added in P2.
+3. **Stop then later comment.** A later human comment starts a **new** Mandate
+   (this doc), not DSH resume of the withdrawn one.
+4. **Instabox Org Secrets.** Interface only in P4. Not assumed on the current
+   plan.
+5. **Unowned `issue_opened`.** Spawn at `observe` (P1 heuristic). A standing
+   duty is not required.
+6. **Host wiring.** Same stack process, exclusive sqlite next to the server
+   dir (`superagent.db`). Not a side process.
+7. **CI runner.** GitHub-hosted remains the default. Super-agent tests stay
+   in the ordinary workspace lane.
 
 ## 17. Attribution
 
