@@ -14,6 +14,6 @@ export function createCodingRunner(
     ...options,
     agents: { 'claude-agent-sdk': cloud.claude, codex: cloud.codex },
     sandbox: new FleetCodingSandbox(cloud.fleet),
-    workspaces: options.workspaces ?? cloud.fleet.workspaces,
+    workspaces: options.workspaces ?? cloud.fleet?.workspaces,
   });
 }
