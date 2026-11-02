@@ -5,6 +5,8 @@ fork absorbed and any fork-side follow-up.
 
 ## 2026-11-02
 
+- `dd11583b4609bccb2284e36e84efc888c1eac6fe` — Merge `origin/main` `4f98ef6a2` (PR #467, apache/maka `5d3a0629a`) into `cursor/maka-engine-602e` so PR #469 is not conflicted. Only `docs/fork/CHANGELOG.md` conflicted (add/add). No new `packages/cloud-*` `@maka/*` call sites arrived; the MakaEngine boundary still holds. Assistant-card fields stay optional on session and model-history; `TsInProcessEngine` is unchanged. No session migration.
+
 Merged apache/maka `5d3a0629a` (`feat(assistant): add compact chat and pet cards with single-choice replies (#6301)`).
 
 - Runtime Host compatibility epoch **237 → 238** for assistant cards and durable single-choice reply/status operations. Older peers cannot display cards or submit and synchronize their choices safely.
