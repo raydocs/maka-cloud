@@ -1,4 +1,4 @@
-import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
+import type { ModelCallAttempt } from '@maka-cloud/maka-engine';
 import type { ModelPrices } from './config.js';
 
 /** Dollars for one model call, from its token counts and the price table. */
