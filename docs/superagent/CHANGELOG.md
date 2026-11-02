@@ -1,12 +1,23 @@
 # Super-agent changelog
 
-Append-only. Newest first. Times are America/Denver.
+Append-only. Newest first. Times are America/Denver, taken from the
+first listed SHA's committer date (`git show -s --format=%cI`).
 Every behavior change under `packages/cloud-superagent` must add an entry
 in the same commit. `changelog.test.ts` fails the package suite when this
 file is missing from the branch diff, when a later Super-agent commit
-omits it, or when uncommitted Super-agent edits leave it unchanged.
+omits it, when uncommitted Super-agent edits leave it unchanged, or when
+a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 02:44 MST — cursor/superagent-real-loop-51be — 50bd4c80c
+## 2026-11-02 02:45 MST — cursor/superagent-real-loop-51be
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** Derive each CHANGELOG heading time from the first listed SHA's committer date in America/Denver. Corrected the backfill (e9680184a, 749221aa8, 001094a1a, and the rest). Test: heading vs `git show -s --format=%cI` within 5 minutes.
+- **Why:** User request: timestamps did not match reality (e9680184a was listed 01:50 MST, requested ~02:10 MST).
+- **Tests:** 122 passed in `@maka-cloud/superagent` (`test:dist`)
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 02:45 MST — cursor/superagent-real-loop-51be — 50bd4c80c
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** `GitCloneStore.exportPatch` stages with `git add -A` then `git diff --cached HEAD` so new untracked files are in the patch. `snapshot` writes a worktree tree id (`write-tree` on a temp index) instead of `rev-parse HEAD`.
@@ -15,7 +26,7 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** n/a
 - **Migrations / risk:** none. Snapshot `id` is now a tree SHA, not a commit SHA. No sqlite change.
 
-## 2026-11-02 02:42 MST — cursor/superagent-real-loop-51be — e5d421ae1
+## 2026-11-02 02:43 MST — cursor/superagent-real-loop-51be — e5d421ae1
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Same-commit changelog check (after this file exists, every `packages/cloud-superagent` commit and dirty tree must also touch CHANGELOG). Filled SHAs on the backfill. Standing user requirement.
@@ -24,7 +35,7 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** n/a
 - **Migrations / risk:** none
 
-## 2026-11-02 02:39 MST — cursor/superagent-real-loop-51be — 3145ce8ca
+## 2026-11-02 02:41 MST — cursor/superagent-real-loop-51be — 3145ce8ca
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Lessons from dori: Done-signal contract + unpushed check (PR, issue, conversation); review receipts (`VERDICT: CLEAR\|BLOCK`) pinned to head SHA as a merge-approval precondition; owner `paused` state with verified stop, no W2 nudge, explicit resume; lead reports re-read live PR/CI and flag STALE; workers have no outbound user channel (`LeadPort` only). Architecture §18.
@@ -33,7 +44,16 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** not run in this environment
 - **Migrations / risk:** none. No sqlite `user_version` bump. New fields are worker JSON. `paused` is a new value of the existing `state` column.
 
-## 2026-11-02 02:26 MST — cursor/superagent-real-loop-51be — 3fd50604e, 8aaaaaf8a
+## 2026-11-02 02:29 MST — cursor/superagent-real-loop-51be — d36e45e52
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** Introduced this append-only changelog and the first branch-diff check. Backfilled #461/#462/#464/#465/#466, usable, real-loop, boxed loop, push-from-box diff, and timings.
+- **Why:** Standing user requirement for traceability (do this first).
+- **Tests:** changelog.test.ts on the branch
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 02:25 MST — cursor/superagent-real-loop-51be — 3fd50604e, 8aaaaaf8a
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Merge approval binds the PR head SHA; `PUT /pulls/N/merge` sends it; Checks/Statuses refuse failed, pending, all-skipped, or empty unless `mandate.allowNoCi`. W2 nudges once before escalate (`waiting` exempt). Drain coalesces a backlog into one handler call. Spawn admission caps live Instabox boxes and tenant spend.
@@ -42,7 +62,7 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** not run in this environment
 - **Migrations / risk:** none (JSON fields only)
 
-## 2026-11-02 01:50 MST — cursor/superagent-real-loop-51be — e9680184a
+## 2026-11-02 02:15 MST — cursor/superagent-real-loop-51be — e9680184a
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Messages API input/output tokens and estimated USD on the in-memory usage object and the sqlite ledger. Empty GitHub scratch repos seed `main` when `MAKA_CLOUD_LOOP_SEED=1`.
@@ -51,7 +71,7 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** not run here. Earlier owner runs: Instabox-only boxed run ok ~14s; real model `claude-haiku-5-5` fixed `add.js`, in-box test ok ~18s, box destroyed (2026-11-02).
 - **Migrations / risk:** none. Ledger rows stay `{tokens, usdMicros, wallMs}`.
 
-## 2026-11-02 01:40 MST — cursor/superagent-real-loop-51be — 749221aa8
+## 2026-11-02 02:09 MST — cursor/superagent-real-loop-51be — 749221aa8
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Publish the box `git diff --cached` onto a clean host checkout. Per-phase timings and box exec stdout/stderr/exit on the CLI report.
@@ -60,7 +80,7 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** owner-verified on Instabox (2026-11-02)
 - **Migrations / risk:** none
 
-## 2026-11-02 01:20 MST — cursor/superagent-real-loop-51be — 001094a1a
+## 2026-11-02 02:02 MST — cursor/superagent-real-loop-51be — 001094a1a
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Clone / apply coder files / install / test run inside the sandbox. Host keeps tokens. FakeSandbox local-exec parity.
@@ -69,22 +89,13 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** owner-verified on Instabox (2026-11-02)
 - **Migrations / risk:** none
 
-## 2026-11-02 00:50 MST — cursor/superagent-real-loop-51be — b958e7aea, 5741d451c
+## 2026-11-02 01:52 MST — cursor/superagent-real-loop-51be — b958e7aea, 5741d451c
 
 - **PR:** none (usable + real-loop compare URLs; ManagePullRequest was unavailable)
 - **What:** Real loop, metrics harness, ModelJudge prefilter, live `HttpCoder` / `HttpGitHost`.
 - **Why:** P0 real loop and P1 judge from the Super-agent architecture ([DSH article](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/000-philosophy.md) + `docs/fork/architecture/superagent.md`).
 - **Tests:** package suite green
 - **Live:** 22fdef92 Instabox smoke passed earlier on the usable line
-- **Migrations / risk:** none
-
-## 2026-11-02 — cursor/superagent-real-loop-51be — d36e45e52
-
-- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
-- **What:** Introduced this append-only changelog and the first branch-diff check. Backfilled #461/#462/#464/#465/#466, usable, real-loop, boxed loop, push-from-box diff, and timings.
-- **Why:** Standing user requirement for traceability (do this first).
-- **Tests:** changelog.test.ts on the branch
-- **Live:** n/a
 - **Migrations / risk:** none
 
 ## 2026-11-02 01:32 MST — cursor/superagent-core-51be — 59135b688 — #462 (merged)
@@ -105,25 +116,16 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** n/a
 - **Migrations / risk:** none
 
-## 2026-11-02 — cursor/superagent-host-51be — 1132472ed — #464 (open)
+## 2026-11-02 00:51 MST — cursor/superagent-usable-51be — 2236473bd, e15f1ceb7, d4650dca5, 22fdef92a, 520f204b8
 
-- **PR:** https://github.com/raydocs/maka-cloud/pull/464
-- **What:** In-process Super-agent on the host, duties Source, T33 stuck cards (T34 P2).
-- **Why:** Architecture § host wiring.
-- **Tests:** host / superagent suites on that branch
-- **Live:** n/a
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-usable-51be))
+- **What:** Local loop, Instabox HTTP sandbox, EnvOrgSecrets, live-smoke (always destroy), smallest 2 vCPU / 4096 MiB, long-poll + DELETE 409 retry. Merged #461/#462.
+- **Why:** P0 usable employee on one machine.
+- **Tests:** local-loop + live-smoke (mocked HTTP) green
+- **Live:** 22fdef92 Instabox smoke passed (2026-11-02)
 - **Migrations / risk:** none
 
-## 2026-11-02 — cursor/superagent-workspaces-51be — 75be1ab11 — #465 (open)
-
-- **PR:** https://github.com/raydocs/maka-cloud/pull/465
-- **What:** Runners `WorkspaceStore` default and LayerFS four-gate harness (T34 P3).
-- **Why:** Architecture workspace store.
-- **Tests:** runners / superagent suites on that branch
-- **Live:** n/a
-- **Migrations / risk:** LayerFS live mount still throws
-
-## 2026-11-02 — cursor/superagent-ledger-51be — 433fa0494, 913e22be5 — #466 (open)
+## 2026-11-01 21:44 MST — cursor/superagent-ledger-51be — 433fa0494, 913e22be5 — #466 (open)
 
 - **PR:** https://github.com/raydocs/maka-cloud/pull/466
 - **What:** Tenant usage ledger, evidence blocks, Org Secrets interface (T34 P4).
@@ -132,11 +134,20 @@ omits it, or when uncommitted Super-agent edits leave it unchanged.
 - **Live:** n/a
 - **Migrations / risk:** package-local `usage_events` (schema 2). Not a cloud-server migration.
 
-## 2026-11-02 — cursor/superagent-usable-51be — 2236473bd, e15f1ceb7, d4650dca5, 22fdef92a, 520f204b8
+## 2026-11-01 21:39 MST — cursor/superagent-workspaces-51be — 75be1ab11 — #465 (open)
 
-- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-usable-51be))
-- **What:** Local loop, Instabox HTTP sandbox, EnvOrgSecrets, live-smoke (always destroy), smallest 2 vCPU / 4096 MiB, long-poll + DELETE 409 retry. Merged #461/#462.
-- **Why:** P0 usable employee on one machine.
-- **Tests:** local-loop + live-smoke (mocked HTTP) green
-- **Live:** 22fdef92 Instabox smoke passed (2026-11-02)
+- **PR:** https://github.com/raydocs/maka-cloud/pull/465
+- **What:** Runners `WorkspaceStore` default and LayerFS four-gate harness (T34 P3).
+- **Why:** Architecture workspace store.
+- **Tests:** runners / superagent suites on that branch
+- **Live:** n/a
+- **Migrations / risk:** LayerFS live mount still throws
+
+## 2026-11-01 21:35 MST — cursor/superagent-host-51be — 1132472ed — #464 (open)
+
+- **PR:** https://github.com/raydocs/maka-cloud/pull/464
+- **What:** In-process Super-agent on the host, duties Source, T33 stuck cards (T34 P2).
+- **Why:** Architecture § host wiring.
+- **Tests:** host / superagent suites on that branch
+- **Live:** n/a
 - **Migrations / risk:** none
