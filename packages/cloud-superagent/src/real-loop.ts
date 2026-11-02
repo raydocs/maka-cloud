@@ -182,7 +182,11 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
         async decide(event) {
           return {
             action: 'spawn',
-            mandate: actMandate(event.subject?.repo ? [event.subject.repo] : [repoName]),
+            mandate: {
+              ...actMandate(event.subject?.repo ? [event.subject.repo] : [repoName]),
+              // Scratch / no-CI fixture. Product mandates omit this.
+              allowNoCi: true,
+            },
             title: 'real-loop',
           };
         },
@@ -246,8 +250,9 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       if (comment.result === 'passthrough') report.steps.push('review-resume');
     }
     const waiting = agent.store.worker('inv_loop', opened.workerId);
-    if (publish && pr && waiting) {
-      const action = mergeAction(repoName, pr.number);
+    const headSha = handler.lastPush.get(opened.workerId)?.sha;
+    if (publish && pr && waiting && headSha) {
+      const action = mergeAction(repoName, pr.number, headSha);
       const held = agent.safety.gate(waiting, action, Date.now());
       if (!held.allowed && held.reason === 'held') {
         report.steps.push('merge-held');

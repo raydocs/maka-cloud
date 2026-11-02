@@ -87,7 +87,7 @@ export interface GitHostPort {
     number?: number;
   }): Promise<PullRequestResult>;
   ciLink(repo: string, sha: string): string;
-  merge?(input: { repo: string; number: number }): Promise<void>;
+  merge?(input: { repo: string; number: number; sha: string; allowNoCi?: boolean }): Promise<void>;
 }
 
 export const LOOP_TIMING_PHASES = [
@@ -199,6 +199,7 @@ export class FakeGitHost implements GitHostPort {
     PullRequestResult & { branch: string; title: string; body: string }
   > = [];
   readonly merged: number[] = [];
+  readonly mergedShas: string[] = [];
   private nextPr = 1;
 
   async commitAndPush(input: {
@@ -259,8 +260,9 @@ export class FakeGitHost implements GitHostPort {
     return `https://github.com/${repo}/commit/${sha}/checks`;
   }
 
-  async merge(input: { number: number }): Promise<void> {
+  async merge(input: { number: number; sha: string }): Promise<void> {
     this.merged.push(input.number);
+    this.mergedShas.push(input.sha);
   }
 }
 
@@ -496,8 +498,32 @@ export class CodingLoopHandler implements WorkerHandler {
     const bound = field(event, 'boundText');
     if (kind === 'merge') {
       const pr = this.lastPr.get(ctx.worker.workerId);
-      if (pr && this.ports.git.merge) {
-        await this.ports.git.merge({ repo, number: pr.number });
+      const parsed = parseMergeBound(bound);
+      const sha = parsed?.sha;
+      if (!pr || !sha) {
+        const reason = 'MERGE_REFUSED missing head sha';
+        return {
+          progress: true,
+          memory: reason,
+          evidence: [{ kind: 'step', label: 'merge', body: reason }],
+        };
+      }
+      if (this.ports.git.merge) {
+        try {
+          await this.ports.git.merge({
+            repo: parsed?.repo || repo,
+            number: parsed?.number ?? pr.number,
+            sha,
+            allowNoCi: ctx.worker.mandate.allowNoCi === true,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'MERGE_REFUSED';
+          return {
+            progress: true,
+            memory: message,
+            evidence: [{ kind: 'step', label: 'merge', body: message }],
+          };
+        }
       }
       return {
         progress: true,
@@ -551,8 +577,21 @@ export class CodingLoopHandler implements WorkerHandler {
   }
 }
 
-export function mergeAction(repo: string, number: number): ProposedAction {
-  return { kind: 'merge', boundText: `Merge pull request #${number} in ${repo}` };
+export function mergeBoundText(repo: string, number: number, sha: string): string {
+  return `Merge pull request #${number} in ${repo} at ${sha}`;
+}
+
+export function mergeAction(repo: string, number: number, sha: string): ProposedAction {
+  return { kind: 'merge', boundText: mergeBoundText(repo, number, sha) };
+}
+
+/** Parses `Merge pull request #N in owner/name at <sha>`. */
+export function parseMergeBound(
+  boundText: string,
+): { repo: string; number: number; sha: string } | undefined {
+  const match = /^Merge pull request #(\d+) in (\S+) at ([0-9a-f]{7,40})$/i.exec(boundText.trim());
+  if (!match) return undefined;
+  return { number: Number(match[1]), repo: match[2] as string, sha: match[3] as string };
 }
 
 function briefOf(event: NormalizedEvent): string {

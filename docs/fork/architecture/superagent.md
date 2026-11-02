@@ -289,6 +289,7 @@ Frozen at spawn. Default intensity is **`observe`**.
 | `authority` | `read-only` \| `open-pr` \| `merge-when-green` | Same ladder as duties / conductor. A worker cannot raise it. |
 | `budgets` | `{ tokens?, usd?, wallMs? }` | Hard. Exceeding → W4, worker stops. |
 | `strength` | `explicit` \| `inferred` | From the article / DSH. Inferred work stays `observe` unless a person raises it. |
+| `allowNoCi` | bool? | Scratch / no-CI repos only. Merge treats an empty Checks/Statuses list as green when set; default refuse. |
 
 ### 4.6 Approval and audit
 
@@ -296,7 +297,7 @@ Frozen at spawn. Default intensity is **`observe`**.
 |---|---|---|
 | `approvalId` | `apr_…` | |
 | `kind` | `merge` \| `push_protected` \| `secrets` \| `deploy` \| `spend` \| `other_irreversible` | |
-| `boundText` | string | Exact text the owner saw. Approve must match. |
+| `boundText` | string | Exact text the owner saw. Approve must match. Merge binds `Merge pull request #N in repo at <sha>` so a new push invalidates the approval. |
 | `state` | `pending` \| `approved` \| `denied` \| `expired` | |
 | `expiresAt` | ms | Default 24h. |
 
@@ -612,7 +613,11 @@ path. Super-agent **additionally** holds:
   raise the budget with a bound-text approval)
 
 Approve is `boundText` byte-identical to the pending row, same as conductor
-grants. A changed diff needs a new approval.
+grants. A changed diff needs a new approval. Merge additionally lists
+Checks + Statuses for that SHA and refuses failed, pending, or all-skipped
+runs. An empty check list is never green unless the mandate sets
+`allowNoCi`. `HttpGitHost.merge` sends `sha` on `PUT /pulls/N/merge` so
+GitHub rejects a moved head.
 
 `observe` workers cannot reach these actions; the gate refuses before an
 approval is even opened.
@@ -824,7 +829,7 @@ Filled in by the implementation PR; kept accurate here:
 | Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards. Host passes `instaboxSandboxPort`, `EnvOrgSecrets`, `createJudgeFromEnv` |
 | Local loop | `npm ci` + `npm run build -w @maka-cloud/superagent` + `npm run local-loop -w @maka-cloud/superagent`. CI smoke: `local-loop.test.ts` with fakes |
 | Live Instabox smoke | `npm run live-smoke -w @maka-cloud/superagent` (env `INSTABOX_API_KEY`; template defaults to `universal`). Creates 2 vCPU / 4096 MiB, `echo live-smoke`, always deletes. Not run in CI |
-| Real loop | `CodingLoopHandler`: repo is materialized **in the box** (public `git clone`, or host tarball for private/scratch). Host-side coder files are written in the box; install/test run in the box; `git diff --cached` is pulled back and applied to a clean host checkout before publish. CLI prints per-phase timings, Messages API input/output tokens + estimated USD (ledger), and box exec stdout/stderr/exit. Empty GitHub repos seed `main` when `MAKA_CLOUD_LOOP_SEED=1`. Checks/Statuses with no runs are `no-checks`. Live GitHub stops at merge-held. `npm run real-loop`. Live only with `MAKA_CLOUD_LOOP_LIVE=1` + keys (never in CI) |
+| Real loop | `CodingLoopHandler`: repo is materialized **in the box** (public `git clone`, or host tarball for private/scratch). Host-side coder files are written in the box; install/test run in the box; `git diff --cached` is pulled back and applied to a clean host checkout before publish. CLI prints per-phase timings, Messages API input/output tokens + estimated USD (ledger), and box exec stdout/stderr/exit. Empty GitHub repos seed `main` when `MAKA_CLOUD_LOOP_SEED=1`. Checks/Statuses with no runs are `no-checks`. Merge approval binds the head SHA; `PUT /pulls/N/merge` sends it; ungreen / empty / all-skipped checks refuse unless `mandate.allowNoCi`. Live GitHub stops at merge-held. `npm run real-loop`. Live only with `MAKA_CLOUD_LOOP_LIVE=1` + keys (never in CI) |
 | Metrics harness | `npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics`. FakeSandbox only. JSON + markdown: success rate, time-to-green, humans, $/PR, wasted Router wakeups |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
 | `#452` InstaboxClient adapter | structural; used when host passes a client |

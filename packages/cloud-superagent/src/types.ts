@@ -100,6 +100,11 @@ export interface Mandate {
   authority: Authority;
   budgets: { tokens?: number; usd?: number; wallMs?: number };
   strength: Strength;
+  /**
+   * When true, mergeGate treats an empty Checks/Statuses list as green.
+   * Scratch / no-CI repos only. Default is refuse (`no-checks` is not green).
+   */
+  allowNoCi?: boolean;
 }
 
 export interface Usage {

@@ -115,7 +115,8 @@ listener is for laptop replay only.
    ```
    Expect the box created and destroyed, `usage:` from the Messages API when
    a model key is set, `ci: no-checks` when the repo has no Actions, and
-   merge held (never auto-merged).
+   merge held on the head SHA (never auto-merged; empty checks are not
+   green unless the scratch mandate sets `allowNoCi`).
 
 6. **Metrics harness (fakes only).**
    ```bash

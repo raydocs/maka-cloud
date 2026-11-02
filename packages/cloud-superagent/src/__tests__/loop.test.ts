@@ -11,6 +11,8 @@ import {
   FakeGitHost,
   NodeFileTestPort,
   mergeAction,
+  mergeBoundText,
+  parseMergeBound,
   mayPush,
   scratchFiles,
   workerBranch,
@@ -136,14 +138,25 @@ test('merge stays held until the owner approves the exact bound text', async () 
   assert.equal(opened.result, 'spawned');
   if (opened.result !== 'spawned') return;
   const pr = git.pullRequests[0];
+  const sha = git.pushes[0]?.sha;
   assert.ok(pr);
-  const action = mergeAction(REPO, pr.number);
+  assert.ok(sha);
+  const action = mergeAction(REPO, pr.number, sha);
+  assert.equal(action.boundText, mergeBoundText(REPO, pr.number, sha));
+  assert.deepEqual(parseMergeBound(action.boundText), { repo: REPO, number: pr.number, sha });
   const worker = agent.worker(TENANT, opened.workerId);
   assert.ok(worker);
   const held = agent.safety.gate(worker, action, Date.now());
   assert.equal(held.allowed, false);
   if (held.allowed || held.reason !== 'held') return;
+  const moved = mergeAction(REPO, pr.number, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(agent.safety.approvedFor(worker, moved), false);
   const ok = await agent.approve(TENANT, held.approvalId, action.boundText);
   assert.equal(ok.ok, true);
   assert.deepEqual(git.merged, [pr.number]);
+  assert.deepEqual(git.mergedShas, [sha]);
+  const after = agent.worker(TENANT, opened.workerId);
+  assert.ok(after);
+  assert.equal(agent.safety.approvedFor(after, action), true);
+  assert.equal(agent.safety.approvedFor(after, moved), false);
 });

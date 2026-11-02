@@ -9,6 +9,7 @@ import { ADD_FIXED } from '../loop.js';
 import {
   HttpGitHost,
   createGitHostFromEnv,
+  evaluateMergeGate,
   githubTokenProblem,
   summarizeCi,
 } from '../loop-github.js';
@@ -132,6 +133,45 @@ test('summarizeCi treats an empty Checks/Statuses list as no-checks, not failure
     ).verdict,
     'success',
   );
+  assert.equal(
+    summarizeCi(
+      { state: 'pending', total_count: 0, statuses: [] },
+      {
+        total_count: 2,
+        check_runs: [
+          { status: 'completed', conclusion: 'skipped' },
+          { status: 'completed', conclusion: 'skipped' },
+        ],
+      },
+    ).verdict,
+    'skipped',
+  );
+  assert.equal(
+    summarizeCi(
+      { state: 'success', total_count: 1, statuses: [{ state: 'success' }] },
+      { total_count: 1, check_runs: [{ status: 'completed', conclusion: 'skipped' }] },
+    ).verdict,
+    'success',
+  );
+  assert.equal(
+    summarizeCi(
+      { state: 'pending', total_count: 0, statuses: [] },
+      { total_count: 1, check_runs: [{ status: 'in_progress', conclusion: null }] },
+    ).verdict,
+    'pending',
+  );
+});
+
+test('evaluateMergeGate refuses failed, pending, skipped and no-checks unless allowNoCi', () => {
+  assert.equal(evaluateMergeGate({ verdict: 'success', detail: 'ok' }).ok, true);
+  assert.equal(evaluateMergeGate({ verdict: 'no-checks', detail: 'empty' }).ok, false);
+  assert.equal(
+    evaluateMergeGate({ verdict: 'no-checks', detail: 'empty' }, { allowNoCi: true }).ok,
+    true,
+  );
+  assert.equal(evaluateMergeGate({ verdict: 'pending', detail: 'wait' }).ok, false);
+  assert.equal(evaluateMergeGate({ verdict: 'failure', detail: 'fail' }).ok, false);
+  assert.equal(evaluateMergeGate({ verdict: 'skipped', detail: 'skip' }).ok, false);
 });
 
 test('HttpGitHost publishes blobs and opens a PR without putting the token on argv', async () => {
@@ -237,6 +277,91 @@ test('HttpGitHost publishes blobs and opens a PR without putting the token on ar
     assert.ok(seen.every((row) => row.auth === 'Bearer github_pat_test-token'));
     assert.ok(seen.some((row) => row.method === 'POST' && row.url.endsWith('/git/blobs')));
     assert.ok(!JSON.stringify(seen.map((row) => row.body)).includes('github_pat_test-token'));
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('HttpGitHost.merge sends sha and refuses ungreen checks', async () => {
+  const seen: Array<{ method: string; url: string; body: unknown }> = [];
+  let status = { state: 'success', total_count: 1, statuses: [{ state: 'success' }] };
+  let checks = {
+    total_count: 1,
+    check_runs: [{ status: 'completed', conclusion: 'success', name: 'ci' }],
+  };
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk) => chunks.push(chunk as Buffer));
+    req.on('end', () => {
+      const url = req.url ?? '';
+      const method = req.method ?? 'GET';
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+      seen.push({ method, url, body });
+      const reply = (code: number, payload: unknown) => {
+        res.writeHead(code, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      if (method === 'GET' && url.includes('/status')) return reply(200, status);
+      if (method === 'GET' && url.includes('/check-runs')) return reply(200, checks);
+      if (method === 'PUT' && url === '/repos/acme/scratch/pulls/4/merge') {
+        return reply(200, { merged: true, sha: body?.sha });
+      }
+      reply(500, { message: `unhandled ${method} ${url}` });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  const git = new HttpGitHost({
+    token: 'github_pat_test-token',
+    repo: 'acme/scratch',
+    baseUrl: `http://127.0.0.1:${port}`,
+  });
+  const sha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  try {
+    await git.merge({ repo: 'acme/scratch', number: 4, sha });
+    const put = seen.find((row) => row.method === 'PUT');
+    assert.deepEqual(put?.body, { merge_method: 'merge', sha });
+    assert.deepEqual(git.merged, [4]);
+
+    status = { state: 'pending', total_count: 0, statuses: [] };
+    checks = { total_count: 0, check_runs: [] };
+    seen.length = 0;
+    await assert.rejects(
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      /MERGE_REFUSED no checks/,
+    );
+    assert.equal(
+      seen.some((row) => row.method === 'PUT'),
+      false,
+    );
+
+    await git.merge({ repo: 'acme/scratch', number: 4, sha, allowNoCi: true });
+    assert.equal(git.merged.length, 2);
+
+    status = { state: 'failure', total_count: 1, statuses: [{ state: 'failure' }] };
+    checks = { total_count: 0, check_runs: [] };
+    await assert.rejects(
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      /MERGE_REFUSED a check or status failed/,
+    );
+
+    status = { state: 'pending', total_count: 1, statuses: [{ state: 'pending' }] };
+    await assert.rejects(
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      /MERGE_REFUSED checks still running/,
+    );
+
+    status = { state: 'pending', total_count: 0, statuses: [] };
+    checks = {
+      total_count: 1,
+      check_runs: [{ status: 'completed', conclusion: 'skipped', name: 'ci' }],
+    };
+    await assert.rejects(
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      /MERGE_REFUSED every check was skipped/,
+    );
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

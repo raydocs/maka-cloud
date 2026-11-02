@@ -12,7 +12,7 @@ export const GITHUB_TOKEN_ENV = 'MAKA_GITHUB_TOKEN';
 export const LOOP_REPO_ENV = 'MAKA_CLOUD_LOOP_REPO';
 export const LOOP_SEED_ENV = 'MAKA_CLOUD_LOOP_SEED';
 
-export type CiVerdict = 'no-checks' | 'pending' | 'success' | 'failure';
+export type CiVerdict = 'no-checks' | 'pending' | 'success' | 'failure' | 'skipped';
 
 export interface CiStatus {
   verdict: CiVerdict;
@@ -198,10 +198,19 @@ export class HttpGitHost implements GitHostPort {
     return summarizeCi(status, checks);
   }
 
-  async merge(input: { repo: string; number: number }): Promise<void> {
+  async merge(input: {
+    repo: string;
+    number: number;
+    sha: string;
+    allowNoCi?: boolean;
+  }): Promise<void> {
     const repo = this.defaultRepo ?? input.repo;
+    const ci = await this.readCi(input.sha, repo);
+    const gate = evaluateMergeGate(ci, { allowNoCi: input.allowNoCi === true });
+    if (!gate.ok) throw new Error(`MERGE_REFUSED ${gate.reason}`);
     await this.api('PUT', `/repos/${repo}/pulls/${input.number}/merge`, {
       merge_method: 'merge',
+      sha: input.sha,
     });
     this.merged.push(input.number);
   }
@@ -376,19 +385,68 @@ export function summarizeCi(
     (row) =>
       row.conclusion === 'failure' ||
       row.conclusion === 'timed_out' ||
-      row.conclusion === 'cancelled',
+      row.conclusion === 'cancelled' ||
+      row.conclusion === 'stale',
   );
   if (failedStatus || failedCheck) {
     return { verdict: 'failure', detail: 'a check or status failed' };
   }
   const pendingStatus = statuses.some((row) => row.state === 'pending');
   const pendingCheck = runs.some(
-    (row) => row.status === 'queued' || row.status === 'in_progress' || row.status === 'pending',
+    (row) =>
+      row.status === 'queued' ||
+      row.status === 'in_progress' ||
+      row.status === 'pending' ||
+      row.conclusion === 'action_required',
   );
   if (pendingStatus || pendingCheck) {
     return { verdict: 'pending', detail: 'checks still running' };
   }
+  const passed =
+    statuses.some((row) => row.state === 'success') ||
+    runs.some((row) => row.conclusion === 'success');
+  if (passed) {
+    return { verdict: 'success', detail: 'checks passed' };
+  }
+  const skippedOnly =
+    runs.length > 0 &&
+    runs.every((row) => row.conclusion === 'skipped' || row.conclusion === 'neutral');
+  if (skippedOnly) {
+    return { verdict: 'skipped', detail: 'every check was skipped' };
+  }
   return { verdict: 'success', detail: 'checks passed' };
+}
+
+export type MergeGateResult =
+  | { ok: true; verdict: CiVerdict }
+  | { ok: false; reason: string; verdict: CiVerdict };
+
+/**
+ * Merge only when this exact SHA is green. An empty check list is never
+ * green unless the mandate sets `allowNoCi` (scratch / no-CI repos).
+ */
+export function evaluateMergeGate(
+  ci: CiStatus,
+  options: { allowNoCi?: boolean } = {},
+): MergeGateResult {
+  if (ci.verdict === 'success') return { ok: true, verdict: ci.verdict };
+  if (ci.verdict === 'no-checks' && options.allowNoCi) {
+    return { ok: true, verdict: ci.verdict };
+  }
+  if (ci.verdict === 'no-checks') {
+    return {
+      ok: false,
+      reason: 'no checks reported: an empty check list is never green',
+      verdict: ci.verdict,
+    };
+  }
+  if (ci.verdict === 'skipped') {
+    return { ok: false, reason: 'every check was skipped', verdict: ci.verdict };
+  }
+  if (ci.verdict === 'pending') {
+    return { ok: false, reason: 'checks still running', verdict: ci.verdict };
+  }
+  return { ok: false, reason: 'a check or status failed', verdict: ci.verdict };
 }
 
 function wrap(error: unknown, token: string, extra = ''): Error {

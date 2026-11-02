@@ -15,9 +15,9 @@ resume the same worker (Router is not called).
 | Coder | `FakeCoder` files written **inside the box** | `HttpCoder` on the host when `ANTHROPIC_API_KEY` / `MAKA_CLOUD_JUDGE_API_KEY` is set; files applied in the box. Public-clone probe without a model key uses `NoopCoder`. Usage is the Messages API `input_tokens` / `output_tokens` plus estimated USD (Haiku 5.5 list price, same as the gateway) |
 | Tests / install | `node add.test.js` (and optional install) **in the box** | `MAKA_CLOUD_LOOP_TEST` / `MAKA_CLOUD_LOOP_INSTALL` in the box; output is evidence |
 | Git / PR | `FakeGitHost` after applying the box `git diff --cached` to a **clean** host checkout | `HttpGitHost` when `MAKA_GITHUB_TOKEN=github_pat_…` and `MAKA_CLOUD_LOOP_REPO=owner/name` (e.g. `raydocs/maka-loop-scratch`). Empty repos need `MAKA_CLOUD_LOOP_SEED=1` to create `main` with the broken scratch fixture via the GitHub API. Public-clone live with no token skips publish |
-| CI | simulated webhook resume | Checks + Statuses API on the pushed SHA. An empty list is `no-checks`, not a failure |
-| Router | forced `act` mandate | still forced `act`. Product Router (`createJudgeFromEnv`) is separate |
-| Merge | held, then approved against the fake host | held only — live GitHub is never auto-merged |
+| CI | simulated webhook resume | Checks + Statuses API on the pushed SHA. An empty list is `no-checks`, not a failure. Merge refuses `no-checks` / pending / failed / all-skipped unless the mandate sets `allowNoCi` (scratch) |
+| Router | forced `act` mandate (`allowNoCi` for the scratch CLI) | still forced `act` + `allowNoCi`. Product Router (`createJudgeFromEnv`) is separate |
+| Merge | held on `Merge pull request #N in repo at <sha>`, then approved against the fake host | held only — live GitHub is never auto-merged. `PUT /pulls/N/merge` sends that SHA so a later push cannot ride the approval |
 
 The box never receives `INSTABOX_API_KEY`, `ANTHROPIC_API_KEY` or
 `MAKA_GITHUB_TOKEN`. Clone of a public URL is credential-less. Private
@@ -79,7 +79,8 @@ npm run real-loop -w @maka-cloud/superagent
 ```
 
 The box is always destroyed. Live GitHub never auto-merges; it stops at
-`merge-held`. An empty Checks/Statuses list prints `ci: no-checks`. Agents
+`merge-held`. An empty Checks/Statuses list prints `ci: no-checks` and is
+not merge-green unless the scratch mandate set `allowNoCi`. Agents
 and CI do not run this live.
 
 ## Live — empty private scratch (`raydocs/maka-loop-scratch`)

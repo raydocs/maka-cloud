@@ -156,6 +156,8 @@ export {
   NodeFileTestPort,
   mayPush,
   mergeAction,
+  mergeBoundText,
+  parseMergeBound,
   workerBranch,
   emptyTimings,
   formatModelUsage,
@@ -184,10 +186,12 @@ export {
   LOOP_SEED_ENV,
   HttpGitHost,
   createGitHostFromEnv,
+  evaluateMergeGate,
   githubTokenProblem,
   summarizeCi,
   type CiStatus,
   type CiVerdict,
+  type MergeGateResult,
 } from './loop-github.js';
 export {
   formatRealLoopReport,
