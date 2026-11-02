@@ -16,6 +16,7 @@ COPY packages ./packages
 COPY scripts/sync-model-metadata.mjs ./scripts/
 COPY scripts/model-metadata ./scripts/model-metadata
 COPY docs/fork/design/layerfs.md ./docs/fork/design/layerfs.md
+COPY docs/fork/isolation-model.md ./docs/fork/isolation-model.md
 
 # Only what the server needs: the host package, the workspaces it depends on, and the root.
 RUN npm ci -w @maka-cloud/host --include-workspace-root --ignore-scripts --no-audit --no-fund

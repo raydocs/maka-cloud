@@ -8,8 +8,9 @@
 !tsconfig.base.json
 !tsconfig.lib.json
 !packages
-# cloud-runners LayerFS gate test reads this page from the real-account image.
+# cloud-runners LayerFS gate tests read these pages from the real-account image.
 !docs/fork/design/layerfs.md
+!docs/fork/isolation-model.md
 # @maka/core's prebuild (npm run sync:model-metadata) reads these.
 !scripts/sync-model-metadata.mjs
 !scripts/model-metadata
