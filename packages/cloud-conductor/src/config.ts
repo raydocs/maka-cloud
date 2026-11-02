@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { LlmConnection } from '@maka/core/llm-connections';
+import type { LlmConnection } from '@maka-cloud/maka-engine';
 
 export const MODEL_ID = 'claude-opus-5-5';
 
