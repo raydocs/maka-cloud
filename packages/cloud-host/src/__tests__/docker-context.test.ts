@@ -120,6 +120,7 @@ test('the build context lets through the build inputs and nothing a checkout mig
     'scripts/model-metadata/models-dev-api.snapshot.json',
     'deploy/Caddyfile',
     'deploy/real-account-tests.sh',
+    'docs/fork/design/layerfs.md',
   ];
   for (const file of required) {
     assert.ok(files.includes(file), `${file} is tracked`);
@@ -135,6 +136,7 @@ test('the build context lets through the build inputs and nothing a checkout mig
       'scripts/sync-model-metadata.mjs',
       'deploy/Caddyfile',
       'deploy/real-account-tests.sh',
+      'docs/fork/design/layerfs.md',
     ].includes(file) ||
     file.startsWith('packages/') ||
     file.startsWith('scripts/model-metadata/');
