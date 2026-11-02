@@ -63,10 +63,16 @@ test('act worker clones, fixes tests, pushes a worker branch and opens a PR with
   assert.match(git.pullRequests[0]?.body ?? '', /Evidence/);
   assert.ok((worker?.evidence ?? []).some((row) => row.kind === 'test'));
   assert.ok((worker?.evidence ?? []).some((row) => row.kind === 'patch'));
+  assert.ok((worker?.evidence ?? []).some((row) => row.label === 'box-upload'));
+  assert.ok((worker?.evidence ?? []).some((row) => row.label === 'box-edit'));
   assert.ok(
     (worker?.evidence ?? []).some((row) => row.kind === 'artifact' && /checks/.test(row.body)),
   );
-  assert.ok(sandbox.commands.some((row) => row.cmd.startsWith('echo loop-verify')));
+  assert.ok(
+    sandbox.commands.some((row) => row.cmd.includes('src.tgz') || row.cmd.includes('tar ')),
+  );
+  assert.ok(sandbox.commands.some((row) => row.cmd === 'node add.test.js'));
+  assert.ok(!sandbox.commands.some((row) => row.cmd.startsWith('echo loop-verify')));
   assert.ok(worker?.workspaceRef);
 });
 

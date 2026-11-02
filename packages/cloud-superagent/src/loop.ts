@@ -12,6 +12,7 @@ import type {
   WorkerHandler,
   WorkerRecord,
 } from './types.js';
+import { BOX_REPO, BoxWorkspace, isPublicCloneUrl } from './loop-box.js';
 import { GitCloneStore, type WorkspaceHandle, type WorkspaceStore } from './workspace.js';
 import type { SandboxPort } from './sandbox.js';
 
@@ -27,13 +28,15 @@ export function mayPush(worker: WorkerRecord): boolean {
 
 export interface CoderResult {
   changed: string[];
+  files: Record<string, string>;
   summary: string;
   usage?: Partial<Usage>;
 }
 
 export interface CoderPort {
   apply(input: {
-    dir: string;
+    dir?: string;
+    snapshot?: string;
     brief: string;
     event: NormalizedEvent;
     worker: WorkerRecord;
@@ -87,28 +90,43 @@ export interface LoopPorts {
   sandbox?: SandboxPort;
   /** Local path or git URL. Defaults to `subject.repo`. */
   repoUrl?: string | ((repo: string) => string);
+  /** `clone` runs `git clone` in the box (public / local path). `upload` sends a host tarball. */
+  boxSource?: 'clone' | 'upload';
   protectedBranches?: readonly string[];
   baseBranch?: string;
+  installCommand?: string;
   testCommand?: string;
+  /** When false, box tests are the deliverable (no git push / PR). */
+  publish?: boolean;
 }
 
 /** Writes known files. CI uses this instead of a live model. */
 export class FakeCoder implements CoderPort {
   constructor(private readonly files: Record<string, string> = { 'add.js': ADD_FIXED }) {}
 
-  async apply(input: { dir: string }): Promise<CoderResult> {
+  async apply(input: { dir?: string }): Promise<CoderResult> {
     const changed: string[] = [];
     for (const [rel, content] of Object.entries(this.files)) {
-      const path = join(input.dir, rel);
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, content);
+      if (input.dir) {
+        const path = join(input.dir, rel);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, content);
+      }
       changed.push(rel);
     }
     return {
       changed,
+      files: { ...this.files },
       summary: `fake coder wrote ${changed.join(', ')}`,
       usage: { tokens: 40, usdMicros: 200, wallMs: 12 },
     };
+  }
+}
+
+/** Live public-repo probe: run the repo's own tests, do not invent files. */
+export class NoopCoder implements CoderPort {
+  async apply(): Promise<CoderResult> {
+    return { changed: [], files: {}, summary: 'no edits' };
   }
 }
 
@@ -219,13 +237,9 @@ export class FakeGitHost implements GitHostPort {
 }
 
 /**
- * Worker that clones via WorkspaceStore, applies a coder, runs tests, pushes
- * a worker branch (act mandate), and opens/updates a PR. Merge / protected
- * push / secrets / deploy are returned as ProposedAction for Safety.
- *
- * The model lives on the host (FakeCoder or a live client). Instabox is used
- * for ensureRunning + a verify exec so the API key never enters the box —
- * the same split as cloud-playbooks GitHubPublisher.
+ * Worker that materializes the repo *inside* the sandbox, applies host-computed
+ * coder edits there, runs install/test there, then pulls a diff back. The host
+ * calls the model and publishes via GitHub API — tokens never enter the box.
  */
 export class CodingLoopHandler implements WorkerHandler {
   private readonly workspaces: WorkspaceStore;
@@ -239,7 +253,7 @@ export class CodingLoopHandler implements WorkerHandler {
   async handle(ctx: WorkerContext, event: NormalizedEvent): Promise<HandlerResult> {
     const worker = ctx.worker;
     const repo = worker.subject.repo ?? 'local/scratch';
-    const box = worker.sandboxRef ?? 'loop';
+    const boxId = worker.sandboxRef ?? 'loop';
     if (event.type === 'approval_granted') {
       return this.onApproval(ctx, event, repo);
     }
@@ -257,44 +271,98 @@ export class CodingLoopHandler implements WorkerHandler {
       };
     }
 
-    if (this.ports.sandbox) {
-      await this.ports.sandbox.ensureRunning(box);
+    const brief = briefOf(event);
+    const mapped = this.mappedUrl(repo);
+    const sandbox = this.ports.sandbox;
+    const boxed = sandbox ? new BoxWorkspace(sandbox, boxId) : undefined;
+    if (sandbox) await sandbox.ensureRunning(boxId);
+
+    const cloneInBox =
+      this.ports.boxSource === 'clone' ||
+      (this.ports.boxSource !== 'upload' && isPublicCloneUrl(mapped));
+    const publish = this.ports.publish !== false;
+    const handle =
+      publish || !cloneInBox
+        ? await this.prepare(worker, repo)
+        : { id: `box:${worker.workerId}`, kind: 'git-clone' as const, dir: null };
+
+    const evidence: EvidenceBlock[] = [];
+    if (boxed) {
+      const kind = await boxed.materialize(
+        cloneInBox ? { clone: mapped } : { hostDir: handle.dir as string },
+      );
+      evidence.push({
+        kind: 'step',
+        label: kind === 'clone' ? 'box-clone' : 'box-upload',
+        body: cloneInBox ? mapped : 'host tarball (no token)',
+      });
     }
 
-    const brief = briefOf(event);
-    const handle = await this.prepare(worker, repo);
+    const snapshot = boxed ? await boxed.snapshot() : undefined;
     const coded = await this.ports.coder.apply({
-      dir: handle.dir as string,
+      dir: boxed ? undefined : (handle.dir ?? undefined),
+      snapshot,
       brief,
       event,
       worker,
     });
-    const patch = await this.workspaces.exportPatch(handle);
-    const tested = await this.ports.tests.run({ dir: handle.dir as string });
-    if (this.ports.sandbox) {
-      await this.ports.sandbox.exec(box, { cmd: `echo loop-verify ${tested.ok ? 'ok' : 'fail'}` });
+    if (boxed) await boxed.writeFiles(coded.files);
+    if (handle.dir) await writeHostFiles(handle.dir, coded.files);
+    evidence.push({
+      kind: 'step',
+      label: 'box-edit',
+      body: `${coded.summary}\n${coded.changed.join('\n')}`,
+    });
+
+    if (boxed && this.ports.installCommand) {
+      const installed = await boxed.run(this.ports.installCommand);
+      evidence.push({
+        kind: 'step',
+        label: this.ports.installCommand,
+        body: `${installed.stdout}${installed.stderr}`.trim(),
+      });
     }
 
-    const evidence: EvidenceBlock[] = [
-      { kind: 'step', label: coded.summary, body: coded.changed.join('\n') },
-      {
-        kind: 'patch',
-        label: 'diff summary',
-        body: summarizePatch(patch),
-        path: handle.dir ?? undefined,
-      },
-      { kind: 'test', label: tested.command, body: tested.output },
-    ];
+    const testCommand = this.ports.testCommand ?? 'node add.test.js';
+    const tested = boxed
+      ? boxTest(await boxed.run(testCommand), testCommand)
+      : await this.ports.tests.run({ dir: handle.dir as string });
+    const patch = boxed
+      ? await boxed.pullPatch()
+      : handle.dir
+        ? await this.workspaces.exportPatch(handle)
+        : '';
+    evidence.push({
+      kind: 'patch',
+      label: 'diff summary',
+      body: summarizePatch(patch),
+      path: handle.dir ?? BOX_REPO,
+    });
+    evidence.push({ kind: 'test', label: tested.command, body: tested.output });
 
     if (!tested.ok) {
       return {
         progress: true,
         workspaceRef: handle.id,
+        sandboxRef: boxId,
         memory: `tests failed: ${tested.output.slice(0, 200)}`,
         plan: 'fix tests after failure',
         usage: coded.usage,
         evidence,
         stepSignature: `test-fail:${event.type}`,
+      };
+    }
+
+    if (!publish) {
+      return {
+        progress: true,
+        workspaceRef: handle.id,
+        sandboxRef: boxId,
+        memory: 'box-tests ok',
+        plan: 'box-tests',
+        usage: coded.usage,
+        evidence,
+        stepSignature: `box:${event.type}`,
       };
     }
 
@@ -304,6 +372,7 @@ export class CodingLoopHandler implements WorkerHandler {
       return {
         progress: true,
         workspaceRef: handle.id,
+        sandboxRef: boxId,
         evidence,
         action: {
           kind: 'push_protected',
@@ -333,6 +402,7 @@ export class CodingLoopHandler implements WorkerHandler {
     return {
       progress: true,
       workspaceRef: handle.id,
+      sandboxRef: boxId,
       memory: `pushed ${pushed.sha} pr=${pr.url}`,
       plan: `open-pr ${pr.url}`,
       usage: coded.usage,
@@ -362,18 +432,19 @@ export class CodingLoopHandler implements WorkerHandler {
     return { progress: true, memory: `approved ${kind}` };
   }
 
+  private mappedUrl(repo: string): string {
+    return typeof this.ports.repoUrl === 'function'
+      ? this.ports.repoUrl(repo)
+      : (this.ports.repoUrl ?? repo);
+  }
+
   private async prepare(worker: WorkerRecord, repo: string): Promise<WorkspaceHandle> {
     const existing = worker.workspaceRef ? this.handles.get(worker.workspaceRef) : undefined;
     if (existing?.dir) return existing;
-    const mapped =
-      typeof this.ports.repoUrl === 'function'
-        ? this.ports.repoUrl(repo)
-        : (this.ports.repoUrl ?? repo);
-    const repoUrl = mapped;
     const handle = await this.workspaces.prepare({
       tenantId: worker.tenantId,
       workerId: worker.workerId,
-      repoUrl,
+      repoUrl: this.mappedUrl(repo),
     });
     if (!handle.dir) throw new Error('CodingLoopHandler needs a git-clone workspace directory.');
     this.handles.set(handle.id, handle);
@@ -406,6 +477,25 @@ function summarizePatch(patch: string): string {
   const minus = (patch.match(/^-/gm) ?? []).length;
   if (files.length === 0 && !patch.trim()) return '(no diff)';
   return `${files.join(', ') || 'workspace'} +${plus} -${minus}\n${patch.slice(0, 800)}`;
+}
+
+async function writeHostFiles(dir: string, files: Record<string, string>): Promise<void> {
+  for (const [rel, content] of Object.entries(files)) {
+    const path = join(dir, rel);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, content);
+  }
+}
+
+function boxTest(
+  ran: { stdout: string; stderr: string; exitCode: number },
+  command: string,
+): TestResult {
+  return {
+    ok: ran.exitCode === 0,
+    output: `${ran.stdout}${ran.stderr}`.trim() || (ran.exitCode === 0 ? 'ok' : 'test failed'),
+    command,
+  };
 }
 
 function formatPrBody(worker: WorkerRecord, evidence: EvidenceBlock[], pushed: PushResult): string {

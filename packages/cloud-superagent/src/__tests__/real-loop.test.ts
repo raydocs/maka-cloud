@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
+import { scratchFiles } from '../loop.js';
 import { FakeSandbox } from '../sandbox.js';
 import { formatRealLoopReport, runRealLoop } from '../real-loop.js';
+import { initLocalRepo } from '../workspace.js';
 
 test('real-loop fake path clones, tests, pushes, resumes CI/review, holds merge', async () => {
   const sandbox = new FakeSandbox();
@@ -21,8 +23,15 @@ test('real-loop fake path clones, tests, pushes, resumes CI/review, holds merge'
   assert.ok(report.steps.includes('review-resume'));
   assert.ok(report.steps.includes('merge-held'));
   assert.ok(report.steps.includes('merge-approved'));
+  assert.equal(report.boxed, true);
+  assert.ok(report.steps.includes('box-materialize'));
+  assert.ok(report.steps.includes('box-test'));
   assert.match(report.evidence, /### Evidence/);
-  assert.ok(sandbox.commands.some((row) => row.cmd.startsWith('echo loop-verify')));
+  assert.ok(
+    sandbox.commands.some((row) => row.cmd.includes('src.tgz') || row.cmd.includes('tar ')),
+  );
+  assert.ok(sandbox.commands.some((row) => row.cmd === 'node add.test.js'));
+  assert.ok(!sandbox.commands.some((row) => row.cmd.startsWith('echo loop-verify')));
   assert.match(formatRealLoopReport(report), /ok: true/);
 });
 
@@ -34,6 +43,25 @@ test('real-loop does not go live without MAKA_CLOUD_LOOP_LIVE=1', async () => {
   assert.equal(report.live, false);
   assert.equal(report.machineId, null);
   assert.equal(report.ok, true);
+});
+
+test('live public clone runs tests in the box and does not need a GitHub token', async () => {
+  const cloneUrl = await initLocalRepo(scratchFiles(false));
+  const sandbox = new FakeSandbox();
+  const report = await runRealLoop({
+    sandbox,
+    cloneUrl,
+    env: { MAKA_CLOUD_LOOP_LIVE: '1', MAKA_CLOUD_LOOP_TEST: 'node add.test.js' },
+  });
+  assert.equal(report.ok, true, report.error ?? '');
+  assert.equal(report.live, true);
+  assert.equal(report.git, 'fake');
+  assert.equal(report.boxed, true);
+  assert.equal(report.prUrl, null);
+  assert.ok(report.steps.includes('box-test'));
+  assert.ok(!report.steps.includes('push'));
+  assert.ok(sandbox.commands.some((row) => row.cmd.includes('git clone')));
+  assert.ok(sandbox.commands.every((row) => !/github_pat_|INSTABOX_API_KEY/.test(row.cmd)));
 });
 
 test('live flag with a fake box still forces act and keeps merge on the fake host', async () => {

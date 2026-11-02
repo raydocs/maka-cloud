@@ -147,6 +147,7 @@ export {
   scratchFiles,
   CodingLoopHandler,
   FakeCoder,
+  NoopCoder,
   FakeGitHost,
   NodeFileTestPort,
   mayPush,
@@ -157,6 +158,13 @@ export {
   type LoopPorts,
   type TestPort,
 } from './loop.js';
+export {
+  BOX_REPO,
+  BoxWorkspace,
+  assertSafeCloneTarget,
+  isPublicCloneUrl,
+  packTar,
+} from './loop-box.js';
 export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
 export {
   GITHUB_TOKEN_ENV,

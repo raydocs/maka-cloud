@@ -5,11 +5,19 @@
  * HttpSandbox speaks the Instabox HTTP API so Super-agent stays zod-only.
  */
 
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
+
 export const DEFAULT_INSTABOX_BASE_URL = 'https://api.instabox.sh';
 
 export interface SandboxExecRequest {
   cmd: string;
   cwd?: string;
+  /** Raw bytes for `base64 -d` uploads. Never put secrets here. */
+  stdin?: string;
+  timeoutSeconds?: number;
 }
 
 export interface SandboxExecResult {
@@ -117,22 +125,47 @@ export function redactSecret(text: string, secret: string): string {
 }
 
 export class FakeSandbox implements SandboxPort {
-  readonly commands: Array<{ machineId: string; cmd: string }> = [];
+  readonly commands: Array<{ machineId: string; cmd: string; cwd?: string }> = [];
   readonly machines = new Map<string, SandboxMachine>();
   readonly snapshots = new Map<string, { id: string; machineId: string; name: string }>();
   readonly leases = new Map<string, string>();
+  readonly roots = new Map<string, string>();
+  private readonly rootJobs = new Map<string, Promise<string>>();
   private snapshotSeq = 0;
 
   async ensureRunning(machineId: string): Promise<void> {
     const current = this.machines.get(machineId) ?? { id: machineId, state: 'stopped' };
     current.state = 'running';
     this.machines.set(machineId, current);
+    await this.ensureRoot(machineId);
+  }
+
+  /** Per-machine host directory that stands in for the box filesystem. */
+  async ensureRoot(machineId: string): Promise<string> {
+    const existing = this.roots.get(machineId);
+    if (existing) return existing;
+    let job = this.rootJobs.get(machineId);
+    if (!job) {
+      job = mkdtemp(join(tmpdir(), `maka-box-${machineId}-`)).then((dir) => {
+        this.roots.set(machineId, dir);
+        return dir;
+      });
+      this.rootJobs.set(machineId, job);
+    }
+    return job;
   }
 
   async exec(machineId: string, request: SandboxExecRequest): Promise<SandboxExecResult> {
     await this.ensureRunning(machineId);
-    this.commands.push({ machineId, cmd: request.cmd });
-    return { stdout: `fake:${request.cmd}`, stderr: '', exitCode: 0 };
+    this.commands.push({ machineId, cmd: request.cmd, cwd: request.cwd });
+    const root = await this.ensureRoot(machineId);
+    const cwd = request.cwd
+      ? isAbsolute(request.cwd)
+        ? request.cwd
+        : join(root, request.cwd)
+      : root;
+    await mkdir(cwd, { recursive: true });
+    return await runLocal(request.cmd, cwd, request.stdin, request.timeoutSeconds);
   }
 
   async getMachine(machineId: string): Promise<SandboxMachine> {
@@ -219,7 +252,12 @@ export class HttpSandbox implements SandboxPort {
     const body = await this.request<SandboxExecResult>(
       'POST',
       `/v1/machines/${encodeURIComponent(machineId)}/exec`,
-      { cmd: request.cmd, ...(request.cwd ? { cwd: request.cwd } : {}) },
+      {
+        cmd: request.cmd,
+        ...(request.cwd ? { cwd: request.cwd } : {}),
+        ...(request.stdin !== undefined ? { stdin: request.stdin } : {}),
+        ...(request.timeoutSeconds !== undefined ? { timeoutSeconds: request.timeoutSeconds } : {}),
+      },
     );
     return {
       stdout: body.stdout ?? '',
@@ -513,6 +551,43 @@ export function createInstaboxSandboxFromEnv(
 ): HttpSandbox {
   const creds = instaboxCredentialsFromEnv(env);
   return new HttpSandbox({ apiKey: creds.apiKey, baseUrl: creds.baseUrl, fetch: fetchImpl });
+}
+
+function runLocal(
+  cmd: string,
+  cwd: string,
+  stdin?: string,
+  timeoutSeconds?: number,
+): Promise<SandboxExecResult> {
+  return new Promise((resolve) => {
+    const child = spawn('/bin/sh', ['-c', cmd], {
+      cwd,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    const timer =
+      timeoutSeconds !== undefined
+        ? setTimeout(() => child.kill('SIGKILL'), timeoutSeconds * 1000)
+        : undefined;
+    child.on('error', (error) => {
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr: `${stderr}${error.message}`, exitCode: 1 });
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode: code ?? 1 });
+    });
+    child.stdin.on('error', () => {});
+    if (stdin !== undefined) child.stdin.end(stdin);
+    else child.stdin.end();
+  });
 }
 
 function instaboxHttpError(

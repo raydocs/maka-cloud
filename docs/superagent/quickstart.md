@@ -93,10 +93,12 @@ npm run build -w @maka-cloud/superagent
 npm run real-loop -w @maka-cloud/superagent
 ```
 
-Live (owner only): `MAKA_CLOUD_LOOP_LIVE=1` plus `INSTABOX_API_KEY`. Optional
-`ANTHROPIC_API_KEY` (host-side coder) and `MAKA_GITHUB_TOKEN=github_pat_…`
-with `MAKA_CLOUD_LOOP_REPO=owner/name`. See [real-loop.md](real-loop.md).
-Never put keys on argv.
+Live (owner only): `MAKA_CLOUD_LOOP_LIVE=1` plus `INSTABOX_API_KEY`. Clone,
+edits and tests run **inside** the box. Public probe:
+`MAKA_CLOUD_LOOP_CLONE_URL=https://github.com/owner/scratch.git` (no GitHub
+token). Optional `ANTHROPIC_API_KEY` (host-side coder; files applied in the
+box) and `MAKA_GITHUB_TOKEN=github_pat_…` with `MAKA_CLOUD_LOOP_REPO`. See
+[real-loop.md](real-loop.md). Never put keys on argv.
 
 ## 4. Metrics harness (fakes)
 

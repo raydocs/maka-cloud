@@ -23,12 +23,13 @@ export class HttpCoder implements CoderPort {
   ) {}
 
   async apply(input: {
-    dir: string;
+    dir?: string;
+    snapshot?: string;
     brief: string;
     event: NormalizedEvent;
     worker: WorkerRecord;
   }): Promise<CoderResult> {
-    const snapshot = await snapshotFiles(input.dir);
+    const snapshot = input.snapshot ?? (input.dir ? await snapshotFiles(input.dir) : '');
     let raw: string;
     try {
       raw = await this.complete(promptOf(input.brief, snapshot));
@@ -40,14 +41,19 @@ export class HttpCoder implements CoderPort {
     const changed: string[] = [];
     for (const [rel, content] of Object.entries(parsed.files)) {
       if (rel.includes('..') || rel.startsWith('/')) continue;
-      const path = join(input.dir, rel);
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, content);
+      if (input.dir) {
+        const path = join(input.dir, rel);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, content);
+      }
       changed.push(rel);
     }
     if (changed.length === 0) return this.fallback.apply(input);
     return {
       changed,
+      files: Object.fromEntries(
+        Object.entries(parsed.files).filter(([rel]) => !rel.includes('..') && !rel.startsWith('/')),
+      ),
       summary: parsed.summary ?? `model coder wrote ${changed.join(', ')}`,
       usage: { tokens: Math.ceil(raw.length / 4), usdMicros: 400, wallMs: 1 },
     };

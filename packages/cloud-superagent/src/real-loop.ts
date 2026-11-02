@@ -3,9 +3,11 @@ import type { IngestInput } from './events.js';
 import { sequentialIds } from './ids.js';
 import { createCoderFromEnv } from './loop-coder.js';
 import { createGitHostFromEnv } from './loop-github.js';
+import { isPublicCloneUrl } from './loop-box.js';
 import {
   CodingLoopHandler,
   FakeGitHost,
+  NoopCoder,
   NodeFileTestPort,
   mergeAction,
   scratchFiles,
@@ -35,6 +37,7 @@ export interface RealLoopReport {
   machineId: string | null;
   coder: 'fake' | 'model';
   git: 'fake' | 'github';
+  boxed: boolean;
   evidence: string;
   steps: string[];
   error?: string;
@@ -44,6 +47,7 @@ export interface RealLoopOptions {
   env?: NodeJS.ProcessEnv;
   sandbox?: SandboxPort;
   repoDir?: string;
+  cloneUrl?: string;
   keepDir?: boolean;
   fetch?: typeof fetch;
 }
@@ -66,6 +70,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     machineId: null,
     coder: 'fake',
     git: 'fake',
+    boxed: false,
     evidence: '',
     steps: [],
   };
@@ -73,7 +78,19 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
   let box: HttpSandbox | undefined;
   let machineId: string | undefined;
   try {
-    dir = options.repoDir ?? (await initLocalRepo(scratchFiles()));
+    const cloneUrl = options.cloneUrl ?? env.MAKA_CLOUD_LOOP_CLONE_URL?.trim() ?? '';
+    if (
+      cloneUrl &&
+      !isPublicCloneUrl(cloneUrl) &&
+      !cloneUrl.startsWith('/') &&
+      !cloneUrl.startsWith('file://')
+    ) {
+      throw new Error(
+        'MAKA_CLOUD_LOOP_CLONE_URL must be https without credentials (or an absolute path in tests).',
+      );
+    }
+    const publicClone = Boolean(cloneUrl);
+    dir = options.repoDir ?? (publicClone ? undefined : await initLocalRepo(scratchFiles()));
     report.steps.push('workspace');
     const sandbox = options.sandbox ?? (live ? await liveSandbox(env) : createSandboxFromEnv(env));
     if (live && sandbox instanceof HttpSandbox) {
@@ -93,18 +110,27 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       report.steps.push('sandbox-create');
     }
     const fetchImpl = options.fetch ?? fetch;
-    const coded = createCoderFromEnv(env, fetchImpl);
+    const hasModel = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
+    const coded =
+      publicClone && !hasModel
+        ? { coder: new NoopCoder(), kind: 'fake' as const }
+        : createCoderFromEnv(env, fetchImpl);
     const hosted = createGitHostFromEnv(env, fetchImpl);
     report.coder = coded.kind;
     report.git = hosted.kind;
     const repoName = hosted.repo ?? 'local/scratch';
     const git = hosted.git;
+    const publish = !publicClone || hosted.kind === 'github';
     const handler = new CodingLoopHandler({
       coder: coded.coder,
       tests: new NodeFileTestPort(),
       git,
       sandbox,
-      repoUrl: dir,
+      repoUrl: cloneUrl || dir,
+      boxSource: publicClone ? 'clone' : 'upload',
+      installCommand: env.MAKA_CLOUD_LOOP_INSTALL?.trim() || undefined,
+      testCommand: env.MAKA_CLOUD_LOOP_TEST?.trim() || 'node add.test.js',
+      publish,
     });
     const agent = new Superagent({
       handler,
@@ -135,17 +161,27 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     const pr = handler.lastPr.get(opened.workerId);
     report.prUrl = pr?.url ?? null;
     report.evidence = formatEvidence(after?.evidence ?? []);
+    const boxed = (after?.evidence ?? []).some(
+      (row) => row.label === 'box-clone' || row.label === 'box-upload' || row.label === 'box-edit',
+    );
+    report.boxed = boxed;
+    if (boxed) report.steps.push('box-materialize', 'box-edit', 'box-test');
+    const boxOk = after?.memory === 'box-tests ok';
     const pushed = Boolean(after?.memory?.includes('pushed') && pr);
-    if (!pushed || !pr) {
-      throw new Error('loop did not push a worker branch or open a PR');
+    if (publish) {
+      if (!pushed || !pr) {
+        throw new Error('loop did not push a worker branch or open a PR');
+      }
+      report.steps.push('push', 'pr');
+    } else if (!boxOk) {
+      throw new Error(after?.memory || 'box tests did not pass');
     }
-    report.steps.push('push', 'pr');
     const ci = await agent.ingest(ciFailed('inv_loop', 7, repoName));
     if (ci.result === 'passthrough') report.steps.push('ci-resume');
     const comment = await agent.ingest(reviewComment('inv_loop', 7, repoName));
     if (comment.result === 'passthrough') report.steps.push('review-resume');
     const waiting = agent.store.worker('inv_loop', opened.workerId);
-    if (waiting) {
+    if (publish && pr && waiting) {
       const action = mergeAction(repoName, pr.number);
       const held = agent.safety.gate(waiting, action, Date.now());
       if (!held.allowed && held.reason === 'held') {
@@ -157,7 +193,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
         }
       }
     }
-    report.ok = pushed && Boolean(pr.url);
+    report.ok = publish ? pushed && Boolean(pr?.url) : boxOk;
     agent.close();
   } catch (error) {
     report.error = redactKeys(error instanceof Error ? error.message : 'real-loop failed', env);
@@ -189,6 +225,7 @@ export function formatRealLoopReport(report: RealLoopReport): string {
     `machine: ${report.machineId ?? '(none)'}`,
     `coder: ${report.coder}`,
     `git: ${report.git}`,
+    `boxed: ${report.boxed}`,
     `destroyed: ${report.destroyed}`,
     `steps: ${report.steps.join(' → ')}`,
     report.evidence,

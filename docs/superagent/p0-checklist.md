@@ -85,14 +85,25 @@ listener is for laptop replay only.
    ```bash
    npm run real-loop -w @maka-cloud/superagent
    ```
-   Expect `ok: true`, `coder: fake`, `git: fake`, and steps
-   `workspace → spawn → push → pr → ci-resume → review-resume → merge-held → merge-approved`.
+   Expect `ok: true`, `boxed: true`, `coder: fake`, `git: fake`, and steps
+   including `box-materialize → box-edit → box-test` then
+   `push → pr → ci-resume → review-resume → merge-held → merge-approved`.
 
-   Live (owner only; keys in the environment, never argv):
+   Live public repo in the box (owner only; no GitHub token):
    ```bash
    export MAKA_CLOUD_LOOP_LIVE=1
    export INSTABOX_API_KEY='…'
-   # optional:
+   export MAKA_CLOUD_LOOP_CLONE_URL='https://github.com/owner/scratch.git'
+   # export MAKA_CLOUD_LOOP_INSTALL='npm ci'
+   # export MAKA_CLOUD_LOOP_TEST='npm test'
+   npm run real-loop -w @maka-cloud/superagent
+   ```
+   Expect the box created, public clone + tests inside it, then destroyed.
+
+   Live scratch + optional model / GitHub:
+   ```bash
+   export MAKA_CLOUD_LOOP_LIVE=1
+   export INSTABOX_API_KEY='…'
    # export ANTHROPIC_API_KEY='…'
    # export MAKA_GITHUB_TOKEN='github_pat_…'
    # export MAKA_CLOUD_LOOP_REPO='owner/scratch'
