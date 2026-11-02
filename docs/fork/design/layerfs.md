@@ -45,9 +45,13 @@ LayerFS commit id is written to the step log.
 - The project is two months old. Pin a release and record it in `docs/fork/THIRD_PARTY.md` when code
   is taken.
 
+The Super-agent architecture (`docs/fork/architecture/superagent.md` §10) restates these
+gates for Instabox (not boat.dev) and puts `WorkspaceStore` in `@maka-cloud/superagent` for
+P1 so `cloud-runners` is not edited until a later PR re-exports it.
+
 ## First steps after the gates
 
-1. A `WorkspaceStore` interface in cloud-runners with two implementations: today's clone and
+1. A `WorkspaceStore` interface (P1: `@maka-cloud/superagent`; later: also cloud-runners) with two implementations: today's clone and
    LayerFS. The clone stays the default.
 2. Kept-change checkpoints as LayerFS commits, behind a setting. This closes the P2-2 class of bug.
 3. Parallel tasks on one repository (C6) on LayerFS overlays.
