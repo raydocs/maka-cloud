@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 14:53 MST — cursor/superagent-bounded-autonomy-51be — 2f921ab8d
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** `checkAgentIsolation` retries an unfinished filecap or setid listing (`unchecked`) up to three probes. A `found` setuid/capability, a missing fact, or any other isolation problem still fails on the first probe. Same assertions.
+- **Why:** CI `real-accounts` on #473 head `f64164fcd` run 41521670607: `the agent account reads and writes the nested files of a checkout, and of a base check` failed `agent_filecaps` (or they could not be listed). Same test on #471 `e174aff2e` failed `agent_setid` at the same minute. Isolation unit tests in the same job passed. Sibling #472 `real-accounts` succeeded. Walk of `/` under parallel real-account load, not MakaEngine.
+- **Tests:** cloud-runners `agent-user` — unfinished listing recovers on retry; `found` and mixed problems do not retry; file-caps cases unchanged
+- **Live:** n/a
+- **Migrations / risk:** none. Retry only `unchecked` listings. Production boxes with a real privileged program still refuse immediately.
+
 ## 2026-11-02 13:42 MST — cursor/superagent-bounded-autonomy-51be — 20b7ba5cc
 
 - **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
