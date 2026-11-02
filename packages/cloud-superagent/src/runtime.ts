@@ -653,6 +653,46 @@ export class Superagent {
     return { ok: true, workerId };
   }
 
+  createByomPairing(
+    tenantId: string,
+    options?: { allowShell?: boolean },
+  ): { ok: true; code: string; expiresAt: number } | { ok: false; reason: string } {
+    if (!this.byom) return { ok: false, reason: 'disabled' };
+    const out = this.byom.createPairing(tenantId, options);
+    if (out.ok && options?.allowShell) {
+      this.audit(tenantId, null, 'byom_allow_shell', this.now(), {
+        allowShell: true,
+        via: 'pairing',
+      });
+    }
+    return out;
+  }
+
+  async setByomAllowShell(
+    tenantId: string,
+    deviceId: string,
+    allowShell: boolean,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!this.byom) return { ok: false, reason: 'disabled' };
+    const device = this.byom.deviceOf(deviceId);
+    if (!device || device.tenantId !== tenantId) return { ok: false, reason: 'unknown_device' };
+    const out = this.byom.setAllowShell(deviceId, allowShell);
+    if (!out.ok) return out;
+    const at = this.now();
+    this.audit(tenantId, null, 'byom_allow_shell', at, { deviceId, allowShell });
+    for (const worker of this.store.workers(tenantId)) {
+      if (worker.retiredAt != null) continue;
+      if (worker.executionTarget?.id !== deviceId) continue;
+      worker.executionTarget = { ...worker.executionTarget, allowShell };
+      await this.recordProgress(
+        worker,
+        { activity: allowShell ? 'allowShell' : 'allowShell_off' },
+        at,
+      );
+    }
+    return { ok: true };
+  }
+
   close(): void {
     this.store.close();
   }
@@ -745,7 +785,11 @@ export class Superagent {
     };
     if (resolved.ok) {
       executionTarget = { kind: resolved.target.kind, id: resolved.target.id };
-      if (resolved.target.kind === 'device') sandboxRef = resolved.target.id;
+      if (resolved.target.kind === 'device') {
+        sandboxRef = resolved.target.id;
+        const device = this.byom?.deviceOf(resolved.target.id);
+        if (device?.allowShell) executionTarget.allowShell = true;
+      }
     } else {
       executionTarget = {
         kind: resolved.kind ?? 'device',
@@ -800,6 +844,8 @@ export class Superagent {
         },
         at,
       );
+    } else if (executionTarget.allowShell) {
+      await this.recordProgress(worker, { activity: 'allowShell' }, at);
     }
     return worker;
   }
@@ -1266,6 +1312,7 @@ export class Superagent {
           kind: worker.executionTarget?.kind ?? 'device',
           id: worker.sandboxRef,
           waitReason: 'device_offline',
+          allowShell: worker.executionTarget?.allowShell,
         };
         await this.recordProgress(
           worker,
@@ -1288,6 +1335,7 @@ export class Superagent {
           kind: 'device',
           id: worker.sandboxRef,
           waitReason: 'device_offline',
+          allowShell: worker.executionTarget?.allowShell,
         };
         await this.recordProgress(
           worker,

@@ -18,7 +18,12 @@ import type {
 import { BYOM_PROTOCOL_VERSION, authPayload, welcomePayload } from './byom-protocol.js';
 import { hmacHex, hmacOk, randomNonce, randomPairingCode, randomSecret } from './byom-crypto.js';
 import { JailError, jailPath } from './byom-jail.js';
-import { DEFAULT_COMMAND_POLICY, decideCommand, type CommandPolicy } from './byom-policy.js';
+import {
+  DEFAULT_COMMAND_POLICY,
+  decideCommand,
+  parseCommand,
+  type CommandPolicy,
+} from './byom-policy.js';
 import type {
   SandboxExecRequest,
   SandboxExecResult,
@@ -39,6 +44,7 @@ export type ByomRefusal =
   | 'repo_not_opted_in'
   | 'denied'
   | 'not_allowlisted'
+  | 'shell_not_allowed'
   | 'jail'
   | 'device_offline'
   | 'timeout'
@@ -49,6 +55,7 @@ export interface PairingRecord {
   tenantId: string;
   expiresAt: number;
   consumedAt: number | null;
+  allowShell: boolean;
 }
 
 export interface DeviceRecord {
@@ -61,6 +68,7 @@ export interface DeviceRecord {
   killed: boolean;
   lastSeenAt: number;
   workspaceRoot?: string;
+  allowShell: boolean;
 }
 
 export interface ByomSettings {
@@ -166,14 +174,35 @@ export class ByomHub {
 
   createPairing(
     tenantId: string,
+    options?: { allowShell?: boolean },
   ): { ok: true; code: string; expiresAt: number } | { ok: false; reason: ByomRefusal } {
     if (!this.settings.enabled) return { ok: false, reason: 'disabled' };
     if (this.settings.killed) return { ok: false, reason: 'killed' };
     const code = this.pairingCode();
     const expiresAt = this.now() + this.settings.pairingTtlMs;
-    this.pairings.set(code, { code, tenantId, expiresAt, consumedAt: null });
-    this.audit('byom_pairing_created', { tenantId, codeLength: code.length, expiresAt });
+    const allowShell = options?.allowShell === true;
+    this.pairings.set(code, { code, tenantId, expiresAt, consumedAt: null, allowShell });
+    this.audit('byom_pairing_created', {
+      tenantId,
+      codeLength: code.length,
+      expiresAt,
+      allowShell,
+    });
+    if (allowShell) {
+      this.audit('byom_allow_shell', { tenantId, allowShell: true, via: 'pairing' });
+    }
     return { ok: true, code, expiresAt };
+  }
+
+  setAllowShell(
+    deviceId: string,
+    allowShell: boolean,
+  ): { ok: true } | { ok: false; reason: ByomRefusal } {
+    const device = this.devices.get(deviceId);
+    if (!device) return { ok: false, reason: 'unknown_device' };
+    device.allowShell = allowShell;
+    this.audit('byom_allow_shell', { deviceId, tenantId: device.tenantId, allowShell });
+    return { ok: true };
   }
 
   killAll(): void {
@@ -234,6 +263,7 @@ export class ByomHub {
         v: 1,
         type: 'welcome',
         serverMac: hmacHex(device.secret, welcomePayload(message.nonce, message.ts)),
+        allowShell: device.allowShell,
       };
     }
     if (message.type === 'poll') {
@@ -291,7 +321,7 @@ export class ByomHub {
     }
     const decided = decideCommand(
       input.request.cmd,
-      this.settings.commandPolicy,
+      { ...this.settings.commandPolicy, allowShell: device.allowShell },
       input.request.timeoutSeconds,
     );
     if (!decided.ok) {
@@ -311,7 +341,16 @@ export class ByomHub {
       cwd: input.request.cwd,
       stdin: input.request.stdin,
       timeoutSeconds: decided.timeoutSeconds,
+      allowShell: device.allowShell,
     };
+    if (decided.viaShell) {
+      this.audit('byom_shell_used', {
+        deviceId: device.deviceId,
+        jobId: job.jobId,
+        workerId: input.workerId,
+        binary: decided.binary,
+      });
+    }
     const result = await new Promise<DeviceExecResult>((resolve) => {
       const row: PendingJob = { job, resolve };
       const queue = this.queues.get(device.deviceId) ?? [];
@@ -358,14 +397,21 @@ export class ByomHub {
       online: true,
       killed: false,
       lastSeenAt: at,
+      allowShell: row.allowShell,
     });
-    this.audit('byom_paired', { deviceId, tenantId: row.tenantId, os: message.capabilities.os });
+    this.audit('byom_paired', {
+      deviceId,
+      tenantId: row.tenantId,
+      os: message.capabilities.os,
+      allowShell: row.allowShell,
+    });
     return {
       v: 1,
       type: 'paired',
       deviceId,
       secret,
       serverMac: hmacHex(secret, welcomePayload(message.nonce, at)),
+      allowShell: row.allowShell,
     };
   }
 
@@ -466,7 +512,10 @@ export interface DeviceDaemonOptions {
     cwd: string,
     stdin: string | undefined,
     timeoutSeconds: number,
+    viaShell?: boolean,
   ) => Promise<SandboxExecResult>;
+  /** Local copy of the cloud switch. Cloud jobs also carry `allowShell`. */
+  allowShell?: boolean;
 }
 
 export interface DeviceCredential {
@@ -483,6 +532,7 @@ export class DeviceDaemon {
   readonly commands: Array<{ cmd: string; cwd: string }> = [];
   credential: DeviceCredential | undefined;
   killed = false;
+  allowShell = false;
   private readonly root: string;
   private readonly transport: DeviceTransport;
   private readonly pairingCode?: string;
@@ -499,6 +549,7 @@ export class DeviceDaemon {
     this.policy = options.policy ?? DEFAULT_COMMAND_POLICY;
     this.now = options.now ?? Date.now;
     this.run = options.run ?? runLocalJailedexec;
+    this.allowShell = options.allowShell === true;
   }
 
   async pairOrHello(): Promise<CloudToDevice> {
@@ -515,6 +566,7 @@ export class DeviceDaemon {
       });
       if (reply.type === 'paired') {
         this.credential = { deviceId: reply.deviceId, secret: reply.secret };
+        this.allowShell = reply.allowShell === true;
         if (!hmacOk(reply.secret, welcomePayload(nonce, this.now()), reply.serverMac)) {
           // Pairing still succeeds if clocks differ on welcome; device stores the secret.
         }
@@ -538,6 +590,7 @@ export class DeviceDaemon {
     });
     if (reply.type === 'killed') this.killed = true;
     if (reply.type === 'welcome') {
+      this.allowShell = reply.allowShell === true;
       if (!hmacOk(this.credential.secret, welcomePayload(nonce, ts), reply.serverMac)) {
         return { v: 1, type: 'error', reason: 'auth_failed' };
       }
@@ -578,7 +631,8 @@ export class DeviceDaemon {
       exitCode: 126,
     };
     if (this.killed || !this.credential) return this.report(denied);
-    const decided = decideCommand(job.cmd, this.policy, job.timeoutSeconds);
+    const allowShell = job.allowShell ?? this.allowShell;
+    const decided = decideCommand(job.cmd, { ...this.policy, allowShell }, job.timeoutSeconds);
     if (!decided.ok) {
       return this.report({ ...denied, stderr: decided.reason });
     }
@@ -590,7 +644,7 @@ export class DeviceDaemon {
       return this.report({ ...denied, stderr: reason });
     }
     this.commands.push({ cmd: job.cmd, cwd });
-    const ran = await this.run!(job.cmd, cwd, job.stdin, decided.timeoutSeconds);
+    const ran = await this.run!(job.cmd, cwd, job.stdin, decided.timeoutSeconds, decided.viaShell);
     return this.report({
       jobId: job.jobId,
       stdout: ran.stdout,
@@ -629,11 +683,31 @@ function runLocalJailedexec(
   cwd: string,
   stdin: string | undefined,
   timeoutSeconds: number,
+  viaShell = false,
+): Promise<SandboxExecResult> {
+  if (!viaShell) {
+    const parsed = parseCommand(cmd);
+    if (parsed.needsShell || parsed.argv.length === 0) {
+      return Promise.resolve({ stdout: '', stderr: 'shell_not_allowed', exitCode: 126 });
+    }
+    const [file, ...args] = parsed.argv;
+    return spawnArgv(file!, args, cwd, stdin, timeoutSeconds);
+  }
+  return spawnArgv('/bin/sh', ['-c', cmd], cwd, stdin, timeoutSeconds);
+}
+
+function spawnArgv(
+  file: string,
+  args: string[],
+  cwd: string,
+  stdin: string | undefined,
+  timeoutSeconds: number,
 ): Promise<SandboxExecResult> {
   return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', cmd], {
+    const child = spawn(file, args, {
       cwd,
       env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: cwd, GIT_TERMINAL_PROMPT: '0' },
+      shell: false,
     });
     let stdout = '';
     let stderr = '';

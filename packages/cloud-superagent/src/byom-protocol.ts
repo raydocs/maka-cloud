@@ -23,6 +23,8 @@ export interface DeviceJob {
   cwd?: string;
   stdin?: string;
   timeoutSeconds: number;
+  /** Cloud is the source of truth. Missing means false. */
+  allowShell?: boolean;
 }
 
 export interface DeviceExecResult {
@@ -77,8 +79,14 @@ export type CloudToDevice =
       deviceId: string;
       secret: string;
       serverMac: string;
+      allowShell: boolean;
     }
-  | { v: typeof BYOM_PROTOCOL_VERSION; type: 'welcome'; serverMac: string }
+  | {
+      v: typeof BYOM_PROTOCOL_VERSION;
+      type: 'welcome';
+      serverMac: string;
+      allowShell: boolean;
+    }
   | { v: typeof BYOM_PROTOCOL_VERSION; type: 'jobs'; jobs: DeviceJob[] }
   | { v: typeof BYOM_PROTOCOL_VERSION; type: 'ack'; jobId: string }
   | { v: typeof BYOM_PROTOCOL_VERSION; type: 'killed' }

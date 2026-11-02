@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:40 MST — cursor/superagent-byom-spec-51be
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** BYOM default command allowlist drops shells (`sh`, `bash`, `zsh`, `dash`, …) and wrappers (`env`, `xargs`, …). Devices exec `argv[0]` by exact basename match, no shell parse. `SandboxPort` `cmd` is tokenized and spawned directly; pipes / redirects / `sh -c` are refused with `shell_not_allowed` (never a silent `sh -c` fallback). Per-device `allowShell` (default false) is set at pairing or via `setAllowShell`; enabling writes `byom_allow_shell` to the hub audit and Super-agent ledger and shows `allowShell` on worker progress. A shell job also records `byom_shell_used`.
+- **Why:** Owner agreed to close the residual that an allowlisted shell could run arbitrary scripts on a paired machine.
+- **Tests:** `@maka-cloud/superagent` byom suite: default refuse `sh` / `bash` / `sh -c` / pipes; allow when `allowShell` is on; existing jail / HMAC / offline / pairing tests unchanged.
+- **Live:** n/a
+- **Migrations / risk:** none. Existing paired devices stay `allowShell: false`. Owners who need a shell opt in per device.
+
 ## 2026-11-02 12:25 MST — cursor/superagent-byom-spec-51be — ca33ac59d
 
 - **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)

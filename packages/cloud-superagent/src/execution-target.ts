@@ -14,6 +14,8 @@ export interface ExecutionTargetRef {
   kind: ExecutionTargetKind;
   id?: string;
   waitReason?: string;
+  /** Per-device shell switch. Unset/false means argv-only exec. */
+  allowShell?: boolean;
 }
 
 export interface ExecutionNeed {

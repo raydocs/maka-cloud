@@ -95,10 +95,18 @@ export {
   DEFAULT_COMMAND_POLICY,
   DEFAULT_DENIED_COMMANDS,
   DEFAULT_MAX_RUNTIME_SECONDS,
+  SHELL_INTERPRETERS,
+  SHELL_WRAPPERS,
+  commandBasename,
   decideCommand,
   firstBinary,
+  isShellInterpreter,
+  isShellWrapper,
+  parseCommand,
   type CommandDecision,
   type CommandPolicy,
+  type CommandRefusal,
+  type ParsedCommand,
 } from './byom-policy.js';
 export { hmacHex, hmacOk, randomNonce, randomPairingCode, randomSecret } from './byom-crypto.js';
 export {

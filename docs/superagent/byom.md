@@ -49,17 +49,29 @@ cloud can otherwise send arbitrary commands.
 | Control | Default |
 |---|---|
 | Command denylist | `sudo`, `rm -rf`, metadata `curl`/`wget`, `ssh`/`scp`, `osascript`, keychain `security`, and similar |
-| Command allowlist | First binary must be a known toolchain (`git`, `npm`, `xcodebuild`, …) |
+| Command allowlist | `argv[0]` basename must exactly match a listed toolchain (`git`, `npm`, `xcodebuild`, …). No shell parse |
+| Shells / wrappers | Not on the default list (`sh`, `bash`, `zsh`, `dash`, `env`, `xargs`, …) |
+| `allowShell` | Per-device, default **false**. Only pairing or `setAllowShell` can turn it on |
 | Workspace jail | `cwd` must resolve inside the owner-chosen root |
 | Max runtime | 15 minutes, then SIGKILL |
 | Repo opt-in | Empty list. A repo is refused until the owner adds it |
 | Kill switch | Tenant, device, or global. Next poll returns `killed` |
-| Audit | Pair, hello, exec, refuse, kill, offline — Super-agent ledger |
+| Audit | Pair, hello, exec, refuse, kill, offline, `allowShell` — Super-agent ledger |
 
-`sh` / `bash` stay on the allowlist so `SandboxPort` `cmd` strings work.
-The denylist is then the last line on the **full** string. That is
-best-effort, not a proven sandbox. Treat a paired machine as an
-execution farm for the opted-in repos.
+`SandboxPort` `cmd` strings are tokenized into argv and exec'd directly
+(`spawn(argv[0], rest)`, no `shell: true`). Pipes, redirects, `&&` / `;`,
+unquoted `$`, and `FOO=bar cmd` are refused with reason `shell_not_allowed`.
+The runner never falls back to `sh -c`.
+
+`allowShell: true` is the explicit per-device exception. The owner sets it
+on the pairing code or later via `Superagent.setByomAllowShell` /
+`ByomHub.setAllowShell`. Enabling writes `byom_allow_shell` to the hub
+audit and the Super-agent ledger, and live workers show `allowShell` on
+progress. A job that actually goes through a shell also records
+`byom_shell_used`. The denylist still applies to the full string.
+
+That is still best-effort, not a proven sandbox. Treat a paired machine as
+an execution farm for the opted-in repos.
 
 ## ExecutionTarget
 
@@ -115,9 +127,11 @@ They cannot (by design):
 
 - Open inbound ports on the device.
 - Reach paths outside the jail via `cwd`.
-- Run denylisted binaries (`sudo`, `ssh`, metadata `curl`, …) unless
-  they also smuggle them through an allowlisted shell. That residual
-  risk is real; see above.
+- Run a shell, `env`/`xargs`, or any piped/redirected `cmd` unless the
+  owner turned on that device's `allowShell`. The default path is
+  argv-only.
+- Run denylisted binaries (`sudo`, `ssh`, metadata `curl`, …). The
+  denylist still wins when `allowShell` is on.
 - Pull the device keychain, SSH agent, or unrelated env. Those never
   leave the machine.
 - Act as another tenant: jobs are scoped to the pairing tenant.
@@ -136,6 +150,12 @@ A code in flight is a one-time, short-lived capability to attach a
 not put it on argv (shell history).
 
 ### Residual
+
+Allowlisted toolchains can still run code (`python -c`, `node -e`,
+`xcodebuild`). That is the point of pairing the machine. A stolen
+`allowShell` device can run `sh -c` of anything the denylist does not
+catch — treat that switch as equivalent to giving the cloud a login
+shell on that host.
 
 BYOM is not Instabox. The owner is extending the trusted computing base
 to a machine they control. Only pair hosts you would let run
