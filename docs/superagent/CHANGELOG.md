@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 14:00 MST — cursor/superagent-decisions-policy-51be
+
+- **PR:** none (base `cursor/superagent-real-loop-51be`)
+- **What:** Decision ledger (human-only decided/refused, tenant+repo, exact match auto-applies, fuzzy hints only). Must-ask whitelist (delete/deploy/spend/outbound/direction/secrets/permissions/migration/force-push); tenant may tighten, never loosen; always-ask delete_data / rotate_secrets / spend. Declarative `superagent.rules.json` with schema, hot reload, event envelope; miss falls through to the existing Router. Progress cites ledger ids. #477 card adapters (`cardDraftFromMustAsk`, `recordFromCardResolution`) without taking `statusSnapshot.decisions`.
+- **Why:** Paid cloud employee: ask once, remember, do not re-ask; irreversible actions always wait; routing rules as a file.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome on the package
+- **Live:** n/a
+- **Migrations / risk:** none. No sqlite `user_version` bump. Ledger is memory + optional JSON + existing audit rows.
+
 ## 2026-11-02 13:42 MST — cursor/superagent-real-loop-51be — 1157d2ea8
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

@@ -1,13 +1,34 @@
 import type { IngestInput } from './events.js';
 import { normalize } from './events.js';
 import { defaultIds } from './ids.js';
+import {
+  DECISION_AUDIT_APPLIED,
+  DECISION_AUDIT_RECORDED,
+  DECISION_AUDIT_REVOKED,
+  DecisionBook,
+  RULE_MATCHED_AUDIT,
+  type DecisionEntry,
+} from './decisions.js';
+import {
+  categoryFromApproval,
+  consultBeforeAsk,
+  DEFAULT_MUST_ASK,
+  mergeMustAskPolicy,
+  speculativeBlocksOutbound,
+  type BeforeAskResult,
+  type MustAskPolicy,
+  type TenantMustAskOverlay,
+} from './must-ask.js';
 import { admit, admitSpawn, HeuristicJudge, isStatusAsk } from './router.js';
-import { overBudget, Safety } from './safety.js';
+import { applyConcurrency, envelopeOf, RulesEngine, type RoutingRule } from './rules.js';
+import { isRisky, mandateBlocks, overBudget, Safety } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
 import {
+  actMandate,
   emptyUsage,
   isLiveState,
+  observeMandate,
   type NormalizedEvent,
   type WorkerContext,
   type WorkerRecord,
@@ -67,7 +88,14 @@ export type IngestResult =
   | { result: 'ignored'; reason: string; eventId?: string; judgeCalls: number }
   | { result: 'passthrough'; eventId: string; workerIds: string[]; judgeCalls: 0 }
   | { result: 'answered'; eventId: string; text: string; judgeCalls: number }
-  | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number };
+  | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number }
+  | {
+      result: 'must_ask';
+      eventId: string;
+      pendingId: string;
+      category: string;
+      judgeCalls: number;
+    };
 
 /** Collapse a worker inbox into one event. Approval wins over the latest row. */
 export function coalesceInbox(events: NormalizedEvent[]): NormalizedEvent {
@@ -136,6 +164,14 @@ export interface SuperagentOptions {
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
   progress?: Partial<ProgressSettings>;
+  /** Standing human decisions. Default empty; hydrates from audit. */
+  decisions?: DecisionBook;
+  /** Must-ask whitelist. Tenant overlay can only tighten. */
+  mustAsk?: MustAskPolicy;
+  mustAskOverlay?: TenantMustAskOverlay;
+  /** Declarative routing rules. Miss falls through to the existing Router. */
+  rules?: RulesEngine;
+  rulesPath?: string;
 }
 
 export class Superagent {
@@ -153,6 +189,10 @@ export class Superagent {
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
   readonly progressSettings: ProgressSettings;
+  readonly decisions: DecisionBook;
+  readonly mustAsk: MustAskPolicy;
+  readonly rules: RulesEngine;
+  private readonly hydratedTenants = new Set<string>();
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
@@ -179,6 +219,28 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
+    this.decisions =
+      options.decisions ??
+      new DecisionBook({
+        ids: {
+          entry: () => this.ids.decision(),
+          pending: () => this.ids.decision().replace(/^dec_/u, 'msk_'),
+          hit: () => this.ids.decision().replace(/^dec_/u, 'hit_'),
+        },
+      });
+    const overlay = options.mustAskOverlay
+      ? mergeMustAskPolicy(options.mustAskOverlay, options.mustAsk ?? DEFAULT_MUST_ASK)
+      : undefined;
+    this.mustAsk = overlay?.ok === true ? overlay.policy : (options.mustAsk ?? DEFAULT_MUST_ASK);
+    this.rules =
+      options.rules ??
+      new RulesEngine({
+        path: options.rulesPath,
+        now: this.now,
+        onInvalid: (message, at) => {
+          this.audit('system', null, 'rules_invalid', at, { message });
+        },
+      });
   }
 
   ledger(tenantId: string) {
@@ -247,6 +309,9 @@ export class Superagent {
       return { result: 'ignored', reason: admission.reason, eventId: event.eventId, judgeCalls: 0 };
     }
 
+    const routed = await this.tryRules(event, at);
+    if (routed) return routed;
+
     this.judgeCalls += 1;
     const decision = await this.judge.decide(event, {
       workers: this.store.workers(event.tenantId),
@@ -311,13 +376,146 @@ export class Superagent {
   }
 
   statusSnapshot(tenantId?: string): StatusSnapshot {
-    return statusSnapshotOf(
+    const snap = statusSnapshotOf(
       this.store,
       this.now(),
       this.progressSettings,
       this.watchdogSettings,
       tenantId,
     );
+    if (!tenantId) return snap;
+    const pending = this.decisionsFor(tenantId).pending(tenantId);
+    const citations = snap.workers
+      .filter((row) => row.decisionEntryId)
+      .map((row) => ({ workerId: row.workerId, entryId: row.decisionEntryId as string }));
+    return {
+      ...snap,
+      ...(pending.length > 0 ? { mustAskPending: pending } : {}),
+      ...(citations.length > 0 ? { decisionCitations: citations } : {}),
+    };
+  }
+
+  decisionBook(): DecisionBook {
+    return this.decisions;
+  }
+
+  pendingMustAsks(tenantId: string) {
+    return this.decisionsFor(tenantId).pending(tenantId);
+  }
+
+  consultAction(
+    action: import('./types.js').ProposedAction,
+    tenantId: string,
+    repo?: string,
+    worker?: WorkerRecord,
+  ): BeforeAskResult {
+    return consultBeforeAsk({
+      book: this.decisionsFor(tenantId),
+      policy: this.mustAsk,
+      action,
+      tenantId,
+      repo,
+      worker,
+    });
+  }
+
+  recordHumanDecision(input: {
+    polarity: 'decided' | 'refused';
+    verbatim: string;
+    sourceEventId: string;
+    actor: { login: string; kind: import('./types.js').ActorKind };
+    scope: import('./decisions.js').DecisionScope;
+    at?: number;
+  }): { ok: true; entry: DecisionEntry } | { ok: false; reason: string } {
+    const at = input.at ?? this.now();
+    const recorded = this.decisionsFor(input.scope.tenantId).record({ ...input, at });
+    if (!recorded.ok) return recorded;
+    this.audit(input.scope.tenantId, null, DECISION_AUDIT_RECORDED, at, {
+      entry: JSON.stringify(recorded.entry),
+      entryId: recorded.entry.entryId,
+      polarity: recorded.entry.polarity,
+    });
+    return recorded;
+  }
+
+  revokeHumanDecision(
+    tenantId: string,
+    entryId: string,
+    actor: { login: string; kind: import('./types.js').ActorKind },
+    at?: number,
+  ): { ok: true; entry: DecisionEntry } | { ok: false; reason: string } {
+    const when = at ?? this.now();
+    const revoked = this.decisionsFor(tenantId).revoke(tenantId, entryId, actor, when);
+    if (!revoked.ok) return revoked;
+    this.audit(tenantId, null, DECISION_AUDIT_REVOKED, when, {
+      entryId,
+      at: when,
+    });
+    return revoked;
+  }
+
+  async resolveMustAsk(
+    tenantId: string,
+    pendingId: string,
+    option: 'accept' | 'reject',
+    input: { verbatim: string; actor: { login: string; kind: import('./types.js').ActorKind } },
+  ): Promise<
+    { ok: true; entry: DecisionEntry; workerId?: string } | { ok: false; reason: string }
+  > {
+    if (input.actor.kind !== 'user') return { ok: false, reason: 'human_only' };
+    const at = this.now();
+    const book = this.decisionsFor(tenantId);
+    const pending = book.pending(tenantId).find((row) => row.pendingId === pendingId);
+    if (!pending) return { ok: false, reason: 'unknown_pending' };
+    const recorded = book.record({
+      polarity: option === 'accept' ? 'decided' : 'refused',
+      verbatim: input.verbatim,
+      sourceEventId: pending.eventId,
+      actor: input.actor,
+      scope: {
+        tenantId,
+        ...(pending.repo ? { repo: pending.repo } : {}),
+        category: pending.category,
+        ...(pending.object ? { object: pending.object } : {}),
+        ...(pending.path ? { path: pending.path } : {}),
+        ...(pending.tags ? { tags: pending.tags } : {}),
+      },
+      at,
+    });
+    if (!recorded.ok) return recorded;
+    book.removePending(tenantId, pendingId);
+    this.audit(tenantId, pending.workerId ?? null, DECISION_AUDIT_RECORDED, at, {
+      entry: JSON.stringify(recorded.entry),
+      entryId: recorded.entry.entryId,
+      polarity: recorded.entry.polarity,
+      pendingId,
+    });
+    if (option !== 'accept' || pending.workerId) {
+      return {
+        ok: true,
+        entry: recorded.entry,
+        ...(pending.workerId ? { workerId: pending.workerId } : {}),
+      };
+    }
+    const event = this.store.event(tenantId, pending.eventId);
+    if (!event?.subject) return { ok: true, entry: recorded.entry };
+    if (this.store.liveWorkerBySubject(tenantId, event.subject.key)) {
+      return { ok: true, entry: recorded.entry };
+    }
+    const rule = pending.ruleId
+      ? this.rules.snapshot().rules.find((row) => row.id === pending.ruleId)
+      : undefined;
+    const repos = event.subject.repo ? [event.subject.repo] : [];
+    const mandate =
+      rule?.intensity === 'act' ? actMandate(repos, 'inferred') : observeMandate(repos, 'inferred');
+    const worker = this.spawn(event, mandate, at, ruleMeta(rule, event.subject.key));
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    await this.drain(tenantId, worker.workerId);
+    this.audit(tenantId, worker.workerId, 'spawned', at, {
+      subject: event.subject.key,
+      from: 'must_ask',
+    });
+    return { ok: true, entry: recorded.entry, workerId: worker.workerId };
   }
 
   async restore(): Promise<{ resumed: number }> {
@@ -396,6 +594,14 @@ export class Superagent {
     };
     this.store.putEvent(grant);
     this.store.enqueue(worker.workerId, grant.eventId, at);
+    this.rememberApproval(
+      worker,
+      decided.approval.kind,
+      decided.approval.boundText,
+      'decided',
+      at,
+      grant.eventId,
+    );
     await this.drain(tenantId, worker.workerId);
     this.audit(tenantId, worker.workerId, 'approved', at, { approvalId });
     return { ok: true, workerId: worker.workerId };
@@ -411,6 +617,14 @@ export class Superagent {
     if (!decided.ok) return decided;
     const worker = this.store.worker(tenantId, decided.approval.workerId);
     if (!worker) return { ok: false, reason: 'worker_gone' };
+    this.rememberApproval(
+      worker,
+      decided.approval.kind,
+      decided.approval.boundText,
+      'refused',
+      at,
+      `approval:${approvalId}:denied`,
+    );
     await this.retire(worker, at, 'approval_denied');
     this.audit(tenantId, worker.workerId, 'denied', at, { approvalId });
     return { ok: true, workerId: worker.workerId };
@@ -542,6 +756,7 @@ export class Superagent {
     event: NormalizedEvent,
     mandate: WorkerRecord['mandate'],
     at: number,
+    routeRule?: WorkerRecord['routeRule'],
   ): WorkerRecord {
     const subject = event.subject;
     if (!subject) throw new Error('Cannot spawn without a subject.');
@@ -564,6 +779,7 @@ export class Superagent {
       lastStepSignature: null,
       stepRepeats: 0,
       progress: startProgress(at),
+      ...(routeRule ? { routeRule } : {}),
       usage: emptyUsage(),
       evidence: [],
       createdAt: at,
@@ -756,35 +972,8 @@ export class Superagent {
       }
     }
     if (result.action) {
-      const gate = this.safety.gate(worker, result.action, at);
-      if (!gate.allowed && gate.reason === 'intensity_observe') {
-        this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
-          kind: result.action.kind,
-          reason: 'intensity_observe',
-        });
-      } else if (!gate.allowed && gate.reason === 'review_required') {
-        this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
-          kind: result.action.kind,
-          reason: 'review_required',
-        });
-      } else if (!gate.allowed && gate.reason === 'held') {
-        worker.state = 'awaiting_approval';
-        this.audit(worker.tenantId, worker.workerId, 'awaiting_approval', at, {
-          approvalId: gate.approvalId,
-          kind: result.action.kind,
-        });
-        await this.recordProgress(
-          worker,
-          {
-            phase: result.action.kind === 'merge' ? 'merge-held' : worker.progress?.phase,
-            waiting: { kind: 'human', detail: result.action.kind },
-            activity: `held ${result.action.kind}`,
-          },
-          at,
-        );
-        worker.lastHeartbeatAt = at;
-        return true;
-      }
+      const halt = await this.applyAction(worker, result.action, at);
+      if (halt) return true;
     }
     worker.lastHeartbeatAt = at;
     return false;
@@ -1021,6 +1210,262 @@ export class Superagent {
     }
   }
 
+  private async tryRules(event: NormalizedEvent, at: number): Promise<IngestResult | undefined> {
+    const reload = this.rules.maybeReload(at);
+    if (reload === 'kept_previous' && this.rules.lastError) {
+      this.audit(event.tenantId, null, 'rules_invalid', at, {
+        message: this.rules.lastError.message,
+      });
+    }
+    const envelope = envelopeOf(event);
+    const rule = this.rules.match(envelope);
+    if (!rule) return undefined;
+    const hit = this.decisionsFor(event.tenantId).recordRuleHit({
+      tenantId: event.tenantId,
+      repo: event.subject?.repo,
+      ruleId: rule.id,
+      eventId: event.eventId,
+      at,
+    });
+    this.audit(event.tenantId, null, RULE_MATCHED_AUDIT, at, {
+      ruleId: rule.id,
+      eventId: event.eventId,
+      hitId: hit.hitId,
+      ...(event.subject?.repo ? { repo: event.subject.repo } : {}),
+    });
+    const conc = applyConcurrency(rule, envelope, this.store.workers(event.tenantId));
+    if (!conc.ok) {
+      this.audit(event.tenantId, null, 'filtered', at, { reason: conc.reason, ruleId: rule.id });
+      return { result: 'ignored', reason: conc.reason, eventId: event.eventId, judgeCalls: 0 };
+    }
+    if (rule.notifyHuman === 'always') {
+      const pending = this.decisionsFor(event.tenantId).addPending({
+        tenantId: event.tenantId,
+        eventId: event.eventId,
+        category: 'rule_notify',
+        boundText: event.summary,
+        repo: event.subject?.repo,
+        object: envelope.object.id,
+        threadId: event.subject?.key,
+        ruleId: rule.id,
+        at,
+      });
+      this.audit(event.tenantId, null, 'must_ask', at, {
+        pendingId: pending.pendingId,
+        ruleId: rule.id,
+        category: 'rule_notify',
+      });
+      return {
+        result: 'must_ask',
+        eventId: event.eventId,
+        pendingId: pending.pendingId,
+        category: 'rule_notify',
+        judgeCalls: 0,
+      };
+    }
+    const existing = this.store.liveWorkerBySubject(event.tenantId, event.subject?.key ?? '');
+    if (existing) {
+      return { result: 'ignored', reason: 'already_owned', eventId: event.eventId, judgeCalls: 0 };
+    }
+    const boxedLive = this.store
+      .allWorkers()
+      .filter((row) => isLiveState(row.state) && row.sandboxRef).length;
+    const spawnGate = admitSpawn({
+      boxedLive,
+      wouldBox: Boolean(this.defaultSandboxRef),
+      tenantUsdMicros: this.store.tenantUsage(event.tenantId).usdMicros,
+      policy: this.admission,
+    });
+    if (!spawnGate.ok) {
+      this.audit(event.tenantId, null, 'filtered', at, {
+        reason: spawnGate.reason,
+        ruleId: rule.id,
+      });
+      return {
+        result: 'ignored',
+        reason: spawnGate.reason,
+        eventId: event.eventId,
+        judgeCalls: 0,
+      };
+    }
+    if (!event.subject) {
+      return { result: 'ignored', reason: 'no_subject', eventId: event.eventId, judgeCalls: 0 };
+    }
+    const repos = event.subject.repo ? [event.subject.repo] : [];
+    const mandate =
+      rule.intensity === 'act' ? actMandate(repos, 'inferred') : observeMandate(repos, 'inferred');
+    const worker = this.spawn(event, mandate, at, ruleMeta(rule, envelope.object.id));
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    await this.drain(event.tenantId, worker.workerId);
+    this.audit(event.tenantId, worker.workerId, 'spawned', at, {
+      subject: event.subject.key,
+      ruleId: rule.id,
+    });
+    return {
+      result: 'spawned',
+      eventId: event.eventId,
+      workerId: worker.workerId,
+      judgeCalls: 0,
+    };
+  }
+
+  private async applyAction(
+    worker: WorkerRecord,
+    action: import('./types.js').ProposedAction,
+    at: number,
+  ): Promise<boolean> {
+    const blocked = mandateBlocks(worker, action);
+    if (blocked === 'intensity_observe' || blocked === 'review_required') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: blocked,
+      });
+      return false;
+    }
+    if (speculativeBlocksOutbound(worker, action)) {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'speculative_blocked',
+      });
+      return false;
+    }
+    const verdict = consultBeforeAsk({
+      book: this.decisionsFor(worker.tenantId),
+      policy: this.mustAsk,
+      action,
+      tenantId: worker.tenantId,
+      repo: worker.subject.repo,
+      worker,
+    });
+    if (verdict.kind === 'apply_decided') {
+      this.audit(worker.tenantId, worker.workerId, DECISION_AUDIT_APPLIED, at, {
+        entryId: verdict.entry.entryId,
+        polarity: 'decided',
+        kind: action.kind,
+      });
+      await this.recordProgress(
+        worker,
+        { activity: `followed decision ${verdict.entry.entryId}` },
+        at,
+      );
+      return false;
+    }
+    if (verdict.kind === 'apply_refused') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'decision_refused',
+        entryId: verdict.entry.entryId,
+      });
+      await this.recordProgress(
+        worker,
+        { activity: `followed decision ${verdict.entry.entryId}` },
+        at,
+      );
+      return false;
+    }
+    const actionForGate =
+      verdict.kind === 'must_ask' && !isRisky(action.kind)
+        ? { ...action, kind: 'other_irreversible' as const }
+        : action;
+    const gate = this.safety.gate(worker, actionForGate, at);
+    if (!gate.allowed && gate.reason === 'intensity_observe') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'intensity_observe',
+      });
+      return false;
+    }
+    if (!gate.allowed && gate.reason === 'review_required') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'review_required',
+      });
+      return false;
+    }
+    if (!gate.allowed && gate.reason === 'held') {
+      if (verdict.kind === 'must_ask') {
+        this.decisionsFor(worker.tenantId).addPending({
+          tenantId: worker.tenantId,
+          eventId: worker.lastEventId ?? '',
+          workerId: worker.workerId,
+          approvalId: gate.approvalId,
+          category: verdict.category,
+          boundText: action.boundText,
+          repo: worker.subject.repo,
+          object: action.object ?? worker.subject.key,
+          path: action.path,
+          tags: action.tags,
+          threadId: worker.subject.key,
+          at,
+        });
+      }
+      worker.state = 'awaiting_approval';
+      this.audit(worker.tenantId, worker.workerId, 'awaiting_approval', at, {
+        approvalId: gate.approvalId,
+        kind: action.kind,
+        ...(verdict.kind === 'must_ask' ? { mustAsk: verdict.category } : {}),
+        ...(verdict.kind === 'must_ask' && verdict.hints?.[0]
+          ? { hint: verdict.hints[0].entryId }
+          : {}),
+      });
+      const hintId =
+        verdict.kind === 'must_ask' && verdict.hints?.[0] ? verdict.hints[0].entryId : undefined;
+      await this.recordProgress(
+        worker,
+        {
+          phase: action.kind === 'merge' ? 'merge-held' : worker.progress?.phase,
+          waiting: {
+            kind: 'human',
+            detail: action.kind,
+            ...(hintId ? { decisionEntryId: hintId } : {}),
+          },
+          activity: `held ${action.kind}`,
+        },
+        at,
+      );
+      worker.lastHeartbeatAt = at;
+      return true;
+    }
+    return false;
+  }
+
+  private rememberApproval(
+    worker: WorkerRecord,
+    kind: import('./types.js').ApprovalKind,
+    boundText: string,
+    polarity: 'decided' | 'refused',
+    at: number,
+    sourceEventId: string,
+  ): void {
+    const recorded = this.decisionsFor(worker.tenantId).record({
+      polarity,
+      verbatim: boundText,
+      sourceEventId,
+      actor: { login: 'owner', kind: 'user' },
+      scope: {
+        tenantId: worker.tenantId,
+        ...(worker.subject.repo ? { repo: worker.subject.repo } : {}),
+        category: categoryFromApproval(kind, boundText),
+        object: worker.subject.key,
+      },
+      at,
+    });
+    if (!recorded.ok) return;
+    this.audit(worker.tenantId, worker.workerId, DECISION_AUDIT_RECORDED, at, {
+      entry: JSON.stringify(recorded.entry),
+      entryId: recorded.entry.entryId,
+      polarity,
+    });
+  }
+
+  private decisionsFor(tenantId: string): DecisionBook {
+    if (!this.hydratedTenants.has(tenantId)) {
+      this.decisions.hydrateFromAudit(this.store.audit(tenantId));
+      this.hydratedTenants.add(tenantId);
+    }
+    return this.decisions;
+  }
+
   private audit(
     tenantId: string,
     workerId: string | null,
@@ -1037,4 +1482,15 @@ export class Superagent {
       detail,
     });
   }
+}
+
+function ruleMeta(rule: RoutingRule | undefined, objectId: string): WorkerRecord['routeRule'] {
+  if (!rule) return undefined;
+  return {
+    ruleId: rule.id,
+    ...(rule.model ? { model: rule.model } : {}),
+    ...(rule.reasoning ? { reasoning: rule.reasoning } : {}),
+    ...(rule.skills ? { skills: [...rule.skills] } : {}),
+    objectId,
+  };
 }

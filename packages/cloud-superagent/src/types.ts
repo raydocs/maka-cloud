@@ -157,6 +157,16 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Declarative routing rule that spawned this worker. JSON only. */
+  routeRule?: {
+    ruleId: string;
+    model?: string;
+    reasoning?: 'low' | 'medium' | 'high';
+    skills?: string[];
+    objectId?: string;
+  };
+  /** #475 speculative meta when present. JSON only; no schema bump. */
+  speculative?: { status?: string };
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -251,6 +261,11 @@ export interface OrgSecretPort {
 export interface ProposedAction {
   kind: ApprovalKind;
   boundText: string;
+  /** Must-ask category when the handler already classified the action. */
+  category?: string;
+  object?: string;
+  path?: string;
+  tags?: string[];
 }
 
 export interface HandlerResult {
@@ -355,6 +370,7 @@ export interface IdFactory {
   subscription(): string;
   approval(): string;
   audit(): string;
+  decision(): string;
 }
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
