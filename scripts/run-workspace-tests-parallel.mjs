@@ -63,6 +63,27 @@ const UNWEIGHED_DIRECTORIES = new Set(['node_modules', 'dist', '.git']);
  * for how long its suite runs. A tree that cannot be read weighs nothing, which
  * leaves the workspace in its declared position rather than failing the run.
  */
+/**
+ * Measured full-suite minutes for the workspaces that dominate CI wall time
+ * (`docs/fork/ci.md`). Used so packing and scheduling follow runtime, not
+ * just test-source bytes.
+ */
+export const KNOWN_SLOW_WORKSPACE_MINUTES = new Map([
+  ['packages/runtime', 15],
+  ['packages/cli', 15],
+  ['packages/cloud-playbooks', 13],
+  ['apps/desktop', 8],
+]);
+
+/** One minute of known runtime outranks any test-source byte count. */
+const KNOWN_SLOW_WEIGHT_SCALE = 1_000_000_000;
+
+export function workspaceScheduleWeight(repoRoot, dir) {
+  const bytes = testSourceWeight(repoRoot, dir);
+  const minutes = KNOWN_SLOW_WORKSPACE_MINUTES.get(dir);
+  return minutes == null ? bytes : minutes * KNOWN_SLOW_WEIGHT_SCALE + bytes;
+}
+
 export function testSourceWeight(repoRoot, dir) {
   let bytes = 0;
   const pending = [join(repoRoot, dir)];
@@ -99,6 +120,49 @@ export function orderByDescendingWeight(dirs, weigh) {
   if (dirs.length < 2) return [...dirs];
   const weights = new Map(dirs.map((dir) => [dir, weigh(dir)]));
   return [...dirs].sort((left, right) => weights.get(right) - weights.get(left));
+}
+
+/** Full-suite CI fans the standard workspaces out this many ways. */
+export const DEFAULT_WORKSPACE_TEST_SHARD_COUNT = 3;
+
+/**
+ * Fewer selected workspaces than this stay in one job, so an affected-only
+ * pull request does not pay three checkouts and three installs.
+ */
+export const WORKSPACE_TEST_SHARD_THRESHOLD = 4;
+
+/**
+ * Pack workspaces into GitHub Actions matrix rows, heaviest first, so a full
+ * suite's long packages do not sit behind each other in one job.
+ */
+export function shardWorkspaces(
+  dirs,
+  { shardCount = DEFAULT_WORKSPACE_TEST_SHARD_COUNT, weigh } = {},
+) {
+  if (dirs.length === 0) return [];
+  const count =
+    dirs.length < WORKSPACE_TEST_SHARD_THRESHOLD ? 1 : Math.min(shardCount, dirs.length);
+  if (count === 1) return [{ shard: '1', workspaces: dirs.join(',') }];
+  if (typeof weigh !== 'function') {
+    throw new Error('weigh is required when splitting workspaces across shards');
+  }
+  const ordered = orderByDescendingWeight(dirs, weigh);
+  const bins = Array.from({ length: count }, (_, index) => ({
+    shard: String(index + 1),
+    weight: 0,
+    dirs: [],
+  }));
+  for (const dir of ordered) {
+    let lightest = bins[0];
+    for (const bin of bins) {
+      if (bin.weight < lightest.weight) lightest = bin;
+    }
+    lightest.dirs.push(dir);
+    lightest.weight += weigh(dir);
+  }
+  return bins
+    .filter((bin) => bin.dirs.length > 0)
+    .map((bin) => ({ shard: bin.shard, workspaces: bin.dirs.join(',') }));
 }
 
 /**
@@ -292,7 +356,7 @@ export async function runWorkspaceTests(options = {}) {
   const spawn = options.spawn ?? defaultSpawn;
   const workspaceDirs = orderByDescendingWeight(
     options.workspaceDirs ?? loadWorkspaceDirs(repoRoot),
-    (dir) => testSourceWeight(repoRoot, dir),
+    (dir) => workspaceScheduleWeight(repoRoot, dir),
   );
   const runOptions = {
     repoRoot,

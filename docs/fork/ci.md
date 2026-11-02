@@ -12,7 +12,8 @@ variable and its jobs go to the owner's runners; delete it and they go back to G
 
 | Job | Runs on today | Variable that moves it |
 |---|---|---|
-| ci `test` | `ubuntu-24.04` (GitHub) | `CI_RUNNER_TEST`, else `CI_RUNNER` |
+| ci `plan`, `validate`, workspace shards, Runtime Host, Desktop e2e, Storybook, CLI packaging | `ubuntu-24.04` (GitHub) | `CI_RUNNER_TEST`, else `CI_RUNNER` |
+| ci `test` (required aggregator) | `ubuntu-24.04` (GitHub) | none; it only joins the lane results |
 | cloud-web, mobile `checks` | `ubuntu-24.04` (GitHub) | `CI_RUNNER` |
 | the rehearsal | `ubuntu-24.04` (GitHub) | `CI_RUNNER_DOCKER`, else `CI_RUNNER` |
 | mobile `ios` | the Mac mini | `CI_RUNNER_MAC` = `["self-hosted","mac"]` (set) |
@@ -80,8 +81,11 @@ run in progress finishes, and the newest push replaces any run still waiting.
 - **Caches:** GitHub's runners restore the npm and Electron caches. A self-hosted runner keeps
   `~/.npm`, the Electron cache and `~/.gradle` itself, so those steps are skipped there.
 - **Batch CI changes into one pull request.** A change to `ci.yml`, a shared script or the lockfile
-  makes `test` select every package, which takes about 30 minutes. Any other change tests only what
-  it touches: about 8 minutes for a `packages/cloud-*` change.
+  makes the planner select every package. The required `test` job is an aggregator: workspace
+  shards, Runtime Host, Desktop e2e, Storybook and CLI packaging run in parallel after `plan`.
+  Any other change still tests only what it touches, so a `packages/cloud-*` pull request stays
+  on the cheap affected-only path (one workspace shard, no e2e/Storybook unless selected).
 - **Where the time goes on a full run:** upstream's `runtime` and `cli` take about 15 minutes each,
-  and our `cloud-playbooks` about 13. Each playbooks test drives several fake agent runs (10 to 27
-  seconds per test), and its files run one at a time.
+  and our `cloud-playbooks` about 13. Those land in separate shards so they overlap, and each shard
+  runs four workspaces at once (one per GitHub-hosted core). Each playbooks test drives several
+  fake agent runs (10 to 27 seconds per test), and its files run one at a time.

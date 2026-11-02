@@ -36,6 +36,14 @@ jobs:
       - run: npm --workspace @maka/desktop run build:workspace-deps
       - run: npm --workspace @maka/desktop run build
       - run: npm --workspace @maka/desktop run build-storybook
+      - id: playwright
+        run: |
+          echo "version=$(node -p "require(require.resolve('@playwright/test/package.json', { paths: ['apps/desktop', '.'] })).version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
       - id: browsers
         run: npx playwright install --with-deps chromium
       - name: Native history traversal never exposes an empty transcript

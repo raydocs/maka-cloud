@@ -20,6 +20,7 @@ name: Runtime Host owner platforms
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/runtime-host-owner-platform.yml'
       - 'package.json'
@@ -42,6 +43,7 @@ permissions:
 jobs:
   owner:
     name: owner (${{ matrix.os }})
+    if: github.event.pull_request.draft != true
     strategy:
       fail-fast: false
       matrix:

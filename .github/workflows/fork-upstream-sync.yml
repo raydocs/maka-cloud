@@ -1,5 +1,8 @@
 # Mirrors apache/maka main into the `upstream` branch and opens a pull request
 # into `main` when main is behind. See AGENTS.md "Upstream sync".
+# Do not skip a scheduled run just because this repository's HEAD is unchanged:
+# upstream can move while main stays still, and that is the case this job exists
+# to notice.
 #
 # Needs the repository secret FORK_SYNC_TOKEN: a fine-grained token for this
 # repository with Contents, Pull requests, Workflows and Actions set to

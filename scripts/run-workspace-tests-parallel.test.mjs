@@ -24,10 +24,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  KNOWN_SLOW_WORKSPACE_MINUTES,
   orderByDescendingWeight,
   parseCliArgs,
   runWorkspaceTests,
+  shardWorkspaces,
   testSourceWeight,
+  workspaceScheduleWeight,
 } from './run-workspace-tests-parallel.mjs';
 
 function immediateSuccessSpawn(started) {
@@ -82,6 +85,47 @@ test('equally weighted workspaces keep their declared order', () => {
   assert.deepEqual(
     orderByDescendingWeight(['b', 'a', 'c'], () => 7),
     ['b', 'a', 'c'],
+  );
+});
+
+test('a short workspace list stays in one shard', () => {
+  assert.deepEqual(shardWorkspaces(['apps/desktop', 'packages/ui']), [
+    { shard: '1', workspaces: 'apps/desktop,packages/ui' },
+  ]);
+});
+
+test('an empty workspace list produces no matrix rows', () => {
+  assert.deepEqual(shardWorkspaces([]), []);
+});
+
+test('known-slow workspaces outrank larger but faster test trees', async () => {
+  assert.ok(KNOWN_SLOW_WORKSPACE_MINUTES.has('packages/runtime'));
+  await withWorkspaceTree(
+    {
+      'packages/runtime/src/a.test.ts': 'x',
+      'packages/ui/src/a.test.ts': 'x'.repeat(50_000),
+    },
+    (root) => {
+      assert.ok(
+        workspaceScheduleWeight(root, 'packages/runtime') >
+          workspaceScheduleWeight(root, 'packages/ui'),
+      );
+    },
+  );
+});
+
+test('a long workspace list is packed heaviest-first across shards', () => {
+  const weights = { heavy: 100, middle: 50, light: 10, tiny: 1 };
+  assert.deepEqual(
+    shardWorkspaces(['light', 'heavy', 'tiny', 'middle'], {
+      shardCount: 3,
+      weigh: (dir) => weights[dir],
+    }),
+    [
+      { shard: '1', workspaces: 'heavy' },
+      { shard: '2', workspaces: 'middle' },
+      { shard: '3', workspaces: 'light,tiny' },
+    ],
   );
 });
 

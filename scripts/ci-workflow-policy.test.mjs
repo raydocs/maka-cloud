@@ -60,35 +60,91 @@ test('one unconditional job carries the required context on every pull request',
   const workflow = readWorkflow('ci.yml');
 
   // `.asf.yaml` requires `test`. A paths filter would stop the workflow and
-  // leave that check pending forever, and a second job would make the same
-  // pull request queue for a scarce runner twice to reach one verdict.
+  // leave that check pending forever. The heavy surfaces run in parallel;
+  // this job is the aggregator that still reports on every pull request.
   assert.doesNotMatch(triggerBlock('ci.yml'), /\bpaths(-ignore)?:/u);
 
   const jobsBlock = workflow.slice(workflow.indexOf('\njobs:'));
   const jobs = [...jobsBlock.matchAll(/^ {2}([a-z0-9_-]+):$/gmu)].map((match) => match[1]);
-  assert.deepEqual(jobs, ['test']);
-  assert.doesNotMatch(jobsBlock, /^ {4}needs:/mu);
-  assert.doesNotMatch(jobsBlock, /^ {4}if:/mu);
+  assert.deepEqual(jobs, [
+    'plan',
+    'validate',
+    'workspace-tests',
+    'runtime-host',
+    'desktop-e2e',
+    'storybook',
+    'cli-package',
+    'test',
+  ]);
+
+  const testJob = jobsBlock.slice(jobsBlock.lastIndexOf('\n  test:'));
+  assert.match(testJob, /^ {4}if: always\(\)$/mu);
+  assert.match(testJob, /^ {4}needs:/mu);
+  for (const needed of [
+    'plan',
+    'validate',
+    'workspace-tests',
+    'runtime-host',
+    'desktop-e2e',
+    'storybook',
+    'cli-package',
+  ]) {
+    assert.match(testJob, new RegExp(`^ {6}- ${needed}$`, 'mu'), needed);
+  }
+  assert.doesNotMatch(testJob, /continue-on-error/u);
+  assert.match(testJob, /success\|skipped/u);
 });
 
 test('comparison precedes planning and every later gate uses plan outputs', () => {
   const workflow = readWorkflow('ci.yml');
 
-  // With the job split gone there is no `needs` context to read. GitHub
-  // resolves a leftover `needs.plan.outputs.x` to the empty string rather
-  // than failing, so the step it guards would silently never run again.
-  assert.doesNotMatch(workflow, /needs\.plan\.outputs/u);
+  const planJobStart = workflow.indexOf('\n  plan:\n');
+  const validateJobStart = workflow.indexOf('\n  validate:\n');
+  assert.ok(planJobStart >= 0 && validateJobStart > planJobStart, 'plan job must precede validate');
+  const planJob = workflow.slice(planJobStart, validateJobStart);
+  // The plan job publishes outputs; it must not read `needs.plan`, which would
+  // resolve empty. Later jobs read those outputs through `needs.plan`.
+  assert.doesNotMatch(planJob, /needs\.plan\.outputs/u);
+  assert.match(workflow.slice(validateJobStart), /needs\.plan\.outputs/u);
 
   const planStep = workflow.indexOf('      - id: plan\n');
   const comparisonStep = workflow.indexOf('      - id: comparison\n');
   assert.ok(planStep >= 0, 'no planning step');
   assert.ok(comparisonStep >= 0 && comparisonStep < planStep, 'resolve comparison before planning');
   assert.doesNotMatch(workflow.slice(comparisonStep, planStep), /\n\s+if:|continue-on-error/u);
-  assert.ok(planStep < workflow.indexOf('steps.plan.outputs'));
   assert.match(
     workflow,
-    /- name: Check renderer architecture\n\s+if: steps\.plan\.outputs\.code == 'true'/u,
+    /- name: Check renderer architecture\n\s+if: needs\.plan\.outputs\.code == 'true'/u,
   );
+});
+
+test('heavy CI lanes skip draft pull requests and rerun when they are marked ready', () => {
+  const workflow = readWorkflow('ci.yml');
+  assert.match(workflow, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+
+  const planHeader = workflow.slice(
+    workflow.indexOf('\n  plan:\n'),
+    workflow.indexOf('\n    steps:\n', workflow.indexOf('\n  plan:\n')),
+  );
+  assert.doesNotMatch(planHeader, /draft/u);
+
+  const testJob = workflow.slice(workflow.lastIndexOf('\n  test:'));
+  assert.match(testJob, /^ {4}if: always\(\)$/mu);
+  assert.doesNotMatch(testJob, /draft/u);
+
+  for (const job of [
+    'validate',
+    'workspace-tests',
+    'runtime-host',
+    'desktop-e2e',
+    'storybook',
+    'cli-package',
+  ]) {
+    const start = workflow.indexOf(`\n  ${job}:\n`);
+    assert.ok(start >= 0, job);
+    const header = workflow.slice(start, workflow.indexOf('\n    steps:\n', start));
+    assert.match(header, /if: github\.event\.pull_request\.draft != true/u, job);
+  }
 });
 
 test('core CI validates pull requests and the resulting main branch state', () => {
@@ -99,6 +155,19 @@ test('core CI validates pull requests and the resulting main branch state', () =
   assert.match(workflow, /PUSH_BASE_SHA: \$\{\{ github\.event\.before \}\}/u);
   assert.match(workflow, /PR_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
   assert.doesNotMatch(workflow, /github\.event\.pull_request\.base\.sha/u);
+});
+
+test('workspace tests use one worker per GitHub-hosted core', () => {
+  const workflow = readWorkflow('ci.yml');
+  const step = ciSteps(workflow).find((candidate) =>
+    candidate.includes('name: Run affected standard workspace tests'),
+  );
+  assert.ok(step, 'no workspace test step');
+  // ubuntu-24.04 has 4 cores; 3 left one idle while the long suites ran.
+  assert.match(
+    step,
+    /run-workspace-tests-parallel\.mjs --concurrency=4 --workspace-timeout-minutes=30/u,
+  );
 });
 
 test('the Desktop e2e tier reaches its servers through the tested runner', () => {
@@ -132,10 +201,13 @@ test('every main commit keeps a concurrency group of its own', () => {
 
 test('every core diff gate consumes the shared comparison without resolving another base', () => {
   const workflow = readWorkflow('ci.yml');
-  const gates = workflow.split('\n      - ').filter((step) => step.includes('--base '));
+  const gates = ciSteps(workflow).filter((step) => step.includes('--base '));
   assert.equal(gates.length, 4, 'planner, epoch, locale and renderer must all be covered');
   for (const gate of gates) {
-    assert.match(gate, /BASE_SHA: \$\{\{ steps\.comparison\.outputs\.base \}\}/u);
+    assert.match(
+      gate,
+      /BASE_SHA: \$\{\{ (?:steps\.comparison|needs\.plan)\.outputs\.base \}\}/u,
+    );
     assert.match(gate, /--base "\$BASE_SHA"/u);
     assert.doesNotMatch(
       gate,
@@ -155,9 +227,8 @@ test('core CI uses the Windows inventory package-script authority', () => {
 test('shared comparison drives every diff gate on refreshed merges, pushes and dispatches', () => {
   const workflow = readWorkflow('ci.yml');
   const scriptFor = (header) => {
-    const start = workflow.indexOf(`      - ${header}\n`);
-    assert.ok(start >= 0, header);
-    const step = workflow.slice(start, workflow.indexOf('\n      - ', start + 1));
+    const step = ciSteps(workflow).find((candidate) => candidate.startsWith(`      - ${header}\n`));
+    assert.ok(step, header);
     const script = step.split('        run: |\n')[1] ?? step.match(/        run: ([^\n]+)/u)?.[1];
     assert.ok(script, header);
     return script;
@@ -363,6 +434,7 @@ test('every selection that gates a step needing dependencies selects the install
   // Any selection named inside an `if:` gates that step, whichever way the
   // condition spells it — `== 'true'`, `!= ''` and `contains(...)` are all
   // already in this file, and recognising one form drops the rest silently.
+  // Later jobs read the same planner keys through `needs.plan.outputs`.
   assert.doesNotMatch(installed, /\n\s+if: [>|]/u, 'a block-scalar `if:` hides its own gates');
   const gating = conditionSelections(installed);
   assert.ok(gating.length > 0, 'no step below the install is gated on a selection');
@@ -392,7 +464,7 @@ test('the app icon gate selects every file its own tests open', () => {
   // config — opened by path rather than imported — stayed off it while the
   // drift assertion it feeds could be skipped silently.
   const step = readWorkflow('ci.yml').match(
-    /if: steps\.plan\.outputs\.app_icons == 'true'\n\s+run: node --test ([^\n]+)/u,
+    /if: (?:steps|needs)\.plan\.outputs\.app_icons == 'true'\n\s+run: node --test ([^\n]+)/u,
   );
   assert.ok(step, 'no step is gated on the app icon selection');
   const suites = step[1].trim().split(/\s+/u);
@@ -430,7 +502,7 @@ test('the app icon gate selects every file its own tests open', () => {
 test('core CI gates app icon drift on the artwork surface', () => {
   assert.match(
     readWorkflow('ci.yml'),
-    /- name: App icon artwork drift\n\s+if: steps\.plan\.outputs\.app_icons == 'true'/u,
+    /- name: App icon artwork drift\n\s+if: (?:steps|needs)\.plan\.outputs\.app_icons == 'true'/u,
   );
 });
 
@@ -446,7 +518,7 @@ test('core CI checks the Astryx inventory for every code change before building'
   const inventoryStep = workflow.slice(inventoryStart, inventoryEnd);
   assert.match(
     inventoryStep,
-    /if: steps\.plan\.outputs\.code == 'true' \|\| steps\.plan\.outputs\.astryx_surface == 'true'/u,
+    /if: (?:steps|needs)\.plan\.outputs\.code == 'true' \|\| (?:steps|needs)\.plan\.outputs\.astryx_surface == 'true'/u,
   );
   assert.doesNotMatch(inventoryStep, /continue-on-error/u);
 });
@@ -462,7 +534,7 @@ test('CI installs dependencies whenever the Astryx surface inventory runs', () =
   const stepStart = workflow.lastIndexOf('\n      - name:', npmCi) + 1;
   const stepEnd = workflow.indexOf('\n      - ', npmCi);
   const installStep = workflow.slice(stepStart, stepEnd);
-  assert.match(installStep, /steps\.plan\.outputs\.astryx_surface == 'true'/u);
+  assert.match(installStep, /(?:steps|needs)\.plan\.outputs\.astryx_surface == 'true'/u);
 });
 
 test('core CI validates affected installed CLI packages on the heavy runner', () => {
@@ -472,7 +544,7 @@ test('core CI validates affected installed CLI packages on the heavy runner', ()
   );
   const pack = workflow.indexOf('run: npm run release:cli:pack');
 
-  assert.match(workflow, /if: steps\.plan\.outputs\.cli_package == 'true'/u);
+  assert.match(workflow, /if: (?:steps|needs)\.plan\.outputs\.cli_package == 'true'/u);
   assert.ok(toolchain >= 0);
   assert.ok(toolchain < pack);
   assert.match(workflow, /run: npm run release:cli:smoke/u);
@@ -525,7 +597,7 @@ test('release contracts run against built CLI outputs', () => {
   assert.ok(buildIndex < releaseIndex);
   assert.match(
     workflow.slice(releaseIndex),
-    /if: steps\.plan\.outputs\.release_contract == 'true'/u,
+    /if: (?:steps|needs)\.plan\.outputs\.release_contract == 'true'/u,
   );
 });
 
@@ -560,11 +632,12 @@ test('every pull request lane holds a scarce runner for a bounded time', () => {
   // release-windows-check): enough headroom for a cold cache and a flake retry,
   // and far short of the 120 and 90 a hung job used to hold. A lane with no
   // limit at all inherits GitHub's 360 and fails here.
-  // Fork lanes that outgrew it, one limit per job in file order: ci.yml `test`
-  // (a full run takes 34-35 minutes and was cut off at 45 under load) and the
-  // Android job of fork-cloud-mobile.yml (a cold Gradle build plus the emulator).
+  // Fork lanes that outgrew it, one limit per job in file order: ci.yml
+  // `workspace-tests` (a shard can still hold desktop or cloud-playbooks, each
+  // of which has a 30-minute per-workspace limit) and the Android job of
+  // fork-cloud-mobile.yml (a cold Gradle build plus the emulator).
   const longer = new Map([
-    ['ci.yml', ['75']],
+    ['ci.yml', ['45', '45', '75', '45', '45', '45', '45', '45']],
     ['fork-cloud-mobile.yml', ['45', '60', '45']],
   ]);
   // `pull_request` only: a `pull_request_target` lane reads the pull request
@@ -986,7 +1059,7 @@ test('core CI runs the live Eval proxy lifecycle when Eval is selected', () => {
 
   assert.match(
     workflow,
-    /if: contains\(steps\.plan\.outputs\.standard_workspaces, 'packages\/eval'\)/u,
+    /if: contains\((?:steps|needs)\.plan\.outputs\.standard_workspaces, 'packages\/eval'\)/u,
   );
   assert.match(workflow, /MAKA_EVAL_EGRESS_PROXY_TEST: '1'/u);
   assert.match(workflow, /docker build[\s\S]*maka-eval-egress-proxy:12\.2\.3/u);
@@ -1002,7 +1075,7 @@ test('core CI rebuilds the DeepSeek Harness tree before accepting a new fingerpr
   const workflow = readWorkflow('ci.yml');
 
   assert.match(workflow, /name: Verify DeepSeek Harness toolchain fingerprint/u);
-  assert.match(workflow, /if: steps\.plan\.outputs\.deepseek_harness_toolchain == 'true'/u);
+  assert.match(workflow, /if: (?:steps|needs)\.plan\.outputs\.deepseek_harness_toolchain == 'true'/u);
   assert.match(workflow, /prepare-deepseek-harness-toolchain\.mjs --out/u);
   assert.match(workflow, /TOOLCHAIN_IDENTITIES\["deepseek-harness"\]\.fingerprint/u);
   assert.match(workflow, /cd "\$toolchain_root" && sha256sum --check --quiet checksums\.sha256/u);
@@ -1111,7 +1184,7 @@ function conditionSelections(section) {
   return [
     ...new Set(
       [...section.matchAll(/^\s+if: ([^\n]*)$/gmu)].flatMap(([, condition]) =>
-        [...condition.matchAll(/steps\.plan\.outputs\.(\w+)/gu)].map(([, name]) => name),
+        [...condition.matchAll(/(?:steps|needs)\.plan\.outputs\.(\w+)/gu)].map(([, name]) => name),
       ),
     ),
   ].sort();
@@ -1166,6 +1239,17 @@ function dependencyClosure(seeds) {
 
 function readWorkflow(name) {
   return readFileSync(new URL(name, WORKFLOW_DIR), 'utf8');
+}
+
+/** Each CI step, cut at the next step or the next job so a job's last step stays whole. */
+function ciSteps(workflow) {
+  const starts = [...workflow.matchAll(/^      - /gmu)].map((match) => match.index);
+  return starts.map((start, index) => {
+    const nextStep = starts[index + 1] ?? workflow.length;
+    const jobMatch = workflow.slice(start + 1).search(/\n  [a-z0-9_-]+:\n/u);
+    const nextJob = jobMatch === -1 ? workflow.length : start + 1 + jobMatch;
+    return workflow.slice(start, Math.min(nextStep, nextJob));
+  });
 }
 
 function triggerBlock(name) {
