@@ -8,11 +8,12 @@ import type {
   NormalizedEvent,
   Subscription,
   Usage,
+  UsageEntry,
   WorkerRecord,
 } from './types.js';
 import { emptyUsage, isLiveState } from './types.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE events (
@@ -91,6 +92,30 @@ CREATE TABLE usage (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (tenant_id, worker_id)
 );
+
+CREATE TABLE usage_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  usd_micros INTEGER NOT NULL,
+  wall_ms INTEGER NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX usage_events_tenant ON usage_events (tenant_id, at);
+`;
+
+const USAGE_EVENTS_V2 = `
+CREATE TABLE IF NOT EXISTS usage_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  usd_micros INTEGER NOT NULL,
+  wall_ms INTEGER NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_events_tenant ON usage_events (tenant_id, at);
 `;
 
 export class SuperagentDatabaseInUseError extends Error {
@@ -116,7 +141,7 @@ export function openSuperagentDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   try {
     const version = userVersion(db);
-    if (version !== 0 && version !== SCHEMA_VERSION) {
+    if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION) {
       throw new SuperagentDatabaseVersionError(path, version);
     }
     db.exec('PRAGMA locking_mode = EXCLUSIVE');
@@ -129,9 +154,16 @@ export function openSuperagentDatabase(path: string): DatabaseSync {
     throw error;
   }
   db.exec('PRAGMA synchronous = FULL');
-  if (userVersion(db) === 0) {
+  const current = userVersion(db);
+  if (current === 0) {
     db.exec('BEGIN IMMEDIATE');
     db.exec(SCHEMA);
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    db.exec('COMMIT');
+  } else if (current === 1) {
+    // Additive: append-only tenant usage events. Not a cloud-server migration.
+    db.exec('BEGIN IMMEDIATE');
+    db.exec(USAGE_EVENTS_V2);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   }
@@ -271,6 +303,27 @@ export class SqliteSuperagentStore implements SuperagentStore {
         { tokens: row.tokens, usdMicros: row.usd_micros, wallMs: row.wall_ms },
         row.updated_at,
       );
+    }
+    for (const row of this.db
+      .prepare(
+        'SELECT tenant_id, worker_id, tokens, usd_micros, wall_ms, at FROM usage_events ORDER BY seq',
+      )
+      .all() as Array<{
+      tenant_id: string;
+      worker_id: string;
+      tokens: number;
+      usd_micros: number;
+      wall_ms: number;
+      at: number;
+    }>) {
+      this.memory.appendUsageEvent({
+        tenantId: row.tenant_id,
+        workerId: row.worker_id,
+        tokens: row.tokens,
+        usdMicros: row.usd_micros,
+        wallMs: row.wall_ms,
+        at: row.at,
+      });
     }
   }
 
@@ -466,6 +519,24 @@ export class SqliteSuperagentStore implements SuperagentStore {
 
   usage(tenantId: string, workerId: string): Usage | undefined {
     return this.memory.usage(tenantId, workerId);
+  }
+
+  appendUsageEvent(entry: UsageEntry): void {
+    this.memory.appendUsageEvent(entry);
+    this.db
+      .prepare(
+        `INSERT INTO usage_events (tenant_id, worker_id, tokens, usd_micros, wall_ms, at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(entry.tenantId, entry.workerId, entry.tokens, entry.usdMicros, entry.wallMs, entry.at);
+  }
+
+  usageEvents(tenantId: string): UsageEntry[] {
+    return this.memory.usageEvents(tenantId);
+  }
+
+  tenantUsage(tenantId: string) {
+    return this.memory.tenantUsage(tenantId);
   }
 
   close(): void {

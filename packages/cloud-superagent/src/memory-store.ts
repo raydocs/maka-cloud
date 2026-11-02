@@ -6,6 +6,7 @@ import type {
   NormalizedEvent,
   Subscription,
   Usage,
+  UsageEntry,
   WorkerRecord,
 } from './types.js';
 import { emptyUsage, isLiveState } from './types.js';
@@ -26,6 +27,7 @@ export class MemorySuperagentStore implements SuperagentStore {
   private readonly approvals = new Map<string, ApprovalRecord>();
   private readonly audits: AuditRecord[] = [];
   private readonly usageRows = new Map<string, Usage>();
+  private readonly usageEventRows: UsageEntry[] = [];
 
   putEvent(event: NormalizedEvent): 'stored' | 'duplicate' {
     const idem = `${event.tenantId}:${event.idempotencyKey}`;
@@ -151,6 +153,33 @@ export class MemorySuperagentStore implements SuperagentStore {
   usage(tenantId: string, workerId: string): Usage | undefined {
     const row = this.usageRows.get(`${tenantId}:${workerId}`);
     return row ? { ...row } : emptyUsage();
+  }
+
+  appendUsageEvent(entry: UsageEntry): void {
+    this.usageEventRows.push({ ...entry });
+  }
+
+  usageEvents(tenantId: string): UsageEntry[] {
+    return this.usageEventRows
+      .filter((row) => row.tenantId === tenantId)
+      .map((row) => ({ ...row }));
+  }
+
+  tenantUsage(tenantId: string): {
+    tenantId: string;
+    tokens: number;
+    usdMicros: number;
+    wallMs: number;
+    events: number;
+  } {
+    const events = this.usageEvents(tenantId);
+    return {
+      tenantId,
+      tokens: events.reduce((sum, row) => sum + row.tokens, 0),
+      usdMicros: events.reduce((sum, row) => sum + row.usdMicros, 0),
+      wallMs: events.reduce((sum, row) => sum + row.wallMs, 0),
+      events: events.length,
+    };
   }
 
   close(): void {

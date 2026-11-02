@@ -124,6 +124,7 @@ export interface WorkerRecord {
   lastStepSignature: string | null;
   stepRepeats: number;
   usage: Usage;
+  evidence: EvidenceBlock[];
   createdAt: number;
   updatedAt: number;
   retiredAt: number | null;
@@ -176,6 +177,41 @@ export interface UsageEntry {
   at: number;
 }
 
+export type EvidenceKind = 'patch' | 'log' | 'artifact' | 'step' | 'test';
+
+/** One proof line a worker may emit. Never a secret. */
+export interface EvidenceBlock {
+  kind: EvidenceKind;
+  label: string;
+  body: string;
+  path?: string;
+}
+
+export interface TenantUsage {
+  tenantId: string;
+  tokens: number;
+  usdMicros: number;
+  wallMs: number;
+  events: number;
+}
+
+export interface OrgSecretRef {
+  tenantId: string;
+  name: string;
+}
+
+export type OrgSecretDestination = { kind: 'header'; name: string } | { kind: 'env'; name: string };
+
+export type OrgSecretResult =
+  | { ok: true }
+  | { ok: false; reason: 'unavailable' | 'unknown' | 'refused' };
+
+/** Interface only (P4). Never returns a raw secret. */
+export interface OrgSecretPort {
+  has(ref: OrgSecretRef): Promise<boolean>;
+  inject(ref: OrgSecretRef, dest: OrgSecretDestination): Promise<OrgSecretResult>;
+}
+
 export interface ProposedAction {
   kind: ApprovalKind;
   boundText: string;
@@ -188,6 +224,7 @@ export interface HandlerResult {
   progress?: boolean;
   stepSignature?: string;
   usage?: Partial<Usage>;
+  evidence?: EvidenceBlock[];
   action?: ProposedAction;
 }
 

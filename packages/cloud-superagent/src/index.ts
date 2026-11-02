@@ -23,6 +23,8 @@ export {
   type StuckCard,
   type StuckOption,
 } from './stuck.js';
+export { clipEvidence, formatEvidence, mergeEvidence } from './evidence.js';
+export { UnconfiguredOrgSecrets } from './secrets.js';
 export { FakeSandbox, type SandboxPort } from './sandbox.js';
 export { overBudget, RISKY_ACTIONS, Safety } from './safety.js';
 export { MemorySuperagentStore } from './memory-store.js';
@@ -58,8 +60,15 @@ export type {
   ApprovalKind,
   ApprovalRecord,
   Mandate,
+  EvidenceBlock,
+  EvidenceKind,
   MeteringHooks,
   NormalizedEvent,
+  OrgSecretDestination,
+  OrgSecretPort,
+  OrgSecretRef,
+  OrgSecretResult,
+  TenantUsage,
   ProposedAction,
   RouterDecision,
   RouterJudge,

@@ -5,6 +5,7 @@ import type {
   NormalizedEvent,
   Subscription,
   Usage,
+  UsageEntry,
   WorkerRecord,
   WorkerState,
 } from './types.js';
@@ -39,6 +40,16 @@ export interface SuperagentStore {
 
   putUsage(tenantId: string, workerId: string, usage: Usage, at: number): void;
   usage(tenantId: string, workerId: string): Usage | undefined;
+  /** Append-only per-tenant usage (T17). Package-local; not a cloud-server migration. */
+  appendUsageEvent(entry: UsageEntry): void;
+  usageEvents(tenantId: string): UsageEntry[];
+  tenantUsage(tenantId: string): {
+    tenantId: string;
+    tokens: number;
+    usdMicros: number;
+    wallMs: number;
+    events: number;
+  };
 
   close(): void;
   backupTo?(destination: string): Promise<void>;
@@ -54,6 +65,7 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
       budgets: { ...worker.mandate.budgets },
     },
     usage: { ...worker.usage },
+    evidence: (worker.evidence ?? []).map((block) => ({ ...block })),
   };
 }
 
