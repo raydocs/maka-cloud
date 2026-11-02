@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 14:53 MST — cursor/superagent-real-loop-51be — 033d5b5dd
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** `checkAgentIsolation` retries an unfinished filecap or setid listing (`unchecked`) up to three probes. A `found` setuid/capability, a missing fact, or any other isolation problem still fails on the first probe. Same assertions.
+- **Why:** CI `real-accounts` on #471 head `e174aff2e` run 41521663328: `the agent account reads and writes the nested files of a checkout, and of a base check` failed `agent_setid` (or they could not be listed). Same test on #473 `f64164fcd` failed `agent_filecaps` at the same minute. Isolation unit tests in the same job passed. Sibling #464–#466/#470/#472 `real-accounts` succeeded. Walk of `/` under parallel real-account load, not MakaEngine. #466 `7f900d01c` / #470 `e6234fce7` `test` failures were upstream desktop e2e flakes (later heads green). #470 android emulator flow failed with no Maestro output; #466/#471 android succeeded — self-hosted/emulator flake, not this change.
+- **Tests:** cloud-runners `agent-user` — unfinished listing recovers on retry; `found` and mixed problems do not retry; file-caps cases unchanged
+- **Live:** n/a
+- **Migrations / risk:** none. Retry only `unchecked` listings. Production boxes with a real privileged program still refuse immediately.
+
 ## 2026-11-02 13:42 MST — cursor/superagent-real-loop-51be — 1157d2ea8
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
