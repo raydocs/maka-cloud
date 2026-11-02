@@ -3,9 +3,19 @@
 Append-only. Newest first. Times are America/Denver.
 Every behavior change under `packages/cloud-superagent` must add an entry
 in the same commit. `changelog.test.ts` fails the package suite when this
-file is missing from the branch diff.
+file is missing from the branch diff, when a later Super-agent commit
+omits it, or when uncommitted Super-agent edits leave it unchanged.
 
-## 2026-11-02 02:39 MST — cursor/superagent-real-loop-51be
+## 2026-11-02 02:42 MST — cursor/superagent-real-loop-51be — 0bb4dae55
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** Same-commit changelog check (after this file exists, every `packages/cloud-superagent` commit and dirty tree must also touch CHANGELOG). Filled SHAs on the backfill. Standing user requirement.
+- **Why:** User request: single append-only Super-agent changelog for traceability; fail CI if Super-agent changes without a CHANGELOG change.
+- **Tests:** 119 passed in `@maka-cloud/superagent` (`test:dist`)
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 02:39 MST — cursor/superagent-real-loop-51be — 3145ce8ca
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Lessons from dori: Done-signal contract + unpushed check (PR, issue, conversation); review receipts (`VERDICT: CLEAR\|BLOCK`) pinned to head SHA as a merge-approval precondition; owner `paused` state with verified stop, no W2 nudge, explicit resume; lead reports re-read live PR/CI and flag STALE; workers have no outbound user channel (`LeadPort` only). Architecture §18.
@@ -59,16 +69,25 @@ file is missing from the branch diff.
 - **Live:** 22fdef92 Instabox smoke passed earlier on the usable line
 - **Migrations / risk:** none
 
-## 2026-11-02 01:32 MST — cursor/superagent-core-51be — #462 (merged)
+## 2026-11-02 — cursor/superagent-real-loop-51be — d36e45e52
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** Introduced this append-only changelog and the first branch-diff check. Backfilled #461/#462/#464/#465/#466, usable, real-loop, boxed loop, push-from-box diff, and timings.
+- **Why:** Standing user requirement for traceability (do this first).
+- **Tests:** changelog.test.ts on the branch
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 01:32 MST — cursor/superagent-core-51be — 59135b688 — #462 (merged)
 
 - **PR:** https://github.com/raydocs/maka-cloud/pull/462
 - **What:** Super-agent core: event intake, subscription pass-through, Router, workers, watchdog, safety.
-- **Why:** T34 implementation of the architecture.
+- **Why:** T34 implementation of the architecture ([DSH 000-philosophy](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/000-philosophy.md), `docs/fork/architecture/superagent.md`).
 - **Tests:** CI on #462
 - **Live:** n/a
 - **Migrations / risk:** package-local sqlite `superagent.db` (not a cloud-server migration)
 
-## 2026-11-02 01:31 MST — cursor/superagent-architecture-51be — #461 (merged)
+## 2026-11-02 01:31 MST — cursor/superagent-architecture-51be — afa38b76e — #461 (merged)
 
 - **PR:** https://github.com/raydocs/maka-cloud/pull/461
 - **What:** Super-agent architecture document (`docs/fork/architecture/superagent.md`).
@@ -77,7 +96,7 @@ file is missing from the branch diff.
 - **Live:** n/a
 - **Migrations / risk:** none
 
-## 2026-11-02 — cursor/superagent-host-51be — #464 (open)
+## 2026-11-02 — cursor/superagent-host-51be — 1132472ed — #464 (open)
 
 - **PR:** https://github.com/raydocs/maka-cloud/pull/464
 - **What:** In-process Super-agent on the host, duties Source, T33 stuck cards (T34 P2).
@@ -86,7 +105,7 @@ file is missing from the branch diff.
 - **Live:** n/a
 - **Migrations / risk:** none
 
-## 2026-11-02 — cursor/superagent-workspaces-51be — #465 (open)
+## 2026-11-02 — cursor/superagent-workspaces-51be — 75be1ab11 — #465 (open)
 
 - **PR:** https://github.com/raydocs/maka-cloud/pull/465
 - **What:** Runners `WorkspaceStore` default and LayerFS four-gate harness (T34 P3).
@@ -95,7 +114,7 @@ file is missing from the branch diff.
 - **Live:** n/a
 - **Migrations / risk:** LayerFS live mount still throws
 
-## 2026-11-02 — cursor/superagent-ledger-51be — #466 (open)
+## 2026-11-02 — cursor/superagent-ledger-51be — 433fa0494, 913e22be5 — #466 (open)
 
 - **PR:** https://github.com/raydocs/maka-cloud/pull/466
 - **What:** Tenant usage ledger, evidence blocks, Org Secrets interface (T34 P4).
@@ -104,7 +123,7 @@ file is missing from the branch diff.
 - **Live:** n/a
 - **Migrations / risk:** package-local `usage_events` (schema 2). Not a cloud-server migration.
 
-## 2026-11-02 — cursor/superagent-usable-51be
+## 2026-11-02 — cursor/superagent-usable-51be — 2236473bd, e15f1ceb7, d4650dca5, 22fdef92a, 520f204b8
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-usable-51be))
 - **What:** Local loop, Instabox HTTP sandbox, EnvOrgSecrets, live-smoke (always destroy), smallest 2 vCPU / 4096 MiB, long-poll + DELETE 409 retry. Merged #461/#462.
