@@ -10,7 +10,7 @@ a heading time is more than five minutes off that SHA's committer date.
 
 ## 2026-11-02 13:29 MST — cursor/superagent-learning-review-51be — 66178a088
 
-- **PR:** none
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
 - **What:** Optional mistake book (off by default) records a lesson when work is bounced — review changes/reject, CI fail-then-fix after a worker push, owner deny, watchdog correction, peer-review BLOCK. Distill merges repo-level lessons and emits skill/prompt diffs that are never auto-applied. Accepted lessons inject as an append-only id+summary prefix via existing spill/recall. Optional cross-model review (off by default, default 2 rounds) runs a different model on the diff before push/PR; blocking findings bounce the worker, then wait on a human; tokens go to the usage ledger. Tests use `FakePeerReviewClient`. Constructor does not read env; host passes flags. No sqlite `user_version` bump (audit + worker JSON).
 - **Why:** Self-learning from bounced work and a second-model review gate, without touching parallel scheduler/watchdog/BYOM/box branches.
 - **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
