@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { SandboxExecResult, SandboxPort } from './sandbox.js';
 
@@ -51,11 +54,70 @@ export async function packTar(dir: string): Promise<Buffer> {
   return stdout;
 }
 
+export interface BoxExecLog {
+  cmd: string;
+  cwd?: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export function formatBoxExec(log: BoxExecLog, clip = 800): string {
+  const stdout = clipText(log.stdout, clip);
+  const stderr = clipText(log.stderr, clip);
+  return [
+    `$ ${log.cmd}${log.cwd ? `  (cwd=${log.cwd})` : ''}`,
+    `exit=${log.exitCode}`,
+    `stdout: ${stdout || '(empty)'}`,
+    `stderr: ${stderr || '(empty)'}`,
+  ].join('\n');
+}
+
+export function formatBoxExecSummary(logs: readonly BoxExecLog[]): string {
+  if (logs.length === 0) return '(no box execs)';
+  return logs
+    .map((log) => `${log.cmd}  exit=${log.exitCode}${log.cwd ? ` cwd=${log.cwd}` : ''}`)
+    .join('\n');
+}
+
+/**
+ * Reset `dir` to HEAD (clean checkout), then apply the box's
+ * `git diff --cached`. Whatever ran the tests is what ships.
+ */
+export async function applyBoxPatch(dir: string, patch: string): Promise<void> {
+  await run('git', ['-C', dir, '-c', 'core.hooksPath=/dev/null', 'reset', '--hard', 'HEAD']);
+  await run('git', ['-C', dir, 'clean', '-fd']);
+  if (!patch.trim()) return;
+  const patchDir = await mkdtemp(join(tmpdir(), 'maka-box-patch-'));
+  const patchFile = join(patchDir, 'box.patch');
+  await writeFile(patchFile, patch);
+  try {
+    await run('git', [
+      '-C',
+      dir,
+      '-c',
+      'core.hooksPath=/dev/null',
+      'apply',
+      '--whitespace=nowarn',
+      patchFile,
+    ]);
+  } catch (error) {
+    const err = error as { stderr?: string; stdout?: string; message?: string };
+    throw new Error(
+      `box patch did not apply to the clean host checkout: ${err.stderr || err.stdout || err.message}`,
+    );
+  } finally {
+    await rm(patchDir, { recursive: true, force: true });
+  }
+}
+
 /**
  * Untrusted work inside the sandbox: materialize the repo, apply host-computed
  * edits, run install/test, pull a diff back. Secrets stay on the host.
  */
 export class BoxWorkspace {
+  readonly execs: BoxExecLog[] = [];
+
   constructor(
     private readonly sandbox: SandboxPort,
     private readonly machineId: string,
@@ -105,11 +167,7 @@ export class BoxWorkspace {
   }
 
   async run(command: string, timeoutSeconds = 180): Promise<SandboxExecResult> {
-    return this.sandbox.exec(this.machineId, {
-      cmd: command,
-      cwd: BOX_REPO,
-      timeoutSeconds,
-    });
+    return this.exec(command, { cwd: BOX_REPO, timeoutSeconds });
   }
 
   async pullPatch(): Promise<string> {
@@ -121,9 +179,17 @@ export class BoxWorkspace {
 
   private async exec(
     cmd: string,
-    extras: { stdin?: string; timeoutSeconds?: number } = {},
+    extras: { stdin?: string; timeoutSeconds?: number; cwd?: string } = {},
   ): Promise<SandboxExecResult> {
-    return this.sandbox.exec(this.machineId, { cmd, ...extras });
+    const result = await this.sandbox.exec(this.machineId, { cmd, ...extras });
+    this.execs.push({
+      cmd,
+      ...(extras.cwd ? { cwd: extras.cwd } : {}),
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+    return result;
   }
 }
 
@@ -133,4 +199,10 @@ function shellQuote(value: string): string {
 
 function tail(result: SandboxExecResult): string {
   return `${result.stderr}${result.stdout}`.trim().slice(0, 400);
+}
+
+function clipText(text: string, max: number): string {
+  const trimmed = text.trimEnd();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max)}…`;
 }

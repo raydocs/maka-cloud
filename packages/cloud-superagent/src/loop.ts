@@ -12,7 +12,15 @@ import type {
   WorkerHandler,
   WorkerRecord,
 } from './types.js';
-import { BOX_REPO, BoxWorkspace, isPublicCloneUrl } from './loop-box.js';
+import {
+  BOX_REPO,
+  BoxWorkspace,
+  applyBoxPatch,
+  formatBoxExec,
+  formatBoxExecSummary,
+  isPublicCloneUrl,
+  type BoxExecLog,
+} from './loop-box.js';
 import { GitCloneStore, type WorkspaceHandle, type WorkspaceStore } from './workspace.js';
 import type { SandboxPort } from './sandbox.js';
 
@@ -80,6 +88,26 @@ export interface GitHostPort {
   }): Promise<PullRequestResult>;
   ciLink(repo: string, sha: string): string;
   merge?(input: { repo: string; number: number }): Promise<void>;
+}
+
+export const LOOP_TIMING_PHASES = [
+  'create',
+  'materialize',
+  'edit',
+  'test',
+  'diff',
+  'destroy',
+] as const;
+
+export type LoopTimingPhase = (typeof LOOP_TIMING_PHASES)[number];
+export type LoopTimings = Record<LoopTimingPhase, number>;
+
+export function emptyTimings(): LoopTimings {
+  return { create: 0, materialize: 0, edit: 0, test: 0, diff: 0, destroy: 0 };
+}
+
+export function formatTimings(timings: LoopTimings): string {
+  return LOOP_TIMING_PHASES.map((phase) => `${phase}=${timings[phase]}ms`).join(' ');
 }
 
 export interface LoopPorts {
@@ -245,6 +273,10 @@ export class CodingLoopHandler implements WorkerHandler {
   private readonly workspaces: WorkspaceStore;
   private readonly handles = new Map<string, WorkspaceHandle>();
   readonly lastPr = new Map<string, PullRequestResult>();
+  readonly lastTimings: LoopTimings = emptyTimings();
+  lastExecs: BoxExecLog[] = [];
+  lastPatch = '';
+  lastPublishDir: string | null = null;
 
   constructor(private readonly ports: LoopPorts) {
     this.workspaces = ports.workspaces ?? new GitCloneStore();
@@ -286,10 +318,11 @@ export class CodingLoopHandler implements WorkerHandler {
         ? await this.prepare(worker, repo)
         : { id: `box:${worker.workerId}`, kind: 'git-clone' as const, dir: null };
 
+    this.resetLast();
     const evidence: EvidenceBlock[] = [];
     if (boxed) {
-      const kind = await boxed.materialize(
-        cloneInBox ? { clone: mapped } : { hostDir: handle.dir as string },
+      const kind = await this.timed('materialize', () =>
+        boxed.materialize(cloneInBox ? { clone: mapped } : { hostDir: handle.dir as string }),
       );
       evidence.push({
         kind: 'step',
@@ -298,47 +331,75 @@ export class CodingLoopHandler implements WorkerHandler {
       });
     }
 
-    const snapshot = boxed ? await boxed.snapshot() : undefined;
-    const coded = await this.ports.coder.apply({
-      dir: boxed ? undefined : (handle.dir ?? undefined),
-      snapshot,
-      brief,
-      event,
-      worker,
+    const coded = await this.timed('edit', async () => {
+      const snapshot = boxed ? await boxed.snapshot() : undefined;
+      const result = await this.ports.coder.apply({
+        dir: boxed ? undefined : (handle.dir ?? undefined),
+        snapshot,
+        brief,
+        event,
+        worker,
+      });
+      if (boxed) await boxed.writeFiles(result.files);
+      return result;
     });
-    if (boxed) await boxed.writeFiles(coded.files);
-    if (handle.dir) await writeHostFiles(handle.dir, coded.files);
     evidence.push({
       kind: 'step',
       label: 'box-edit',
       body: `${coded.summary}\n${coded.changed.join('\n')}`,
     });
 
-    if (boxed && this.ports.installCommand) {
-      const installed = await boxed.run(this.ports.installCommand);
-      evidence.push({
-        kind: 'step',
-        label: this.ports.installCommand,
-        body: `${installed.stdout}${installed.stderr}`.trim(),
-      });
-    }
-
     const testCommand = this.ports.testCommand ?? 'node add.test.js';
-    const tested = boxed
-      ? boxTest(await boxed.run(testCommand), testCommand)
-      : await this.ports.tests.run({ dir: handle.dir as string });
-    const patch = boxed
-      ? await boxed.pullPatch()
-      : handle.dir
-        ? await this.workspaces.exportPatch(handle)
-        : '';
+    const tested = await this.timed('test', async () => {
+      if (boxed && this.ports.installCommand) {
+        const installed = await boxed.run(this.ports.installCommand);
+        evidence.push({
+          kind: 'step',
+          label: this.ports.installCommand,
+          body: formatBoxExec({
+            cmd: this.ports.installCommand,
+            cwd: BOX_REPO,
+            exitCode: installed.exitCode,
+            stdout: installed.stdout,
+            stderr: installed.stderr,
+          }),
+        });
+      }
+      if (boxed) return boxTest(await boxed.run(testCommand), testCommand);
+      return this.ports.tests.run({ dir: handle.dir as string });
+    });
+    const patch = await this.timed('diff', async () => {
+      const raw = boxed
+        ? await boxed.pullPatch()
+        : handle.dir
+          ? await this.workspaces.exportPatch(handle)
+          : '';
+      this.lastPatch = raw;
+      return raw;
+    });
+    this.lastExecs = boxed ? [...boxed.execs] : [];
+    this.lastPublishDir = handle.dir ?? null;
     evidence.push({
       kind: 'patch',
-      label: 'diff summary',
-      body: summarizePatch(patch),
+      label: 'box-diff',
+      body: boxed
+        ? `applied box git diff --cached to a clean host checkout\n${summarizePatch(patch)}`
+        : summarizePatch(patch),
       path: handle.dir ?? BOX_REPO,
     });
     evidence.push({ kind: 'test', label: tested.command, body: tested.output });
+    if (this.lastExecs.length > 0) {
+      evidence.push({
+        kind: 'step',
+        label: 'box-exec',
+        body: this.lastExecs.map((log) => formatBoxExec(log)).join('\n\n'),
+      });
+      evidence.push({
+        kind: 'step',
+        label: 'box-exec-summary',
+        body: formatBoxExecSummary(this.lastExecs),
+      });
+    }
 
     if (!tested.ok) {
       return {
@@ -364,6 +425,10 @@ export class CodingLoopHandler implements WorkerHandler {
         evidence,
         stepSignature: `box:${event.type}`,
       };
+    }
+
+    if (boxed && handle.dir) {
+      await this.timed('diff', () => applyBoxPatch(handle.dir as string, patch));
     }
 
     const branch = workerBranch(worker.workerId);
@@ -450,6 +515,28 @@ export class CodingLoopHandler implements WorkerHandler {
     this.handles.set(handle.id, handle);
     return handle;
   }
+
+  private resetLast(): void {
+    this.lastTimings.materialize = 0;
+    this.lastTimings.edit = 0;
+    this.lastTimings.test = 0;
+    this.lastTimings.diff = 0;
+    this.lastExecs = [];
+    this.lastPatch = '';
+    this.lastPublishDir = null;
+  }
+
+  private async timed<T>(
+    phase: 'materialize' | 'edit' | 'test' | 'diff',
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const started = Date.now();
+    try {
+      return await fn();
+    } finally {
+      this.lastTimings[phase] += Date.now() - started;
+    }
+  }
 }
 
 export function mergeAction(repo: string, number: number): ProposedAction {
@@ -479,21 +566,19 @@ function summarizePatch(patch: string): string {
   return `${files.join(', ') || 'workspace'} +${plus} -${minus}\n${patch.slice(0, 800)}`;
 }
 
-async function writeHostFiles(dir: string, files: Record<string, string>): Promise<void> {
-  for (const [rel, content] of Object.entries(files)) {
-    const path = join(dir, rel);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, content);
-  }
-}
-
 function boxTest(
   ran: { stdout: string; stderr: string; exitCode: number },
   command: string,
 ): TestResult {
+  const stdout = ran.stdout.trimEnd();
+  const stderr = ran.stderr.trimEnd();
   return {
     ok: ran.exitCode === 0,
-    output: `${ran.stdout}${ran.stderr}`.trim() || (ran.exitCode === 0 ? 'ok' : 'test failed'),
+    output: [
+      `exit=${ran.exitCode}`,
+      `stdout: ${stdout || '(empty)'}`,
+      `stderr: ${stderr || '(empty)'}`,
+    ].join('\n'),
     command,
   };
 }

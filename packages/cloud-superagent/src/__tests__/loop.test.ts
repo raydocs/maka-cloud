@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { sequentialIds } from '../ids.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
+  ADD_BROKEN,
+  ADD_FIXED,
   CodingLoopHandler,
   FakeCoder,
   FakeGitHost,
@@ -48,7 +52,7 @@ async function loopRig(intensity: 'act' | 'observe' = 'act') {
 }
 
 test('act worker clones, fixes tests, pushes a worker branch and opens a PR with evidence', async () => {
-  const { agent, git, sandbox } = await loopRig('act');
+  const { agent, git, sandbox, repoDir, handler } = await loopRig('act');
   const opened = await agent.ingest(
     github(TENANT, 'loop-1', 'pull_request', prPayload('opened', 3)),
   );
@@ -65,6 +69,13 @@ test('act worker clones, fixes tests, pushes a worker branch and opens a PR with
   assert.ok((worker?.evidence ?? []).some((row) => row.kind === 'patch'));
   assert.ok((worker?.evidence ?? []).some((row) => row.label === 'box-upload'));
   assert.ok((worker?.evidence ?? []).some((row) => row.label === 'box-edit'));
+  assert.ok((worker?.evidence ?? []).some((row) => row.label === 'box-diff'));
+  assert.ok((worker?.evidence ?? []).some((row) => /exit=0/.test(row.body)));
+  assert.equal(await readFile(join(repoDir, 'add.js'), 'utf8'), ADD_BROKEN);
+  assert.ok(handler.lastPublishDir);
+  assert.equal(await readFile(join(handler.lastPublishDir, 'add.js'), 'utf8'), ADD_FIXED);
+  assert.match(handler.lastPatch, /return a \+ b/);
+  assert.ok(handler.lastExecs.some((row) => row.cmd === 'node add.test.js' && row.exitCode === 0));
   assert.ok(
     (worker?.evidence ?? []).some((row) => row.kind === 'artifact' && /checks/.test(row.body)),
   );

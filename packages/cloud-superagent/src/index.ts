@@ -153,17 +153,24 @@ export {
   mayPush,
   mergeAction,
   workerBranch,
+  emptyTimings,
+  formatTimings,
+  LOOP_TIMING_PHASES,
   type CoderPort,
   type GitHostPort,
   type LoopPorts,
+  type LoopTimings,
   type TestPort,
 } from './loop.js';
 export {
   BOX_REPO,
   BoxWorkspace,
+  applyBoxPatch,
   assertSafeCloneTarget,
+  formatBoxExec,
   isPublicCloneUrl,
   packTar,
+  type BoxExecLog,
 } from './loop-box.js';
 export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
 export {

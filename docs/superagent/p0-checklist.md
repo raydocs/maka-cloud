@@ -85,9 +85,11 @@ listener is for laptop replay only.
    ```bash
    npm run real-loop -w @maka-cloud/superagent
    ```
-   Expect `ok: true`, `boxed: true`, `coder: fake`, `git: fake`, and steps
-   including `box-materialize → box-edit → box-test` then
+   Expect `ok: true`, `boxed: true`, `coder: fake`, `git: fake`, a `timings:`
+   line (`create/materialize/edit/test/diff/destroy`), in-box execs with
+   `exit=`, and steps including `box-materialize → box-edit → box-test` then
    `push → pr → ci-resume → review-resume → merge-held → merge-approved`.
+   Push is the box `git diff --cached` applied to a clean host checkout.
 
    Live public repo in the box (owner only; no GitHub token):
    ```bash

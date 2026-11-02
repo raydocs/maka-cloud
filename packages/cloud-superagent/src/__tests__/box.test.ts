@@ -2,8 +2,14 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { BOX_REPO, BoxWorkspace, assertSafeCloneTarget, isPublicCloneUrl } from '../loop-box.js';
-import { ADD_FIXED, scratchFiles } from '../loop.js';
+import {
+  BOX_REPO,
+  BoxWorkspace,
+  applyBoxPatch,
+  assertSafeCloneTarget,
+  isPublicCloneUrl,
+} from '../loop-box.js';
+import { ADD_BROKEN, ADD_FIXED, scratchFiles } from '../loop.js';
 import { FakeSandbox } from '../sandbox.js';
 import { initLocalRepo } from '../workspace.js';
 
@@ -43,4 +49,24 @@ test('FakeSandbox clones a local path inside the box with no host token on argv'
   assert.equal(tested.exitCode, 0, tested.stderr || tested.stdout);
   assert.ok(sandbox.commands.some((row) => row.cmd.includes('git clone')));
   assert.ok(sandbox.commands.every((row) => !/github_pat_|INSTABOX|ANTHROPIC/.test(row.cmd)));
+});
+
+test('applyBoxPatch writes the box cached diff onto a clean checkout, including extra box files', async () => {
+  const source = await initLocalRepo(scratchFiles());
+  const publish = await initLocalRepo(scratchFiles());
+  const sandbox = new FakeSandbox();
+  const box = new BoxWorkspace(sandbox, 'patch');
+  await box.materialize({ hostDir: source });
+  await box.writeFiles({ 'add.js': ADD_FIXED, 'note.txt': 'from-box\n' });
+  const tested = await box.run('node add.test.js');
+  assert.equal(tested.exitCode, 0, tested.stderr || tested.stdout);
+  const patch = await box.pullPatch();
+  assert.match(patch, /add\.js/);
+  assert.match(patch, /note\.txt/);
+  assert.equal(await readFile(join(publish, 'add.js'), 'utf8'), ADD_BROKEN);
+  await applyBoxPatch(publish, patch);
+  assert.equal(await readFile(join(publish, 'add.js'), 'utf8'), ADD_FIXED);
+  assert.equal(await readFile(join(publish, 'note.txt'), 'utf8'), 'from-box\n');
+  assert.ok(box.execs.every((row) => typeof row.exitCode === 'number'));
+  assert.ok(box.execs.some((row) => row.cmd === 'node add.test.js' && row.exitCode === 0));
 });

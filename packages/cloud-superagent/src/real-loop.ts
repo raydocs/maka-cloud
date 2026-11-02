@@ -9,10 +9,15 @@ import {
   FakeGitHost,
   NoopCoder,
   NodeFileTestPort,
+  emptyTimings,
+  formatTimings,
   mergeAction,
   scratchFiles,
   workerBranch,
+  type LoopTimings,
 } from './loop.js';
+import type { BoxExecLog } from './loop-box.js';
+import { formatBoxExec } from './loop-box.js';
 import { Superagent } from './runtime.js';
 import {
   HttpSandbox,
@@ -38,6 +43,8 @@ export interface RealLoopReport {
   coder: 'fake' | 'model';
   git: 'fake' | 'github';
   boxed: boolean;
+  timings: LoopTimings;
+  execs: BoxExecLog[];
   evidence: string;
   steps: string[];
   error?: string;
@@ -71,6 +78,8 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     coder: 'fake',
     git: 'fake',
     boxed: false,
+    timings: emptyTimings(),
+    execs: [],
     evidence: '',
     steps: [],
   };
@@ -95,6 +104,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     const sandbox = options.sandbox ?? (live ? await liveSandbox(env) : createSandboxFromEnv(env));
     if (live && sandbox instanceof HttpSandbox) {
       box = sandbox;
+      const createdAt = Date.now();
       const created = await box.createMachine({
         name: `maka-loop-${Date.now()}`,
         ...instaboxCreateSourceFromEnv(env),
@@ -107,6 +117,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
         created.state === 'succeeded' ? created : await box.waitForOperation(created.id);
       machineId = settled.machineId ?? created.machineId;
       report.machineId = machineId ?? null;
+      report.timings.create = Date.now() - createdAt;
       report.steps.push('sandbox-create');
     }
     const fetchImpl = options.fetch ?? fetch;
@@ -161,6 +172,11 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     const pr = handler.lastPr.get(opened.workerId);
     report.prUrl = pr?.url ?? null;
     report.evidence = formatEvidence(after?.evidence ?? []);
+    report.timings.materialize = handler.lastTimings.materialize;
+    report.timings.edit = handler.lastTimings.edit;
+    report.timings.test = handler.lastTimings.test;
+    report.timings.diff = handler.lastTimings.diff;
+    report.execs = handler.lastExecs;
     const boxed = (after?.evidence ?? []).some(
       (row) => row.label === 'box-clone' || row.label === 'box-upload' || row.label === 'box-edit',
     );
@@ -199,6 +215,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     report.error = redactKeys(error instanceof Error ? error.message : 'real-loop failed', env);
   } finally {
     if (machineId && box) {
+      const destroyedAt = Date.now();
       try {
         await box.destroyMachine(machineId);
         report.destroyed = true;
@@ -206,6 +223,8 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       } catch (error) {
         const extra = redactKeys(error instanceof Error ? error.message : 'destroy failed', env);
         report.error = report.error ? `${report.error}; ${extra}` : extra;
+      } finally {
+        report.timings.destroy = Date.now() - destroyedAt;
       }
     }
     if (dir && !options.keepDir && !options.repoDir) {
@@ -227,7 +246,11 @@ export function formatRealLoopReport(report: RealLoopReport): string {
     `git: ${report.git}`,
     `boxed: ${report.boxed}`,
     `destroyed: ${report.destroyed}`,
+    `timings: ${formatTimings(report.timings)}`,
     `steps: ${report.steps.join(' → ')}`,
+    report.execs.length > 0
+      ? `execs:\n${report.execs.map((log) => formatBoxExec(log)).join('\n\n')}`
+      : '',
     report.evidence,
     report.error ? `error: ${report.error}` : '',
   ]

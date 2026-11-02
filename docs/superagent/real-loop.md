@@ -14,13 +14,17 @@ resume the same worker (Router is not called).
 | Materialize | host tarball uploaded into the box (`base64` + `tar`) | public `MAKA_CLOUD_LOOP_CLONE_URL` → `git clone` in the box; otherwise the same host tarball (private / scratch; no token in the box) |
 | Coder | `FakeCoder` files written **inside the box** | `HttpCoder` on the host when `ANTHROPIC_API_KEY` / `MAKA_CLOUD_JUDGE_API_KEY` is set; files applied in the box. Public-clone probe without a model key uses `NoopCoder` |
 | Tests / install | `node add.test.js` (and optional install) **in the box** | `MAKA_CLOUD_LOOP_TEST` / `MAKA_CLOUD_LOOP_INSTALL` in the box; output is evidence |
-| Git / PR | `FakeGitHost` from the pulled diff | `HttpGitHost` when `MAKA_GITHUB_TOKEN=github_pat_…` and `MAKA_CLOUD_LOOP_REPO=owner/name`. Public-clone live with no token skips publish |
+| Git / PR | `FakeGitHost` after applying the box `git diff --cached` to a **clean** host checkout | `HttpGitHost` when `MAKA_GITHUB_TOKEN=github_pat_…` and `MAKA_CLOUD_LOOP_REPO=owner/name`. Public-clone live with no token skips publish |
 | Router | forced `act` mandate | still forced `act`. Product Router (`createJudgeFromEnv`) is separate |
 | Merge | held, then approved against the fake host | held only — live GitHub is never auto-merged |
 
 The box never receives `INSTABOX_API_KEY`, `ANTHROPIC_API_KEY` or
 `MAKA_GITHUB_TOKEN`. Clone of a public URL is credential-less. Private
-workspaces are packed on the host and uploaded as a tarball.
+workspaces are packed on the host and uploaded as a tarball. The host does
+not write coder files itself: it `git reset --hard` a clean checkout and
+applies the box's cached diff, so the tree that ran tests is the tree that
+ships. The CLI prints `create/materialize/edit/test/diff/destroy` timings and
+saves every in-box exec's stdout/stderr/exit code.
 
 Worker-branch push (`maka/sa-<workerId>`) is allowed under intensity `act` and
 authority `open-pr`. `main` / `master` are protected. Merge, protected push,

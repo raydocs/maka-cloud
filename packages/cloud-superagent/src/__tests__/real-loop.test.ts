@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
-import { scratchFiles } from '../loop.js';
+import { formatTimings, scratchFiles } from '../loop.js';
 import { FakeSandbox } from '../sandbox.js';
 import { formatRealLoopReport, runRealLoop } from '../real-loop.js';
 import { initLocalRepo } from '../workspace.js';
@@ -32,7 +32,17 @@ test('real-loop fake path clones, tests, pushes, resumes CI/review, holds merge'
   );
   assert.ok(sandbox.commands.some((row) => row.cmd === 'node add.test.js'));
   assert.ok(!sandbox.commands.some((row) => row.cmd.startsWith('echo loop-verify')));
+  assert.ok(report.timings.materialize > 0);
+  assert.ok(report.timings.edit > 0);
+  assert.ok(report.timings.test > 0);
+  assert.ok(report.timings.diff > 0);
+  assert.equal(report.timings.create, 0);
+  assert.equal(report.timings.destroy, 0);
+  assert.ok(report.execs.some((row) => row.cmd === 'node add.test.js' && row.exitCode === 0));
+  assert.match(report.evidence, /exit=0/);
   assert.match(formatRealLoopReport(report), /ok: true/);
+  assert.match(formatRealLoopReport(report), /timings: /);
+  assert.ok(formatRealLoopReport(report).includes(formatTimings(report.timings)));
 });
 
 test('real-loop does not go live without MAKA_CLOUD_LOOP_LIVE=1', async () => {
