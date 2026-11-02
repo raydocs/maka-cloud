@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 12:13 MST — cursor/superagent-real-loop-51be
+## 2026-11-02 12:13 MST — cursor/superagent-real-loop-51be — b87e48b09
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
 - **What:** Host stack test ticks twice for W2 (nudge, then escalate → stuck card), matching `stuck.test.ts` / `watchdog.test.ts`. Forwarded from #466: harness cleanup kills `.setup-*` install dirs and retries `fs.rm` on ENOTEMPTY.
