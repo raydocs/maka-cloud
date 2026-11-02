@@ -867,6 +867,7 @@ Filled in by the implementation PR; kept accurate here:
 | Review receipts | implemented. `FakeReviewer` in tests; hosts inject a non-interactive reviewer. Missing VERDICT = no receipt |
 | Owner pause | implemented. Verified stop, no W2 nudge, explicit resume only |
 | Freshness + lead channel | implemented. `reportToLead` re-reads live PR/CI; `LeadPort` is the only user channel; worker `userMessage` is dropped |
+| First-class progress | implemented. Named phases on worker JSON; ETA from phase samples / usage ledger / defaults; lead speaks on phase change, every 5 min on a long phase, and once when past ETA+margin (W1/W2); waiting on CI/review/human ≠ stuck. CLI `npm run status`; JSON/SSE `GET /v1/superagent/progress` |
 
 ## 16. Open questions — decisions recorded (revisit with the owner)
 
@@ -1038,5 +1039,26 @@ Still open, on purpose or not yet built:
 
 No sqlite table migration in this pass. New data lives on the worker
 JSON (`doneClaim`, `reviewReceipts`, `pausedFrom`, `pausedVerified`,
-`lastLive`, `nudges`). `paused` is a new value of the existing `state`
+`lastLive`, `nudges`, `progress`). `paused` is a new value of the existing `state`
 column. Flag if a later change needs `user_version` 3.
+
+### 18.8 First-class progress
+
+A 40–50 minute silent run looks stuck. Each worker carries a step plan
+(`materialize`, `edit`, `install`, `test`, `push`, `pr`, `ci-wait`,
+`review-wait`, `merge-held`) on `worker.progress` (JSON only). The
+runtime emits structured views: phase `k/N`, percent, elapsed, ETA
+(median of completed phase samples on the tenant, else a weak mean of
+`usage_events.wallMs`, else defaults), last activity, heartbeat.
+
+The lead answers "how is it going" from that live snapshot after a
+freshness re-read. It speaks on a phase change, every N minutes
+(default 5) on a long phase (`still X, did Y`), and once when there is
+no heartbeat or progress past the phase ETA plus a margin — the same
+W1 heartbeat / W2 stall signals. Waiting on CI, review, or a human is
+shown as waiting, not stuck; W2 skips it.
+
+`npm run status -w @maka-cloud/superagent` prints a bar per live
+worker. `GET /v1/superagent/progress` (JSON or `text/event-stream`) is
+what cloud-server serves to cloud-web and mobile when the host injects
+the snapshot.

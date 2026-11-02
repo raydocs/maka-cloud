@@ -32,6 +32,7 @@ export function formatLeadReport(input: {
   live: LiveFacts;
   freshness: { stale: boolean; reasons: string[] };
   plan: string;
+  progress?: string;
 }): string {
   const freshness = input.freshness.stale ? `STALE ${input.freshness.reasons.join('; ')}` : 'fresh';
   return [
@@ -39,5 +40,6 @@ export function formatLeadReport(input: {
     `live sha=${input.live.sha ?? '(none)'} ci=${input.live.ci ?? '(none)'} merged=${input.live.prMerged ?? false}`,
     freshness,
     input.plan,
+    ...(input.progress ? [input.progress] : []),
   ].join('\n');
 }

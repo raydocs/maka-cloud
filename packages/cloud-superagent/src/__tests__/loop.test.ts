@@ -89,6 +89,8 @@ test('act worker clones, fixes tests, pushes a worker branch and opens a PR with
   assert.ok(sandbox.commands.some((row) => row.cmd === 'node add.test.js'));
   assert.ok(!sandbox.commands.some((row) => row.cmd.startsWith('echo loop-verify')));
   assert.ok(worker?.workspaceRef);
+  assert.equal(worker?.progress?.phase, 'ci-wait');
+  assert.equal(worker?.progress?.waiting?.kind, 'ci');
 });
 
 test('observe worker does not push', async () => {

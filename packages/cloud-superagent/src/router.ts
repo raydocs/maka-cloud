@@ -16,8 +16,29 @@ export interface AdmissionResult {
   reason: string;
 }
 
-const STATUS_RE = /\b(status|what'?s happening|where are we|any update)\b/iu;
+const STATUS_RE = /\b(status|what'?s happening|where are we|any update|how(?:'s| is) it going)\b/iu;
 const WORK_RE = /\b(fix|implement|please|can you|ship|open a pr|investigate)\b/iu;
+
+export function isStatusAskText(text: string): boolean {
+  return STATUS_RE.test(text) && !WORK_RE.test(text);
+}
+
+export function statusAskText(event: NormalizedEvent): string {
+  return (
+    field(event, 'text') ||
+    field(event, 'comment') ||
+    field(event, 'body') ||
+    field(event, 'review') ||
+    event.summary
+  );
+}
+
+export function isStatusAsk(event: NormalizedEvent): boolean {
+  if (event.type === 'user_message' || event.type === 'issue_comment') {
+    return isStatusAskText(statusAskText(event));
+  }
+  return false;
+}
 
 export function admit(
   event: NormalizedEvent,
@@ -77,7 +98,7 @@ export class HeuristicJudge implements RouterJudge {
   ): Promise<RouterDecision> {
     if (event.type === 'user_message') {
       const text = field(event, 'text');
-      if (STATUS_RE.test(text) && !WORK_RE.test(text)) {
+      if (isStatusAskText(text)) {
         return { action: 'answer', text: 'No worker is on this thread yet.' };
       }
       if (WORK_RE.test(text) || text.trim().length > 0) {

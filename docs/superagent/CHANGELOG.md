@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 03:20 MST — cursor/superagent-real-loop-51be
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** First-class worker progress: named phases, persisted `worker.progress`, ETA from phase samples / usage ledger / defaults, last activity + heartbeat. Lead speaks on phase change, every 5 minutes on a long phase, and once when past ETA+margin (W1/W2); waiting on CI/review/human is not stuck. CLI `npm run status`; JSON/SSE `GET /v1/superagent/progress`; cloud-web `WorkerProgressBar` in the conversation work panel.
+- **Why:** Top user pain from Amp Puck and Grok Bot: a 40–50 min silent run looks stuck.
+- **Tests:** 133 passed in `@maka-cloud/superagent` (`test:dist`). cloud-server progress route tests passed. cloud-web `WorkerProgressBar` unit test added (vitest deps not installed in this environment).
+- **Live:** n/a
+- **Migrations / risk:** none. Progress is worker JSON. No sqlite `user_version` bump.
+
 ## 2026-11-02 02:47 MST — cursor/superagent-real-loop-51be — 8766e7a14
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))

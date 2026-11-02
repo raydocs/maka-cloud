@@ -1,7 +1,7 @@
 import type { IngestInput } from './events.js';
 import { normalize } from './events.js';
 import { defaultIds } from './ids.js';
-import { admit, admitSpawn, HeuristicJudge } from './router.js';
+import { admit, admitSpawn, HeuristicJudge, isStatusAsk } from './router.js';
 import { overBudget, Safety } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
@@ -9,6 +9,7 @@ import {
   emptyUsage,
   isLiveState,
   type NormalizedEvent,
+  type WorkerContext,
   type WorkerRecord,
   type WorkerState,
 } from './types.js';
@@ -31,6 +32,19 @@ import {
 import { mergeEvidence } from './evidence.js';
 import { defaultDoneWorld, verifyDone, type DoneWorld } from './done.js';
 import { formatLeadReport, freshnessOf, type LiveFacts } from './freshness.js';
+import {
+  applyProgressPatch,
+  DEFAULT_PROGRESS,
+  formatLeadProgress,
+  formatProgressLine,
+  nextLeadKind,
+  startProgress,
+  statusSnapshotOf,
+  viewOf,
+  type ProgressPatch,
+  type ProgressSettings,
+  type StatusSnapshot,
+} from './progress.js';
 import { SilentLead, workerOutboundText, type LeadPort } from './lead.js';
 import { parseMergeBound } from './loop.js';
 import { boxLooksRunning, isPauseActive, resumeState } from './pause.js';
@@ -120,6 +134,8 @@ export interface SuperagentOptions {
   doneWorld?: DoneWorld;
   /** Re-read PR/CI for lead reports. Cached worker memory is not enough. */
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
+  /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
+  progress?: Partial<ProgressSettings>;
 }
 
 export class Superagent {
@@ -136,6 +152,7 @@ export class Superagent {
   readonly lead: LeadPort;
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
+  readonly progressSettings: ProgressSettings;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
@@ -160,6 +177,7 @@ export class Superagent {
     this.lead = options.lead ?? new SilentLead();
     this.reviewer = options.reviewer;
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
+    this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
   }
 
@@ -191,6 +209,23 @@ export class Superagent {
     }
 
     const subscribers = this.store.liveSubscribers(event.tenantId, event.subject.key);
+    if (isStatusAsk(event)) {
+      const owned =
+        this.store.liveWorkerBySubject(event.tenantId, event.subject.key) ??
+        (subscribers[0] ? this.store.worker(event.tenantId, subscribers[0].workerId) : undefined);
+      if (owned) {
+        const reported = await this.reportToLead(event.tenantId, owned.workerId);
+        if (reported.ok) {
+          this.audit(event.tenantId, owned.workerId, 'answered', at, { reason: 'status' });
+          return {
+            result: 'answered',
+            eventId: event.eventId,
+            text: reported.text,
+            judgeCalls: 0,
+          };
+        }
+      }
+    }
     if (subscribers.length > 0) {
       const workerIds: string[] = [];
       for (const sub of subscribers) {
@@ -275,6 +310,16 @@ export class Superagent {
     return this.store.workers(tenantId);
   }
 
+  statusSnapshot(tenantId?: string): StatusSnapshot {
+    return statusSnapshotOf(
+      this.store,
+      this.now(),
+      this.progressSettings,
+      this.watchdogSettings,
+      tenantId,
+    );
+  }
+
   async restore(): Promise<{ resumed: number }> {
     let resumed = 0;
     for (const worker of this.store.allWorkers()) {
@@ -301,12 +346,20 @@ export class Superagent {
       at,
     );
     for (const found of findings) {
+      if (found.rule === 'stuck' || found.rule === 'crashed') {
+        const worker = this.store.worker(found.tenantId, found.workerId);
+        if (worker) await this.speakProgress(worker, 'stuck', at);
+      }
       if (found.action !== 'escalate' && found.action !== 'stop') continue;
       const worker = this.store.worker(found.tenantId, found.workerId);
       if (!worker) continue;
       const card = stuckCardOf(worker, found, at);
       this.escalations.push(card);
       this.onEscalate?.(card);
+    }
+    for (const worker of this.store.allWorkers()) {
+      if (!isLiveState(worker.state)) continue;
+      await this.refreshProgressSpeak(worker, at);
     }
     return findings;
   }
@@ -460,6 +513,9 @@ export class Superagent {
       live,
       freshness,
       plan: worker.plan,
+      progress: formatProgressLine(
+        this.progressView(this.store.worker(tenantId, workerId) ?? worker, at),
+      ),
     });
     worker.lastLive = live;
     worker.updatedAt = at;
@@ -507,6 +563,7 @@ export class Superagent {
       lastHeartbeatAt: at,
       lastStepSignature: null,
       stepRepeats: 0,
+      progress: startProgress(at),
       usage: emptyUsage(),
       evidence: [],
       createdAt: at,
@@ -614,6 +671,7 @@ export class Superagent {
       worker.spills = spilled.spills;
     }
     if (result.plan !== undefined) worker.plan = result.plan;
+    if (result.progressUpdate) await this.recordProgress(worker, result.progressUpdate, at);
     if (result.transcriptPointer !== undefined) worker.transcriptPointer = result.transcriptPointer;
     if (result.workspaceRef !== undefined) worker.workspaceRef = result.workspaceRef;
     if (result.sandboxRef !== undefined) worker.sandboxRef = result.sandboxRef;
@@ -715,6 +773,15 @@ export class Superagent {
           approvalId: gate.approvalId,
           kind: result.action.kind,
         });
+        await this.recordProgress(
+          worker,
+          {
+            phase: result.action.kind === 'merge' ? 'merge-held' : worker.progress?.phase,
+            waiting: { kind: 'human', detail: result.action.kind },
+            activity: `held ${result.action.kind}`,
+          },
+          at,
+        );
         worker.lastHeartbeatAt = at;
         return true;
       }
@@ -859,23 +926,77 @@ export class Superagent {
     return { sha, ci: extra.ci, prMerged, at };
   }
 
-  private context(
-    worker: WorkerRecord,
-    event: NormalizedEvent,
-  ): {
-    worker: WorkerRecord;
-    event: NormalizedEvent;
-    sandbox: SandboxPort;
-    orgSecrets: Superagent['orgSecrets'];
-    recall: () => string;
-  } {
+  private context(worker: WorkerRecord, event: NormalizedEvent): WorkerContext {
     return {
       worker: { ...worker },
       event,
       sandbox: this.sandbox,
       orgSecrets: this.orgSecrets,
       recall: () => recallMemory(worker),
+      reportProgress: async (patch) => {
+        const live = this.store.worker(worker.tenantId, worker.workerId);
+        if (!live) return;
+        await this.recordProgress(live, patch, this.now());
+        worker.progress = live.progress;
+        worker.lastHeartbeatAt = live.lastHeartbeatAt;
+        worker.lastProgressAt = live.lastProgressAt;
+      },
     };
+  }
+
+  private progressView(worker: WorkerRecord, at: number) {
+    return viewOf(worker, at, this.store, this.progressSettings, this.watchdogSettings);
+  }
+
+  private async recordProgress(
+    worker: WorkerRecord,
+    patch: ProgressPatch,
+    at: number,
+  ): Promise<void> {
+    const previous = worker.progress;
+    const { progress, phaseChanged } = applyProgressPatch(previous, patch, at);
+    worker.progress = progress;
+    worker.lastHeartbeatAt = at;
+    if (phaseChanged || patch.activity !== undefined) {
+      worker.lastProgressAt = at;
+      worker.nudges = 0;
+    }
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    const view = this.progressView(worker, at);
+    const kind = nextLeadKind(previous, progress, view, at, this.progressSettings, phaseChanged);
+    if (kind) await this.speakProgress(worker, kind, at);
+  }
+
+  private async refreshProgressSpeak(worker: WorkerRecord, at: number): Promise<void> {
+    const live = this.store.worker(worker.tenantId, worker.workerId);
+    if (!live?.progress) return;
+    const view = this.progressView(live, at);
+    const kind = nextLeadKind(live.progress, live.progress, view, at, this.progressSettings, false);
+    if (kind) await this.speakProgress(live, kind, at);
+  }
+
+  private async speakProgress(
+    worker: WorkerRecord,
+    kind: 'phase' | 'still' | 'stuck',
+    at: number,
+  ): Promise<void> {
+    const live = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
+    const view = this.progressView(live, at);
+    if (kind === 'stuck' && live.progress?.stuckSpoken) return;
+    const text = formatLeadProgress(kind, view);
+    const progress = live.progress ?? startProgress(at);
+    progress.lastLeadAt = at;
+    progress.lastLeadKind = kind;
+    if (kind === 'stuck') progress.stuckSpoken = true;
+    live.progress = progress;
+    live.updatedAt = at;
+    this.store.putWorker(live);
+    await this.lead.speak({ tenantId: live.tenantId, workerId: live.workerId, text });
+    this.audit(live.tenantId, live.workerId, `progress_${kind}`, at, {
+      phase: view.phase,
+      look: view.look,
+    });
   }
 
   private async wakeBox(worker: WorkerRecord): Promise<void> {

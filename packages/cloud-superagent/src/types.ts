@@ -155,6 +155,8 @@ export interface WorkerRecord {
   /** Pause is recorded only after the worker is verified stopped. */
   pausedVerified?: boolean;
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
+  /** Named step plan + heartbeat. JSON only; no schema bump. */
+  progress?: import('./progress.js').WorkerProgress;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -262,6 +264,8 @@ export interface HandlerResult {
   usage?: Partial<Usage>;
   evidence?: EvidenceBlock[];
   action?: ProposedAction;
+  /** Mid-run phase / activity. Superagent persists it on the worker JSON. */
+  progressUpdate?: import('./progress.js').ProgressPatch;
   /** Claim only. Superagent re-reads signals before retiring. */
   done?: import('./done.js').DoneClaim;
   /**
@@ -278,6 +282,11 @@ export interface WorkerContext {
   orgSecrets: OrgSecretPort;
   /** Chain of Recall: spilled chunks plus the inline window. */
   recall: () => string;
+  /**
+   * Persist a phase / activity / waiting heartbeat. Not a user channel —
+   * Superagent may speak through `LeadPort` after it writes the store.
+   */
+  reportProgress?: (patch: import('./progress.js').ProgressPatch) => Promise<void>;
   /**
    * Intentionally absent: workers have no outbound user channel.
    * `LeadPort.speak` lives on Superagent, never here.

@@ -18,6 +18,8 @@ export {
   type ModelJudgeOptions,
   parseModelDecision,
   RecordingJudge,
+  isStatusAsk,
+  isStatusAskText,
 } from './router.js';
 export {
   FakeRouterInspect,
@@ -241,6 +243,44 @@ export {
   type MetricsReport,
 } from './metrics.js';
 export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
+export {
+  DEFAULT_PHASE_MS,
+  DEFAULT_PROGRESS,
+  DEFAULT_STILL_EVERY_MS,
+  PROGRESS_PHASES,
+  WAITING_PHASES,
+  applyProgressPatch,
+  cloneProgress,
+  defaultPhases,
+  encodeProgressSse,
+  estimatePhaseMs,
+  formatLeadProgress,
+  formatProgressBar,
+  formatProgressLine,
+  formatStatusText,
+  historicalPhaseMs,
+  looksStuck,
+  nextLeadKind,
+  progressWaiting,
+  startProgress,
+  statusSnapshotOf,
+  viewOf,
+  wantsProgressSse,
+  type ProgressLook,
+  type ProgressPatch,
+  type ProgressPhase,
+  type ProgressSettings,
+  type ProgressView,
+  type StatusSnapshot,
+  type WaitingKind,
+  type WorkerProgress,
+} from './progress.js';
+export {
+  PROGRESS_HTTP_PATH,
+  handleProgressRequest as handleProgressHttp,
+  runStatusCli,
+  writeProgressResponse,
+} from './status.js';
 export {
   createWorkspaceStore,
   GitCloneStore,

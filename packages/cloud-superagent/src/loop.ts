@@ -12,6 +12,7 @@ import type {
   WorkerHandler,
   WorkerRecord,
 } from './types.js';
+import { defaultPhases, type ProgressPhase } from './progress.js';
 import {
   BOX_REPO,
   BoxWorkspace,
@@ -325,11 +326,39 @@ export class CodingLoopHandler implements WorkerHandler {
     const worker = ctx.worker;
     const repo = worker.subject.repo ?? 'local/scratch';
     const boxId = worker.sandboxRef ?? 'loop';
+    const report = ctx.reportProgress ?? (async () => undefined);
+    const enter = async (
+      phase: ProgressPhase,
+      activity: string,
+      waiting?: null | { kind: 'ci' | 'review' | 'human'; detail: string },
+    ) => {
+      await report({
+        phase,
+        activity,
+        ...(waiting === undefined ? {} : { waiting }),
+      });
+    };
     if (event.type === 'watchdog_nudge') {
+      await enter(worker.progress?.phase ?? 'edit', event.summary);
       return { progress: false, plan: worker.plan };
     }
     if (event.type === 'approval_granted') {
       return this.onApproval(ctx, event, repo);
+    }
+    if (event.type === 'ci_passed' && this.lastPr.has(worker.workerId)) {
+      await enter('review-wait', event.summary, { kind: 'review', detail: event.summary });
+      return {
+        progress: true,
+        plan: 'ci green; waiting on review',
+        progressUpdate: {
+          phase: 'review-wait',
+          waiting: { kind: 'review', detail: event.summary },
+          activity: event.summary,
+        },
+      };
+    }
+    if (event.type === 'ci_failed') {
+      await enter('edit', event.summary, null);
     }
     if (!mayPush(worker)) {
       return {
@@ -361,8 +390,14 @@ export class CodingLoopHandler implements WorkerHandler {
         : { id: `box:${worker.workerId}`, kind: 'git-clone' as const, dir: null };
 
     this.resetLast();
+    const phases = defaultPhases({
+      publish,
+      install: Boolean(boxed && this.ports.installCommand),
+    });
+    await report({ phases, phase: phases[0], activity: `plan ${phases.join(' → ')}` });
     const evidence: EvidenceBlock[] = [];
     if (boxed) {
+      await enter('materialize', cloneInBox ? `git clone ${mapped}` : 'upload host tarball');
       const kind = await this.timed('materialize', () =>
         boxed.materialize(cloneInBox ? { clone: mapped } : { hostDir: handle.dir as string }),
       );
@@ -373,6 +408,7 @@ export class CodingLoopHandler implements WorkerHandler {
       });
     }
 
+    await enter('edit', `model step: ${brief.slice(0, 80)}`);
     const coded = await this.timed('edit', async () => {
       const snapshot = boxed ? await boxed.snapshot() : undefined;
       const result = await this.ports.coder.apply({
@@ -402,6 +438,7 @@ export class CodingLoopHandler implements WorkerHandler {
     const testCommand = this.ports.testCommand ?? 'node add.test.js';
     const tested = await this.timed('test', async () => {
       if (boxed && this.ports.installCommand) {
+        await enter('install', this.ports.installCommand);
         const installed = await boxed.run(this.ports.installCommand);
         evidence.push({
           kind: 'step',
@@ -415,6 +452,7 @@ export class CodingLoopHandler implements WorkerHandler {
           }),
         });
       }
+      await enter('test', testCommand);
       if (boxed) return boxTest(await boxed.run(testCommand), testCommand);
       return this.ports.tests.run({ dir: handle.dir as string });
     });
@@ -496,12 +534,14 @@ export class CodingLoopHandler implements WorkerHandler {
       };
     }
 
+    await enter('push', `git push ${branch}`);
     const pushed = await this.ports.git.commitAndPush({
       dir: handle.dir as string,
       branch,
       message: `superagent: ${brief.slice(0, 72)}`,
       repo,
     });
+    await enter('pr', `open pull request on ${branch}`);
     const pr = await this.ports.git.openOrUpdatePullRequest({
       repo,
       branch,
@@ -515,6 +555,10 @@ export class CodingLoopHandler implements WorkerHandler {
     const ci = this.ports.git.ciLink(repo, pushed.sha);
     evidence.push({ kind: 'artifact', label: 'CI', body: ci, path: pr.url });
 
+    await enter('ci-wait', `waiting on CI for ${pushed.sha.slice(0, 8)}`, {
+      kind: 'ci',
+      detail: ci,
+    });
     return {
       progress: true,
       workspaceRef: handle.id,
@@ -524,6 +568,11 @@ export class CodingLoopHandler implements WorkerHandler {
       usage: coded.usage,
       evidence,
       stepSignature: `loop:${event.type}:${pushed.sha}`,
+      progressUpdate: {
+        phase: 'ci-wait',
+        waiting: { kind: 'ci', detail: ci },
+        activity: `waiting on CI for ${pushed.sha.slice(0, 8)}`,
+      },
     };
   }
 

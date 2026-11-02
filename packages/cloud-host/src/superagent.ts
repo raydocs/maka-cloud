@@ -40,6 +40,7 @@ export interface HostSuperagent {
   enqueue(work: () => Promise<unknown>): void;
   close(): void;
   backupTo(destination: string): Promise<void>;
+  statusSnapshot(tenantId?: string): ReturnType<Superagent['statusSnapshot']>;
 }
 
 export function startHostSuperagent(
@@ -104,6 +105,7 @@ export function startHostSuperagent(
     },
     close: () => agent.close(),
     backupTo: (destination) => store.backupTo?.(destination) ?? Promise.resolve(),
+    statusSnapshot: (tenantId) => agent.statusSnapshot(tenantId),
   };
 }
 

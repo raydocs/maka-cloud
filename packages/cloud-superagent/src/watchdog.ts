@@ -57,8 +57,9 @@ export function evaluateWorker(
   return undefined;
 }
 
-/** Memory or plan that self-reports waiting is not a W2 stall. */
+/** A declared wait (CI/review/human) or memory/plan that self-reports waiting is not a W2 stall. */
 export function reportsWaiting(worker: WorkerRecord): boolean {
+  if (worker.progress?.waiting) return true;
   return /\bwaiting\b/i.test(`${worker.memory}\n${worker.plan}`);
 }
 
