@@ -18,7 +18,7 @@ spend cap.
 
 | Mode | Config | Notes |
 |---|---|---|
-| Live smoke (ephemeral) | `INSTABOX_TEMPLATE_ID` or `MAKA_CLOUD_BOX_TEMPLATE` | `npm run live-smoke` creates the smallest box, runs `echo live-smoke`, always deletes it. No `INSTABOX_MACHINE_ID`. |
+| Live smoke (ephemeral) | `INSTABOX_API_KEY` only (template optional) | `npm run live-smoke` creates 2 vCPU / 4096 MiB (Pro floor), template `universal` when unset, runs `echo live-smoke`, always deletes it. No `INSTABOX_MACHINE_ID`. Allowed sizes: 2/4096, 4/8192, 8/16384. |
 | Local loop against an existing box | `INSTABOX_MACHINE_ID` | Only if you want the Router/worker loop on a box you already have. |
 | Host product, fixed machines | `MAKA_CLOUD_SANDBOXES` | JSON `{"<inviteId>":"<machineId>"}`. One machine per invite. **Do not** also set `INSTABOX_MACHINE_ID` on the host (`INSTABOX_MACHINE_ID is no longer used`). |
 | Host product, pool | `MAKA_CLOUD_BOXES=1` and `MAKA_CLOUD_BOX_TEMPLATE` | Server creates/sleeps/deletes boxes. Optional `MAKA_CLOUD_BOX_MAX` (1–32, default 3). |

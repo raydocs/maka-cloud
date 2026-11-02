@@ -3,6 +3,9 @@
 Two commands after install and build. The default loop never talks to Instabox.
 The live smoke does, using `INSTABOX_API_KEY` from the environment (never argv).
 
+**Node.js `^22.19.0 || >=24`.** The store uses `node:sqlite` (stable on 22.19+
+and 24). Node 23 is not supported. The owner's local loop ran on Node 24.
+
 ## 1. Fake local loop (no secrets)
 
 ```bash
@@ -35,9 +38,14 @@ steps: spawn → resume-store → passthrough-comment → passthrough-ci → app
 
 ## 2. Live Instabox smoke (owner runs this)
 
-Creates the smallest ephemeral sandbox (1 vCPU / 512 MiB), runs `echo live-smoke`,
-and **always deletes the box**, including when exec fails. Prints timings.
-Never prints the API key.
+Creates the smallest Instabox Pro sandbox (2 vCPU / 4096 MiB; the API rejects
+1/512 as `spec_not_allowed`). Allowed sizes: `2/4096`, `4/8192`, `8/16384`.
+Runs `echo live-smoke`, and **always deletes the box**, including when exec
+fails. Prints timings. Never prints the API key.
+
+When `INSTABOX_TEMPLATE_ID` / `MAKA_CLOUD_BOX_TEMPLATE` are unset, the smoke
+uses template `universal` (`base` / `dev` are retired). Override with
+`INSTABOX_TEMPLATE_ID` or `INSTABOX_SNAPSHOT_ID`.
 
 Export the key in the shell. Do not put it on the command line.
 
@@ -45,7 +53,7 @@ Export the key in the shell. Do not put it on the command line.
 export INSTABOX_API_KEY='…'          # already in the environment; not on argv
 # optional:
 # export INSTABOX_API_URL='https://api.instabox.sh'
-export INSTABOX_TEMPLATE_ID='…'      # or MAKA_CLOUD_BOX_TEMPLATE
+# export INSTABOX_TEMPLATE_ID='universal'   # default; or MAKA_CLOUD_BOX_TEMPLATE
 npm ci
 npm run build -w @maka-cloud/superagent
 npm run live-smoke -w @maka-cloud/superagent
@@ -65,7 +73,7 @@ created: true
 destroyed: true
 exec: echo live-smoke exit=0 stdout="live-smoke"
 timings_ms: create=… exec=… delete=… total=…
-size: 1 vCPU / 512 MiB
+size: 2 vCPU / 4096 MiB
 ```
 
 This repository's agents and CI do **not** run the live smoke against Instabox.

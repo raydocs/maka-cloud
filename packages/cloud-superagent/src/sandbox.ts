@@ -61,8 +61,20 @@ export interface InstaboxOperation {
   state: string;
 }
 
-/** Smallest create the live smoke asks for. The API may raise a floor. */
-export const SMALLEST_SANDBOX = { vcpus: 1, memMiB: 512 } as const;
+/**
+ * Smallest Instabox Pro size. Other sizes (including 1/512) return HTTP 400
+ * `spec_not_allowed`. Allowed: 2/4096, 4/8192, 8/16384.
+ */
+export const SMALLEST_SANDBOX = { vcpus: 2, memMiB: 4096 } as const;
+
+/** Usable default. `base` / `dev` are retired; `GET /v1/templates` lists this. */
+export const DEFAULT_LIVE_SMOKE_TEMPLATE = 'universal';
+
+/** Replace a secret in any string we print. Never log the raw key. */
+export function redactSecret(text: string, secret: string): string {
+  if (!secret) return text;
+  return text.split(secret).join('<redacted>');
+}
 
 export class FakeSandbox implements SandboxPort {
   readonly commands: Array<{ machineId: string; cmd: string }> = [];
@@ -284,7 +296,7 @@ export class HttpSandbox implements SandboxPort {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`instabox ${method} ${path} failed: HTTP ${response.status}`);
+      throw new Error(formatHttpError(method, path, response.status, text, this.apiKey));
     }
     if (!text) return {} as T;
     try {
@@ -342,9 +354,7 @@ export function instaboxCreateSourceFromEnv(
   }
   if (templateId) return { templateId };
   if (snapshotId) return { snapshotId };
-  throw new Error(
-    'Set INSTABOX_TEMPLATE_ID or MAKA_CLOUD_BOX_TEMPLATE (or INSTABOX_SNAPSHOT_ID) so live-smoke can create the smallest ephemeral sandbox.',
-  );
+  return { templateId: DEFAULT_LIVE_SMOKE_TEMPLATE };
 }
 
 /**
@@ -368,4 +378,19 @@ export function createInstaboxSandboxFromEnv(
 ): HttpSandbox {
   const creds = instaboxCredentialsFromEnv(env);
   return new HttpSandbox({ apiKey: creds.apiKey, baseUrl: creds.baseUrl, fetch: fetchImpl });
+}
+
+function formatHttpError(
+  method: string,
+  path: string,
+  status: number,
+  body: string,
+  apiKey: string,
+): string {
+  const clipped = body.length > 800 ? `${body.slice(0, 800)}…` : body;
+  const detail = clipped.replace(/\s+/g, ' ').trim();
+  return redactSecret(
+    `instabox ${method} ${path} failed: HTTP ${status}${detail ? ` ${detail}` : ''}`,
+    apiKey,
+  );
 }

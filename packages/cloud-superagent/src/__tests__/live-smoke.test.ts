@@ -8,7 +8,13 @@ import {
   redactSecret,
   runLiveSmoke,
 } from '../live-smoke.js';
-import { InstaboxCredentialsError, instaboxApiFromEnv, SMALLEST_SANDBOX } from '../sandbox.js';
+import {
+  DEFAULT_LIVE_SMOKE_TEMPLATE,
+  InstaboxCredentialsError,
+  instaboxApiFromEnv,
+  instaboxCreateSourceFromEnv,
+  SMALLEST_SANDBOX,
+} from '../sandbox.js';
 
 const KEY = 'ibx-live-secret-do-not-print';
 
@@ -63,7 +69,7 @@ function header(req: IncomingMessage, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-test('live-smoke refuses to start without a key or template and never fetches', async () => {
+test('live-smoke refuses to start without a key and never fetches', async () => {
   let fetched = false;
   const fetchImpl: typeof fetch = async () => {
     fetched = true;
@@ -74,12 +80,57 @@ test('live-smoke refuses to start without a key or template and never fetches', 
     (error: unknown) =>
       error instanceof InstaboxCredentialsError && /INSTABOX_API_KEY/.test(error.message),
   );
-  await assert.rejects(
-    () => runLiveSmoke({ env: { INSTABOX_API_KEY: KEY }, fetch: fetchImpl }),
-    /INSTABOX_TEMPLATE_ID|MAKA_CLOUD_BOX_TEMPLATE/,
-  );
   assert.equal(fetched, false);
   assert.throws(() => instaboxApiFromEnv({}), InstaboxCredentialsError);
+  assert.deepEqual(instaboxCreateSourceFromEnv({}), { templateId: DEFAULT_LIVE_SMOKE_TEMPLATE });
+  assert.deepEqual(instaboxCreateSourceFromEnv({ INSTABOX_TEMPLATE_ID: 'herdr' }), {
+    templateId: 'herdr',
+  });
+  assert.deepEqual(instaboxCreateSourceFromEnv({ INSTABOX_SNAPSHOT_ID: 'snap_1' }), {
+    snapshotId: 'snap_1',
+  });
+  assert.throws(
+    () =>
+      instaboxCreateSourceFromEnv({
+        INSTABOX_TEMPLATE_ID: 'universal',
+        INSTABOX_SNAPSHOT_ID: 'snap_1',
+      }),
+    /only one/,
+  );
+});
+
+test('live-smoke defaults to universal and Instabox Pro smallest 2/4096', async () => {
+  const fake = await mockInstabox({
+    'POST /v1/machines': () => ({
+      body: { id: 'op_c', machineId: 'mch_default', type: 'create', state: 'succeeded' },
+    }),
+    'GET /v1/machines/mch_default': () => ({ body: { id: 'mch_default', state: 'running' } }),
+    'POST /v1/machines/mch_default/exec': () => ({
+      body: { stdout: 'live-smoke\n', stderr: '', exitCode: 0 },
+    }),
+    'DELETE /v1/machines/mch_default': () => ({
+      body: { id: 'op_d', machineId: 'mch_default', type: 'delete', state: 'succeeded' },
+    }),
+  });
+  try {
+    const report = await runLiveSmoke({
+      env: { INSTABOX_API_KEY: KEY, INSTABOX_API_URL: fake.url },
+    });
+    assert.equal(report.ok, true);
+    const create = fake.requests.find(
+      (row) => row.method === 'POST' && row.path === '/v1/machines',
+    );
+    const body = create?.body as { vcpus?: number; memMiB?: number; templateId?: string };
+    assert.equal(SMALLEST_SANDBOX.vcpus, 2);
+    assert.equal(SMALLEST_SANDBOX.memMiB, 4096);
+    assert.equal(DEFAULT_LIVE_SMOKE_TEMPLATE, 'universal');
+    assert.equal(body.vcpus, 2);
+    assert.equal(body.memMiB, 4096);
+    assert.equal(body.templateId, 'universal');
+    assert.match(formatLiveSmokeReport(report), /2 vCPU \/ 4096 MiB/);
+  } finally {
+    await fake.close();
+  }
 });
 
 test('live-smoke creates the smallest box, execs, always deletes, and never prints the key', async () => {
@@ -170,6 +221,36 @@ test('live-smoke deletes the box when exec fails', async () => {
     assert.equal(JSON.stringify(report).includes(KEY), false);
     assert.equal(formatLiveSmokeReport(report).includes(KEY), false);
     assert.match(report.error ?? '', /HTTP 500/);
+    assert.match(report.error ?? '', /<redacted>/);
+    assert.equal((report.error ?? '').includes(KEY), false);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('live-smoke create 400 includes HTTP status and redacted body', async () => {
+  const fake = await mockInstabox({
+    'POST /v1/machines': () => ({
+      status: 400,
+      body: {
+        error: {
+          code: 'spec_not_allowed',
+          message: `size 1/512 not allowed; key=${KEY}`,
+        },
+      },
+    }),
+  });
+  try {
+    const report = await runLiveSmoke({
+      env: { INSTABOX_API_KEY: KEY, INSTABOX_API_URL: fake.url },
+    });
+    assert.equal(report.ok, false);
+    assert.equal(report.created, false);
+    assert.equal(report.destroyed, false);
+    assert.match(report.error ?? '', /HTTP 400/);
+    assert.match(report.error ?? '', /spec_not_allowed/);
+    assert.match(report.error ?? '', /<redacted>/);
+    assert.equal((report.error ?? '').includes(KEY), false);
   } finally {
     await fake.close();
   }

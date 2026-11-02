@@ -132,7 +132,31 @@ test('HttpSandbox fails clearly on HTTP errors and createSandboxFromEnv uses the
       fetch,
     );
     assert.ok(box instanceof HttpSandbox);
-    await assert.rejects(box.getMachine('mch_1'), /HTTP 401/);
+    await assert.rejects(
+      box.getMachine('mch_1'),
+      (error: unknown) =>
+        error instanceof Error &&
+        /HTTP 401/.test(error.message) &&
+        error.message.includes('"message":"no"'),
+    );
+  } finally {
+    await fake.close();
+  }
+});
+
+test('HttpSandbox 400 includes status and redacted body', async () => {
+  const key = 'ibx-echoed-secret';
+  const fake = await mockInstabox({
+    'POST /v1/machines': () => ({
+      status: 400,
+      body: { error: { code: 'spec_not_allowed', message: `denied ${key}` } },
+    }),
+  });
+  try {
+    const box = new HttpSandbox({ apiKey: key, baseUrl: fake.url, fetch });
+    await assert.rejects(box.createMachine({ templateId: 'universal', vcpus: 1, memMiB: 512 }), {
+      message: /HTTP 400.*spec_not_allowed.*<redacted>/,
+    });
   } finally {
     await fake.close();
   }

@@ -4,7 +4,10 @@ import {
   SMALLEST_SANDBOX,
   instaboxApiFromEnv,
   instaboxCreateSourceFromEnv,
+  redactSecret,
 } from './sandbox.js';
+
+export { redactSecret };
 
 export const LIVE_SMOKE_CMD = 'echo live-smoke';
 
@@ -30,12 +33,6 @@ export interface LiveSmokeOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   now?: () => number;
-}
-
-/** Replace a secret in any string we print. Never log the raw key. */
-export function redactSecret(text: string, secret: string): string {
-  if (!secret) return text;
-  return text.split(secret).join('<redacted>');
 }
 
 export async function runLiveSmoke(options: LiveSmokeOptions = {}): Promise<LiveSmokeReport> {
