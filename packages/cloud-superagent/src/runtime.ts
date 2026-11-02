@@ -59,7 +59,18 @@ import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
 import { recallMemory, spillMemory } from './spill.js';
 import { type StuckCard, stuckCardOf } from './stuck.js';
+import { DUPLEX_ACK, isPreemptEvent, rememberEventIds } from './duplex.js';
 import { runWatchdog } from './watchdog.js';
+import {
+  answerWatchdog,
+  collectWatchdogContext,
+  commandRefusedAsk,
+  formatWatchdogAnswer,
+  parseWatchdogText,
+  type WatchdogActionResult,
+  type WatchdogAnswer,
+  type WatchdogNarrator,
+} from './watchdog-query.js';
 
 export type IngestResult =
   | { result: 'rejected'; reason: string; judgeCalls: 0 }
@@ -69,13 +80,14 @@ export type IngestResult =
   | { result: 'answered'; eventId: string; text: string; judgeCalls: number }
   | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number };
 
-/** Collapse a worker inbox into one event. Approval wins over the latest row. */
+/** Collapse a worker inbox into one event. Preempt, then approval, then latest. */
 export function coalesceInbox(events: NormalizedEvent[]): NormalizedEvent {
   if (events.length === 0) throw new Error('coalesceInbox needs events');
   const first = events[0];
   if (events.length === 1 && first) return first;
+  const preempt = [...events].reverse().find(isPreemptEvent);
   const approval = [...events].reverse().find((row) => row.type === 'approval_granted');
-  const primary = approval ?? events[events.length - 1] ?? first;
+  const primary = preempt ?? approval ?? events[events.length - 1] ?? first;
   if (!primary) throw new Error('coalesceInbox needs events');
   return {
     ...primary,
@@ -136,6 +148,8 @@ export interface SuperagentOptions {
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
   progress?: Partial<ProgressSettings>;
+  /** Cheap watchdog narrator. Absent → deterministic fallback. */
+  watchdogNarrator?: WatchdogNarrator;
 }
 
 export class Superagent {
@@ -155,10 +169,15 @@ export class Superagent {
   readonly progressSettings: ProgressSettings;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
+  /** Timer-loop findings the conversational watchdog can cite. */
+  readonly incidents: WatchdogFinding[] = [];
   judgeCalls = 0;
   private readonly now: () => number;
   private readonly onEscalate?: (card: StuckCard) => void;
   private readonly defaultSandboxRef: string | null;
+  private readonly watchdogNarrator?: WatchdogNarrator;
+  private readonly draining = new Set<string>();
+  private readonly duplexWaiters = new Map<string, Set<() => void>>();
 
   constructor(options: SuperagentOptions = {}) {
     this.store = options.store ?? new MemorySuperagentStore();
@@ -179,6 +198,7 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
+    this.watchdogNarrator = options.watchdogNarrator;
   }
 
   ledger(tenantId: string) {
@@ -230,7 +250,12 @@ export class Superagent {
       const workerIds: string[] = [];
       for (const sub of subscribers) {
         this.store.enqueue(sub.workerId, event.eventId, at);
-        await this.drain(event.tenantId, sub.workerId);
+        if (this.draining.has(sub.workerId)) {
+          await this.ackDuplexArrival(event.tenantId, sub.workerId, event, at);
+          this.notifyDuplex(sub.workerId);
+        } else {
+          await this.drain(event.tenantId, sub.workerId);
+        }
         workerIds.push(sub.workerId);
       }
       this.audit(event.tenantId, workerIds[0] ?? null, 'passthrough', at, {
@@ -320,6 +345,83 @@ export class Superagent {
     );
   }
 
+  async askWatchdog(tenantId: string, text: string): Promise<WatchdogAnswer> {
+    const intent = parseWatchdogText(text);
+    if (intent.kind === 'command') return commandRefusedAsk(intent);
+    const ctx = collectWatchdogContext({
+      store: this.store,
+      tenantId,
+      at: this.now(),
+      incidents: this.incidents,
+      snapshot: this.statusSnapshot(tenantId),
+      settings: this.watchdogSettings,
+    });
+    return answerWatchdog(intent, ctx, this.watchdogNarrator);
+  }
+
+  async instructWatchdog(tenantId: string, text: string): Promise<WatchdogAnswer> {
+    const intent = parseWatchdogText(text);
+    if (intent.kind !== 'command') return this.askWatchdog(tenantId, text);
+    const action = await this.applyWatchdogCommand(tenantId, intent.command, intent.workerId);
+    const after = await this.askWatchdog(
+      tenantId,
+      intent.workerId ? `why is worker ${intent.workerId} stuck` : 'what is everyone doing',
+    );
+    const citations = [...(intent.workerId ? [intent.workerId] : []), ...after.citations];
+    const textOut = `${formatWatchdogAnswer({ ...after, action, citations, intent })}`;
+    return { ...after, action, citations, intent, text: textOut };
+  }
+
+  async nudgeWorker(
+    tenantId: string,
+    workerId: string,
+    detail = 'owner instruct',
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    await this.nudge(worker, this.now(), detail);
+    return { ok: true };
+  }
+
+  async cancel(
+    tenantId: string,
+    workerId: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (worker.state === 'retired' || worker.state === 'retiring') {
+      return { ok: false, reason: 'not_live' };
+    }
+    const at = this.now();
+    worker.cancelRequested = true;
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    const event: NormalizedEvent = {
+      eventId: this.ids.event(),
+      tenantId,
+      source: 'internal',
+      type: 'user_cancel',
+      subject: worker.subject,
+      idempotencyKey: `cancel:${workerId}:${at}`,
+      actor: { login: 'owner', kind: 'user' },
+      occurredAt: at,
+      receivedAt: at,
+      summary: 'The owner cancelled the worker.',
+      fields: [['text', 'cancel']],
+      closesSubject: false,
+    };
+    this.store.putEvent(event);
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    this.audit(tenantId, workerId, 'cancelled', at, { eventId: event.eventId });
+    if (this.draining.has(workerId)) {
+      await this.ackDuplexArrival(tenantId, workerId, event, at);
+      this.notifyDuplex(workerId);
+      return { ok: true };
+    }
+    await this.retire(worker, at, 'owner_cancel');
+    return { ok: true };
+  }
+
   async restore(): Promise<{ resumed: number }> {
     let resumed = 0;
     for (const worker of this.store.allWorkers()) {
@@ -345,6 +447,8 @@ export class Superagent {
       },
       at,
     );
+    for (const found of findings) this.incidents.push(found);
+    if (this.incidents.length > 200) this.incidents.splice(0, this.incidents.length - 200);
     for (const found of findings) {
       if (found.rule === 'stuck' || found.rule === 'crashed') {
         const worker = this.store.worker(found.tenantId, found.workerId);
@@ -563,6 +667,7 @@ export class Superagent {
       lastHeartbeatAt: at,
       lastStepSignature: null,
       stepRepeats: 0,
+      seenEventIds: [],
       progress: startProgress(at),
       usage: emptyUsage(),
       evidence: [],
@@ -582,7 +687,59 @@ export class Superagent {
     return worker;
   }
 
+  private async applyWatchdogCommand(
+    tenantId: string,
+    command: WatchdogActionResult['kind'],
+    workerId?: string,
+  ): Promise<WatchdogActionResult> {
+    if (command !== 'stuck_check' && !workerId) {
+      return { kind: command, ok: false, reason: 'worker_required' };
+    }
+    if (command === 'nudge' && workerId) {
+      const nudged = await this.nudgeWorker(tenantId, workerId);
+      return { kind: 'nudge', workerId, ...nudged };
+    }
+    if (command === 'pause' && workerId) {
+      const paused = await this.pause(tenantId, workerId);
+      return { kind: 'pause', workerId, ...paused };
+    }
+    if (command === 'resume' && workerId) {
+      const resumed = await this.resume(tenantId, workerId);
+      return { kind: 'resume', workerId, ...resumed };
+    }
+    if (command === 'cancel' && workerId) {
+      const cancelled = await this.cancel(tenantId, workerId);
+      return { kind: 'cancel', workerId, ...cancelled };
+    }
+    const findings = await this.tick();
+    const scoped = workerId ? findings.filter((row) => row.workerId === workerId) : findings;
+    return {
+      kind: 'stuck_check',
+      ...(workerId ? { workerId } : {}),
+      ok: true,
+      reason: scoped.length > 0 ? scoped.map((row) => row.rule).join(',') : 'clear',
+    };
+  }
+
   private async drain(tenantId: string, workerId: string): Promise<void> {
+    if (this.draining.has(workerId)) {
+      const worker = this.store.worker(tenantId, workerId);
+      const pending = this.store.inbox(workerId).filter((item) => item.consumedAt === null);
+      const last = pending[pending.length - 1];
+      const event = last && worker ? this.store.event(tenantId, last.eventId) : undefined;
+      if (worker && event) await this.ackDuplexArrival(tenantId, workerId, event, this.now());
+      this.notifyDuplex(workerId);
+      return;
+    }
+    this.draining.add(workerId);
+    try {
+      await this.drainBody(tenantId, workerId);
+    } finally {
+      this.draining.delete(workerId);
+    }
+  }
+
+  private async drainBody(tenantId: string, workerId: string): Promise<void> {
     const worker = this.store.worker(tenantId, workerId);
     if (!worker) return;
     if (worker.state === 'retired' || worker.state === 'retiring') return;
@@ -641,6 +798,11 @@ export class Superagent {
       const result = await this.handler.handle(this.context(worker, event), event);
       const halt = await this.applyResult(worker, result, at);
       for (const item of items) this.store.consume(workerId, item.seq, at);
+      const live = this.store.worker(tenantId, workerId);
+      if (live?.cancelRequested) {
+        await this.retire(live, at, 'owner_cancel');
+        return;
+      }
       if (halt) {
         if (worker.retiredAt == null) this.store.putWorker(worker);
         return;
@@ -941,7 +1103,53 @@ export class Superagent {
         worker.lastHeartbeatAt = live.lastHeartbeatAt;
         worker.lastProgressAt = live.lastProgressAt;
       },
+      pollInbox: () => this.pollDuplexInbox(worker.tenantId, worker.workerId),
+      ackInbox: (eventIds) => this.ackDuplexInbox(worker, eventIds),
     };
+  }
+
+  private pollDuplexInbox(tenantId: string, workerId: string): NormalizedEvent[] {
+    const live = this.store.worker(tenantId, workerId);
+    const seen = new Set(live?.seenEventIds ?? []);
+    const out: NormalizedEvent[] = [];
+    for (const item of this.store.inbox(workerId)) {
+      if (item.consumedAt !== null || seen.has(item.eventId)) continue;
+      const event = this.store.event(tenantId, item.eventId);
+      if (event) out.push(event);
+    }
+    return out.sort((a, b) => a.receivedAt - b.receivedAt || a.eventId.localeCompare(b.eventId));
+  }
+
+  private ackDuplexInbox(worker: WorkerRecord, eventIds: string[]): void {
+    const live = this.store.worker(worker.tenantId, worker.workerId);
+    if (!live) return;
+    const at = this.now();
+    const seen = new Set(live.seenEventIds ?? []);
+    for (const item of this.store.inbox(worker.workerId)) {
+      if (!eventIds.includes(item.eventId) || item.consumedAt !== null) continue;
+      this.store.consume(worker.workerId, item.seq, at);
+      seen.add(item.eventId);
+    }
+    live.seenEventIds = rememberEventIds([...seen], eventIds);
+    live.updatedAt = at;
+    this.store.putWorker(live);
+    worker.seenEventIds = live.seenEventIds;
+  }
+
+  private async ackDuplexArrival(
+    tenantId: string,
+    workerId: string,
+    event: NormalizedEvent,
+    at: number,
+  ): Promise<void> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return;
+    await this.recordProgress(worker, { activity: DUPLEX_ACK }, at);
+    this.audit(tenantId, workerId, 'duplex_ack', at, { eventId: event.eventId });
+  }
+
+  private notifyDuplex(workerId: string): void {
+    for (const wake of this.duplexWaiters.get(workerId) ?? []) wake();
   }
 
   private progressView(worker: WorkerRecord, at: number) {

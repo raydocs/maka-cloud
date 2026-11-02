@@ -97,6 +97,13 @@ export interface ProgressView {
 export interface StatusSnapshot {
   at: number;
   workers: ProgressView[];
+  /** Conversational watchdog answer when the progress API was asked. */
+  watchdog?: {
+    text: string;
+    citations: string[];
+    source: 'model' | 'fallback';
+    action?: { kind: string; ok: boolean; workerId?: string; reason?: string };
+  };
 }
 
 export function isProgressPhase(value: string): value is ProgressPhase {

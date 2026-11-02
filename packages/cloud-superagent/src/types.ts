@@ -157,6 +157,10 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Duplex: event ids already applied. JSON only; no schema bump. */
+  seenEventIds?: string[];
+  /** Owner/watchdog cancel; the running loop preempts then retires. */
+  cancelRequested?: boolean;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -291,6 +295,10 @@ export interface WorkerContext {
    * Intentionally absent: workers have no outbound user channel.
    * `LeadPort.speak` lives on Superagent, never here.
    */
+  /** Unconsumed inbox that arrived after this run started (duplex). */
+  pollInbox?: () => NormalizedEvent[];
+  /** Consume + remember event ids. Idempotent. */
+  ackInbox?: (eventIds: string[]) => void;
 }
 
 export interface WorkerHandler {

@@ -46,6 +46,13 @@ export class MemorySuperagentStore implements SuperagentStore {
     return id === undefined ? undefined : this.event(tenantId, id);
   }
 
+  /** Watchdog chain-of-recall. Not required by SuperagentStore. */
+  listEvents(tenantId: string): NormalizedEvent[] {
+    return [...this.events.values()]
+      .filter((row) => row.tenantId === tenantId)
+      .map((row) => structuredClone(row));
+  }
+
   putWorker(worker: WorkerRecord): void {
     this.workerRows.set(worker.workerId, cloneWorker(worker));
   }
