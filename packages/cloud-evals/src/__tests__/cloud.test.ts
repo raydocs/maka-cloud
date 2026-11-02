@@ -8,7 +8,7 @@ import {
   expandExperiment,
   runExperiment,
   selectCellResult,
-} from '@maka-cloud/maka-engine';
+} from '@maka-cloud/maka-engine/eval';
 import { createCloudEvals } from '../cloud.js';
 import { VendorAloneDriver } from '../drivers.js';
 import { outcomeOf } from '../sandbox-ops.js';

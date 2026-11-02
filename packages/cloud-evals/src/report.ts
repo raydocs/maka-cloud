@@ -5,7 +5,7 @@ import {
   type AttemptStore,
   type ExperimentSpec,
   selectCellResult,
-} from '@maka-cloud/maka-engine';
+} from '@maka-cloud/maka-engine/eval';
 import { type ProofSignals, proofFromArtifacts } from './proof.js';
 
 export interface CellRow {

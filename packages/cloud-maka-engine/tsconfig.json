@@ -8,5 +8,6 @@
     "composite": true
   },
   "include": ["src"],
+  "exclude": ["src/eval-api.ts"],
   "references": [{ "path": "../core" }, { "path": "../storage" }, { "path": "../runtime" }]
 }

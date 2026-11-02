@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { access, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { FileAttemptStore, expandExperiment } from '@maka-cloud/maka-engine';
+import { FileAttemptStore, expandExperiment } from '@maka-cloud/maka-engine/eval';
 import type { UnrecordedSpend } from '@maka-cloud/gateway';
 import { runCloudEvalsCli } from '../cli.js';
 import { FakeDriver, FakeGrader, FakeHiddenTests } from '../fake.js';

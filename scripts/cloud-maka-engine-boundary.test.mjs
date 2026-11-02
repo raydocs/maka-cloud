@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  ENGINE_CONSUMER_BUILD_FILES,
   ENGINE_PACKAGE_DIR,
   FORBIDDEN_MAKA_PACKAGES,
   findForbiddenCloudMakaImports,
+  findMissingMakaEngineBuildSteps,
 } from './cloud-maka-engine-boundary.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -42,4 +44,35 @@ test('the scanner reports a source import and a package.json dependency', () => 
   assert.ok(hits.some((hit) => hit.kind === 'dependency' && hit.specifier === '@maka/core'));
   assert.ok(!hits.some((hit) => hit.file.includes(ENGINE_PACKAGE_DIR)));
   assert.deepEqual(FORBIDDEN_MAKA_PACKAGES, ['core', 'runtime', 'storage', 'runtime-host', 'eval']);
+});
+
+test('deploy, cloud-web and cloud-mobile build maka-engine before instabox', () => {
+  const hits = findMissingMakaEngineBuildSteps(repoRoot);
+  assert.deepEqual(hits, [], hits.map((hit) => `${hit.file}: ${hit.reason}`).join('\n'));
+  assert.deepEqual(ENGINE_CONSUMER_BUILD_FILES, [
+    'deploy/Dockerfile',
+    '.github/workflows/fork-cloud-web.yml',
+    '.github/workflows/fork-cloud-mobile.yml',
+  ]);
+});
+
+test('the build-step scanner reports an instabox compile with no engine before it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'maka-engine-build-step-'));
+  mkdirSync(join(root, 'deploy'), { recursive: true });
+  mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+  writeFileSync(
+    join(root, 'deploy', 'Dockerfile'),
+    'RUN npm --workspace @maka-cloud/instabox run build\n',
+  );
+  writeFileSync(
+    join(root, '.github', 'workflows', 'fork-cloud-web.yml'),
+    'npm --workspace @maka-cloud/maka-engine run build\nnpm --workspace @maka-cloud/instabox run build\n',
+  );
+  writeFileSync(
+    join(root, '.github', 'workflows', 'fork-cloud-mobile.yml'),
+    'npm --workspace @maka-cloud/maka-engine run build\nnpm --workspace @maka-cloud/instabox run build\n',
+  );
+  const hits = findMissingMakaEngineBuildSteps(root);
+  assert.equal(hits.length, 1, JSON.stringify(hits, null, 2));
+  assert.equal(hits[0]?.file, 'deploy/Dockerfile');
 });

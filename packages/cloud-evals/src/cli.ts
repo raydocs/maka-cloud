@@ -7,7 +7,7 @@ import {
   parseExperimentSpec,
   runMakaEvalCli,
   type ExperimentSpec,
-} from '@maka-cloud/maka-engine';
+} from '@maka-cloud/maka-engine/eval';
 import { budgetOf, createCloudEvals } from './cloud.js';
 import { FAKE_PROFILES, FakeDriver, FakeGrader, FakeHiddenTests } from './fake.js';
 import { BudgetLedger } from './ledger.js';

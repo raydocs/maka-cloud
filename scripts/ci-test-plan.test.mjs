@@ -34,7 +34,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { findForbiddenCloudMakaImports } from './cloud-maka-engine-boundary.mjs';
+import {
+  findForbiddenCloudMakaImports,
+  findMissingMakaEngineBuildSteps,
+} from './cloud-maka-engine-boundary.mjs';
 import { changedFilesBetween, formatGitHubOutputs, planTests } from './ci-test-plan.mjs';
 
 /**
@@ -618,6 +621,11 @@ test('cloud packages outside maka-engine do not import in-process @maka/* packag
   const repoRoot = new URL('..', import.meta.url);
   const hits = findForbiddenCloudMakaImports(fileURLToPath(repoRoot));
   assert.deepEqual(hits, [], hits.map((hit) => `${hit.file}: ${hit.specifier}`).join('\n'));
+});
+
+test('deploy, cloud-web and cloud-mobile build maka-engine before instabox', () => {
+  const hits = findMissingMakaEngineBuildSteps(fileURLToPath(new URL('..', import.meta.url)));
+  assert.deepEqual(hits, [], hits.map((hit) => `${hit.file}: ${hit.reason}`).join('\n'));
 });
 
 test('the maka-engine import scanner reports a source import and a package.json dependency', () => {

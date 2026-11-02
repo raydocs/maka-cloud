@@ -33,7 +33,9 @@ file outside this package imports `@maka/core`, `@maka/runtime`, `@maka/storage`
 Workspace-executor helpers (instabox) and `@maka/eval` (cloud-evals) are
 re-exports, not methods on `MakaEngine`. They are TypeScript-line APIs. On
 rust-preview the workspace becomes Host file methods; eval has no Host
-equivalent yet.
+equivalent yet. Eval lives on `@maka-cloud/maka-engine/eval` so the default
+engine compile (deploy, cloud-web, cloud-mobile) does not need
+`@maka/runtime-host`.
 
 ## Call sites
 
@@ -44,7 +46,7 @@ equivalent yet.
 | `cloud-conductor-checks` `harness.ts` | same host construction, plus context-budget, summarizer, tool-result archive, compact, restart |
 | `cloud-conductor-checks` `conversation.ts` | `MakaTool` |
 | `cloud-instabox` `executor.ts`, `facts.ts`, builtin-tools test | `WorkspaceExecutor` and the grep/image/read helpers |
-| `cloud-evals` | `@maka/eval` (`parseExperimentSpec`, `FileAttemptStore`, `expandExperiment`, `runMakaEvalCli`, …) |
+| `cloud-evals` | `@maka-cloud/maka-engine/eval` (`parseExperimentSpec`, `FileAttemptStore`, `expandExperiment`, `runMakaEvalCli`, …) |
 
 ## Transport (rust-preview)
 

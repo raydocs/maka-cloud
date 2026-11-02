@@ -14,6 +14,13 @@ export const ENGINE_PACKAGE_DIR = 'packages/cloud-maka-engine';
 
 export const FORBIDDEN_MAKA_PACKAGES = ['core', 'runtime', 'storage', 'runtime-host', 'eval'];
 
+/** Lanes that compile instabox/conductor without the root `build` script. */
+export const ENGINE_CONSUMER_BUILD_FILES = [
+  'deploy/Dockerfile',
+  '.github/workflows/fork-cloud-web.yml',
+  '.github/workflows/fork-cloud-mobile.yml',
+];
+
 const SOURCE_EXT = /\.(?:[cm]?[jt]s|tsx)$/;
 const SKIP_DIRS = new Set(['dist', 'node_modules', 'coverage']);
 const FROM_RE = /\bfrom\s+['"]@maka\/(core|runtime|storage|runtime-host|eval)(?:\/[^'"]*)?['"]/g;
@@ -104,4 +111,34 @@ function collectDependencies(path, repoRoot, hits) {
       }
     }
   }
+}
+
+/**
+ * Every instabox compile in the deploy/web/mobile lanes must build
+ * `@maka-cloud/maka-engine` first. Those lanes do not use the root `build`
+ * script, so a missing step fails them with TS2307.
+ *
+ * @param {string} repoRoot
+ * @returns {Array<{ file: string, reason: string }>}
+ */
+export function findMissingMakaEngineBuildSteps(repoRoot) {
+  /** @type {Array<{ file: string, reason: string }>} */
+  const hits = [];
+  for (const file of ENGINE_CONSUMER_BUILD_FILES) {
+    const text = readFileSync(join(repoRoot, file), 'utf8');
+    const instaboxRe = /@maka-cloud\/instabox/g;
+    let searchFrom = 0;
+    let match;
+    while ((match = instaboxRe.exec(text))) {
+      const before = text.slice(searchFrom, match.index);
+      if (!before.includes('@maka-cloud/maka-engine')) {
+        hits.push({
+          file,
+          reason: 'instabox build is missing a preceding @maka-cloud/maka-engine',
+        });
+      }
+      searchFrom = match.index + match[0].length;
+    }
+  }
+  return hits;
 }

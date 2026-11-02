@@ -20,4 +20,3 @@ export {
 export { TsInProcessEngine } from './ts-in-process.js';
 export * from './types.js';
 export * from './workspace.js';
-export * from './eval-api.js';
