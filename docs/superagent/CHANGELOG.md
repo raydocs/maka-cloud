@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 14:10 MST — cursor/superagent-review-verify-51be
+
+- **PR:** none
+- **What:** Harden cross-model review: isolated read-only contract (diff+repo only; write/network/secrets forced false; secret-shaped env stripped and proven not to reach the reviewer), prompt and parse drop style-only findings, default max rounds 3, ledger records review duration / token share / issues reported / issues fixed. After merge+publish, optional `/version` probe confirms the live SHA contains the merge commit before Done; timeout or mismatch marks the worker stuck and raises a watchdog card. Optional weekly sweep (default off) opens a cleanup PR for duplicates / temp patches / leftover code / diary docs and never pushes trunk. Tests use fakes only.
+- **Why:** Follow-up to the learning/review hook: isolate the reviewer, verify the live deploy, and keep a weekly cleanup lane without touching parallel branches.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
+- **Live:** n/a
+- **Migrations / risk:** none. Defaults false. No server/deploy/billing change. No sqlite `user_version` bump.
+
 ## 2026-11-02 13:29 MST — cursor/superagent-learning-review-51be — 66178a088
 
 - **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)

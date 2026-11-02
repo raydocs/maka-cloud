@@ -73,6 +73,13 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
       ? { ...worker.doneClaim, signals: worker.doneClaim.signals.map((row) => ({ ...row })) }
       : undefined,
     lastLive: worker.lastLive ? { ...worker.lastLive } : undefined,
+    peerReviewStats: worker.peerReviewStats
+      ? {
+          ...worker.peerReviewStats,
+          openFindings: [...worker.peerReviewStats.openFindings],
+        }
+      : undefined,
+    releaseVerify: worker.releaseVerify ? { ...worker.releaseVerify } : undefined,
     progress: worker.progress
       ? {
           ...worker.progress,
