@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 14:00 MST — cursor/superagent-decisions-policy-51be
+## 2026-11-02 14:10 MST — cursor/superagent-decisions-policy-51be — dc4783aa1
 
 - **PR:** none (base `cursor/superagent-real-loop-51be`)
 - **What:** Decision ledger (human-only decided/refused, tenant+repo, exact match auto-applies, fuzzy hints only). Must-ask whitelist (delete/deploy/spend/outbound/direction/secrets/permissions/migration/force-push); tenant may tighten, never loosen; always-ask delete_data / rotate_secrets / spend. Declarative `superagent.rules.json` with schema, hot reload, event envelope; miss falls through to the existing Router. Progress cites ledger ids. #477 card adapters (`cardDraftFromMustAsk`, `recordFromCardResolution`) without taking `statusSnapshot.decisions`.
