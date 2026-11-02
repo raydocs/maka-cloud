@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 12:40 MST — cursor/superagent-byom-spec-51be
+## 2026-11-02 12:42 MST — cursor/superagent-byom-spec-51be — 010c9b925
 
 - **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
 - **What:** BYOM default command allowlist drops shells (`sh`, `bash`, `zsh`, `dash`, …) and wrappers (`env`, `xargs`, …). Devices exec `argv[0]` by exact basename match, no shell parse. `SandboxPort` `cmd` is tokenized and spawned directly; pipes / redirects / `sh -c` are refused with `shell_not_allowed` (never a silent `sh -c` fallback). Per-device `allowShell` (default false) is set at pairing or via `setAllowShell`; enabling writes `byom_allow_shell` to the hub audit and Super-agent ledger and shows `allowShell` on worker progress. A shell job also records `byom_shell_used`.
