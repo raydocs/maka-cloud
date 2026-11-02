@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 12:05 MST — cursor/superagent-shared-box-51be
+## 2026-11-02 12:01 MST — cursor/superagent-shared-box-51be — 4e52438a1
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
 - **What:** One host process per tenant box (`BoxDaemon`). Each worker is a lightweight in-process session (git worktree cwd, own env, own AbortController) instead of one maka process per worker. Isolation and cancel stay per worker. RSS measured here: idle `node` **43 MiB**; eight daemon sessions added **<1 MiB** total (~0.5 KiB/session at the noise floor). Owner-measured idle maka process is **232–278 MiB**, so N workers in one daemon pay that once instead of N times.
