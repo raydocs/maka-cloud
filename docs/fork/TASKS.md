@@ -1029,6 +1029,41 @@ of another person's task is refused; a move to a box and back keeps every
 message and the session id and never overwrites a dirty folder; no model
 credential is read from the computer.
 
+## T34: Super-agent (event routing, persistent workers, watchdog)
+
+Depends on: T23 (duties as a Source), T28 (durable executions), T20
+(supervisor inbox). Builds on open PR #460 (PR follow-up as the first
+WorkItem) and the `SandboxApi` seam of open PR #452. Does not depend on
+the parked boat.dev PRs (#451, #453, #455). T32 stays after launch.
+
+Architecture (read first): `docs/fork/architecture/superagent.md`.
+
+Objective: maka-cloud becomes a DeepSeek-Harness-style Super-agent for a
+paid hosted product. Events whose subject (PR, issue, chat thread) is
+already owned go straight to that worker (no Router tokens). Unowned
+events go through admission and a Router judge (`ignore` / `answer` /
+`spawn`). Each worker owns one subject, sleeps, resumes, and retires
+when the subject closes. An external watchdog detects stuck, looping,
+over-budget and crashed workers. Safety (Mandate, budgets, exact-text
+approvals, tenant isolation, metering hooks) is the differentiator
+against the DSH prototype's full-access operator user.
+
+- Package: `packages/cloud-superagent` (`@maka-cloud/superagent`).
+- New package only: do not import host/server/conductor/duties/runners.
+  Those compose it through ports in a later wiring PR.
+- Persistence: package-local SQLite (`superagent.sqlite`), not a
+  `cloud-server` migration.
+- `WorkspaceStore`: git clone default; LayerFS adapter compiled, off,
+  no FUSE/Docker/server. Spike gates stay in
+  `docs/fork/design/layerfs.md` and §10 of the architecture.
+- Tests (fakes only, no live model or sandbox): pass-through has zero
+  judge calls; duplicate Trigger → one worker; sqlite restore resumes
+  inbox and plan; looping handler → W3; merge/push/secrets/deploy
+  without a matching grant → `awaiting_approval`; tenant A cannot read
+  tenant B.
+- Check: `npm run typecheck -w @maka-cloud/superagent` and the
+  package's `test:dist`.
+
 ---
 
 # Batch 3: personal assistant feel
